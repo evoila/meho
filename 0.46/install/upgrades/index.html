@@ -1689,6 +1689,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#the-bootstrap-job-needs-manage-realm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The bootstrap Job needs manage-realm
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#version-specific-notes" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3188,6 +3199,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#the-bootstrap-job-needs-manage-realm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The bootstrap Job needs manage-realm
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#version-specific-notes" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3427,6 +3449,37 @@ helm<span class="w"> </span>rollback<span class="w"> </span>meho<span class="w">
 </code></pre></div>
 <p>Then check that <code>/healthz</code> answers and <code>/version</code> shows the previous
 release. The rollback contract has the full checklist.</p>
+<h2 id="the-bootstrap-job-needs-manage-realm">The bootstrap Job needs <code>manage-realm</code><a class="headerlink" href="#the-bootstrap-job-needs-manage-realm" title="Permanent link">&para;</a></h2>
+<p>This applies to the built-in Keycloak (<code>coreKeycloak.enabled</code>).</p>
+<p>After every install and upgrade, the bootstrap Job keeps the approval
+sign-in up to date: it makes the login flow <code>meho approval sign-in</code> with
+the steps of the realm file, and binds the client <code>meho-cli-approve</code> to
+it. For this, its account <code>meho-admin</code> needs the realm-management role
+<code>manage-realm</code>. A new install gets the role from the realm file.</p>
+<p>An install whose first start was older, and had the company login off,
+may lack the role. Then the Job stops, and its log names the role and
+this section:</p>
+<div class="highlight"><pre><span></span><code>core_bootstrap_failed: login flow meho approval sign-in: meho-admin may not read or change login flows, ...
+</code></pre></div>
+<p>With <code>helm upgrade --atomic</code>, Helm rolls the release back when the Job
+stops, so the old version keeps running until you add the role.</p>
+<p>Give <code>meho-admin</code> the role once, then run the upgrade again:</p>
+<ol>
+<li>Log in to the Keycloak admin console as the console admin
+   (<a href="../keycloak-realm/#the-console-admin">The console admin</a>) and pick
+   realm <code>meho</code>. Lost every admin login? See
+   <a href="../keycloak-break-glass/">Keycloak break-glass</a>.</li>
+<li><strong>Clients → meho-admin → Service account roles → Assign role →
+   Filter by clients</strong>, search for <code>realm-management</code>, select
+   <code>manage-realm</code>, <strong>Assign</strong>.</li>
+<li>Run <code>helm upgrade</code> again. The Job's log says <code>login flow meho approval
+   sign-in: kept</code> (or <code>created</code>), and <code>client meho-cli-approve: kept</code>.</li>
+</ol>
+<p>Then check it: <code>GET /api/v1/health</code> shows <code>approvals.sign_in.state: ok</code>,
+and <code>meho doctor</code> shows <code>approval sign-in</code> as OK.</p>
+<p>With this role the backplane, which also uses <code>meho-admin</code>, can change
+the login settings of realm <code>meho</code>. It could already change people,
+groups and clients.</p>
 <h2 id="version-specific-notes">Version-specific notes<a class="headerlink" href="#version-specific-notes" title="Permanent link">&para;</a></h2>
 <p>Read these when your upgrade crosses the version in question:</p>
 <table>
@@ -3502,6 +3555,11 @@ release. The rollback contract has the full checklist.</p>
 <td><strong>v0.46.0</strong></td>
 <td>Fifteen database migrations (<code>0138</code> to <code>0152</code>). They only add, and change no existing row. The upgrade ends every approval request that still waits. With the built-in Keycloak, four chart values must be empty or equal the chart's value: <code>config.uiKeycloakClientId</code>, <code>checkRunner.clientId</code>, <code>keycloakAdmin.url</code> and <code>keycloakAdmin.clientId</code>. The retrieval quality check and the retire checklist are removed. Machine logins no longer write targets or topology over REST. An operation from an API file runs only on a connector class that accepts such operations (<code>accepts_ingested_operations</code>); otherwise MEHO answers <code>ingested_ops_not_accepted</code>.</td>
 <td>Back up the database, and decide waiting approval requests first. If you use connector packages, update them before this version or together with it, to a version that sets <code>accepts_ingested_operations = True</code> where it runs operations from an API file. With the built-in Keycloak, remove the four values or set the value the error message names. Machine logins use the operations <code>targets.register</code>, <code>targets.update</code>, <code>targets.remove</code> and <code>topology.*</code> through <code>call_operation</code>. On OpenShift, set the UBI OpenBao image in <code>coreVault.image</code>. Details: <a href="https://github.com/evoila/meho/blob/main/CHANGELOG.md">CHANGELOG</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>With the built-in Keycloak, the bootstrap Job keeps the approval sign-in flow and its binding to <code>meho-cli-approve</code> up to date on every upgrade. It needs the role <code>manage-realm</code> on <code>meho-admin</code>, and it stops when the role is missing. <code>/api/v1/health</code> shows the state of the approval sign-in (<code>approvals.sign_in</code>), and <code>meho doctor</code> shows it in one line.</td>
+<td><strong>Built-in Keycloak, first started before v0.47.0 with the company login off:</strong> give <code>meho-admin</code> the role <code>manage-realm</code> before the upgrade, as <a href="#the-bootstrap-job-needs-manage-realm">The bootstrap Job needs <code>manage-realm</code></a> says. Otherwise the upgrade stops at the Job. <strong>Your own Keycloak:</strong> give the backplane's Keycloak admin client the realm-management role <code>view-realm</code>, so MEHO can check the approval sign-in, and make sure the flow is set up (<a href="../keycloak-realm/#the-approval-client-meho-cli-approve">The approval client</a>).</td>
 </tr>
 </tbody>
 </table>

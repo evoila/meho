@@ -1627,6 +1627,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#5-check-the-approval-sign-in-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Check the approval sign-in (required)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-rules" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3118,6 +3129,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#5-check-the-approval-sign-in-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Check the approval sign-in (required)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-rules" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3415,6 +3437,35 @@ Your people then add a passkey on your Keycloak's account page. For a
 company login of another kind (Entra ID, authentik), turn passkeys on in
 that system. When you use your Keycloak in place of MEHO's, set the same
 rows in the realm <code>meho</code>.</p>
+<h2 id="5-check-the-approval-sign-in-required">5. Check the approval sign-in (required)<a class="headerlink" href="#5-check-the-approval-sign-in-required" title="Permanent link">&para;</a></h2>
+<p><code>meho approvals approve</code> signs in through its own login flow in realm
+<code>meho</code>: <code>meho approval sign-in</code>, bound to the client <code>meho-cli-approve</code>.
+The flow asks for the password, and for the one-time code when the person
+has set one up. It has no other step. Every install needs this flow and
+its binding.</p>
+<ul>
+<li><strong>MEHO's built-in Keycloak in front of yours (this page):</strong> the install
+  makes the flow and binds it at every <code>helm upgrade</code>. On an older install
+  the install may stop and ask you to give <code>meho-admin</code> the role
+  <code>manage-realm</code> once
+  (<a href="../../upgrades/#the-bootstrap-job-needs-manage-realm">The bootstrap Job needs <code>manage-realm</code></a>).</li>
+<li><strong>Your Keycloak in place of MEHO's (<code>coreKeycloak.enabled: false</code>):</strong>
+  set it up yourself, in one of two ways:<ul>
+<li>by hand, as
+  <a href="../../keycloak-realm/#the-approval-client-meho-cli-approve">The approval client <code>meho-cli-approve</code></a>
+  says ("Its own login flow");</li>
+<li>with the operation <code>keycloak.authflow.ensure_approval_flow</code>
+  (<a href="../../keycloak-realm/#add-the-approval-flow-to-a-running-realm-through-meho">Add the approval flow to a running realm through MEHO</a>).
+  It waits for approval.</li>
+</ul>
+</li>
+</ul>
+<p>Then check it. <code>meho doctor</code> shows the line <code>approval sign-in</code>, and
+<code>GET /api/v1/health</code> shows <code>approvals.sign_in.state</code>. Both must say <code>ok</code>.
+<code>flow_missing</code>, <code>not_bound</code> or <code>flow_differs</code> mean the flow or its
+binding is not right; <code>meho doctor</code> names the fix. <code>not_checked</code> with
+<code>no_right_to_read_login_flows</code> means MEHO's Keycloak admin client needs
+the realm-management role <code>view-realm</code>.</p>
 <h2 id="the-rules">The rules<a class="headerlink" href="#the-rules" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>One MEHO group per person.</strong> Put each person in one of your MEHO
@@ -3438,6 +3489,7 @@ rows in the realm <code>meho</code>.</p>
 <ul>
 <li>[ ] <code>meho login https://&lt;meho-host&gt;</code> works with the account from your
       Keycloak. <code>meho status</code> shows the right tenant and role.</li>
+<li>[ ] <code>meho doctor</code> shows <code>approval sign-in</code> as OK.</li>
 <li>[ ] The web UI (<code>https://&lt;meho-host&gt;/ui/</code>) logs in with the same
       account and shows the same role.</li>
 <li>[ ] Claude (MCP) logs in through the browser and can call a MEHO

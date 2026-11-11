@@ -3748,13 +3748,15 @@ group of a removed or changed line.</p>
 <div class="admonition note">
 <p class="admonition-title">You turn on the company login on an existing install</p>
 <p>The Job needs two Keycloak rights to set up the broker:
-<code>manage-identity-providers</code> and <code>manage-realm</code>. The chart gives them
-only when the company login is on at the <strong>first</strong> install, because
-Keycloak reads its realm file only at its first start. If you turn
-the company login on later, the Job stops with a message that names
-the two rights. Then add them once by hand: in the Keycloak admin
-console, realm <code>meho</code>, open <strong>Clients &gt; <code>meho-admin</code></strong>, tab
-<strong>Service accounts roles</strong>, assign the two <code>realm-management</code> roles, and run
+<code>manage-identity-providers</code> and <code>manage-realm</code>. The chart gives
+<code>manage-identity-providers</code> only when the company login is on at the
+<strong>first</strong> install, because Keycloak reads its realm file only at its
+first start (<code>manage-realm</code> comes from the realm file since v0.47.0).
+If you turn the company login on later, the Job stops with a message
+that names the two rights. Then add the missing ones once by hand: in
+the Keycloak admin console, realm <code>meho</code>, open <strong>Clients &gt;
+<code>meho-admin</code></strong>, tab <strong>Service accounts roles</strong>, assign the
+<code>realm-management</code> roles it lacks, and run
 <code>helm upgrade</code> again. For a Keycloak admin login, see
 <a href="#reach-the-keycloak-admin-console">Reach the Keycloak admin console</a>.</p>
 </div>

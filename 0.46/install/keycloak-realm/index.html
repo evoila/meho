@@ -4043,9 +4043,12 @@ and asks for the password again (see
 scope puts <code>auth_time</code> into the access token, and the <code>acr</code> scope puts
 <code>acr</code> into it. Without both, every approve on the command line is
 refused.</p>
-<p><strong>Its own login flow.</strong> The approval client signs in with its own flow,
-which always asks for the password. Create it under <strong>Authentication →
-Create flow</strong>:</p>
+<p><strong>Its own login flow (required).</strong> The approval client signs in with its
+own flow, which always asks for the password. Every install needs it.
+Create it by hand as below, or with the operation
+<code>keycloak.authflow.ensure_approval_flow</code>
+(<a href="#add-the-approval-flow-to-a-running-realm-through-meho">Add the approval flow to a running realm through MEHO</a>).
+By hand, under <strong>Authentication → Create flow</strong>:</p>
 <ol>
 <li>Name <code>meho approval sign-in</code>, type <strong>Basic flow</strong>.</li>
 <li>Add the step <strong>Username Password Form</strong>. Set it to <strong>Required</strong>.</li>
@@ -4073,12 +4076,12 @@ run finishes it. A flow <code>meho approval sign-in</code> with other steps than
 the ones above is left as it is, and the client is not bound to it. The
 Keycloak that ships with the MEHO chart creates the client on the next
 upgrade (the realm finishing job adds a client that is missing, and sets
-the two token settings on an existing one). The job makes
-the login flow only when its account <code>meho-admin</code> has the
-<code>manage-realm</code> role, which it has when the company login is on.
-Otherwise add the flow through MEHO (see
-<a href="#add-the-approval-flow-to-a-running-realm-through-meho">Add the approval flow to a running realm through MEHO</a>)
-or by hand as above.</p>
+the two token settings on an existing one). The job also makes the login
+flow and binds the client to it, on every upgrade. For this its account
+<code>meho-admin</code> needs the realm-management role <code>manage-realm</code>. A new
+install gets it from the realm file. On an older install without it, the
+job stops with a message that names the role. The fix is in
+<a href="../upgrades/#the-bootstrap-job-needs-manage-realm">The bootstrap Job needs <code>manage-realm</code></a>.</p>
 <p><strong>Bind the flow before people approve on the command line.</strong> A
 command-line approval must always sign in through <code>meho approval
 sign-in</code>, also on a realm that was made before this flow existed. So on
@@ -4090,6 +4093,45 @@ does not use that login, so the person always types the password (and
 the code) at Keycloak. Check the binding with
 <code>keycloak.client.get</code> (<code>authenticationFlowBindingOverrides.browser</code> must
 name the flow) and the realm's login with <code>keycloak.identity_provider.list</code>.</p>
+<p><strong>MEHO checks it for you.</strong> <code>GET /api/v1/health</code> (and the <code>meho_status</code>
+tool) shows the state in <code>approvals.sign_in.state</code>:</p>
+<table>
+<thead>
+<tr>
+<th>State</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ok</code></td>
+<td>The flow has exactly the steps above, and <code>meho-cli-approve</code> uses it.</td>
+</tr>
+<tr>
+<td><code>flow_missing</code></td>
+<td>The realm has no flow <code>meho approval sign-in</code>.</td>
+</tr>
+<tr>
+<td><code>not_bound</code></td>
+<td>The flow is right, but <code>meho-cli-approve</code> is missing, has no own browser flow, or uses another flow. <code>detail</code> says which.</td>
+</tr>
+<tr>
+<td><code>flow_differs</code></td>
+<td>The flow has other steps. <code>detail</code> names the first difference. MEHO does not bind the client to such a flow.</td>
+</tr>
+<tr>
+<td><code>not_checked</code></td>
+<td>MEHO could not read it. <code>detail</code> says why, for example <code>no_right_to_read_login_flows</code>.</td>
+</tr>
+</tbody>
+</table>
+<p><code>meho doctor</code> shows the same state in its line <code>approval sign-in</code>, with
+the fix. MEHO keeps the answer for one minute, so a fix shows up within a
+minute. MEHO reads the realm with its Keycloak admin client
+(<code>keycloakAdmin</code> in the chart). Reading login flows needs the
+realm-management role <code>view-realm</code> (or <code>manage-realm</code>) on that client.
+On your own Keycloak, give it <code>view-realm</code>. Without it the state is
+<code>not_checked</code>.</p>
 <p>Two backplane settings control the check:</p>
 <table>
 <thead>
@@ -4557,14 +4599,14 @@ authenticator app at their first login, and Keycloak shows them twelve
 recovery codes once. Each recovery code works one time, instead of the code
 from the app. Two realm settings turn the recovery codes on, and the
 bootstrap Job sets them on every run.</p>
-<p>On an install made before this, the Job cannot set them. Changing login
-settings needs the realm-management role <code>manage-realm</code>. The first-start
-account had it, but the first run removed that account. <code>meho-admin</code> has
-it only when the company login is on. The Job does not fail. Its log
-says <code>recovery codes: not checked</code> and points here. Turn them on once, in
-one of two ways.</p>
-<p><strong>Way 1: let the Job do it.</strong> Give <code>meho-admin</code> the role, then run the
-upgrade again:</p>
+<p>On an install made before this, the Job may lack the right to set them.
+Changing login settings needs the realm-management role <code>manage-realm</code>.
+The first-start account had it, but the first run removed that account.
+On an install made before the realm file gave <code>meho-admin</code> this role,
+<code>meho-admin</code> has it only when the company login was on at the first
+start. Without it, the Job stops at the login flows and names the role
+(see <a href="../upgrades/#the-bootstrap-job-needs-manage-realm">The bootstrap Job needs <code>manage-realm</code></a>).
+Give the role once:</p>
 <ol>
 <li>Log in to the admin console as the console admin (see
    <a href="#the-console-admin">The console admin</a>) and pick realm <code>meho</code>.</li>
@@ -4575,16 +4617,7 @@ upgrade again:</p>
 </ol>
 <p>With this role, the backplane, which uses <code>meho-admin</code>, can also change
 the login settings of realm <code>meho</code>. It could already change people and
-groups. If you do not want that, use way 2.</p>
-<p><strong>Way 2: by hand.</strong> As the console admin, in realm <code>meho</code>:</p>
-<ol>
-<li><strong>Authentication → Required actions.</strong> Open the settings of
-   <strong>Configure OTP</strong> and turn on <strong>Add recovery codes</strong>. <strong>Save</strong>.</li>
-<li><strong>Authentication → Flows → browser.</strong> Set <strong>Recovery Authentication
-   Code Form</strong> to <strong>Alternative</strong>.</li>
-</ol>
-<p>The Job's log keeps saying <code>recovery codes: not checked</code>. That is expected:
-it cannot read the settings.</p>
+groups.</p>
 <p><strong>People who exist already.</strong> The Job does not change the required actions
 of people who exist already. To make a person set up an authenticator app
 at the next login, open <strong>Users →</strong> the person <strong>→ Details → Required user

@@ -28,6 +28,7 @@ call when the switch was turned off after the start.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.db.engine import get_sessionmaker
@@ -37,6 +38,7 @@ from meho_backplane.policy.store import (
     classification_enabled,
     set_classification,
 )
+from meho_backplane.settings import parse_bool_env
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -212,8 +214,13 @@ async def register_policy_classify_operation(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert the ``policy.classify`` typed op; nothing while the switch is off."""
-    if not classification_enabled():
+    """Upsert the ``policy.classify`` typed op; nothing while the switch is off.
+
+    Reads the switch from the environment, with the same parsing as
+    :class:`~meho_backplane.settings.Settings`: a registrar runs also where
+    the other settings are not set (registry checks in tests).
+    """
+    if not parse_bool_env(os.environ.get("POLICY_CLASSIFICATION")):
         return
     await register_typed_operation(
         product="policy",

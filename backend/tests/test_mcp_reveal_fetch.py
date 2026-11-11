@@ -15,7 +15,9 @@ approved ``reveal_secret`` request once for the person who asked, behind the
   and do not use up the one-time permission;
 * a person's ``reveal_secret: true`` on a plain read runs at once, with the
   switch on or off, and its HTTP answer says no-store; the same call
-  without ``reveal_secret`` does not.
+  without ``reveal_secret`` does not;
+* a reveal call cannot run in the background: ``reveal_secret: true``
+  with ``async: true`` is refused as bad input, and no run starts.
 """
 
 from __future__ import annotations
@@ -27,9 +29,12 @@ from uuid import UUID
 import pytest
 import structlog
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import OperationRun
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.operations import reset_dispatcher_caches
@@ -318,3 +323,39 @@ async def test_an_immediate_reveal_says_no_store(
     else:
         assert response.headers.get("cache-control") != "no-store"
         assert "pragma" not in response.headers
+
+
+@pytest.mark.usefixtures("vault_read")
+@pytest.mark.parametrize("switch_on", [False, True], ids=["switch-off", "switch-on"])
+async def test_a_reveal_call_cannot_run_in_the_background(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, switch_on: bool
+) -> None:
+    _switch(monkeypatch, on=switch_on)
+    async with get_sessionmaker()() as session:
+        before = await session.scalar(select(func.count()).select_from(OperationRun))
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "call_operation",
+                "arguments": {
+                    "connector_id": CONNECTOR_ID,
+                    "op_id": PLAIN_OP,
+                    "params": {"reveal_secret": True},
+                    "async": True,
+                },
+            },
+        },
+    )
+
+    body = response.json()
+    assert body["error"]["code"] == -32602, body
+    assert body["error"]["data"]["reason"] == "reveal_secret_with_async"
+    assert "without `async`" in body["error"]["message"]
+    assert SECRET_VALUE not in response.text
+    async with get_sessionmaker()() as session:
+        after = await session.scalar(select(func.count()).select_from(OperationRun))
+    assert after == before

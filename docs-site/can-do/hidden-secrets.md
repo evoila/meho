@@ -37,6 +37,8 @@ More rules:
   No browser or proxy keeps the answer with the value: it says
   `Cache-Control: no-store`. The same is true when a person sees the
   values at once, on a read that needs no approval.
+- A call with `reveal_secret: true` cannot run in the background. With
+  `async: true` it is refused. It runs at once, or through an approval.
 - How the person who asked gets the value:
     - **Command line:** `meho secret read --approval <id> --field <name>`.
     - **Console:** "Show value" in the Vault view.

@@ -1676,6 +1676,11 @@ for the person who asked, not a run. The code is in
   call without `reveal_secret` keeps its usual headers. Tests:
   `tests/test_approval_reveal_no_store.py`, `tests/test_ui_vault.py`,
   `tests/test_mcp_reveal_fetch.py`.
+- **A reveal call cannot run in the background.** `reveal_secret: true`
+  together with `async: true` is refused before any run starts: HTTP 422
+  `reveal_secret_with_async` on `POST /api/v1/operations/call`, and bad
+  input (reason `reveal_secret_with_async`) on MCP `call_operation`. The
+  call runs at once, or through an approval.
 - **Once, and only for a short time.** The fetch must win the one-resumer
   claim, so a second fetch is refused (`reveal_already_used`). It must
   come within `APPROVAL_REVEAL_FETCH_WINDOW_SECONDS` (default 900, 15

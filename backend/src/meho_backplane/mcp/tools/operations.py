@@ -91,6 +91,7 @@ from meho_backplane.operations._contract_guidance import (
     GUIDANCE_MAX_CHARS,
     GUIDANCE_VALUE_MAX_CHARS,
 )
+from meho_backplane.operations._secret_values import REVEAL_NOT_IN_BACKGROUND, asks_reveal
 from meho_backplane.operations.meta_tools import (
     SEARCH_NARROWING_MAX,
     SEARCH_OUTCOMES,
@@ -203,7 +204,9 @@ async def _call_operation_handler(
     (:mod:`meho_backplane.operation_picks`). With ``MCP_REVEAL_FETCH`` on,
     ``approval_request_id`` fetches the value of the caller's approved
     secret reveal instead (:mod:`._call_operation_reveal`); it writes no
-    call record.
+    call record. A reveal call cannot run in the background:
+    ``reveal_secret: true`` with ``async: true`` is refused
+    (``reveal_secret_with_async``).
     """
     if APPROVAL_REQUEST_ID in arguments:
         return await fetch_reveal_over_mcp(operator, arguments)
@@ -224,6 +227,10 @@ async def _call_operation_handler(
             )
         return with_data_notice(
             await poll_call(operator, call_arguments, str(run_id), wait_seconds=wait_seconds or 0)
+        )
+    if run_async and asks_reveal(call_arguments.get("params")):
+        raise McpInvalidParamsError(
+            REVEAL_NOT_IN_BACKGROUND, data={"reason": "reveal_secret_with_async"}
         )
     if run_async:
         result = await recorded_background_call(

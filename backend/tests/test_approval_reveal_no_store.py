@@ -8,7 +8,9 @@ answers with the value. ``POST /api/v1/operations/call`` with
 ``reveal_secret: true`` on a plain read answers with the value at once.
 Those answers must not be kept by a browser or a proxy. The answers that
 carry no value (a refused fetch, the stored run result, the same call
-without ``reveal_secret``) keep their usual headers.
+without ``reveal_secret``) keep their usual headers. A reveal call cannot
+run in the background: ``reveal_secret: true`` with ``async: true`` is
+refused, and no run starts.
 """
 
 from __future__ import annotations
@@ -18,9 +20,12 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import OperationRun
 from meho_backplane.main import app
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.no_store import NO_STORE_HEADERS, answer_scope, mark_answer_holds_secret
@@ -137,6 +142,32 @@ async def test_rest_call_says_no_store_only_when_it_reveals(
     assert _says_no_store(answer) is reveal
     if not reveal:
         assert "pragma" not in answer.headers
+
+
+async def _run_count() -> int:
+    async with get_sessionmaker()() as session:
+        return int(await session.scalar(select(func.count()).select_from(OperationRun)) or 0)
+
+
+@pytest.mark.usefixtures("vault_read")
+async def test_rest_reveal_call_cannot_run_in_the_background(client: TestClient) -> None:
+    """``reveal_secret: true`` with ``async: true`` is refused with a 422; no run starts."""
+    before = await _run_count()
+    answer = client.post(
+        "/api/v1/operations/call",
+        json={
+            "connector_id": CONNECTOR_ID,
+            "op_id": PLAIN_OP,
+            "params": {"reveal_secret": True},
+            "async": True,
+        },
+    )
+    assert answer.status_code == 422, answer.text
+    detail = answer.json()["detail"]
+    assert detail["error_code"] == "reveal_secret_with_async"
+    assert "without `async`" in detail["message"]
+    assert SECRET_VALUE not in answer.text
+    assert await _run_count() == before
 
 
 def test_answer_scope_marks_only_inside_and_starts_unset() -> None:

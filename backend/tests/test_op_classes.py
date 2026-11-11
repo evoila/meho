@@ -41,6 +41,7 @@ def fresh_registry() -> Iterator[None]:
     saved_safe_writes = set(op_classes._SAFE_WRITES)
     saved_root_shell = set(op_classes._ROOT_SHELL)
     saved_per_call = set(op_classes._PER_CALL_APPROVAL)
+    saved_no_secret_value = set(op_classes._NO_SECRET_VALUE)
     op_classes._reset_declared_op_classes_for_testing()
     try:
         yield
@@ -50,6 +51,7 @@ def fresh_registry() -> Iterator[None]:
         op_classes._SAFE_WRITES.update(saved_safe_writes)
         op_classes._ROOT_SHELL.update(saved_root_shell)
         op_classes._PER_CALL_APPROVAL.update(saved_per_call)
+        op_classes._NO_SECRET_VALUE.update(saved_no_secret_value)
 
 
 def test_declared_class_wins_over_the_pattern_rules(fresh_registry: None) -> None:
@@ -198,3 +200,13 @@ def test_ssh_connectors_mark_their_root_writes_at_import() -> None:
     assert not op_classes.is_root_shell("linux.file.read")
     assert not op_classes.is_root_shell("pfsense.config.show")
     assert not op_classes.is_root_shell("pfsense.diag.ping")
+
+
+def test_no_secret_value_mark(fresh_registry: None) -> None:
+    assert not op_classes.returns_no_secret_value("example.secret.names")
+
+    op_classes.declare_no_secret_value(("example.secret.names",))
+    op_classes.declare_no_secret_value(("example.secret.names",))
+
+    assert op_classes.returns_no_secret_value("example.secret.names")
+    assert not op_classes.returns_no_secret_value("example.secret.read")

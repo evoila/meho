@@ -1546,7 +1546,7 @@ async def test_call_operation_with_target_resolves_and_dispatches(
         product="vault",
         version="1.x",
         impl_id="vault",
-        op_id="vault.kv.read",
+        op_id="vault.kv.versions",
         handler=_module_handler,
         summary="Read a secret.",
         description="reads.",
@@ -1585,10 +1585,9 @@ async def test_call_operation_with_target_resolves_and_dispatches(
         operator,
         {
             "connector_id": "vault-1.x",
-            "op_id": "vault.kv.read",
+            "op_id": "vault.kv.versions",
             "target": {"name": "rdc-vault"},
-            # vault.kv.read hides values by default; the echo needs them.
-            "params": {"path": "secret/foo", "reveal_secret": True},
+            "params": {"path": "secret/foo"},
         },
     )
 
@@ -1612,7 +1611,7 @@ async def test_call_operation_without_target_uses_none(
         product="vault",
         version="1.x",
         impl_id="vault",
-        op_id="vault.kv.read",
+        op_id="vault.kv.versions",
         handler=_module_handler,
         summary="Read.",
         description="reads.",
@@ -1626,10 +1625,9 @@ async def test_call_operation_without_target_uses_none(
         operator,
         {
             "connector_id": "vault-1.x",
-            "op_id": "vault.kv.read",
+            "op_id": "vault.kv.versions",
             "target": None,
-            # vault.kv.read hides values by default; the echo needs them.
-            "params": {"hello": "world", "reveal_secret": True},
+            "params": {"hello": "world"},
         },
     )
 
@@ -1745,7 +1743,7 @@ async def test_call_operation_with_bare_string_target_resolves_and_dispatches(
         product="vault",
         version="1.x",
         impl_id="vault",
-        op_id="vault.kv.read",
+        op_id="vault.kv.versions",
         handler=_module_handler,
         summary="Read a secret.",
         description="reads.",
@@ -1783,10 +1781,9 @@ async def test_call_operation_with_bare_string_target_resolves_and_dispatches(
         operator,
         {
             "connector_id": "vault-1.x",
-            "op_id": "vault.kv.read",
+            "op_id": "vault.kv.versions",
             "target": "rdc-vault",
-            # vault.kv.read hides values by default; the echo needs them.
-            "params": {"path": "secret/foo", "reveal_secret": True},
+            "params": {"path": "secret/foo"},
         },
     )
 

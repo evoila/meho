@@ -202,6 +202,13 @@ func (o BootstrapOptions) validate() error {
 				"(MEHO normalises MCP_RESOURCE_URI server-side; the " +
 				"audience claim in the token must match the no-slash form)")
 	}
+	for _, t := range toolMCPClients {
+		if o.CLIClientID == t.ID || o.MCPClientID == t.ID || o.CLIApproveClientID == t.ID {
+			return fmt.Errorf(
+				"refusing client name %s: it is the client of %s, "+
+					"which this verb sets up by itself", t.ID, t.Tool)
+		}
+	}
 	if o.CLIClientID == "meho-backplane" || o.MCPClientID == "meho-backplane" ||
 		o.CLIApproveClientID == "meho-backplane" {
 		return errors.New(
@@ -480,7 +487,7 @@ func (o BootstrapOptions) desiredCLIClient() *clientRep {
 	c := &clientRep{
 		ClientID:                  o.CLIClientID,
 		Name:                      "MEHO CLI + MCP-OAuth-2.1 device-code public client",
-		Description:               "Public OAuth client for RFC 8628 device-code flow used by `meho login` and any MCP-OAuth-2.1 client targeting <backplane-url>/mcp. Audience-mapped to " + o.BackplaneAudience + ". Provisioned by `meho admin keycloak bootstrap-clients` (#791).",
+		Description:               "Public OAuth client for the RFC 8628 device-code flow of `meho login`. MCP clients sign in through `meho-mcp`, not this client. Audience-mapped to " + o.BackplaneAudience + ". Provisioned by `meho admin keycloak bootstrap-clients` (#791).",
 		Enabled:                   boolPtr(true),
 		PublicClient:              boolPtr(true),
 		StandardFlowEnabled:       boolPtr(true),
@@ -602,6 +609,34 @@ func (o BootstrapOptions) desiredMCPClient() *clientRep {
 	}
 }
 
+// toolMCPClients are the login clients of the AI tool kinds (#6210):
+// one for the Claude Code plugin and one for the Claude Desktop
+// extension. They have the same settings as the MCP browser-flow
+// client. With MCP_CLIENT_PER_TOOL_KIND on, MEHO lists them in
+// GET /api/v1/auth-config, and each tool signs in with its own one and
+// keeps a saved login of its own. The names match the backend list
+// (api/v1/auth_config.py MCP_TOOL_CLIENTS).
+var toolMCPClients = []struct{ ID, Name, Tool string }{
+	{"meho-mcp-code", "MEHO MCP for Claude Code", "the Claude Code plugin"},
+	{"meho-mcp-desktop", "MEHO MCP for Claude Desktop", "the Claude Desktop extension"},
+}
+
+// desiredToolMCPClients builds the client of each AI tool kind: a copy
+// of desiredMCPClient with its own id, name and description.
+func (o BootstrapOptions) desiredToolMCPClients() []*clientRep {
+	clients := make([]*clientRep, 0, len(toolMCPClients))
+	for _, t := range toolMCPClients {
+		c := o.desiredMCPClient()
+		c.ClientID = t.ID
+		c.Name = t.Name
+		c.Description = "Public OAuth client of " + t.Tool + " (authorization code + PKCE). " +
+			"Same settings as " + o.MCPClientID + "; a login of its own. " +
+			"Provisioned by `meho admin keycloak bootstrap-clients`."
+		clients = append(clients, c)
+	}
+	return clients
+}
+
 // Result captures the IDs of the resources the bootstrap touched.
 // Used by the cobra command to print the "set these in your chart"
 // summary, and by tests for assertions.
@@ -612,7 +647,8 @@ type Result struct {
 	ApproveClientUUID string
 	MCPClientID       string // clientId of the MCP browser-flow client
 	MCPClientUUID     string
-	AdminGroupUUID    string // UUID of MEHO-Admins
+	ToolMCPClientIDs  []string // clientIds of the clients of the AI tool kinds
+	AdminGroupUUID    string   // UUID of MEHO-Admins
 	AdminUserCreated  bool
 	AdminUserJoined   bool // this run added the user to MEHO-Admins or MEHO-Platform-Admins
 	// AddedTenantID is the id of the --add-tenant tenant; AddedTenantIDNew
@@ -637,7 +673,9 @@ type Result struct {
 //     scopes, bound to its own login flow `meho approval sign-in`
 //     (password form, then the one-time code when the person has one;
 //     made when missing)
-//  4. Public MCP browser-flow client (`meho-mcp`)
+//  4. Public MCP browser-flow client (`meho-mcp`), and the clients of
+//     the AI tool kinds (`meho-mcp-code`, `meho-mcp-desktop`, #6210)
+//     with the same settings as `meho-mcp` (steps 4 and 5)
 //  5. Same 8 mappers + 4 default scopes on the MCP client, **plus**
 //     `offline_access`, `mcp:read`, `mcp:execute` and `mcp:admin` as
 //     *optional* client scopes (the three `mcp:*` scopes are created in
@@ -813,6 +851,17 @@ func Bootstrap(
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, mcpOptionalEvents...)
 
+	// --- Clients of the AI tool kinds (#6210) -------------------------------
+
+	for _, desired := range opts.desiredToolMCPClients() {
+		events, terr := reconcileToolMCPClient(ctx, c, opts, desired, createdScopes)
+		if terr != nil {
+			return nil, fmt.Errorf("reconcile MCP client %q: %w", desired.ClientID, terr)
+		}
+		res.ToolMCPClientIDs = append(res.ToolMCPClientIDs, desired.ClientID)
+		res.MapperEventsLog = append(res.MapperEventsLog, events...)
+	}
+
 	// --- Role groups + first admin user ------------------------------------
 
 	specs := append(opts.firstTenantGroups(), platformAdminGroup())
@@ -862,6 +911,36 @@ func Bootstrap(
 	return res, nil
 }
 
+// reconcileToolMCPClient sets up the client of one AI tool kind the
+// same way as the MCP browser-flow client: the client, the mappers, the
+// default scopes and the optional scopes. The realm client scopes exist
+// already (or, in a dry run, are in createdScopes).
+func reconcileToolMCPClient(
+	ctx context.Context, c *adminClient, opts BootstrapOptions,
+	desired *clientRep, createdScopes []string,
+) ([]string, error) {
+	uuid, events, err := reconcileClient(ctx, c, desired)
+	if err != nil {
+		return nil, err
+	}
+	mapperEvents, err := reconcileMappers(ctx, c, uuid, opts.desiredMappers())
+	if err != nil {
+		return nil, fmt.Errorf("mappers: %w", err)
+	}
+	events = append(events, mapperEvents...)
+	scopeEvents, err := reconcileDefaultScopes(ctx, c, uuid, requiredDefaultScopes())
+	if err != nil {
+		return nil, fmt.Errorf("default scopes: %w", err)
+	}
+	events = append(events, scopeEvents...)
+	optionalEvents, err := reconcileOptionalScopes(
+		ctx, c, uuid, requiredMCPOptionalScopes(), createdScopes)
+	if err != nil {
+		return nil, fmt.Errorf("optional scopes: %w", err)
+	}
+	return append(events, optionalEvents...), nil
+}
+
 // dryRunSummary prints the shape a run sets up. The changes against
 // the realm follow in the events of the dry run.
 func dryRunSummary(opts BootstrapOptions, out io.Writer) {
@@ -874,6 +953,10 @@ func dryRunSummary(opts BootstrapOptions, out io.Writer) {
 	fmt.Fprintf(out, "==> login flow of the approval sign-in client: %q "+
 		"(always asks for the password; made if missing)\n", approvalFlowAlias)
 	fmt.Fprintf(out, "==> MCP browser-flow client: %s\n", opts.MCPClientID)
+	for _, t := range toolMCPClients {
+		fmt.Fprintf(out, "==> MCP client of %s: %s (same settings as %s)\n",
+			t.Tool, t.ID, opts.MCPClientID)
+	}
 	fmt.Fprintln(out, "==> protocol mappers (each on the CLI and MCP clients):")
 	for _, m := range opts.desiredMappers() {
 		fmt.Fprintf(out, "    - %s (%s)\n", m.Name, m.ProtocolMapper)
@@ -1400,5 +1483,9 @@ func buildConfigKeySummary(opts BootstrapOptions) []string {
 		"# Surfaced as `cli_approve_client_id`; `meho approvals approve` signs in with it.",
 		"",
 		"MCP browser-flow client_id (paste into your MCP client config — mcp-remote shim / MCP Inspector / Claude Code): " + opts.MCPClientID,
+		"",
+		"Clients of the AI tool kinds: meho-mcp-code (Claude Code), meho-mcp-desktop (Claude Desktop).",
+		"# Set MCP_CLIENT_PER_TOOL_KIND=true on the backplane to list them in GET /api/v1/auth-config;",
+		"# then each tool signs in with its own client and keeps a saved login of its own.",
 	}
 }

@@ -36,6 +36,7 @@ from typing import Final
 
 __all__ = [
     "DECLARABLE_OP_CLASSES",
+    "declare_no_secret_value",
     "declare_op_classes",
     "declare_per_call_approval",
     "declare_root_shell",
@@ -45,6 +46,7 @@ __all__ = [
     "is_root_shell",
     "is_safe_write",
     "needs_per_call_approval",
+    "returns_no_secret_value",
 ]
 
 #: The classes a connector may declare. ``credential_read``: the answer
@@ -60,6 +62,7 @@ _DECLARED: dict[str, str] = {}
 _SAFE_WRITES: set[str] = set()
 _ROOT_SHELL: set[str] = set()
 _PER_CALL_APPROVAL: set[str] = set()
+_NO_SECRET_VALUE: set[str] = set()
 
 
 def declare_op_classes(
@@ -147,6 +150,27 @@ def needs_per_call_approval(op_id: str) -> bool:
     return op_id in _PER_CALL_APPROVAL
 
 
+def declare_no_secret_value(op_ids: Iterable[str]) -> None:
+    """Mark *op_ids* as credential reads whose answer holds no secret value.
+
+    A ``credential_read`` operation is at least ``caution`` and waits for a
+    person's approval (:mod:`meho_backplane.operations.credential_read`).
+    A read in that class whose answer holds no secret value is the
+    exception: for example one that returns only key names, or only "same"
+    or "different". Its connector marks it here, in code. A spec import or
+    a tenant override cannot set the mark.
+
+    Mark only a read whose answer holds no secret value also when the call
+    asks for ``reveal_secret``. Safe to call twice with the same ids.
+    """
+    _NO_SECRET_VALUE.update(op_ids)
+
+
+def returns_no_secret_value(op_id: str) -> bool:
+    """Return ``True`` when a connector marked *op_id* with :func:`declare_no_secret_value`."""
+    return op_id in _NO_SECRET_VALUE
+
+
 def declared_op_ids(op_class: str) -> frozenset[str]:
     """Return every op id declared with *op_class*."""
     return frozenset(op_id for op_id, known in _DECLARED.items() if known == op_class)
@@ -158,3 +182,4 @@ def _reset_declared_op_classes_for_testing() -> None:
     _SAFE_WRITES.clear()
     _ROOT_SHELL.clear()
     _PER_CALL_APPROVAL.clear()
+    _NO_SECRET_VALUE.clear()

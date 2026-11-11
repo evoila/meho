@@ -109,7 +109,8 @@ class Connector(ABC):
     * :attr:`supported_version_range` — PEP 440-style version spec
       (e.g. ``">=8.5,<10.0"``) the connector advertises against a
       target's fingerprinted product version. ``None`` means "any
-      version" and preserves v1 behaviour.
+      version" and preserves v1 behaviour. A class that leaves it
+      ``None`` also sets :attr:`version_range_reason`.
     * :attr:`priority` — integer tie-break for the registry v2 resolver
       (#393) when two connectors match the same ``(product, version)``;
       higher wins.
@@ -129,6 +130,14 @@ class Connector(ABC):
     impl_id: str = ""
     supported_version_range: str | None = None
     priority: int = 0
+
+    #: Why ``supported_version_range`` is ``None``, in one plain sentence
+    #: (for example "Microsoft Graph is called at API version 1.0"). A
+    #: connector class that leaves the range ``None`` must set this, or the
+    #: check in ``backend/tests/test_connector_version_ranges.py`` fails.
+    #: The generated connector page shows it in the "Built for" column.
+    #: Setting it means "any product version is fine, on purpose".
+    version_range_reason: str | None = None
 
     #: One plain sentence on what the connector does, shown in the
     #: "What it does" column of the generated connector list on the docs

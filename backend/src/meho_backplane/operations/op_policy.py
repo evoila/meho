@@ -289,8 +289,7 @@ async def effective_policy_map(
         )
         policies = [_with_classification(p, c) for p, c in zip(policies, classified, strict=True)]
     return {
-        OpKey.of(row): _with_floors(row, policy)
-        for row, policy in zip(rows, policies, strict=True)
+        OpKey.of(row): _with_floors(row, policy) for row, policy in zip(rows, policies, strict=True)
     }
 
 

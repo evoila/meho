@@ -10,9 +10,11 @@ small throw-away trees, plus once on this checkout.
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -80,6 +82,9 @@ def test_claim_with_the_wrong_version_fails(tmp_path: Path) -> None:
         "Tested live on `my-nsx-rest-4.2` 4.2.1.\n",
         "Tested live on `nsx-rest-4.2` 4.2.1 and `vmware-rest-9.0` 9.0.1.\n",
         "Tested live on `nsx-rest-4.2`.\n",
+        "Tested live on `nsx-rest-4.2` 4.2.1 and `nsx-typed-4.2` 4.2.1.\n",
+        "Tested live on `nsx-typed-4.2` 4.2.1 and `nsx-rest-4.2` 4.2.1.\n",
+        "Tested live on nsx-typed-4.2 and `nsx-rest-4.2` 4.2.1.\n",
     ],
 )
 def test_claim_with_an_unrecorded_pair_fails(tmp_path: Path, page: str) -> None:
@@ -103,6 +108,48 @@ def test_claim_with_only_recorded_pairs_passes(tmp_path: Path, page: str) -> Non
     )
     result = _run(_tree(tmp_path, record=record, page=page))
     assert result.returncode == 0, result.stderr
+
+
+def _record_with_version(version: str) -> str:
+    return _RECORD_WITH_ROW.replace('"4.2.1"', f'"{version}"')
+
+
+@pytest.mark.parametrize(
+    ("version", "claim"),
+    [
+        ("2022", "2022"),
+        ("4.2.1_rc1", "4.2.1_rc1"),
+        ("v4.2.1", "v4.2.1"),
+        ("v4.2.1", "4.2.1"),
+        ("2.7.2-RELEASE", "2.7.2-RELEASE"),
+    ],
+)
+def test_claim_in_every_record_version_format_passes(
+    tmp_path: Path, version: str, claim: str
+) -> None:
+    page = f"1. Tested live on `nsx-rest-4.2` {claim}.\n"
+    result = _run(_tree(tmp_path, record=_record_with_version(version), page=page))
+    assert result.returncode == 0, result.stderr
+
+
+def test_claim_with_a_different_suffix_fails(tmp_path: Path) -> None:
+    page = "Tested live on `nsx-rest-4.2` 4.2.1_rc2.\n"
+    result = _run(_tree(tmp_path, record=_record_with_version("4.2.1_rc1"), page=page))
+    assert result.returncode == 1
+
+
+def test_shapes_match_the_record_check() -> None:
+    def load(path: Path) -> Any:
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    claims = load(_SCRIPT)
+    record = load(_REPO_ROOT / "backend" / "scripts" / "validate_live_tests.py")
+    assert record._VERSION.pattern == claims.VERSION_SHAPE
+    assert record._CONNECTOR_ID.pattern == claims.CONNECTOR_ID_SHAPE
 
 
 def test_claim_with_a_row_without_tests_fails(tmp_path: Path) -> None:

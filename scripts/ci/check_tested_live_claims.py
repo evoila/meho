@@ -13,9 +13,12 @@ A line that says "tested live" (or "live-tested", "live tested", "tested on a
 real system") must name a connector id and a product version. Each version
 must have a test in the record for the connector id before it. Ids and
 versions match only in full: ``4.2.1`` does not back ``4.2.1-rc1``, and
-``nsx-rest-4.2`` does not back ``nsx-rest-4.20``. The check skips the generated parts: the connector
-inventory page and any block between ``<!-- live-tests:start -->`` and
-``<!-- live-tests:end -->``.
+``nsx-rest-4.2`` does not back ``nsx-rest-4.20``. A leading ``v`` does not
+count: ``v4.2.1`` and ``4.2.1`` are the same version. Every word shaped like a
+connector id (such as ``nsx-typed-4.2``) counts, also when the record does not
+know it. Every number on the line counts as a version, so write other numbers
+in words. The check skips the generated parts: the connector inventory page and
+any block between ``<!-- live-tests:start -->`` and ``<!-- live-tests:end -->``.
 
 It also runs ``backend/scripts/validate_live_tests.py`` on the record.
 
@@ -41,12 +44,18 @@ _GENERATED_PAGES = {"docs-site/reference/connectors.md"}
 _SECTION = re.compile(r"^## \[", re.MULTILINE)
 _FIX = "add a row to docs/compatibility/live-tests.yaml or change the text"
 _RECORD = "docs/compatibility/live-tests.yaml"
-# A complete version with its suffix, such as 4.2.1, 4.2.1-rc1 or v9.0.0+build.5.
-_VERSION = re.compile(
-    r"(?<![\w.-])v?"
-    r"(\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.+-]*[0-9A-Za-z])?)"
-    r"(?![\w-]|\.\w)"
-)
+# The version and connector id shapes of backend/scripts/validate_live_tests.py,
+# so every version the record accepts (2022, 4.2.1_rc1, v4.2.1) can be claimed.
+# A connector id here starts with a letter, so a date is no connector id.
+VERSION_SHAPE = r"v?\d+(?:\.\d+){0,3}(?:[-+_][A-Za-z0-9]+)*"
+CONNECTOR_ID_SHAPE = r"[a-z0-9]+(?:-[a-z0-9]+)*-v?\d+(?:\.(?:\d+|x))*"
+# Only complete words: "4.2" in "4.2.1" or "nsx-rest-4.2" in "nsx-rest-4.20" is none.
+_BEFORE = r"(?<![\w.-])"
+_AFTER = r"(?![\w-]|\.\w)"
+_VERSION = re.compile(_BEFORE + VERSION_SHAPE + _AFTER)
+_CONNECTOR_ID = re.compile(_BEFORE + r"(?=[a-z])" + CONNECTOR_ID_SHAPE + _AFTER)
+# A list marker at the start of a line, like "- " or "1. ", is no version.
+_LIST_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 
 
 def recorded_tests(record: Any) -> dict[str, set[str]]:
@@ -68,13 +77,20 @@ def recorded_tests(record: Any) -> dict[str, set[str]]:
 def _connector_spans(line: str, connector_ids: set[str]) -> list[tuple[int, int, str]]:
     """Return ``(start, end, id)`` for each complete connector id in *line*.
 
-    ``nsx-rest-4.2`` does not match inside ``nsx-rest-4.20`` or ``my-nsx-rest-4.2``.
+    An id counts when the record knows it or when it has the shape of an id, so
+    an id with no row in the record is not missed. ``nsx-rest-4.2`` does not
+    match inside ``nsx-rest-4.20`` or ``my-nsx-rest-4.2``.
     """
-    spans: list[tuple[int, int, str]] = []
+    found = {(m.start(), m.end(), m.group()) for m in _CONNECTOR_ID.finditer(line)}
     for connector_id in connector_ids:
-        pattern = rf"(?<![\w.-]){re.escape(connector_id)}(?![\w-]|\.\w)"
-        spans.extend((m.start(), m.end(), connector_id) for m in re.finditer(pattern, line))
-    return sorted(spans)
+        pattern = _BEFORE + re.escape(connector_id) + _AFTER
+        found.update((m.start(), m.end(), connector_id) for m in re.finditer(pattern, line))
+    # Keep an id only when no longer id holds it.
+    return sorted(
+        span
+        for span in found
+        if not any(o != span and o[0] <= span[0] and span[1] <= o[1] for o in found)
+    )
 
 
 def claimed_pairs(line: str, connector_ids: set[str]) -> list[tuple[str, str]] | None:
@@ -84,6 +100,7 @@ def claimed_pairs(line: str, connector_ids: set[str]) -> list[tuple[str, str]] |
     when no id comes before it. None means the line names no known connector,
     names no version, or names a connector with no version.
     """
+    line = _LIST_MARKER.sub(lambda m: " " * len(m.group()), line)
     spans = _connector_spans(line, connector_ids)
     if not spans:
         return None
@@ -94,17 +111,23 @@ def claimed_pairs(line: str, connector_ids: set[str]) -> list[tuple[str, str]] |
     starts = [start for start, _, _ in spans] + [len(line)]
     ends = [0] + [end for _, end, _ in spans]
     for owner, start, end in zip(owners, ends, starts, strict=True):
-        pairs.extend((owner, match.group(1)) for match in _VERSION.finditer(line[start:end]))
+        pairs.extend((owner, match.group()) for match in _VERSION.finditer(line[start:end]))
     named = {connector_id for _, _, connector_id in spans}
     if named - {connector_id for connector_id, _ in pairs}:
         return None
     return pairs
 
 
+def _without_v(version: str) -> str:
+    return version.removeprefix("v")
+
+
 def line_is_recorded(line: str, tested: dict[str, set[str]]) -> bool:
     """True when every connector version that *line* claims has a test in the record."""
     pairs = claimed_pairs(line, set(tested))
-    return pairs is not None and all(version in tested[c] for c, version in pairs)
+    return pairs is not None and all(
+        _without_v(version) in {_without_v(v) for v in tested.get(c, set())} for c, version in pairs
+    )
 
 
 def claim_lines(text: str) -> list[tuple[int, str]]:

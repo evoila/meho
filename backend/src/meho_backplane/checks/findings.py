@@ -15,7 +15,8 @@ Two callers use this module:
 * the event drain (:mod:`meho_backplane.events.drain`), through
   :func:`record_finding_for_event`. With ``CHECKS_AGENT_EVENTS`` on, an agent
   started by an ordinary event trigger has no step after its run. So the drain
-  calls this module when such a run ends.
+  calls this module when such a run ends. It checks the stored run, its
+  trigger and the Dashboard event that started it before it writes anything.
 
 Like the investigator, this module imports no operations dispatcher. It reads
 a stored run and writes memory and mail.
@@ -25,15 +26,27 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import dataclass
 from typing import cast
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.checks.events import CHECK_DASHBOARD_CHANGED
 from meho_backplane.checks.notify import FindingNotice, schedule_finding_notification
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentRun, AgentRunStatus, CheckDashboard
+from meho_backplane.db.models import (
+    AgentRun,
+    AgentRunStatus,
+    AgentRunTrigger,
+    CheckDashboard,
+    EventOutbox,
+    ScheduledTrigger,
+    ScheduledTriggerKind,
+)
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
 from meho_backplane.settings import get_settings
@@ -62,13 +75,19 @@ _MEMORY_SOURCE = "checks-investigator"
 #: so audit rows name the check investigator, not a real user.
 _INVESTIGATOR_SUB = "__checks_investigator__"
 
-#: The run key of a run that an event trigger started for a Dashboard event:
-#: ``event:<trigger id>:c:dashboard:<dashboard id>:<group key>``. The format is
-#: made by ``events.matcher._coalesce_work_ref`` from the event's
-#: ``coalesce_key`` (``checks.events.publish_dashboard_changed``).
-_DASHBOARD_RUN_KEY = re.compile(
-    r"^event:(?P<trigger>[0-9a-f-]{36}):c:dashboard:(?P<dashboard>[0-9a-f-]{36}):(?P<group>.+)$"
-)
+#: The run key of a run that an event trigger started for a keyed event:
+#: ``event:<trigger id>:c:<coalesce key>`` (``events.matcher._coalesce_work_ref``).
+#: A Dashboard event's key is ``dashboard:<dashboard id>:<group key>``
+#: (``checks.events.publish_dashboard_changed``), but a key over 200 characters
+#: is stored as a hash. So the Dashboard and the group come from the event.
+_EVENT_RUN_KEY = re.compile(r"^event:(?P<trigger>[0-9a-f-]{36}):c:.+$")
+
+#: Run sources of a run that a trigger started. A direct run, or a run that
+#: another agent started, never counts as a Dashboard event run.
+_TRIGGER_RUN_SOURCES = frozenset({AgentRunTrigger.SCHEDULED.value, AgentRunTrigger.EVENT.value})
+
+#: How many of the tenant's newest Dashboard events to search for a run's cause.
+_CAUSE_EVENT_SEARCH_LIMIT = 500
 
 
 def _log() -> structlog.typing.FilteringBoundLogger:
@@ -233,10 +252,11 @@ async def record_finding_for_event(payload: dict[str, object]) -> bool:
 
     *payload* is the payload of an ``agent_run.completed`` event. Returns
     ``True`` when a finding was stored. Does nothing (``False``) when the
-    switch is off, the run did not succeed, the run key is not the Dashboard
-    form, the Dashboard is not in the run's tenant, or the answer is not a
-    finding (any agent may answer in another shape). Never raises, so a bad
-    run cannot stop the drain loop.
+    switch is off, the run did not succeed, a Dashboard event trigger did not
+    start the run (:func:`_load_dashboard_run`), the answer is not a finding
+    (any agent may answer in another shape), or this run's finding is already
+    stored (a replayed event). Never raises, so a bad run cannot stop the
+    drain loop.
     """
     try:
         return await _record_finding_for_event(payload)
@@ -245,42 +265,61 @@ async def record_finding_for_event(payload: dict[str, object]) -> bool:
         return False
 
 
-def _parse_run_key(
-    payload: dict[str, object],
-) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, str] | None:
-    """Return ``(run id, tenant id, dashboard id, group key)`` for a Dashboard run.
+@dataclass(frozen=True)
+class _DashboardRun:
+    """A succeeded run that an event trigger started for a Dashboard event."""
 
-    ``None`` when the run did not succeed, the run key is not the Dashboard
-    form, or an id is not a UUID.
-    """
-    work_ref = payload.get("work_ref")
-    if payload.get("status") != AgentRunStatus.SUCCEEDED.value or not isinstance(work_ref, str):
-        return None
-    match = _DASHBOARD_RUN_KEY.match(work_ref)
-    if match is None:
+    output: dict[str, object] | None
+    dashboard_id: uuid.UUID
+    dashboard_name: str
+    recipient: str | None
+    group_key: str
+
+
+def _payload_ids(payload: dict[str, object]) -> tuple[uuid.UUID, uuid.UUID] | None:
+    """Return ``(run id, tenant id)`` of a succeeded run, else ``None``."""
+    if payload.get("status") != AgentRunStatus.SUCCEEDED.value:
         return None
     try:
-        return (
-            uuid.UUID(str(payload.get("run_id"))),
-            uuid.UUID(str(payload.get("tenant_id"))),
-            uuid.UUID(match.group("dashboard")),
-            match.group("group"),
-        )
+        return uuid.UUID(str(payload.get("run_id"))), uuid.UUID(str(payload.get("tenant_id")))
     except ValueError:
         return None
 
 
-async def _load_run_output_and_dashboard(
-    run_id: uuid.UUID, tenant_id: uuid.UUID, dashboard_id: uuid.UUID
-) -> tuple[dict[str, object] | None, str, str | None] | None:
-    """Read the run's answer and the Dashboard's name and mail address.
+async def _load_dashboard_run(run_id: uuid.UUID, tenant_id: uuid.UUID) -> _DashboardRun | None:
+    """Load the run, but only when a Dashboard event trigger started it.
 
-    ``None`` when the run or the Dashboard is not in *tenant_id*.
+    The stored run, not the event payload, is the source. ``None`` unless all
+    of these hold:
+
+    * the run is in *tenant_id*, succeeded, and a trigger started it (never a
+      direct run or a run that another agent started);
+    * its run key names an event trigger of the same tenant and agent, and no
+      cron or one-off trigger of the tenant carries that run key;
+    * a ``check.dashboard.changed`` event with a cause group gives exactly
+      this run key for that trigger and passes its filter.
+
+    The Dashboard and the group key come from that event, so a long group key
+    that the run key holds only as a hash still works.
     """
     async with get_sessionmaker()() as session:
         run = await session.get(AgentRun, run_id)
-        if run is None or run.tenant_id != tenant_id:
+        if (
+            run is None
+            or run.tenant_id != tenant_id
+            or run.status != AgentRunStatus.SUCCEEDED.value
+            or run.trigger not in _TRIGGER_RUN_SOURCES
+            or run.work_ref is None
+        ):
             return None
+        trigger = await _event_trigger_for_run(session, run, run.work_ref)
+        if trigger is None:
+            return None
+        cause = await _cause_event(session, trigger, run.work_ref)
+        if cause is None:
+            _log().info("checks_event_finding_no_cause", run_id=str(run_id))
+            return None
+        dashboard_id, group_key = cause
         dashboard = await session.get(CheckDashboard, dashboard_id)
         if dashboard is None or dashboard.tenant_id != tenant_id:
             _log().info(
@@ -289,34 +328,131 @@ async def _load_run_output_and_dashboard(
                 dashboard_id=str(dashboard_id),
             )
             return None
-        return run.output, dashboard.name, dashboard.notify_email
+        return _DashboardRun(
+            output=run.output,
+            dashboard_id=dashboard_id,
+            dashboard_name=dashboard.name,
+            recipient=dashboard.notify_email,
+            group_key=group_key,
+        )
+
+
+async def _event_trigger_for_run(
+    session: AsyncSession, run: AgentRun, work_ref: str
+) -> ScheduledTrigger | None:
+    """Return the event trigger the run key names, if it really owns the run."""
+    match = _EVENT_RUN_KEY.match(work_ref)
+    if match is None:
+        return None
+    try:
+        trigger_id = uuid.UUID(match.group("trigger"))
+    except ValueError:
+        return None
+    trigger = await session.get(ScheduledTrigger, trigger_id)
+    if (
+        trigger is None
+        or trigger.tenant_id != run.tenant_id
+        or trigger.kind != ScheduledTriggerKind.EVENT.value
+        or trigger.agent_definition_id != run.agent_definition_id
+    ):
+        return None
+    # A cron or one-off trigger may carry any run key, so one that copies
+    # this key could start the same agent. Such a run is not trusted.
+    copied = await session.execute(
+        select(ScheduledTrigger.id)
+        .where(
+            ScheduledTrigger.tenant_id == run.tenant_id,
+            ScheduledTrigger.kind != ScheduledTriggerKind.EVENT.value,
+            ScheduledTrigger.work_ref == work_ref,
+        )
+        .limit(1)
+    )
+    if copied.scalar_one_or_none() is not None:
+        return None
+    return trigger
+
+
+async def _cause_event(
+    session: AsyncSession, trigger: ScheduledTrigger, work_ref: str
+) -> tuple[uuid.UUID, str] | None:
+    """Find the Dashboard event that gave *work_ref*: ``(dashboard id, group key)``.
+
+    Searches the tenant's newest ``check.dashboard.changed`` events. The run
+    key is made the way the event matcher makes it, so a hashed key matches too.
+    """
+    # Imported here: the matcher pulls in the agent runtime.
+    from meho_backplane.events.matcher import _coalesce_work_ref, _payload_contains
+
+    events = await session.execute(
+        select(EventOutbox)
+        .where(
+            EventOutbox.tenant_id == trigger.tenant_id,
+            EventOutbox.event_kind == CHECK_DASHBOARD_CHANGED,
+        )
+        .order_by(EventOutbox.event_id.desc())
+        .limit(_CAUSE_EVENT_SEARCH_LIMIT)
+    )
+    for event in events.scalars():
+        if _coalesce_work_ref(trigger, event) != work_ref:
+            continue
+        if not _payload_contains(event.payload, trigger.event_filter or {}):
+            continue
+        return _dashboard_and_group(event.payload)
+    return None
+
+
+def _dashboard_and_group(payload: dict[str, object]) -> tuple[uuid.UUID, str] | None:
+    """Read ``(dashboard id, group key)`` from a Dashboard event payload."""
+    source = payload.get("source")
+    cause_group = payload.get("cause_group")
+    if not isinstance(source, dict) or not isinstance(cause_group, dict):
+        return None
+    group_key = cause_group.get("key")
+    if not isinstance(group_key, str) or not group_key:
+        return None
+    try:
+        return uuid.UUID(str(source.get("id"))), group_key
+    except ValueError:
+        return None
+
+
+async def _already_recorded(
+    memory: MemoryService, operator: Operator, group_key: str, run_id: uuid.UUID
+) -> bool:
+    """``True`` when the group's stored finding came from this run.
+
+    The drain marks an event processed only after this step, so a restart or
+    a failed commit delivers the same ``agent_run.completed`` event again.
+    The stored entry keeps the run id, so a second delivery stores and mails
+    nothing.
+    """
+    entry = await memory.recall(operator, MemoryScope.TENANT, f"{NOISE_SLUG_PREFIX}{group_key}")
+    return entry is not None and entry.metadata.get("run_id") == str(run_id)
 
 
 async def _record_finding_for_event(payload: dict[str, object]) -> bool:
     if not get_settings().checks_agent_events:
         return False
-    parsed = _parse_run_key(payload)
-    if parsed is None:
+    ids = _payload_ids(payload)
+    if ids is None:
         return False
-    run_id, tenant_id, dashboard_id, group_key = parsed
-    loaded = await _load_run_output_and_dashboard(run_id, tenant_id, dashboard_id)
+    run_id, tenant_id = ids
+    loaded = await _load_dashboard_run(run_id, tenant_id)
     if loaded is None:
         return False
-    output, dashboard_name, recipient = loaded
-    finding = parse_finding(output, run_id=run_id)
+    finding = parse_finding(loaded.output, run_id=run_id)
     if finding is None:
         return False
-    await persist_finding(
-        MemoryService(),
-        investigator_operator(tenant_id),
-        group_key,
-        finding,
-        run_id=run_id,
-    )
+    memory = MemoryService()
+    operator = investigator_operator(tenant_id)
+    if await _already_recorded(memory, operator, loaded.group_key, run_id):
+        _log().info("checks_event_finding_already_recorded", run_id=str(run_id))
+        return False
+    await persist_finding(memory, operator, loaded.group_key, finding, run_id=run_id)
     _log().info(
         "checks_event_finding_recorded",
         run_id=str(run_id),
-        group_key=group_key,
+        group_key=loaded.group_key,
         verdict=finding.verdict,
         re_escalate=finding.re_escalate,
         tenant_id=str(tenant_id),
@@ -324,9 +460,9 @@ async def _record_finding_for_event(payload: dict[str, object]) -> bool:
     schedule_finding_notification(
         finding_notice(
             finding,
-            dashboard_id=dashboard_id,
-            dashboard_name=dashboard_name,
-            recipient=recipient,
+            dashboard_id=loaded.dashboard_id,
+            dashboard_name=loaded.dashboard_name,
+            recipient=loaded.recipient,
             run_id=run_id,
         )
     )

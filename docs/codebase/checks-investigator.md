@@ -230,13 +230,27 @@ needs no memory or mail rights, because MEHO stores and mails the finding:
 - `events/drain.py` `_dispatch_event`: after the triggers fire, when the event
   is `agent_run.completed`, the drain calls
   `checks/findings.py` `record_finding_for_event`.
-- That function acts only for a run that **succeeded**, whose run key has the
-  form `event:<trigger id>:c:dashboard:<dashboard id>:<group key>` (the key
-  that the Dashboard event's `coalesce_key` gives), and whose Dashboard is in
-  the run's tenant. It parses the run's answer with `parse_finding`. Any other
-  answer shape writes nothing.
+- That function acts only for a run that a Dashboard event trigger really
+  started. It reads the stored run, not the event payload, and checks:
+  - the run **succeeded**, is in the tenant, and a trigger started it. A direct
+    run, or a run that another agent started, never counts, even with the
+    same run key;
+  - the run key `event:<trigger id>:c:<key>` names an event trigger of the same
+    tenant and agent, and no cron or one-off trigger of the tenant carries that
+    run key;
+  - a `check.dashboard.changed` event with a cause group gives exactly this run
+    key for that trigger (made the way the event matcher makes it) and passes
+    the trigger's filter. The Dashboard and the group key come from this event.
+    So a long key that the run key holds only as a hash still works. The
+    step searches the tenant's 500 newest Dashboard events.
+
+  The Dashboard must be in the run's tenant. The run's answer is parsed with
+  `parse_finding`. Any other answer shape writes nothing.
 - A finding is written to the memory entry `checks-noise-<group key>` (the same
   entry the old path writes) and mailed to the Dashboard's `notify_email`.
+- The drain marks the `agent_run.completed` event processed only after this
+  step, so a restart can deliver it again. The memory entry keeps the run id.
+  When it already holds this run's finding, the step stores and mails nothing.
 - It never raises into the drain loop.
 
 **No double runs.** When an *active* `kind=event` trigger exists in the tenant
@@ -256,10 +270,6 @@ trigger filters on `known_noise: false`, so it does not start.
    your agent name.
 2. From then on the old path steps aside. To go back, pause or cancel the
    trigger.
-
-A run key longer than 200 characters is hashed by the trigger path, and then the
-finding step cannot read the group key. Group keys are short, so this does not
-happen for MEHO's own keys.
 
 The code for the finding (`ChecksFinding`, `parse_finding`, `persist_finding`,
 `finding_notice`) is in `checks/findings.py`, so both paths use one copy.

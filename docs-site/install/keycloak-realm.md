@@ -316,9 +316,14 @@ What the realm has:
     cookie, the company login, the password form (which also takes a
     passkey), and the one-time code when the person has one and did not
     use a passkey. So the normal console login looks the same as
-    before. These are the steps of Keycloak's own browser flow, not a
-    copy of your realm's current one. If your own Keycloak uses a
-    changed browser flow, the console login loses those changes.
+    before. Level 1 skips the one-time code after a passkey with user
+    verification (a PIN or a fingerprint). These are the steps of
+    Keycloak's own browser flow, not a copy of your realm's current one.
+    So the helper and the operation below first compare your realm's
+    `browser` flow with Keycloak's default: its steps, their
+    requirements and their settings. When something differs (for
+    example the one-time code is required for everyone), they make the
+    flow but do not bind it, and they name the difference.
   - Level 3 asks for a passkey with user verification (**WebAuthn
     Passwordless Authenticator**). Its condition has **Max Age** 0, so a
     touch counts for one login only. Every request for the touch asks

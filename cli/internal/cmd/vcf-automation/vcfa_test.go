@@ -388,7 +388,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "GET:/cloudapi/1.0.0/site", "rdc-vcfa", "", nil)
+	r, err := dispatchOp(context.Background(), srv.URL, "GET:/cloudapi/1.0.0/site", "vcfa-lab", "", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -440,8 +440,8 @@ func TestDispatchOpThreadsFqdnIntoTargetBody(t *testing.T) {
 				w.WriteHeader(400)
 				return
 			}
-			if got := body.Target["name"]; got != "rdc-vcfa" {
-				t.Errorf("target.name: got %v want rdc-vcfa", got)
+			if got := body.Target["name"]; got != "vcfa-lab" {
+				t.Errorf("target.name: got %v want vcfa-lab", got)
 			}
 			if got := body.Target["fqdn"]; got != "vcfa.rdc.example.com" {
 				t.Errorf("target.fqdn: got %v want vcfa.rdc.example.com", got)
@@ -453,7 +453,7 @@ func TestDispatchOpThreadsFqdnIntoTargetBody(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	const opID = "GET:/cloudapi/1.0.0/site"
-	if _, err := dispatchOp(context.Background(), srv.URL, opID, "rdc-vcfa", "vcfa.rdc.example.com", nil); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, opID, "vcfa-lab", "vcfa.rdc.example.com", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -480,7 +480,7 @@ func TestDispatchOpOmitsFqdnWhenEmpty(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/cloudapi/1.0.0/site", "rdc-vcfa", "", nil); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/cloudapi/1.0.0/site", "vcfa-lab", "", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -508,7 +508,7 @@ func TestDispatchGetByIdSubstitutesPathParam(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{"id": "abc123"}
-	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/cloudapi/1.0.0/orgs/{id}", "rdc-vcfa", "", params); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/cloudapi/1.0.0/orgs/{id}", "vcfa-lab", "", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -573,7 +573,7 @@ func TestAboutVerbDispatchesPerPlane(t *testing.T) {
 			root.SetArgs([]string{
 				"about",
 				"--plane", tc.plane,
-				"--target", "rdc-vcfa",
+				"--target", "vcfa-lab",
 				"--backplane", srv.URL,
 			})
 			root.SetOut(&bytes.Buffer{})
@@ -592,7 +592,7 @@ func TestAboutVerbDispatchesPerPlane(t *testing.T) {
 // is required. Cobra exits with a structured error when omitted.
 func TestAboutVerbRejectsMissingPlane(t *testing.T) {
 	root := NewRootCmd()
-	root.SetArgs([]string{"about", "--target", "rdc-vcfa", "--backplane", "https://meho.test.invalid"})
+	root.SetArgs([]string{"about", "--target", "vcfa-lab", "--backplane", "https://meho.test.invalid"})
 	var stderr bytes.Buffer
 	root.SetOut(&bytes.Buffer{})
 	root.SetErr(&stderr)
@@ -610,7 +610,7 @@ func TestAboutVerbRejectsMissingPlane(t *testing.T) {
 // before dispatch).
 func TestProjectListRejectsProviderPlane(t *testing.T) {
 	root := NewRootCmd()
-	root.SetArgs([]string{"project", "list", "--plane", "provider", "--target", "rdc-vcfa", "--backplane", "https://meho.test.invalid"})
+	root.SetArgs([]string{"project", "list", "--plane", "provider", "--target", "vcfa-lab", "--backplane", "https://meho.test.invalid"})
 	var stderr bytes.Buffer
 	root.SetOut(&bytes.Buffer{})
 	root.SetErr(&stderr)
@@ -627,7 +627,7 @@ func TestProjectListRejectsProviderPlane(t *testing.T) {
 // provider-plane verb.
 func TestOrgListRejectsTenantPlane(t *testing.T) {
 	root := NewRootCmd()
-	root.SetArgs([]string{"org", "list", "--plane", "tenant", "--target", "rdc-vcfa", "--backplane", "https://meho.test.invalid"})
+	root.SetArgs([]string{"org", "list", "--plane", "tenant", "--target", "vcfa-lab", "--backplane", "https://meho.test.invalid"})
 	var stderr bytes.Buffer
 	root.SetOut(&bytes.Buffer{})
 	root.SetErr(&stderr)
@@ -666,7 +666,7 @@ func TestDeploymentListThreadsFqdn(t *testing.T) {
 	root := NewRootCmd()
 	root.SetArgs([]string{
 		"deployment", "list",
-		"--target", "rdc-vcfa",
+		"--target", "vcfa-lab",
 		"--fqdn", "vcfa.rdc.example.com",
 		"--backplane", srv.URL,
 	})

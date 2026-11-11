@@ -167,6 +167,9 @@ class GitHubRestConnector(HttpConnector):
         "Reads GitHub repositories, issues, pull requests and projects, and creates issues, "
         "comments, repositories and commits."
     )
+    version_range_reason = (
+        "GitHub.com has no product version. Each call sends REST API version 2022-11-28."
+    )
     priority = 1
     # This class serves the operations of its ingested catalog.
     accepts_ingested_operations = True

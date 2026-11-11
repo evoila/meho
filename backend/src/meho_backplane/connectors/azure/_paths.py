@@ -407,6 +407,23 @@ OFFAZURE_MASTER_SITES_PATH: Final[str] = f"{_OFFAZURE}/masterSites"
 
 # ---- monitor (Task #5090) ----
 
+#: ``GET /{resourceUri}/providers/Microsoft.Insights/metrics``: the metrics of
+#: one resource (Metrics - List). *resource_uri* is the resource ID without its
+#: leading ``/``.
+METRICS_PATH: Final[str] = "/{resource_uri}/providers/Microsoft.Insights/metrics"
+
+#: The API version of the metrics read of one resource (Microsoft.Insights).
+METRICS_API_VERSION: Final[str] = "2023-10-01"
+
+#: ``POST /subscriptions/{subscriptionId}/metrics:getBatch``: the metrics of up
+#: to 50 resources of one region and one type (Metrics Data Plane - Batch). A
+#: read, even though it is a POST. It is sent to the regional host
+#: ``{region}.metrics.monitor.azure.com``, not to Resource Manager.
+METRICS_BATCH_PATH: Final[str] = "/subscriptions/{subscription_id}/metrics:getBatch"
+
+#: The API version of the metrics batch read.
+METRICS_BATCH_API_VERSION: Final[str] = "2024-02-01"
+
 # ---- network (Task #5085) ----
 
 #: The API version of the Microsoft.Network reads: virtual networks, network
@@ -632,6 +649,33 @@ BLOB_API_VERSION: Final[str] = "2026-10-06"
 #: a key, signed by Azure, that MEHO signs one download link with (Get User
 #: Delegation Key). Only an Entra ID login may ask for it. The query part is fixed.
 USER_DELEGATION_KEY_PATH: Final[str] = "/?restype=service&comp=userdelegationkey"
+
+
+# ---- dns (Task #5368) ----
+#
+# Public DNS zones (Microsoft.Network/dnsZones), not the private zones of the
+# network family. The record set paths take a record type and a relative name.
+
+#: The API version of the public DNS calls (Microsoft.Network/dnsZones).
+DNS_API_VERSION: Final[str] = "2018-05-01"
+
+#: ``GET .../providers/Microsoft.Network/dnsZones``: every public DNS zone of
+#: the subscription (Zones - List).
+DNS_ZONES_PATH: Final[str] = "/subscriptions/{subscription_id}/providers/Microsoft.Network/dnsZones"
+
+#: ``GET .../dnsZones/{zone}/recordsets``: every record set of one zone, of
+#: every type (Record Sets - List By Dns Zone).
+DNS_RECORD_SETS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Network/dnsZones/{zone}/recordsets"
+)
+
+#: ``/dnsZones/{zone}/{recordType}/{name}``: ``GET`` reads one record set,
+#: ``PUT`` creates or changes it, ``DELETE`` removes it.
+DNS_RECORD_SET_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Network/dnsZones/{zone}/{record_type}/{name}"
+)
 
 
 def subscription_path(subscription_id: str) -> str:

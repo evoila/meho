@@ -859,7 +859,7 @@ PYTHONPATH-leak imports.
 | `ProbeResult` (`dataclass`) | `src/meho_backplane/health.py` | Frozen record `(name, ok, detail)` returned by every readiness probe. Surfaced verbatim in the `/ready` response body. |
 | `register_probe` / `run_probes` / `run_probes_async` / `clear_probes` | `src/meho_backplane/health.py` | Public registry API. G2.2 (Vault, Keycloak) and G2.3 (DB migrations) call `register_probe` at startup. `run_probes()` returns the sync subset (test-friendly); `run_probes_async()` awaits async probes too and is what `/ready` calls. `clear_probes` is test-only. |
 | `health.router` (`/healthz`, `/ready`) | `src/meho_backplane/health.py` | Liveness and readiness endpoints. `/healthz` is unconditional 200; `/ready` aggregates the probe registry and **fails closed on the empty default** (vacuous-truth trap explicitly guarded). |
-| `version.router` (`/version`) | `src/meho_backplane/version.py` | Build identity. Reads `GIT_SHA`, `BUILD_DATE` (injected via `docker build --build-arg` by `image.yml` / `pr-smoke.yml`, #631) and `CHART_VERSION` (injected by the chart's Deployment from `.Chart.Version`, #631) env vars. `git_sha` / `build_date` fall back to `"unknown"` when unset or empty; `chart_version` falls back to `None`. `connector_packages` lists the connector packages the image carries, read once at start from the allowlist file (empty for the plain public image; #5036, see `connector-packages.md`). |
+| `version.router` (`/version`) | `src/meho_backplane/version.py` | Build identity. Reads `GIT_SHA`, `BUILD_DATE` (injected via `docker build --build-arg` by `image.yml` / `pr-smoke.yml`, #631) and `CHART_VERSION` (injected by the chart's Deployment from `.Chart.Version`, #631) env vars. `git_sha` / `build_date` fall back to `"unknown"` when unset or empty; `chart_version` falls back to `None`. `connector_packages` lists the connector packages the image carries, read once at start from the allowlist file (empty for the plain public image; #5036, see `connector-packages.md`). `agent_switches` lists each setting that changes what an AI agent sees, by env name with `true` / `false` (#6178, see "Agent switches on `/version`" below). |
 | `configure_logging` | `src/meho_backplane/logging.py` | Configures structlog: `merge_contextvars` → `add_log_level` → `TimeStamper(iso, utc)` → `ExceptionRenderer(ExceptionDictTransformer(show_locals=False))` → `JSONRenderer`, writing to stdout. Idempotent. The traceback transformer (the `dict_tracebacks` processor) runs with **`show_locals=False`** (#1488): structlog's default `show_locals=True` writes every frame's local variables into the log line, which is a credential-disclosure vector (CWE-532) — any secret held as a frame local on a captured traceback would be serialised to stdout verbatim. The motivating leak was a failed scheduled agent run (`scheduler_fire_failed`) rendering the agent's `client_credentials` secret as a frame local. Disabling locals keeps the structured frames (file / line / function / exception type + message) for triage while closing the vector for every frame across the backplane, including frames that must hold a secret as a plain `str` (the httpx form-post in `auth/agent_token.py`). The logger factory is constructed as `PrintLoggerFactory()` with **no `file=` argument** — structlog's `PrintLogger.msg` then resolves `sys.stdout` lazily at write time (calls `print()` with no `file=` keyword whenever `self._file is sys.stdout`). Tests under `pytest`'s `capfd` swap `sys.stdout` for a wrapped fd that gets closed on test teardown; the lazy shape avoids capturing that wrapped fd at lifespan-startup time and surviving into a later test as a closed-fd `ValueError` from `cache_logger_on_first_use=True`. Production behaviour unchanged because the real process `sys.stdout` does not get rebound at runtime. **Test convention — asserting on a module-level production logger:** because `configure_logging` sets `cache_logger_on_first_use=True`, the first emit through a module-level `_log = structlog.get_logger(__name__)` pins a `BoundLogger` to the *then-current* processor-list instance; any later `structlog.configure(...)` (a `TestClient` app boot, a per-test `configure` + `reset_defaults`, or another module's `configure_logging`) **replaces** that instance, orphaning the cached logger. `structlog.testing.capture_logs()` patches only the *current* instance, so under the `pytest -n 6 --dist loadscope` lane a logger warmed-and-orphaned by an earlier test on the same xdist worker is missed — the capture list comes back **empty** while the event still prints to stdout, and any negative assertion (e.g. "the JWT never appears") then passes vacuously. A test that asserts on events from such a logger therefore must **not** use bare `capture_logs`; instead bind a private capture — `capture = structlog.testing.LogCapture(); private_log = structlog.wrap_logger(structlog.PrintLogger(), processors=[capture])` — and `monkeypatch.setattr(<subject_module>, "_log", private_log)`, asserting on `capture.entries`. This is process-local, contextvar-free, immune to any concurrent `configure`, and auto-restored by `monkeypatch` on teardown. Established by #1254 (`tests/test_operations_register_ingested.py::test_check_version_covered_logs_orphan_when_no_class_registered`), then generalised to the remaining `test_operations_register_ingested.py` orphan-class assertions by #1712 and to `test_corpus_client.py::test_forwarded_jwt_never_logged` by #1622; the subject-side alternative is per-call logger resolution (`auth/jwt.py` / `retrieval/embedding.EmbeddingService`, #738). Do **not** "fix" this by disabling `cache_logger_on_first_use` — it is the intended production performance default. |
 | `RequestContextMiddleware` | `src/meho_backplane/middleware.py` | Pure-ASGI middleware. Per request: extracts/mints a `request_id`, clears any leftover contextvars and binds the new `request_id`, mirrors it onto the `X-Request-Id` response header, records `http_requests_total{method,path,status}` (counter) **and** `http_request_duration_seconds{method,path,status}` (histogram, observed in seconds at the same seam), emits one `request_completed` JSON log line with method / path / status / duration_ms (which inherits any contextvars bound during the request, including `operator_sub` and `tenant_id` from `verify_jwt_and_bind`). The metric `path` label is the matched route template or the `__unmatched__` constant (`UNMATCHED_ROUTE_LABEL`) for 404s — bounded cardinality — while the *log* line keeps the literal request path for unmatched routes (forensics; a log is not a bounded label set). Metrics are recorded only on the normal-completion path; a handler that raises re-raises after the `request_failed` log without touching either metric (symmetric with the counter's pre-existing behaviour). |
 | `verify_jwt_and_bind` | `src/meho_backplane/middleware.py` | FastAPI dependency wrapper around `verify_jwt`. On successful validation, binds `operator_sub` (the JWT's `sub` claim) and `tenant_id` (`str(operator.tenant_id)` — JSON renderer cannot serialise raw `uuid.UUID`) into structlog contextvars so every subsequent log line in the request scope carries both fields automatically. Authenticated routes use `Depends(verify_jwt_and_bind)` instead of `Depends(verify_jwt)` directly. Lives alongside the middleware because `RequestContextMiddleware`'s request-entry `clear_contextvars` call is what guarantees the bound keys do not leak across requests reusing the same asyncio task. `tenant_role` is intentionally *not* bound — it's enforced at the dependency layer (G0.1-T4 `require_role`) so handlers reach for the typed `Operator` instead of pulling roles out of contextvars. G0.8-T1 (#628): after binding contextvars the wrapper calls `tenancy.ensure_tenant(operator.tenant_id, …)` in its own short `get_sessionmaker()` session (the same own-session pattern `AuditMiddleware` uses), committed before the route runs so the row is visible to the route's transaction. This is the just-in-time tenant-seed seam — every authenticated route flows through this wrapper, and it is the first point `operator.tenant_id` is available as a verified value, so seeding here guarantees no tenant-scoped write hits `documents_tenant_id_fkey` on a fresh deploy. Initiative #2415 (#2502): the wrapper also hosts the runner **negative cage** — after binding contextvars (so the 403 is attributable) and before tenant seeding, a `principal_kind=runner` operator whose `request.url.path` is not under `RUNNER_ALLOWED_PATH_PREFIXES` (`/api/v1/gateway/`, `/api/v1/checks/`) is 403'd `runner_scope_violation`. The cage keys on the unforgeable `principal_kind` discriminator so a runner client missing any other mapper still cannot roam the read API. |
@@ -995,7 +995,8 @@ PYTHONPATH-leak imports.
    - `GET /` → `root()` returns the identity dict.
    - `GET /healthz` → `healthz()` returns `{"status": "ok"}` with 200.
    - `GET /version` → reads `GIT_SHA` / `BUILD_DATE` / `CHART_VERSION`
-     env vars per request (cheap; no caching needed).
+     env vars per request (cheap; no caching needed), and the agent
+     switches from the cached `get_settings()`.
    - `GET /ready` → calls `run_probes_async()` (which awaits async
      probes and calls sync probes inline) and translates the
      aggregate into a 200 / 503 `JSONResponse`.
@@ -1158,6 +1159,40 @@ timestamps that can drift (#631). The third `/version` field,
 `chart_version`, is **not** an image build-arg — it is injected at
 deploy time by the chart's Deployment template from `.Chart.Version`,
 because the image build cannot know which chart release wraps it.
+
+### Agent switches on `/version` (#6178)
+
+A change to what the AI model sees ships behind a switch that is off
+by default. A before-and-after benchmark compares two runs that differ
+in one switch, so each run must record which switches were on. An
+operator also wants to see that MEHO read a new value after a roll.
+
+`GET /version` answers both. Its `agent_switches` field lists each
+agent-facing switch by env name, sorted, with its current value:
+
+```json
+"agent_switches": {"AGENT_OPERATION_TOOLS_FROM_MCP": false, "...": false, "TEAM_KNOWLEDGE_RECALL": false}
+```
+
+- A setting is on the list when its field in `Settings`
+  (`backend/src/meho_backplane/settings.py`) carries the mark
+  `json_schema_extra=AGENT_FACING`. `version.agent_switches()` builds
+  the list from the marked fields. The key is the field name in upper
+  case, the env name `get_settings()` reads.
+- Only `bool` settings may carry the mark. So the answer holds only
+  names and `true` / `false`: no text, no address and no secret.
+  `/version` needs no login, like before.
+- The rule for a new setting: `tests/test_version_agent_switches.py`
+  pins every `Settings` field in one of two groups, agent-facing or
+  not agent-facing. A new field in neither group fails the test.
+  Decide if the setting changes what the AI sees. If yes, mark it and
+  put it in the agent-facing group. If no, put it in the other group.
+- The list is not on `meho_status`, `tools/list` or any tool text.
+  Agents read those, so a new field there would itself change what
+  the AI sees. `/ready` keeps its own `features.mcp.short_tool_texts`.
+- Limit: `/version` knows no tenant and no agent definition. Settings
+  per tenant (such as a tenant's team wiki collection) and settings
+  per agent definition (such as `meta_tools`) are not on the list.
 
 ### Cosign keyless signing (Task #34, ADR 0006)
 

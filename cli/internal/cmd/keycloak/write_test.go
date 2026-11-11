@@ -143,7 +143,7 @@ func TestWriteOpsDispatchCanonicalOpIDs(t *testing.T) {
 		"keycloak.role_mapping.assign",
 	}
 	for _, opID := range writeOps {
-		if _, err := dispatchOp(context.Background(), srv.URL, opID, "rdc-keycloak", nil); err != nil {
+		if _, err := dispatchOp(context.Background(), srv.URL, opID, "keycloak-lab", nil); err != nil {
 			t.Fatalf("dispatchOp %s: %v", opID, err)
 		}
 	}
@@ -185,7 +185,7 @@ func TestUserCreatePassesSecretRefNotPassword(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{
-		"--target", "rdc-keycloak",
+		"--target", "keycloak-lab",
 		"--representation-file", repPath,
 		"--password-secret-ref", "rdc/keycloak/operator-a",
 		"--backplane", srv.URL,
@@ -250,7 +250,7 @@ func TestRoleMappingAssignForwardsRoles(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{
-		"--target", "rdc-keycloak",
+		"--target", "keycloak-lab",
 		"--username", "operator-a",
 		"--role", "tenant_admin",
 		"--backplane", srv.URL,
@@ -294,7 +294,7 @@ func TestRoleMappingAssignAwaitingApprovalRealPath(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errBuf)
 	cmd.SetArgs([]string{
-		"--target", "rdc-keycloak", "--username", "operator-a",
+		"--target", "keycloak-lab", "--username", "operator-a",
 		"--role", "tenant_admin", "--backplane", srv.URL,
 	})
 	if err := cmd.Execute(); err != nil {

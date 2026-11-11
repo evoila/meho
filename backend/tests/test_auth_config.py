@@ -70,6 +70,8 @@ def test_auth_config_returns_keycloak_issuer_audience_and_cli_client_id(
         "audience": "meho-backplane",
         "cli_client_id": "meho-cli",
         "cli_approve_client_id": "meho-cli-approve",
+        # MCP_CLIENT_PER_TOOL_KIND is off by default: no per-tool client.
+        "mcp_clients": {},
     }
 
 
@@ -181,3 +183,38 @@ def test_auth_config_route_is_registered_in_main_app() -> None:
     assert "get" in openapi_paths["/api/v1/auth-config"], (
         "expected GET /api/v1/auth-config in OpenAPI paths"
     )
+
+
+@pytest.mark.parametrize("value", ["true", "1"])
+def test_auth_config_lists_a_client_per_tool_kind_with_the_switch_on(
+    _auth_config_settings: None,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    """``MCP_CLIENT_PER_TOOL_KIND`` on: each AI tool kind gets its own client."""
+    monkeypatch.setenv("MCP_CLIENT_PER_TOOL_KIND", value)
+    get_settings.cache_clear()
+    with TestClient(app) as client:
+        response = client.get("/api/v1/auth-config")
+
+    assert response.status_code == 200
+    assert response.json()["mcp_clients"] == {
+        "claude-code": "meho-mcp-code",
+        "claude-desktop": "meho-mcp-desktop",
+    }
+
+
+@pytest.mark.parametrize("value", ["false", "0", ""])
+def test_auth_config_lists_no_tool_client_with_the_switch_off(
+    _auth_config_settings: None,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    """Switch off (or empty): the list is empty, so the tools keep ``meho-mcp``."""
+    monkeypatch.setenv("MCP_CLIENT_PER_TOOL_KIND", value)
+    get_settings.cache_clear()
+    with TestClient(app) as client:
+        response = client.get("/api/v1/auth-config")
+
+    assert response.status_code == 200
+    assert response.json()["mcp_clients"] == {}

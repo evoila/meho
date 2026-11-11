@@ -648,7 +648,9 @@ scheduler create` (`--on-sensor`, `--on-dashboard`, `--on-any-sensor`,
 trigger detail page shows "Starts on: Sensor <name>" for a filter of this
 shape. Such a trigger fires only when `CHECKS_AGENT_EVENTS` is on. While it is
 off, the console form warns, and the create answer carries a `notice` that the
-CLI prints.
+CLI prints. The MCP tool `meho_scheduler_create` shows the `check_source` input
+and its sentence only while the switch is on. While it is off, the tool has the
+same text and input as before, and its input check refuses `check_source`.
 
 Until #2878 this create was refused with `event_triggers_not_implemented`
 (#2325) and pre-existing `active` event rows were parked by a startup

@@ -99,7 +99,7 @@ async def describe_check_source_filter(
     if not isinstance(source, dict) or set(source) - {"kind", "id"}:
         return None
     kind = source.get("kind")
-    if kind not in _MODELS:
+    if not isinstance(kind, str) or kind not in _MODELS:
         return None
     label = "Sensor" if kind == "sensor" else "Dashboard"
     raw_id = source.get("id")

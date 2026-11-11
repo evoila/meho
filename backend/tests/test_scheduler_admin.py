@@ -1682,3 +1682,61 @@ async def test_describe_check_source_filter_names_the_source() -> None:
     assert named == "Dashboard web, only when it gets worse"
     assert anyone == "any Sensor"
     assert custom is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event_filter",
+    [
+        {"source": {"kind": ["sensor"]}},
+        {"source": {"kind": {"x": 1}}},
+        {"source": {"kind": None}},
+        {"source": {"kind": "sensor", "id": ["x"]}},
+        {"source": ["sensor"]},
+    ],
+)
+async def test_describe_check_source_filter_custom_shapes_give_none(
+    event_filter: dict[str, object],
+) -> None:
+    from meho_backplane.scheduler.check_source import describe_check_source_filter
+
+    async with get_sessionmaker()() as session:
+        assert await describe_check_source_filter(session, _TENANT_A, event_filter) is None
+
+
+def test_mcp_create_tool_unchanged_while_check_events_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jsonschema
+
+    from meho_backplane.mcp.registry import tool_for_settings
+
+    operator = Operator(
+        sub="mcp-admin", raw_jwt="dummy", tenant_id=_TENANT_A, tenant_role=TenantRole.TENANT_ADMIN
+    )
+    entry = get_tool("meho_scheduler_create")
+    assert entry is not None
+    registered = entry[0]
+    args = {
+        "kind": "event",
+        "agent_definition_id": str(uuid4()),
+        "check_source": {"kind": "sensor"},
+    }
+
+    monkeypatch.setenv("CHECKS_AGENT_EVENTS", "false")
+    get_settings.cache_clear()
+    off = tool_for_settings(registered, operator)
+    assert off.description == registered.description
+    assert off.inputSchema == registered.inputSchema
+    assert "check_source" not in off.description
+    assert "check_source" not in off.inputSchema["properties"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(args, off.inputSchema, cls=jsonschema.Draft202012Validator)
+
+    monkeypatch.setenv("CHECKS_AGENT_EVENTS", "true")
+    get_settings.cache_clear()
+    on = tool_for_settings(registered, operator)
+    assert "check_source" in on.description
+    assert on.description.startswith(registered.description.split("dispatched by")[0])
+    assert "check_source" in on.inputSchema["properties"]
+    jsonschema.validate(args, on.inputSchema, cls=jsonschema.Draft202012Validator)

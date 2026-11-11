@@ -63,6 +63,7 @@ nav:
       - "Form 1: VMware appliance": install/form-1-vmware-appliance.md
       - "Form 2: Linux server": install/form-2-linux-server.md
       - "Form 3: Your Kubernetes": install/form-3-your-kubernetes.md
+      - Install MEHO on VKS by hand: install/form-3-vks.md
       - The setup page and the settings file: install/setup-page.md
       - The first-start checks: install/first-start-checks.md
       - Your first day: install/first-day.md

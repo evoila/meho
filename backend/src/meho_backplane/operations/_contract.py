@@ -279,7 +279,10 @@ async def _find_descriptor(
             return None
         descriptor, group_key = row
         # #4711: the contract shows the risk level and approval that apply.
-        return await apply_effective_policy(session, tenant_id=tenant_id, row=descriptor), group_key
+        policy_row = await apply_effective_policy(
+            session, tenant_id=tenant_id, row=descriptor, group_keys={descriptor.id: group_key}
+        )
+        return policy_row, group_key
 
 
 async def build_operation_contract(

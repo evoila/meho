@@ -434,6 +434,7 @@ def test_features_block_carries_all_six_entries() -> None:
         "approval_custody",
         "vault_tenant_scope",
         "mcp",
+        "policy",
     }
 
 
@@ -447,6 +448,7 @@ def test_features_block_carries_all_six_entries() -> None:
         "approval_custody",
         "vault_tenant_scope",
         "mcp",
+        "policy",
     ],
 )
 def test_every_feature_has_configured_bool(feature: str) -> None:

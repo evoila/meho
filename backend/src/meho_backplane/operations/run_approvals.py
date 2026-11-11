@@ -75,6 +75,7 @@ from meho_backplane.operations.run_approval_schemas import (
     RunApprovalStatus,
 )
 from meho_backplane.operations.service_grants import (
+    always_wait_grant_reason,
     caller_address_grant_reason,
     delete_grant_reason,
 )
@@ -216,8 +217,12 @@ async def _entry_refusal(tenant_id: uuid.UUID, entry: RunApprovalEntry) -> str |
     descriptor = await lookup_descriptor(
         tenant_id=tenant_id, product=product, version=version, impl_id=impl_id, op_id=entry.op_id
     )
-    reason = caller_address_grant_reason(descriptor) or delete_grant_reason(
-        entry.op_id, get_settings().service_grant_delete_shaped_patterns, descriptor
+    reason = (
+        caller_address_grant_reason(descriptor)
+        or always_wait_grant_reason(descriptor)
+        or delete_grant_reason(
+            entry.op_id, get_settings().service_grant_delete_shaped_patterns, descriptor
+        )
     )
     if reason is None:
         return None

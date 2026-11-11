@@ -3382,6 +3382,12 @@ of it before the user asks anything. So a client can ask for a
   still runs under the person's role, and changes still wait for
   approval when the rules say so.</li>
 </ul>
+<p>A small model also gains from shorter tool texts. Add <code>texts=short</code> to
+the URL, for example <code>https://&lt;meho-host&gt;/mcp?texts=short</code>, or together
+with a profile: <code>https://&lt;meho-host&gt;/mcp?profile=investigate&amp;texts=short</code>.
+The biggest tools then show a short description. They accept the same
+inputs as before. Other sessions keep the full texts. A value other than
+<code>short</code> is refused with HTTP 400.</p>
 <h2 id="the-operator-planes-behind-mcpadmin">The operator planes (behind <code>mcp:admin</code>)<a class="headerlink" href="#the-operator-planes-behind-mcpadmin" title="Permanent link">&para;</a></h2>
 <p>The governance and lifecycle tools — connector lifecycle and ingest,
 agents / principals / grants, scheduler, sensors, broadcast overrides,

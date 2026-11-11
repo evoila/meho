@@ -3,8 +3,8 @@
 
 """Store a category and labels per operation, and a policy per tenant.
 
-Revision ID: 0157
-Revises: 0156
+Revision ID: 0158
+Revises: 0157
 Create Date: 2026-11-11
 
 Each connector, operation group and operation can carry a category,
@@ -28,8 +28,8 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
 # revision identifiers, used by Alembic.
-revision: str = "0157"
-down_revision: str | None = "0156"
+revision: str = "0158"
+down_revision: str | None = "0157"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

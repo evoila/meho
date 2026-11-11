@@ -20,7 +20,7 @@ approval it has today, and `category`, `labels` and `rule_ref` stay empty.
 
 | Place | Holds |
 |---|---|
-| `tenant_policy` (model `TenantPolicy`, migration `0157`) | One document per tenant, and at most one for the whole install (`tenant_id` NULL): the `taxonomy` and the `classifications` entries. |
+| `tenant_policy` (model `TenantPolicy`, migration `0158`) | One document per tenant, and at most one for the whole install (`tenant_id` NULL): the `taxonomy` and the `classifications` entries. |
 | `operation_policy_override.category`, `.labels` | The category and labels of one operation: an exact operation entry. |
 
 A document has the shape of the policy file:

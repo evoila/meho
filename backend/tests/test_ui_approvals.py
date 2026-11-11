@@ -2401,6 +2401,49 @@ def test_modal_write_capability_warning_renders_a_denial_alert() -> None:
     assert "may still be denied" in warning
 
 
+def test_modal_shows_the_classification() -> None:
+    """The category badge, the labels and the classification rule (#6041)."""
+    body = _render_modal(
+        {
+            "op_id": "switch.port.disable",
+            "connector_id": "switch-1.x",
+            "safety_level": "caution",
+            "category": "network",
+            "labels": {"team": "net", "env": "prod"},
+            "classification_rule": "tenant:classifications[1]",
+        }
+    )
+    assert 'title="Category">network<' in body
+    block = body.split('data-testid="approval-classification"')[1].split("</dl>")[0]
+    assert "env=prod, team=net" in block
+    assert "tenant:classifications[1]" in block
+    assert "disagree" not in block
+
+
+def test_modal_names_a_classification_conflict() -> None:
+    """A null category says that two classification rules disagree."""
+    conflict = _render_modal(
+        {
+            "op_id": "switch.port.disable",
+            "connector_id": "switch-1.x",
+            "safety_level": "caution",
+            "category": None,
+            "labels": {},
+            "classification_rule": None,
+        }
+    )
+    assert "two classification rules disagree" in conflict
+
+
+def test_modal_shows_no_classification_without_one() -> None:
+    """A request made with the switch off has no classification block."""
+    plain = _render_modal(
+        {"op_id": "switch.port.disable", "connector_id": "switch-1.x", "safety_level": "caution"}
+    )
+    assert 'data-testid="approval-classification"' not in plain
+    assert 'title="Category"' not in plain
+
+
 def test_modal_preview_unavailable_renders_blast_radius_unknown() -> None:
     """A ``preview_unavailable`` envelope renders the error string + unknown copy."""
     body = _render_modal(

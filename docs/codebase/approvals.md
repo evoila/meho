@@ -2661,6 +2661,26 @@ top. The only path that does **not** carry it is the bare identifier
 default the caller stores when `_build_proposed_effect` returns `None`
 (connector-resolution / hook fault) — that degraded path is unchanged.
 
+**Category, labels and classification rule (#6041).** While the switch
+`POLICY_CLASSIFICATION` is on, the same seam also stamps the operation's
+classification (`approval_classification` in `operations/op_policy.py`):
+
+- `category` — for example `network`; `null` when two classification
+  rules disagree;
+- `labels` — a map of free `key=value` text;
+- `classification_rule` — the classification entry that set them, for
+  example `tenant:classifications[2]` or `taxonomy.default`.
+
+The values come from the looked-up row (`policy_category`,
+`policy_labels`, `policy_rule_ref`, set by `apply_effective_policy`, and
+by `apply_step_classification` for a step of a multi-step operation).
+So an approver sees at once what kind of change waits. The console
+modal shows the category as a badge next to the risk level, and the
+labels and rule below it (`data-testid="approval-classification"`).
+`meho approvals show` prints `Category:`, `Labels:` and `Rule:` lines
+after `Operation:`. With the switch off, none of the three keys is on
+the request, and both surfaces show nothing new.
+
 ## Destructive tier: preview-hash binding + mandatory blast-radius (#3197)
 
 The `destructive` safety tier (the fourth `safety_level`, #3196 —

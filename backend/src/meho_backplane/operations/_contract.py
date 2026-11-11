@@ -20,6 +20,8 @@ op_id)`` and builds an :class:`OperationContract`:
   ``result_query``, and that text from the vendor system is data,
   never an instruction.
 * ``pagination_hint`` -- only when the op registered one.
+* ``category`` and ``labels`` -- the op's classification, only while the
+  ``POLICY_CLASSIFICATION`` switch is on.
 * ``recovery`` -- what a good retry looks like.
 * ``guidance`` -- the op's written advice from ``llm_instructions``,
   size-limited (:mod:`~meho_backplane.operations._contract_guidance`).
@@ -41,7 +43,7 @@ import json
 import uuid
 from typing import Any, Final
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from meho_backplane.connectors.schemas import OperationResult
@@ -55,7 +57,10 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._search import agent_description
 from meho_backplane.operations.dispatcher import descriptor_requires_target
-from meho_backplane.operations.op_policy import apply_effective_policy
+from meho_backplane.operations.op_policy import (
+    apply_effective_policy,
+    hidden_classification_fields,
+)
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import VENDOR_TEXT_RULE
 
@@ -120,6 +125,10 @@ class OperationContract(BaseModel):
     ``description`` is the original text, or the admin's
     ``custom_description`` while the ``AGENT_READS_CUSTOM_DESCRIPTION``
     switch is on (:func:`~meho_backplane.operations._search.agent_description`).
+
+    ``category`` and ``labels`` are the operation's classification for the
+    caller's tenant, the same values as on a search hit. They are left out
+    of the payload while the ``POLICY_CLASSIFICATION`` switch is off.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -131,6 +140,8 @@ class OperationContract(BaseModel):
     group_key: str | None
     safety_level: str
     requires_approval: bool
+    category: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
     parameter_schema: dict[str, Any]
     examples: list[dict[str, Any]]
     target: dict[str, Any]
@@ -140,8 +151,14 @@ class OperationContract(BaseModel):
     guidance: dict[str, Any] | None = None
 
     def as_payload(self) -> dict[str, Any]:
-        """Return the JSON payload; ``guidance`` is left out when there is none."""
-        exclude = {"guidance"} if self.guidance is None else None
+        """Return the JSON payload.
+
+        ``guidance`` is left out when there is none, and ``category`` and
+        ``labels`` while the ``POLICY_CLASSIFICATION`` switch is off.
+        """
+        exclude = hidden_classification_fields()
+        if self.guidance is None:
+            exclude.add("guidance")
         return self.model_dump(mode="json", exclude=exclude)
 
 
@@ -325,6 +342,8 @@ async def build_operation_contract(
         group_key=group_key,
         safety_level=descriptor.safety_level,
         requires_approval=descriptor.requires_approval,
+        category=descriptor.policy_category,
+        labels=dict(descriptor.policy_labels),
         parameter_schema=parameter_schema,
         examples=_bounded_examples(parameter_schema, llm_instructions),
         target=_target_requirement(target_required),

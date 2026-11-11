@@ -39,6 +39,7 @@ from meho_backplane.mcp.short_texts import (
 from meho_backplane.mcp.tools import _short_tool_texts as texts
 from meho_backplane.mcp.tools._kb_similar_text import similar_check_for_settings
 from meho_backplane.mcp.tools._operation_recall import recall_schema_for_settings
+from meho_backplane.mcp.tools._search_classification import classification_schema_for_settings
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -103,6 +104,8 @@ def _before(name: str) -> dict[str, Any]:
         definition = similar_check_for_settings(definition)
     if name in {"call_operation", "preview_operation"}:
         definition = recall_schema_for_settings(definition)
+    if name == "search_operations":
+        definition = classification_schema_for_settings(definition)
     return definition.to_wire()
 
 

@@ -860,6 +860,21 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   added only when the caller sets `include_scores` **and** is
   `tenant_admin` (the same role the full descriptor read needs);
   anyone else gets the slim hit.
+- **Category and labels, behind a switch (#6041).** While the switch
+  `POLICY_CLASSIFICATION` is on, a ranked hit and the exact-op contract
+  also carry `category` (for example `network`) and `labels` (a map of
+  free `key=value` text). They are the operation's classification for
+  the caller's tenant, the same values dispatch uses
+  ([policy-classification.md](policy-classification.md)). `category` is
+  `null` when two classification rules disagree; then every call waits
+  for approval. Search stays tenant-wide: it does not say whether a call
+  waits for *this* caller. With the switch off, both keys are left out,
+  so every answer is the same as before. The registered `outputSchema`
+  names both fields; while the switch is off,
+  `classification_schema_for_settings`
+  (`mcp/tools/_search_classification.py`) takes them out of the schema
+  that `tools/list` sends, so that list does not change either. Tests:
+  `backend/tests/test_policy_classification_shown.py`.
 - **The admin's description, behind a switch (#4753).** An admin can
   replace an operation's text with `meho_connector_edit_op`
   (`custom_description`). The backplane switch

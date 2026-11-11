@@ -131,7 +131,11 @@ from meho_backplane.operations.delivery_budget import (
 from meho_backplane.operations.dispatch_limits import rate_limited_read_envelope
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
-from meho_backplane.operations.op_policy import OpKey, effective_policy_map
+from meho_backplane.operations.op_policy import (
+    OpKey,
+    effective_policy_map,
+    hidden_classification_fields,
+)
 from meho_backplane.retrieval.retriever import RRF_K
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
@@ -392,6 +396,11 @@ class OperationSearchHit(BaseModel):
     ``description`` is the original text, or the admin's
     ``custom_description`` while the ``AGENT_READS_CUSTOM_DESCRIPTION``
     switch is on (:func:`~meho_backplane.operations._search.agent_description`).
+
+    ``category`` and ``labels`` are the operation's classification for the
+    caller's tenant. :func:`search_operations` leaves them out while the
+    ``POLICY_CLASSIFICATION`` switch is off. ``category`` is ``None`` when
+    two classification entries conflict.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -402,6 +411,8 @@ class OperationSearchHit(BaseModel):
     group_key: str | None
     safety_level: str
     requires_approval: bool
+    category: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
     fused_score: float
     bm25_score: float | None
     cosine_score: float | None
@@ -1374,7 +1385,9 @@ async def search_operations(
     **Ranked mode.** Returns ``{"hits": [...], "query_duration_ms":
     float, "outcome": str, "advisory": str | None, "narrowing":
     [str]}``. Each hit carries ``op_id`` / ``summary`` / ``description``
-    / ``group_key`` / ``safety_level`` / ``requires_approval``. The
+    / ``group_key`` / ``safety_level`` / ``requires_approval``, and
+    ``category`` / ``labels`` while the ``POLICY_CLASSIFICATION`` switch
+    is on. The
     ranking scores are added only when ``include_scores`` is true and
     the caller is ``tenant_admin``; anyone else gets the slim hit. Tenant
     boundary enforced: every candidate query filters on the same
@@ -1487,7 +1500,7 @@ async def search_operations(
         tenant_id=str(operator.tenant_id),
         duration_ms=duration_ms,
     )
-    exclude = None if show_scores else set(_SCORE_FIELDS)
+    exclude = hidden_classification_fields() | (set() if show_scores else set(_SCORE_FIELDS))
     return {
         "hits": [h.model_dump(mode="json", exclude=exclude) for h in hits],
         "query_duration_ms": duration_ms,

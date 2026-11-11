@@ -645,7 +645,8 @@ async def _hydrate_hits(
     """Bulk-fetch full descriptor rows + group_key for the fused top-N entries.
 
     Each hit shows the risk level and approval that apply to *tenant_id*,
-    with the operator overrides (#4711) — the same values a call uses.
+    with the operator overrides (#4711) — the same values a call uses —
+    and the category and labels of the classification.
     """
     from meho_backplane.operations.meta_tools import OperationSearchHit
 
@@ -682,6 +683,8 @@ async def _hydrate_hits(
                 group_key=group_key,
                 safety_level=policy.safety_level,
                 requires_approval=policy.requires_approval,
+                category=policy.category,
+                labels=dict(policy.labels),
                 fused_score=entry.fused_score,
                 bm25_score=entry.bm25_score,
                 cosine_score=entry.cosine_score,

@@ -90,6 +90,18 @@ the call contract and the console all read `effective_policy_map`, so they
 show the same values. The returned `EffectivePolicy` carries `category`,
 `labels`, `rule_ref` and `always_wait`.
 
+## Where a person and an agent see it
+
+While the switch is on:
+
+- a `search_operations` hit and the call contract (exact-op mode) carry
+  `category` and `labels` ([mcp.md](mcp.md));
+- an approval request carries `category`, `labels` and
+  `classification_rule` (the `rule_ref`), and the approvals console and
+  `meho approvals show` show them ([approvals.md](approvals.md)).
+
+With the switch off, none of these keys is in an answer.
+
 ## "Always wait" means a person approves each call
 
 When a classification entry makes an operation always wait, or two entries
@@ -147,7 +159,5 @@ The change is the operation `policy.classify` on the connector
 - The edit surfaces (REST, CLI, console, edit by pattern) and the policy
   file import come in later changes. They use `policy.classify` or the same
   rights-change mark.
-- Search hits, the call contract and the approval request do not show the
-  category yet.
 - The flight-recorder check (`test_flight_recorder_typed_spans.py`) runs
   with the switch off, so it does not list `policy-registry`.

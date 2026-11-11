@@ -2851,6 +2851,11 @@ type BodyUiAccountRevokeSessionUiAccountSessionsRevokePost struct {
 	SessionRef *string `json:"session_ref,omitempty"`
 }
 
+// BodyUiAccountToolSignOutUiAccountToolsSignOutPost defines model for Body_ui_account_tool_sign_out_ui_account_tools_sign_out_post.
+type BodyUiAccountToolSignOutUiAccountToolsSignOutPost struct {
+	Tool *string `json:"tool,omitempty"`
+}
+
 // BodyUiAgentGrantsCreateSubmitUiAgentsGrantsCreatePost defines model for Body_ui_agent_grants_create_submit_ui_agents_grants_create_post.
 type BodyUiAgentGrantsCreateSubmitUiAgentsGrantsCreatePost struct {
 	ExpiresAt    *string `json:"expires_at"`
@@ -14195,6 +14200,9 @@ type UiAccountPushUnsubscribeUiAccountPushUnsubscribePostFormdataRequestBody = B
 // UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody defines body for UiAccountRevokeSessionUiAccountSessionsRevokePost for application/x-www-form-urlencoded ContentType.
 type UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody = BodyUiAccountRevokeSessionUiAccountSessionsRevokePost
 
+// UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody defines body for UiAccountToolSignOutUiAccountToolsSignOutPost for application/x-www-form-urlencoded ContentType.
+type UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody = BodyUiAccountToolSignOutUiAccountToolsSignOutPost
+
 // UiAgentsListUiAgentsGetJSONRequestBody defines body for UiAgentsListUiAgentsGet for application/json ContentType.
 type UiAgentsListUiAgentsGetJSONRequestBody = UISessionContext
 
@@ -17234,6 +17242,11 @@ type ClientInterface interface {
 
 	// UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost request
 	UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAccountToolSignOutUiAccountToolsSignOutPostWithBody request with any body
+	UiAccountToolSignOutUiAccountToolsSignOutPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAccountToolSignOutUiAccountToolsSignOutPostWithFormdataBody(ctx context.Context, body UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAgentsListUiAgentsGetWithBody request with any body
 	UiAgentsListUiAgentsGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -21849,6 +21862,30 @@ func (c *Client) UiAccountRevokeSessionUiAccountSessionsRevokePostWithFormdataBo
 
 func (c *Client) UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountToolSignOutUiAccountToolsSignOutPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountToolSignOutUiAccountToolsSignOutPostWithFormdataBody(ctx context.Context, body UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -40910,6 +40947,46 @@ func NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest(server str
 	return req, nil
 }
 
+// NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithFormdataBody calls the generic UiAccountToolSignOutUiAccountToolsSignOutPost builder with application/x-www-form-urlencoded body
+func NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithFormdataBody(server string, body UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithBody generates requests for UiAccountToolSignOutUiAccountToolsSignOutPost with any type of body
+func NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account/tools/sign-out")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiAgentsListUiAgentsGetRequest calls the generic UiAgentsListUiAgentsGet builder with application/json body
 func NewUiAgentsListUiAgentsGetRequest(server string, body UiAgentsListUiAgentsGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -52858,6 +52935,11 @@ type ClientWithResponsesInterface interface {
 	// UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse request
 	UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse, error)
 
+	// UiAccountToolSignOutUiAccountToolsSignOutPostWithBodyWithResponse request with any body
+	UiAccountToolSignOutUiAccountToolsSignOutPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountToolSignOutUiAccountToolsSignOutPostResponse, error)
+
+	UiAccountToolSignOutUiAccountToolsSignOutPostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountToolSignOutUiAccountToolsSignOutPostResponse, error)
+
 	// UiAgentsListUiAgentsGetWithBodyWithResponse request with any body
 	UiAgentsListUiAgentsGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsListUiAgentsGetResponse, error)
 
@@ -59055,6 +59137,28 @@ func (r UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse) Status()
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAccountToolSignOutUiAccountToolsSignOutPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountToolSignOutUiAccountToolsSignOutPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountToolSignOutUiAccountToolsSignOutPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -66600,6 +66704,23 @@ func (c *ClientWithResponses) UiAccountRevokeOthersUiAccountSessionsRevokeOthers
 		return nil, err
 	}
 	return ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse(rsp)
+}
+
+// UiAccountToolSignOutUiAccountToolsSignOutPostWithBodyWithResponse request with arbitrary body returning *UiAccountToolSignOutUiAccountToolsSignOutPostResponse
+func (c *ClientWithResponses) UiAccountToolSignOutUiAccountToolsSignOutPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountToolSignOutUiAccountToolsSignOutPostResponse, error) {
+	rsp, err := c.UiAccountToolSignOutUiAccountToolsSignOutPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountToolSignOutUiAccountToolsSignOutPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAccountToolSignOutUiAccountToolsSignOutPostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountToolSignOutUiAccountToolsSignOutPostResponse, error) {
+	rsp, err := c.UiAccountToolSignOutUiAccountToolsSignOutPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountToolSignOutUiAccountToolsSignOutPostResponse(rsp)
 }
 
 // UiAgentsListUiAgentsGetWithBodyWithResponse request with arbitrary body returning *UiAgentsListUiAgentsGetResponse
@@ -76908,6 +77029,32 @@ func ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse(rsp *ht
 	response := &UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiAccountToolSignOutUiAccountToolsSignOutPostResponse parses an HTTP response from a UiAccountToolSignOutUiAccountToolsSignOutPostWithResponse call
+func ParseUiAccountToolSignOutUiAccountToolsSignOutPostResponse(rsp *http.Response) (*UiAccountToolSignOutUiAccountToolsSignOutPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountToolSignOutUiAccountToolsSignOutPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

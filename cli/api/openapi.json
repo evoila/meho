@@ -24881,6 +24881,54 @@
         }
       }
     },
+    "/ui/account/tools/sign-out": {
+      "post": {
+        "tags": [
+          "ui-account",
+          "ui-account"
+        ],
+        "summary": "Ui Account Tool Sign Out",
+        "description": "``POST /ui/account/tools/sign-out`` -- the tool kind key is a form field.",
+        "operationId": "ui_account_tool_sign_out_ui_account_tools_sign_out_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_account_tool_sign_out_ui_account_tools_sign_out_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The MCP_CLIENT_PER_TOOL_KIND switch is off, or the tool form field names no tool kind that can be signed out.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/first-start": {
       "get": {
         "tags": [
@@ -28792,6 +28840,17 @@
         },
         "type": "object",
         "title": "Body_ui_account_revoke_session_ui_account_sessions_revoke_post"
+      },
+      "Body_ui_account_tool_sign_out_ui_account_tools_sign_out_post": {
+        "properties": {
+          "tool": {
+            "type": "string",
+            "title": "Tool",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_account_tool_sign_out_ui_account_tools_sign_out_post"
       },
       "Body_ui_agent_grants_create_submit_ui_agents_grants_create_post": {
         "properties": {

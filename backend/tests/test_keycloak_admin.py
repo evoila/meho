@@ -22,6 +22,7 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminError,
     KeycloakClientConflictError,
     KeycloakClientNotFoundError,
+    KeycloakConsentNotFoundError,
 )
 
 _ADMIN_URL = "https://kc.test/admin/realms/meho"
@@ -306,3 +307,63 @@ async def test_get_service_account_user_id_empty_id_raises() -> None:
         async with _client() as kc:
             with pytest.raises(KeycloakAdminError):
                 await kc.get_service_account_user_id(_INTERNAL_ID)
+
+
+@pytest.mark.asyncio
+async def test_revoke_user_client_consent_deletes_one_client() -> None:
+    with respx.mock as r:
+        _mock_token(r)
+        route = r.delete(f"{_ADMIN_URL}/users/{_INTERNAL_ID}/consents/meho-mcp-desktop").mock(
+            return_value=httpx.Response(204)
+        )
+        async with _client() as kc:
+            await kc.revoke_user_client_consent(_INTERNAL_ID, "meho-mcp-desktop")
+    assert route.call_count == 1
+    assert route.calls.last.request.headers["Authorization"] == "Bearer admin-tok"
+
+
+@pytest.mark.asyncio
+async def test_revoke_user_client_consent_quotes_the_path() -> None:
+    """A user id or client id cannot change the URL path."""
+    with respx.mock as r:
+        _mock_token(r)
+        route = r.delete(url__regex=r"/consents/").mock(return_value=httpx.Response(204))
+        async with _client() as kc:
+            await kc.revoke_user_client_consent("../../clients/x", "a/b?c")
+    raw = route.calls.last.request.url.raw_path.decode()
+    assert raw == "/admin/realms/meho/users/..%2F..%2Fclients%2Fx/consents/a%2Fb%3Fc"
+
+
+@pytest.mark.asyncio
+async def test_revoke_user_client_consent_not_found_raises() -> None:
+    with respx.mock as r:
+        _mock_token(r)
+        r.delete(url__regex=r"/consents/").mock(
+            return_value=httpx.Response(404, json={"error": "Consent nor offline token not found"})
+        )
+        async with _client() as kc:
+            with pytest.raises(KeycloakConsentNotFoundError):
+                await kc.revoke_user_client_consent(_INTERNAL_ID, "meho-cli")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 403, 500, 503])
+async def test_revoke_user_client_consent_other_status_raises(status: int) -> None:
+    with respx.mock as r:
+        _mock_token(r)
+        r.delete(url__regex=r"/consents/").mock(return_value=httpx.Response(status))
+        async with _client() as kc:
+            with pytest.raises(KeycloakAdminError) as info:
+                await kc.revoke_user_client_consent(_INTERNAL_ID, "meho-cli")
+    assert not isinstance(info.value, KeycloakConsentNotFoundError)
+    assert f"HTTP {status}" in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_revoke_user_client_consent_network_error_raises() -> None:
+    with respx.mock as r:
+        _mock_token(r)
+        r.delete(url__regex=r"/consents/").mock(side_effect=httpx.ConnectError("refused"))
+        async with _client() as kc:
+            with pytest.raises(KeycloakAdminError, match="ConnectError"):
+                await kc.revoke_user_client_consent(_INTERNAL_ID, "meho-cli")

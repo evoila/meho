@@ -1004,6 +1004,47 @@ Code: `web_push/` (`keys.py`, `endpoints.py`, `models.py`, `store.py`),
 On iPhone and iPad, web push works only in the installed app (iOS 16.4 and
 newer), so the switch says to install MEHO first.
 
+## Your tools: sign out one tool kind
+
+With `MCP_CLIENT_PER_TOOL_KIND` on, each tool kind signs in with its own
+Keycloak login client. The account page then has a card "Your tools". It
+lists each tool kind with its login client and its last use:
+
+| Tool kind | Login client | Sign-out button |
+|---|---|---|
+| Web console | `UI_KEYCLOAK_CLIENT_ID` | no: "Active sessions" signs out a browser |
+| Command line | `KEYCLOAK_CLI_CLIENT_ID` | yes |
+| Claude Code | `meho-mcp-code` | yes |
+| Claude Desktop | `meho-mcp-desktop` | yes |
+| Other MCP client | `meho-mcp` | yes |
+
+A kind whose client id is not set is left out.
+
+- **Last use** is the newest audit row of the person (every tenant) whose
+  `client` block names that client, in the last 90 days. Audit rows name
+  the client only while `AUDIT_CLIENT_IDENTITY` is on.
+- **"Sign out this tool"** asks for a confirm, then posts
+  `POST /ui/account/tools/sign-out` with the form field `tool` (the tool
+  kind key, never a client id). MEHO calls
+  `DELETE /admin/realms/{realm}/users/{user id}/consents/{client id}` with
+  the Keycloak admin client (it needs the realm role `manage-users`). The
+  user id is the person of the session, never a form field. Keycloak ends
+  the person's saved login for that one client. Their other tools keep
+  working.
+- After the Keycloak call succeeded, MEHO writes the audit row
+  `auth.tool_sign_out` (method `INTERNAL`, payload `client_id` and
+  `tool`). A failed call (an error answer, no answer, no admin client)
+  shows an error line and writes no row. A 404 (no saved login of this
+  person for this client) says "Nothing changed" and writes no row.
+- The tool's last access token works until it ends: about five minutes on
+  the built-in realm (300 seconds plus 30 seconds leeway). The card says
+  so. Signing out is not a block: the tool can sign in again.
+- With the switch off, the card is not shown and the route answers 404.
+
+Code: `auth/tool_sign_out.py` (tool kinds, last use, the sign-out and the
+audit row), `ui/routes/account_tools.py` (the route and the card rows),
+`templates/account/_tools.html`. Tests: `tests/test_ui_account_tools.py`.
+
 ## Dependencies
 
 - **`jinja2 >= 3.1.6`** — already a backplane dependency; no

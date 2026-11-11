@@ -18,6 +18,8 @@ principal lifecycle service needs:
 * :meth:`delete_client` — DELETE the client outright. Used to roll back
   a created client when the DB row that records it cannot be written, so
   register never leaves an orphaned, unrevocable token-issuing identity.
+* :meth:`revoke_user_client_consent` — end one person's saved login for
+  one login client (the "Sign out this tool" button of the account page).
 
 Design decisions
 ----------------
@@ -52,6 +54,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -65,6 +68,7 @@ __all__ = [
     "KeycloakAdminNotConfiguredError",
     "KeycloakClientConflictError",
     "KeycloakClientNotFoundError",
+    "KeycloakConsentNotFoundError",
 ]
 
 _ADMIN_HTTP_TIMEOUT_SECONDS: float = 10.0
@@ -115,6 +119,10 @@ class KeycloakClientConflictError(KeycloakAdminError):
 
 class KeycloakClientNotFoundError(KeycloakAdminError):
     """Raised when the target client does not exist (404 from Keycloak)."""
+
+
+class KeycloakConsentNotFoundError(KeycloakAdminError):
+    """Raised when Keycloak has no saved login of the person for the client (404)."""
 
 
 def _hardcoded_claim_mapper(name: str, claim_name: str, claim_value: str) -> dict[str, Any]:
@@ -665,3 +673,49 @@ class KeycloakAdminClient:
                 status=resp.status_code,
             )
             raise KeycloakAdminError(f"Keycloak delete_client failed: HTTP {resp.status_code}")
+
+    async def revoke_user_client_consent(self, user_id: str, client_id: str) -> None:
+        """End the saved login of user *user_id* for login client *client_id*.
+
+        Calls ``DELETE /users/{user id}/consents/{client id}``. *client_id*
+        is the OAuth ``clientId`` (for example ``meho-mcp-desktop``), not the
+        internal UUID. Keycloak removes the person's consent and offline
+        login for that one client; the person's logins in other clients keep
+        working. The tool cannot get a new token after this. Its last access
+        token works until it expires. The admin client needs the realm role
+        ``manage-users``.
+
+        Raises
+        ------
+        KeycloakConsentNotFoundError
+            Keycloak answered 404: no saved login of this person for this
+            client, or no such client or person.
+        KeycloakAdminError
+            Any other failure (a network error, 403, 5xx).
+        """
+        assert self._http is not None
+        assert self._token
+        log = structlog.get_logger(__name__)
+        url = (
+            f"{self._admin_url}/users/{quote(user_id, safe='')}"
+            f"/consents/{quote(client_id, safe='')}"
+        )
+        try:
+            resp = await self._http.delete(url, headers=self._auth_headers())
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(
+                f"Keycloak revoke_user_client_consent network error: {type(exc).__name__}"
+            ) from exc
+        if resp.status_code == 404:
+            raise KeycloakConsentNotFoundError(
+                f"Keycloak has no saved login of this person for client {client_id!r}"
+            )
+        if resp.status_code not in (200, 204):
+            log.warning(
+                "keycloak_revoke_user_client_consent_failed",
+                client_id=client_id,
+                status=resp.status_code,
+            )
+            raise KeycloakAdminError(
+                f"Keycloak revoke_user_client_consent failed: HTTP {resp.status_code}"
+            )

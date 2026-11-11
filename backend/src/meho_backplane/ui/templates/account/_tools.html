@@ -1,0 +1,106 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  "Your tools" card of the account page. Shown only while the
+  MCP_CLIENT_PER_TOOL_KIND switch is on (the route passes ``tools=None``
+  while it is off). Rendered inline on the page and as the HTMX swap
+  target after "Sign out this tool" (``POST /ui/account/tools/sign-out``,
+  form field ``tool``). The whole card is swapped, so the result line
+  ``tools_result`` shows at its top.
+
+  Each row: the tool kind, its login client and the last use from the
+  person's audit rows of the last 90 days. The web console has no button:
+  the "Active sessions" card signs out a browser.
+
+  The CSRF header comes from the enclosing ``<section hx-headers>`` of the
+  page.
+-#}
+<div
+  id="account-tools"
+  class="card bg-base-100 border-base-300 border shadow-sm"
+  data-field="your-tools"
+>
+  <div class="card-body space-y-3">
+    <h2 class="card-title text-base">Your tools</h2>
+    <p class="text-xs opacity-60">
+      Each tool signs in with its own login. Sign out one tool to stop it.
+      Your other tools keep working. A signed-out tool stops within about
+      five minutes, when its last access token ends. Signing out is not a
+      block: the tool can sign in again and then gets a new login.
+    </p>
+
+    {% if tools_result %}
+    <div
+      role="status"
+      class="alert alert-sm {% if tools_result.kind == 'error' %}alert-error{% elif tools_result.kind == 'success' %}alert-success{% else %}alert-info{% endif %}"
+      data-result="{{ tools_result.kind }}"
+    >
+      <span class="text-sm">{{ tools_result.text }}</span>
+    </div>
+    {% endif %}
+
+    <ul class="divide-base-300 divide-y rounded-lg border border-base-300">
+      {% for t in tools %}
+      <li class="flex flex-wrap items-center justify-between gap-3 px-3 py-2.5" data-tool-row="{{ t.key }}">
+        <div class="min-w-0 space-y-0.5">
+          <div class="text-sm font-medium">{{ t.label }}</div>
+          <div class="text-xs opacity-60">
+            login client <span class="font-mono">{{ t.client_id }}</span>
+            &middot; last use
+            {% if t.last_used_at is not none %}
+              <span data-field="last-use" title="{{ t.last_used_at.isoformat() }}">{{ t.last_used_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+            {% else %}
+              <span data-field="last-use">none in the last 90 days</span>
+            {% endif %}
+          </div>
+        </div>
+        <div>
+          {% if t.can_sign_out %}
+          <button
+            type="button"
+            class="btn btn-xs btn-ghost text-error"
+            data-action="open-tool-sign-out"
+            onclick="document.getElementById('account-tool-modal-{{ t.key }}').showModal()"
+          >
+            Sign out this tool
+          </button>
+          <dialog id="account-tool-modal-{{ t.key }}" class="modal">
+            <div class="modal-box">
+              <h3 class="text-lg font-semibold">Sign out {{ t.label }}?</h3>
+              <p class="py-2 text-sm opacity-80">
+                {{ t.label }} stops within about five minutes. Your other
+                tools keep working. If it signs in again, it gets a new
+                login.
+              </p>
+              <div class="modal-action">
+                <form method="dialog">
+                  <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+                </form>
+                <button
+                  type="button"
+                  class="btn btn-sm btn-error"
+                  data-action="confirm-tool-sign-out"
+                  hx-post="/ui/account/tools/sign-out"
+                  hx-vals='{"tool": "{{ t.key }}"}'
+                  hx-target="#account-tools"
+                  hx-swap="outerHTML"
+                  onclick="document.getElementById('account-tool-modal-{{ t.key }}').close()"
+                >
+                  Sign out
+                </button>
+              </div>
+            </div>
+            <form method="dialog" class="modal-backdrop">
+              <button>close</button>
+            </form>
+          </dialog>
+          {% else %}
+          <span class="text-xs opacity-60">Use "Active sessions" to sign out a browser.</span>
+          {% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+</div>

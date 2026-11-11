@@ -32,6 +32,7 @@ backplane — reach for whichever the task in front of you needs:
 | [Topology](topology.md) | The dependency graph: blast-radius (`dependents`), reachability (`path`), and how a resource gets into the graph. |
 | [Broadcast](broadcast.md) | The cross-operator activity feed — read it, announce intent, watch it live, and the read-before-start discipline. |
 | [MEHO on your phone and laptop](phone-and-laptop.md) | Sign in and approve with a passkey: Face ID, Touch ID, a fingerprint or Windows Hello. |
+| [Your tools: sign out one tool](your-tools.md) | See which tools you used, and stop one of them while your other tools keep working. |
 | [Memory and knowledge](memory-and-knowledge.md) | Two durable stores: scoped, TTL'd memory and the tenant knowledge base, and which belongs where. |
 | [Agent sessions](agent-sessions.md) | Keep uploaded agent sessions in your own object storage: turn the store on with Helm values, rights, retention and quarantine. |
 | [Audit forensics](audit-forensics.md) | Reconstructing "who did X to Y and when" from the append-only ledger, and tracing an agent session end to end. |

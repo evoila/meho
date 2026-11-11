@@ -106,6 +106,7 @@ nav:
       - Topology: guides/topology.md
       - Broadcast: guides/broadcast.md
       - MEHO on your phone and laptop: guides/phone-and-laptop.md
+      - "Your tools: sign out one tool": guides/your-tools.md
       - Memory and knowledge: guides/memory-and-knowledge.md
       - Agent sessions: guides/agent-sessions.md
       - Audit forensics: guides/audit-forensics.md

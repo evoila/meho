@@ -98,6 +98,8 @@ EXPECTED_WRITE_OP_IDS: tuple[str, ...] = (
     "keycloak.client.delete",
     "keycloak.user.logout",
     "keycloak.realm.delete",
+    "keycloak.user.disable",
+    "keycloak.user.enable",
 )
 
 #: Expected (safety_level, requires_approval) per op — the registration
@@ -105,15 +107,17 @@ EXPECTED_WRITE_OP_IDS: tuple[str, ...] = (
 #: all ``dangerous`` (privilege-adjacent: group membership + attributes drive
 #: the backplane's tenant claims). The governed deletes (#3944) are
 #: ``destructive``: a second person must approve.
+#: User create, password reset, client create/update and protocol-mapper
+#: create are ``dangerous`` too: they change what goes into the login token.
 EXPECTED_SAFETY: dict[str, str] = {
     "keycloak.realm.create": "dangerous",
     "keycloak.realm.update": "caution",
-    "keycloak.client.create": "caution",
-    "keycloak.client.update": "caution",
+    "keycloak.client.create": "dangerous",
+    "keycloak.client.update": "dangerous",
     "keycloak.client_scope.create": "caution",
-    "keycloak.protocol_mapper.create": "caution",
-    "keycloak.user.create": "caution",
-    "keycloak.user.reset_password": "caution",
+    "keycloak.protocol_mapper.create": "dangerous",
+    "keycloak.user.create": "dangerous",
+    "keycloak.user.reset_password": "dangerous",
     "keycloak.role_mapping.assign": "dangerous",
     "keycloak.group.create": "dangerous",
     "keycloak.group.update_attributes": "dangerous",
@@ -124,6 +128,8 @@ EXPECTED_SAFETY: dict[str, str] = {
     "keycloak.client.delete": "destructive",
     "keycloak.user.logout": "caution",
     "keycloak.realm.delete": "destructive",
+    "keycloak.user.disable": "dangerous",
+    "keycloak.user.enable": "dangerous",
 }
 
 
@@ -270,10 +276,10 @@ async def _dispatch(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_write_ops_registration_set() -> None:
-    """WRITE_OPS carries the eighteen write ops (nine + four group + four deletes + logout)."""
+    """WRITE_OPS carries the twenty write ops (the eighteen before, plus disable and enable)."""
     op_ids = {op.op_id for op in WRITE_OPS}
     assert op_ids == set(EXPECTED_WRITE_OP_IDS)
-    assert len(WRITE_OPS) == 18
+    assert len(WRITE_OPS) == 20
 
 
 def test_write_ops_safety_levels_and_approval() -> None:

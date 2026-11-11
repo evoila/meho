@@ -498,7 +498,8 @@ size is accepted.
 
 ## Drift check against the team rules
 
-The team rules are written once, in the team wiki's methods pages. MEHO
+The team rules are written once, in the methods pages of the tenant's
+own wiki (a Git repo of Markdown pages the tenant owns). MEHO
 never reads the wiki and holds no Git credentials. A person loads the rules
 into the tenant's `operational` conventions with the settings file
 ([settings.md](settings.md)). The drift check shows when MEHO no longer
@@ -552,6 +553,11 @@ class `read`, `in_sync` and the three counts; never a convention text.
 
 ### The drift check login
 
+Setup steps for an operator (the Keycloak client, the client secret and
+the CI call):
+[Lessons in your own wiki](../../docs-site/guides/memory-and-knowledge.md#step-2-create-the-three-machine-logins)
+in the operator guide. This section keeps the code detail.
+
 The route admits a `tenant_admin` or a `platform_admin` (for their own
 tenant), or a login whose token carries the claim
 `conventions_drift_only: true` (`Operator.conventions_drift_only`,
@@ -582,11 +588,11 @@ Set the login up in Keycloak as a confidential client with only
 | Hardcoded claim | `principal_kind` | `service` |
 | Hardcoded claim (JSON type boolean) | `conventions_drift_only` | `true` |
 
-The client secret lives in the team wiki repo's CI secrets, never in MEHO.
+The client secret lives in the wiki repo's CI secrets, never in MEHO.
 
 ### The call from the CI job
 
-The team wiki repo's CI job runs after every merge. It renders the rules
+The wiki repo's CI job runs after every merge. It renders the rules
 into a settings file with only `conventions`, gets a token with the client
 credentials grant, and sends the file. It fails when anything differs:
 
@@ -603,7 +609,7 @@ jq -e '.in_sync' drift.json > /dev/null
 ```
 
 The job renders the toolkit's CLAUDE.md sections from the same source.
-That part lives in the team wiki repo, not here.
+That part lives in the wiki repo, not here.
 
 ## Domain provenance (#3747)
 

@@ -13,6 +13,8 @@ What is covered, with a respx-mocked IPA server and no ingested catalog:
 * a refused login names FreeIPA's reason; a ``400`` names the ``Referer`` rule;
   a command error names the command, FreeIPA's error and its text;
 * a call as MEHO's system identity never uses a cached session;
+* a session shared by two targets of one credential goes, on the second
+  target, only to a caller whose own read of that target's secret passed;
 * the fingerprint and the probe; the registration shape;
 * no password and no session cookie in a result or a stored trace;
 * the wire helpers are tested in ``test_connectors_freeipa_rpc.py``.
@@ -35,6 +37,8 @@ import respx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.vault import VaultRoleDeniedError
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.freeipa import (
     FREEIPA_CONNECTOR_ID,
@@ -255,6 +259,34 @@ async def test_system_operator_never_uses_a_cached_session() -> None:
         await connector.auth_headers(target, make_operator())
         await connector.auth_headers(target, synthesise_system_operator())
     assert login.call_count == 2
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_shared_session_on_another_target_needs_a_read_of_that_target() -> None:
+    """Two targets of one credential share a session; each target's own read decides."""
+    first, second = Target(), Target()
+    reads: list[object] = []
+
+    async def _loader(target: object, operator: Operator) -> dict[str, str]:
+        reads.append(target)
+        if target is second and operator.sub == "op-reads-freeipa":
+            raise VaultRoleDeniedError("read refused")
+        return {"username": USERNAME, "password": PASSWORD}
+
+    connector = FreeipaConnector(credentials_loader=_loader)
+    other = make_operator().model_copy(update={"sub": "second-operator"})
+    async with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(LOGIN).mock(return_value=login_response())
+        await connector.auth_headers(first, make_operator())
+        with pytest.raises(VaultRoleDeniedError):
+            await connector.auth_headers(second, make_operator())
+        await connector.auth_headers(second, other)
+        await connector.auth_headers(second, other)
+
+    # One login for the shared credential; one read per caller and target.
+    assert login.call_count == 1
+    assert reads == [first, second, second]
     await connector.aclose()
 
 
@@ -498,7 +530,7 @@ async def test_registered_ops_are_typed_and_documented_and_writes_need_approval(
         .all()
     )
     assert {r.op_id for r in rows} == {op.op_id for op in FREEIPA_TYPED_OPS}
-    assert len(rows) == 34
+    assert len(rows) == 42
     for row in rows:
         assert row.source_kind == "typed"
         assert row.handler_ref is not None

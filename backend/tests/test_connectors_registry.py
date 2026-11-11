@@ -493,6 +493,14 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 # yield its task creation triggers) back into this env-free test.
                 start_audit_raw_payload_reaper=MagicMock(),
                 stop_audit_raw_payload_reaper=AsyncMock(),
+                # #4901 agent session store cleanup -- on by default, so the
+                # real loop (and the topology scheduler yield its task
+                # creation triggers) must stay out of this env-free test.
+                start_session_store_cleanup=MagicMock(),
+                stop_session_store_cleanup=AsyncMock(),
+                # #6214 passkey touch clean-up: on by default, keep it out too.
+                start_presence_challenge_cleanup=MagicMock(),
+                stop_presence_challenge_cleanup=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),
@@ -680,6 +688,14 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 # yield its task creation triggers) back into this env-free test.
                 start_audit_raw_payload_reaper=MagicMock(),
                 stop_audit_raw_payload_reaper=AsyncMock(),
+                # #4901 agent session store cleanup -- on by default, so the
+                # real loop (and the topology scheduler yield its task
+                # creation triggers) must stay out of this env-free test.
+                start_session_store_cleanup=MagicMock(),
+                stop_session_store_cleanup=AsyncMock(),
+                # #6214 passkey touch clean-up: on by default, keep it out too.
+                start_presence_challenge_cleanup=MagicMock(),
+                stop_presence_challenge_cleanup=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),

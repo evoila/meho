@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-# Compatibility gate for the REST API and the MCP tools.
+# Compatibility gate for the REST API, the MCP tools and the Helm values.
 #
-# Compares the two committed contract snapshots with the base of the pull
+# Compares the committed contract files with the base of the pull
 # request and fails on a breaking change:
 #   - cli/api/openapi.json (REST API, public paths under /api/v1/ only),
 #     with oasdiff;
 #   - backend/contracts/mcp-tools-list.json (MCP tool names, surface,
-#     input and output schemas), with scripts/ci/check_contract_compat.py.
+#     input and output schemas), with scripts/ci/check_contract_compat.py;
+#   - deploy/charts/meho/values.yaml and values.schema.json (a removed key,
+#     a narrower schema), with the same script.
 # A breaking change passes only when the pull request has the
 # `breaking-change` label and a "## Breaking changes" section in its text.
 # The job runs again when a label or the text changes.
@@ -53,7 +55,7 @@ env:
 
 jobs:
   compat:
-    name: REST API and MCP tools compatibility
+    name: REST API, MCP tools and Helm values compatibility
     # GitHub-hosted runner: the job needs only git, Python and a public
     # download, so a fork pull request is safe here too.
     runs-on: ubuntu-latest
@@ -72,6 +74,10 @@ jobs:
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
+
+      - name: Install PyYAML
+        # The check reads values.yaml of the Helm chart.
+        run: python -m pip install 'PyYAML==6.0.3'
 
       - name: Install oasdiff
         run: |

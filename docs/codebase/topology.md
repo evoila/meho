@@ -234,6 +234,21 @@ the login is a person (`ensure_human_principal` in `auth/rbac.py`). So:
   `operator`.
 - The reads and `POST /refresh/{target_name}` keep the `operator` role
   and stay open to machine logins.
+- A service login with a read scope (see `service-principal-grants.md`)
+  refreshes only the targets inside that scope. For any other target the
+  REST route and the console route `POST /ui/topology/refresh/{target_name}`
+  answer 403 `read_scope_denied`. `refresh_target_topology` runs this check
+  first (`ensure_refresh_in_read_scope` in `topology/refresh_read_scope.py`),
+  so MEHO does not call the connector and does not change the graph.
+
+**The console graph writes are for people too.** The console pages call
+the topology services as plain functions, so the REST gate does not run
+there. Their gate, `_require_topology_admin` in `ui/routes/topology/edges.py`,
+checks the `tenant_admin` role and then that the login is a person
+(`ensure_ui_human` in `ui/auth/human.py`). It guards the annotate modal,
+the annotate and unannotate submits, and the bulk-import panel and submit.
+A console session of a service or runner login gets 403
+`human_principal_required`.
 
 The typed-op handlers unwrap params and call `annotate_edge_with_plan` /
 `create_or_get_node` / `delete_node` / `unannotate_edge` /

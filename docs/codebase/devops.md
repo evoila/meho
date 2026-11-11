@@ -1078,7 +1078,7 @@ on a person directly: the claim always comes from the group.
 | `meho-cli-approve` | public, authorization code + PKCE (S256) | redirect `http://127.0.0.1:*`; the approval sign-in: its own login flow `meho approval sign-in` (password, then the one-time code), a 15-minute access token and no refresh token |
 | `meho-mcp` | public, authorization code + PKCE (S256) | redirect URIs `http://localhost:*`, `http://127.0.0.1:*`; optional scopes `offline_access`, `mcp:read`, `mcp:execute`, `mcp:admin`; offline login idle limit 48 hours |
 | `meho-web` | confidential, authorization code + PKCE (S256) | redirect `https://<host>/ui/auth/callback`, after logout `https://<host>/ui/auth/login` |
-| `meho-admin` | confidential, service account | realm-management roles `manage-clients` and `manage-users`; with the company login on, the chart adds `manage-identity-providers` and `manage-realm` (#4592) |
+| `meho-admin` | confidential, service account | realm-management roles `manage-clients`, `manage-realm` (the login flows, #6280) and `manage-users`; with the company login on, the chart adds `manage-identity-providers` (#4592) |
 | `meho-check-runner` | confidential, service account | its tokens carry the audience `meho-check-runner`, not `meho-backplane` |
 
 The three main clients people log in with (`meho-cli`, `meho-mcp`, `meho-web`)
@@ -1229,6 +1229,9 @@ What an operator can do now:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
   ```
+
+  `deploy/values-examples/values-vks.yaml` does this for Traefik in the
+  namespace `traefik`, and turns on the OpenBao rule too (#5833).
 
 - Run a service mesh that encrypts traffic between pods (mutual TLS).
 
@@ -1545,14 +1548,14 @@ Three properties make this the right contract:
 `helm lint` against the unmodified `values.yaml` **deliberately fails**
 with the safe-by-default empty fields. The chart's `validate` job in
 [`.github/workflows/chart.yml`](../../.github/workflows/chart.yml) and
-[`deploy/values-examples/values-rdc-example.yaml`](../../deploy/values-examples/values-rdc-example.yaml)
+[`deploy/values-examples/values-example-lab.yaml`](../../deploy/values-examples/values-example-lab.yaml)
 both supply the required overrides; ad-hoc lint invocations pass them via
 `--set` or `-f`.
 
 ### Example values + ESO patterns
 
 A sanitized example values file lives at
-[`deploy/values-examples/values-rdc-example.yaml`](../../deploy/values-examples/values-rdc-example.yaml).
+[`deploy/values-examples/values-example-lab.yaml`](../../deploy/values-examples/values-example-lab.yaml).
 It targets a lab with PostgreSQL, Vault and Keycloak inside the cluster
 and an ingress-nginx controller, and is structured so that other Vault-+-Keycloak-+-Postgres-shaped labs can
 copy it, substitute the `<REPLACE: ...>` placeholders, and apply it.
@@ -2013,6 +2016,7 @@ changed by a maintainer, never by a pull request.
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252); on a no-backend diff it requires `python-outside-backend` to pass (#5296). |
 | `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/`, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). |
 | `python-integration` (`Python (integration testcontainers)`) | fan-in | `needs: [changes, python-integration-shard]`; **required check (#698)** so the lane that exercises real connector dispatch can no longer ship red. Fails when any shard failed or was cancelled, or the detector is not green; reports success-by-skip on a docs-only diff and on a no-backend diff (#5296). Same rules as `python-unit-lane` (#5384). |
+| `python-timing-tests` (`Python timing tests (non-blocking)`) | test files with a `slow_runner_tolerant` test | Runs only the tests that compare real elapsed time with a wide fixed limit (`tests/_time_limits.py`). The required unit and integration shards set `MEHO_SKIP_TIME_LIMITS=1`: those tests still run there, but their time limit does not fail the job. Not a required check, and `continue-on-error`, so a busy runner cannot block a merge with a time limit (#6270). |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v9 action, golangci-lint v2) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
@@ -2605,10 +2609,11 @@ reason.
 
 `ci.yml` deliberately does **not** build the backplane container image.
 [`image.yml`](../../.github/workflows/image.yml) runs on PRs that touch
-`backend/**`, `.github/workflows/image.yml` or `.trivyignore`
+`backend/**` or `.github/workflows/image.yml`
 (path-filtered, see `image.yml`'s `on.pull_request.paths`) with
-`push: false` — the Dockerfile + dep-resolution gate — plus a trivy scan
-of `backend/uv.lock` on a hosted runner (the `lock-scan` job; see
+`push: false` — the Dockerfile + dep-resolution gate. The trivy scan of
+`backend/uv.lock` is not in `image.yml`: it is the `python-deps` job of
+`security-scan.yml`, which runs on every PR (see
 `docs/codebase/backend.md`). PRs that don't touch the backend
 (chart-only, CLI-only, docs-only) skip the image build by design,
 because the gate's inputs haven't changed and rebuilding would add zero
@@ -2836,7 +2841,7 @@ their isolation posture:
 | Workflow | Runs untrusted PR code? | Isolation mechanism |
 | --- | --- | --- |
 | `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
-| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job, which runs on GitHub-hosted `ubuntu-latest` for pull requests and on `meho-runners-ci` only for `main` and tag pushes; the `lock-scan` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
+| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job, which runs on GitHub-hosted `ubuntu-latest` for pull requests and on `meho-runners-ci` only for `main` and tag pushes |
 | `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-latest`; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |
@@ -2846,7 +2851,8 @@ their isolation posture:
 | `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **hosted runner** for every event (#4626) |
 | `linux-server-test.yml` | yes (shellcheck, and the unit tests run `deploy/linux-server/install.sh` against stub commands) | **route**: fork PR → disposable GitHub-hosted runner |
 | `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for every event (#4626) |
-| `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`) |
+| `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
+| `security-weekly.yml` | no (`schedule` and `workflow_dispatch` only; trivy reads the lock files of `main`) | GitHub-hosted `ubuntu-latest`; built-in token is `contents: read`; the findings go to a private repo with a separate token (repository secrets `SECURITY_FINDINGS_REPO` and `SECURITY_FINDINGS_TOKEN`, so the log masks the repo name), so a finding is never public before its fix. all severities are reported. `scripts/ci/security_weekly_issue.py` opens one issue or comments only the new findings |
 | `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted) |
 
 ### Two in-repo isolation patterns
@@ -3065,7 +3071,7 @@ Steps, in order:
    Labels the namespace with `meho.io/managed-by=pr-smoke` and
    `meho.io/pr-number=<n>` for consumer-side audit-log filtering.
 8. **Helm install** — `helm upgrade --install meho deploy/charts/meho/
-   -f deploy/values-examples/values-rdc-example.yaml
+   -f deploy/values-examples/values-example-lab.yaml
    --set image.tag=pr-<n>-<sha> --wait --timeout 5m`. Uses the
    in-tree example overlay as the base (real-target fixture layout)
    with the PR-tagged image as the only override.

@@ -282,6 +282,7 @@ func printReplayNode(
 // tenant name, or the tenant id when the backend has no name for it
 // (#5238); it comes after the op_id so the op_id stays easy to find.
 // `actor` is the agent that acted for the person (#5773), only when set.
+// The line is server text, so it goes through output.SafeText.
 func formatReplayNode(node *api.ReplayNode) string {
 	dur := strDeref(node.DurationMs)
 	if dur == "" {
@@ -293,7 +294,7 @@ func formatReplayNode(node *api.ReplayNode) string {
 	if actor := strDeref(node.ActorSub); actor != "" {
 		line += " actor=" + actor
 	}
-	return line
+	return output.SafeText(line)
 }
 
 // countDescendants counts every node strictly below `node` (its whole

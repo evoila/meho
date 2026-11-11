@@ -107,7 +107,7 @@ Sanctioned exceptions:
 | `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware; G0.25 (#1694) wires the rotation primitive into the request path (`refresh` + `errors` modules). |
 | `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `load_session_for_update` (side-effect-free `SELECT ... FOR UPDATE` variant for the refresh path, G0.25 #1694), `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. `rotate_refresh` optionally extends `expires_at` by a refreshed token's lifetime (`new_lifetime=`), monotonic and clamped to `created_at + ui_session_absolute_lifetime_seconds`, and accepts a caller-supplied clock (`now=`, default wall clock) so a caller that pre-checks `expires_at` (the inline refresh path) shares one reading with the internal replay gate -- two independent clock reads would leave a microsecond gap where the gate's "expired" branch self-deadlocks on the caller's own row lock. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. `list_active_sessions(operator_sub)` returns the person's live sessions in every tenant (own `operator_sub`, `revoked_at IS NULL`, `expires_at > now()`, ordered `last_seen_at DESC`) as token-free `ActiveSessionRow` projections (the Fernet ciphertext columns are never read for a metadata listing) and `revoke_other_sessions(operator_sub, keep_session_id)` soft-deletes every active session of the person, in every tenant, except the current one -- both back the Account surface (G10.11-T1 #1892) and take `operator_sub` from the validated session context, never a form field. |
 | `meho_backplane.ui.auth.flow` | OAuth 2.1 + PKCE client primitives layered on authlib's `AsyncOAuth2Client`. `build_authorization_request` mints the Keycloak redirect URL (S256 PKCE + RFC 8707 `resource` parameter; with `fresh_sign_in=True` also `prompt=login` and `max_age=0`, so Keycloak asks for the credentials again also in a remembered browser), mints a second per-flow `browser_binding` secret (login-CSRF defence, F10 #272), and registers the verifier + binding + `return_to` in a server-side `PKCEVerifierStore`; it returns `(url, state, browser_binding)`. `exchange_code_for_tokens` pops the pending flow, **rejects it (`browser_binding_mismatch`) when the callback's replayed binding is missing or does not match — before the token exchange** (constant-time `hmac.compare_digest`), then exchanges code+verifier at the token endpoint. `resolve_oidc_endpoints` caches the discovery doc on the same TTL the JWKS cache uses. |
-| `meho_backplane.ui.auth.routes` | FastAPI `APIRouter` for `/ui/auth/{login,callback,logout}`. `build_router()` returns the router for T5 to mount. Login sets the short-lived `browser_binding` cookie (`login_binding_cookie_name(state)` = `meho_ob_<sha256(state)[:32]>`; `HttpOnly; Secure; SameSite=Lax; Path=/ui/auth; Max-Age=<flow TTL>`) — `Lax`, not `Strict`, so it survives the cross-site top-level callback navigation from a separately hosted Keycloak; the per-`state` name lets concurrent logins from one browser bind independently. Callback reads that cookie, passes it to `exchange_code_for_tokens` for the binding check, verifies the access token through the chassis JWT chain (`verify_jwt_for_audience`) so the BFF inherits issuer / audience / sub / tenant_id / tenant_role checks, sets `meho_session` (`HttpOnly; Secure; SameSite=Strict; Path=/`), and clears the single-use binding cookie on success. Logout revokes the session, clears the cookie, and 302s to Keycloak's `end_session_endpoint` (best-effort -- a missing endpoint falls back to a local `/ui/auth/login` redirect). |
+| `meho_backplane.ui.auth.routes` | FastAPI `APIRouter` for `/ui/auth/{login,callback,logout}`. `build_router()` returns the router for T5 to mount. Login sets the short-lived `browser_binding` cookie (`login_binding_cookie_name(state)` = `meho_ob_<sha256(state)[:32]>`; `HttpOnly; Secure; SameSite=Lax; Path=/ui/auth; Max-Age=<flow TTL>`) — `Lax`, not `Strict`, so it survives the cross-site top-level callback navigation from a separately hosted Keycloak; the per-`state` name lets concurrent logins from one browser bind independently. Callback reads that cookie, passes it to `exchange_code_for_tokens` for the binding check, verifies the access token through the chassis JWT chain (`verify_jwt_for_audience`) so the BFF inherits issuer / audience / sub / tenant_id / tenant_role checks, sets `__Host-meho_session` (`HttpOnly; Secure; SameSite=Strict; Path=/`, no `Domain`), and clears the single-use binding cookie on success. Logout revokes the session, clears the cookie, and 302s to Keycloak's `end_session_endpoint` (best-effort -- a missing endpoint falls back to a local `/ui/auth/login` redirect). |
 | `meho_backplane.ui.auth.middleware` | Pure-ASGI `UISessionMiddleware` for `/ui/*`. Loads operator identity from the session cookie on every request; 302s to login on missing/expired session (an htmx request gets `204` + `HX-Redirect` instead, with `return_to` taken from `HX-Current-URL`, the page and not the fragment; when the browser still sent a session cookie the login URL also carries `reason=session_ended`, #5518). Skips `/ui/static/*` (chassis assets) and `/ui/auth/*` (the BFF surfaces themselves). Per-request `UISessionContext` (frozen dataclass: `session_id`, `operator_sub`, `tenant_id`, plus `tenant_slug` + `tenant_name` populated from a same-transaction `tenant` PK lookup added by G0.15-T9 #1217) lands on `request.state.ui_session`; route handlers read it via `Depends(require_ui_session)`. Two role gates sit on top and share one load, verify and refresh chain (`_require_ui_role`): `require_ui_operator` (the `operator` floor; `read_only` gets `403 operator_required`) and `require_ui_admin` (the `tenant_admin` floor). Both load + verify the stored access token through `meho_backplane.ui.auth.refresh`, so expired tokens silently refresh instead of 401ing (G0.25 #1694). `require_ui_read_operator` (`ui/routes/operator_read.py`) runs `require_ui_operator` and then returns a reader `Operator`. Most console pages, reads included, need the `operator` role, like their REST twins; a `read_only` session can open only the dashboard, account, tenant, memory, automation and approvals pages. After every successful row load the middleware also runs the drift-gated read-path revalidation (`meho_backplane.ui.auth.revalidation.revalidate_read_session`): past `ui_session_read_revalidation_seconds` (default 300; `0` = every request) without a validation, the stored token is re-presented to the JWKS-cached JWT chain -- an in-memory check on a cache hit, moving on to one reactive refresh only once the token is past `exp` -- and a terminal failure collapses to the same redirect-to-login as a missing session. This bounds IdP revocation / role-demotion lag on read renders to ~(access-token TTL + threshold) instead of the 10 h absolute session lifetime; the anchor is a process-local last-validated map (not `last_seen_at`, which active sessions bump every request, so a gap-based gate would never fire for exactly the sessions that matter). |
 | `meho_backplane.ui.auth.refresh` | Inline token-refresh lifecycle (G0.25 #1694). `load_fresh_session` (proactive: refresh when the row is within 60 s of `expires_at`), `verify_access_token_with_refresh` (reactive: refresh once on the JWT chain's `token_expired`, re-verify), both funnelling into `refresh_session_tokens` -- the `SELECT ... FOR UPDATE`-serialised chokepoint that POSTs the RFC 6749 § 6 refresh grant (single attempt, 5 s timeout) and rotates the row via `rotate_refresh` (RFC 9700 § 4.14). Concurrent refreshes: first wins; the loser observes the rotated pair under the lock and skips its network call. Failures log `ui_auth_token_refresh_failed` (reason: `invalid_grant` / `network_error` / `timeout` / `malformed_response`) and raise `401 session_expired`; successes log `ui_auth_token_refresh_succeeded` (session_id, old/new expires_at, time_cost_ms). No token material in logs. The refresh performs zero `Set-Cookie` operations -- `meho_session` and `meho_csrf` stay byte-identical, so in-flight pages and their CSRF tokens survive a rotation (no #1706-class cookie desync). The seam serves **token-presenting** dependencies: `require_ui_admin` and `require_ui_operator` (both through `_require_ui_role`), the session middleware's drift-gated read-path revalidation (`meho_backplane.ui.auth.revalidation`), plus (G10.x #121) every per-route operator lift that re-verifies the stored access token to surface `tenant_role` / `sub` — `agents.operator`, `connectors.operator` (and the topology write gates that reuse its `lift_operator_from_session`), `memory.operator`, and the `kb` / `runbooks` / `operations` / `audit` / `keycloak` / `vault` route resolvers. Each calls `load_fresh_session` then `verify_access_token_with_refresh` (mirroring the `approvals` / `corpus` / `retrieval` precedent) rather than bare `load_session` + `verify_jwt_for_audience`, so no token-consuming `/ui/*` route 401s on an expired-but-refreshable token. The soft-fail role probes (`runbooks` / `audit` `_resolve_role`, the `agents` / `connectors` `resolve_role_probe`) keep their `try/except` → "no role" floor: a terminal `session_expired` from an unavailable refresh is absorbed there, never a 5xx. The dashboard tray is a recent-operations card that `recent-ops-refresh.js` reloads every 5 seconds. The broadcast stream `/ui/broadcast/stream` needs the `operator` role (`require_ui_operator`). |
 | `meho_backplane.ui.auth.errors` | App-level `HTTPException` handler registered in `main.py` for the whole app (G0.25 #1694). Intercepts three recoverable shapes, for htmx requests and HTML navigations (`Accept: text/html`): (1) `401 session_expired` on `/ui/*` (G0.25 #1694) -> `302 /ui/auth/login?return_to=<path>&reason=session_ended` + `meho_session` cookie clear; an htmx request (`HX-Request: true`) gets the middleware's htmx answer instead, `204` + `HX-Redirect` to the same login URL with `return_to` from `HX-Current-URL` (#5518); (2) `400 authorization_state_expired` on `/ui/auth/callback` (G0.29 #2089, Leg 1) -> `303 /ui/auth/login` (no cookie touched -- pre-session; no `return_to` -- it died with the expired verifier); (3) `409 tenant_removed` on `/ui/*` (the token does not allow the session's tenant any more) -> `303 /ui/tenant?notice=removed`, or `204` + `HX-Redirect` for htmx. Non-HTML callers on either shape keep the structured JSON body (the `session_expired` case also clears the dead cookie). Every other HTTPException -- including the callback's genuine IdP `authorization_failed` and its token-endpoint `502` -- delegates byte-for-byte to FastAPI's stock `http_exception_handler`, so `/api/*` 401 codes and the non-recoverable callback errors are untouched. |
@@ -246,7 +246,21 @@ The BFF login flow is OAuth 2.1 Authorization Code + PKCE against
 the `meho-web` confidential Keycloak client (see
 [`docs/cross-repo/keycloak-web-client.md`](../cross-repo/keycloak-web-client.md)).
 Tokens stay server-side; the browser holds only the opaque
-`meho_session` cookie.
+`__Host-meho_session` cookie.
+
+The session cookie (`meho_backplane.ui.auth.session_cookie`):
+
+- The name has the `__Host-` prefix. A browser keeps such a cookie only
+  when it is set with `Secure`, with `Path=/` and with no `Domain`. So
+  only the MEHO host can set it, and no other host under the same parent
+  domain.
+- `read_session_cookie(scope)` is the one reader. The session
+  middleware, the CSRF middleware and logout all use it. A request that
+  carries the cookie more than once counts as a request with no session:
+  the middleware sends it to the login, the CSRF check answers `403
+  no_session`, and logout revokes no row.
+- A browser that sends only a cookie named `meho_session` has no
+  session and signs in once.
 
 Round-trip shape:
 
@@ -279,7 +293,7 @@ Round-trip shape:
    access token through the chassis JWT chain (`verify_jwt_for_audience`)
    so the BFF inherits issuer / audience / sub / tenant_id / tenant_role
    defences; on success it calls `create_session` to write the encrypted
-   row, sets the `meho_session` cookie, and clears the now-consumed
+   row, sets the `__Host-meho_session` cookie, and clears the now-consumed
    binding cookie.
 5. **302 to the original `return_to`.** Operator lands on the page
    they were originally bounced from.
@@ -307,7 +321,7 @@ Per-flow state custody:
 | `code_verifier` | Server-side `PKCEVerifierStore` keyed on `state` | One authorization round-trip (≤10 min) |
 | `state` (CSRF) | On the IdP's authorization URL + echoed in callback | Same one round-trip |
 | `browser_binding` (login-CSRF) | Server-side `PKCEVerifierStore` **and** a per-`state` browser cookie (`meho_ob_<hash>`, `HttpOnly` + `Secure` + `SameSite=Lax` + `Path=/ui/auth`) | Same one round-trip; cookie `Max-Age` = flow TTL; cleared on callback success |
-| `meho_session` cookie | Browser, `HttpOnly` + `Secure` + `SameSite=Strict` | Session lifetime (seeded at login from access-token expiry minus 60s margin; extended by the sliding window #869 and by every successful token refresh #1694, both capped at `created_at + ui_session_absolute_lifetime_seconds`) |
+| `__Host-meho_session` cookie | Browser, `HttpOnly` + `Secure` + `SameSite=Strict` | Session lifetime (seeded at login from access-token expiry minus 60s margin; extended by the sliding window and by every successful token refresh, both capped at `created_at + ui_session_absolute_lifetime_seconds`) |
 | Access + refresh tokens | `web_session` row, Fernet-encrypted | Rotated in place on every silent refresh (#1694); the row -- and therefore the cookie value -- survives rotation unchanged |
 
 The `code_verifier` deliberately does NOT live in a cookie -- a
@@ -365,7 +379,7 @@ maps to a `302 /ui/auth/login?return_to=<path>&reason=session_ended`
 login URL, `return_to` = the page from `HX-Current-URL`) for htmx
 requests (#5518). JSON callers keep the structured body -- never raw
 JSON at a browser. The refresh path performs zero `Set-Cookie`
-operations: `meho_session` (the row id) and `meho_csrf` (HMAC-keyed
+operations: `__Host-meho_session` (the row id) and `meho_csrf` (HMAC-keyed
 on that id) are byte-identical before and after a rotation, so
 already-rendered pages and their forms keep working -- the
 cookie-rotation desync class #1706 diagnosed cannot occur here.
@@ -377,7 +391,7 @@ ended. Please sign in again.") and a "Sign in" button to
 `/ui/auth/login?return_to=<same page>`. The button starts the normal
 login, which lands the person back on the page they were on. The
 reason is set by the refresh-failure handler above and by the session
-middleware when the browser still sent a `meho_session` cookie but the
+middleware when the browser still sent a `__Host-meho_session` cookie but the
 session is gone (1 hour without use, the 10-hour limit, revoked, or a
 failed read-path revalidation). A first visit has no cookie and goes
 straight to the login. Any other `reason` value is ignored.
@@ -535,6 +549,22 @@ conditionally on `session_tenant is not none` and falls through
 session still produces a readable chip (the `web_session.tenant_id`
 FK is intentionally soft; the chassis logs
 `ui_session_tenant_row_missing` and serves the page).
+
+That `name → slug → id` fall-through is a macro,
+[`_tenant_label.html`](../../backend/src/meho_backplane/ui/templates/_tenant_label.html),
+not a spelling each template repeats (#810). The dashboard header and
+the broadcast feed subtitle printed the bare `tenant_id` until then —
+a UUID says nothing about which tenant an operator is in, which is the
+one thing on screen that matters when someone holds several tenants
+and is about to run a write. Both now call the macro; the id stays in
+`title=` so a support thread can still quote it.
+
+The id also stays in the attributes that address the DOM —
+`data-meho-tenant` on `<body>`, the per-tenant SSE bridge URL, the
+`hx-*` targets. Those are read by the client JS and by routing, so
+"show the name" applies to text only. `tests/test_ui_tenant_chip.py`
+pins both halves: the name reaches the rendered text, and
+`data-meho-tenant` still carries the UUID.
 
 The processor also exposes `session_operator_sub` (the signed-in
 operator's Keycloak `sub`, or `None` outside a session). The sidebar
@@ -1822,6 +1852,9 @@ layer; the BFF mirrors this two ways. The drawer (`_drawer.html`)
 fail-soft); every write route additionally **hard-403s** a non-admin via
 `_require_topology_admin` (mirrors `connectors.operator.resolve_operator_or_403`,
 reusing the promoted `lift_operator_from_session` JWT-revalidation helper).
+After the role check the gate asks for a person (`ensure_ui_human`): a
+console session of a service or runner login gets 403
+`human_principal_required`, the same as on the REST graph writes.
 The same template serving both roles is the regression trap — the
 soft-hidden button is UX only; a forged POST still 403s.
 
@@ -2645,7 +2678,11 @@ Memory UI), Task [#879](https://github.com/evoila/meho/issues/879)
 
 The route resolves IDs to entries via a tenant-scoped + `source='memory'`
 filter so an operator can't smuggle a knowledge-base or audit-row UUID
-through the form. Per row, `MemoryRbacResolver.can_write` is re-checked
+through the form. Each row then passes `MemoryService.readable_entry`,
+the owner rule of `read_by_id` (expired rows pass, so a recently
+expired note can be extended). Another person's user-scoped note
+counts as `missing` and is never acted on, also for a `tenant_admin`.
+Per row, `MemoryRbacResolver.can_write` is re-checked
 before dispatch; the service's own `can_write` re-check still runs
 inside `forget` / `remember`. The route-side check exists so the
 result counts (`succeeded` / `denied` / `missing`) are honest in the
@@ -2780,9 +2817,12 @@ always an acceptable product (no dropdown / validator drift, no
 surprise 422 on a product the operator could pick).
 
 **RBAC posture.** All six routes in `forms_router.py` (create, edit and
-delete, modal and submit) depend on `resolve_operator_or_403`
-(the same rigorous tenant_admin write-gate T1's probe uses): a
-non-admin GET (modal) or POST/PATCH (submit) hits 403 server-side. The
+delete, modal and submit) depend on `resolve_human_admin_or_403`: the
+tenant_admin write-gate T1's probe uses (`resolve_operator_or_403`), then a
+person check (`ensure_ui_human`). A non-admin GET (modal) or POST/PATCH
+(submit) hits 403 server-side, and a console session of a service or
+runner login gets 403 `human_principal_required`, the same as on the REST
+target routes. The import routes in `import_router.py` use the same gate. The
 list / detail templates additionally hide the "Create target" / "Edit"
 buttons from non-admins (UX); the hide is not the security boundary.
 Because the in-process REST handler's own `Depends(require_role(...))`
@@ -2928,7 +2968,9 @@ preview and confirm is correctly PATCHed rather than re-CREATEd into a
 409.
 
 **RBAC + CSRF + isolation.** All three routes depend on
-`resolve_operator_or_403` (tenant_admin only; operators 403 server-side).
+`resolve_human_admin_or_403` (tenant_admin only; operators 403 server-side;
+a console session of a service or runner login gets 403
+`human_principal_required`).
 CSRF is enforced by the chassis `CSRFMiddleware` on the two `POST`
 routes. Cross-tenant isolation is two-layer: the existing-name lookup
 filters on `session_ctx.tenant_id`, and the in-process `create_target` /

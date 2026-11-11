@@ -36,7 +36,7 @@ func newNetworkPoolListCmd() *cobra.Command {
 		Short: "List VCF network pools (IP ranges and VLANs for host commission)",
 		Long: "list dispatches sddc.network_pool.list against connector_id=\"sddc-rest-9.0\".\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example:       "  meho sddc-manager network-pool list --target rdc-sddc-manager",
+		Example:       "  meho sddc-manager network-pool list --target sddc-manager-lab",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -97,7 +97,7 @@ func newNetworkPoolGetCmd() *cobra.Command {
 			"host-commissioning IP-capacity pre-flight: free/used = free vs used IP\n" +
 			"counts per VMOTION/vSAN network.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example:       "  meho sddc-manager network-pool get np-01 --target rdc-sddc-manager",
+		Example:       "  meho sddc-manager network-pool get np-01 --target sddc-manager-lab",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

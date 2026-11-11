@@ -17,6 +17,15 @@ So MEHO shows a few entries itself, in two places:
   the prompt of a hosted run carry the caller's newest Memory notes from
   their own scopes and the tenant scope.
 
+**Off by default.** Both places show something only when the setting
+`TEAM_KNOWLEDGE_RECALL` is `true` (Helm: `config.teamKnowledgeRecall`).
+With it off, `preview_operation`, `call_operation`, the MCP start text
+and the hosted prompt are exactly as they were before recall, and MEHO
+reads nothing for them. The `outputSchema` of both operation tools then
+has no `team_knowledge` field either (see "Tool text that follows a
+switch" in [mcp.md](mcp.md)). It stays off until model tests show it
+helps.
+
 All shown text is data, not instructions. It sits inside one
 untrusted-text envelope (`untrusted_text.wrap_untrusted_text`), the same
 marker that `search_knowledge` and `search_memory` use on their
@@ -78,6 +87,28 @@ Only the MCP tools add the block. The REST routes, the console, runbooks
 and hosted runs call the operation functions in `operations/meta_tools.py`
 directly and do not get it.
 
+## Shown entries count as retrievals
+
+The entries a block shows count for the learning numbers of
+`meho audit reflex`, like search hits
+([reflex-adoption.md](reflex-adoption.md#learning-numbers)).
+`recall_for_target` returns the block and the entries it shows. When the
+block goes out with the answer, `with_recall` calls `record_shown`. That
+writes one `lesson_retrieval` row per shown entry, with
+`channel = recall`, through the same helpers the search tools use
+(`lessons/retrievals.py`):
+
+- Knowledge entries by slug and owner tenant, so a shared entry and the
+  tenant's own entry with the same slug are not mixed up.
+- Memory notes by id.
+- Not recorded: entries left out for size, a block left off for the wire
+  limit, a call without a session id, and the Memory band of the start
+  text.
+- With `TEAM_KNOWLEDGE_RECALL` off there is no block, so nothing is
+  recorded.
+- A failed write is logged (`lesson_retrieval_record_failed`). It never
+  fails the operation's answer.
+
 ## The Memory band of the start text
 
 `memory_band(operator)` returns a short band: the heading
@@ -108,10 +139,12 @@ the next one.
 ## Key code
 
 - `backend/src/meho_backplane/recall.py` — the queries, the filters, the
-  packing, `recall_for_target`, `memory_band`.
+  packing, `recall_for_target`, `record_shown`, `memory_band`.
 - `backend/src/meho_backplane/mcp/tools/_operation_recall.py` —
-  `with_recall`: resolves the target and adds the block to an MCP answer.
-- `backend/tests/test_recall.py` — the tests.
+  `with_recall`: resolves the target, adds the block to an MCP answer
+  and records the shown entries.
+- `backend/tests/test_recall.py` — the tests. They turn the setting on;
+  `test_with_recall_off_nothing_new_is_shown` checks the off state.
 
 ## Known limits
 

@@ -9,16 +9,16 @@ The knowledge-base (`kb`) service is the persistent, tenant-scoped
 durable-team-knowledge layer. It has four callers:
 
 - **REST** under `/api/v1/kb/...` (G4.1-T2). This includes
-  `POST /api/v1/kb/import`, which the team wiki's CI job calls after
-  each merge (#5728, see [Import of pages sent in the request](#import-of-pages-sent-in-the-request-5728)).
-  It also includes `POST /api/v1/kb/export`, which the team wiki's CI
-  job calls to get MEHO's confirmed and candidate generic lessons (#5730, see
+  `POST /api/v1/kb/import`, which a CI job of the tenant's own wiki calls
+  after each merge (#5728, see [Import of pages sent in the request](#import-of-pages-sent-in-the-request-5728)).
+  It also includes `POST /api/v1/kb/export`, which a CI job of the
+  tenant's own wiki calls to get MEHO's confirmed and candidate generic lessons (#5730, see
   [Export of generic entries](#export-of-generic-entries-5730)).
 - **MCP** via the `search_knowledge` + `add_to_knowledge` meta-tools
   in [`mcp/tools/knowledge.py`](../../backend/src/meho_backplane/mcp/tools/knowledge.py)
-  (G4.1-T3). On a tenant that keeps its lessons in a team wiki, both
+  (G4.1-T3). On a tenant that keeps its lessons in its own wiki, both
   tools also report on the wiki
-  ([Team wiki search](#team-wiki-search-5976)).
+  ([Wiki search](#wiki-search-5976)).
 - **Console** under `/ui/kb` (`ui/routes/kb/routes.py`).
 - **CLI** through the `meho kb` verb (G4.1-T4). The Go CLI calls the
   REST routes; `meho kb search` calls `POST /api/v1/retrieve` with
@@ -161,7 +161,7 @@ before returning. Seven verbs:
 
 | Verb | What it does | Throws |
 |---|---|---|
-| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None, own_entries_only=False, may_set_curation_keys=None)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, checks the lesson header, stamps attribution and `direct` provenance, runs `kb/revisions.py::write_entry`. | `InvalidKbSlugError` on bad slug; `LessonHeaderError` on a wrong header value; `KbSharedNotAllowedError`, `KbSharedSlugError` (shared scope) |
+| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None, own_entries_only=False, may_set_curation_keys=None, may_confirm=True, expected_revision=None)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, checks the lesson header, stamps attribution and `direct` provenance, runs `kb/revisions.py::write_entry`. | `InvalidKbSlugError` on bad slug; `LessonHeaderError` on a wrong header value; `KbSharedNotAllowedError`, `KbSharedSlugError` (shared scope) |
 | `get_entry(tenant_id, slug)` | Natural-key SELECT; returns the latest `KbEntry` (with its current `revision_id`) or `None`. Also finds a shared entry of another tenant. | – |
 | `get_revision(tenant_id, entry_id, revision_id)` | Exact retained read. Returns `KbEntryRevision` only when the revision belongs to the entry and both belong to the tenant; otherwise `None`, without saying why. | – |
 | `list_entries(tenant_id, filter_pattern=None, limit=100, offset=0, order="slug")` | List entries; slug-sorted by default, `order="newest"` sorts by `updated_at`, newest first; SQL `LIKE` pattern forwarded verbatim. | `ValueError` on negative `limit`/`offset` |
@@ -329,6 +329,17 @@ console editor and uploads. `create_entry` itself does not change.
 Directory ingest (`meho kb ingest`) and the import job do not run the
 check; they keep their own dry run.
 
+**Off by default.** The search runs only when the setting
+`KB_SIMILAR_CHECK` is `true` (Helm: `config.kbSimilarCheck`). With it
+off, MEHO does not search: nothing counts as similar, so a create of a
+new slug is written as before, `create_anyway` changes nothing, and a
+dry run answers `would_write: true` with an empty list. The console
+upload page hides its "Create anyway" box. The MCP tool
+`add_to_knowledge` then has no text about the check and no
+`create_anyway` input; a call that still sends it is refused as an
+invalid input (see "Tool text that follows a switch" in
+[mcp.md](mcp.md)). It stays off until model tests show it helps.
+
 How it decides:
 
 1. The slug, the lesson header and the shared scope are checked first,
@@ -384,7 +395,9 @@ The check is advice at write time, not a lock. Two writers that create
 similar entries at the same moment both get through. The weekly upkeep
 merges such duplicates later.
 
-Tests: the default test database is SQLite, which cannot run the
+Tests: `tests/test_kb_similar.py` turns `KB_SIMILAR_CHECK` on;
+`test_with_the_check_off_a_create_is_written_as_before` checks the off
+state. The default test database is SQLite, which cannot run the
 search. `tests/conftest.py::_no_similar_kb_entries` makes the search
 find nothing in every test, unless the test requests the
 `real_similar_check` fixture and mocks `retrieve` itself
@@ -432,7 +445,15 @@ Only a `tenant_admin` may set the curation keys
   (`source_kind`, the key the curated-slice search filter scopes to,
   and `shared`, see "Lesson header and shared scope";
   `KbReservedMetadataError`, `reason: reserved_metadata`). So an
-  operator's entry cannot look curated.
+  operator's entry cannot look curated;
+- drops those keys from the stored entry when it changes an entry, also
+  when the write sends no `metadata` (`_drop_review_marks`). A shared
+  entry stays private until a tenant admin shares it again.
+
+A caller that may not confirm (`create_entry(..., may_confirm=False)`;
+the MCP tool passes `lesson_header.py::may_confirm`) stores a
+`confirmed` entry as `candidate` when it changes it. So text that
+nobody reviewed never keeps the marks of an earlier review.
 
 An operator can still create new entries and change its own. A
 `tenant_admin` keeps the wiki-like rule on both surfaces.
@@ -495,13 +516,21 @@ The CLI prints a `conflicted:` counter and a `conflicts` list.
 
 ### Import of pages sent in the request (#5728)
 
+The import and the export (next section) move lessons between MEHO and
+the tenant's own wiki. MEHO never sends knowledge anywhere by itself.
+It only answers a call. Two kinds of caller can get the export: the
+tenant's own wiki job, with a login set up only for the export, and a
+person with the operator or tenant admin role (`meho kb export`).
+Without such a call, nothing leaves MEHO.
+
 `POST /api/v1/kb/import` (`kb/page_import.py::import_pages`) takes the
 pages in the request body. The caller has the pages on its own machine.
 MEHO reads no folder on the server and fetches nothing, so it never
-holds Git credentials. The first caller is a CI job in the team wiki
+holds Git credentials. The caller is a CI job in the tenant's own wiki
 repo: after every merge to main it sends the wiki's product pages with
-`applies_to: product-and-version` and `status: confirmed`. The job
-lives in the team wiki repo, not here.
+`applies_to: product-and-version` and `status: confirmed`. The first
+caller is the wiki job of the team that builds MEHO. A customer runs
+the same kind of job against its own wiki. The job lives in the wiki repo, not here.
 
 Body (`KbImportRequest`, unknown fields are a `422`):
 
@@ -536,7 +565,7 @@ one is skipped (`action: "skip"`), and `reason` says why:
    the credential label or the header name in front of the value comes
    off before the check, never a part of the value. The reason names the pattern and
    the line, never the value. MEHO holds no list of customer names, host
-   names or addresses: the team wiki's CI job checks its own
+   names or addresses: the wiki's CI job checks its own
    identifier list before it sends the pages, and refuses and reports a
    page with a listed identifier there.
 3. **Lesson header.** The page starts with a YAML header that has
@@ -599,6 +628,11 @@ sorted by path.
 
 #### The import login
 
+The step-by-step setup for an operator (all three machine logins, the
+client secrets and the CI calls) is in the operator guide:
+[Lessons in your own wiki](../../docs-site/guides/memory-and-knowledge.md#lessons-in-your-own-wiki).
+This section keeps the code detail.
+
 The route admits a `tenant_admin`, or a login whose token carries the
 claim `kb_import_only: true` (`Operator.kb_import_only`,
 `auth/jwt.py::_extract_kb_import_only`). Such a login can do nothing
@@ -631,7 +665,7 @@ as in `docs/cross-repo/keycloak-agent-client.md`):
 | Hardcoded claim (JSON type boolean) | `kb_import_only` | `true` |
 
 The client gets no `meho_tenants` claim, so the login works in one
-tenant only. The client secret lives in the team wiki repo's CI
+tenant only. The client secret lives in the wiki repo's CI
 secrets, never in MEHO.
 
 #### The call from the CI job
@@ -662,10 +696,12 @@ the answer.
 
 `POST /api/v1/kb/export` (`kb/page_export.py::export_pages`) returns
 the caller's confirmed and candidate generic entries as Markdown pages. It is the
-mirror of the import. The caller is a CI job in the team wiki repo: it
-writes the pages into the wiki and opens a merge request there, and a
-person reviews it. MEHO writes nothing, and never holds Git
-credentials. The job lives in the team wiki repo, not here.
+mirror of the import. The caller is a CI job in the tenant's own wiki
+repo: it writes the pages into the wiki and opens a merge request there,
+and a person reviews it. MEHO writes nothing, and never holds Git
+credentials. The first caller is the wiki job of the team that builds
+MEHO. A customer runs the same kind of job against its own wiki. The job lives in the
+wiki repo, not here.
 
 The route has no body. It is a `POST` because `GET /api/v1/kb/export`
 would hide an entry with the slug `export` from `GET /api/v1/kb/{slug}`.
@@ -699,7 +735,7 @@ product-and-version`. Then, by `status`:
   export it.
 
 `plan_entry` holds this rule for one entry; `add_to_knowledge` uses it
-too (see [Team wiki search](#team-wiki-search-5976)).
+too (see [Wiki search](#wiki-search-5976)).
 
 **The page.** The file name is `<slug>.md` (`path` in the answer). The
 page is the YAML lesson header, then the entry's text with a single
@@ -738,6 +774,9 @@ slug"). So a lesson that every tenant can read stays readable after
 the round trip.
 
 #### The export login
+
+Setup steps for an operator:
+[Lessons in your own wiki](../../docs-site/guides/memory-and-knowledge.md#step-2-create-the-three-machine-logins).
 
 The route admits an `operator` or a `tenant_admin`, or a login whose
 token carries the claim `kb_export_only: true`
@@ -862,7 +901,7 @@ owner of the entry, with a permission refusal,
 service applies the same rule to every memory write (REST, MCP and the
 console). REST
 `POST /api/v1/kb` and the directory import are tenant admin only, so an
-import carries the status a reviewer set in the team wiki. The upkeep
+import carries the status a reviewer set in the tenant's own wiki. The upkeep
 job never confirms a candidate.
 
 ### Weekly upkeep (`lessons/upkeep.py`)
@@ -870,7 +909,8 @@ job never confirms a candidate.
 A background job keeps the store clean. It runs once per
 `KNOWLEDGE_UPKEEP_INTERVAL_SECONDS` (one week by default), counted from
 its last recorded run, and can be turned off with
-`KNOWLEDGE_UPKEEP_ENABLED=false`. On PostgreSQL an advisory lock lets
+`KNOWLEDGE_UPKEEP_ENABLED=false` (Helm: `config.knowledgeUpkeepEnabled`
+and `config.knowledgeUpkeepIntervalSeconds`). On PostgreSQL an advisory lock lets
 one replica at a time run it. Each run:
 
 1. **Merges duplicates.** Entries of one tenant with exactly the same
@@ -886,12 +926,15 @@ one replica at a time run it. Each run:
    memory entry that a session used in the last interval gets
    `confirmed_at` set to the time of that use. "Used" is defined in
    [reflex-adoption.md](reflex-adoption.md#learning-numbers): a search
-   gave the entry to a session, and the session then ran an operation
-   that succeeded.
+   gave the entry to a session, or MEHO showed it before an operation,
+   and the session then ran an operation that succeeded.
 4. **Lists used candidates for a reviewer**, with the number of
    different sessions and different targets that used each one. Copies
    of one story are not independent proof, so two searches in one
-   session count once.
+   session count once. Each candidate also gives how many sessions used
+   it after a search (`search_sessions`) and how many after MEHO showed
+   it before an operation (`recall_sessions`). A session can count in
+   both.
 5. **Measures** the four learning numbers for the interval.
 
 The job changes only metadata, through `kb/revisions.py::update_head_metadata`
@@ -908,7 +951,8 @@ retrievals older than 180 days.
 The payload lists what was merged (`merged`: slug and `into`), retired
 (`retired`), refreshed (`refreshed`) and what waits for a reviewer
 (`for_review`), each list at most 100 items with full counts
-(`merged_count` and so on), plus the four numbers (`numbers`). Read it
+(`merged_count` and so on), plus the four numbers (`numbers`). The
+report models are in `lessons/upkeep_report.py`. Read it
 with `meho audit query` and the principal `system:knowledge-upkeep`. A
 row with the totals goes to the system tenant
 `00000000-0000-0000-0000-000000005733`; the schedule reads it as the
@@ -920,7 +964,8 @@ written only when every tenant committed.
 **Shared scope.** An entry with `shared: true` in its metadata is
 readable from every tenant on the instance, if its owner tenant is
 listed in `KB_SHARED_TENANT_IDS` (comma-separated tenant ids; empty by
-default, so nothing is shared). Only reading is shared:
+default, so nothing is shared; Helm: `config.kbSharedTenantIds`). Only
+reading is shared:
 
 - the entry stays in its owner tenant (`KbEntry.tenant_id` is the
   owner's id);
@@ -1080,14 +1125,16 @@ The retrieval substrate enforces tenant scoping at SQL level via the
 pinned inside `search_entries`, cross-tenant or cross-source reads
 are structurally impossible.
 
-### Team wiki search (#5976)
+### Wiki search (#5976)
 
-A tenant may keep its lessons as pages in a Git wiki. A knowledge index
+A tenant may keep its lessons as pages in its own wiki: a Git repo of
+Markdown pages the tenant owns. A knowledge index
 loads the wiki (outside MEHO), and MEHO reaches the index as a docs
 collection ([doc-collections.md](doc-collections.md)). Then a lesson
 lives in two places: the wiki is the source of truth, and the store
 keeps a copy. The import (#5728) brings the wiki's pages in; the export
-(#5730) sends lessons written in MEHO out as pages for review.
+(#5730) hands lessons written in MEHO, as pages for review, to the
+tenant's own job that calls it.
 
 **The setting.** `tenant.knowledge_wiki_collection` (migration `0150`)
 holds the key of the docs collection, per tenant. `NULL` (the default)

@@ -132,7 +132,7 @@ gets, and which connectors it may use. You pass it with `--toolset`.
 
 | Field | Type | If you leave it out | If it is an empty list `[]` |
 |---|---|---|---|
-| `meta_tools` | list of tool names | The agent gets every tool marked "yes" in the "In the default set" column below. | The agent gets **no** tools from the table below. It still gets `invoke_agent` (see the note under the table). |
+| `meta_tools` | list of tool names | The agent gets every tool marked "yes" in the "In the default set" column below. | The agent gets **no** tools. |
 | `connectors` | list of connector ids, for example `k8s-1.x` | No connector limit. The agent may use any connector in your tenant. Grants and approvals still apply. | The agent may use **no** connector. Every `call_operation` is refused. |
 
 More rules:
@@ -187,10 +187,22 @@ Memory note for the whole team, even when a tenant admin starts the run.
 
 !!! note "One more tool: `invoke_agent`"
 
-    Every hosted run also gets the `invoke_agent` tool. With it, the
-    agent can start another agent definition in your tenant. The
-    toolset does not turn this tool on or off, so it is not in the table
-    above. Putting `invoke_agent` in `meta_tools` does nothing.
+    With the `invoke_agent` tool, an agent can start another agent
+    definition in your tenant as a child run. The agent gets this tool
+    only when its `meta_tools` list names `invoke_agent`. Leaving out
+    `meta_tools` does not add it.
+
+    A child run gets at most what both definitions allow:
+
+    - Tools: only the tools on both `meta_tools` lists. A child with no
+      `meta_tools` list gets the default tools that the parent's list names.
+    - Connectors: only the connectors on both `connectors` lists. A
+      missing list means no limit, so the other list counts.
+
+    So a parent that should hand work to a wider agent must itself name
+    the tools and connectors that the child needs. When an agent login
+    starts the run, the child must be a definition that login owns, the
+    same rule as for a direct run.
 
 ### Tools a hosted agent does not have
 
@@ -558,6 +570,60 @@ In each row, check:
 `tenant_admin`. The
 [audit forensics guide](audit-forensics.md) explains all filters.
 
+## Step 8 — Set a spend cap
+
+MEHO checks a spend cap before every run. You can cap three things for
+one window (a day, a week, or a month):
+
+- the tokens the agent uses;
+- the cost in US dollars;
+- the number of runs.
+
+A cap belongs to a login. A scheduled run, and a run as the agent, use
+the agent's login (`agent:<name>`). A run you start by hand uses your
+own login, so your own cap applies to it.
+
+Set a cap with `meho agent budget set`. You need the `tenant_admin`
+role, and you must be a person. An agent cannot change its own cap.
+
+```bash
+meho agent budget set agent:pod-reader --window daily \
+  --cost-limit 5 --request-limit 200
+```
+
+A limit you leave out stays as it was. A limit of `0` stops the agent
+from running at all. A cap stays in force in every later window until
+you change or remove it.
+
+Show the caps and what the agent has used so far in the current day,
+week, and month:
+
+```bash
+meho agent budget show agent:pod-reader
+```
+
+Remove all limits of one window (what the agent has used is kept):
+
+```bash
+meho agent budget clear agent:pod-reader --window daily
+```
+
+When a run would start and a cap is already reached, MEHO refuses the
+run with `budget_exceeded`. The error says which window and which limit
+was reached. No run is created. The agent can run again when the next
+window starts, or when you raise or clear the cap.
+
+Two details:
+
+- A run in progress counts as one request. So runs that start at the
+  same time cannot all pass a request cap.
+- MEHO counts the tokens and the cost of a run after it ends. A run can
+  go over a token or cost cap while it runs. The next run is then
+  refused.
+
+Every change of a cap writes an audit row (`agent.budget.set` and
+`agent.budget.clear`).
+
 ## What can go wrong here
 
 | What you see | Why | What to do |
@@ -570,6 +636,7 @@ In each row, check:
 | A call is `denied` | A grant or the safety level denies it. | Check `meho agent grant list --principal agent:<name>` and the operation's `safety_level`. |
 | A run you started by hand is denied an operation that you may run | The agent's grants deny it. In a run by hand, the stricter answer wins. | Add a grant with `meho agent grant create --principal agent:<name>`, or run the operation yourself. |
 | The run fails with `turn budget exhausted` | The agent used all its turns. | Raise `--turn-budget` with `meho agent edit`, or make the task smaller. |
+| A run is refused with `budget_exceeded` | The agent's login has reached a spend cap. | Run `meho agent budget show agent:<name>`, then raise the cap with `meho agent budget set` or remove it with `meho agent budget clear`. |
 | The run fails right away and the error names a runbook | The prompt or input tells the agent to run a runbook. Hosted agents cannot run runbooks. | Remove that instruction. |
 | `agent run` gives back a run id but no output | The run took longer than the wait limit, so it went on in the background. | Run `meho agent run-status <run-id>`. |
 | `409` on `agent run` | The definition is switched off. | Run `meho agent edit <name> --enabled`. |

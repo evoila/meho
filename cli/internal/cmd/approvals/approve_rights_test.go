@@ -176,6 +176,7 @@ func TestPrintDetailShowsMayApprove(t *testing.T) {
 		{ptr(true), ptr("own_change"), "May approve:  yes, your own change (a self-approval"},
 		{ptr(false), ptr("own_change"), "May approve:  no, it is your own change"},
 		{ptr(false), ptr("wrong_group"), "May approve:  no, another person's dangerous or destructive change needs a MEHO-SA-Operator or a MEHO-Admin"},
+		{ptr(false), ptr("rights_change"), "May approve:  no, it is a change of rights and another admin must approve it"},
 		{ptr(false), ptr("something_new"), "May approve:  no (something_new)"},
 	}
 	for _, c := range cases {
@@ -193,6 +194,28 @@ func TestPrintDetailShowsMayApprove(t *testing.T) {
 	printDetail(cmd, &d)
 	if strings.Contains(stdout.String(), "May approve:") {
 		t.Errorf("show printed May approve without an answer from the server:\n%s", stdout.String())
+	}
+}
+
+// TestPrintDetailShowsRightsChange checks the "Rights change" line of show.
+func TestPrintDetailShowsRightsChange(t *testing.T) {
+	cases := []struct {
+		mark *bool
+		want bool
+	}{
+		{ptr(true), true},
+		{ptr(false), false},
+		{nil, false},
+	}
+	for _, c := range cases {
+		d := newApprovalView(t, "pending", "")
+		d.RightsChange = c.mark
+		cmd, stdout, _ := newCapturingCmd(t)
+		printDetail(cmd, &d)
+		got := strings.Contains(stdout.String(), "Rights change: another admin must approve")
+		if got != c.want {
+			t.Errorf("mark %v: got %v, want %v:\n%s", c.mark, got, c.want, stdout.String())
+		}
 	}
 }
 

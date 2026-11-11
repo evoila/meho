@@ -16,7 +16,7 @@ Four routes, all under the per-agent `/run` sub-path:
 |---|---|---|
 | `GET /ui/agents/{name}/run` | operator (`require_ui_operator`; a `read_only` session gets 403) | The console page: run form (prompt + optional `work_ref`) + the transcript mount. |
 | `POST /ui/agents/{name}/run` | operator | The CSRF-gated run-initiation action. Validates the prompt, confirms the agent is runnable (404 / 409 / 429 surface here), mints a run token, returns the transcript fragment. |
-| `GET /ui/agents/{name}/run/stream?token=…` | operator | The cookie-authed SSE bridge: verifies the token, lifts the operator, proxies `invoker.stream_events`. |
+| `GET /ui/agents/{name}/run/stream?token=…` | operator | The cookie-authed SSE bridge: verifies the token, records its first use (a repeated GET gets 204 and starts no run), lifts the operator, proxies `invoker.stream_events`. |
 | `POST /ui/agents/{name}/run/{handle}/cancel` | operator | The Stop button's CSRF-gated cancel proxy (T9 [#1833](https://github.com/evoila/meho/issues/1833)): lifts the operator and drives `invoker.cancel` — the same service path the REST cancel route uses. 204 / 404 / 409 / 403. |
 
 The console carries a **Stop button** (T9
@@ -68,7 +68,10 @@ operator presses Run
 browser EventSource opens GET /ui/agents/{name}/run/stream?token=…
   └─ verify_run_token(session_id from cookie, token)
        ├─ bad / expired / cross-session / name-mismatch → 403 (no stream)
-       └─ ok → invoker.ensure_runnable (re-check; race guard)
+       └─ ok → claim_run_token(token id)   [Valkey SET NX EX 120 s]
+                 ├─ already used → 204 (no run; EventSource stops reconnecting)
+                 ├─ Valkey error → 503 (no run)
+                 └─ first use → invoker.ensure_runnable (re-check; race guard)
                  └─ StreamingResponse over invoker.stream_events(operator, …)
                        one SSE frame per event, X-Accel-Buffering: no
 ```
@@ -100,8 +103,10 @@ closes).
 deps; the same primitive the session store uses):
 
 ```
-token = fernet.encrypt_at_time(json({"sd", "name", "input", "work_ref"}), now)
+token = fernet.encrypt_at_time(json({"id", "sd", "name", "input", "work_ref"}), now)
 ```
+
+- `id` is a random value that names this one token.
 
 - The Fernet key is `Settings.ui_session_encryption_key` (the same key
   the CSRF tokens and the session store use).
@@ -112,6 +117,14 @@ token = fernet.encrypt_at_time(json({"sd", "name", "input", "work_ref"}), now)
 - The bridge decrypts with a 120 s TTL, recomputes the digest from the
   cookie session, and checks the agent `name`. A token from another
   session, another agent, or older than the TTL yields no stream (403).
+
+**One token starts one run.** On the first accepted GET the bridge
+records the token `id` in Valkey (`claim_run_token`: `SET
+meho:ui:agent-run-token:<id> 1 NX EX 120`). The key is written only
+when it is absent, so one GET wins, across all workers. Every later GET
+with the same token gets `204 No Content` and starts nothing. `204` is
+the status that tells a browser `EventSource` to stop reconnecting. When
+Valkey cannot record the use, the bridge answers `503` and starts no run.
 
 The token is **not** a capability that widens access: the bridge still
 re-lifts the operator from the cookie session and re-runs the same
@@ -140,12 +153,21 @@ the `run_id` (a deep-link to run detail, T3), the terminal status pill, and
 the `awaiting_approval` pause (which deep-links to `/ui/approvals`, T7,
 rather than re-implementing decide).
 
+The controller closes the stream when a `final` or `error` frame arrives
+(`closeStream`). Two things would reconnect otherwise: the browser's
+`EventSource` reconnects by itself when the server ends the stream, and
+the sse extension (2.2.4) opens a new `EventSource` after a closed one
+errors. `closeStream` removes the `sse-connect` attribute first (the
+extension's reconnect timer reads it and stops when it is gone), then
+calls `close()` on the `EventSource`. A reconnect could never show more
+of the run anyway: the token starts one run only.
+
 ## Key types
 
 - `ui/routes/agents/run.py` — `render_run_console`, `submit_run`,
   `stream_run_events`, `_bridge_generator`.
 - `ui/routes/agents/run_token.py` — `mint_run_token`, `verify_run_token`,
-  `DecodedRunToken`, `RUN_TOKEN_TTL_SECONDS`.
+  `claim_run_token`, `DecodedRunToken`, `RUN_TOKEN_TTL_SECONDS`.
 - `ui/routes/agents/operator.py` — `resolve_run_operator_or_403` (the
   operator-floor gate for the run POST + bridge; distinct from the
   tenant_admin-only `resolve_operator_or_403` the definition-CRUD writes
@@ -165,6 +187,8 @@ rather than re-implementing decide).
 - `ui/csrf.py` — the double-submit middleware that gates the run POST and
   the cancel POST.
 - `ui/auth/middleware.py` — `UISessionMiddleware` / `require_ui_session`.
+- `broadcast/client.py` — `get_broadcast_client` (the Valkey client that
+  holds the single-use record of each run token).
 
 ## Known issues / out of scope
 

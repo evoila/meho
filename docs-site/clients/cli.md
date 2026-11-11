@@ -1,5 +1,7 @@
 # The `meho` CLI
 
+New here? Start with the [laptop guide](../install/laptop-tools.md).
+
 The `meho` CLI is a single static Go binary and the **starting point**
 for connecting to a backplane. It runs on a VPN-connected workstation,
 verifies TLS against your operating system's trust store, and
@@ -13,7 +15,8 @@ depends on this step having happened first.
 
 ## Install the signed binary
 
-Releases ship as four platform tarballs plus a `SHA256SUMS` file at the
+Releases ship as four platform tarballs (Linux and macOS), two Windows
+zip files, and a `SHA256SUMS` file at the
 [releases page](https://github.com/evoila/meho/releases). Each artefact
 carries a matching `.cosign.bundle` sigstore bundle — signed keyless
 via [cosign](https://docs.sigstore.dev/) (the GitHub Actions OIDC token
@@ -60,6 +63,57 @@ Unpack and install:
 tar xzf ${TARBALL}
 sudo install -m 0755 meho /usr/local/bin/meho
 meho version
+```
+
+### Windows
+
+Windows has two zip files: `meho_<version>_windows_amd64.zip` (Intel and
+AMD) and `meho_<version>_windows_arm64.zip` (ARM). Use PowerShell. This
+example uses the amd64 file.
+
+```powershell
+$Tag = "<the release tag matching your backplane, e.g. v0.27.0>"
+$Zip = "meho_$($Tag.TrimStart('v'))_windows_amd64.zip"   # or windows_arm64.zip
+$Base = "https://github.com/evoila/meho/releases/download/$Tag"
+
+Invoke-WebRequest "$Base/$Zip" -OutFile $Zip
+Invoke-WebRequest "$Base/$Zip.cosign.bundle" -OutFile "$Zip.cosign.bundle"
+Invoke-WebRequest "$Base/SHA256SUMS" -OutFile SHA256SUMS
+Invoke-WebRequest "$Base/SHA256SUMS.cosign.bundle" -OutFile SHA256SUMS.cosign.bundle
+```
+
+Check the signature of the checksums file with
+[cosign](https://docs.sigstore.dev/). It uses the same identity and
+issuer as above:
+
+```powershell
+cosign verify-blob `
+  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/cli-release\.yml@refs/tags/v.+$' `
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' `
+  --bundle SHA256SUMS.cosign.bundle `
+  SHA256SUMS
+```
+
+Then check the hash of the zip file against the line in `SHA256SUMS`.
+Both values must be the same:
+
+```powershell
+(Get-FileHash -Algorithm SHA256 $Zip).Hash.ToLower()
+(Select-String -Path SHA256SUMS -Pattern ([regex]::Escape($Zip))).Line.Split(' ')[0]
+```
+
+Unzip, put `meho.exe` in a folder on your user PATH, and run it. The
+steps below use `%LOCALAPPDATA%\Programs\meho`. Open a new terminal
+afterwards, so it picks up the new PATH.
+
+```powershell
+$Dir = "$env:LOCALAPPDATA\Programs\meho"
+Expand-Archive -Path $Zip -DestinationPath $Dir -Force
+$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if (($UserPath -split ';') -notcontains $Dir) {
+  [Environment]::SetEnvironmentVariable("Path", "$UserPath;$Dir", "User")
+}
+& "$Dir\meho.exe" version
 ```
 
 ## Keep the CLI in step with the backplane

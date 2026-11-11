@@ -63,6 +63,7 @@ TAG_FEATURE: Final[dict[str, str]] = {
     # Paired-surface activation (#3029): the automation surface is part of the
     # add-on pairing contract (Initiative #2900) and shares its maturity.
     "automation": "addon_pairing",
+    "agent-budgets": "agent_runtime",
     "agent-grants": "agent_runtime",
     "agent-principals": "agent_runtime",
     "agents": "agent_runtime",
@@ -104,6 +105,9 @@ TAG_FEATURE: Final[dict[str, str]] = {
     # Run approvals (#4126): a person approves the operation list of one
     # automation run once, on the same operator plane as the grants.
     "service-principal-run-approvals": "approvals",
+    # The agent session store (#4901): new and not yet proven in the field,
+    # so it rides the beta ``write_surfaces`` tier, like the settings file.
+    "sessions": "write_surfaces",
     # The settings file (core.md §5): export / import / history over the
     # tenant policies, conventions and targets. New and not yet proven in the
     # field, and its import is a bulk write, so it rides the beta

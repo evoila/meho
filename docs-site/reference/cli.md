@@ -133,6 +133,53 @@ Manage agent definitions, runs and grants (list / show / create / edit / delete 
 meho agent
 ```
 
+### `meho agent budget`
+
+Set, show and clear the spend caps of an agent login (tenant_admin)
+
+```
+meho agent budget
+```
+
+#### `meho agent budget clear`
+
+Remove the spend cap of an agent login for one window (tenant_admin)
+
+```
+meho agent budget clear <principal> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw AgentBudgetRead JSON
+- `--window` — daily | weekly | monthly (required)
+
+#### `meho agent budget set`
+
+Set the spend cap of an agent login for one window (tenant_admin)
+
+```
+meho agent budget set <principal> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--cost-limit` — cost cap for the window, in USD
+- `--json` — emit raw AgentBudgetRead JSON
+- `--request-limit` — cap on the number of runs in the window
+- `--token-limit` — token cap for the window
+- `--window` — daily | weekly | monthly (required)
+
+#### `meho agent budget show`
+
+Show the caps of an agent login and what is used so far (tenant_admin)
+
+```
+meho agent budget show <principal> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw AgentBudgetListResponse JSON
+- `--window` — show one window only: daily | weekly | monthly
+
 ### `meho agent create`
 
 Create one agent definition (tenant_admin)
@@ -4672,9 +4719,10 @@ meho secret move [flags]
 Pipe a single raw secret field to stdout (pipe-only, audited)
 
 ```
-meho secret read <mount> <path> [flags]
+meho secret read <mount> <path> | read --approval <id> [flags]
 ```
 
+- `--approval` — id of an approved read request: run it once and write its --field value instead of sending a new read
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--field` — key within the secret's data map whose raw value is written to stdout (required)
 - `--target` — Vault target slug to dispatch against (resolved server-side)
@@ -4914,6 +4962,52 @@ meho service-principals read-scope show <principal-sub> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw ServiceReadScopeRead JSON
+
+## `meho sessions`
+
+List, show and delete stored agent sessions
+
+```
+meho sessions
+```
+
+### `meho sessions delete`
+
+Delete one stored agent session and its files (DELETE /api/v1/sessions/{session_id})
+
+```
+meho sessions delete <session-id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by `meho login`)
+- `--confirm` — do not ask before deleting
+- `--json` — print the result as JSON
+
+### `meho sessions list`
+
+List the stored agent sessions of your tenant (GET /api/v1/sessions)
+
+```
+meho sessions list [flags]
+```
+
+- `--all` — follow every page to the end
+- `--backplane` — backplane URL (defaults to the URL recorded by `meho login`)
+- `--json` — print the sessions as JSON
+- `--limit` — sessions per page (1 to 200)
+- `--project` — only sessions of this project
+- `--state` — only sessions in this state: open, ended or unfinished
+
+### `meho sessions show`
+
+Show one stored agent session (GET /api/v1/sessions/{session_id})
+
+```
+meho sessions show <session-id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by `meho login`)
+- `--json` — print the session as JSON
 
 ## `meho status`
 

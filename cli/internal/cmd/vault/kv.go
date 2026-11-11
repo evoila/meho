@@ -110,8 +110,8 @@ func newKVReadCmd() *cobra.Command {
 			"the agent surface uses — auth, audit, broadcast, and policy gates\n" +
 			"all run as documented in CLAUDE.md §6.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vault kv read --target rdc-vault secret meho/test/federation\n" +
-			"  meho vault kv read --target rdc-vault secret app/db --json | jq .result.data",
+		Example: "  meho vault kv read --target vault-lab secret meho/test/federation\n" +
+			"  meho vault kv read --target vault-lab secret app/db --json | jq .result.data",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -136,8 +136,8 @@ func newKVListCmd() *cobra.Command {
 			"it with the `meho operation result-query` verb (handle_id, offset,\n" +
 			"limit) exactly as for any other connector's set-shaped op.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vault kv list --target rdc-vault secret meho\n" +
-			"  meho vault kv list --target rdc-vault secret meho/test --json",
+		Example: "  meho vault kv list --target vault-lab secret meho\n" +
+			"  meho vault kv list --target vault-lab secret meho/test --json",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -167,8 +167,8 @@ func newKVPutCmd() *cobra.Command {
 			"exist). This is a write op — the dispatcher emits an audit row at\n" +
 			"op_class=write.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vault kv put --target rdc-vault secret app/db --data '{\"password\":\"s3cr3t\"}'\n" +
-			"  meho vault kv put --target rdc-vault secret app/db --data @secret.json --cas 3",
+		Example: "  meho vault kv put --target vault-lab secret app/db --data '{\"password\":\"s3cr3t\"}'\n" +
+			"  meho vault kv put --target vault-lab secret app/db --data @secret.json --cas 3",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -208,8 +208,8 @@ func newKVVersionsCmd() *cobra.Command {
 			"version map (version number → created/deleted/destroyed\n" +
 			"timestamps) from the KV-v2 metadata endpoint.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vault kv versions --target rdc-vault secret app/db\n" +
-			"  meho vault kv versions --target rdc-vault secret app/db --json",
+		Example: "  meho vault kv versions --target vault-lab secret app/db\n" +
+			"  meho vault kv versions --target vault-lab secret app/db --json",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -233,8 +233,8 @@ func newKVDeleteCmd() *cobra.Command {
 			"versions can be undeleted). This is a write op — the dispatcher\n" +
 			"emits an audit row at op_class=write.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vault kv delete --target rdc-vault secret app/db --versions 3\n" +
-			"  meho vault kv delete --target rdc-vault secret app/db --versions 3,4,5",
+		Example: "  meho vault kv delete --target vault-lab secret app/db --versions 3\n" +
+			"  meho vault kv delete --target vault-lab secret app/db --versions 3,4,5",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,

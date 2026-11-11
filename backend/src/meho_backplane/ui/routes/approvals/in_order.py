@@ -121,6 +121,11 @@ from meho_backplane.operations.approval_rights import (
     approve_right,
     self_approval_confirmation,
 )
+from meho_backplane.operations.approved_reveal import (
+    WAITING_FOR_REQUESTER,
+    is_secret_reveal,
+    is_write_reveal,
+)
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.routes import login_location
@@ -163,8 +168,8 @@ _NOT_ENDED: Final[str] = (
 )
 
 _SIGN_IN_AGAIN: Final[str] = (
-    "This step needs a new sign-in: an approval needs a recent sign-in that asked "
-    "for your password, and a destructive step needs a sign-in of its own. "
+    "This step needs a new sign-in: an approval needs a recent sign-in with your "
+    "password or a passkey, and a destructive step needs a sign-in of its own. "
     "Sign in again, then start this run again. The steps that ran OK are skipped."
 )
 
@@ -393,6 +398,14 @@ def _settle_approved_step(step: _Step) -> None:
         step.outcome, step.detail = "stopped", f"Approved earlier. {_NOT_ENDED}"
     elif state == ApprovalResultState.UNCERTAIN:
         step.outcome, step.detail = "stopped", f"Approved earlier. {UNCERTAIN_ADVICE}"
+    elif state == ApprovalResultState.NOT_STARTED and is_secret_reveal(step.row):
+        # Not a failed run: it runs only when the person who asked gets the
+        # value, and that has not happened yet.
+        step.outcome, step.detail = (
+            "stopped",
+            "Approved earlier. It did not run yet: it runs when the person who "
+            "asked gets the value. The steps after it wait until then.",
+        )
     else:
         step.outcome = "stopped"
         step.detail = f"Approved earlier, but its run did not end OK. {_ONE_USE}"
@@ -443,6 +456,19 @@ async def _run_step(
     step.row = approved
     if status == "ok":
         step.outcome, step.detail = "approved", "Ran OK."
+    elif status == WAITING_FOR_REQUESTER and is_write_reveal(approved):
+        # The change happens only when the person who asked gets the
+        # value, so the steps after it must not run before it.
+        step.outcome, step.detail = (
+            "stopped",
+            "Approved. It did not run yet: it runs when the person who asked "
+            "gets the value. The steps after it wait until then.",
+        )
+    elif status == WAITING_FOR_REQUESTER:
+        step.outcome, step.detail = (
+            "approved",
+            "Approved. The person who asked can now get the value.",
+        )
     elif status == "already_resumed":
         await _wait_for_stored_result(step)
     elif (getattr(result, "extras", None) or {}).get("execution_outcome") == UNCERTAIN_OUTCOME:

@@ -20,6 +20,7 @@ from meho_backplane.connectors.freeipa._write_common import (
     check_done,
     description_option,
     result_dict,
+    run_delete,
 )
 from meho_backplane.connectors.freeipa.connector import FreeipaConnector
 from meho_backplane.connectors.freeipa.rpc import (
@@ -135,30 +136,6 @@ async def automember_condition_add_impl(
     return {"entry": result_dict(result.get("result")), "completed": result.get("completed")}
 
 
-async def _delete(
-    connector: FreeipaConnector,
-    operator: Operator,
-    target: FreeipaTargetLike,
-    command: str,
-    name: str,
-    options: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Run a ``*_del`` command for one object; return what FreeIPA deleted, and its warnings.
-
-    The warnings are FreeIPA's messages, for example that it found no DNS
-    records to remove.
-    """
-    answer = await connector.call(target, operator, command, [name], options)
-    result = result_dict(answer.result)
-    check_done(command, result_dict(result.get("result")).get("failed"))
-    warnings = [
-        str(message["message"])
-        for message in as_list(result.get("messages"))
-        if isinstance(message, dict) and message.get("message")
-    ]
-    return {"deleted": as_list(result.get("value")), "warnings": warnings}
-
-
 async def host_delete_impl(
     connector: FreeipaConnector,
     operator: Operator,
@@ -167,7 +144,7 @@ async def host_delete_impl(
 ) -> dict[str, Any]:
     """``freeipa.host.delete``: ``host_del``, with ``updatedns`` when asked."""
     options = {"updatedns": bool(params.get("updatedns", False))}
-    return await _delete(connector, operator, target, HOST_DEL_COMMAND, params["fqdn"], options)
+    return await run_delete(connector, operator, target, HOST_DEL_COMMAND, params["fqdn"], options)
 
 
 async def hostgroup_delete_impl(
@@ -177,7 +154,7 @@ async def hostgroup_delete_impl(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """``freeipa.hostgroup.delete``: ``hostgroup_del``."""
-    return await _delete(connector, operator, target, HOSTGROUP_DEL_COMMAND, params["name"])
+    return await run_delete(connector, operator, target, HOSTGROUP_DEL_COMMAND, params["name"])
 
 
 async def host_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:

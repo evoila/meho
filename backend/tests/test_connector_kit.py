@@ -76,6 +76,14 @@ def test_every_listed_name_imports_from_the_kit() -> None:
         assert getattr(module, name) is not None, name
 
 
+def test_kit_exports_the_root_shell_mark() -> None:
+    # #6092 -- a connector package outside the core marks its root writes.
+    from meho_backplane.op_classes import declare_root_shell
+
+    assert "declare_root_shell" in kit.__all__
+    assert kit.declare_root_shell is declare_root_shell
+
+
 def test_kit_names_file_matches_the_code() -> None:
     message = check_message(read_names_file()["names"], build_names())
     assert message is None, message

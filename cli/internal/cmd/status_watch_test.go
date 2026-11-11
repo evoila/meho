@@ -261,7 +261,7 @@ func canonicalEventJSON(t *testing.T, principal, opID, opClass, status string, t
 // frame produces one rendered line with the expected columns.
 func TestRunWatch_RendersHumanLine(t *testing.T) {
 	xdg := withTempXDG(t)
-	target := "rdc-vcenter"
+	target := "vcenter-lab"
 	frame := makeFrame("broadcast", canonicalEventJSON(t, "alice", "vsphere.vm.list", "read", "ok", &target), "1715600000000-0")
 	feed := newFakeFeed(t, http.StatusOK, [][]byte{frame}, false)
 	seedWatchCreds(t, xdg, feed.URL, jwtMarker)
@@ -296,7 +296,7 @@ func TestRunWatch_RendersHumanLine(t *testing.T) {
 	if !strings.Contains(out, "vsphere.vm.list") {
 		t.Errorf("missing op_id in line: %q", out)
 	}
-	if !strings.Contains(out, "target=rdc-vcenter") {
+	if !strings.Contains(out, "target=vcenter-lab") {
 		t.Errorf("missing target suffix in line: %q", out)
 	}
 	if strings.Contains(out, jwtMarker) {
@@ -395,7 +395,7 @@ func TestRunWatch_FilterFlagsForwardToQuery(t *testing.T) {
 			BackplaneURL: feed.URL,
 			OpClass:      "write",
 			Principal:    "alice",
-			Target:       "rdc-vcenter",
+			Target:       "vcenter-lab",
 			Stdout:       stdout,
 			Stderr:       stderr,
 			HTTPClient:   feed.client(),
@@ -412,7 +412,7 @@ func TestRunWatch_FilterFlagsForwardToQuery(t *testing.T) {
 		t.Fatal("fake feed never received a request")
 	}
 	q := records[0].Query
-	for _, kv := range []string{"op_class=write", "principal=alice", "target=rdc-vcenter"} {
+	for _, kv := range []string{"op_class=write", "principal=alice", "target=vcenter-lab"} {
 		if !strings.Contains(q, kv) {
 			t.Errorf("missing %q in query %q", kv, q)
 		}
@@ -465,7 +465,7 @@ func TestRunWatch_AuthHeaderSent(t *testing.T) {
 // rendered frame.
 func TestRunWatch_ReconnectsWithLastEventID(t *testing.T) {
 	xdg := withTempXDG(t)
-	target := "rdc-vcenter"
+	target := "vcenter-lab"
 	frames := [][]byte{
 		makeFrame("broadcast", canonicalEventJSON(t, "alice", "vsphere.vm.list", "read", "ok", &target), "1715600000000-0"),
 		makeFrame("broadcast", canonicalEventJSON(t, "alice", "vsphere.vm.create", "write", "ok", &target), "1715600000001-0"),
@@ -788,8 +788,8 @@ func TestBuildFeedURL(t *testing.T) {
 			name:        "all three filters",
 			opClass:     "write",
 			principal:   "alice",
-			target:      "rdc-vcenter",
-			wantInQuery: []string{"op_class=write", "principal=alice", "target=rdc-vcenter"},
+			target:      "vcenter-lab",
+			wantInQuery: []string{"op_class=write", "principal=alice", "target=vcenter-lab"},
 		},
 		{
 			name:           "trailing slash on backplane is stripped",
@@ -826,7 +826,7 @@ func TestBuildFeedURL(t *testing.T) {
 // formatter (column shape + (aggregate-only) placeholder + bare
 // target=… suffix + empty summary).
 func TestHumanLine(t *testing.T) {
-	target := "rdc-vcenter"
+	target := "vcenter-lab"
 	cases := []struct {
 		name    string
 		event   broadcastEvent
@@ -842,7 +842,7 @@ func TestHumanLine(t *testing.T) {
 				ResultStatus: "ok",
 				TargetName:   &target,
 			},
-			wantSub: "target=rdc-vcenter",
+			wantSub: "target=vcenter-lab",
 		},
 		{
 			name: "credential_read renders aggregate-only",
@@ -890,7 +890,7 @@ func TestHumanLine(t *testing.T) {
 
 // TestSummariseEvent — the summary picker by op_class + target.
 func TestSummariseEvent(t *testing.T) {
-	target := "rdc-vcenter"
+	target := "vcenter-lab"
 	cases := []struct {
 		opClass string
 		target  *string
@@ -898,8 +898,8 @@ func TestSummariseEvent(t *testing.T) {
 	}{
 		{opClass: "credential_read", target: &target, want: "(aggregate-only)"},
 		{opClass: "audit_query", target: &target, want: "(aggregate-only)"},
-		{opClass: "read", target: &target, want: "target=rdc-vcenter"},
-		{opClass: "write", target: &target, want: "target=rdc-vcenter"},
+		{opClass: "read", target: &target, want: "target=vcenter-lab"},
+		{opClass: "write", target: &target, want: "target=vcenter-lab"},
 		{opClass: "read", target: nil, want: ""},
 	}
 	for _, c := range cases {

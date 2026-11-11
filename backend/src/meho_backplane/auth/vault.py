@@ -346,10 +346,21 @@ async def vault_client_for_operator(
         or the role is missing. A denied *override* role fails closed here
         with no fallback to ``vault_oidc_role`` (#3274, mirroring the
         #2757 no-silent-widen rule).
+        MEHO raises it too, before any login, for an agent token that says
+        ``tenant_admin`` (``operator.agent_role_capped``).
     VaultClientError:
         Any other Vault-side failure (4xx / 5xx that isn't 403, sealed
         Vault, malformed response, etc.).
     """
+    if operator.agent_role_capped:
+        # Vault takes the role from the token, not from the Operator. This
+        # agent token says ``tenant_admin``, but the agent acts as an
+        # ``operator`` (:func:`meho_backplane.auth.jwt._cap_agent_role`).
+        raise VaultRoleDeniedError(
+            "MEHO does not send this agent's token to Vault: the token says "
+            "tenant_role=tenant_admin, and an agent acts with the operator role. "
+            "Revoke the agent and register it again, so its token says operator."
+        )
     settings = get_settings()
     client = _build_client(settings)
 

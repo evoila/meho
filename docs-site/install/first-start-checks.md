@@ -32,8 +32,11 @@ Three ways to read it:
   only the host from `BACKPLANE_URL`. The reachability line shows how many
   systems did not answer, not their names. The console page shows the names.
 
-The checks run again on every call. Calls that arrive while a run is in
-progress get the result of that run. The checks change nothing.
+Calls that arrive while a run is in progress get the result of that run.
+After a run ends, `GET /first-start` and `meho status --first-start` show
+its result for 30 seconds, and then the next call runs the checks again.
+So after you fix a problem, wait 30 seconds before you look again. The
+console page runs the checks on every load. The checks change nothing.
 
 A line is `ok` (green), `warn` (a warning), `fail` (red) or `skipped`. A warning does not make the list red, and the install goes on. A line is skipped when the
 check cannot run or has no meaning: the certificate check waits until the DNS

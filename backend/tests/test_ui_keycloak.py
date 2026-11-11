@@ -808,6 +808,7 @@ def test_keycloak_ui_user_create_password_is_vault_ref_never_inline(
         assert 'name="password_secret_ref"' in modal.text
         assert 'name="password"' not in modal.text
         assert 'type="password"' not in modal.text
+        assert "data-keycloak-safety>safety: dangerous" in modal.text
         # The dispatched params carry only the Vault ref, never a value.
         response = client.post(
             "/ui/keycloak/users/create",
@@ -1009,6 +1010,7 @@ def test_keycloak_ui_reset_password_vault_ref_awaiting_approval(
         assert modal.status_code == 200, modal.text
         assert 'name="password_secret_ref"' in modal.text
         assert 'type="password"' not in modal.text
+        assert "data-keycloak-safety>safety: dangerous" in modal.text
         response = client.post(
             f"/ui/keycloak/users/{user_uuid}/reset-password",
             data={"target": _TARGET_NAME, "password_secret_ref": "rdc/keycloak/operator-a"},

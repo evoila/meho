@@ -127,6 +127,8 @@ from meho_backplane.mcp.server import (
     McpInvalidParamsError,
     McpPermissionDeniedError,
 )
+from meho_backplane.mcp.short_texts import with_short_text
+from meho_backplane.mcp.tools._short_tool_texts import LIST_TARGETS_SHORT, QUERY_TOPOLOGY_SHORT
 from meho_backplane.mcp.tools._topology_answer import COMPLETENESS_SCHEMA, bounded_answer
 from meho_backplane.operations._lookup import connector_product_known, parse_connector_id
 from meho_backplane.operations.answer_ready import ANSWER_READY_OUTPUT_PROPERTIES
@@ -1068,6 +1070,7 @@ register_mcp_tool(
         name=_QUERY_TOPOLOGY_NAME,
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
+        for_settings=with_short_text(QUERY_TOPOLOGY_SHORT),
         description=_QUERY_TOPOLOGY_DESCRIPTION,
         inputSchema=_QUERY_TOPOLOGY_INPUT_SCHEMA,
         outputSchema={
@@ -1712,6 +1715,7 @@ register_mcp_tool(
         name=_LIST_TARGETS_NAME,
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
+        for_settings=with_short_text(LIST_TARGETS_SHORT),
         description=_LIST_TARGETS_DESCRIPTION,
         inputSchema=_LIST_TARGETS_INPUT_SCHEMA,
         outputSchema={

@@ -97,6 +97,9 @@ from meho_backplane.connectors.azure.compute import ComputeOps
 # cost (Task #5088)
 from meho_backplane.connectors.azure.cost import CostOps
 
+# dns (Task #5368)
+from meho_backplane.connectors.azure.dns import DnsOps
+
 # inventory (Task #5082)
 from meho_backplane.connectors.azure.inventory import InventoryOps
 
@@ -104,6 +107,7 @@ from meho_backplane.connectors.azure.inventory import InventoryOps
 from meho_backplane.connectors.azure.migrate import MigrateOps
 
 # monitor (Task #5090)
+from meho_backplane.connectors.azure.monitor import MonitorOps
 
 # network (Task #5085)
 from meho_backplane.connectors.azure.network import NetworkOps
@@ -182,11 +186,14 @@ class AzureConnector(
     ComputeOps,
     # cost (Task #5088)
     CostOps,
+    # dns (Task #5368)
+    DnsOps,
     # inventory (Task #5082)
     InventoryOps,
     # migrate (Task #5093)
     MigrateOps,
     # monitor (Task #5090)
+    MonitorOps,
     # network (Task #5085)
     NetworkOps,
     # security (Task #5089)
@@ -200,7 +207,8 @@ class AzureConnector(
     Registered as ``("azure", "2026.10", "azure-arm")``, so the connector ID is
     ``azure-arm-2026.10``, plus the ``("azure", "", "")`` row that lets every
     ``azure`` target find it. Azure has no product version, so
-    ``supported_version_range`` stays ``None``.
+    ``supported_version_range`` stays ``None`` and ``version_range_reason``
+    says why.
     """
 
     product = "azure"
@@ -211,6 +219,9 @@ class AzureConnector(
         "and policy), changes tags and starts patch checks."
     )
     supported_version_range: str | None = None
+    version_range_reason = (
+        "Azure has no product version. Each call names the API version of its resource type."
+    )
     priority = 1
     #: No redirect is followed: every subscription shares one host, so even a
     #: redirect on the same host could carry the token elsewhere.

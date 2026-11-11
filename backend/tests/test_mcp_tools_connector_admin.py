@@ -2086,7 +2086,7 @@ def fit_world(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _load(_operator: Operator, name: str) -> Any:
         return _FIT_TARGETS[name]
 
-    monkeypatch.setattr(resolver_mod, "all_connectors_v2", lambda: dict(_FIT_REGISTRY))
+    monkeypatch.setattr(resolver_mod, "connectors_for_tenant", lambda _tenant: dict(_FIT_REGISTRY))
     monkeypatch.setattr(ca_mod, "get_connector_v2", lambda *key: _FIT_REGISTRY.get(key))
     monkeypatch.setattr(guard_mod, "get_connector_v2", lambda *key: _FIT_REGISTRY.get(key))
     monkeypatch.setattr(ca_mod, "list_ingested_connectors", _rows)

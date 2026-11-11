@@ -145,6 +145,8 @@ from meho_backplane.mcp.server import (
     McpPermissionDeniedError,
     McpRateLimitedError,
 )
+from meho_backplane.mcp.short_texts import with_short_text
+from meho_backplane.mcp.tools._short_tool_texts import READ_DOCS_SHORT, SEARCH_DOCS_SHORT
 from meho_backplane.targets.resolver import AmbiguousTargetError, TargetNotFoundError
 from meho_backplane.untrusted_text import wrap_untrusted_text
 
@@ -494,6 +496,7 @@ register_mcp_tool(
         name="search_docs",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
+        for_settings=with_short_text(SEARCH_DOCS_SHORT),
         description=(
             "Search a vendor-document collection (manuals, KB articles, "
             "guides) for a vendor fact, e.g. 'NSX config maximums for 9.0' "
@@ -863,6 +866,7 @@ register_mcp_tool(
         name="read_docs",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
+        for_settings=with_short_text(READ_DOCS_SHORT),
         description=(
             "Read more around a vendor-document hit: the text before and after "
             "it, the whole page, or the section it sits in. Use it when a "

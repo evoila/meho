@@ -488,7 +488,9 @@ async def net_ping(operator: Operator, target: Any, params: dict[str, Any]) -> d
 
     assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
-    return await run_blocking_probe(_blocking_ping, host, count, timeout)
+    return await run_blocking_probe(
+        _blocking_ping, host, count, timeout, tenant_id=operator.tenant_id, timeout=timeout
+    )
 
 
 async def net_trace(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -510,7 +512,15 @@ async def net_trace(operator: Operator, target: Any, params: dict[str, Any]) -> 
 
     assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
-    return await run_blocking_probe(_blocking_trace, host, port, max_hops, hop_timeout)
+    return await run_blocking_probe(
+        _blocking_trace,
+        host,
+        port,
+        max_hops,
+        hop_timeout,
+        tenant_id=operator.tenant_id,
+        timeout=hop_timeout,
+    )
 
 
 async def net_path_mtu(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -528,7 +538,9 @@ async def net_path_mtu(operator: Operator, target: Any, params: dict[str, Any]) 
 
     assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
-    return await run_blocking_probe(_blocking_path_mtu, host, port, timeout)
+    return await run_blocking_probe(
+        _blocking_path_mtu, host, port, timeout, tenant_id=operator.tenant_id, timeout=timeout
+    )
 
 
 # ---------------------------------------------------------------------------

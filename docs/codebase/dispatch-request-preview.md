@@ -155,7 +155,12 @@ policy gate.
 
 The HTTP transport (`HttpConnector._post_json` / `_request_json`) is
 **never** called: there is no network egress, no audit row, no broadcast
-event, no policy-gate park. The synthetic-preview branch keeps this
+event, no policy-gate park. "No audit row" means no row for the
+operation. The request that asks for the preview is audited like any
+other request: by default the REST route and the MCP tool call each write
+one request row (for REST, `http.post:/api/v1/operations/preview`). With
+`AUDIT_WRAPPER_ROWS_RETIRED=true` a preview is routine and writes no row,
+unless it is refused (see [request-usage.md](request-usage.md#retiring-the-wrapper-rows)). The synthetic-preview branch keeps this
 contract — it reuses `build_proposed_effect` with **no connector instance**,
 so a pure builder (e.g. `vault.kv.delete`) populates while a live-read
 blast-radius builder declines rather than dialling out. A declined plan is

@@ -174,8 +174,10 @@ WALKS_SOMETHING_ELSE = {
     "tests/test_connectors_vmware_rest_8_0_spec_reconcile.py": "the vmware_rest folder",
     "tests/test_kb_service.py": "a fake rglob in a knowledge folder",
     "tests/test_operations_connector_auth_failed.py": "the Go CLI source",
+    "tests/test_time_limits.py": "the test files",
     "tests/test_ui_static_assets.py": "the UI templates",
     "tests/test_ui_templates.py": "the UI templates",
+    "tests/test_ui_tenant_chip.py": "the UI templates",
     "tests/test_unit_connector_select.py": "this file",
     "tests/test_unit_shard_split.py": "the test files",
 }

@@ -173,12 +173,35 @@ entry again, merge your change, and retry. A change to the header
 (metadata) counts as a change. A write that changes neither body nor
 metadata costs only an `updated_at` bump (no re-embed).
 
-## Lessons in a team wiki
+## Lessons in your own wiki
 
-A team can keep its lessons as pages in a Git wiki. Then a lesson lives
+A team can keep its lessons as pages in its own wiki: a Git repo of
+Markdown pages the team owns. Then a lesson lives
 in two places: the wiki is the source of truth, and MEHO keeps a copy.
 
-To set it up:
+Two one-way jobs keep the two equal. Both run in the CI of your wiki
+repo, and MEHO only answers their calls:
+
+- **The import** sends your wiki's pages into MEHO after each merge.
+- **The export** takes new lessons out of MEHO on a schedule. Your job
+  writes them into the wiki and opens a merge request there, and a
+  person reviews it.
+
+A third job, **the drift check**, compares the team rules in your wiki
+with the rules MEHO holds (the tenant's conventions). It fails when they
+differ.
+
+MEHO never reads your wiki by itself and holds no Git credentials.
+
+To set it up, follow the steps below:
+
+1. [Connect the wiki search](#step-1-connect-the-wiki-search).
+2. [Create the three machine logins in Keycloak](#step-2-create-the-three-machine-logins).
+3. [Store each client secret in your wiki repo's CI](#step-3-store-the-client-secrets).
+4. [Add the CI calls](#step-4-add-the-ci-calls), each with a dry run first.
+5. [Check what each login can and cannot do](#what-each-login-can-and-cannot-do).
+
+### Step 1: connect the wiki search
 
 1. Load the wiki into a knowledge index and add it to MEHO as a docs
    collection (see [Grounded docs search](#grounded-docs-search-add-on)).
@@ -187,7 +210,188 @@ To set it up:
    `policies` in the [settings file](settings-file.md). Leave it out or
    set it to `null` to keep lessons in MEHO only.
 
-What changes for the tenant:
+### Step 2: create the three machine logins
+
+Each job gets its own login: a Keycloak client that a program uses, not
+a person. Create each one in the MEHO realm with these client settings:
+
+| Setting | Value |
+|---|---|
+| Client authentication | On (a confidential client with a secret) |
+| Service accounts roles | On (the client credentials grant) |
+| Standard flow | Off |
+| Direct access grants | Off |
+
+Then add these mappers to the client. Each table differs only in the
+last row: the claim that limits the login to one job. Add the last row
+as a **Hardcoded claim** mapper with the claim JSON type **boolean**.
+
+**The import login** (for example the client `meho-kb-import`):
+
+| Mapper | Claim | Value |
+|---|---|---|
+| Audience | `aud` | the backplane audience (the `KEYCLOAK_AUDIENCE` setting) |
+| Hardcoded claim | `tenant_id` | the one tenant the pages go to |
+| Hardcoded claim | `tenant_role` | `read_only` |
+| Hardcoded claim | `principal_kind` | `service` |
+| Hardcoded claim (boolean) | `kb_import_only` | `true` |
+
+**The export login** (for example the client `meho-kb-export`):
+
+| Mapper | Claim | Value |
+|---|---|---|
+| Audience | `aud` | the backplane audience |
+| Hardcoded claim | `tenant_id` | the one tenant to export |
+| Hardcoded claim | `tenant_role` | `read_only` |
+| Hardcoded claim | `principal_kind` | `service` |
+| Hardcoded claim (boolean) | `kb_export_only` | `true` |
+
+**The drift check login** (for example the client `meho-conventions-drift`):
+
+| Mapper | Claim | Value |
+|---|---|---|
+| Audience | `aud` | the backplane audience |
+| Hardcoded claim | `tenant_id` | the tenant whose rules are checked |
+| Hardcoded claim | `tenant_role` | `read_only` |
+| Hardcoded claim | `principal_kind` | `service` |
+| Hardcoded claim (boolean) | `conventions_drift_only` | `true` |
+
+Give these clients no `meho_tenants` claim, so each login works in one
+tenant only. Use three clients, not one: a token that carries two of the
+limiting claims reaches no route at all.
+
+### Step 3: store the client secrets
+
+Copy each client's secret from Keycloak (the client's **Credentials**
+tab) into the CI secrets of your wiki repo, for example
+`MEHO_IMPORT_CLIENT_SECRET`, `MEHO_EXPORT_CLIENT_SECRET` and
+`MEHO_DRIFT_CLIENT_SECRET`. Never store them in MEHO, in the settings
+file or in the wiki pages.
+
+### Step 4: add the CI calls
+
+Start each job script with `set -euo pipefail`. Then a failed call
+fails the job, also when its answer goes on to `jq` through a pipe.
+Without it, `jq` gets no input, ends without an error, and the job
+passes while MEHO's copy stays old.
+
+Each job first gets a token with the client credentials grant. The
+example is for the import login; use the other client for the other
+jobs:
+
+```bash
+set -euo pipefail
+
+TOKEN=$(curl -sf -d grant_type=client_credentials \
+  -d client_id="$MEHO_IMPORT_CLIENT_ID" -d client_secret="$MEHO_IMPORT_CLIENT_SECRET" \
+  "$KEYCLOAK_ISSUER_URL/protocol/openid-connect/token" | jq -r .access_token)
+```
+
+**The import, after each merge to main.** The job sends the wiki's
+product pages (`applies_to: product-and-version`, `status: confirmed`)
+as one `{"path", "content"}` object per page. Your job checks the pages
+for customer names, host names and addresses before it sends them; MEHO
+checks only for secrets. At most 1000 pages go in one request.
+
+```bash
+find products -name '*.md' | sort | while read -r f; do
+  jq -n --arg path "$f" --rawfile content "$f" '{path: $path, content: $content}'
+done | jq -s '{pages: ., dry_run: true}' > import.json
+
+curl -sf -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data @import.json "$MEHO_URL/api/v1/kb/import" | jq '.pages[] | select(.action == "skip")'
+```
+
+Start with `dry_run: true`: MEHO runs every check and writes nothing.
+The answer lists each page as `create`, `update`, `unchanged` or `skip`,
+and says why a page is skipped. When the list looks right, set
+`dry_run: false`. The import is safe to run twice: an unchanged page
+writes nothing.
+
+**The export, on a schedule** (for example once a day). The call
+changes nothing in MEHO. It returns the lessons that should go to the
+wiki, the pages to remove, and the entries it skipped, with the reason:
+
+```bash
+curl -sf -X POST -H "Authorization: Bearer $TOKEN" \
+  "$MEHO_URL/api/v1/kb/export" > export.json
+jq '{page_count, remove_count, skipped}' export.json
+```
+
+For the first runs, only print the answer and do not commit. A person
+with the operator role can see the same with
+`meho kb export <directory> --dry-run`, which lists what would be added,
+changed and removed. When the lists look right, let the job write the
+pages into a folder of their own, commit them to a branch and open a
+merge request. The full job is in the
+[developer notes on the export](https://github.com/evoila/meho/blob/main/docs/codebase/kb.md#meho-kb-export-and-the-call-from-the-ci-job).
+
+**The drift check, after each merge to main.** The job renders the team
+rules into a settings file that holds only `conventions` (all of kind
+`operational`), and sends it:
+
+```bash
+curl -sf -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/yaml' \
+  --data-binary @team-rules-settings.yaml \
+  "$MEHO_URL/api/v1/settings/conventions-drift" > drift.json
+jq . drift.json
+jq -e '.in_sync' drift.json > /dev/null
+```
+
+The check saves nothing. The answer lists the rules MEHO does not have
+(`added`), the rules that differ (`changed`) and the rules only MEHO has
+(`only_in_meho`). For the first runs, let the job only print the answer.
+When it is right, let the last line fail the job when anything differs.
+A person brings MEHO up to date with the
+[settings file](settings-file.md) import.
+
+### What each login can and cannot do
+
+| Login | Can | Cannot |
+|---|---|---|
+| Import (`kb_import_only`) | Send pages to `POST /api/v1/kb/import` for its one tenant. | Call any other route or any MCP tool (answer `403 kb_import_only_scope_violation`), read knowledge, sign in to the console. |
+| Export (`kb_export_only`) | Read the export, `POST /api/v1/kb/export`, of its one tenant. | Write anything, call any other route or any MCP tool (answer `403 kb_export_only_scope_violation`), sign in to the console. |
+| Drift check (`conventions_drift_only`) | Send a settings file to `POST /api/v1/settings/conventions-drift` for its one tenant. | Preview or import settings, call any other route or any MCP tool (answer `403 conventions_drift_only_scope_violation`), sign in to the console. |
+
+The limiting claim takes rights away whatever role the token names. A
+value MEHO cannot read (a number, a list, `"yes"`) also limits the
+login. Only no claim, `false` or `"false"` leaves a login unlimited.
+
+### The lesson header
+
+Each wiki page starts with a YAML header. The import needs `type`,
+`applies_to` and `status`; the other fields are optional.
+
+| Field | What it says | Values |
+|---|---|---|
+| `type` | What kind of note it is | `fact`, `lesson`, `decision`, `rule`, `person-and-role`, `preference`, `observation` |
+| `applies_to` | What the note is about | `tenant`, `customer`, `target`, `product-and-version`, `team`, `person` |
+| `status` | How far you can trust it | `candidate`, `confirmed`, `disputed`, `replaced`, `retired` |
+| `product`, `version` | The product and version it is about | text |
+| `learned_at`, `confirmed_at`, `expires_at` | When it was learned, last confirmed, and when it runs out | a date, or a date and time |
+| `source`, `author`, `summary` | Where it comes from, who wrote it, one line about it | text |
+| `tags` | Words to find it by | a list of text |
+
+Who may set `status: confirmed`: only a reviewer (a person who can
+decide approvals in the tenant) or a tenant admin. MEHO refuses it from
+anyone else, also from the person who wrote the entry. A page imported
+from your wiki keeps the status a reviewer set there.
+The weekly upkeep never confirms a candidate. A candidate runs out after
+six months unless someone confirms it.
+
+### Instance settings
+
+Three chart values (Helm values) change how knowledge works on the whole
+instance:
+
+| Value | Default | What it does |
+|---|---|---|
+| `config.kbSharedTenantIds` | `""` (nothing shared) | Tenant ids, comma-separated, whose entries marked `shared` every tenant can read. Only the owner tenant can change them. |
+| `config.knowledgeUpkeepEnabled` | `"true"` | Runs the weekly upkeep: it merges duplicate entries, retires expired ones and writes one report per tenant (`meho audit query`, principal `system:knowledge-upkeep`). |
+| `config.knowledgeUpkeepIntervalSeconds` | `604800` (one week) | How often the upkeep runs, from `60` to `604800` seconds. |
+
+### What changes for the tenant
+
 
 - `search_knowledge` and `meho kb search` also search the wiki. A wiki
   hit has `source: wiki`, its `collection` and its `source_url` (the link
@@ -205,7 +409,9 @@ What changes for the tenant:
   `wiki` part: the collection, and whether the lesson also goes to the
   wiki. A lesson with `applies_to: product-and-version`, a full lesson
   header and status `candidate` reaches the wiki as a candidate page
-  through the knowledge export, and a person reviews it there.
+  through the knowledge export, and a person reviews it there. MEHO
+  does not send the lesson. Your own CI job calls the export and opens
+  a merge request in your wiki.
 - A person can also write the wiki page directly. The import brings it
   into MEHO after the merge.
 
@@ -219,7 +425,9 @@ exists, extend it (read it, merge, re-add with the same slug and the
 creating a near-duplicate. The mirror habit on the read side: `search_*`
 **before asking the operator** a question the corpus may already answer.
 
-For knowledge, MEHO also checks this itself. Before it writes a **new**
+For knowledge, MEHO can also check this itself. The check is off by
+default; an operator turns it on with the setting `KB_SIMILAR_CHECK=true`
+(Helm: `config.kbSimilarCheck: "true"`). Then, before it writes a **new**
 slug, it looks for entries that say something similar: first entries
 with the same `product` and `version` in the metadata, then entries
 close in meaning. When it finds some, it writes nothing and lists them

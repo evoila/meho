@@ -15,6 +15,11 @@ value with a marker as soon as:
 
 A row whose params hold no secret-named value is not rewritten. A re-run
 of a failed run needs the params sent again, as for a credential write.
+
+A marker the requester sent as a value (#6064, an object read from MEHO
+and passed back unchanged) is part of the approved params: the run uses
+it as sent. An approved request with no params MEHO can run with ends as
+a failed run with a reason, not as "approved, not run" for ever.
 """
 
 from __future__ import annotations
@@ -27,15 +32,17 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 
 import meho_backplane.operations.dispatcher as dispatcher_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequestStatus
+from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
+    approval_result_state,
     claim_resume,
     create_pending_request,
     expire_stale_requests,
@@ -164,14 +171,16 @@ async def _park(
     release_id: str | None = None,
     expires_at: datetime | None = None,
     target_id: uuid.UUID | None = None,
+    connector_id: str = _CONNECTOR_ID,
+    op_id: str = _OP_ID,
 ) -> uuid.UUID:
     target = SimpleNamespace(id=target_id, fqdn=None) if target_id is not None else None
     async with get_sessionmaker()() as s:
         request = await create_pending_request(
             s,
             operator=_requester(),
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_ID,
+            connector_id=connector_id,
+            op_id=op_id,
             target=target,
             params=params,
             params_hash=compute_params_hash(params),
@@ -403,3 +412,145 @@ async def test_run_refused_after_a_target_change_keeps_no_secret_values(
     assert result.extras["error_code"] == "target_changed_since_approval"
     assert fake_dispatch.calls == []
     _assert_hidden(await _stored_params(request_id))
+
+
+# ---------------------------------------------------------------------------
+# #6064: markers the requester sent, and a request MEHO cannot run
+# ---------------------------------------------------------------------------
+
+#: A FortiGate interface update. ``expected_before`` is the interface object
+#: exactly as MEHO's read returned it, so its three password fields already
+#: hold the marker. The connector compares them as markers.
+_FGT_CONNECTOR_ID = "fortigate-rest-7.x"
+_FGT_OP_ID = "fortios.interface.update"
+_FGT_PARAMS: dict[str, Any] = {
+    "name": "port3",
+    "expected_before": {
+        "name": "port3",
+        "alias": "uplink",
+        "password": _MARKER,
+        "pptp-password": _MARKER,
+        "eap-password": _MARKER,
+    },
+    "changes": {"alias": "uplink-b"},
+}
+
+
+async def _set_stored_params(request_id: uuid.UUID, params: dict[str, Any] | None) -> None:
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        row.params = params
+        await s.commit()
+
+
+async def _resume_audit_rows(request_id: uuid.UUID) -> list[AuditLog]:
+    async with get_sessionmaker()() as s:
+        query = select(AuditLog).where(AuditLog.path == "approval.resume")
+        rows = (await s.execute(query)).scalars()
+        return [r for r in rows if r.payload.get("approval_request_id") == str(request_id)]
+
+
+@pytest.mark.asyncio
+async def test_markers_sent_by_the_requester_run_as_sent(
+    fake_dispatch: _FakeDispatch,
+) -> None:
+    request_id = await _park(
+        _FGT_PARAMS, approved=True, connector_id=_FGT_CONNECTOR_ID, op_id=_FGT_OP_ID
+    )
+
+    # The console, ``/decide`` and the MCP approve send no params.
+    result = await resume_dispatch_after_approval(
+        operator=_reviewer(), request=await _load(request_id)
+    )
+
+    assert result.status == "ok"
+    assert len(fake_dispatch.calls) == 1
+    assert fake_dispatch.calls[0]["op_id"] == _FGT_OP_ID
+    assert fake_dispatch.calls[0]["params"] == _FGT_PARAMS
+    row = await _load(request_id)
+    assert row.resumed_at is not None
+    assert approval_result_state(row) == "executed"
+    assert row.params == _FGT_PARAMS
+
+
+@pytest.mark.asyncio
+async def test_rerun_with_markers_sent_by_the_requester_needs_no_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeDispatch(status="error")
+    monkeypatch.setattr(dispatcher_module, "dispatch", fake)
+    request_id = await _park(
+        _FGT_PARAMS, approved=True, connector_id=_FGT_CONNECTOR_ID, op_id=_FGT_OP_ID
+    )
+    first = await resume_dispatch_after_approval(
+        operator=_reviewer(), request=await _load(request_id)
+    )
+    assert first.status == "error"
+
+    fake.status = "ok"
+    outcome = await rerun_failed_request(operator=_requester(), request_id=request_id)
+
+    assert outcome.result.status == "ok"
+    assert fake.calls[1]["params"] == _FGT_PARAMS
+
+
+@pytest.mark.asyncio
+async def test_markers_meho_wrote_never_run_and_the_request_fails_with_a_reason(
+    fake_dispatch: _FakeDispatch,
+) -> None:
+    request_id = await _park(_SPEC_PARAMS, approved=True)
+    hidden = json.loads(json.dumps(_SPEC_PARAMS))
+    hidden["spec"]["vcenterSpec"] = {"rootPassword": _MARKER, "licenseKey": _MARKER}
+    hidden["spec"]["hostSpecs"][0]["credentials"] = _MARKER
+    await _set_stored_params(request_id, hidden)
+
+    result = await resume_dispatch_after_approval(
+        operator=_reviewer(), request=await _load(request_id)
+    )
+
+    assert fake_dispatch.calls == [], "params that do not match the approval never run"
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "approval_resume_params_unavailable"
+    assert "did not run" in result.extras["reason"]
+    row = await _load(request_id)
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+    assert row.resumed_at is not None
+    assert approval_result_state(row) == "failed"
+    (audit,) = await _resume_audit_rows(request_id)
+    assert audit.payload["result_status"] == "approval_resume_params_unavailable"
+    assert result.audit_id == audit.id
+
+
+@pytest.mark.asyncio
+async def test_request_without_params_fails_with_a_reason_and_can_run_again(
+    fake_dispatch: _FakeDispatch,
+) -> None:
+    request_id = await _park(_PLAIN_PARAMS, approved=True)
+    await _set_stored_params(request_id, None)
+
+    result = await resume_dispatch_after_approval(
+        operator=_reviewer(), request=await _load(request_id)
+    )
+
+    assert fake_dispatch.calls == []
+    assert result.extras["error_code"] == "approval_resume_params_unavailable"
+    row = await _load(request_id)
+    assert approval_result_state(row) == "failed"
+    assert len(await _resume_audit_rows(request_id)) == 1
+
+    # A second approval surface finds the run already taken: nothing runs.
+    again = await resume_dispatch_after_approval(
+        operator=_reviewer(), request=await _load(request_id)
+    )
+    assert again.status == "already_resumed"
+    assert fake_dispatch.calls == []
+
+    # The requester can run it again and send the params.
+    with pytest.raises(RerunParamsRequiredError):
+        await rerun_failed_request(operator=_requester(), request_id=request_id)
+    outcome = await rerun_failed_request(
+        operator=_requester(), request_id=request_id, params=dict(_PLAIN_PARAMS)
+    )
+    assert outcome.result.status == "ok"
+    assert fake_dispatch.calls[0]["params"] == _PLAIN_PARAMS

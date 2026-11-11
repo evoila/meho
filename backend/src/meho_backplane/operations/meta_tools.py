@@ -112,6 +112,10 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._search import hybrid_search, resolve_group_id
+from meho_backplane.operations._search_clear_lead import (
+    search_clear_lead,
+    top_hit_lead_is_unclear,
+)
 from meho_backplane.operations._search_plain_sentences import (
     group_leaves_one_operation,
     top_hit_holds_a_query_word,
@@ -1310,12 +1314,15 @@ async def _run_search(
         group_id=group_id,
         query=query,
         limit=max(limit, SEARCH_CLASSIFY_MIN_HITS),
+        keep_best_meaning=search_clear_lead(),
     )
     if hits:
         outcome = _classify_hits(
             hits,
             top_holds_a_word=await top_hit_holds_a_query_word(session, hits=hits, query=query),
         )
+        if outcome == "matched" and top_hit_lead_is_unclear(hits):
+            outcome = "ambiguous"
         if outcome == "ambiguous" and await group_leaves_one_operation(
             session,
             hits=hits,

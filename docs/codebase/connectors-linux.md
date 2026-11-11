@@ -64,6 +64,10 @@ split into per-distro impls. A genuine per-distro command dialect would
 land as a *second* impl resolved by fingerprint (the versioned dual-impl
 policy), not a rewrite.
 
+The class sets no `supported_version_range`. It sets `version_range_reason`
+instead: any systemd host fits, so a rule for the distribution applies, not a
+version range.
+
 ## Transport & auth
 
 `LinuxSshConnector` subclasses the shared `SshConnector` adapter and
@@ -140,14 +144,17 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 
 | op_id | group | Params | Returns |
 |---|---|---|---|
-| `linux.about` | `system` | — | `{vendor, product, version, kernel, os_pretty, hostname, init_system}` |
-| `linux.file.read` | `file` | `path`, `max_bytes?` | `{path, content, truncated, size_bytes, exists}` |
+| `linux.about` | `system` | — | `{vendor, product, version, kernel, os_pretty, hostname, init_system, uptime_seconds, load_1m, load_5m, load_15m}` |
+| `linux.file.read` | `file` | `path`, `max_bytes?` | `{path, content, truncated, size_bytes, exists, zero_length}` |
 | `linux.log.tail` | `log` | `path`, `lines?` | `{rows, total, path}` |
 | `linux.service.status` | `service` | `unit` | `{unit, active, enabled, sub_state}` |
 | `linux.sysctl.read` | `system` | `key` | `{key, value}` |
 | `linux.dns.lookup` | `network` | `name` | `{name, found, addresses, exit_code}` |
 | `linux.firewall.show` | `firewall` | — | `{rows, total, backend}` |
 | `linux.mount.list` | `storage` | — | `{rows, total}` (each row `kind` = `mount` / `export`) |
+| `linux.journal.tail` | `log` | `unit?`, `since?`, `until?`, `priority?`, `lines?` | `{rows, total, truncated}` (+ `warning?`); row = `{ts, unit, priority, message, message_truncated}` |
+| `linux.fs.usage` | `storage` | `path` | `{path, filesystem, fstype, size_bytes, used_bytes, avail_bytes, inodes_total, inodes_used}` |
+| `linux.dir.list` | `file` | `path`, `depth?`, `include_hidden?` | `{rows, total, path, exists, truncated, incomplete}`; row = `{name, type, size_bytes, mtime, mode, owner}` |
 
 `linux.about` is the identity canary (its handler wraps `fingerprint`).
 `linux.firewall.show` reads the rules as root. When the login is not root,
@@ -160,8 +167,61 @@ read that fails is an error that starts with `permission_denied` or
 has neither `nft` nor `iptables-save`.
 `linux.mount.list` inspects the mount table (`findmnt` / `mount`) plus NFS
 exports (`exportfs -s` / `showmount -e`); each row carries a `kind`
-discriminator. Block-topology and capacity reporting (`df` / `lsblk`) is
-out of scope — a separate op if a concrete need arises.
+discriminator. Block topology (`lsblk`) is out of scope.
+
+`linux.about` also returns `uptime_seconds` and the 1, 5 and 15 minute load
+(`load_1m`, `load_5m`, `load_15m`). They come from `/proc/uptime` and
+`/proc/loadavg`, read in the same fixed round-trip as the identity; a value
+the host does not answer is `null`.
+
+`linux.file.read` sets `zero_length: true` when a `/proc` or `/sys` file read
+back with no content. Those files always report size 0, so empty content is
+the kernel's empty answer, not an empty file. An empty regular file has
+`size_bytes: 0` and `zero_length: false`.
+
+### Journal, filesystem usage and directory listing (`ops_inspect.py`)
+
+Three reads for storage and NFS diagnosis, in `ops_inspect.py` (handlers
+and checks) and `ops_inspect_ops.py` (op rows).
+
+- `linux.journal.tail` runs `journalctl -o json --all --no-pager -n <lines>`
+  (default 200, same cap as `log.tail`). `--all` keeps fields over 4096
+  bytes; without it `journalctl` prints them as `null`. `unit` uses the
+  unit-name check of `service.status`; `since` / `until` allow letters,
+  digits, space and `: + . _ -` (max 64 characters) and are passed as
+  `--since=<quoted>`; `priority` is `0`-`7` or a syslog level name.
+  The command prints the exit code of `journalctl` after its output,
+  because a pipe returns only the exit code of its last command. The
+  output is cut at 8 MiB (`head` keeps one byte more, so a cut right
+  after a line break is still seen), and then `awk` (in the C locale, so
+  it counts bytes) keeps only the lines that fit the cap whole, so a cut
+  never splits a UTF-8 character. The rows are oldest first, so a cut
+  drops the newest rows. A cut ends with a cut marker and sets
+  `truncated`. A
+  message over 4096 characters is cut and its row has
+  `message_truncated: true`. No `journalctl` (exit 127), a `journalctl`
+  exit code other than 0, an output with neither the exit code nor the
+  cut marker, or no rows with text on stderr (for example no permission
+  to read the journal) is an error, never an empty list. Rows with
+  stderr text carry a `warning`.
+- `linux.fs.usage` runs `df -B1 --output=source,fstype,size,used,avail,itotal,iused`
+  for one path. `/` itself is allowed here only. A `-` inode count is
+  `null`. A df failure or an answer that cannot be read is an error.
+- `linux.dir.list` runs one command: it changes into the directory with
+  `cd -P`, prints the real path, then `find -mindepth 1 -maxdepth <depth>`
+  with NUL-ended records. `depth` is 1 or 2. Hidden names are left out
+  unless `include_hidden`. At most 5000 rows; more sets `truncated`.
+  `incomplete` is true when `find` exited non-zero (part of the tree could
+  not be read). A missing directory is `exists: false`. The real path the
+  host reports goes through the same allow-list check as the typed path.
+
+The paths of `fs.usage` and `dir.list` must lie under the **directory
+allow-list**: `LINUX_READ_ROOTS` plus `/srv`, `/mnt`, `/media`, `/data`,
+`/export`, `/exports`, `/opt`, plus any absolute roots in the
+`LINUX_DIR_LIST_ROOTS` environment variable of the backplane (separated by
+`:`; `/` is refused and a wrong entry raises an error). The key and
+password deny list of `file.read` applies too. Overlap with the host
+readiness reads: `linux.fs.usage` is the one `df` read.
 
 ### DNS lookup on the host (`linux.dns.lookup`)
 
@@ -234,7 +294,12 @@ connection files, `/etc/wireguard`, `/etc/ipsec.secrets`,
 `/etc/ipsec.d/private`, `/etc/sssd/sssd.conf`, `/var/lib/sss/secrets`,
 `/run/secrets`, any `*.key`, `*.keytab`, `*.p12`, `*.pfx`, `id_rsa`, `id_dsa`,
 `id_ecdsa`, `id_ed25519` or `.pgpass` file, every Ceph keyring (`*.keyring`
-and the bare `keyring` file of a monitor or OSD directory), every backup of
+and the bare `keyring` file of a monitor or OSD directory), DNSSEC
+`*.private` keys, the Postfix `sasl_passwd` file and its map, the cloud-init
+user and vendor data (`*user-data*`, `*vendor-data*`, the combined
+`cloud-config.txt`, `obj.pkl` under `/var/lib/cloud`, and
+`instance-data-sensitive.json`), `wpa_supplicant` files, `htpasswd` files,
+`.netrc`, every backup of
 `shadow` and `gshadow` (`shadow-`, `shadow.bak`, `shadow~`), and every path
 that contains `secret` or `credential`. The match ignores upper and lower
 case. Public files next to them (`/etc/passwd`, `*.pub`, `/etc/ssl/certs`,
@@ -539,17 +604,17 @@ host), exactly the un-governed footgun this connector exists to retire.
   `vault_credentials_read_error`. `#<field>` names the field within that
   secret. Each
   `ENV_NAME` must be a valid POSIX identifier, must not start with a digit,
-  must not collide with a reserved wrapper variable (`tmp` / `args` / `f`) or
-  with a name already declared in `env`, and the mapping is bounded (≤ 32
-  entries).
+  must not be a reserved name (see "Reserved env names" below) or a name
+  already declared in `env`, and the mapping is bounded (≤ 32 entries).
 - **Checked before the call waits for approval.** The `secret_env` schema
-  carries `propertyNames` (the POSIX name pattern) and `maxProperties: 32`.
-  The dispatcher checks the schema before the policy gate, so a bad name or
-  too many entries fail at once with `invalid_params`, and no approval is
-  asked for. The pattern ends with `(?![\s\S])`, not `$`, so a name with a
-  trailing newline also fails here. The handler (`_validate_secret_env`) still checks every rule at
-  run time. The reserved names, the clash with `env`, and the reference shape
-  are checked only there.
+  carries `propertyNames` (the POSIX name pattern and a `not` rule for the
+  reserved names) and `maxProperties: 32`.
+  The dispatcher checks the schema before the policy gate, so a bad or
+  reserved name or too many entries fail at once with `invalid_params`, and
+  no approval is asked for. The pattern ends with `(?![\s\S])`, not `$`, so a
+  name with a trailing newline also fails here. The handler
+  (`_validate_secret_env`) still checks every rule at run time. The clash
+  with `env` and the reference shape are checked only there.
 - **Resolution at execution time only.** The value is resolved when the handler
   runs — the `_approved=True` resume path (or a non-parking dispatch) — never at
   park time. Each field is read through the connector's single Vault seam
@@ -569,8 +634,38 @@ host), exactly the un-governed footgun this connector exists to retire.
   command is built or run (no partial execution). The error names the `ENV`
   and the `<vault-path>#<field>` reference — never a resolved value.
 
-`env` behaviour is unchanged. `secret_env` is `script.run`-scoped; the
-connector has no `command.run` verb to extend it to.
+`secret_env` is `script.run`-scoped; the connector has no `command.run` verb
+to extend it to.
+
+### Reserved env names (`env` and `secret_env`)
+
+The approver of `script.run` sees the script and the env **names**, not the
+env values. So an env value must not change which code runs. `env` and
+`secret_env` refuse the same reserved names:
+
+- the wrapper's own shell variables: `tmp`, `args`, `f`;
+- names that control how a shell starts or splits words: `ENV`,
+  `SHELLOPTS`, `BASHOPTS`, `PS4`, `IFS`, `GLOBIGNORE`, `CDPATH`,
+  `PROMPT_COMMAND`, `ZDOTDIR`, `HOME`;
+- bash variables whose assigned value bash evaluates as arithmetic:
+  `HISTCMD`, `OPTIND`, `RANDOM`, `SRANDOM`. An arithmetic value can run a
+  command, so the wrapper's own `export` line would run it;
+- names that control where commands and libraries are found: `PATH`,
+  `GCONV_PATH`;
+- Java start options: `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`,
+  `_JAVA_OPTIONS`;
+- every name that starts with `BASH_` (for example `BASH_ENV`), `LD_` (the
+  dynamic loader, for example `LD_PRELOAD`), `PYTHON`, `PERL`, `RUBY` or
+  `NODE_`.
+
+Names are case-sensitive, so `TMP` or `bash_env` stay allowed. Both schemas
+carry the list under `propertyNames` → `not`, so the dispatcher refuses a
+reserved name with `invalid_params` before the call waits for approval. The
+handler (`_check_env_name`, used by `_validate_env` and
+`_validate_secret_env`) checks the same list again at run time. The list
+lives in `_RESERVED_ENV_NAMES` and `_RESERVED_ENV_PREFIXES` in
+`connectors/linux/ops_write.py`. A script that needs one of these names sets
+it in its own body, where the approver reads it.
 
 ## Key types
 

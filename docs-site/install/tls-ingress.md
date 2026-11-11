@@ -67,6 +67,18 @@ internal CA adds — trusting it on each operator workstation — and the
 per-client trust picture are in
 [Connect clients](../clients/index.md).
 
+**HSTS is the proxy's job.** MEHO does not send the
+`Strict-Transport-Security` header. Set it on the ingress or reverse
+proxy in front of MEHO, so a browser that has visited the console once
+uses only HTTPS for it. ingress-nginx sends it on TLS hosts by default
+(ConfigMap keys `hsts`, `hsts-max-age`, `hsts-include-subdomains`).
+Another proxy: add the header there, for example
+`Strict-Transport-Security: max-age=31536000`.
+
+The console session cookie is named `__Host-meho_session`. A browser
+keeps it only for the exact host of the console, so MEHO must be served
+over HTTPS for the console login to work.
+
 ## Reverse-proxy trust (`forwardedAllowIps`)
 
 The backplane sits behind your ingress controller, so it reads the real

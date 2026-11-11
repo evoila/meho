@@ -80,6 +80,7 @@ __all__ = [
     "lookup_descriptor",
     "package_visible_group_clause",
     "parse_connector_id",
+    "shipped_profile_triples",
     "visible_scope_clause",
 ]
 
@@ -597,7 +598,7 @@ async def _visible_connector_triples(tenant_id: UUID) -> set[tuple[str, str, str
     return triples
 
 
-def _shipped_profile_triples() -> set[tuple[str, str, str]]:
+def shipped_profile_triples() -> set[tuple[str, str, str]]:
     """Return the parsed triple of every catalog row shipped with an execution profile.
 
     Startup stamps a profiled connector class for each such row under
@@ -624,7 +625,7 @@ def _builtin_registered_triples() -> set[tuple[str, str, str]]:
     Two kinds of registered class are built-in: a hand-coded class
     (``shim_kind == "none"``), and the profiled class startup stamps for
     a catalog row shipped with a profile (``mehoauto-rest-0.1.0``; see
-    :func:`_shipped_profile_triples`). Before its first ingest such a
+    :func:`shipped_profile_triples`). Before its first ingest such a
     connector has no operation rows, yet ``meho_connector_list`` shows
     it, so its id is named here too.
 
@@ -637,7 +638,7 @@ def _builtin_registered_triples() -> set[tuple[str, str, str]]:
     skipped, and each entry is rendered and parsed back, the same round
     trip :func:`connector_class_registered` uses.
     """
-    shipped_profiles = _shipped_profile_triples()
+    shipped_profiles = shipped_profile_triples()
     triples: set[tuple[str, str, str]] = set()
     for (_product, version, impl_id), cls in all_connectors_v2().items():
         if not version or not impl_id:

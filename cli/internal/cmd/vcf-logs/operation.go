@@ -124,8 +124,8 @@ func newOperationCallCmd() *cobra.Command {
 			"\"vrli-rest-9.0\" pre-baked. Use when an op doesn't have a\n" +
 			"dedicated alias yet.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vcf-logs operation call GET:/api/v2/version --target rdc-vrli\n" +
-			"  meho vcf-logs operation call GET:/api/v2/events/{constraints} --target rdc-vrli --params '{\"constraints\":\"\"}'",
+		Example: "  meho vcf-logs operation call GET:/api/v2/version --target vrli-lab\n" +
+			"  meho vcf-logs operation call GET:/api/v2/events/{constraints} --target vrli-lab --params '{\"constraints\":\"\"}'",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

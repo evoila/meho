@@ -359,6 +359,128 @@ writes an audit row. The REST routes are
 `GET /api/v1/checks/dashboard-files/export?name=<name>` and
 `POST /api/v1/checks/dashboard-files/import`.
 
+## Watch an Azure subscription (budget, policy, Advisor)
+
+Three sensors and one dashboard for one Azure subscription. The file below
+is a dashboard file, so you import it in one step.
+
+What each sensor measures:
+
+| Sensor | Value | Degraded | Critical | Checked |
+|---|---|---|---|---|
+| `<dashboard>-budget-used` | Highest percent used of the budgets, in the current budget period | 80 or more | 100 or more | every day |
+| `<dashboard>-policy-non-compliant` | Non-compliant resources now | above the baseline | more than 10 above the baseline | every 6 hours |
+| `<dashboard>-advisor-high-impact` | Open high-impact Advisor recommendations now | above the baseline | more than 10 above the baseline | every day |
+
+The baseline is the count on the day you make the sensor. Read it once:
+
+```bash
+meho operation call azure-arm-2026.10 azure.policy.compliance.summary \
+  --target <azure-target>
+meho operation call azure-arm-2026.10 azure.advisor.recommendation.list \
+  --target <azure-target> --params '{"impact": "High"}'
+```
+
+Put the `non_compliant_resources` number and the Advisor `count` into the
+file as the `degraded` bounds (`12` and `3` below), and add 10 for the
+`critical` bounds (`22` and `13`). Save the file, then import it:
+
+```json
+{
+  "format": "meho-dashboard/1",
+  "dashboard": {
+    "name": "azure-subscription-health",
+    "description": "One Azure subscription: budget used in the current period, non-compliant resources and high-impact Advisor recommendations against their baseline.",
+    "notify_min_state": "critical"
+  },
+  "sensors": [
+    {
+      "name": "azure-subscription-health-budget-used",
+      "connector_id": "azure-arm-2026.10",
+      "op_id": "azure.cost.budget.list",
+      "target": "azure-subscription",
+      "params": {},
+      "assertion": {
+        "select": {
+          "path": "$.budgets[*].percent_used",
+          "aggregate": "max"
+        },
+        "compare": {
+          "type": "threshold",
+          "op": "gte",
+          "degraded": 80,
+          "critical": 100
+        }
+      },
+      "cadence_kind": "interval",
+      "interval_seconds": 86400,
+      "severity": "critical"
+    },
+    {
+      "name": "azure-subscription-health-policy-non-compliant",
+      "connector_id": "azure-arm-2026.10",
+      "op_id": "azure.policy.compliance.summary",
+      "target": "azure-subscription",
+      "params": {},
+      "assertion": {
+        "select": {
+          "path": "$.non_compliant_resources"
+        },
+        "compare": {
+          "type": "threshold",
+          "op": "gt",
+          "degraded": 12,
+          "critical": 22
+        }
+      },
+      "cadence_kind": "interval",
+      "interval_seconds": 21600,
+      "severity": "critical"
+    },
+    {
+      "name": "azure-subscription-health-advisor-high-impact",
+      "connector_id": "azure-arm-2026.10",
+      "op_id": "azure.advisor.recommendation.list",
+      "target": "azure-subscription",
+      "params": {
+        "impact": "High"
+      },
+      "assertion": {
+        "select": {
+          "path": "$.count"
+        },
+        "compare": {
+          "type": "threshold",
+          "op": "gt",
+          "degraded": 3,
+          "critical": 13
+        }
+      },
+      "cadence_kind": "interval",
+      "interval_seconds": 86400,
+      "severity": "critical"
+    }
+  ]
+}
+```
+
+```bash
+meho dashboard import azure-health.json \
+  --map-target azure-subscription=<azure-target> --dry-run
+meho dashboard import azure-health.json \
+  --map-target azure-subscription=<azure-target>
+```
+
+Import finds a sensor by its name. So each sensor name starts with the
+dashboard name. To watch a second subscription, change the dashboard name
+in a copy of the file (for example `azure-sub-b-health`) and change the start
+of the three sensor names the same way. Otherwise the second import changes
+the sensors of the first subscription.
+
+A budget with no amount has no percent, and a sensor with no value shows
+`unknown`, never `ok`. The Python version of these recipes is
+`meho_backplane.connectors.azure.sensor_templates`.
+
 ## The investigator (optional deep tier)
 
 When a dashboard's rollup crosses from green into a non-green state,

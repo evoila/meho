@@ -41,6 +41,7 @@ from meho_backplane.checks.schemas import (
     _RETRY_TIMES_MAX,
     _TIMEZONE_MAX_LENGTH,
     SensorCreate,
+    SensorParams,
 )
 from meho_backplane.db.models import SensorCadenceKind, SensorSeverity
 
@@ -87,7 +88,7 @@ class DashboardFileSensor(BaseModel):
     op_id: Annotated[str, Field(min_length=1, max_length=_OP_ID_MAX_LENGTH)]
     #: The target placeholder, or ``None`` for an operation without a target.
     target: Annotated[str, Field(min_length=1, max_length=_TARGET_NAME_MAX_LENGTH)] | None = None
-    params: dict[str, object] = Field(default_factory=dict)
+    params: SensorParams = Field(default_factory=dict)
     assertion: AssertionSpec
     cadence_kind: SensorCadenceKind
     interval_seconds: Annotated[

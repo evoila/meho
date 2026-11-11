@@ -637,7 +637,7 @@ def test_mcp_tools_are_unchanged_while_the_switch_is_off(tool: str, module: Any)
     assert "starting_grants" not in defn.inputSchema["properties"]
     assert "starting_grants" not in defn.description
     assert "AGENT_GRANT_REQUIRED" not in defn.description
-    assert tool_for_settings(defn) is defn
+    assert tool_for_settings(defn, _operator()) is defn
 
 
 @pytest.mark.parametrize("mode", ["observe", "on"])
@@ -647,7 +647,7 @@ def test_mcp_tools_show_the_pick_while_the_switch_is_not_off(
 ) -> None:
     defn = _registered(tool, module)
     _switch(monkeypatch, mode)
-    shown = tool_for_settings(defn)
+    shown = tool_for_settings(defn, _operator())
     assert shown.inputSchema["properties"]["starting_grants"] == STARTING_GRANTS_JSON_SCHEMA
     assert shown.inputSchema["required"] == defn.inputSchema["required"]
     assert shown.description.startswith(defn.description)

@@ -16,16 +16,17 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from meho_backplane.agents.grant_sets import STARTING_GRANTS_JSON_SCHEMA
+from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.registry import ToolDefinition
 from meho_backplane.settings import get_settings
 
 __all__ = ["with_starting_grants"]
 
 
-def with_starting_grants(sentence: str) -> Callable[[ToolDefinition], ToolDefinition]:
+def with_starting_grants(sentence: str) -> Callable[[ToolDefinition, Operator], ToolDefinition]:
     """Return a ``for_settings`` function that adds the pick while the switch is not off."""
 
-    def for_settings(definition: ToolDefinition) -> ToolDefinition:
+    def for_settings(definition: ToolDefinition, operator: Operator) -> ToolDefinition:
         if get_settings().agent_grant_required == "off":
             return definition
         schema = definition.inputSchema

@@ -72,6 +72,14 @@ re-run of a failed approved call by the requester, also a service login.
   the tenant already has, 404 for an unknown target, and 409
   `target_has_references` for a delete without `force`. Nothing is written until a person approves it. The CLI
   prints the approval id and exits 0.
+- `meho targets import` sends one `POST` or `PATCH` per row, so each row
+  makes its own approval request: a file with 50 rows makes 50 requests.
+  For a large file, import it in the web console, where it is written at
+  once. Or give the import a change ticket
+  (`meho --work-ref CHG-1 targets import <file>`): every request then
+  carries it, and a person approves all of them in one command,
+  `meho approvals approve --filter-work-ref CHG-1 --in-order`. The
+  command help says the same.
 - Only a person in the web interface (`Operator.web_session`) writes at
   once. The console calls `create_target`, `update_target` and
   `delete_target` as functions with its web session, not through the

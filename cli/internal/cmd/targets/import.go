@@ -120,6 +120,16 @@ var skipSilent = map[string]struct{}{
 	"fingerprint": {},
 }
 
+// importManyRowsNote is the help text paragraph that says what a file
+// with many rows does: each row is its own write, so each row makes its
+// own approval request.
+const importManyRowsNote = "Each row of the file makes its own approval " +
+	"request. A file with 50 rows makes 50 requests, and a person approves " +
+	"each one. For a large file, import it in the web console, where it is " +
+	"written at once. Or give the import a change ticket, for example " +
+	"`meho --work-ref CHG-1 targets import <file>`, and approve all its rows " +
+	"in one command: `meho approvals approve --filter-work-ref CHG-1 --in-order`.\n\n"
+
 // --- Plan model --------------------------------------------------------
 
 // action describes what the import would do for one entry.
@@ -205,6 +215,7 @@ func newImportCmd() *cobra.Command {
 		Long: "import reads a YAML file shaped as `targets: [<entry>, ...]` and " +
 			"applies each entry against the backplane.\n\n" +
 			dispatch.RESTWriteApprovalNote +
+			importManyRowsNote +
 			"Mapping rules. Top-level columns recognised on the API's " +
 			"TargetCreate / TargetUpdate models are mapped 1:1: name, aliases, " +
 			"product, host, port, fqdn, secret_ref, auth_model, vpn_required, " +

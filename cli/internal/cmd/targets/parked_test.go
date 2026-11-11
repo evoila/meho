@@ -111,3 +111,19 @@ func TestImportRecordsWritesThatWait(t *testing.T) {
 		}
 	}
 }
+
+// TestImportHelpSaysEachRowWaits: the import help says that each row makes
+// its own approval request, and how to handle a large file.
+func TestImportHelpSaysEachRowWaits(t *testing.T) {
+	t.Parallel()
+	long := newImportCmd().Long
+	for _, want := range []string{
+		"Each row of the file makes its own approval request.",
+		"import it in the web console",
+		"meho approvals approve --filter-work-ref CHG-1 --in-order",
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("import help does not say %q:\n%s", want, long)
+		}
+	}
+}

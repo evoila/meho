@@ -808,6 +808,10 @@ model, or resume endpoint):
    operation through the dispatcher and answers 202 with the approval
    request id (`api/v1/_wait_for_approval.py`); the console writes at
    once. See [targets.md](targets.md) and [topology.md](topology.md).
+   `meho targets import` sends one write per row, so each row makes its
+   own approval request. For a large file, a person imports it in the web
+   console, or runs the import with `--work-ref` and approves all its rows
+   with `meho approvals approve --filter-work-ref <ref> --in-order`.
 
    Only `verify_access_token_with_refresh`
    (`backend/src/meho_backplane/ui/auth/refresh.py`) sets

@@ -726,6 +726,14 @@ class Settings(BaseModel):
         ``False``: the rows stay as before. See
         :mod:`meho_backplane.auth.client_identity`. Env var
         ``AUDIT_CLIENT_IDENTITY``.
+    mcp_client_per_tool_kind:
+        List one login client per AI tool kind in ``GET /api/v1/auth-config``
+        (``mcp_clients``): ``meho-mcp-code`` for Claude Code and
+        ``meho-mcp-desktop`` for Claude Desktop. The Claude Code plugin and
+        the Claude Desktop extension then sign in with their own client and
+        keep separate saved logins. Default ``False``: the field is empty and
+        both tools keep the shared ``meho-mcp`` client. Turn it on only when
+        the realm has the two clients. Env var ``MCP_CLIENT_PER_TOOL_KIND``.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1821,6 +1829,8 @@ class Settings(BaseModel):
     operation_search_store_query_text: bool = False
     # Off by default; with it off the audit rows stay as before.
     audit_client_identity: bool = False
+    # Off by default; with it off auth-config lists no per-tool login client.
+    mcp_client_per_tool_kind: bool = False
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
     result_cache_redis_password: str | None = Field(default=None)
@@ -3092,6 +3102,9 @@ def get_settings() -> Settings:
         ),
         audit_client_identity=parse_bool_env(
             os.environ.get("AUDIT_CLIENT_IDENTITY", "false"),
+        ),
+        mcp_client_per_tool_kind=parse_bool_env(
+            os.environ.get("MCP_CLIENT_PER_TOOL_KIND", "false"),
         ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),

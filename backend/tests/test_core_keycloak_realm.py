@@ -8,7 +8,7 @@ Keycloak imports at its first start. These checks pin the realm the product
 owner decided (``docs/decisions/login-role-groups.md``): five role groups that
 carry ``tenant_id`` and ``tenant_role`` (plus ``approver`` on MEHO-Approvers),
 the platform group that carries only ``platform_admin`` (#4043), the
-``meho_tenant`` attribute and ``meho-tenants`` mapper for several tenants, the six
+``meho_tenant`` attribute and ``meho-tenants`` mapper for several tenants, the
 clients, the mappers ``meho admin keycloak bootstrap-clients`` puts on the
 clients people log in with, and no secret or host name written into the
 file.
@@ -38,7 +38,9 @@ _REALM_FILE = (
     / "meho-realm.json"
 )
 
-_HUMAN_CLIENTS = ("meho-cli", "meho-mcp", "meho-web")
+#: The login client of each AI tool kind (MCP_CLIENT_PER_TOOL_KIND).
+_TOOL_CLIENTS = ("meho-mcp-code", "meho-mcp-desktop")
+_HUMAN_CLIENTS = ("meho-cli", "meho-mcp", *_TOOL_CLIENTS, "meho-web")
 #: Every client a person signs in with, including the approval sign-in (#5515).
 _PERSON_CLIENTS = (*_HUMAN_CLIENTS, "meho-cli-approve")
 _PLACEHOLDERS = {
@@ -185,6 +187,8 @@ def test_clients(realm: dict[str, Any]) -> None:
         "meho-cli",
         "meho-cli-approve",
         "meho-mcp",
+        "meho-mcp-code",
+        "meho-mcp-desktop",
         "meho-web",
         "meho-admin",
         "meho-check-runner",
@@ -281,7 +285,7 @@ def test_cli_client_requires_no_pkce(realm: dict[str, Any]) -> None:
     """
     client = _client(realm, "meho-cli")
     assert "pkce.code.challenge.method" not in client["attributes"]
-    for client_id in ("meho-cli-approve", "meho-mcp", "meho-web"):
+    for client_id in ("meho-cli-approve", "meho-mcp", *_TOOL_CLIENTS, "meho-web"):
         other = _client(realm, client_id)
         assert other["attributes"]["pkce.code.challenge.method"] == "S256"
         assert other["attributes"]["oauth2.device.authorization.grant.enabled"] == "false"
@@ -308,6 +312,27 @@ def test_mcp_client_browser_login(realm: dict[str, Any]) -> None:
         "mcp:execute",
         "mcp:admin",
     }
+
+
+@pytest.mark.parametrize("client_id", _TOOL_CLIENTS)
+def test_tool_clients_are_copies_of_the_mcp_client(realm: dict[str, Any], client_id: str) -> None:
+    """Claude Code and Claude Desktop each get a client of their own.
+
+    Only the id, the name and the description differ from ``meho-mcp``: the
+    same public browser login with PKCE, the same loopback redirects, scopes,
+    idle limit and mappers. So a token of either client carries the same
+    claims as a ``meho-mcp`` token, and no fixed tenant or role.
+    """
+    mcp = _client(realm, "meho-mcp")
+    client = _client(realm, client_id)
+    assert client["publicClient"] is True
+    assert client["attributes"]["pkce.code.challenge.method"] == "S256"
+    assert "secret" not in client
+    differ = {"clientId", "name", "description"}
+    assert {k: v for k, v in client.items() if k not in differ} == {
+        k: v for k, v in mcp.items() if k not in differ
+    }
+    assert client["name"] != mcp["name"]
 
 
 def test_mcp_scopes_exist_and_keep_default_scopes(realm: dict[str, Any]) -> None:

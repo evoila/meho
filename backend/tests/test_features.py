@@ -365,6 +365,17 @@ def test_mcp_block_short_tool_texts_is_off_by_default() -> None:
     assert build_features_block(_settings_with())["mcp"]["short_tool_texts"] is False
 
 
+@pytest.mark.parametrize("on", [False, True])
+def test_mcp_block_reports_the_client_per_tool_kind_switch(on: bool) -> None:
+    """``/ready`` says whether Claude Code and Claude Desktop get their own login client."""
+    block = build_features_block(_settings_with(mcp_client_per_tool_kind=on))
+    assert block["mcp"]["client_per_tool_kind"] is on
+
+
+def test_mcp_block_client_per_tool_kind_is_off_by_default() -> None:
+    assert build_features_block(_settings_with())["mcp"]["client_per_tool_kind"] is False
+
+
 # ---------------------------------------------------------------------------
 # approval_custody (#3712)
 # ---------------------------------------------------------------------------

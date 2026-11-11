@@ -98,8 +98,9 @@ AGENT_GRANT_REQUIRED_MODES: Final[tuple[str, ...]] = ("off", "observe", "on")
 
 #: The values ``APPROVAL_SIGN_IN_LEVEL`` accepts (#6281). ``off`` keeps the
 #: checks of an approval sign-in as before; ``observe`` also logs a token
-#: without the approval level; ``required`` refuses it.
-APPROVAL_SIGN_IN_LEVEL_MODES: Final[tuple[str, ...]] = ("off", "observe", "required")
+#: without the approval level; ``required`` refuses it; ``auto`` (the
+#: default) refuses it when the realm gives the level, else observes.
+APPROVAL_SIGN_IN_LEVEL_MODES: Final[tuple[str, ...]] = ("off", "observe", "auto", "required")
 
 #: Truthy spellings accepted by :func:`_parse_bool`. Anything else
 #: (including the empty string and "disabled") is treated as ``False``
@@ -1324,11 +1325,13 @@ class Settings(BaseModel):
         level in the token's ``acr`` claim (#6281). Only the approval
         sign-in flow of the realm gives the level ``meho-approve``; the
         passkey touch level ``meho-touch`` counts too. ``off``: the checks
-        as before. ``observe`` (the default for one release): the same,
-        and MEHO logs ``approval_sign_in_level_missing`` for a token
-        without the level. ``required``: such a token gets the same
-        ``401`` as an old sign-in. Any other value stops the start. Set
-        via ``APPROVAL_SIGN_IN_LEVEL``.
+        as before. ``observe``: the same, and MEHO logs
+        ``approval_sign_in_level_missing`` for a token without the level.
+        ``required``: such a token gets the same ``401`` as an old
+        sign-in. ``auto`` (the default): ``required`` while MEHO's check
+        of the approval sign-in (``approvals.sign_in`` in
+        ``/api/v1/health``) is ``ok``, else ``observe``. Any other value
+        stops the start. Set via ``APPROVAL_SIGN_IN_LEVEL``.
     approval_allow_delegated_decision:
         Lab-class switch for **delegated** approval decisions (#3693).
         A delegated decision is an approve or reject whose ``reason``
@@ -1942,8 +1945,8 @@ class Settings(BaseModel):
     # #3979 -- the acr values that mean a one-time code step. Empty = off.
     approval_one_time_code_acr_values: tuple[str, ...] = ()
     # #6281 -- does an approve on the command line or REST need the
-    # approval level in ``acr``? off | observe | required.
-    approval_sign_in_level: str = "observe"
+    # approval level in ``acr``? off | observe | auto | required.
+    approval_sign_in_level: str = "auto"
     # #4622 -- sandbox mode: a standing grant may also cover deletes, only
     # on an instance for disposable test systems. Both read at boot only.
     sandbox_mode: bool = False
@@ -2665,7 +2668,7 @@ class Settings(BaseModel):
     @field_validator("approval_sign_in_level")
     @classmethod
     def _approval_sign_in_level_must_be_known(cls, value: str) -> str:
-        """Stop the start when ``APPROVAL_SIGN_IN_LEVEL`` is not off, observe or required.
+        """Stop the start when ``APPROVAL_SIGN_IN_LEVEL`` is not off, observe, auto or required.
 
         A typo must not turn the approval level check off, so an unknown
         value fails at startup.
@@ -3293,7 +3296,7 @@ def get_settings() -> Settings:
         ),
         # #6281 -- does an approve need the approval level in acr?
         approval_sign_in_level=os.environ.get("APPROVAL_SIGN_IN_LEVEL", "").strip().lower()
-        or "observe",
+        or "auto",
         # #4622 -- sandbox mode is off unless both settings are set; the
         # boot guards in ``meho_backplane.sandbox_mode`` check them.
         sandbox_mode=parse_bool_env(

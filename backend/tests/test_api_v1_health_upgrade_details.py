@@ -199,7 +199,12 @@ async def test_approvals_default_posture_and_missing_key() -> None:
             "client": "meho-cli-approve",
             "detail": "keycloak_admin_not_configured",
         },
-        "sign_in_level": "observe",
+        "sign_in_level": "auto",
+        "sign_in_level_in_force": "observe",
+        "sign_in_level_warning": (
+            "MEHO does not require the approval level: APPROVAL_SIGN_IN_LEVEL is auto and "
+            "approvals.sign_in is not_checked, not ok. Fix the approval sign-in in Keycloak."
+        ),
     }
     by_name = {entry.name: entry for entry in response.features}
     assert set(by_name) == {
@@ -239,6 +244,8 @@ async def test_approvals_follow_the_settings_and_never_carry_the_key(
             "detail": "keycloak_admin_not_configured",
         },
         "sign_in_level": "required",
+        "sign_in_level_in_force": "required",
+        "sign_in_level_warning": None,
     }
     by_name = {entry.name: entry for entry in response.features}
     assert by_name["approval_custody"].configured is True

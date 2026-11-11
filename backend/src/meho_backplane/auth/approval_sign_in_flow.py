@@ -14,24 +14,35 @@ form, then the one-time code when the person has set one up. No other step.
 :func:`read_approval_sign_in` reads the realm with the backplane's Keycloak
 admin client and says one of:
 
-* ``ok``: the flow has exactly the steps of the realm file, and the client's
-  browser sign-in is bound to it;
+* ``ok``: the realm really gives the approval level: the flow has exactly
+  the steps of the realm file, its level step has the settings of the file
+  (level 2, maximum age 0), the realm's ``acr.loa.map`` names level 2
+  ``meho-approve`` and no other name has level 2, and the client's browser
+  sign-in is bound to the flow;
 * ``flow_missing``: the realm has no flow ``meho approval sign-in level``;
-* ``flow_differs``: the flow has other steps; ``detail`` names the first
-  difference;
+* ``flow_differs``: the flow has other steps, its level step has no or other
+  settings, the realm's ``acr.loa.map`` does not name level 2
+  ``meho-approve``, or the client has its own ``acr.loa.map``; ``detail``
+  names the first difference;
 * ``not_bound``: the flow is right, but the client is missing, has no own
   browser flow, or is bound to another flow;
+* ``other_grant_on``: the client also allows direct grant (password sent by
+  the program) or device grant; such a sign-in skips the approval flow;
 * ``not_checked``: the check could not run; ``detail`` is a short reason
   word: ``keycloak_admin_not_configured``, ``no_right_to_read_login_flows``,
-  ``no_right_to_read_clients``, ``keycloak_timeout``,
-  ``keycloak_unexpected_answer`` or ``keycloak_unreachable``.
+  ``no_right_to_read_realm``, ``no_right_to_read_clients``,
+  ``keycloak_timeout``, ``keycloak_unexpected_answer`` or
+  ``keycloak_unreachable``.
+
+``APPROVAL_SIGN_IN_LEVEL=auto`` (the default) requires the approval level
+only when the state is ``ok`` (:func:`sign_in_level_in_force`).
 
 A failed read is never ``ok``. The answer of a read is kept for
 :data:`_KEEP_S` seconds, so ``/api/v1/health`` and ``meho_status``, which
 are called often, do not log in to Keycloak on every call.
 
-Reading login flows needs ``view-realm`` or ``manage-realm`` on the admin
-client; the built-in realm gives ``meho-admin`` ``manage-realm``.
+Reading login flows and the realm needs ``view-realm`` or ``manage-realm``
+on the admin client; the built-in realm gives ``meho-admin`` ``manage-realm``.
 """
 
 from __future__ import annotations
@@ -51,16 +62,42 @@ from meho_backplane.auth.keycloak_admin import (
 )
 from meho_backplane.connectors.keycloak.ops_authflow import (
     APPROVAL_FLOW_ALIAS,
+    APPROVAL_LEVEL_CONFIG,
+    APPROVAL_LEVEL_STEP,
     approval_flow_difference,
 )
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
+from meho_backplane.core.keycloak_levels import (
+    APPROVAL_LEVEL,
+    APPROVAL_LEVEL_NAME,
+    LEVEL_MAP,
+    client_level_map,
+    level_conflict,
+    parse_level_map,
+)
 from meho_backplane.settings import Settings, get_settings
 
-__all__ = ["ApprovalSignInState", "ApprovalSignInStatus", "read_approval_sign_in"]
+__all__ = [
+    "ApprovalSignInState",
+    "ApprovalSignInStatus",
+    "SignInLevelInForce",
+    "read_approval_sign_in",
+    "sign_in_level_for_state",
+    "sign_in_level_in_force",
+    "sign_in_level_warning",
+]
 
-ApprovalSignInState = Literal["ok", "flow_missing", "flow_differs", "not_bound", "not_checked"]
+ApprovalSignInState = Literal[
+    "ok", "flow_missing", "flow_differs", "not_bound", "other_grant_on", "not_checked"
+]
+
+#: What MEHO does with a token of the approval client that lacks the level.
+SignInLevelInForce = Literal["off", "observe", "required"]
+
+#: The client attribute that turns on the device grant.
+_DEVICE_GRANT = "oauth2.device.authorization.grant.enabled"
 
 #: The whole check gives up after this many seconds, so a slow Keycloak never
 #: holds up the health answer for long.
@@ -89,14 +126,79 @@ class _NoRightError(Exception):
     """The admin client may not read what the check needs; the arg is the reason word."""
 
 
-async def _read_list(kc: KeycloakAdminClient, path: str, **params: str) -> list[Any]:
+async def _read_json(kc: KeycloakAdminClient, path: str, want: type, **params: str) -> Any:
     status, body = await kc.read(path, params or None)
     if status == 403:
-        what = "login_flows" if path.startswith("/authentication/") else "clients"
+        if path.startswith("/authentication/"):
+            what = "login_flows"
+        elif path.startswith("/clients"):
+            what = "clients"
+        else:
+            what = "realm"
         raise _NoRightError(f"no_right_to_read_{what}")
-    if status != 200 or not isinstance(body, list):
+    if status != 200 or not isinstance(body, want):
         raise KeycloakUnexpectedResponseError(f"GET {path} answered HTTP {status}")
     return body
+
+
+def _object(value: Any) -> dict[str, Any]:
+    """*value* when it is a JSON object, else an empty one."""
+    return value if isinstance(value, dict) else {}
+
+
+async def _read_list(kc: KeycloakAdminClient, path: str, **params: str) -> list[Any]:
+    body: list[Any] = await _read_json(kc, path, list, **params)
+    return body
+
+
+async def _level_step_difference(kc: KeycloakAdminClient, steps: list[Any]) -> str | None:
+    """Whether the level step has the settings of the realm file (level 2, maximum age 0)."""
+    step = next(
+        s for s in steps if isinstance(s, dict) and s.get("providerId") == APPROVAL_LEVEL_STEP
+    )
+    config_id = step.get("authenticationConfig")
+    if not config_id:
+        return "the level step has no settings"
+    have = await _read_json(kc, f"/authentication/config/{quote(str(config_id), safe='')}", dict)
+    config = _object(have.get("config"))
+    if any(config.get(key) != value for key, value in APPROVAL_LEVEL_CONFIG.items()):
+        return f"the level step has the settings {config!r}; wanted {dict(APPROVAL_LEVEL_CONFIG)!r}"
+    return None
+
+
+async def _level_map_difference(kc: KeycloakAdminClient) -> str | None:
+    """Whether the realm's ``acr.loa.map`` names level 2 ``meho-approve``, and only it."""
+    realm = await _read_json(kc, "", dict)
+    attributes = _object(realm.get("attributes"))
+    levels = parse_level_map(attributes.get(LEVEL_MAP))
+    if levels is None:
+        return f"the realm attribute {LEVEL_MAP} is not a JSON object"
+    if str(levels.get(APPROVAL_LEVEL_NAME)) != str(APPROVAL_LEVEL):
+        return (
+            f"the realm attribute {LEVEL_MAP} does not name level {APPROVAL_LEVEL} "
+            f"{APPROVAL_LEVEL_NAME}"
+        )
+    return level_conflict(levels, {APPROVAL_LEVEL_NAME: APPROVAL_LEVEL})
+
+
+def _client_state(
+    client: dict[str, Any], client_id: str, flow_id: str
+) -> tuple[ApprovalSignInState, str | None]:
+    """The state of the client: its own level map, its grants, its binding."""
+    own_map = client_level_map(client)
+    if own_map is not None:
+        return "flow_differs", own_map
+    attributes = _object(client.get("attributes"))
+    if client.get("directAccessGrantsEnabled") is True:
+        return "other_grant_on", f"the client {client_id} allows direct grant"
+    if str(attributes.get(_DEVICE_GRANT)).lower() == "true":
+        return "other_grant_on", f"the client {client_id} allows device grant"
+    bound = (client.get("authenticationFlowBindingOverrides") or {}).get("browser")
+    if not bound:
+        return "not_bound", f"the client {client_id} has no own browser flow"
+    if bound != flow_id:
+        return "not_bound", f"the client {client_id} is bound to another flow"
+    return "ok", None
 
 
 async def _state(kc: KeycloakAdminClient, client_id: str) -> tuple[ApprovalSignInState, str | None]:
@@ -115,6 +217,10 @@ async def _state(kc: KeycloakAdminClient, client_id: str) -> tuple[ApprovalSignI
         kc, f"/authentication/flows/{quote(APPROVAL_FLOW_ALIAS, safe='')}/executions"
     )
     difference = approval_flow_difference(steps)
+    if difference is None:
+        difference = await _level_step_difference(kc, steps)
+    if difference is None:
+        difference = await _level_map_difference(kc)
     if difference is not None:
         return "flow_differs", difference
     clients = await _read_list(kc, "/clients", clientId=client_id)
@@ -123,12 +229,7 @@ async def _state(kc: KeycloakAdminClient, client_id: str) -> tuple[ApprovalSignI
     )
     if client is None:
         return "not_bound", f"the client {client_id} does not exist"
-    bound = (client.get("authenticationFlowBindingOverrides") or {}).get("browser")
-    if not bound:
-        return "not_bound", f"the client {client_id} has no own browser flow"
-    if bound != flow_id:
-        return "not_bound", f"the client {client_id} is bound to another flow"
-    return "ok", None
+    return _client_state(client, client_id, flow_id)
 
 
 async def read_approval_sign_in(settings: Settings | None = None) -> ApprovalSignInStatus:
@@ -169,3 +270,40 @@ async def _read(settings: Settings) -> ApprovalSignInStatus:
         )
         return not_checked("keycloak_unreachable")
     return ApprovalSignInStatus(state=state, client=client_id, detail=detail)
+
+
+def sign_in_level_for_state(mode: str, state: ApprovalSignInState | None) -> SignInLevelInForce:
+    """What MEHO does for *mode* (the setting) when the approval sign-in is in *state*."""
+    if mode == "off":
+        return "off"
+    if mode == "observe" or (mode == "auto" and state != "ok"):
+        return "observe"
+    return "required"
+
+
+async def sign_in_level_in_force(settings: Settings) -> SignInLevelInForce:
+    """What MEHO does now with a token of the approval client that lacks the level (#6281).
+
+    ``off``, ``observe`` and ``required`` are the setting itself. ``auto``
+    reads the approval sign-in (:func:`read_approval_sign_in`, kept for a
+    short time): ``required`` when its state is ``ok``, else ``observe``.
+    """
+    mode = settings.approval_sign_in_level
+    if mode != "auto":
+        return sign_in_level_for_state(mode, None)
+    return sign_in_level_for_state(mode, (await read_approval_sign_in(settings)).state)
+
+
+def sign_in_level_warning(mode: str, state: ApprovalSignInState | None) -> str | None:
+    """The health warning when MEHO does not require the approval level; else ``None``."""
+    if sign_in_level_for_state(mode, state) == "required":
+        return None
+    if mode == "auto":
+        return (
+            "MEHO does not require the approval level: APPROVAL_SIGN_IN_LEVEL is auto and "
+            f"approvals.sign_in is {state}, not ok. Fix the approval sign-in in Keycloak."
+        )
+    return (
+        f"MEHO does not require the approval level: APPROVAL_SIGN_IN_LEVEL is {mode}. "
+        "Set it to auto or required."
+    )

@@ -707,12 +707,13 @@ config:
   approvalOneTimeCodeAcrValues: ""
   # -- Does an approve on the command line or REST need the approval level
   # (`acr` `meho-approve`) that only the approval sign-in flow gives
-  # (#6281)? Rendered into `APPROVAL_SIGN_IN_LEVEL`. `"off"`: no level
-  # check. `"observe"` (the default for this release): approves as before
-  # and logs `approval_sign_in_level_missing`. `"required"`: refuses a
-  # sign-in without the level. Set `"required"` at once when a company
-  # login is in front of MEHO's Keycloak.
-  approvalSignInLevel: "observe"
+  # (#6281)? Rendered into `APPROVAL_SIGN_IN_LEVEL`. `"auto"` (the
+  # default): refuses a sign-in without the level while MEHO's check of
+  # the approval sign-in (`approvals.sign_in` in `/api/v1/health`) is
+  # `ok`, else only logs it. `"off"`: no level check. `"observe"`:
+  # approves as before and logs `approval_sign_in_level_missing`.
+  # `"required"`: always refuses a sign-in without the level.
+  approvalSignInLevel: "auto"
   # -- Switches for what the agent sees. Each is off (`"false"`) by default
   # and stays off until model tests show it helps.
   # `teamKnowledgeRecall` is rendered into `TEAM_KNOWLEDGE_RECALL`. When

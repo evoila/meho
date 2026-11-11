@@ -71,11 +71,12 @@ const (
 
 // Defines values for ApprovalSignInStatusState.
 const (
-	ApprovalSignInStatusStateFlowDiffers ApprovalSignInStatusState = "flow_differs"
-	ApprovalSignInStatusStateFlowMissing ApprovalSignInStatusState = "flow_missing"
-	ApprovalSignInStatusStateNotBound    ApprovalSignInStatusState = "not_bound"
-	ApprovalSignInStatusStateNotChecked  ApprovalSignInStatusState = "not_checked"
-	ApprovalSignInStatusStateOk          ApprovalSignInStatusState = "ok"
+	ApprovalSignInStatusStateFlowDiffers  ApprovalSignInStatusState = "flow_differs"
+	ApprovalSignInStatusStateFlowMissing  ApprovalSignInStatusState = "flow_missing"
+	ApprovalSignInStatusStateNotBound     ApprovalSignInStatusState = "not_bound"
+	ApprovalSignInStatusStateNotChecked   ApprovalSignInStatusState = "not_checked"
+	ApprovalSignInStatusStateOk           ApprovalSignInStatusState = "ok"
+	ApprovalSignInStatusStateOtherGrantOn ApprovalSignInStatusState = "other_grant_on"
 )
 
 // Defines values for AuditEventClass.
@@ -2011,15 +2012,21 @@ type ApprovalSignInStatusState string
 // approval client's own login flow in Keycloak (#6280,
 // :mod:`meho_backplane.auth.approval_sign_in_flow`). “sign_in_level“
 // is the value of “APPROVAL_SIGN_IN_LEVEL“ (#6281): “off“,
-// “observe“ or “required“.
+// “observe“, “auto“ or “required“. “sign_in_level_in_force“ is
+// what MEHO does now with an approval sign-in that lacks the approval
+// level: “off“, “observe“ or “required“ (“auto“ is “required“
+// only while “sign_in“ is “ok“). “sign_in_level_warning“ is a short
+// sentence whenever the level is not required in practice, else “None“.
 type ApprovalsStatus struct {
 	Custody                  string `json:"custody"`
 	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
 	EffectivePosture         string `json:"effective_posture"`
 
 	// SignIn The state of the approval sign-in flow and its binding (#6280).
-	SignIn      *ApprovalSignInStatus `json:"sign_in,omitempty"`
-	SignInLevel *string               `json:"sign_in_level"`
+	SignIn             *ApprovalSignInStatus `json:"sign_in,omitempty"`
+	SignInLevel        *string               `json:"sign_in_level"`
+	SignInLevelInForce *string               `json:"sign_in_level_in_force"`
+	SignInLevelWarning *string               `json:"sign_in_level_warning"`
 }
 
 // ApproveRequestBody POST body for “…/approve“.
@@ -6633,7 +6640,11 @@ type HealthResponse struct {
 	// approval client's own login flow in Keycloak (#6280,
 	// :mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``
 	// is the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,
-	// ``observe`` or ``required``.
+	// ``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is
+	// what MEHO does now with an approval sign-in that lacks the approval
+	// level: ``off``, ``observe`` or ``required`` (``auto`` is ``required``
+	// only while ``sign_in`` is ``ok``). ``sign_in_level_warning`` is a short
+	// sentence whenever the level is not required in practice, else ``None``.
 	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 

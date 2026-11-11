@@ -8,9 +8,13 @@ with a recent ``auth_time``. ``APPROVAL_SIGN_IN_LEVEL`` adds a check of the
 token's ``acr``: only the approval sign-in flow gives ``meho-approve``, and
 the higher passkey touch level ``meho-touch`` counts too.
 
-* ``required``: any other ``acr`` gets the same ``401`` as an old sign-in;
-* ``observe`` (the default): the approve goes through, MEHO logs
+* ``required``: any other ``acr`` gets the same ``401`` as an old sign-in,
+  plus one sentence that names ``approvals.sign_in`` in ``/api/v1/health``
+  when the level is the one missing part;
+* ``observe``: the approve goes through, MEHO logs
   ``approval_sign_in_level_missing`` and the audit row says so;
+* ``auto`` (the default): ``required`` while MEHO's check of the approval
+  sign-in is ``ok``, else ``observe``;
 * ``off``: the checks as before.
 
 The requests go through the real REST route with signed tokens.
@@ -26,6 +30,9 @@ import httpx
 import pytest
 from structlog.testing import capture_logs
 
+from meho_backplane.auth import approval_sign_in_flow
+from meho_backplane.auth.approval_sign_in import LEVEL_MISSING_REMEDIATION
+from meho_backplane.auth.approval_sign_in_flow import ApprovalSignInStatus
 from meho_backplane.db.models import ApprovalRequestStatus
 from meho_backplane.settings import Settings, get_settings
 
@@ -43,7 +50,7 @@ from .test_api_v1_approvals_fresh_sign_in import (
 
 __all__ = ["_client", "_fake_resume", "_settings_env"]
 
-_MODES = ["off", "observe", "required"]
+_MODES = ["off", "observe", "auto", "required"]
 
 
 def _set_mode(monkeypatch: pytest.MonkeyPatch, mode: str | None) -> None:
@@ -52,6 +59,15 @@ def _set_mode(monkeypatch: pytest.MonkeyPatch, mode: str | None) -> None:
     else:
         monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", mode)
     get_settings.cache_clear()
+
+
+def _sign_in_state(monkeypatch: pytest.MonkeyPatch, state: str) -> None:
+    """Make MEHO's check of the approval sign-in answer *state*."""
+
+    async def read(_settings: Any = None) -> ApprovalSignInStatus:
+        return ApprovalSignInStatus(state=state, client="meho-cli-approve")  # type: ignore[arg-type]
+
+    monkeypatch.setattr(approval_sign_in_flow, "read_approval_sign_in", read)
 
 
 def _fresh(key: Any, **claims: Any) -> str:
@@ -115,11 +131,59 @@ async def test_required_refuses_a_token_without_the_approval_level(
         response = await _approve(ac, route, request_id, _fresh(key, **claims))
 
     _assert_challenge(response)
-    assert response.json()["detail"].startswith("fresh_sign_in_required:")
+    detail = response.json()["detail"]
+    assert detail.startswith("fresh_sign_in_required:")
+    # The extra sentence only when the level is the one missing part.
+    only_the_level = claims["acr"] in ("1", "2") and "azp" not in claims
+    assert detail.endswith(LEVEL_MISSING_REMEDIATION) is only_the_level
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
     assert _fake_resume == []
     refused = next(e for e in logs if e["event"] == "approval_sign_in_not_fresh")
     assert refused["approval_level"] is (claims["acr"] == "meho-approve")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["auto", None], ids=["auto", "default"])
+async def test_auto_requires_the_level_when_the_approval_sign_in_is_ok(
+    mode: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    _client: tuple[httpx.AsyncClient, Any],
+    _fake_resume: list[uuid.UUID],
+) -> None:
+    _set_mode(monkeypatch, mode)
+    _sign_in_state(monkeypatch, "ok")
+    ac, key = _client
+    request_id = await _park()
+
+    refused = await _approve(ac, "approve", request_id, _fresh(key, acr="1"))
+    _assert_challenge(refused)
+    assert refused.json()["detail"].endswith(LEVEL_MISSING_REMEDIATION)
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+
+    accepted = await _approve(ac, "approve", request_id, _fresh(key, acr="meho-approve"))
+    assert accepted.status_code == 200, accepted.text
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["flow_missing", "flow_differs", "not_bound", "not_checked"])
+async def test_auto_only_records_the_missing_level_while_the_approval_sign_in_is_not_ok(
+    state: str,
+    monkeypatch: pytest.MonkeyPatch,
+    _client: tuple[httpx.AsyncClient, Any],
+    _fake_resume: list[uuid.UUID],
+) -> None:
+    _set_mode(monkeypatch, "auto")
+    _sign_in_state(monkeypatch, state)
+    ac, key = _client
+    request_id = await _park()
+
+    with capture_logs() as logs:
+        response = await _approve(ac, "decide", request_id, _fresh(key, acr="1"))
+
+    assert response.status_code == 200, response.text
+    assert (await _approval_auth(request_id))["level_missing"] is True
+    assert [e for e in logs if e["event"] == "approval_sign_in_level_missing"]
 
 
 @pytest.mark.asyncio
@@ -130,7 +194,9 @@ async def test_observe_logs_and_records_the_missing_level_and_approves(
     _client: tuple[httpx.AsyncClient, Any],
     _fake_resume: list[uuid.UUID],
 ) -> None:
+    """The default (``auto``) acts so while the approval sign-in cannot be checked."""
     _set_mode(monkeypatch, mode)
+    _sign_in_state(monkeypatch, "not_checked")
     ac, key = _client
     request_id = await _park()
 
@@ -185,11 +251,11 @@ async def test_the_level_never_replaces_the_other_checks(
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
 
 
-def test_the_setting_defaults_to_observe_and_refuses_unknown_values(
+def test_the_setting_defaults_to_auto_and_refuses_unknown_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_mode(monkeypatch, None)
-    assert get_settings().approval_sign_in_level == "observe"
+    assert get_settings().approval_sign_in_level == "auto"
     _set_mode(monkeypatch, " Required ")
     assert get_settings().approval_sign_in_level == "required"
     with pytest.raises(ValueError, match="APPROVAL_SIGN_IN_LEVEL must be one of"):

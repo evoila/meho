@@ -508,8 +508,8 @@
         },
         "approvalSignInLevel": {
           "type": "string",
-          "enum": ["off", "observe", "required"],
-          "description": "Does an approve on the command line or REST need the approval level `meho-approve` (#6281)? Rendered into `APPROVAL_SIGN_IN_LEVEL`. `off`, `observe` (default) or `required`."
+          "enum": ["off", "observe", "auto", "required"],
+          "description": "Does an approve on the command line or REST need the approval level `meho-approve` (#6281)? Rendered into `APPROVAL_SIGN_IN_LEVEL`. `auto` (default: required while the approval sign-in check is ok), `off`, `observe` or `required`."
         },
         "teamKnowledgeRecall": {
           "type": "string",

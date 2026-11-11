@@ -37,7 +37,9 @@ func TestApprovalSignInCheck(t *testing.T) {
 		{"not bound", signInHealth(api.ApprovalSignInStatusStateNotBound, "the client meho-cli-approve has no own browser flow"), doctorWarn,
 			"has no own browser flow", "keycloak.authflow.ensure_approval_flow", false},
 		{"flow differs", signInHealth(api.ApprovalSignInStatusStateFlowDiffers, "the flow has 5 steps; wanted 4"), doctorWarn,
-			"other steps than MEHO's: the flow has 5 steps", "sets the flow back", false},
+			"differs from MEHO's: the flow has 5 steps", "the level step's settings", false},
+		{"other grant on", signInHealth(api.ApprovalSignInStatusStateOtherGrantOn, "the client meho-cli-approve allows direct grant"), doctorWarn,
+			"skips the login flow: the client meho-cli-approve allows direct grant", "turns off direct grant and device grant", false},
 		{"no right", signInHealth(api.ApprovalSignInStatusStateNotChecked, "no_right_to_read_login_flows"), doctorWarn,
 			"could not check the approval sign-in: no_right_to_read_login_flows", "view-realm", false},
 		{"unreachable", signInHealth(api.ApprovalSignInStatusStateNotChecked, "keycloak_unreachable"), doctorWarn,
@@ -67,6 +69,44 @@ func TestApprovalSignInCheck(t *testing.T) {
 				t.Errorf("exit code = %d, want 0: the line is a warning at most", doctorExitCode(r))
 			}
 		})
+	}
+}
+
+func TestApprovalLevelCheck(t *testing.T) {
+	str := func(v string) *string { return &v }
+	cases := []struct {
+		name      string
+		approvals *api.ApprovalsStatus
+		status    string
+		detailHas string
+	}{
+		{"required", &api.ApprovalsStatus{SignInLevelInForce: str("required")}, doctorOK, "needs the approval level"},
+		{"auto, sign-in not ok", &api.ApprovalsStatus{
+			SignInLevelInForce: str("observe"),
+			SignInLevelWarning: str("MEHO does not require the approval level: APPROVAL_SIGN_IN_LEVEL is auto and approvals.sign_in is not_bound, not ok."),
+		}, doctorWarn, "approvals.sign_in is not_bound"},
+		{"off", &api.ApprovalsStatus{
+			SignInLevelInForce: str("off"),
+			SignInLevelWarning: str("MEHO does not require the approval level: APPROVAL_SIGN_IN_LEVEL is off."),
+		}, doctorWarn, "APPROVAL_SIGN_IN_LEVEL is off"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &doctorReport{}
+			addApprovalLevelCheck(r, &api.HealthResponse{Approvals: tc.approvals})
+			c := findCheck(t, r, approvalLevelCheckName)
+			if c.Status != tc.status || !strings.Contains(c.Detail, tc.detailHas) {
+				t.Errorf("status/detail = %s/%q, want %s/%q", c.Status, c.Detail, tc.status, tc.detailHas)
+			}
+			if doctorExitCode(r) != 0 {
+				t.Errorf("exit code = %d, want 0", doctorExitCode(r))
+			}
+		})
+	}
+	r := &doctorReport{}
+	addApprovalLevelCheck(r, &api.HealthResponse{Approvals: &api.ApprovalsStatus{}})
+	if len(r.Checks) != 0 {
+		t.Errorf("an older backplane got a line: %v", r.Checks)
 	}
 }
 

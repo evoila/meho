@@ -65,10 +65,13 @@ def _step(level: int, name: str, requirement: str, *, flow: bool = False) -> dic
     }
 
 
-def _good_steps() -> list[dict[str, Any]]:
+def _good_steps(*, settings: str | None = "cfg-level") -> list[dict[str, Any]]:
+    level_step = _step(1, "conditional-level-of-authentication", "REQUIRED")
+    if settings:
+        level_step["authenticationConfig"] = settings
     return [
         _step(0, _LEVEL, "CONDITIONAL", flow=True),
-        _step(1, "conditional-level-of-authentication", "REQUIRED"),
+        level_step,
         _step(1, "auth-username-password-form", "REQUIRED"),
         _step(1, _SUB, "CONDITIONAL", flow=True),
         _step(2, "conditional-user-configured", "REQUIRED"),
@@ -76,8 +79,17 @@ def _good_steps() -> list[dict[str, Any]]:
     ]
 
 
-def _client(binding: str | None = _FLOW_ID) -> dict[str, Any]:
-    client: dict[str, Any] = {"id": "uuid-approve", "clientId": "meho-cli-approve"}
+_GOOD_CONFIG = {"loa-condition-level": "2", "loa-max-age": "0"}
+
+
+def _client(binding: str | None = _FLOW_ID, **fields: Any) -> dict[str, Any]:
+    client: dict[str, Any] = {
+        "id": "uuid-approve",
+        "clientId": "meho-cli-approve",
+        "directAccessGrantsEnabled": False,
+        "attributes": {"oauth2.device.authorization.grant.enabled": "false"},
+        **fields,
+    }
     if binding is not None:
         client["authenticationFlowBindingOverrides"] = {"browser": binding}
     return client
@@ -89,6 +101,8 @@ def _mount(
     flows: Any = None,
     steps: Any = None,
     clients: Any = None,
+    config: Any = None,
+    levels: Any = '{"meho-approve":2,"meho-touch":3}',
 ) -> None:
     """The realm: by default the flow of the realm file, bound to the client."""
     mock.post(_TOKEN).respond(200, json={"access_token": "made-up-token"})
@@ -106,6 +120,19 @@ def _mount(
         return_value=steps
         if isinstance(steps, httpx.Response)
         else httpx.Response(200, json=steps if steps is not None else _good_steps())
+    )
+    mock.get(f"{_ADMIN}/authentication/config/cfg-level").mock(
+        return_value=config
+        if isinstance(config, httpx.Response)
+        else httpx.Response(200, json={"config": config if config is not None else _GOOD_CONFIG})
+    )
+    mock.get(_ADMIN).mock(
+        return_value=levels
+        if isinstance(levels, httpx.Response)
+        else httpx.Response(
+            200,
+            json={"realm": "meho", "attributes": {} if levels is None else {"acr.loa.map": levels}},
+        )
     )
     mock.get(f"{_ADMIN}/clients", params={"clientId": "meho-cli-approve"}).mock(
         return_value=clients
@@ -208,6 +235,74 @@ async def test_a_flow_with_other_steps_is_flow_differs(
     assert status.detail is not None and status.detail.startswith(difference)
 
 
+@pytest.mark.parametrize(
+    ("realm", "difference"),
+    [
+        ({"steps": _good_steps(settings=None)}, "the level step has no settings"),
+        (
+            {"config": {"loa-condition-level": "1", "loa-max-age": "0"}},
+            "the level step has the settings",
+        ),
+        (
+            {"config": {"loa-condition-level": "2", "loa-max-age": "36000"}},
+            "the level step has the settings",
+        ),
+        ({"levels": None}, "the realm attribute acr.loa.map does not name level 2 meho-approve"),
+        (
+            {"levels": '{"meho-approve":3}'},
+            "the realm attribute acr.loa.map does not name level 2 meho-approve",
+        ),
+        ({"levels": "[2]"}, "the realm attribute acr.loa.map is not a JSON object"),
+        (
+            {"levels": '{"meho-approve":2,"gold":2}'},
+            "the name 'gold' already has level 2 in acr.loa.map",
+        ),
+        (
+            {"clients": [_client(attributes={"acr.loa.map": '{"gold":2}'})]},
+            "the client meho-cli-approve has its own acr.loa.map",
+        ),
+    ],
+    ids=[
+        "level step without settings",
+        "wrong level",
+        "level kept for a time",
+        "no level map",
+        "approval name on another level",
+        "level map not an object",
+        "another name on level 2",
+        "client has its own level map",
+    ],
+)
+async def test_a_realm_that_does_not_give_the_level_is_flow_differs(
+    realm: dict[str, Any], difference: str
+) -> None:
+    """``ok`` means the realm really gives the approval level; anything less is not ok."""
+    status = await _read(**realm)
+    assert status.state == "flow_differs"
+    assert status.detail is not None and status.detail.startswith(difference)
+
+
+@pytest.mark.parametrize(
+    ("client", "detail"),
+    [
+        (_client(directAccessGrantsEnabled=True), "allows direct grant"),
+        (
+            _client(attributes={"oauth2.device.authorization.grant.enabled": "true"}),
+            "allows device grant",
+        ),
+    ],
+    ids=["direct grant", "device grant"],
+)
+async def test_a_client_with_another_grant_is_other_grant_on(
+    client: dict[str, Any], detail: str
+) -> None:
+    status = await _read(clients=[client])
+    assert (status.state, status.detail) == (
+        "other_grant_on",
+        f"the client meho-cli-approve {detail}",
+    )
+
+
 # --- A failed read is "not_checked", never "ok" ----------------------------------
 
 
@@ -226,6 +321,8 @@ async def test_without_the_admin_client_it_is_not_checked(monkeypatch: pytest.Mo
         ({"flows": httpx.Response(403)}, "no_right_to_read_login_flows"),
         ({"steps": httpx.Response(403)}, "no_right_to_read_login_flows"),
         ({"clients": httpx.Response(403)}, "no_right_to_read_clients"),
+        ({"config": httpx.Response(403)}, "no_right_to_read_login_flows"),
+        ({"levels": httpx.Response(403)}, "no_right_to_read_realm"),
         ({"flows": httpx.Response(500)}, "keycloak_unexpected_answer"),
         ({"steps": httpx.Response(404)}, "keycloak_unexpected_answer"),
         ({"flows": httpx.Response(200, json={"alias": _FLOW})}, "keycloak_unexpected_answer"),
@@ -237,6 +334,8 @@ async def test_without_the_admin_client_it_is_not_checked(monkeypatch: pytest.Mo
         "flows 403",
         "steps 403",
         "clients 403",
+        "level settings 403",
+        "realm 403",
         "flows 500",
         "steps 404",
         "flows not a list",
@@ -349,3 +448,55 @@ async def test_health_shows_the_state_in_the_approvals_block(
         client="meho-cli-approve",
         detail="the client meho-cli-approve has no own browser flow",
     )
+
+
+@pytest.mark.parametrize(
+    ("mode", "realm", "in_force", "warned"),
+    [
+        ("auto", {}, "required", False),
+        ("auto", {"clients": [_client(None)]}, "observe", True),
+        ("auto", {"levels": None}, "observe", True),
+        ("required", {"clients": [_client(None)]}, "required", False),
+        ("observe", {}, "observe", True),
+        ("off", {}, "off", True),
+    ],
+    ids=[
+        "auto, realm gives the level",
+        "auto, client not bound",
+        "auto, no level name",
+        "required",
+        "observe",
+        "off",
+    ],
+)
+async def test_health_warns_whenever_the_level_is_not_required_in_practice(
+    mode: str,
+    realm: dict[str, Any],
+    in_force: str,
+    warned: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def vault(*_args: object, **_kwargs: object) -> VaultStatus:
+        return VaultStatus(reachable=True, read_ok=True, detail=None)
+
+    monkeypatch.setattr("meho_backplane.api.v1.health._probe_federation", vault)
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", mode)
+    get_settings.cache_clear()
+    operator = Operator(
+        sub="op-6281",
+        raw_jwt="<jwt>",
+        tenant_id=uuid.UUID("00000000-0000-0000-0000-000000006281"),
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.USER,
+    )
+    with respx.mock(assert_all_called=False) as mock:
+        _mount(mock, **realm)
+        response = await build_health_response(operator)
+
+    assert response.approvals is not None
+    assert response.approvals.sign_in_level == mode
+    assert response.approvals.sign_in_level_in_force == in_force
+    warning = response.approvals.sign_in_level_warning
+    assert (warning is not None) is warned
+    if warning is not None:
+        assert warning.startswith("MEHO does not require the approval level")

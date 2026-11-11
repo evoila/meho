@@ -95,6 +95,7 @@ from meho_backplane.auth.approval_sign_in import (
     check_fresh_approval_sign_in,
     fresh_sign_in_required,
 )
+from meho_backplane.auth.approval_sign_in_flow import sign_in_level_in_force
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.rbac import (
     require_approvals_access,
@@ -1781,9 +1782,12 @@ async def decide_approval_request(
         )
 
     # Approve needs a fresh approval sign-in (#3979, #5515); reject does not.
-    approval_auth = (
-        check_fresh_approval_sign_in(operator, get_settings()) if decision == "approved" else None
-    )
+    approval_auth = None
+    if decision == "approved":
+        settings = get_settings()
+        approval_auth = check_fresh_approval_sign_in(
+            operator, settings, level_in_force=await sign_in_level_in_force(settings)
+        )
     request = await _capture_operator_decision(
         request_id=request_id,
         decision=decision,

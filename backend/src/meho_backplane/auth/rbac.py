@@ -365,7 +365,7 @@ def require_human_principal(
     return operator
 
 
-def require_fresh_approval_sign_in(
+async def require_fresh_approval_sign_in(
     operator: Operator = Depends(verify_jwt_and_bind),
 ) -> ApprovalAuth:
     """FastAPI dependency: the token must come from a fresh approval sign-in (#3979, #5515).
@@ -376,4 +376,11 @@ def require_fresh_approval_sign_in(
     so a machine principal still gets its ``403`` first. Only for approve:
     a reject never runs anything and needs no fresh sign-in.
     """
-    return check_fresh_approval_sign_in(operator, get_settings())
+    # Imported here: the check reads Keycloak through the Keycloak connector
+    # package, and loading that package registers the connector.
+    from meho_backplane.auth.approval_sign_in_flow import sign_in_level_in_force
+
+    settings = get_settings()
+    return check_fresh_approval_sign_in(
+        operator, settings, level_in_force=await sign_in_level_in_force(settings)
+    )

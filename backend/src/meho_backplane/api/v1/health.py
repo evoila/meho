@@ -89,6 +89,8 @@ from pydantic import BaseModel, ConfigDict
 from meho_backplane.auth.approval_sign_in_flow import (
     ApprovalSignInStatus,
     read_approval_sign_in,
+    sign_in_level_for_state,
+    sign_in_level_warning,
 )
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.jwt import verify_jwt_allow_unchosen
@@ -345,7 +347,11 @@ class ApprovalsStatus(BaseModel):
     approval client's own login flow in Keycloak (#6280,
     :mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``
     is the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,
-    ``observe`` or ``required``.
+    ``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is
+    what MEHO does now with an approval sign-in that lacks the approval
+    level: ``off``, ``observe`` or ``required`` (``auto`` is ``required``
+    only while ``sign_in`` is ``ok``). ``sign_in_level_warning`` is a short
+    sentence whenever the level is not required in practice, else ``None``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -355,6 +361,8 @@ class ApprovalsStatus(BaseModel):
     delegated_decision_posture: str
     sign_in: ApprovalSignInStatus | None = None
     sign_in_level: str | None = None
+    sign_in_level_in_force: str | None = None
+    sign_in_level_warning: str | None = None
 
 
 class FeatureStatus(BaseModel):
@@ -981,6 +989,18 @@ def _approvals_and_features() -> tuple[ApprovalsStatus, list[FeatureStatus]]:
     return approvals, features
 
 
+def _with_sign_in(approvals: ApprovalsStatus, sign_in: ApprovalSignInStatus) -> ApprovalsStatus:
+    """Add the approval sign-in state and what it means for the approval level (#6281)."""
+    mode = approvals.sign_in_level or "auto"
+    return approvals.model_copy(
+        update={
+            "sign_in": sign_in,
+            "sign_in_level_in_force": sign_in_level_for_state(mode, sign_in.state),
+            "sign_in_level_warning": sign_in_level_warning(mode, sign_in.state),
+        }
+    )
+
+
 async def build_health_response(operator: Operator) -> HealthResponse:
     """Assemble the :class:`HealthResponse` for a validated operator.
 
@@ -999,7 +1019,7 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     vault_status = await _probe_federation(operator, log)
     db_state = await db_migration_status()
     approvals, features = _approvals_and_features()
-    approvals = approvals.model_copy(update={"sign_in": await read_approval_sign_in()})
+    approvals = _with_sign_in(approvals, await read_approval_sign_in())
     return HealthResponse(
         operator=_operator_identity(operator),
         vault=vault_status,

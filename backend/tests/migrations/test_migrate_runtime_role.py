@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
@@ -365,7 +366,10 @@ async def test_runner_waits_for_a_role_created_a_moment_later(owner_db: dict[str
 
     code, err = await _run_runner_until_it_waits(owner_db["owner_url"], role, _create)
     assert code == 0, err
-    assert f"migration_runtime_role_waiting: no role '{role}' yet; waited 0 s of 60 s" in err
+    # The elapsed seconds depend on runner speed; only the message counts.
+    assert re.search(
+        rf"migration_runtime_role_waiting: no role '{role}' yet; waited \d+ s of 60 s", err
+    ), err
     assert f"migration_runtime_role_granted: {role}" in err
 
 

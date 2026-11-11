@@ -135,7 +135,19 @@ service:
 #   registry: registry.example.com
 #   repository: meho/traefik
 #   tag: v3.7.17
+# Only when your registry needs a login: the pull secret of Traefik.
+# deployment:
+#   imagePullSecrets:
+#     - name: registry-pull
 ```
+
+A pod can only use a pull secret of its own namespace. So when your
+registry needs a login, Traefik needs its own pull secret in the
+namespace `traefik`. The one of Step 2.4 is in `meho` and does not
+count. Make it after the `kubectl label` line below and before
+`helm install`, with the command of Step 2.4 and `-n traefik` in place
+of `-n meho`. Without it, the Traefik pod stays in `ImagePullBackOff`
+and `helm install` ends with an error.
 
 Then install it:
 
@@ -190,11 +202,24 @@ namespace. The installer may do this too.
 kubectl -n meho create secret tls meho-tls --cert=tls.crt --key=tls.key
 ```
 
-You should see `secret/meho-tls created`. Without a certificate, the
-install makes a self-signed one. That is fine for a first test. If your
-certificate comes from an internal certificate authority, every laptop
-must trust it: see
+You should see `secret/meho-tls created`. If your certificate comes
+from an internal certificate authority, every laptop must trust it: see
 [Tools for your laptop](laptop-tools.md#step-1-trust-the-sites-own-certificate-authority).
+
+**Without a certificate**, the install makes a self-signed one, in the
+Secret `meho-core-tls`. That is fine for a first test, but your laptop
+must trust it before Step 5. Otherwise the `curl` lines of Step 5.2
+print nothing, and the install check and `meho login` fail with a
+certificate error. Right after Step 4, save the authority of that
+certificate:
+
+```bash
+kubectl -n meho get secret meho-core-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > meho-ca.crt
+```
+
+Then add `meho-ca.crt` to the trust store of your laptop, as in
+[Tools for your laptop](laptop-tools.md#step-1-trust-the-sites-own-certificate-authority).
+This file is a public certificate, not a secret.
 
 ## Step 2: With no internet: your own registry
 
@@ -243,8 +268,9 @@ crane digest registry.example.com/meho/evoila/meho:v0.45.0
 ```
 
 The two `crane digest` lines must print the same `sha256:` value. The
-pods pull every image by its digest, so the tag in your registry is only
-a label.
+pods pull the five images of the list by their digest, so for them the
+tag in your registry is only a label. MEHO's own image is pulled by its
+tag, `v0.45.0`.
 
 ### 2.3 The nodes must trust your registry
 

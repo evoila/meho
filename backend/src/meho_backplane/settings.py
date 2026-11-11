@@ -91,6 +91,11 @@ _SUPPORTED_BROADCAST_URL_SCHEMES: Final[tuple[str, ...]] = (
 #: backend of :func:`meho_backplane.agent.models.settings_model_resolver`.
 AGENT_MODEL_BACKENDS: Final[tuple[str, ...]] = ("anthropic", "openai", "bedrock", "vcf-paif")
 
+#: The values ``AGENT_GRANT_REQUIRED`` accepts (#6189). ``off`` keeps the
+#: risk-level default for an agent with no matching grant; ``observe``
+#: keeps it and logs what ``on`` would refuse; ``on`` refuses the call.
+AGENT_GRANT_REQUIRED_MODES: Final[tuple[str, ...]] = ("off", "observe", "on")
+
 #: Truthy spellings accepted by :func:`_parse_bool`. Anything else
 #: (including the empty string and "disabled") is treated as ``False``
 #: so a misconfigured env var never silently enables a guarded surface.
@@ -1391,6 +1396,16 @@ class Settings(BaseModel):
         switched (G11.5-T6 #1080). Case-insensitive; whitespace
         between values ignored. An empty string (the default) means no
         tenants are disabled. Set via ``AGENT_RUNS_DISABLED_TENANTS``.
+    agent_grant_required:
+        What happens when an agent login calls an operation and none of
+        its grants matches (#6189). ``off`` (the default): the risk-level
+        default, as before (``safe`` runs at once, every other level waits
+        for approval). ``observe``: the same, and MEHO logs
+        ``agent_no_grant_would_deny`` for each call that ``on`` would
+        refuse. ``on``: the call is refused on every risk level with the
+        code ``agent_no_grant``. People, service accounts and runners are
+        not affected. Any other value stops the start. Set via
+        ``AGENT_GRANT_REQUIRED``.
     vcf_paif_base_url:
         Base URL of the VCF Private AI Foundation OpenAI-compatible
         endpoint (G11.5-T4 #1078), **including** the fixed sub-path
@@ -2184,6 +2199,9 @@ class Settings(BaseModel):
     # exactly like the global switch. An empty string (the default) is
     # "no tenants disabled". Set via ``AGENT_RUNS_DISABLED_TENANTS``.
     agent_runs_disabled_tenants: str = ""
+    # #6189 — "no grant, no rights" for agent logins. See the class
+    # docstring; read by ``auth/permissions.py::resolve_verdict``.
+    agent_grant_required: str = "off"
     # G11.5-T4 #1078 — VCF Private AI Foundation backend. PAIF is the
     # air-gapped enterprise target: OpenAI-compatible wire format under
     # a fixed ``/api/v1/compatibility/openai/v1/`` sub-path, OpenID
@@ -2590,6 +2608,19 @@ class Settings(BaseModel):
         if value not in AGENT_MODEL_BACKENDS:
             allowed = ", ".join(AGENT_MODEL_BACKENDS)
             raise ValueError(f"AGENT_MODEL_BACKEND must be one of: {allowed}. Got: {value!r}")
+        return value
+
+    @field_validator("agent_grant_required")
+    @classmethod
+    def _agent_grant_required_must_be_known(cls, value: str) -> str:
+        """Stop the start when ``AGENT_GRANT_REQUIRED`` is not off, observe or on.
+
+        A typo must not leave agents with rights the operator meant to
+        take away, so an unknown value fails at startup.
+        """
+        if value not in AGENT_GRANT_REQUIRED_MODES:
+            allowed = ", ".join(AGENT_GRANT_REQUIRED_MODES)
+            raise ValueError(f"AGENT_GRANT_REQUIRED must be one of: {allowed}. Got: {value!r}")
         return value
 
     @field_validator("result_cache_redis_url")
@@ -3365,6 +3396,7 @@ def get_settings() -> Settings:
             "AGENT_RUNS_DISABLED_TENANTS",
             "",
         ),
+        agent_grant_required=os.environ.get("AGENT_GRANT_REQUIRED", "").strip().lower() or "off",
         vcf_paif_base_url=os.environ.get("VCF_PAIF_BASE_URL", "").strip(),
         vcf_paif_model=os.environ.get(
             "VCF_PAIF_MODEL",

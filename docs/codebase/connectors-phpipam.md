@@ -36,7 +36,9 @@ So there is nothing to ingest, and the four operations are written by hand.
 
 The version `1.x` is the phpIPAM major version. phpIPAM's API does not report
 its version, so the fingerprint leaves `version` empty and
-`supported_version_range` is not set. The wildcard row lets every `phpipam`
+`supported_version_range` is not set. The class says why in
+`version_range_reason`: the connector is built from the 1.8.2 API reference.
+The wildcard row lets every `phpipam`
 target find the connector.
 
 ## Setup in phpIPAM

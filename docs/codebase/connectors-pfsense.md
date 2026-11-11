@@ -582,6 +582,26 @@ Design notes:
   `mgmt_nets` (a list of `{cidr, leg}`) are **required** params; `mgmt_ports`
   defaults to the vendor-generic 443/22/902/5480 class; `baseline_src` is
   optional. The domain-specific values live in the pinning Sensor's `params`.
+- **`baseline_src` takes two kinds of entries in one list.** A string
+  (address or CIDR) marks the source as known for every management network and
+  port. An object `{"src", "dst", "ports"}` marks the source as known only for
+  connections to `dst`, on those `ports` (without `ports`, every management
+  port on `dst`). `src` and `dst` are required. The check runs per open
+  connection. A source that matches an object entry stays non-sanctioned, so
+  only `unexpected_sources` changes: its `ports` list the ports that no entry
+  covers. An entry that cannot be read (bad address, bad or empty `ports`)
+  hides nothing. Example:
+
+  ```json
+  "baseline_src": [
+    "203.0.113.0/24",
+    {"src": "192.0.2.10/32", "dst": "198.51.100.20/32", "ports": [443]}
+  ]
+  ```
+
+  With this list, `192.0.2.10` to `198.51.100.20` on 443 is known. The same
+  source to `198.51.100.20` on 22, or to `198.51.100.21` on 443, is
+  unexpected. Any source in `203.0.113.0/24` is known everywhere.
 - **Zero firewall change.** It classifies the live state table (the same
   zero-change source as the stage-1 report's `states` mode), so no counting /
   logging rule is required. The trade-off is snapshot semantics — a flow that

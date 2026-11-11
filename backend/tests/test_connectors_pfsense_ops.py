@@ -1507,6 +1507,70 @@ def test_classify_mgmt_flows_nat_translated_line_counted_unparsed_not_all_clear(
     assert "198.51.100.7" not in unexpected_srcs
 
 
+_PAIR_STATES = (
+    "vmx6 tcp 10.11.16.9:443 <- 192.0.2.10:50001  ESTABLISHED:ESTABLISHED\n"
+    "vmx6 tcp 10.11.16.9:22 <- 192.0.2.10:50002  ESTABLISHED:ESTABLISHED\n"
+    "vmx6 tcp 10.11.16.10:443 <- 192.0.2.10:50003  ESTABLISHED:ESTABLISHED\n"
+)
+
+
+def _classify_pairs(baseline: list[Any]) -> dict[str, Any]:
+    return classify_mgmt_flows(
+        parse_pfctl_states(_PAIR_STATES),
+        sanctioned_src=_SANCTIONED,
+        mgmt_nets=_MGMT_NETS,
+        baseline_src=baseline,
+    )
+
+
+def test_baseline_pair_entry_hides_only_the_named_destination_and_port() -> None:
+    entry = {"src": "192.0.2.10/32", "dst": "10.11.16.9/32", "ports": [443]}
+    result = _classify_pairs(["203.0.113.0/24", entry])
+    rows = {(r["src"], tuple(r["ports"])) for r in result["unexpected_sources"]}
+    # 443 to .9 is known; 22 to .9 and 443 to .10 stay unexpected (one row, ports 22 and 443).
+    assert result["unexpected_source_count"] == 1
+    assert rows == {("192.0.2.10", (22, 443))}
+    assert result["unexpected_sources"][0]["states"] == 2
+    # The source stays non-sanctioned: all three states are counted.
+    assert result["non_sanctioned_state_count"] == 3
+    assert result["non_sanctioned_source_count"] == 1
+
+
+def test_baseline_pair_entry_without_ports_hides_every_port_on_dst() -> None:
+    result = _classify_pairs([{"src": "192.0.2.10", "dst": "10.11.16.9"}])
+    assert [r["ports"] for r in result["unexpected_sources"]] == [[443]]
+
+
+def test_baseline_pair_entry_hiding_everything_keeps_non_sanctioned_count() -> None:
+    baseline = [{"src": "192.0.2.10", "dst": "10.11.16.0/24"}]
+    result = _classify_pairs(baseline)
+    assert result["unexpected_source_count"] == 0
+    assert result["non_sanctioned_source_count"] == 1
+    assert result["non_sanctioned_state_count"] == 3
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"src": "192.0.2.10", "dst": "not-an-address", "ports": [443]},
+        {"src": "not-an-address", "dst": "10.11.16.9"},
+        {"src": "192.0.2.10", "dst": "10.11.16.9", "ports": ["443"]},
+        {"src": "192.0.2.10", "dst": "10.11.16.9", "ports": []},
+        {"src": "192.0.2.10"},
+    ],
+)
+def test_baseline_pair_entry_that_cannot_be_read_hides_nothing(entry: dict[str, Any]) -> None:
+    result = _classify_pairs([entry])
+    assert result["unexpected_source_count"] == 1
+    assert result["unexpected_sources"][0]["ports"] == [22, 443]
+    assert result["unexpected_sources"][0]["states"] == 3
+
+
+def test_baseline_strings_only_behave_as_before() -> None:
+    result = _classify_pairs(["192.0.2.0/24"])
+    assert result["unexpected_source_count"] == 0
+
+
 @pytest.mark.asyncio
 async def test_mgmt_flow_summary_handler_classifies_state_table() -> None:
     connector = PfSenseConnector()

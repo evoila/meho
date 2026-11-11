@@ -188,7 +188,7 @@ postgres:
 vault:
   address: https://vault.example.lab
   authMethod: oidc
-  # Provisioned by the consumer by the consumer (Vault role
+  # Provisioned by the consumer (Vault role
   # bound to the Keycloak issuer configured above).
   role: meho-mcp
   paths:
@@ -274,7 +274,7 @@ networkPolicy:
   # MUST be substituted: site-specific CIDRs. The schema's IPv4-CIDR
   # pattern rejects `<REPLACE: ...>` literals so a forgotten substitution
   # fails-loud at `helm install` time. Recover the actual CIDRs from
-  # `kubectl get endpoints <svc> -n <ns> -o yaml` against the the platform cluster
+  # `kubectl get endpoints <svc> -n <ns> -o yaml` against the platform cluster
   # PG / vault.example.lab / keycloak.example.lab services.
   postgresCIDR: "<REPLACE: the platform cluster Postgres CIDR, e.g. 10.0.1.0/24>"
   vaultCIDR: "<REPLACE: vault.example.lab CIDR, e.g. 10.0.2.0/24>"

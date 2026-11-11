@@ -55,6 +55,7 @@ own page:
 | `/ui/runners` | [`satellite-runner.md`](satellite-runner.md) |
 | `/ui/automation`, `/ui/pairing` | [`addon-pairing.md`](addon-pairing.md) |
 | `/ui/connectors/overrides` | [`spec-ingestion.md`](spec-ingestion.md) |
+| `/ui/policy/classify` | [`policy-classification.md`](policy-classification.md) |
 | `/ui/keycloak` | [`ui-keycloak-console.md`](ui-keycloak-console.md) |
 | `/ui/agents/{name}/run` | [`ui-agent-run-console.md`](ui-agent-run-console.md) |
 | `/ui/sensors` | the `meho_backplane.ui.routes` row of "Key types" below, and [`sensor.md`](sensor.md) |

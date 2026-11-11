@@ -1305,6 +1305,25 @@ meho connector catalog list [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 
+### `meho connector classify`
+
+Set the category, labels or "always wait" of operations, one at a time or by pattern
+
+```
+meho connector classify [flags]
+```
+
+- `--always-wait` — every call of a matched operation waits for approval
+- `--apply` — ask for the change (without it: dry run only)
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--category` — a category of the taxonomy, for example network
+- `--connector` — connector id pattern, for example vault-1.x
+- `--group` — operation group key pattern
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--label` — a key=value label (repeat for more); replaces the labels of this entry
+- `--no-always-wait` — back to the operation's own approval value (never below it)
+- `--op` — operation id pattern, for example 'k8s.deployment.*'
+
 ### `meho connector delete`
 
 Remove a connector from your tenant (its operations and groups; the built-in copy stays)
@@ -1338,7 +1357,9 @@ meho connector edit-group <connector_id> <group_key> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--category` — a category of the taxonomy, for example network
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--label` — a key=value label (repeat for more); replaces the labels of this entry
 - `--name` — replacement display name; supports `@<path>` to read from a file
 - `--when-to-use` — replacement when_to_use text; supports `@<path>` to read from a file
 
@@ -1351,10 +1372,12 @@ meho connector edit-op <connector_id> <op_id> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--category` — a category of the taxonomy, for example network
 - `--custom-description` — replacement custom_description; supports `@<path>` to read from a file
 - `--disable` — set is_enabled=false on this op
 - `--enable` — set is_enabled=true on this op
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--label` — a key=value label (repeat for more); replaces the labels of this entry
 - `--no-requires-approval` — clear the requires_approval flag
 - `--reason` — why you make this change; written to the audit row and required to turn approval off
 - `--requires-approval` — mark the op as requiring an approval workflow

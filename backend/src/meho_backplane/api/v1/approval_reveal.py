@@ -11,8 +11,10 @@ value; MEHO stores the run result without it. ``meho secret read --approval
 
 HTTP status codes:
 
-* 200 -- the read ran. The body is the run result; ``status`` says how it
-  ended (``ok`` with the value, or an error without one).
+* 200 -- the operation ran. It may be a read, or an operation that changes
+  something (for example it creates a token). The body is the run result;
+  ``status`` says how it ended (``ok`` with the value, or an error without
+  one).
 * 403 -- the caller did not send the request.
 * 404 -- no such request in the caller's tenant.
 * 409 -- the fetch is refused and nothing ran: the request is not a reveal,
@@ -69,7 +71,9 @@ async def reveal_approved_request(
     """Run an approved secret reveal once and return the value to the person who asked."""
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.reveal",
-        audit_op_class="read",
+        # The answer holds a secret value, and the run may change something.
+        # So the record of this call is never a plain read.
+        audit_op_class="credential_read",
         audit_approval_request_id=str(request_id),
     )
     try:

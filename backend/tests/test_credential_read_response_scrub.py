@@ -1016,7 +1016,7 @@ async def test_http_approve_of_a_read_reveal_holds_no_value(
     body: dict[str, Any],
 ) -> None:
     """``/approve`` and ``/decide``, sync and async: the answer body holds no value."""
-    monkeypatch.setattr(approvals_api, "get_operation_run_service", lambda: _NoBackgroundRun())
+    monkeypatch.setattr(approvals_api, "get_operation_run_service", _NoBackgroundRun)
     await _register_vault_read(stub_embedding_service)
     request_id = await _parked_reveal()
 
@@ -1080,7 +1080,7 @@ async def test_approving_a_credential_create_with_a_reveal_runs_it_only_for_the_
     hold no value. The person who asked runs it once and gets the value; a
     second fetch is refused.
     """
-    monkeypatch.setattr(approvals_api, "get_operation_run_service", lambda: _NoBackgroundRun())
+    monkeypatch.setattr(approvals_api, "get_operation_run_service", _NoBackgroundRun)
     await _register_mint(stub_embedding_service)
     request_id = await _parked_reveal(_MINT_OP, _MINTED_SECRET_ID)
 

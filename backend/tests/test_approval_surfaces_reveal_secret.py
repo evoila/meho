@@ -135,6 +135,13 @@ def test_rest_view_says_when_the_approved_request_waits_for_the_requester() -> N
     # and the view says it changes something when it runs.
     assert _view(write).waits_for_requester is True
     assert _view(write).reveal_changes_something is True
+    # An op the class rules do not know as a read (here an apply) counts as
+    # a change too: only a read is a read.
+    other_rid = _seed_request(tenant_id=_TENANT_A, op_id="k8s.apply")
+    _set_reveal(other_rid)
+    other = _load(other_rid)
+    assert _view(other).waits_for_requester is True
+    assert _view(other).reveal_changes_something is True
 
 
 def test_mcp_list_and_get_return_the_reveal_choice() -> None:

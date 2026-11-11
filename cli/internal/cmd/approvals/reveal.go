@@ -13,7 +13,7 @@ import (
 
 // revealNotice is the line every approval view prints when the requester
 // asked for the hidden values of the answer (reveal_secret: true).
-const revealNotice = "Hidden values: the approved run returns the secret values to the requester."
+const revealNotice = "Hidden values: approving runs nothing. It runs once, when the requester gets the secret values."
 
 // dispatchWaitingForRequester is the dispatch_status of an approve of a
 // request that shows secret values (a read, or an operation that creates a
@@ -45,8 +45,8 @@ func requesterFetchNote(id string) string {
 		"time limit, they must ask again.", safe, safe)
 }
 
-// printRevealNotice writes revealNotice, after indent, when the approved run
-// of d returns the hidden values to the requester. It writes nothing
+// printRevealNotice writes revealNotice, after indent, when the requester of
+// d asked for the hidden values of the answer. It writes nothing
 // otherwise.
 func printRevealNotice(w io.Writer, indent string, d *api.ApprovalRequestView) {
 	if d.RevealSecret != nil && *d.RevealSecret {

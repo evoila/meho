@@ -61,8 +61,8 @@ __all__ = [
 WAITING_FOR_REQUESTER: Final[str] = "waiting_for_requester"
 
 #: The op classes (:func:`~meho_backplane.broadcast.events.classify_op`) of an
-#: operation that changes something.
-_WRITE_CLASSES: Final[frozenset[str]] = frozenset({"write", "credential_write", "credential_mint"})
+#: operation that only reads. Every other class counts as a change.
+_READ_CLASSES: Final[frozenset[str]] = frozenset({"read", "credential_read"})
 
 #: Status code of the ``approval.reveal`` audit row of a refused fetch.
 _REFUSED_STATUS_CODE: Final[int] = 409
@@ -98,8 +98,12 @@ def is_write_reveal(request: ApprovalRequest) -> bool:
 
     Such a request has not changed anything after the approve. An approve
     in order stops at it, so the steps after it do not run before it.
+
+    Only an operation of class ``read`` or ``credential_read`` counts as a
+    read. Every other class counts as a change, also ``other`` (for example
+    an apply, a scale, or a reboot). When in doubt, the approve in order stops.
     """
-    return is_secret_reveal(request) and classify_op(request.op_id) in _WRITE_CLASSES
+    return is_secret_reveal(request) and classify_op(request.op_id) not in _READ_CLASSES
 
 
 def reveal_fetch_window() -> timedelta:

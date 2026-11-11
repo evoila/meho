@@ -694,6 +694,41 @@ def test_a_write_reveal_waiting_for_the_requester_stops_the_run() -> None:
     assert resume.await_count == 1
 
 
+def test_a_reveal_on_an_op_of_class_other_stops_the_run() -> None:
+    """Only a read counts as a read. An op the class rules do not know (for
+    example an apply) may change something, so the steps after it wait."""
+    session_id = _session()
+    s1 = _seed(1, "caution", op_id="k8s.apply", reveal_secret=True)
+    s2 = _seed(2, "caution")
+    resume = _fake_reveal_resume()
+
+    response = _post(session_id, resume)
+
+    assert 'data-approval-in-order-stopped="1"' in response.text
+    assert "The steps after it wait until then" in response.text
+    assert _request_status(s1) == "approved"
+    assert _request_status(s2) == "pending"
+    assert resume.await_count == 1
+
+
+def test_an_earlier_approved_reveal_not_yet_fetched_stops_with_a_clear_message() -> None:
+    """On a new run, a reveal approved earlier and not fetched yet still holds
+    the steps after it. The message says it waits for the person who asked,
+    not that its run failed."""
+    session_id = _session()
+    _seed(1, "caution", status_value="approved", op_id="vault.kv.put", reveal_secret=True)
+    s2 = _seed(2, "caution")
+    resume = _fake_reveal_resume()
+
+    response = _post(session_id, resume)
+
+    assert 'data-approval-in-order-stopped="1"' in response.text
+    assert "Approved earlier. It did not run yet" in response.text
+    assert "did not end OK" not in response.text
+    assert _request_status(s2) == "pending"
+    resume.assert_not_awaited()
+
+
 def test_rejected_predecessor_stops_the_run() -> None:
     session_id = _session()
     _seed(1, "caution", status_value="rejected")

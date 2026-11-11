@@ -1624,11 +1624,19 @@ for the person who asked, not a run. The code is in
   prints how the person who asked gets the value.
 - **An approve in order stops at a change that has not happened.**
   `ApprovalRequestView.reveal_changes_something` is `true` when such a
-  request also changes something when it runs (a write class, for
-  example a credential write or a token create; `is_write_reveal`). The
-  console in-order page and `meho approvals approve --in-order` stop at
-  such a step, so the steps after it do not run before it. After a read
-  they go on: a read changes nothing.
+  request may change something when it runs (`is_write_reveal`). Only
+  an op of class `read` or `credential_read` counts as a read. Every
+  other class counts as a change: a credential write, a token create,
+  and also class `other` (for example an apply, a scale or a reboot).
+  The console in-order page and `meho approvals approve --in-order` stop
+  at such a step, so the steps after it do not run before it. After a
+  read they go on: a read changes nothing. On a later in-order run, a
+  reveal approved earlier and not fetched yet still stops the run, with
+  a message that it waits for the person who asked.
+- **The audit class of the fetch.** The HTTP record of `POST
+  /api/v1/approvals/{id}/reveal` has class `credential_read`, never a
+  plain `read`: its answer holds a secret value, and the run may change
+  something.
 - **The person who asked fetches the value.** `POST
   /api/v1/approvals/{id}/reveal` (`api/v1/approval_reveal.py`), the
   console's "Show value" button (`POST /ui/vault/read/reveal`) and `meho

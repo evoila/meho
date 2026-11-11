@@ -121,7 +121,11 @@ from meho_backplane.operations.approval_rights import (
     approve_right,
     self_approval_confirmation,
 )
-from meho_backplane.operations.approved_reveal import WAITING_FOR_REQUESTER, is_write_reveal
+from meho_backplane.operations.approved_reveal import (
+    WAITING_FOR_REQUESTER,
+    is_secret_reveal,
+    is_write_reveal,
+)
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.routes import login_location
@@ -394,6 +398,14 @@ def _settle_approved_step(step: _Step) -> None:
         step.outcome, step.detail = "stopped", f"Approved earlier. {_NOT_ENDED}"
     elif state == ApprovalResultState.UNCERTAIN:
         step.outcome, step.detail = "stopped", f"Approved earlier. {UNCERTAIN_ADVICE}"
+    elif state == ApprovalResultState.NOT_STARTED and is_secret_reveal(step.row):
+        # Not a failed run: it runs only when the person who asked gets the
+        # value, and that has not happened yet.
+        step.outcome, step.detail = (
+            "stopped",
+            "Approved earlier. It did not run yet: it runs when the person who "
+            "asked gets the value. The steps after it wait until then.",
+        )
     else:
         step.outcome = "stopped"
         step.detail = f"Approved earlier, but its run did not end OK. {_ONE_USE}"

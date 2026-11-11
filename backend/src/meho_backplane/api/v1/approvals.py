@@ -373,8 +373,9 @@ class ApprovalRequestView(BaseModel):
     preview_hash: str | None = None
     proposed_effect: dict[str, Any]
     #: The requester asked for the hidden values of the answer
-    #: (``reveal_secret: true``). When ``True``, the approved run returns
-    #: the secret values to the requester. Read off the row. Additive.
+    #: (``reveal_secret: true``). When ``True``, the run happens when the
+    #: requester fetches the value, and that fetch returns the secret values.
+    #: Read off the row. Additive.
     reveal_secret: bool = False
     #: ``True`` for every request with ``reveal_secret``: a read that shows
     #: secret values, or an operation that creates a credential. Approving it
@@ -383,9 +384,10 @@ class ApprovalRequestView(BaseModel):
     #: waiting for a run. Additive.
     waits_for_requester: bool = False
     #: ``True`` when such a request also changes something when it runs
-    #: (for example it creates a token). Until the person who asked gets the
-    #: value, the change has not happened, so an approve in order stops at
-    #: it. Additive.
+    #: (for example it creates a token). Only an operation that only reads
+    #: (class ``read`` or ``credential_read``) gives ``False``; every other
+    #: class gives ``True``. Until the person who asked gets the value, the
+    #: change has not happened, so an approve in order stops at it. Additive.
     reveal_changes_something: bool = False
     status: ApprovalRequestStatus
     #: Run phase of an approved request (#3486): ``not_started`` /

@@ -195,6 +195,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "operation_search_store_query_text",
         "params_hash_key",
         "per_action_sign_in_max_age_seconds",
+        "policy_classification",
         "raw_payload_prune_enabled",
         "raw_payload_prune_interval_seconds",
         "raw_payload_retention_days",

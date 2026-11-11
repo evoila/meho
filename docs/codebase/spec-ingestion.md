@@ -1154,6 +1154,11 @@ upgrade and a new ingest of the API description.
   `requires_approval=false` (see below). A destructive operation always
   requires approval.
 
+With the `POLICY_CLASSIFICATION` switch on, a classification entry for the
+connector, group or operation can raise the level further or add a wait,
+after the overrides and before the floors; see
+[policy-classification.md](policy-classification.md).
+
 `lookup_descriptor` (dispatch, preview, checks, gateway mint, governed
 sub-operations, service grants), the operation contract,
 `search_operations` hits, `describe_descriptor` (`GET

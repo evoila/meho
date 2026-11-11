@@ -1484,6 +1484,14 @@ class Settings(BaseModel):
         stay the same. A small model keeps more of its context window for
         the job. It stays off until model tests show it helps. Env
         ``MCP_SHORT_TOOL_TEXTS``.
+    policy_classification:
+        Off by default. When on, each connector, operation group and
+        operation can carry a category, labels and an "always wait" mark,
+        and an operation takes the values of its group and connector
+        (:mod:`meho_backplane.policy.classification`). When off, MEHO reads
+        none of it and every operation keeps today's risk level and
+        approval. Env ``POLICY_CLASSIFICATION``; Helm
+        ``config.policy.classification``.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -2370,6 +2378,7 @@ class Settings(BaseModel):
     mcp_topology_off_default_list: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    policy_classification: bool = False
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
     #: forwarded operator JWT. Empty ("") means the add-on is not
@@ -3418,6 +3427,9 @@ def get_settings() -> Settings:
         ),
         mcp_short_tool_texts=parse_bool_env(
             os.environ.get("MCP_SHORT_TOOL_TEXTS"),
+        ),
+        policy_classification=parse_bool_env(
+            os.environ.get("POLICY_CLASSIFICATION"),
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),

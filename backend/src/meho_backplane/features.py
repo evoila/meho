@@ -531,6 +531,22 @@ def _vault_tenant_scope_block(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _policy_block(settings: Settings) -> dict[str, Any]:
+    """The policy switches, so ``/ready`` shows which are on.
+
+    ``classification`` is the ``POLICY_CLASSIFICATION`` switch: category,
+    labels and "always wait" on connectors, operation groups and
+    operations (:mod:`meho_backplane.policy.classification`). It is off by
+    default. Nothing is missing when it is off, so ``configured`` is always
+    ``True`` and ``missing_env`` is always empty.
+    """
+    return {
+        "configured": True,
+        "classification": settings.policy_classification,
+        "missing_env": [],
+    }
+
+
 def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
     """Return the ``features`` block exposed under ``/ready``.
 
@@ -583,7 +599,9 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
                                  "docs": "docs/codebase/connectors-vault-tenant-scope.md",
                                  "maturity": "ga"},
           "mcp":            {"configured": true,   "protocol_version": "...",
-                             "short_tool_texts": <bool>, "missing_env": []}
+                             "short_tool_texts": <bool>, "missing_env": []},
+          "policy":         {"configured": true, "classification": <bool>,
+                             "missing_env": []}
         }
     """
     block: dict[str, dict[str, Any]] = {
@@ -594,6 +612,7 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
         "approval_custody": _approval_custody_block(settings),
         "vault_tenant_scope": _vault_tenant_scope_block(settings),
         "mcp": _mcp_block(settings),
+        "policy": _policy_block(settings),
     }
     for entry_name, feature_key in _READY_ENTRY_FEATURE.items():
         block[entry_name].update(FEATURE_MATURITY[feature_key])

@@ -42,14 +42,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import select
 from structlog.testing import capture_logs
 
-import meho_backplane.operations.approval_queue as approval_queue_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog, Tenant
-from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations import approval_queue, reset_dispatcher_caches
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, register_preview_builder
-from meho_backplane.operations.approval_queue import record_approval_step_event
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.settings import get_settings
 from meho_backplane.web_push import send as send_module
@@ -228,7 +226,7 @@ def _request(
 
 
 async def _step(request: ApprovalRequest, decision: str = "pending") -> None:
-    await record_approval_step_event(
+    await approval_queue.record_approval_step_event(
         tenant_id=_TENANT, request=request, decision=decision, audit_id=uuid.uuid4()
     )
     await send_module.wait_for_sends_for_testing()
@@ -391,7 +389,7 @@ async def test_the_rate_limit_holds_and_ends_with_one_summary(
 
     started = time.monotonic()
     for _ in range(4):
-        await record_approval_step_event(
+        await approval_queue.record_approval_step_event(
             tenant_id=_TENANT, request=_request(), decision="pending", audit_id=uuid.uuid4()
         )
     await send_module.wait_for_sends_for_testing()
@@ -414,12 +412,12 @@ async def test_a_burst_of_decisions_gives_one_decision_message(
 
     # No reset in between: 5 new requests, then all 5 expire.
     for request in requests:
-        await record_approval_step_event(
+        await approval_queue.record_approval_step_event(
             tenant_id=_TENANT, request=request, decision="pending", audit_id=uuid.uuid4()
         )
     for request in requests:
         request.status = "expired"
-        await record_approval_step_event(
+        await approval_queue.record_approval_step_event(
             tenant_id=_TENANT, request=request, decision="expired", audit_id=uuid.uuid4()
         )
     await send_module.wait_for_sends_for_testing()
@@ -431,7 +429,9 @@ async def test_a_burst_of_decisions_gives_one_decision_message(
         "Approvals changed",
     ]
     # Only the request whose first message was shown gets its decision at once.
-    assert messages[0]["tag"] == messages[1]["tag"] == f"approval-{requests[0].id}"
+    # The sends run in parallel, so any of the 5 requests can be the shown one.
+    assert messages[0]["tag"] == messages[1]["tag"]
+    assert messages[0]["tag"] in {f"approval-{r.id}" for r in requests}
     assert messages[2]["body"] == "8 more approval messages. Open the approvals page."
 
 
@@ -652,7 +652,7 @@ async def test_a_failed_commit_sends_nothing(
     push_service: _FakePushService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     await _subscribe(_browser("admin"), sub="admin", scope="all")
-    real_create = approval_queue_module.create_pending_request
+    real_create = approval_queue.create_pending_request
 
     async def _create_then_fail_commit(session: Any, **kwargs: Any) -> ApprovalRequest:
         request = await real_create(session, **kwargs)
@@ -663,7 +663,7 @@ async def test_a_failed_commit_sends_nothing(
         monkeypatch.setattr(session, "commit", _refuse)
         return request
 
-    monkeypatch.setattr(approval_queue_module, "create_pending_request", _create_then_fail_commit)
+    monkeypatch.setattr(approval_queue, "create_pending_request", _create_then_fail_commit)
 
     result = await _park_destructive([0.1] * 384)
 

@@ -35,7 +35,9 @@
 # `python-unit-shard` (heavy pool), `python-integration-shard`,
 # `python-migration-tests` and the nightly coverage jobs. Every moved job
 # keeps its name, `if:` guard and triggers, so the required checks are
-# unchanged.
+# unchanged. Merge-queue runs are the exception (#6325): there these jobs
+# and the merge-queue watchdog use the internal `meho-runners-ci` pool, so
+# the queue never waits for GitHub-hosted runners.
 #
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
@@ -259,7 +261,8 @@ jobs:
     # Same fork-PR guard as the other jobs; the dependent jobs re-check
     # head.repo in their own `if:`.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     # actions: read lets the step `map` list and download the test map
     # artifact of the nightly run (#5642).
@@ -520,7 +523,7 @@ jobs:
     # python-unit-lane fan-in below. Whole-tree ruff + ruff format + mypy: none
     # of it is shardable by test file, none of it needs testcontainers / the
     # vendor spec-shelf / the embedding or spaCy models, and it is CPU-cheap
-    # (~1-2 min), so it runs ONCE here on a GitHub-hosted runner rather than N
+    # (~1-2 min), so it runs ONCE here on a small runner rather than N
     # times inside every pytest shard. Nothing in it needs the internal network
     # (#4626). Same fork-PR guard as every other job,
     # plus the #3252 docs-only skip: a proven docs-only PR skips this job (and
@@ -536,7 +539,8 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true' &&
        needs.changes.outputs.backend_python != 'false')
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # Twice the ~1-2 min observed cost, per the file's per-job cap convention.
     timeout-minutes: 10
     defaults:
@@ -634,7 +638,7 @@ jobs:
        needs.changes.outputs.backend_python != 'false')
     # The heavy runner pool (#761); its sizes live outside this repo. Only the
     # pytest sweep is CPU/memory-bound enough to want the extra cores;
-    # ruff/mypy run once in python-lint on a GitHub-hosted runner.
+    # ruff/mypy run once in python-lint on a small runner.
     # Two heavy runner sets share the same machines. Only merge-queue runs
     # use `meho-runners-ci-heavy-queue` (6 runners: one per shard of one
     # merge-queue run, so its size changes with the shard count). Every
@@ -1363,14 +1367,16 @@ jobs:
     # Python jobs. It does not skip when backend_python is false: a pull
     # request that changes only the template must still test it.
     #
-    # GitHub-hosted runner: it needs public tools only (uv, the PyPI index for
-    # the wheel build backend).
+    # GitHub-hosted runner, and the internal pool in merge-queue runs (#6325):
+    # it needs public tools only (uv, the PyPI index for the wheel build
+    # backend).
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true')
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # About 3 minutes; the cap is a hang backstop.
     timeout-minutes: 20
     defaults:
@@ -1476,8 +1482,9 @@ jobs:
     # in-flight run as a SET and a fresh run supersedes it — there is no
     # partial-cancel path that could leave this gate green on stale shards.
     # GitHub-hosted runner (#4626): this job does no setup and runs one bash
-    # step, and it is the last job of every CI run — it must never wait for a
-    # slot on the internal pool.
+    # step, and it is the last job of every CI run. Merge-queue runs use the
+    # internal pool instead (#6325), so the queue never waits for
+    # GitHub-hosted runners.
     #  4. No-backend path (#5296). When `backend_python` is `false`, lint and
     #     the shards skip by their own `if:`, and `python-outside-backend`
     #     must pass instead. On every other path that job is skipped.
@@ -1486,7 +1493,8 @@ jobs:
       always() &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Assert lint + typecheck + every pytest shard passed
@@ -2577,14 +2585,16 @@ jobs:
     #  4. No-backend PRs (#5296): the shards skip the same way when
     #     `backend_python` is `false`, and this step accepts `skipped` then
     #     too. The merge queue runs the shards on the merged result.
-    # GitHub-hosted runner (#4626): one bash step, no setup; it must never
-    # wait for a slot on the internal pool.
+    # GitHub-hosted runner (#4626): one bash step, no setup. Merge-queue runs
+    # use the internal pool instead (#6325), so the queue never waits for
+    # GitHub-hosted runners.
     needs: [changes, python-integration-shard]
     if: >-
       always() &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Assert every integration shard passed
@@ -2698,10 +2708,11 @@ jobs:
   go-lint-test:
     name: Go (golangci-lint + go test)
     # Fork-PR guard mirrors the Python job — same rationale. Runs on a
-    # GitHub-hosted runner since #4626: it needs only the Go toolchain and
-    # public egress.
+    # GitHub-hosted runner since #4626 (the internal pool in merge-queue runs,
+    # #6325): it needs only the Go toolchain and public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -2820,8 +2831,8 @@ jobs:
         # then this step keeps PR CI green without expanding the
         # workflow's blast radius. On the GitHub-hosted runner this job
         # uses since #4626, gcc and libc6-dev are preinstalled, so the
-        # probe passes and apt never runs; the step stays so the job can
-        # move back to the internal pool without edits.
+        # probe passes and apt never runs. Merge-queue runs use the
+        # internal pool (#6325), where this step is needed.
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -2879,9 +2890,11 @@ jobs:
   cli-api-snapshot-freshness:
     name: CLI API snapshot freshness
     # Fork-PR guard mirrors the other jobs (kept unchanged by #4626). Runs on
-    # a GitHub-hosted runner: it needs only Go, uv and public egress.
+    # a GitHub-hosted runner (the internal pool in merge-queue runs, #6325):
+    # it needs only Go, uv and public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -2910,7 +2923,8 @@ jobs:
         # Same `sudo -n apt-get` pattern as the go-lint-test C-toolchain
         # step; baking make into the base image is the long-term fix.
         # The GitHub-hosted runner this job uses since #4626 ships make,
-        # so the step is a no-op there and stays for a possible move back.
+        # so the step is a no-op there. Merge-queue runs use the internal
+        # pool (#6325), where this step is needed.
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -2970,9 +2984,11 @@ jobs:
   helm-lint-template:
     name: Helm (lint + template + kubeconform)
     # Fork-PR guard mirrors the other jobs. Runs on a GitHub-hosted runner
-    # since #4626: helm + kubeconform need only public egress.
+    # since #4626 (the internal pool in merge-queue runs, #6325): helm +
+    # kubeconform need only public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -3005,7 +3021,7 @@ jobs:
         # / CI run 25644668781). Appending to $GITHUB_PATH surfaces
         # the binary to subsequent steps without relying on the install
         # step's frozen PATH. $HOME/.local/bin works the same on the
-        # GitHub-hosted runner this job uses since #4626.
+        # GitHub-hosted runner and on the internal pool.
         run: |
           set -euo pipefail
           # shellcheck source=/dev/null
@@ -3122,8 +3138,10 @@ jobs:
   # call is checked; a failed or unreadable call only means "look again
   # next minute", and no branch check runs while the jobs' state is
   # unknown), it is not a required check, and
-  # it runs on a GitHub-hosted runner so it never takes a slot from the
-  # jobs it watches. The queue builds at most 4 groups at once, so at most
+  # it runs on the internal `meho-runners-ci` pool (#6325). It holds one
+  # slot there for the whole run; the test shards it watches run on the
+  # heavy pools, so it does not take their slots. The queue builds at most
+  # 4 groups at once, so at most
   # 4 watchdogs run at the same time: about 480 of the 1,000 API calls an
   # hour that the job token may make per repository, worst case.
   # ---------------------------------------------------------------------------
@@ -3132,7 +3150,8 @@ jobs:
     # Only merge-queue runs. A pull-request run must still show every failing
     # job, and a push to `main` has no queue group that can be dropped.
     if: github.event_name == 'merge_group'
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # Backstop only: the loop below stops itself, with success, after 170
     # minutes. A green merge-queue run took at most 78 minutes (#4732), and
     # the queue itself gives up on a group long before this cap.
@@ -3144,6 +3163,25 @@ jobs:
       contents: read
       actions: write
     steps:
+      - name: Install gh and jq
+        # The internal runner image ships without the `gh` CLI (#3171).
+        # Same `sudo -n apt-get` pattern as the go-lint-test C-toolchain
+        # step. continue-on-error keeps the watchdog from ever failing: if
+        # the install fails, every gh call below fails too, and the loop
+        # only looks again next minute.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          missing=()
+          command -v gh >/dev/null 2>&1 || missing+=(gh)
+          command -v jq >/dev/null 2>&1 || missing+=(jq)
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "gh and jq are already installed"
+            exit 0
+          fi
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+          gh --version
       - name: Cancel this run once the queue has dropped its group
         env:
           GH_TOKEN: ${{ github.token }}

@@ -205,7 +205,8 @@
               references=drawer.references, trace=drawer.trace,
               is_execution=drawer.is_execution,
               event_class_label=drawer.event_class_label,
-              tenant_label=drawer.tenant_label %}
+              tenant_label=drawer.tenant_label,
+              via_label=drawer.via_label %}
         {% include "audit/_drawer.html" %}
       {% endwith %}
     {% else %}

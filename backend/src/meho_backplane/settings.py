@@ -718,6 +718,14 @@ class Settings(BaseModel):
         was working on. The records exist only when
         ``REQUEST_USAGE_RETENTION_DAYS`` is set, and the same daily job
         deletes them. Env var ``OPERATION_SEARCH_STORE_QUERY_TEXT``.
+    audit_client_identity:
+        Write a ``client`` block into every audit row: the login client
+        (``azp``), the channel (``web`` or ``token``), the principal kind
+        and a short hash of the sign-in session. An approval request and an
+        approval decision also name the client of the person. Default
+        ``False``: the rows stay as before. See
+        :mod:`meho_backplane.auth.client_identity`. Env var
+        ``AUDIT_CLIENT_IDENTITY``.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1811,6 +1819,8 @@ class Settings(BaseModel):
     audit_wrapper_rows_retired: bool = False
     # #4750: off by default; the search record keeps only the query hash.
     operation_search_store_query_text: bool = False
+    # Off by default; with it off the audit rows stay as before.
+    audit_client_identity: bool = False
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
     result_cache_redis_password: str | None = Field(default=None)
@@ -3079,6 +3089,9 @@ def get_settings() -> Settings:
         ),
         operation_search_store_query_text=parse_bool_env(
             os.environ.get("OPERATION_SEARCH_STORE_QUERY_TEXT", "false"),
+        ),
+        audit_client_identity=parse_bool_env(
+            os.environ.get("AUDIT_CLIENT_IDENTITY", "false"),
         ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),

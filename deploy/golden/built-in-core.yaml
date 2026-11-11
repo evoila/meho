@@ -280,9 +280,10 @@ data:
 # pod's environment during the import (see the StatefulSet).
 #
 # With the company login on, the bootstrap Job sets up the identity provider
-# as meho-admin, which then needs two more realm-management roles. They are
+# as meho-admin, which then needs one more realm-management role. It is
 # added here, so the realm file itself stays the one of an install without
-# the company login (docs/codebase/core-bootstrap.md).
+# the company login (docs/codebase/core-bootstrap.md). The realm file
+# already gives meho-admin manage-realm: the Job needs it for the login flows.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -1198,6 +1199,7 @@ data:
           "clientRoles": {
             "realm-management": [
               "manage-clients",
+              "manage-realm",
               "manage-users"
             ]
           }

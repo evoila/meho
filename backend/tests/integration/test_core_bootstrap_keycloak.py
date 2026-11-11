@@ -86,6 +86,7 @@ from meho_backplane.core.keycloak import (
     BOOTSTRAP_SECRET_ENV,
     HttpAdmin,
     Plan,
+    RealmStageError,
     TenantPlan,
     finish_realm,
 )
@@ -1066,27 +1067,84 @@ def _manage_realm_of_meho_admin(kc: _Keycloak) -> tuple[str, list[dict[str, Any]
 async def test_an_older_install_gets_recovery_codes_once_meho_admin_may_change_login_settings(
     keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    """An upgrade with the rights of an existing install, then the first way of the docs."""
-    _turn_recovery_codes_off(keycloak)
+    """An older install: ``meho-admin`` without ``manage-realm``. The Job stops (#6280).
+
+    Then the fix of the upgrade notes: give the role back, run again.
+    """
+    url, roles = _manage_realm_of_meho_admin(keycloak)
+    httpx.request("DELETE", url, headers=_master_headers(keycloak), json=roles).raise_for_status()
+    try:
+        _turn_recovery_codes_off(keycloak)
+        capfd.readouterr()
+
+        with pytest.raises(RealmStageError, match="manage-realm"):
+            await _run_stage(keycloak, store)
+
+        output = capfd.readouterr().out
+        assert "login: meho-admin" in output
+        assert "not checked" not in output
+        assert _recovery_settings(keycloak) == ("false", "DISABLED")
+    finally:
+        httpx.post(url, headers=_master_headers(keycloak), json=roles).raise_for_status()
+
+    await _run_stage(keycloak, store)
+    assert "recovery codes: set" in capfd.readouterr().out
+    assert _recovery_settings(keycloak) == ("true", "ALTERNATIVE")
+
+
+_APPROVAL_FLOW = "meho approval sign-in"
+
+
+def _approval_flow_and_binding(kc: _Keycloak) -> tuple[str | None, str | None]:
+    """The id of the approval flow and the browser flow bound to ``meho-cli-approve``."""
+    admin = f"{kc.base_url}/admin/realms/meho"
+    headers = _master_headers(kc)
+    flows = httpx.get(f"{admin}/authentication/flows", headers=headers).json()
+    flow_id = next((f["id"] for f in flows if f["alias"] == _APPROVAL_FLOW), None)
+    (client,) = httpx.get(
+        f"{admin}/clients", headers=headers, params={"clientId": "meho-cli-approve"}
+    ).json()
+    return flow_id, (client.get("authenticationFlowBindingOverrides") or {}).get("browser")
+
+
+async def test_an_upgrade_makes_the_approval_flow_and_binds_it_again(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A realm without the approval flow and binding gets both back from the Job (#6280)."""
+    admin = f"{keycloak.base_url}/admin/realms/meho"
+    headers = _master_headers(keycloak)
+    flow_id, bound = _approval_flow_and_binding(keycloak)
+    assert flow_id and bound == flow_id
+    (client,) = httpx.get(
+        f"{admin}/clients", headers=headers, params={"clientId": "meho-cli-approve"}
+    ).json()
+    # Keycloak refuses to delete a flow a client is bound to: unbind first.
+    client["authenticationFlowBindingOverrides"] = {"browser": ""}
+    httpx.put(f"{admin}/clients/{client['id']}", headers=headers, json=client).raise_for_status()
+    httpx.delete(f"{admin}/authentication/flows/{flow_id}", headers=headers).raise_for_status()
+    assert _approval_flow_and_binding(keycloak) == (None, None)
     capfd.readouterr()
 
     await _run_stage(keycloak, store)
 
     output = capfd.readouterr().out
     assert "login: meho-admin" in output
-    assert (
-        "recovery codes: not checked (no right to read login settings); see "
-        "docs-site/install/keycloak-realm.md, 'Recovery codes on an older install'"
-    ) in output
-    assert _recovery_settings(keycloak) == ("false", "DISABLED")
-
-    url, roles = _manage_realm_of_meho_admin(keycloak)
-    httpx.post(url, headers=_master_headers(keycloak), json=roles).raise_for_status()
-    try:
-        await _run_stage(keycloak, store)
-        assert "recovery codes: set" in capfd.readouterr().out
-        assert _recovery_settings(keycloak) == ("true", "ALTERNATIVE")
-    finally:
-        httpx.request(
-            "DELETE", url, headers=_master_headers(keycloak), json=roles
-        ).raise_for_status()
+    assert f"login flow {_APPROVAL_FLOW}: created" in output
+    flow_id, bound = _approval_flow_and_binding(keycloak)
+    assert flow_id and bound == flow_id
+    steps = httpx.get(
+        f"{admin}/authentication/flows/meho%20approval%20sign-in/executions", headers=headers
+    ).json()
+    assert [
+        (
+            s["level"],
+            s["displayName"] if s["authenticationFlow"] else s["providerId"],
+            s["requirement"],
+        )
+        for s in steps
+    ] == [
+        (0, "auth-username-password-form", "REQUIRED"),
+        (0, "meho approval sign-in - one-time code", "CONDITIONAL"),
+        (1, "conditional-user-configured", "REQUIRED"),
+        (1, "auth-otp-form", "REQUIRED"),
+    ]

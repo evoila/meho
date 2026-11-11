@@ -463,6 +463,27 @@ class KeycloakAdminClient:
             )
         return internal_id
 
+    async def read(self, path: str, params: dict[str, str] | None = None) -> tuple[int, Any]:
+        """GET *path* under the realm's admin URL: the status and the JSON body.
+
+        The body is ``None`` when the answer is not JSON. Used by the
+        approval sign-in check of ``/api/v1/health`` (#6280), which turns
+        each status into a state of its own.
+        """
+        assert self._http is not None
+        assert self._token
+        try:
+            resp = await self._http.get(
+                f"{self._admin_url}{path}", params=params, headers=self._auth_headers()
+            )
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(f"Keycloak read network error: {type(exc).__name__}") from exc
+        try:
+            body: Any = resp.json()
+        except ValueError:
+            body = None
+        return resp.status_code, body
+
     async def get_client_secret(self, keycloak_internal_id: str) -> str:
         """Return the ``client_credentials`` secret for an existing client.
 

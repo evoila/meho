@@ -14,9 +14,11 @@ and no client is bound to it: a flow that is not the one of the file must
 not guard the approval sign-in.
 
 Reading and changing login flows needs the ``manage-realm`` role. The
-``meho-admin`` account of the realm file has it only when the company login
-is on (docs/codebase/core-bootstrap.md, "Rights"). Without it the stage says
-so in one line and goes on.
+``meho-admin`` account of the realm file has it. An install made before the
+realm file gave it to ``meho-admin`` may lack it (docs/codebase/core-bootstrap.md,
+"Rights"). Then the stage stops with :data:`NO_FLOW_RIGHT`, which names the
+role and the one-time fix: without the role, the stage cannot make sure that
+the approval sign-in has its own flow (#6280).
 
 :func:`flow_overrides` turns a client's ``authenticationFlowBindingOverrides``
 from the realm file (flow ids of the file) into flow ids of the realm.
@@ -28,14 +30,26 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote
 
-from meho_backplane.core.keycloak_api import REALM, Admin, expect, id_from
+from meho_backplane.core.keycloak_api import REALM, Admin, RealmStageError, expect, id_from
 
-__all__ = ["OVERRIDES", "ensure_flows", "flow_overrides"]
+__all__ = ["NO_FLOW_RIGHT", "OVERRIDES", "ensure_flows", "flow_overrides"]
 
 #: The client field that binds a client to its own login flow.
 OVERRIDES = "authenticationFlowBindingOverrides"
 
 _BASE = f"/admin/realms/{REALM}/authentication"
+
+#: Why the stage stops when ``meho-admin`` may not read or change login flows.
+NO_FLOW_RIGHT = (
+    "meho-admin may not read or change login flows, so the stage cannot keep the "
+    "approval sign-in flow up to date. Give meho-admin the realm-management role "
+    "manage-realm once, then run the upgrade again; see docs-site/install/upgrades.md, "
+    "'The bootstrap Job needs manage-realm'"
+)
+
+
+def _no_right(alias: str) -> RealmStageError:
+    return RealmStageError(f"login flow {alias}: {NO_FLOW_RIGHT}")
 
 
 def _say(line: str) -> None:
@@ -106,14 +120,11 @@ def _step_name(step: Mapping[str, Any]) -> str:
     return str(name)
 
 
-async def _read_steps(admin: Admin, alias: str) -> dict[str, str] | None:
-    """The requirement of every step of the realm's flow *alias*, by step name.
-
-    ``None`` when the account may not read them.
-    """
+async def _read_steps(admin: Admin, alias: str) -> dict[str, str]:
+    """The requirement of every step of the realm's flow *alias*, by step name."""
     reply = await admin.call("GET", _flow_url(alias))
     if reply.status == 403:
-        return None
+        raise _no_right(alias)
     steps = expect(reply, 200, what=f"cannot list the steps of login flow {alias}").data
     return {_step_name(step): step.get("requirement") for step in steps}
 
@@ -149,13 +160,13 @@ async def _finish_flow(admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[
 
     Adds the steps the flow lacks and sets their requirements: a run that
     stopped half-way leaves both. Returns ``"kept"`` when the flow already
-    matched the file (or its steps cannot be read), ``"completed"`` when it
+    matched the file, ``"completed"`` when it
     matches after this, and ``"differs"`` when it still has other steps
     than the file.
     """
     wanted = _requirements(flow, by_alias)
     have = await _read_steps(admin, flow["alias"])
-    if have is None or have == wanted:
+    if have == wanted:
         return "kept"
     added = await _add_missing_steps(admin, flow, by_alias, set(have))
     changed = await _set_requirements(admin, flow, by_alias)
@@ -164,10 +175,8 @@ async def _finish_flow(admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[
     return "completed" if have == wanted else "differs"
 
 
-async def _make_flow(
-    admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[str, Any]
-) -> str | None:
-    """Make *flow* with its steps; ``None`` when the account may not."""
+async def _make_flow(admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[str, Any]) -> str:
+    """Make *flow* with its steps."""
     body = {
         "alias": flow["alias"],
         "description": flow.get("description", ""),
@@ -177,7 +186,7 @@ async def _make_flow(
     }
     reply = await admin.call("POST", f"{_BASE}/flows", json=body)
     if reply.status == 403:
-        return None
+        raise _no_right(flow["alias"])
     flow_id = id_from(expect(reply, 201, what=f"cannot create login flow {flow['alias']}"))
     await _add_missing_steps(admin, flow, by_alias, set())
     await _set_requirements(admin, flow, by_alias)
@@ -191,16 +200,15 @@ async def ensure_flows(admin: Admin, flows: list[Mapping[str, Any]]) -> dict[str
     (:func:`_finish_flow`). Returns the flow id of the realm file -> the flow
     id in the realm, for every flow that has the steps of the file after
     this step. A flow with other steps is left out, so no client is bound
-    to it.
+    to it. Raises :class:`RealmStageError` (:data:`NO_FLOW_RIGHT`) when the
+    account may not read or change login flows.
     """
     top = [flow for flow in flows if flow.get("topLevel")]
     if not top:
         return {}
     reply = await admin.call("GET", f"{_BASE}/flows")
     if reply.status == 403:
-        for flow in top:
-            _say(f"login flow {flow['alias']}: not checked (no right to read login flows)")
-        return {}
+        raise _no_right(top[0]["alias"])
     have = {
         item["alias"]: item["id"]
         for item in expect(reply, 200, what="cannot list the login flows").data
@@ -222,11 +230,7 @@ async def ensure_flows(admin: Admin, flows: list[Mapping[str, Any]]) -> dict[str
             else:
                 _say(f"login flow {alias}: kept")
         else:
-            made = await _make_flow(admin, flow, by_alias)
-            if made is None:
-                _say(f"login flow {alias}: not made (no right to change login flows)")
-                continue
-            have[alias] = made
+            have[alias] = await _make_flow(admin, flow, by_alias)
             _say(f"login flow {alias}: created")
         ids[flow["id"]] = have[alias]
     return ids

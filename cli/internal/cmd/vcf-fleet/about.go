@@ -40,8 +40,8 @@ func newAboutCmd() *cobra.Command {
 			"`vcf-fleet datacenter list` as the reachability probe instead\n" +
 			"(it doubles as the wrapper-verified probe and works on 9.0).\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho vcf-fleet about --target rdc-fleet\n" +
-			"  meho vcf-fleet about --target rdc-fleet --json | jq .result",
+		Example: "  meho vcf-fleet about --target fleet-lab\n" +
+			"  meho vcf-fleet about --target fleet-lab --json | jq .result",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

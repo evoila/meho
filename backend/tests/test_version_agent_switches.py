@@ -38,6 +38,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
     {
         "agent_operation_tools_from_mcp",
         "agent_reads_custom_description",
+        "checks_agent_events",
         "jsonflux_answer_ready",
         "kb_similar_check",
         "mcp_short_tool_texts",
@@ -75,6 +76,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "approval_one_time_code_acr_values",
         "approval_outcome_unknown_after_minutes",
         "approval_reveal_fetch_window_seconds",
+        "audit_client_identity",
         "audit_wrapper_rows_retired",
         "backplane_url",
         "bedrock_default_model",
@@ -234,6 +236,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "sensor_runner_tick_interval_seconds",
         "service_grant_delete_shaped_patterns",
         "shutdown_drain_seconds",
+        "spaces_enabled",
         "test_amortize_typed_op_registrars",
         "test_fail_start_after_registration",
         "test_stub_descriptor_embedding",

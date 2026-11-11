@@ -43,10 +43,18 @@ Route inventory (read-only, all GET)
   out-of-band" note, NOT a huge blob -- mirroring the operations
   launcher's handle branch.
 * ``GET /ui/vault/read`` -- the HTMX read partial. Dispatches
-  ``vault.kv.read`` and renders the secret. The values reach the
-  operator's browser (reveal-on-click + copy) but the BFF NEVER logs the
-  envelope ``result`` -- the deliberate, scoped un-redaction happens only
-  at the response template (see the redaction note below).
+  ``vault.kv.read`` with ``reveal_secret`` and renders the secret. A read
+  that shows secret values waits for a second person's approval, so the
+  partial first shows "waiting for approval" with a link to the request.
+  The values reach the operator's browser (reveal-on-click + copy) but
+  the BFF NEVER logs the envelope ``result`` -- the deliberate, scoped
+  un-redaction happens only at the response template (see the redaction
+  note below).
+* ``POST /ui/vault/read/reveal`` -- the HTMX partial behind the "Show
+  value" button of a waiting read
+  (:mod:`~meho_backplane.ui.routes.vault.reveal`). After the approval it
+  runs the read once for the person who asked and renders it like
+  ``/ui/vault/read``. MEHO stores no value.
 * ``GET /ui/vault/versions`` -- the HTMX version-history partial.
   Dispatches ``vault.kv.versions`` and renders the per-version metadata
   table (created / deleted / destroyed). Never returns secret values.
@@ -114,6 +122,7 @@ form carries no tenant field for a caller to spoof.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Final
 
 import structlog
@@ -130,6 +139,7 @@ from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.routes.vault.reveal import render_approved_reveal, with_csrf_cookie
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_vault_router"]
@@ -313,6 +323,20 @@ def build_vault_router() -> APIRouter:
         """
         return await _render_read(request, session, target, mount, path)
 
+    @router.post("/ui/vault/read/reveal", response_class=HTMLResponse)
+    async def vault_read_reveal(
+        request: Request,
+        session: UISessionContext = _require_operator,
+        request_id: uuid.UUID = Query(...),
+    ) -> HTMLResponse:
+        """Run the approved read once for the person who asked and render the value.
+
+        Reveal-gated like ``/ui/vault/read``. Before the approval, the
+        waiting panel comes back.
+        """
+        operator = await _resolve_operator(session)
+        return await render_approved_reveal(request, session, operator, request_id)
+
     @router.get("/ui/vault/versions", response_class=HTMLResponse)
     async def vault_versions(
         request: Request,
@@ -411,7 +435,9 @@ async def _render_read(
         "path": path.strip(),
         "target": target.strip(),
     }
-    return get_templates().TemplateResponse(request, "vault/_secret.html", context)
+    response = get_templates().TemplateResponse(request, "vault/_secret.html", context)
+    # The "Show value" button of a waiting read is a POST: it needs the cookie.
+    return with_csrf_cookie(response, session)
 
 
 async def _render_versions(
@@ -464,9 +490,11 @@ async def _dispatch(
     responses by default so an agent transcript never receives the secret;
     the Vault console is an explicit reveal-on-click operator surface, so
     the read path passes ``reveal_secret=True`` to keep the secret reaching
-    the browser. The choice is stamped on the audit row, so a console reveal
-    is queryable. ``vault.kv.list`` / ``vault.kv.versions`` are value-free
-    and leave it ``False``.
+    the browser. Such a call waits for a second person's approval
+    (:mod:`meho_backplane.operations.credential_read`). The choice is
+    stamped on the audit row, so a console reveal is queryable.
+    ``vault.kv.list`` / ``vault.kv.versions`` are value-free and leave it
+    ``False``.
 
     The structured envelope is returned verbatim -- ``ok`` (carrying the
     result / handle) / ``error`` / ``denied`` all ride inside it (the

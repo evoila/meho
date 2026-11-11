@@ -91,6 +91,11 @@ _SUPPORTED_BROADCAST_URL_SCHEMES: Final[tuple[str, ...]] = (
 #: backend of :func:`meho_backplane.agent.models.settings_model_resolver`.
 AGENT_MODEL_BACKENDS: Final[tuple[str, ...]] = ("anthropic", "openai", "bedrock", "vcf-paif")
 
+#: The values ``AGENT_GRANT_REQUIRED`` accepts (#6189). ``off`` keeps the
+#: risk-level default for an agent with no matching grant; ``observe``
+#: keeps it and logs what ``on`` would refuse; ``on`` refuses the call.
+AGENT_GRANT_REQUIRED_MODES: Final[tuple[str, ...]] = ("off", "observe", "on")
+
 #: Truthy spellings accepted by :func:`_parse_bool`. Anything else
 #: (including the empty string and "disabled") is treated as ``False``
 #: so a misconfigured env var never silently enables a guarded surface.
@@ -722,10 +727,20 @@ class Settings(BaseModel):
         Write a ``client`` block into every audit row: the login client
         (``azp``), the channel (``web`` or ``token``), the principal kind
         and a short hash of the sign-in session. An approval request and an
-        approval decision also name the client of the person. Default
+        approval decision also name the client of the person, and a new
+        MCP session writes one ``mcp.session_open`` row with the client
+        name and version the tool sent about itself. Default
         ``False``: the rows stay as before. See
         :mod:`meho_backplane.auth.client_identity`. Env var
         ``AUDIT_CLIENT_IDENTITY``.
+    mcp_client_per_tool_kind:
+        List one login client per AI tool kind in ``GET /api/v1/auth-config``
+        (``mcp_clients``): ``meho-mcp-code`` for Claude Code and
+        ``meho-mcp-desktop`` for Claude Desktop. The Claude Code plugin and
+        the Claude Desktop extension then sign in with their own client and
+        keep separate saved logins. Default ``False``: the field is empty and
+        both tools keep the shared ``meho-mcp`` client. Turn it on only when
+        the realm has the two clients. Env var ``MCP_CLIENT_PER_TOOL_KIND``.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1284,6 +1299,13 @@ class Settings(BaseModel):
         is ``destructive``. Such an approval also needs a sign-in that has
         approved nothing else. Default ``300`` (five minutes). Set via
         ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
+    approval_presence_touch_valid_seconds:
+        How long a started passkey touch for an approval stays valid
+        (#6214). When a person clicks Approve, MEHO makes a one-time touch
+        challenge for that request. The person must finish the touch in
+        this time; after it the challenge is void and the person clicks
+        Approve again. Default ``120`` (two minutes), from 30 to 600. Set
+        via ``APPROVAL_PRESENCE_TOUCH_VALID_SECONDS``.
     approval_one_time_code_acr_values:
         The ``acr`` values that mean "the person entered a one-time code
         from their authenticator app" (#3979). An approve whose token
@@ -1391,6 +1413,16 @@ class Settings(BaseModel):
         switched (G11.5-T6 #1080). Case-insensitive; whitespace
         between values ignored. An empty string (the default) means no
         tenants are disabled. Set via ``AGENT_RUNS_DISABLED_TENANTS``.
+    agent_grant_required:
+        What happens when an agent login calls an operation and none of
+        its grants matches (#6189). ``off`` (the default): the risk-level
+        default, as before (``safe`` runs at once, every other level waits
+        for approval). ``observe``: the same, and MEHO logs
+        ``agent_no_grant_would_deny`` for each call that ``on`` would
+        refuse. ``on``: the call is refused on every risk level with the
+        code ``agent_no_grant``. People, service accounts and runners are
+        not affected. Any other value stops the start. Set via
+        ``AGENT_GRANT_REQUIRED``.
     vcf_paif_base_url:
         Base URL of the VCF Private AI Foundation OpenAI-compatible
         endpoint (G11.5-T4 #1078), **including** the fixed sub-path
@@ -1821,6 +1853,8 @@ class Settings(BaseModel):
     operation_search_store_query_text: bool = False
     # Off by default; with it off the audit rows stay as before.
     audit_client_identity: bool = False
+    # Off by default; with it off auth-config lists no per-tool login client.
+    mcp_client_per_tool_kind: bool = False
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
     result_cache_redis_password: str | None = Field(default=None)
@@ -1888,6 +1922,8 @@ class Settings(BaseModel):
     # sign-in each time: turning approval off (#4711) and a destructive
     # approve.
     per_action_sign_in_max_age_seconds: int = Field(default=300, ge=30, le=3600)
+    # #6214 -- how long a started passkey touch for an approval stays valid.
+    approval_presence_touch_valid_seconds: int = Field(default=120, ge=30, le=600)
     # #3979 -- the acr values that mean a one-time code step. Empty = off.
     approval_one_time_code_acr_values: tuple[str, ...] = ()
     # #4622 -- sandbox mode: a standing grant may also cover deletes, only
@@ -1915,6 +1951,10 @@ class Settings(BaseModel):
     # #5026 -- an approved run that started and stored no result after this
     # many minutes is listed for operators to check ("outcome unknown").
     approval_outcome_unknown_after_minutes: int = Field(default=15, ge=1, le=1440)
+    # An approved secret reveal runs only when the person who asked fetches
+    # the value, once, and only within this many seconds after the approval
+    # (``operations.approved_reveal``).
+    approval_reveal_fetch_window_seconds: int = Field(default=900, ge=60, le=86400)
     # #3151 — op-id patterns a service-principal standing grant may never
     # cover (delete-shaped ops are the floor of what runs unattended, never
     # grantable). See ``operations.service_grants``.
@@ -2180,6 +2220,9 @@ class Settings(BaseModel):
     # exactly like the global switch. An empty string (the default) is
     # "no tenants disabled". Set via ``AGENT_RUNS_DISABLED_TENANTS``.
     agent_runs_disabled_tenants: str = ""
+    # #6189 — "no grant, no rights" for agent logins. See the class
+    # docstring; read by ``auth/permissions.py::resolve_verdict``.
+    agent_grant_required: str = "off"
     # G11.5-T4 #1078 — VCF Private AI Foundation backend. PAIF is the
     # air-gapped enterprise target: OpenAI-compatible wire format under
     # a fixed ``/api/v1/compatibility/openai/v1/`` sub-path, OpenID
@@ -2586,6 +2629,19 @@ class Settings(BaseModel):
         if value not in AGENT_MODEL_BACKENDS:
             allowed = ", ".join(AGENT_MODEL_BACKENDS)
             raise ValueError(f"AGENT_MODEL_BACKEND must be one of: {allowed}. Got: {value!r}")
+        return value
+
+    @field_validator("agent_grant_required")
+    @classmethod
+    def _agent_grant_required_must_be_known(cls, value: str) -> str:
+        """Stop the start when ``AGENT_GRANT_REQUIRED`` is not off, observe or on.
+
+        A typo must not leave agents with rights the operator meant to
+        take away, so an unknown value fails at startup.
+        """
+        if value not in AGENT_GRANT_REQUIRED_MODES:
+            allowed = ", ".join(AGENT_GRANT_REQUIRED_MODES)
+            raise ValueError(f"AGENT_GRANT_REQUIRED must be one of: {allowed}. Got: {value!r}")
         return value
 
     @field_validator("result_cache_redis_url")
@@ -3093,6 +3149,9 @@ def get_settings() -> Settings:
         audit_client_identity=parse_bool_env(
             os.environ.get("AUDIT_CLIENT_IDENTITY", "false"),
         ),
+        mcp_client_per_tool_kind=parse_bool_env(
+            os.environ.get("MCP_CLIENT_PER_TOOL_KIND", "false"),
+        ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
         ),
@@ -3190,6 +3249,10 @@ def get_settings() -> Settings:
         ),
         per_action_sign_in_max_age_seconds=int(
             os.environ.get("PER_ACTION_SIGN_IN_MAX_AGE_SECONDS", "300"),
+        ),
+        # #6214 -- how long a started passkey touch stays valid.
+        approval_presence_touch_valid_seconds=int(
+            os.environ.get("APPROVAL_PRESENCE_TOUCH_VALID_SECONDS", "120"),
         ),
         # #3979 -- which acr values mean a one-time code step.
         approval_one_time_code_acr_values=tuple(
@@ -3361,6 +3424,7 @@ def get_settings() -> Settings:
             "AGENT_RUNS_DISABLED_TENANTS",
             "",
         ),
+        agent_grant_required=os.environ.get("AGENT_GRANT_REQUIRED", "").strip().lower() or "off",
         vcf_paif_base_url=os.environ.get("VCF_PAIF_BASE_URL", "").strip(),
         vcf_paif_model=os.environ.get(
             "VCF_PAIF_MODEL",

@@ -212,6 +212,58 @@ check (the event is sent also when the group is known noise). Every other
 claimed edge publishes one event in `_process_transition`. The investigator
 call itself is unchanged. Payloads: `docs/codebase/events.md`, "Check events".
 
+## Two paths: the old path and the event trigger (#6183)
+
+With `CHECKS_AGENT_EVENTS` on, the investigator can run on one of two paths.
+With the switch off, only the old path exists and nothing below applies.
+
+**The old path** is the code in this module. `_investigate_group` finds the
+agent by the name in `CHECKS_INVESTIGATOR_AGENT`, starts it, waits for the
+answer and then stores and mails the finding.
+
+**The trigger path** uses no special code. A person makes an ordinary event
+trigger (kind `event`) for any agent, with a filter on the
+`check.dashboard.changed` event. See `examples/checks-investigator/` for the
+agent, its grants and the trigger. The event drain starts the agent. The agent
+needs no memory or mail rights, because MEHO stores and mails the finding:
+
+- `events/drain.py` `_dispatch_event`: after the triggers fire, when the event
+  is `agent_run.completed`, the drain calls
+  `checks/findings.py` `record_finding_for_event`.
+- That function acts only for a run that **succeeded**, whose run key has the
+  form `event:<trigger id>:c:dashboard:<dashboard id>:<group key>` (the key
+  that the Dashboard event's `coalesce_key` gives), and whose Dashboard is in
+  the run's tenant. It parses the run's answer with `parse_finding`. Any other
+  answer shape writes nothing.
+- A finding is written to the memory entry `checks-noise-<group key>` (the same
+  entry the old path writes) and mailed to the Dashboard's `notify_email`.
+- It never raises into the drain loop.
+
+**No double runs.** When an *active* `kind=event` trigger exists in the tenant
+for the agent named in `CHECKS_INVESTIGATOR_AGENT`, `_investigate_group` skips
+its own start and logs `checks_investigation_skipped_trigger_owns`. The event
+is still published, and the trigger path does the work. A trigger for another
+agent does not stop the old path.
+
+**Known noise** works on both paths. The finding step writes the same memory
+entry, so the next event for that group has `known_noise: true`. The example
+trigger filters on `known_noise: false`, so it does not start.
+
+**Move from the old path to the trigger:**
+
+1. Create the agent, its grants and the trigger from `examples/checks-investigator/`.
+   Use the agent name from `CHECKS_INVESTIGATOR_AGENT`, or set the setting to
+   your agent name.
+2. From then on the old path steps aside. To go back, pause or cancel the
+   trigger.
+
+A run key longer than 200 characters is hashed by the trigger path, and then the
+finding step cannot read the group key. Group keys are short, so this does not
+happen for MEHO's own keys.
+
+The code for the finding (`ChecksFinding`, `parse_finding`, `persist_finding`,
+`finding_notice`) is in `checks/findings.py`, so both paths use one copy.
+
 ## Agent-name convention (opt-in per tenant)
 
 The wiring is **off** until a tenant creates an *enabled* agent definition

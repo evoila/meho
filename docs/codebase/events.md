@@ -267,6 +267,15 @@ webhook or `agent_run.completed` event. An input-less event trigger on a
 the Sensor names (`events/normalizers/checks_events.py`), inside the
 untrusted-text wrapper. The old investigator call is unchanged by this switch.
 
+A run that an event trigger started for a Dashboard event has no step after it
+ends. So with the switch on, `_dispatch_event` calls
+`checks/findings.py` `record_finding_for_event` for each `agent_run.completed`
+event. It does something only for a succeeded run whose run key is
+`event:<trigger id>:c:dashboard:<dashboard id>:<group key>` and whose answer is
+a finding. Then it writes the memory entry `checks-noise-<group key>` and
+schedules the finding mail. It never raises into the drain loop. Details:
+`docs/codebase/checks-investigator.md`, "Two paths".
+
 ## The subscription matcher
 
 `backend/src/meho_backplane/events/matcher.py` is the junction between a

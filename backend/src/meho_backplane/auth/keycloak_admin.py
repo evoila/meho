@@ -360,8 +360,11 @@ class KeycloakAdminClient:
             raise KeycloakAdminError(
                 f"Keycloak admin auth unreachable: {type(exc).__name__}"
             ) from exc
-        data: Any = resp.json()
-        self._token = data.get("access_token", "")
+        try:
+            data: Any = resp.json()
+        except ValueError as exc:
+            raise KeycloakAdminError("Keycloak admin auth answered with no JSON body") from exc
+        self._token = data.get("access_token", "") if isinstance(data, dict) else ""
         if not self._token:
             raise KeycloakAdminError("Keycloak admin auth returned no access_token")
 

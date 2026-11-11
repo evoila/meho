@@ -241,6 +241,22 @@ async def test_a_refused_admin_login_is_not_checked() -> None:
     assert (status.state, status.detail) == ("not_checked", "keycloak_unreachable")
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(200, text="<html>sign in</html>"),
+        httpx.Response(200, json=["not", "a", "token"]),
+    ],
+    ids=["html", "not an object"],
+)
+async def test_a_bad_token_answer_is_not_checked(answer: httpx.Response) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _mount(mock)
+        mock.post(_TOKEN).mock(return_value=answer)
+        status = await read_approval_sign_in()
+    assert (status.state, status.detail) == ("not_checked", "keycloak_unreachable")
+
+
 async def test_an_unreachable_keycloak_is_not_checked() -> None:
     with respx.mock(assert_all_called=False) as mock:
         _mount(mock)

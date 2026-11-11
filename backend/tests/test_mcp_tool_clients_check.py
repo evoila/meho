@@ -200,7 +200,7 @@ async def test_an_unexpected_token_answer_lists_nothing_and_is_kept(
     report = tool_clients_report(get_settings())
     assert report is not None
     assert report["state"] == "unknown"
-    assert report["detail"].startswith("client check failed: ")
+    assert report["detail"].startswith("Keycloak admin auth ")
 
 
 def test_auth_config_route_answers_200_when_the_token_answer_is_unexpected() -> None:

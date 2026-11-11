@@ -62,6 +62,7 @@ import re
 import secrets
 import struct
 import time
+import warnings
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
@@ -1132,6 +1133,7 @@ async def test_a_company_login_from_the_approval_page_gets_no_approval_level(
     claims = _approval_sign_in_through_the_company_login(keycloak)
     if claims is None:
         # Nothing to follow: the approval page does not offer the company login.
+        warnings.warn("the approval page offers no company login button", stacklevel=1)
         return
     assert claims["azp"] == _APPROVAL_CLIENT
     assert claims["acr"] not in {"meho-approve", "meho-touch"}

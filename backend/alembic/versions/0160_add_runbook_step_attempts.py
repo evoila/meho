@@ -3,8 +3,8 @@
 
 """Add ``runbook_run_step_states.attempts``.
 
-Revision ID: 0158
-Revises: 0157
+Revision ID: 0160
+Revises: 0159
 Create Date: 2026-11-10
 
 One column: the list of check attempts for a step. Each entry holds the
@@ -24,8 +24,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0158"
-down_revision: str | None = "0157"
+revision: str = "0160"
+down_revision: str | None = "0159"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

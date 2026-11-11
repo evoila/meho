@@ -1138,7 +1138,8 @@ async def test_an_upgrade_makes_the_approval_flow_and_binds_it_again(
     assert [
         (
             s["level"],
-            s["displayName"] if s["authenticationFlow"] else s["providerId"],
+            # Keycloak leaves "authenticationFlow" out for a plain step.
+            s["displayName"] if s.get("authenticationFlow") else s["providerId"],
             s["requirement"],
         )
         for s in steps

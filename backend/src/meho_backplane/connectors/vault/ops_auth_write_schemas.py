@@ -48,9 +48,6 @@ __all__ = [
     "VAULT_AUTH_USERPASS_UPDATE_PASSWORD_LLM_INSTRUCTIONS",
     "VAULT_AUTH_USERPASS_UPDATE_PASSWORD_PARAMETER_SCHEMA",
     "VAULT_AUTH_USERPASS_UPDATE_PASSWORD_RESPONSE_SCHEMA",
-    "VAULT_AUTH_USERPASS_WRITE_LLM_INSTRUCTIONS",
-    "VAULT_AUTH_USERPASS_WRITE_PARAMETER_SCHEMA",
-    "VAULT_AUTH_USERPASS_WRITE_RESPONSE_SCHEMA",
 ]
 
 
@@ -115,78 +112,6 @@ _ROLE_NAME_PROPERTY: dict[str, Any] = {
 
 
 # --- userpass.write --------------------------------------------------------
-
-VAULT_AUTH_USERPASS_WRITE_PARAMETER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "username": _USERNAME_PROPERTY,
-        "password": _PASSWORD_PROPERTY,
-        "token_policies": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1},
-            "description": (
-                "Policies bound to tokens this user receives at login -- "
-                "the privilege assignment. Omit to leave unchanged on an "
-                "update (Vault treats the field as optional)."
-            ),
-        },
-        "mount": _mount_property("userpass"),
-    },
-    "required": ["username", "password"],
-    "additionalProperties": False,
-}
-
-VAULT_AUTH_USERPASS_WRITE_RESPONSE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "username": {"type": "string", "description": "The user created or updated."},
-        "mount": {"type": "string", "description": "The mount the user lives on."},
-        "token_policies": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Policies assigned to the user (echoed from the request).",
-        },
-        "written": {"type": "boolean", "description": "Always true on success."},
-    },
-    "required": ["username", "written"],
-    "description": (
-        "Confirms the create/update. NEVER carries the password -- the "
-        "value-free echo reports the username, mount, and assigned "
-        "policies only."
-    ),
-}
-
-VAULT_AUTH_USERPASS_WRITE_LLM_INSTRUCTIONS: dict[str, Any] = {
-    "when_to_use": (
-        "Create a new userpass user or update an existing one's password "
-        "and/or token policies. Use when provisioning a human/service "
-        "login on the userpass backend. DANGEROUS, requires approval: "
-        "binding token_policies is a privilege assignment. The password "
-        "is SECRET -- it is redacted from the audit row and the broadcast "
-        "feed (credential_write), reaches Vault verbatim, and is never "
-        "echoed back."
-    ),
-    "parameter_hints": {
-        "username": "Required. The userpass username, no mount prefix.",
-        "password": "Required. The user's password (secret; redacted from audit/broadcast).",
-        "token_policies": (
-            "Optional. Policy names bound to the user's tokens (privilege "
-            "assignment). Omit to leave unchanged on an update."
-        ),
-        "mount": _mount_hint("userpass"),
-    },
-    "output_shape": (
-        "On success: {'username': ..., 'mount': ..., 'token_policies': "
-        "[...], 'written': true} -- never the password. On failure: a "
-        "connector_error OperationResult with extras.exception_class "
-        "naming the failure class ('VaultAuthBackendNotMountedError' when "
-        "userpass is not enabled at the mount)."
-    ),
-    # Credential-class ops get no default scalar copy when token_policies
-    # spills; these value-free fields stay inline (#3633).
-    "result_scalars": {"keys": ["username", "mount", "written"]},
-}
-
 
 # --- userpass.update_password ----------------------------------------------
 

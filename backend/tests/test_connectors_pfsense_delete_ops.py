@@ -50,6 +50,7 @@ from meho_backplane.connectors.pfsense.ops_delete import (
     parse_aliases_xml,
     parse_nat_port_forwards_xml,
 )
+from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 from meho_backplane.connectors.registry import all_connectors_v2, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
@@ -58,7 +59,9 @@ from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations.approval_object_check import REASON_UNREADABLE
 from meho_backplane.operations.approval_queue import (
+    ApprovalResultState,
     SelfApprovalForbiddenError,
+    approval_result_state,
     approve_request,
     resume_dispatch_after_approval,
 )
@@ -163,6 +166,14 @@ def _reset_caches() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 # Unit-test stubs
 # ---------------------------------------------------------------------------
+
+
+def _assert_refused(exc_info: Any, code: str) -> None:
+    """The refusal names its code, keeps the guidance, and says nothing changed."""
+    exc = exc_info.value
+    assert exc.code == code
+    assert f"refused ({code})" in str(exc)
+    assert exc.guidance and exc.guidance in str(exc)
 
 
 def _proc(stdout: str = "", exit_status: int = 0) -> Any:
@@ -374,10 +385,9 @@ async def test_nat_delete_ambiguous_refuses_fail_closed() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_CONFIG_DUP_TRACKER)]
-        result = await connector.nat_delete(None, {"tracker": _TRACKER})
-    assert result["status"] == "ambiguous"
-    assert result["matched"] == 2
-    assert result["removed"] is None
+        with pytest.raises(PfSenseRefusedError) as exc_info:
+            await connector.nat_delete(None, {"tracker": _TRACKER})
+    _assert_refused(exc_info, "ambiguous")
     # Duplicate trackers -> never delete either. Guard read only.
     assert mock_cmd.await_count == 1
 
@@ -448,13 +458,13 @@ async def test_alias_delete_referenced_refuses_and_names_referrers() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_CONFIG_ALIASES)]
-        result = await connector.alias_delete(None, {"name": "WEB_SERVERS"})
-    assert result["status"] == "referenced"
-    assert result["reference_count"] == 2
-    ref_ids = {(r["kind"], r["id"]) for r in result["references"]}
-    assert ("alias", "NESTED") in ref_ids
-    assert ("filter_rule", "1600000001") in ref_ids
-    assert "still referenced" in result["guidance"]
+        with pytest.raises(PfSenseRefusedError) as exc_info:
+            await connector.alias_delete(None, {"name": "WEB_SERVERS"})
+    _assert_refused(exc_info, "referenced")
+    # The message still names every object that uses the alias.
+    assert "alias(NESTED" in exc_info.value.guidance
+    assert "filter_rule(1600000001" in exc_info.value.guidance
+    assert "still referenced by 2 object(s)" in exc_info.value.guidance
     # Fail-closed: refuses after a single guard read, stages nothing.
     assert mock_cmd.await_count == 1
 
@@ -504,8 +514,8 @@ def test_delete_ops_are_destructive_requires_approval_with_tag() -> None:
     assert seen == delete_ids
 
 
-def test_pfsense_op_count_is_twenty_four() -> None:
-    assert len(PFSENSE_OPS) == 24
+def test_pfsense_op_count_is_twenty_six() -> None:
+    assert len(PFSENSE_OPS) == 26
 
 
 def test_delete_ops_group_keys() -> None:
@@ -556,16 +566,27 @@ def test_alias_delete_response_schema_accepts_outcomes() -> None:
         {
             "op_class": "delete",
             "resource": "alias",
-            "status": "referenced",
+            "status": "not_found",
             "name": "WEB_SERVERS",
-            "matched": 1,
+            "matched": 0,
             "removed": None,
-            "references": [{"kind": "filter_rule", "id": "1600000001", "descr": "allow web"}],
-            "reference_count": 1,
+            "references": [],
+            "reference_count": 0,
             "aliases_before": 4,
             "aliases_after": None,
             "verified": False,
-            "guidance": "referenced",
+            "guidance": "no alias",
+        }
+    )
+    # A refusal is an error, not a result: the schema no longer lists it.
+    assert not validator.is_valid(
+        {
+            "op_class": "delete",
+            "resource": "alias",
+            "status": "referenced",
+            "name": "WEB_SERVERS",
+            "matched": 1,
+            "verified": False,
         }
     )
 
@@ -929,11 +950,15 @@ async def test_referenced_alias_refused_post_approval_fail_closed() -> None:
         row = await s.get(ApprovalRequest, request_id)
         assert row is not None
         resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
-    # Fail-closed at execution: refuses, deletes nothing.
-    assert resume.status == "ok", resume.error
-    assert resume.result["status"] == "referenced"
-    assert resume.result["reference_count"] == 2
+    # Fail-closed at execution: refuses, deletes nothing, and the run says failed.
+    assert resume.status == "error", resume
+    assert resume.extras["exception_class"] == "PfSenseRefusedError"
+    assert "refused (referenced)" in resume.extras["exception_message"]
     assert not recorder.playback_ran
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        assert approval_result_state(row) == ApprovalResultState.FAILED
 
 
 @pytest.mark.asyncio

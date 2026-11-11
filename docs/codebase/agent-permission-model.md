@@ -266,15 +266,26 @@ claim for audit parent-linkage (#3446), is never matched against this table).
 
    A multi-step operation with the switch `on`: before the call waits for
    approval or runs a step, the dispatcher checks every listed write step
-   of the operation for the agent (`agent_no_grant_step_reason` in
+   of the operation for the agent (`agent_step_refusal` in
    `operations/_preview_steps.py`, the same list the preview checks). When
    one step has no grant, the whole call is refused with `agent_no_grant`,
-   no approval request is stored, and no step runs. So the call never
-   stops half-way at a step the switch refuses. The preview runs the same
+   no approval request is stored, and no step runs. When a `deny` grant
+   meets a step, the call is refused in the same place, with the grant's
+   own reason and the code `agent_grant_denied` (#6285). So the call never
+   stops half-way at a step the agent's grants refuse. The preview runs the same
    check, also when the operation itself would wait for approval, so it
    says `deny` with the same reason. With `observe` the dispatcher runs
    the check too: each uncovered write step logs one
    `agent_no_grant_would_deny` line, and the call runs or waits as before.
+   A step with a `deny` grant is left to the step gate, as before.
+
+   The check reads the step list of the operation
+   (`operations/governed_subops.py`). A CI check
+   (`tests/test_agent_grant_step_check.py`) makes sure that every
+   multi-step operation that changes something declares its steps
+   (`register_governed_subops`), or declares that it has no step that
+   MEHO checks on its own (`declare_no_governed_subops`). It fails and
+   names the operation when one does neither.
 
 4. **Apply safety-level ceiling.** A row's verdict can only tighten to the
    op's ceiling, never loosen beyond it:

@@ -1100,7 +1100,7 @@ The lists are in `mcp/profiles.py`.
 How it works:
 
 - The MCP route reads the `profile` URL parameter
-  (`_dispatch_mcp_request` in `mcp/server.py`) and stores it on the
+  (`_apply_url_options` in `mcp/server.py`) and stores it on the
   request's `Operator` as `mcp_tool_profile`. Only this route sets it.
 - `all_tools_for` (`mcp/registry.py`) runs the four gates above first,
   then keeps only the profile's tools. So a profile only removes tools.
@@ -1687,21 +1687,57 @@ Two switches take text away while they are off:
 `tests/test_mcp_surface_conformance.py` checks both states of each switch.
 
 A third switch works the other way: `MCP_SHORT_TOOL_TEXTS` (off by
-default) gives the biggest tools a short text while it is on. See "Short
-tool texts" below.
+default) gives the biggest tools a short text while it is on. One session
+can also ask for these texts. See "Short tool texts" below.
 
 ## Short tool texts (`MCP_SHORT_TOOL_TEXTS`, off by default)
 
 The biggest tools on the default list have a short text. A session sees it
-only when the `MCP_SHORT_TOOL_TEXTS` switch is on (Helm:
-`config.mcpShortToolTexts`). It stays off until a model test shows it
-helps: a small model scores better, and Claude does not score worse.
+when the `MCP_SHORT_TOOL_TEXTS` switch is on (Helm:
+`config.mcpShortToolTexts`), or when the session asks for it (see "One
+session asks for the short texts" below). The switch stays off until a
+model test shows it helps: a small model scores better, and Claude does
+not score worse.
 
 - **Off (default):** every tool shows its full text, byte for byte as
-  before.
-- **On:** 14 tools show a short description and short input texts. The
-  whole default list goes from 67,865 to 46,067 characters (32% less).
-  No other tool changes.
+  before, unless the session asks for the short texts.
+- **On:** 14 tools show a short description and short input texts, in
+  every session. The whole default list goes from 67,865 to 46,067
+  characters (32% less). No other tool changes.
+
+### One session asks for the short texts (#6293)
+
+A client adds `?texts=short` to the MCP URL, for example
+`https://<meho-host>/mcp?texts=short`. That session then sees the short
+texts, also while the switch is off. Other sessions keep the full texts.
+This lets a person try the short texts in daily work without changing
+them for everyone.
+
+- The MCP route reads the `texts` URL parameter (`_apply_url_options`
+  in `mcp/server.py`, `parse_tool_texts` in `mcp/short_texts.py`) and
+  sets `mcp_short_tool_texts` on the request's `Operator`. Only this
+  route sets it.
+- `short_texts_shown(operator)` is true when the switch is on or the
+  session asked. Every `for_settings` function gets the session's
+  `Operator` (`tool_for_settings(definition, operator)` in
+  `mcp/registry.py`). So `tools/list` and the `tools/call` input check
+  use the same texts.
+- No `texts`, or an empty `texts=`, gives the default texts. Any value
+  other than `short` (not case-sensitive) is refused with HTTP 400
+  before the body is read, like an unknown profile. There is no
+  `texts=full`: with the switch on, every session sees the short texts.
+- It works with a profile: `?profile=operate&texts=short`.
+- The `tools/call` audit row of such a session has
+  `"tool_texts": "short"` in its payload, so a measurement can tell these
+  sessions apart. Other rows do not have the key.
+- The request usage event of every request of such a session has
+  `tool_texts = short` (column added by migration `0158`). With
+  `AUDIT_WRAPPER_ROWS_RETIRED=true`, a read or `call_operation` writes no
+  audit row, so this event is then the record of the choice. See
+  [request-usage.md](request-usage.md).
+- Like the profile, the parameter is read on each request. A client
+  sends the same URL with every request, so the whole session sees the
+  same texts.
 
 What stays the same in both states:
 
@@ -1763,6 +1799,11 @@ Tests:
 - `tests/test_mcp_surface_conformance.py` runs every test in both states.
 - `tests/test_mcp_tool_profiles.py`: a profile shows the short texts only
   with the switch on.
+- `tests/test_mcp_short_tool_texts_session.py`: `?texts=short` gives one
+  session the short texts while the switch is off; two sessions at the
+  same time each see their own texts; `tools/call` uses the same texts
+  and its audit row names the choice; the usage event names the choice
+  also when no audit row is written; an unknown value is refused.
 - `/ready` shows the switch as `features.mcp.short_tool_texts`.
 
 How to measure it: run the same benchmark task set twice against one

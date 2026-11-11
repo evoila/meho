@@ -288,6 +288,20 @@ lines. The **Backfill** item below adds the lines for them.
    was not marked as old at the last tag
    ([`connector-packages.md`](codebase/connector-packages.md#the-connector-kit)).
 
+6. **Check the "Tested live on" table.** Open
+   [`docs-site/reference/connectors.md`](../docs-site/reference/connectors.md).
+   Each "Tested live on" cell must match a test you know of. If a live test
+   happened since the last release, add its row to
+   `docs/compatibility/live-tests.yaml` and build the page again. Then run:
+
+   ```bash
+   python3 scripts/ci/check_tested_live_claims.py
+   ```
+
+   Exit 0 → proceed. Exit 1 → a page or the release notes say "tested live"
+   for a version that the record does not hold. Add the row or change the
+   text.
+
 ### 3. Release-cutting PR → merge
 
 Open the PR (CHANGELOG roll + any release-only edits), get it reviewed,
@@ -1117,7 +1131,9 @@ are left. Each is a follow-up task.
        docs-site/reference/whats-new.md section added for [X.Y.Z]
        (publishes with the v* tag — skipping it ships a stale What's new);
        connector kit check green
-       (scripts/release/check_connector_kit_release.py)
+       (scripts/release/check_connector_kit_release.py);
+       "Tested live on" table checked, record up to date
+       (scripts/ci/check_tested_live_claims.py)
 [ ] 3. Release-body path-freshness gate green
        (scripts/release/check_release_body_paths.py — sister to #928);
        upgrade-relevant change → deploying.md version-specific notes row

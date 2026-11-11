@@ -34,8 +34,7 @@ once per inherited MEHO group, so MEHO refuses a person in two SG-* groups
 without any ``JWT_ROLE_GROUPS`` setting.
 
 The login is the password grant on ``meho-cli`` (switched on by the
-``baseline`` fixture); Keycloak checks the password against LDAP. Adding user
-federation needs ``manage-realm``, which ``meho-admin`` lacks, so the
+``baseline`` fixture); Keycloak checks the password against LDAP. The
 federation is set up with the master admin the customer-IdP test adds.
 """
 

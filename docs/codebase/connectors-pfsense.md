@@ -37,7 +37,9 @@ optional `descr` to `pfsense.gateway.add` and `pfsense.route.static.add`, and
 the read `pfsense.diag.ping`: a short ping that runs on the firewall, from
 one of the firewall's own addresses, to prove that a route carries traffic.
 #4131 puts the firewall's subnets and active DHCP leases on the topology map
-(see "Topology map" below).
+(see "Topology map" below). #4093 adds two reads for OpenVPN sessions:
+`pfsense.openvpn.clients` (who is connected now) and `pfsense.openvpn.log` (the
+log lines of one user in a time window, with an event type for each).
 
 Source: `backend/src/meho_backplane/connectors/pfsense/`.
 
@@ -67,7 +69,7 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   REPL) instead of a POSIX shell, causing any subsequent command to hang.
 
 - **Op metadata** (`ops.py`) — the `PfSenseOp` dataclass, the `_pfsense_ops()`
-  composition function, and the `PFSENSE_OPS` tuple (24 ops total). T1 shipped
+  composition function, and the `PFSENSE_OPS` tuple (26 ops total). T1 shipped
   `pfsense.about`; T2 (#847) adds 7 read ops via the `ops_read` module; #2849
   appends `pfsense.dhcp.leases`; #3090 appends the two write ops via the
   `ops_write` module; #3232 appends the first two destructive deletes and #3313
@@ -79,7 +81,11 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   `pfsense.filter.rule.delete` via the `ops_filter_rule` module; #3937
   appends `pfsense.user.disable` and `pfsense.user.enable` via the
   `ops_user_write` module; #3965 appends `pfsense.diag.ping` via the
-  `ops_diag` module.
+  `ops_diag` module; #4093 appends `pfsense.openvpn.clients` and
+  `pfsense.openvpn.log` via the `ops_openvpn_meta` module.
+
+- **OpenVPN reads** (`ops_openvpn.py` handlers, `ops_openvpn_meta.py`
+  schemas and `OPENVPN_OPS`, #4093) — see "OpenVPN reads" below.
 
 - **Diagnostics** (`ops_diag.py`, #3965) — the handler `pfsense_diag_ping`,
   the input checks (`_validate_host`, `_validate_source`, `_validate_count`),
@@ -280,7 +286,7 @@ Two-phase registration, identical to the bind9 pattern:
   (`connectors/registry.py`, `operations/typed_register.py`) — registration
   infrastructure.
 
-## Op surface (24 ops)
+## Op surface (26 ops)
 
 | Op ID | Command | Group | Safety |
 |---|---|---|---|
@@ -308,6 +314,8 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.user.disable` | `cat /cf/conf/config.xml` guard (match one `<system><user>` by name, refuse the admin account) + `pfSsh.php playback` fragment (set `disabled` + `local_user_set()` + `write_config()`) + read-back verify | `users` | `dangerous` |
 | `pfsense.user.enable` | same as `pfsense.user.disable`, but clears `disabled` | `users` | `dangerous` |
 | `pfsense.diag.ping` | `ifconfig -a` (the source must be one of these addresses) + `ping -4\|-6 -n -c <1-5> -W 1000 -t <count+2> -S <source> <host>` | `diagnostics` | `caution` |
+| `pfsense.openvpn.clients` | for each `/var/etc/openvpn/server*` with a socket: `grep` of `proto` / `port` in `config.ovpn` + `nc -U` to the management socket (`status 3`) | `openvpn` | `safe` |
+| `pfsense.openvpn.log` | `date` + `{ grep -E <whole common_name> /var/log/openvpn.log; echo <grep status>; } \| tail -n 5001` | `openvpn` | `safe` |
 
 The 11 read / identity ops plus the `pfsense.mgmt_flow.summary` classifier
 are `safety_level="safe"`. `pfsense.diag.ping` is `safety_level="caution"` /
@@ -331,15 +339,24 @@ satellite mint), a #3197 preview-hash binding, and a mandatory blast-radius
 statement naming the exact object. Each acts on exactly one object by stable
 identity (`<tracker>` for a NAT rule, exact name for an alias / gateway,
 canonical network for a route, exact member token for an alias member — never
-by position), refuses fail-closed on a missing (`not_found`) / duplicated
-(`ambiguous`) identity or a live reference (`referenced`, naming every
-referrer, for `alias.delete` and `gateway.delete`), and read-back-verifies the
-result. `pfsense.alias.member.remove` is the odd one out: it is a
+by position). A missing identity (`not_found`) is a normal `ok` answer: the
+wanted state is already true. A duplicated identity (`ambiguous`) or a live
+reference (`referenced`, naming every referrer, for `alias.delete` and
+`gateway.delete`) is a refusal. A refusal changes nothing and **fails the
+call** (#5138): it raises `PfSenseRefusedError`, so the call gets
+`status: error`, the audit record says it failed, and an approved request shows
+`result_state: failed`. The message reads
+`pfsense.alias.delete refused (<code>): <why>`. MEHO cuts that message to 256
+characters, so the error's `remediation` field carries the whole text, up to
+2048 characters. For `referenced` it lists every referrer; when the list is
+longer than that, it names the first ones and says how many more there are,
+and tells the caller to search the `config_xml` of `pfsense.config.show` for
+the name to find every one. Each delete is read-back-verified. `pfsense.alias.member.remove` is the odd one out: it is a
 **read-modify-write on a shared object**, not a delete — it removes ONE member
 from the alias's `<address>` (and its positionally-aligned `<detail>`) while
-keeping the alias and every other member, refuses `member_not_found` /
-`last_member` (never empties a shared alias into deletion — that is
-`alias.delete`'s job), and verifies the member is gone, the alias is retained,
+keeping the alias and every other member. `member_not_found` (the member is
+already gone) stays `ok`. `last_member` and `ambiguous` fail the call (never
+empties a shared alias into deletion — that is `alias.delete`'s job). It verifies the member is gone, the alias is retained,
 and the residual members survive. The 2 user writes (#3937) are
 `safety_level="dangerous"` / `requires_approval=True`: every call waits until a
 second person approves. See "User writes" below.
@@ -582,6 +599,26 @@ Design notes:
   `mgmt_nets` (a list of `{cidr, leg}`) are **required** params; `mgmt_ports`
   defaults to the vendor-generic 443/22/902/5480 class; `baseline_src` is
   optional. The domain-specific values live in the pinning Sensor's `params`.
+- **`baseline_src` takes two kinds of entries in one list.** A string
+  (address or CIDR) marks the source as known for every management network and
+  port. An object `{"src", "dst", "ports"}` marks the source as known only for
+  connections to `dst`, on those `ports` (without `ports`, every management
+  port on `dst`). `src` and `dst` are required. The check runs per open
+  connection. A source that matches an object entry stays non-sanctioned, so
+  only `unexpected_sources` changes: its `ports` list the ports that no entry
+  covers. An entry that cannot be read (bad address, bad or empty `ports`)
+  hides nothing. Example:
+
+  ```json
+  "baseline_src": [
+    "203.0.113.0/24",
+    {"src": "192.0.2.10/32", "dst": "198.51.100.20/32", "ports": [443]}
+  ]
+  ```
+
+  With this list, `192.0.2.10` to `198.51.100.20` on 443 is known. The same
+  source to `198.51.100.20` on 22, or to `198.51.100.21` on 443, is
+  unexpected. Any source in `203.0.113.0/24` is known everywhere.
 - **Zero firewall change.** It classifies the live state table (the same
   zero-change source as the stage-1 report's `states` mode), so no counting /
   logging rule is required. The trade-off is snapshot semantics — a flow that
@@ -635,10 +672,13 @@ config libraries and `eval`s the text inside a function scope, so the config
 libraries populate the `$config` global and the fragment must pull it into
 scope (mirroring the shipped `gatewaystatus` script's `global $argv;`).
 
-**Guarded + idempotent.** A gateway whose `name` already exists, or a route
-whose canonical `network` already exists, is reported as
+**Guarded + idempotent.** A gateway whose `name` already exists with the same
+`interface` and address, or a route whose canonical `network` already exists
+with the same gateway, is reported as
 `{existed_before: true, applied: false, existing: <row>}` and stages **no**
-playback — never a duplicate. `pfsense.route.static.add` additionally requires
+playback — never a duplicate. When the existing gateway or route has other
+settings, the wanted state is not true: the add raises `PfSenseRefusedError`
+with code `conflict`, changes nothing, and the call fails (#5138). `pfsense.route.static.add` additionally requires
 the referenced gateway to already exist (pre-stage it with
 `pfsense.gateway.add`, whose `monitor_disable` flag suits a gateway whose
 upstream device is not up yet). A non-zero playback exit, or a silent
@@ -789,7 +829,8 @@ and no audit.
 - **A refusal fails the call (#5136).** Every refusal above (`conflict`,
   `ambiguous`, `unknown_interface`, `mgmt_path`, `mgmt_path_unknown`,
   `nat_associated`) changes nothing and raises
-  `PfSenseFilterRuleRefusedError`. The call then ends with `status: error`,
+  `PfSenseFilterRuleRefusedError`, a subclass of `PfSenseRefusedError`
+  (`refusal.py`), the error that every pfSense write raises (#5138). The call then ends with `status: error`,
   the audit record says it failed, and an approved request shows
   `result_state: failed`. The message reads
   `pfsense.filter.rule.add refused (<code>): <why>`. Before #5136 the
@@ -843,7 +884,9 @@ the account, its password, its groups and its certificates stay.
   egress-free `preview_operation` path) `current_state` is `null`.
 - **Refused before any change.** `not_found` (no user with this name),
   `ambiguous` (more than one), and `protected` (the built-in admin account:
-  `uid` 0 or `scope` `system`). The fragment checks "exactly one match, not
+  `uid` 0 or `scope` `system`). A refusal is a failed call (#5138): it raises
+  `PfSenseRefusedError`, so the call gets `status: error`, the audit record
+  says it failed, and an approved request shows `result_state: failed`. The fragment checks "exactly one match, not
   uid 0" again before it changes anything.
 - **Safe to run twice.** A user already in the wanted state returns
   `status: nothing_to_do`, `nothing_to_do: true`, and nothing is written.
@@ -876,6 +919,40 @@ the account, its password, its groups and its certificates stay.
   not run the full read-back (`assert_only_own_object_changed`) that the
   other config writes use; they check only the user list. That is separate
   work.
+
+## OpenVPN reads (#4093)
+
+Two `safe` reads for the first step of a "the VPN is slow" or "the VPN keeps
+dropping" ticket. They change nothing.
+
+- **`pfsense.openvpn.clients`** takes no parameters. It finds each OpenVPN
+  server that has a management socket and reads `status 3`. The column names
+  come from the `HEADER` line, so a new column does not break the parser.
+  Answer: `{servers: [{server, proto, port, readable, clients: [{common_name,
+  real_address, virtual_address, virtual_ipv6_address, bytes_received,
+  bytes_sent, connected_since, username}]}], client_count}`. A server whose
+  status did not end with `END` is `readable: false`: its list is unknown, not
+  empty. `client_count` counts readable servers only. No server at all gives an
+  empty list.
+- **`pfsense.openvpn.log`** takes `common_name` (required; 2 to 64 characters of
+  letters, digits, `.`, `_`, `@`, `-`), `since` and `until` (ISO 8601 with a
+  zone; a time without a zone is refused) and `limit` (1 to 1000, default 200).
+  It greps the log for the whole name (quoted; `bob` does not match `bobby` or
+  `bob.smith`) and keeps the last 5000 matching lines. grep prints its exit
+  status after its lines, so a read error (status 2) raises an error instead
+  of an empty answer. No matching line (status 1) is an empty answer. Each line gets an event: `connect`, `disconnect` (with a
+  reason such as `remote-exit` or `inactivity-timeout`), `restart` (reason such
+  as `ping-restart`), `error` (TLS and auth errors) or `other`.
+- **Time.** A log stamp has no year and no zone. The op reads the firewall's
+  date and UTC offset in the same command, adds them, and compares the lines to
+  the window as exact moments. A stamp that would be in the future belongs to
+  the year before. The offset is the one at call time.
+- **`truncated: true`** means older lines may be missing (the 5000-line read
+  was full) or more events matched than `limit`. The newest events are kept.
+- **Known limit.** Lines are matched by the common name text. A line from
+  before the server knew the user (for example an early TLS error) has no name
+  and is not returned.
+- **Tests.** `backend/tests/test_connectors_pfsense_openvpn_ops.py`.
 
 ## Diagnostics: `pfsense.diag.ping` (#3965)
 
@@ -1004,10 +1081,10 @@ Tests: `backend/tests/test_connectors_pfsense_topology.py`.
 - Task #3313: `pfsense.route.static.delete` + `pfsense.gateway.delete` +
   `pfsense.alias.member.remove` — the three teardown-inverse governed deletes
   that reverse a bring-up (retire a route / gateway; trim one member out of a
-  shared alias without deleting it). `gateway.delete` refuses fail-closed while
+  shared alias without deleting it). `gateway.delete` fails the call while
   any static route / gateway group / default-gateway setting still uses the
-  gateway; `alias.member.remove` refuses `last_member` so a shared alias is
-  never emptied into deletion.
+  gateway; `alias.member.remove` fails the call on `last_member` so a shared
+  alias is never emptied into deletion.
 - Task #3954: `pfsense.user.list` + `pfsense.route.static.list` — safe reads
   with an allow-list of fields, so nobody needs `pfsense.config.show` to check
   a user or a static route.

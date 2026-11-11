@@ -41,8 +41,8 @@ func newNodeListCmd() *cobra.Command {
 			"\"nsx-rest-4.2\". Renders id / display_name / type for human eyes;\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho nsx node list --target rdc-nsx\n" +
-			"  meho nsx node list --target rdc-nsx --json",
+		Example: "  meho nsx node list --target nsx-lab\n" +
+			"  meho nsx node list --target nsx-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

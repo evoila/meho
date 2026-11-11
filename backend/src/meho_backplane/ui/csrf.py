@@ -26,7 +26,7 @@ session via HMAC:
     token = hmac_sha256(secret, session_id || random) + "." + random
 
 The server validates by recomputing the HMAC from the presented random
-half + the session_id read from the validated ``meho_session`` cookie;
+half + the session_id read from the validated ``__Host-meho_session`` cookie;
 mismatch → reject. An attacker forging the cookie cannot also forge a
 header echo matching the HMAC (the secret never leaves the server) and
 cannot read the session_id (``HttpOnly`` cookie + same-origin
@@ -41,7 +41,7 @@ Why in-house instead of ``starlette-csrf``
   that the chassis can carry directly.
 * ``starlette-csrf`` ties to its own cookie name / header name and
   ignores the BFF's session_id; in-house lets us pin the HMAC to the
-  ``meho_session`` cookie value end-to-end.
+  ``__Host-meho_session`` cookie value end-to-end.
 * The middleware shape mirrors :class:`UISessionMiddleware` (pure ASGI,
   one ``__call__``, narrow path-prefix scope) so a single mental model
   governs every ``/ui/*`` pre-routing hook.
@@ -126,7 +126,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from meho_backplane.auth.current_tenant import TENANT_HEADER
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.routes import SESSION_COOKIE_NAME
+from meho_backplane.ui.auth.session_cookie import read_session_cookie
 from meho_backplane.ui.auth.session_store import EncryptionKeyMissingError
 from meho_backplane.ui.auth.tenant import (
     PAGE_TENANT_FORM_FIELD,
@@ -146,7 +146,7 @@ __all__ = [
 
 
 #: Name of the cookie carrying the double-submit token. Separate from
-#: ``meho_session`` so the JS-readable half (the random tail of the
+#: ``__Host-meho_session`` so the JS-readable half (the random tail of the
 #: token) can be set without ``HttpOnly`` -- HTMX needs to echo it
 #: back in the ``X-CSRF-Token`` header, which requires JavaScript
 #: access. The HMAC binding to the session_id is what defeats cookie
@@ -344,8 +344,8 @@ def _select_method(scope: Scope) -> str:
 def _extract_cookie(scope: Scope, cookie_name: str) -> str | None:
     """Pull a single cookie value out of the raw ASGI headers.
 
-    Mirrors :func:`~meho_backplane.ui.auth.middleware._extract_session_cookie`
-    so the two pre-routing hooks share the parse pattern.
+    Used for the CSRF cookie. The session cookie goes through
+    :func:`~meho_backplane.ui.auth.session_cookie.read_session_cookie`.
     """
     headers = scope.get("headers")
     if not isinstance(headers, list):
@@ -641,7 +641,7 @@ class CSRFMiddleware:
             await self.app(scope, receive, send)
             return
 
-        session_id = _extract_cookie(scope, SESSION_COOKIE_NAME)
+        session_id = read_session_cookie(scope)
         cookie_token = _extract_cookie(scope, CSRF_COOKIE_NAME)
 
         # Cheap pre-checks BEFORE draining the body. ``_resolve_presented_token``

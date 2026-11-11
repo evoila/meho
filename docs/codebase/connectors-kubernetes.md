@@ -1028,7 +1028,8 @@ the result.
 `k8s.logs` passes `include_init_containers=True` to
 `resolve_pod_and_container()` in `ops_logs.py`. So an init container
 name (for example a `migrate` step) is a valid `container` value, and
-the `MultiContainerAmbiguityError` candidate list shows the app
+the candidate list of `MultiContainerAmbiguityError` (no `container`
+given) and `ContainerNotFoundError` (a wrong `container` name) shows the app
 containers first, then the init containers. Auto-pick still looks only
 at the app containers: a pod with one app container and some init
 containers still resolves to the app container. `k8s.exec` uses the same

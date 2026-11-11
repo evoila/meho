@@ -138,6 +138,12 @@ operations you register, not `execute`.
 - **Errors.** Raise `kit.ConnectorUpstreamError` when the vendor answers
   with an error, and `kit.ConnectorAuthError` when it refuses the
   credential. A failed read must never look like an empty answer.
+- **Version range.** Set `supported_version_range` (for example
+  `">=1.0,<2.0"`) to the product versions the connector is built for. When no
+  range applies, for example for a cloud API with no product version, leave
+  it out and set `version_range_reason` to one plain sentence. The template
+  has a test, `tests/test_version_range.py`, that fails when a connector has
+  neither.
 - **Caches.** Key a cache you keep across calls, for example a login
   token, with `kit.target_cache_key(target)`.
 
@@ -174,6 +180,10 @@ The inputs of `register_typed_operation`:
   `when_to_use` and `llm_instructions`. An agent picks your operation
   from these texts, so write them with care.
 - `embedding_service`: pass on the value MEHO hands to your function.
+- **Tags:** add the tag `no-trace-body` to an operation whose request
+  body must not be kept in the trace (for example an operation that runs
+  code with given inputs). It changes nothing else: not the risk level,
+  not the approval, and not the error text of the vendor.
 
 **An input that holds an address.** Some operations connect to an
 address the caller gives: a URL, a host name, or a host and port. The

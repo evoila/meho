@@ -34,7 +34,7 @@ func newRegionListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "list",
 		Short:         "List provider-plane regions on a VCFA appliance",
-		Example:       "  meho vcf-automation region list --target rdc-vcfa",
+		Example:       "  meho vcf-automation region list --target vcfa-lab",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -59,7 +59,7 @@ func newRegionGetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "get <id>",
 		Short:         "Read one provider-plane region by id",
-		Example:       "  meho vcf-automation region get r-1234 --target rdc-vcfa",
+		Example:       "  meho vcf-automation region get r-1234 --target vcfa-lab",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -27,9 +27,9 @@ Source: `backend/src/meho_backplane/connectors/bind9/`.
 - **`Bind9Connector`** (`connector.py`) -- `SshConnector` subclass.
   Class attributes: `product="bind9"`, `version="9.x"`,
   `impl_id="bind9-ssh"`. It sets no `supported_version_range` and keeps
-  the default `priority` of 0. Inherits the per-target asyncssh connection
-  pool, the key-or-password auth selection, and `aclose()` from the
-  adapter; overrides `fingerprint`, `probe`, `execute`, and adds the
+  the default `priority` of 0. Inherits the asyncssh connection
+  pool (one login per caller and target), the key-or-password auth
+  selection, and `aclose()` from the adapter; overrides `fingerprint`, `probe`, `execute`, and adds the
   `about` op handler.
 - **`_remote_bash_with_sudo()`** -- the load-bearing safety
   primitive. The only sudo-shell-construction path in the connector
@@ -212,7 +212,7 @@ reason.
 | `bind9.record.delete` | `Bind9Connector.bind9_record_delete` | `destructive` | Governed-delete tier (#3231): deletes exactly ONE record scoped by `(zone, name, type, rdata?)` — never zone-wide, never a whole-rrset sweep. Mandatory human approval + preview-hash binding + blast-radius (the exact record + its siblings). Fail-closed structured refusals `not_found` / `ambiguous` (candidates named) / `unmanaged_zone`; verify predicate confirms the single deleted value is gone (view → `rndc zonestatus`) |
 | `bind9.config.show` | `Bind9Connector.bind9_config_show` | `safe` | Read one config file under the bind config root: `named.conf`, `named.conf.*` or `*.conf`. Runs at once, without approval (#5132), so a session can read a file before `bind9.config.apply_file` changes it. Key files (`rndc.key`, `*.key`, `*.private`), zone files (use `bind9.zone.read`) and paths outside the root are refused with `ConfigPathRejectedError` and no content. Declared `credential_read` in `bind9/op_classes.py` (summary-only broadcast, no body in the flight recorder), because a config file can hold TSIG / rndc key secrets; the value of every `secret` and `cookie-secret` line, with or without quotes, also in a commented-out key block, comes back as `[REDACTED:bind_key_secret]`; the rule reads BIND comments and quoted strings the way BIND does, so a `secret` word in a comment can never hide a real key (#4617, #5342 review) |
 | `bind9.config.apply_file` | `Bind9Connector.bind9_config_apply_file` | `dangerous` | Atomic single-fragment write via T3's primitive; validate = `named-checkconf -p`; verify = config still parses after live reload |
-| `bind9.config.apply_views` | `Bind9Connector.bind9_config_apply_views` | `dangerous` | Atomic multi-file tree write (tar mode of T3's primitive); validate = `named-checkconf -p`; verify = caller-supplied `dig` or fallback parse check |
+| `bind9.config.apply_views` | `Bind9Connector.bind9_config_apply_views` | `dangerous` | Atomic multi-file tree write (tar mode of T3's primitive); validate = `named-checkconf -p`; verify = parse check, then for every staged file that a configured zone uses, `rndc zonestatus` per view must show the serial that `named-checkzone` reads from the file (`_served_check.py`; a staged zone file that no zone uses fails), then the optional caller-supplied `dig` of `verify_fqdn`, sent from `verify_source` when given so it reaches one view; staged files carry the apply time, because BIND skips a zone whose file is not newer than its last load |
 | `bind9.config.backup` | `Bind9Connector.bind9_config_backup` | `caution` | `tar -czf` of `/etc/bind/` under `/var/backups/meho-bind9/`; returns backup ID + listing of existing backups |
 | `bind9.config.reload` | `Bind9Connector.bind9_config_reload` | `caution` | `rndc reload` with structured success/failure envelope; captures `rndc status` before/after for audit |
 
@@ -271,8 +271,9 @@ All refusal envelopes carry `status` / `deleted=False` / `guidance` — the
 
 Right before an approved run of `record.delete` or `record.remove`, MEHO
 builds the preview card again against the nameserver and compares the
-record fields on it with the approved card
-(`operations/approval_object_check.py`). If the fields differ, if records
+record fields and the record values on it with the approved card
+(`operations/approval_object_check.py`). A delete with a pinned `rdata`
+compares only that value. If the fields or the values differ, if records
 appeared under a name the approved card showed as empty, or if the card
 does not build, the run is refused with `object_changed_since_approval`
 and nothing is changed on the nameserver.

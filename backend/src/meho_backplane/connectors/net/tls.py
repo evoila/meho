@@ -615,7 +615,13 @@ async def net_tls_inspect(
 
     try:
         chain, protocol, cipher = await run_blocking_probe(
-            _blocking_tls_inspect, host, port, server_name, timeout
+            _blocking_tls_inspect,
+            host,
+            port,
+            server_name,
+            timeout,
+            tenant_id=operator.tenant_id,
+            timeout=timeout,
         )
     except (OSError, SSL.Error) as exc:
         # Every connect/handshake failure is the product, not an error:

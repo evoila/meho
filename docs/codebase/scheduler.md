@@ -19,7 +19,8 @@ The third shape (event-subscription, T3 #824) lives in a sibling
 substrate (`event_outbox` table + drain loop in
 `backend/src/meho_backplane/events/`) because events arrive
 asynchronously rather than on a clock boundary. See [events.md](events.md)
-for that surface.
+for that surface. An event that carries a `coalesce_key` starts at most one
+unfinished run per trigger and key (see "Coalescing" in events.md).
 
 T1 (#822) is an in-flight spike that may settle the durable-execution
 layer as DBOS Transact. T2 ships on the codebase's twice-stated

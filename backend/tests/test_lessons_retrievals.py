@@ -125,6 +125,7 @@ async def test_search_knowledge_records_each_hit_with_status_and_expiry() -> Non
     assert rows[old.id].expired is True
     assert all(row.agent_session_id == SESSION for row in rows.values())
     assert all(row.tenant_id == TENANT and row.store == "kb" for row in rows.values())
+    assert all(row.channel == "search" for row in rows.values())
 
 
 @pytest.mark.asyncio

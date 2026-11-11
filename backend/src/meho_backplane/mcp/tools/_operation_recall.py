@@ -12,6 +12,10 @@ default); when it is off, the answer goes out as it came. A
 the answer over it, the answer goes out without the block, so the block
 never makes a result ``partial``.
 
+The entries of a block that goes out are recorded as retrievals for the
+learning numbers (:func:`meho_backplane.recall.record_shown`). A block left
+off for the wire limit records nothing, because the agent never saw it.
+
 With the setting off, the ``outputSchema`` of both tools has no
 ``team_knowledge`` field either (:func:`recall_schema_for_settings`), so an
 agent reads nothing about a block that never comes.
@@ -27,7 +31,13 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.registry import ToolDefinition
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.operations.meta_tools import _resolve_target_or_error
-from meho_backplane.recall import RECALL_KEY, recall_for_target, unavailable_block
+from meho_backplane.recall import (
+    RECALL_KEY,
+    RecallItem,
+    recall_for_target,
+    record_shown,
+    unavailable_block,
+)
 from meho_backplane.settings import get_settings
 
 __all__ = ["RECALL_OUTPUT_SCHEMA", "recall_schema_for_settings", "with_recall"]
@@ -80,7 +90,10 @@ async def with_recall(
     *,
     max_wire_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Return *answer* with the ``team_knowledge`` block, when it applies and fits."""
+    """Return *answer* with the ``team_knowledge`` block, when it applies and fits.
+
+    The entries of a block that goes out are recorded as retrievals.
+    """
     if not get_settings().team_knowledge_recall:
         return answer
     if answer.get("status") == "rate_limited" or arguments.get("target") is None:
@@ -96,12 +109,14 @@ async def with_recall(
         _log.warning(
             "recall_target_lookup_failed", tenant_id=str(operator.tenant_id), exc_info=True
         )
-        block = unavailable_block()
+        block: dict[str, Any] = unavailable_block()
+        shown: list[RecallItem] = []
     else:
         if error is not None or target is None:
             return answer
-        block = await recall_for_target(operator, target)
+        block, shown = await recall_for_target(operator, target)
     with_block = {**answer, RECALL_KEY: block}
     if max_wire_bytes is not None and measure_delivered_wire_bytes(with_block) > max_wire_bytes:
         return answer
+    await record_shown(operator.tenant_id, shown)
     return with_block

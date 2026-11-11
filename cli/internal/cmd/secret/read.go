@@ -4,13 +4,18 @@
 package secret
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -65,9 +70,10 @@ func newReadCmd() *cobra.Command {
 		targetName        string
 		field             string
 		backplaneOverride string
+		approvalID        string
 	)
 	cmd := &cobra.Command{
-		Use:   "read <mount> <path>",
+		Use:   "read <mount> <path> | read --approval <id>",
 		Short: "Pipe a single raw secret field to stdout (pipe-only, audited)",
 		Long: "read dispatches the audited op_id=\"vault.kv.read\" against\n" +
 			"connector_id=\"vault-1.x\" (the same op `meho vault kv read` uses),\n" +
@@ -86,14 +92,33 @@ func newReadCmd() *cobra.Command {
 			"empty. The read is audited server-side by vault.kv.read's standard\n" +
 			"/api/v1/operations/call audit row (mount + path); the --field name\n" +
 			"is NOT recorded (extraction is client-side).\n\n" +
+			"A read that shows a secret value waits for a second person's\n" +
+			"approval. Then the command writes no value, prints the request id\n" +
+			"on stderr and exits 4. After the approval, run\n" +
+			"`meho secret read --approval <id> --field <name>`: it runs the\n" +
+			"approved read and writes the value to stdout the same way. Only\n" +
+			"the person who sent the request can, once, and only within a short\n" +
+			"time after the approval (15 minutes by default). MEHO keeps no\n" +
+			"value. Do not run the first command again: that sends a new\n" +
+			"request.\n\n" +
 			"Exit codes mirror meho operation call: 0=ok, 1=error/denied,\n" +
-			"2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho secret read --target rdc-vault secret app/db --field password | sshpass -f /dev/stdin ssh root@host\n" +
-			"  PW=$(meho secret read --target rdc-vault secret app/db --field password)",
-		Args:          cobra.ExactArgs(2),
+			"2=auth_expired, 3=unreachable, 4=unexpected or still waiting,\n" +
+			"5=not the person who sent the request.",
+		Example: "  meho secret read --target vault-lab secret app/db --field password | sshpass -f /dev/stdin ssh root@host\n" +
+			"  PW=$(meho secret read --target vault-lab secret app/db --field password)\n" +
+			"  PW=$(meho secret read --approval 3f2b9c1e-0000-4000-8000-000000000000 --field password)",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if approvalID != "" {
+				return cobra.NoArgs(cmd, args)
+			}
+			return cobra.ExactArgs(2)(cmd, args)
+		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if approvalID != "" {
+				return runReadApproved(cmd, approvalID, field, backplaneOverride)
+			}
 			return runRead(cmd, targetName, args[0], args[1], field, backplaneOverride)
 		},
 	}
@@ -103,6 +128,8 @@ func newReadCmd() *cobra.Command {
 		"key within the secret's data map whose raw value is written to stdout (required)")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL (defaults to the URL from the most recent `meho login`)")
+	cmd.Flags().StringVar(&approvalID, "approval", "",
+		"id of an approved read request: run it once and write its --field value instead of sending a new read")
 	if err := cmd.MarkFlagRequired("field"); err != nil {
 		panic(err) // programmer error: the flag is defined directly above
 	}
@@ -156,6 +183,13 @@ func runRead(
 	// the diagnostic lands on stderr and the exit code matches the rest of
 	// the CLI — but pin the output writer to stderr so no envelope text
 	// leaks onto the value channel.
+	return writeFieldValue(cmd, r, field)
+}
+
+// writeFieldValue writes the --field value of an ok read result to
+// stdout, or routes a non-ok result to stderr. It is the one place both
+// a direct read and the read of an approved request write the value.
+func writeFieldValue(cmd *cobra.Command, r *dispatch.CallResult, field string) error {
 	if r.Status != "ok" {
 		return renderNonOKToStderr(cmd, r)
 	}
@@ -179,13 +213,18 @@ func runRead(
 // then maps the status to an exit code the same way dispatch.Render does.
 func renderNonOKToStderr(cmd *cobra.Command, r *dispatch.CallResult) error {
 	if r.Status == dispatch.StatusAwaitingApproval {
-		// vault.kv.read is not approval-gated, so this is not expected in
-		// practice; handle it defensively rather than mis-classifying it
-		// as an invalid status. Parked = no value, exit non-zero (unlike
-		// secret move's exit-0 park, there is nothing to hand back here).
+		// vault.kv.read with reveal_secret waits for a second person's
+		// approval, so a read lands here until someone approves it. Parked
+		// = no value, exit non-zero. After the approval, --approval runs the
+		// read once for the requester.
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"meho: read parked at status=%s; no value written (%s)\n",
 			r.Status, dispatch.ParkedHint)
+		if id := dispatch.ParkedApprovalID(r.Extras); id != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"meho: after the approval, get the value with: "+
+					"meho secret read --approval %s --field <name>\n", id)
+		}
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected("read dispatch parked awaiting approval; no value available"), false)
 	}
@@ -199,6 +238,113 @@ func renderNonOKToStderr(cmd *cobra.Command, r *dispatch.CallResult) error {
 	default:
 		return output.RenderError(cmd.ErrOrStderr(), dispatch.UnknownStatusError(r.Status), false)
 	}
+}
+
+// runReadApproved writes the --field value of an approved read request.
+// It calls POST /api/v1/approvals/{id}/reveal: the backplane runs the
+// approved read once, for the person who sent the request only, and
+// within a short time after the approval. MEHO keeps no value, so the
+// command works once per approval. The pipe-only guard and the
+// stdout/stderr split are the same as runRead.
+func runReadApproved(cmd *cobra.Command, idArg, field, backplaneOverride string) error {
+	if stdoutIsTTY() {
+		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(
+			"refusing to write a raw secret to a terminal; `meho secret read` is "+
+				"pipe-only — redirect or pipe stdout (e.g. `$(meho secret read …)`)",
+		), false)
+	}
+	requestID, err := uuid.Parse(idArg)
+	if err != nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("--approval %q is not a request id: %v", idArg, err)), false)
+	}
+	backplaneURL, err := resolveBackplane(backplaneOverride)
+	if err != nil {
+		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), false)
+	}
+	client, err := api.NewAuthedClient(cmd.Context(), backplaneURL, api.AuthedClientOptions{})
+	if err != nil {
+		return renderRequestError(cmd, backplaneURL, err, false)
+	}
+	view, err := fetchApprovedReveal(cmd.Context(), client, requestID)
+	if err != nil {
+		var apiErr *dispatch.APIResponseError
+		if errors.As(err, &apiErr) {
+			switch apiErr.StatusCode {
+			case http.StatusForbidden:
+				return output.RenderError(cmd.ErrOrStderr(), output.InsufficientRole(
+					"not_request_owner: only the person who sent this request can read its value"), false)
+			case http.StatusConflict:
+				return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(
+					"no value: "+revealRefusal(apiErr.Body)), false)
+			}
+		}
+		return renderRequestError(cmd, backplaneURL, err, false)
+	}
+	r, serr := approvedReadResult(view)
+	if serr != nil {
+		return output.RenderError(cmd.ErrOrStderr(), serr, false)
+	}
+	return writeFieldValue(cmd, r, field)
+}
+
+// statusTokenExpired is HTTP 401: the stored token has expired, so the
+// call is retried once after a refresh.
+const statusTokenExpired = 401
+
+// fetchApprovedReveal calls POST /api/v1/approvals/{id}/reveal with one
+// retry after a token refresh. A non-2xx answer comes back as a
+// structured error, so the caller never mistakes it for a result.
+func fetchApprovedReveal(
+	ctx context.Context, client *api.AuthedClient, requestID uuid.UUID,
+) (*api.ApprovalRevealResult, error) {
+	resp, err := client.RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse(ctx, requestID, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode() == statusTokenExpired {
+		if rerr := client.Refresh(ctx); rerr != nil {
+			return nil, rerr
+		}
+		resp, err = client.RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse(ctx, requestID, nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 || resp.JSON200 == nil {
+		return nil, &dispatch.APIResponseError{StatusCode: resp.StatusCode(), Body: string(resp.Body)}
+	}
+	return resp.JSON200, nil
+}
+
+// revealRefusal is the plain reason of a refused fetch: the "detail" of
+// the 409 answer ("reveal_<code>: <message>"), or the raw body.
+func revealRefusal(body string) string {
+	var parsed struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal([]byte(body), &parsed); err == nil && parsed.Detail != "" {
+		return parsed.Detail
+	}
+	return body
+}
+
+// approvedReadResult turns the answer of the reveal route into the read
+// result. It fails when the request is not a vault.kv.read.
+func approvedReadResult(v *api.ApprovalRevealResult) (*dispatch.CallResult, *output.StructuredError) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, output.Unexpected(fmt.Sprintf("encode reveal result: %v", err))
+	}
+	var r dispatch.CallResult
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return nil, output.Unexpected(fmt.Sprintf("decode reveal result: %v", err))
+	}
+	if r.OpID != opKVRead {
+		return nil, output.Unexpected(fmt.Sprintf(
+			"request %s is not a secret read (op_id=%q)", v.ApprovalRequestId, r.OpID))
+	}
+	return &r, nil
 }
 
 // extractField decodes the vault.kv.read result envelope ({data: {...},

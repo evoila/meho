@@ -4,7 +4,8 @@
 """Keep knowledge and memory useful, and measure whether lessons help.
 
 * :mod:`~meho_backplane.lessons.retrievals` records which entries a search
-  gave to an agent session, and finds the ones the session then used.
+  gave to an agent session, or MEHO showed before an operation, and finds
+  the ones the session then used.
 * :mod:`~meho_backplane.lessons.metrics` computes the four learning numbers
   of ``meho audit reflex``.
 * :mod:`~meho_backplane.lessons.upkeep` is the weekly job: it merges

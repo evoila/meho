@@ -84,10 +84,14 @@ and results reduced to what an agent can use.
 The connectors for the VMware and Broadcom estate (vSphere, NSX, VCF
 Operations, VCF Automation, SDDC Manager, VCF Installer, Cloud Director,
 HCX, Site Recovery Manager, vSphere Replication, Orchestrator, Aria
-Automation Config and the VCF Identity Broker) are evoila's own. They
-ship as a commercial enterprise pack: an overlay image built on this
-public image, with the VMware connectors installed as packages. Contact
-evoila for the enterprise pack. The public image runs without it.
+Automation Config, VMware Holodeck and the VCF Identity Broker), the
+Fortinet connectors (FortiGate, FortiManager, FortiAnalyzer, FortiMail
+and FortiSIEM) and the CrowdStrike Falcon connector are evoila's own.
+They ship as a commercial enterprise pack: an overlay image built on
+this public image, with these connectors installed as packages. The
+full list is in the
+[connector inventory](docs-site/reference/connectors.md#evoilas-enterprise-pack).
+Contact evoila for the enterprise pack. The public image runs without it.
 
 Anyone can add a connector the same way: write a connector package
 against the connector kit and install it into your own build of MEHO
@@ -204,8 +208,8 @@ MEHO ships as five operator-facing artefacts:
   aliases (`k8s`, `vault`, `harbor`, `keycloak`, `argocd`, `gcloud`,
   `bind9`, `pfsense`, and more; the `vmware` and `nsx` aliases need the
   enterprise pack on the server), and admin/migration
-  tooling (`admin`, `migrate`). Released as multi-platform tarballs
-  (`linux/macOS × amd64/arm64`) on every `v*` tag, each individually
+  tooling (`admin`, `migrate`). Released as multi-platform archives
+  (`linux/macOS/Windows × amd64/arm64`) on every `v*` tag, each individually
   cosign-signed. Full command reference:
   [`docs/codebase/cli.md`](./docs/codebase/cli.md).
 - **Claude Desktop bundle** — `meho-claude-desktop-X.Y.Z.mcpb`, attached
@@ -304,8 +308,8 @@ with an ingress controller. Since v0.45.0 the chart brings its own
 PostgreSQL, Keycloak and OpenBao and connects MEHO to them. To use your
 own, set `corePostgres.enabled`, `coreKeycloak.enabled` or
 `coreVault.enabled` to `false` and fill the matching values. A Linux
-server install is available, in testing. A VMware appliance is in
-progress.
+server install is available, in testing. The VMware appliance is in
+progress, not released.
 
 ```bash
 helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
@@ -317,7 +321,7 @@ helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
 With the built-in parts, `your-values.yaml` needs only the values listed
 under [Helm chart values reference](#helm-chart-values-reference).
 To bring your own parts, see
-[`deploy/values-examples/values-rdc-example.yaml`](./deploy/values-examples/values-rdc-example.yaml)
+[`deploy/values-examples/values-example-lab.yaml`](./deploy/values-examples/values-example-lab.yaml)
 for the shape `your-values.yaml` should follow and
 [`deploy/values-examples/README.md`](./deploy/values-examples/README.md)
 for the **External Secrets Operator (ESO) sync patterns** the chart
@@ -462,7 +466,8 @@ vendors. See [How MEHO compares](#how-meho-compares).
 
 **Where are the VMware connectors?**
 In evoila's enterprise pack: an overlay image built on the public image
-with the VMware connectors installed as packages. The public repository
+with the VMware, Fortinet and CrowdStrike connectors installed as
+packages. The public repository
 ships the backplane and the connectors for common products. See
 [Why MEHO](#why-meho).
 

@@ -628,6 +628,11 @@ sorted by path.
 
 #### The import login
 
+The step-by-step setup for an operator (all three machine logins, the
+client secrets and the CI calls) is in the operator guide:
+[Lessons in your own wiki](../../docs-site/guides/memory-and-knowledge.md#lessons-in-your-own-wiki).
+This section keeps the code detail.
+
 The route admits a `tenant_admin`, or a login whose token carries the
 claim `kb_import_only: true` (`Operator.kb_import_only`,
 `auth/jwt.py::_extract_kb_import_only`). Such a login can do nothing
@@ -770,6 +775,9 @@ the round trip.
 
 #### The export login
 
+Setup steps for an operator:
+[Lessons in your own wiki](../../docs-site/guides/memory-and-knowledge.md#step-2-create-the-three-machine-logins).
+
 The route admits an `operator` or a `tenant_admin`, or a login whose
 token carries the claim `kb_export_only: true`
 (`Operator.kb_export_only`, `auth/jwt.py::_extract_kb_export_only`).
@@ -901,7 +909,8 @@ job never confirms a candidate.
 A background job keeps the store clean. It runs once per
 `KNOWLEDGE_UPKEEP_INTERVAL_SECONDS` (one week by default), counted from
 its last recorded run, and can be turned off with
-`KNOWLEDGE_UPKEEP_ENABLED=false`. On PostgreSQL an advisory lock lets
+`KNOWLEDGE_UPKEEP_ENABLED=false` (Helm: `config.knowledgeUpkeepEnabled`
+and `config.knowledgeUpkeepIntervalSeconds`). On PostgreSQL an advisory lock lets
 one replica at a time run it. Each run:
 
 1. **Merges duplicates.** Entries of one tenant with exactly the same
@@ -917,12 +926,15 @@ one replica at a time run it. Each run:
    memory entry that a session used in the last interval gets
    `confirmed_at` set to the time of that use. "Used" is defined in
    [reflex-adoption.md](reflex-adoption.md#learning-numbers): a search
-   gave the entry to a session, and the session then ran an operation
-   that succeeded.
+   gave the entry to a session, or MEHO showed it before an operation,
+   and the session then ran an operation that succeeded.
 4. **Lists used candidates for a reviewer**, with the number of
    different sessions and different targets that used each one. Copies
    of one story are not independent proof, so two searches in one
-   session count once.
+   session count once. Each candidate also gives how many sessions used
+   it after a search (`search_sessions`) and how many after MEHO showed
+   it before an operation (`recall_sessions`). A session can count in
+   both.
 5. **Measures** the four learning numbers for the interval.
 
 The job changes only metadata, through `kb/revisions.py::update_head_metadata`
@@ -939,7 +951,8 @@ retrievals older than 180 days.
 The payload lists what was merged (`merged`: slug and `into`), retired
 (`retired`), refreshed (`refreshed`) and what waits for a reviewer
 (`for_review`), each list at most 100 items with full counts
-(`merged_count` and so on), plus the four numbers (`numbers`). Read it
+(`merged_count` and so on), plus the four numbers (`numbers`). The
+report models are in `lessons/upkeep_report.py`. Read it
 with `meho audit query` and the principal `system:knowledge-upkeep`. A
 row with the totals goes to the system tenant
 `00000000-0000-0000-0000-000000005733`; the schedule reads it as the
@@ -951,7 +964,8 @@ written only when every tenant committed.
 **Shared scope.** An entry with `shared: true` in its metadata is
 readable from every tenant on the instance, if its owner tenant is
 listed in `KB_SHARED_TENANT_IDS` (comma-separated tenant ids; empty by
-default, so nothing is shared). Only reading is shared:
+default, so nothing is shared; Helm: `config.kbSharedTenantIds`). Only
+reading is shared:
 
 - the entry stays in its owner tenant (`KbEntry.tenant_id` is the
   owner's id);

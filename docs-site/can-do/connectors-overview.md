@@ -13,8 +13,9 @@ for each vendor.
 
 MEHO has two kinds of connectors. Both work the same for the caller:
 
-- **Generic** connectors are built from a vendor's API file (OpenAPI,
-  GraphQL, WSDL or proto).
+- **Generic** connectors are built from a vendor's OpenAPI file (version
+  3.0 or 3.1). The command line converts a Swagger 2.0 file to OpenAPI 3
+  first.
 - **Typed** connectors are written by hand against a vendor library or
   a protocol, where no good API file exists.
 
@@ -23,12 +24,14 @@ You can add your own connector as a package. See
 
 ## Product versions
 
-The tables below group the connectors by what they manage. The exact
-version ranges are on the [connector inventory](../reference/connectors.md).
+The tables below group the connectors by what they manage. **Built for**
+is the range the code declares and CI tests. The exact ranges, and the
+versions that a person ran against a real system, are on the
+[connector inventory](../reference/connectors.md).
 
 ### In the public image
 
-| Area | Systems | Versions |
+| Area | Systems | Built for |
 |---|---|---|
 | Kubernetes and delivery | Kubernetes, RKE2, Argo CD, Harbor | Kubernetes 1.x, Argo CD 2 to 3, Harbor 2.x |
 | Secrets and login | Vault and OpenBao, Keycloak, FreeIPA, Microsoft Entra ID | Keycloak 26.x, FreeIPA 4.9 and later |
@@ -43,9 +46,35 @@ version ranges are on the [connector inventory](../reference/connectors.md).
 
 The enterprise pack is a commercial add-on. It brings the VMware and
 VCF connectors, and connectors for Fortinet and CrowdStrike products,
-as a signed package on top of the public image. It covers, for example,
-vCenter 8.0 and 9.x, NSX 4.x and 9.x, VCF 5.x and 9.x, HCX, Site
-Recovery Manager and Cloud Director. To get the pack, contact evoila.
+as a signed package on top of the public image. To get the pack,
+contact evoila.
+
+<!-- live-tests:start -->
+| Product | Built for | Tested live on |
+| --- | --- | --- |
+| VMware vCenter and vSphere | 8.0, 9.x | `vmware-rest-9.0`: not yet recorded. `vmware-rest-8.0`: not yet recorded. |
+| VMware NSX | 4.x, 9.x | `nsx-rest-9.0`: not yet recorded. `nsx-rest-4.2`: not yet recorded. |
+| VCF SDDC Manager | 5.x, 9.x | `sddc-rest-9.0`: not yet recorded. `sddc-vcf5-5.0`: not yet recorded. |
+| VCF Installer and Cloud Builder | 5.x, 9.x | `installer-rest-9.1`: not yet recorded. `installer-cb-5.0`: not yet recorded. |
+| VCF fleet management and Aria Suite Lifecycle | 8.x, 9.x | `fleet-lcm-9.0`: not yet recorded. `fleet-rest-9.0`: not yet recorded. |
+| VCF Automation and Aria Automation | 8.x, 9.x | `vcfa-rest-9.0`: not yet recorded. `vcfa-vra8-8.0`: not yet recorded. |
+| VCF Operations and Aria Operations | 8.x, 9.x | `vrops-rest-9.0`: not yet recorded. `vrops-vrops8-8.0`: not yet recorded. |
+| VCF Operations for logs and Aria Operations for Logs | 8.x, 9.x | `vrli-rest-9.0`: not yet recorded. `vrli-vrli8-8.0`: not yet recorded. |
+| VCF Operations orchestrator | 8.x, 9.x | not yet recorded |
+| VCF Identity Broker and Workspace ONE Access | 3.3, 9.x | `idb-rest-9.0`: not yet recorded. `idb-wsa-3.3`: not yet recorded. |
+| VMware Cloud Director | 10.x | not yet recorded |
+| VMware HCX | 4.7 to 9.x | not yet recorded |
+| VMware Site Recovery Manager | 8.8 to 9.x | not yet recorded |
+| VMware vSphere Replication | 8.8 to 9.x | not yet recorded |
+| VMware Aria Automation Config (Salt) | 8.x, 9.x | not yet recorded |
+| VMware Holodeck | 9.0 | not yet recorded |
+| Fortinet FortiGate | 7.2 to 7.x | not yet recorded |
+| Fortinet FortiManager | 7.2 to 7.x | not yet recorded |
+| Fortinet FortiAnalyzer | 7.2 to 7.x | not yet recorded |
+| Fortinet FortiMail | 7.2 to 7.x | not yet recorded |
+| Fortinet FortiSIEM | 7.4 to 7.x | `fortisiem-rest-7.5`: not yet recorded. `fortisiem-rest-7.4`: not yet recorded. |
+| CrowdStrike Falcon | cloud service | not yet recorded |
+<!-- live-tests:end -->
 
 ## State
 

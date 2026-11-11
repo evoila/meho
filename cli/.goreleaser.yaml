@@ -5,11 +5,12 @@
 #
 # Locked artefact contract (Goal #11 — CLI release-distribution principle):
 #   linux/amd64, linux/arm64, darwin/amd64, darwin/arm64 single-static
-#   tar.gz tarballs published to https://github.com/evoila/meho/releases
+#   tar.gz tarballs, and windows/amd64, windows/arm64 zip archives,
+#   published to https://github.com/evoila/meho/releases
 #   on every `v*` tag push, alongside a single combined SHA256SUMS file.
 #
-# Tarball naming (GoReleaser default with `_` separator):
-#   meho_<version>_<os>_<arch>.tar.gz
+# Archive naming (GoReleaser default with `_` separator):
+#   meho_<version>_<os>_<arch>.tar.gz   (Windows: .zip)
 #
 # Each tarball ships the `meho` binary + LICENSE + CLI README so anonymous
 # download → extract → verify identity → run is a single workflow with no
@@ -61,6 +62,7 @@ builds:
     goos:
       - linux
       - darwin
+      - windows
     goarch:
       - amd64
       - arm64
@@ -117,10 +119,15 @@ archives:
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     # `formats` is the v2 idiom (v1 used the singular `format`).
     # tar.gz is universal across linux + macOS — operators on either
-    # OS can `tar xzf` without extra tooling. Zip is the convention
-    # for Windows, which v0.1 doesn't ship.
+    # OS can `tar xzf` without extra tooling. Windows gets a zip,
+    # which File Explorer and PowerShell (`Expand-Archive`) open
+    # without extra tools.
     formats:
       - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
     files:
       # Both files resolve from the dist build context (`cli/`).
       # `LICENSE` is copied into `cli/` by the `before:` hook above
@@ -144,7 +151,7 @@ checksum:
 # Cosign keyless blob-signing (Issue #47, ADR 0006).
 #
 # GoReleaser runs this block AFTER `archives:` and `checksum:`, so the
-# `artifacts: all` glob includes the four tarballs + SHA256SUMS — every
+# `artifacts: all` glob includes the archives + SHA256SUMS — every
 # operator-downloadable file gets a sigstore bundle. The bundle is a
 # single JSON document containing the signature, the Fulcio-issued
 # x509 cert, and the Rekor transparency-log inclusion proof, so the
@@ -175,7 +182,7 @@ signs:
   - id: cosign
     # `artifacts: all` is the broadest setting (vs. `archive` or
     # `checksum`). It iterates every artefact GoReleaser produces in
-    # the v0.1 pipeline — the four tarballs + SHA256SUMS — so an
+    # the v0.1 pipeline — the archives + SHA256SUMS — so an
     # operator can verify the checksum file's signature first, then
     # `sha256sum -c SHA256SUMS` against any subset of tarballs they
     # actually downloaded. The two-step trust chain is what

@@ -88,6 +88,7 @@ __all__ = [
     "IngestRequest",
     "IngestResponse",
     "IngestionResultModel",
+    "LoginSetupOutcome",
     "NextStep",
     "OperationOverrideList",
     "OperationOverrideRow",
@@ -103,6 +104,17 @@ __all__ = [
 #: the CLI / MCP sibling tasks can use it as a sentinel without
 #: needing to send ``status=<empty>``.
 ConnectorStatusFilter = Literal["staged", "enabled", "disabled", "all"]
+
+#: What happened to the login setup of an ingest with a login type (the
+#: ``login_setup`` field of :class:`IngestionResultModel`). See
+#: :mod:`meho_backplane.operations.ingest.login_setup`.
+LoginSetupOutcome = Literal[
+    "registered",
+    "replaced",
+    "unchanged",
+    "served_by_connector_code",
+    "served_by_builtin_login_setup",
+]
 
 
 class SpecSource(BaseModel):
@@ -685,6 +697,20 @@ class IngestionResultModel(BaseModel):
     safety_changes: list[SafetyChangeModel] = Field(default_factory=list)
     dropped_count: int = 0
     dropped_ops: list[DroppedOpModel] = Field(default_factory=list)
+    login_setup: LoginSetupOutcome | None = Field(
+        default=None,
+        description=(
+            "What happened to the login setup of an ingest with a login type. "
+            "registered: the scope's calls use it now. replaced: it replaced a "
+            "different login setup of the same scope (audited with the old and the "
+            "new login type). unchanged: the same login setup was already in place. "
+            "served_by_connector_code / served_by_builtin_login_setup: hand-written "
+            "connector code or a shipped or built-in login setup serves this "
+            "connector for every tenant, so this login setup is saved but not used. "
+            "A tenant's login setup applies only to that tenant's calls. Null for an "
+            "ingest without a login type."
+        ),
+    )
 
 
 class GroupSummaryModel(BaseModel):

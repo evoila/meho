@@ -1,5 +1,9 @@
 # Claude Desktop
 
+New here? Start with the [laptop guide](../install/laptop-tools.md).
+
+Admins: read the [organisation setup page](organisation-setup.md) first.
+
 Claude Desktop reaches an internal MEHO backplane through a **local
 [`mcp-remote`](https://github.com/geelen/mcp-remote) stdio→HTTP shim**
 that runs on your own VPN-connected machine. The shim runs the OAuth
@@ -173,9 +177,9 @@ that differ per deployment —
   CA in your OS trust store instead — see
   [Trusting an internal CA](#trusting-an-internal-ca).
 
-Two advanced fields default to the working setup and rarely need
-changing: the OAuth **client id** (default `meho-mcp`) and the OAuth
-**scopes** (default `mcp:read mcp:execute offline_access`). To opt the
+Two advanced fields rarely need changing: the OAuth **client id** (leave
+it empty; see [A login of its own for Claude Desktop](#a-login-of-its-own-for-claude-desktop))
+and the OAuth **scopes** (default `mcp:read mcp:execute offline_access`). To opt the
 session into the operator planes, add `mcp:admin` to the scopes field — see
 [MCP surface and scopes](mcp-surface-and-scopes.md#how-a-client-requests-elevation).
 
@@ -192,6 +196,28 @@ hours with the
 [recommended realm setting](../install/keycloak-realm.md#how-long-an-mcp-login-lasts).
 Without it, the login ends at the realm's SSO idle limit (30 minutes by
 default). If you change the scopes field, keep `offline_access` in it.
+
+### A login of its own for Claude Desktop
+
+When your MEHO admin turns on `MCP_CLIENT_PER_TOOL_KIND`, Claude Desktop
+and Claude Code no longer share one login:
+
+- At start, the extension asks MEHO which login client Claude Desktop uses
+  (`GET /api/v1/auth-config`). MEHO names `meho-mcp-desktop`.
+- The extension signs in with `meho-mcp-desktop` and sends the header
+  `Meho-Tool: claude-desktop`. The header gives Claude Desktop a saved
+  login of its own, apart from Claude Code.
+- The audit log names the client (`meho-mcp-desktop`), so it tells Claude
+  Desktop from Claude Code.
+- The first use after the change asks for one browser login.
+
+With the switch off, with an older MEHO, or when MEHO does not answer
+within 5 seconds, the extension keeps `meho-mcp` and sends no header, as
+before. A value in the **client id** field wins; then the extension does
+not ask MEHO and sends no header. The value `meho-mcp` counts as empty:
+older versions of the extension filled it in by default. The realm needs
+the `meho-mcp-desktop` client: see
+[the MCP clients of the AI tools](../install/keycloak-realm.md#the-mcp-clients-of-the-ai-tools).
 
 ### When the login expires or is not finished
 
@@ -210,8 +236,9 @@ After you update to a bundle with this fix, the first use opens **one new
 browser login**. The bundle's newer `mcp-remote` keeps saved logins in a
 new folder, `~/.mcp-auth/mcp-remote-0.1.38/`.
 
-The bundle still expects the realm's public `meho-mcp` client with the
-shim's loopback redirect URIs registered (below), and — on an
+The bundle still expects the realm's public `meho-mcp` client (and
+`meho-mcp-desktop` when the switch above is on) with the shim's loopback
+redirect URIs registered (below), and — on an
 internal-CA deploy — one of the two CA trust routes below. If you cannot
 install the bundle, wire the shim by hand with the rest of this page.
 

@@ -280,9 +280,10 @@ data:
 # pod's environment during the import (see the StatefulSet).
 #
 # With the company login on, the bootstrap Job sets up the identity provider
-# as meho-admin, which then needs two more realm-management roles. They are
+# as meho-admin, which then needs one more realm-management role. It is
 # added here, so the realm file itself stays the one of an install without
-# the company login (docs/codebase/core-bootstrap.md).
+# the company login (docs/codebase/core-bootstrap.md). The realm file
+# already gives meho-admin manage-realm: the Job needs it for the login flows.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -971,6 +972,326 @@ data:
           ]
         },
         {
+          "clientId": "meho-mcp-code",
+          "name": "MEHO MCP for Claude Code",
+          "description": "Public client for the Claude Code plugin (authorization code with PKCE). Same settings as meho-mcp; a login of its own.",
+          "enabled": true,
+          "protocol": "openid-connect",
+          "publicClient": true,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "serviceAccountsEnabled": false,
+          "frontchannelLogout": false,
+          "attributes": {
+            "pkce.code.challenge.method": "S256",
+            "oauth2.device.authorization.grant.enabled": "false",
+            "use.refresh.tokens": "true",
+            "client.use.lightweight.access.token.enabled": "false",
+            "client.offline.session.idle.timeout": "172800"
+          },
+          "redirectUris": [
+            "http://localhost:*",
+            "http://127.0.0.1:*"
+          ],
+          "webOrigins": [
+            "+"
+          ],
+          "defaultClientScopes": [
+            "basic",
+            "roles",
+            "web-origins",
+            "acr",
+            "profile",
+            "email"
+          ],
+          "optionalClientScopes": [
+            "offline_access",
+            "mcp:read",
+            "mcp:execute",
+            "mcp:admin"
+          ],
+          "protocolMappers": [
+            {
+              "name": "audience-meho-backplane",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-audience-mapper",
+              "config": {
+                "included.client.audience": "meho-backplane",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "false"
+              }
+            },
+            {
+              "name": "meho-mcp-audience",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-audience-mapper",
+              "config": {
+                "included.custom.audience": "${MEHO_REALM_PUBLIC_URL}/mcp",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "false"
+              }
+            },
+            {
+              "name": "tenant-id",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "tenant_id",
+                "claim.name": "tenant_id",
+                "jsonType.label": "String",
+                "aggregate.attrs": "false",
+                "multivalued": "false",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "tenant-role",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "tenant_role",
+                "claim.name": "tenant_role",
+                "jsonType.label": "String",
+                "aggregate.attrs": "false",
+                "multivalued": "false",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "approver",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "approver",
+                "claim.name": "approver",
+                "jsonType.label": "boolean",
+                "aggregate.attrs": "false",
+                "multivalued": "false",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "platform-admin",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "platform_admin",
+                "claim.name": "platform_admin",
+                "jsonType.label": "boolean",
+                "aggregate.attrs": "false",
+                "multivalued": "false",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "meho-tenants",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "meho_tenant",
+                "claim.name": "meho_tenants",
+                "jsonType.label": "String",
+                "aggregate.attrs": "true",
+                "multivalued": "true",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "groups-claim",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-group-membership-mapper",
+              "config": {
+                "claim.name": "groups",
+                "full.path": "false",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "false"
+              }
+            }
+          ]
+        },
+        {
+          "clientId": "meho-mcp-desktop",
+          "name": "MEHO MCP for Claude Desktop",
+          "description": "Public client for the Claude Desktop extension (authorization code with PKCE). Same settings as meho-mcp; a login of its own.",
+          "enabled": true,
+          "protocol": "openid-connect",
+          "publicClient": true,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "serviceAccountsEnabled": false,
+          "frontchannelLogout": false,
+          "attributes": {
+            "pkce.code.challenge.method": "S256",
+            "oauth2.device.authorization.grant.enabled": "false",
+            "use.refresh.tokens": "true",
+            "client.use.lightweight.access.token.enabled": "false",
+            "client.offline.session.idle.timeout": "172800"
+          },
+          "redirectUris": [
+            "http://localhost:*",
+            "http://127.0.0.1:*"
+          ],
+          "webOrigins": [
+            "+"
+          ],
+          "defaultClientScopes": [
+            "basic",
+            "roles",
+            "web-origins",
+            "acr",
+            "profile",
+            "email"
+          ],
+          "optionalClientScopes": [
+            "offline_access",
+            "mcp:read",
+            "mcp:execute",
+            "mcp:admin"
+          ],
+          "protocolMappers": [
+            {
+              "name": "audience-meho-backplane",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-audience-mapper",
+              "config": {
+                "included.client.audience": "meho-backplane",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "false"
+              }
+            },
+            {
+              "name": "meho-mcp-audience",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-audience-mapper",
+              "config": {
+                "included.custom.audience": "${MEHO_REALM_PUBLIC_URL}/mcp",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "false"
+              }
+            },
+            {
+              "name": "tenant-id",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "tenant_id",
+                "claim.name": "tenant_id",
+                "jsonType.label": "String",
+                "aggregate.attrs": "false",
+                "multivalued": "false",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "tenant-role",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "tenant_role",
+                "claim.name": "tenant_role",
+                "jsonType.label": "String",
+                "aggregate.attrs": "false",
+                "multivalued": "false",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "approver",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "approver",
+                "claim.name": "approver",
+                "jsonType.label": "boolean",
+                "aggregate.attrs": "false",
+                "multivalued": "false",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "platform-admin",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "platform_admin",
+                "claim.name": "platform_admin",
+                "jsonType.label": "boolean",
+                "aggregate.attrs": "false",
+                "multivalued": "false",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "meho-tenants",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "meho_tenant",
+                "claim.name": "meho_tenants",
+                "jsonType.label": "String",
+                "aggregate.attrs": "true",
+                "multivalued": "true",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "groups-claim",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-group-membership-mapper",
+              "config": {
+                "claim.name": "groups",
+                "full.path": "false",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "false"
+              }
+            }
+          ]
+        },
+        {
           "clientId": "meho-web",
           "name": "MEHO console",
           "description": "Confidential client for the MEHO web console login (authorization code with PKCE).",
@@ -1198,6 +1519,7 @@ data:
           "clientRoles": {
             "realm-management": [
               "manage-clients",
+              "manage-realm",
               "manage-users"
             ]
           }
@@ -1430,6 +1752,11 @@ data:
       capabilities = ["create", "read", "update"]
     }
     path "secret/metadata/agents/+/credentials" {
+      capabilities = ["read"]
+    }
+    # The object storage keys of the agent session store
+    # (config.sessionStore.credentialsVaultPath). Read only.
+    path "secret/data/services/session-store" {
       capabilities = ["read"]
     }
     # The dead-token check reads lookup-self after a refused write.
@@ -1871,7 +2198,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: b22e38c613fe3a91dfcb02d561d91eb1089a508ab68829bab5f2ff4d4c6bdb6e
+        checksum/config: e658d44876cd0f62b8cca0c7fc65c0ca79cb375d0716fce9b265b03ec3816093
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.
@@ -2773,7 +3100,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: golden-vault-init-dd647dbd
+  name: golden-vault-init-5875ea0f
   labels:
     helm.sh/chart: meho-chart-0.2.0
     app.kubernetes.io/name: meho
@@ -3141,9 +3468,17 @@ data:
   APPROVAL_ONE_TIME_CODE_ACR_VALUES: ""
   # Switches for what the agent sees, off by default until model tests
   # show they help: team knowledge before an operation and in the start
-  # text, and the similar-entry check on a new knowledge entry.
+  # text, the similar-entry check on a new knowledge entry, and short
+  # texts for the biggest tools on the MCP tool list.
   TEAM_KNOWLEDGE_RECALL: "false"
   KB_SIMILAR_CHECK: "false"
+  MCP_SHORT_TOOL_TEXTS: "false"
+  # The shared knowledge scope and the weekly knowledge upkeep. Rendered
+  # always; the defaults match the backplane's own defaults (nothing
+  # shared, upkeep on, once a week).
+  KB_SHARED_TENANT_IDS: ""
+  KNOWLEDGE_UPKEEP_ENABLED: "true"
+  KNOWLEDGE_UPKEEP_INTERVAL_SECONDS: "604800"
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that

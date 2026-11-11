@@ -4714,11 +4714,25 @@ adds them to a running realm at the next upgrade.</p>
    and role from their group, as with <code>meho-mcp</code>.</li>
 </ol>
 <p><strong>Then turn the switch on.</strong> Set <code>MCP_CLIENT_PER_TOOL_KIND=true</code> on the
-backplane. <code>GET /api/v1/auth-config</code> then lists
+backplane (Helm: <code>config.mcpClientPerToolKind: "true"</code>).
+<code>GET /api/v1/auth-config</code> then lists
 <code>"mcp_clients": {"claude-code": "meho-mcp-code", "claude-desktop": "meho-mcp-desktop"}</code>.
 The plugin and the extension read it at start. Each person signs in
-once more in each tool. Turn the switch on only after the realm has both
-clients: a tool that signs in with a missing client gets a Keycloak error.</p>
+once more in each tool.</p>
+<p><strong>MEHO checks the clients first.</strong> Before it lists a client, MEHO asks
+Keycloak whether the client exists. It uses the admin client
+(<code>KEYCLOAK_ADMIN_URL</code>, <code>KEYCLOAK_ADMIN_CLIENT_ID</code>,
+<code>KEYCLOAK_ADMIN_CLIENT_SECRET</code>), which needs the right to read clients.
+MEHO keeps the answer for one minute.</p>
+<ul>
+<li>A client that Keycloak does not have is not listed. That tool keeps
+  <code>meho-mcp</code>.</li>
+<li>When MEHO cannot ask (no admin client, or Keycloak does not answer),
+  it lists no client, and both tools keep <code>meho-mcp</code>.</li>
+<li><code>/ready</code> shows the result in <code>features.mcp.tool_clients</code>: <code>state</code> is
+  <code>ok</code>, <code>missing</code> (the <code>missing</code> list names the clients) or <code>unknown</code>
+  (<code>detail</code> says why).</li>
+</ul>
 <p>With the switch off (the default), both tools keep <code>meho-mcp</code>, as before.
 Older plugins and other MCP clients keep <code>meho-mcp</code> in any case. MEHO
 accepts tokens of all three clients on <code>/mcp</code>. None of them can approve

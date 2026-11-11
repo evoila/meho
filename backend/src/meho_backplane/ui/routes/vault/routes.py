@@ -131,6 +131,7 @@ from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.tenant_scope import rendered_tenant_prefix
+from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
@@ -417,7 +418,11 @@ async def _render_read(
     mount: str,
     path: str,
 ) -> HTMLResponse:
-    """Dispatch ``vault.kv.read`` in-process and render the secret reveal-gated."""
+    """Dispatch ``vault.kv.read`` in-process and render the secret reveal-gated.
+
+    A page that shows the value says ``Cache-Control: no-store``
+    (:mod:`meho_backplane.no_store`); a read that waits for approval does not.
+    """
     operator = await _resolve_operator(session)
     connector_id = await _vault_connector_id(operator)
     if connector_id is None:
@@ -425,9 +430,10 @@ async def _render_read(
             request, "vault/_secret.html", _no_connector_error_context()
         )
 
-    envelope = await _dispatch(
-        operator, connector_id, _OP_READ, target, mount, path, reveal_secret=True
-    )
+    with answer_scope() as mark:
+        envelope = await _dispatch(
+            operator, connector_id, _OP_READ, target, mount, path, reveal_secret=True
+        )
     context: dict[str, Any] = {
         "error": None,
         "envelope": envelope,
@@ -436,6 +442,8 @@ async def _render_read(
         "target": target.strip(),
     }
     response = get_templates().TemplateResponse(request, "vault/_secret.html", context)
+    if mark.holds_secret:
+        set_no_store(response)
     # The "Show value" button of a waiting read is a POST: it needs the cookie.
     return with_csrf_cookie(response, session)
 

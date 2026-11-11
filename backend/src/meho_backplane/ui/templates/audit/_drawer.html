@@ -47,6 +47,8 @@
     event_class_label -- str: plain label of the row's record type
     tenant_label   -- str: the row's tenant name, or its id when the tenant
                        row is gone (#5238)
+    via_label      -- str | None: "<client> (<channel>)" from the row's
+                       ``client`` block, or None when it has none
 -#}
 {% from "_references.html" import what_happened, principal_chip, operation_ref, target_ref, status_badge, timestamp, work_ref_ref, lineage %}
 <aside
@@ -88,6 +90,10 @@
         <dd data-tenant>{{ tenant_label }}</dd>
         <dt class="opacity-60">Principal</dt>
         <dd>{{ principal_chip(references.principal) }}</dd>
+        {% if via_label %}
+          <dt class="opacity-60">Via</dt>
+          <dd data-via>{{ via_label }}</dd>
+        {% endif %}
         <dt class="opacity-60">Operation</dt>
         <dd>{{ operation_ref(references.operation) }}</dd>
         {% if references.target.present %}

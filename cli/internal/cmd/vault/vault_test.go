@@ -273,7 +273,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := conn.Call(context.Background(), srv.URL, opKVRead, "rdc-vault", nil)
+	r, err := conn.Call(context.Background(), srv.URL, opKVRead, "vault-lab", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -320,7 +320,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 				return
 			}
 			tgt, _ := raw["target"].(map[string]any)
-			if tgt == nil || tgt["name"] != "rdc-vault" {
+			if tgt == nil || tgt["name"] != "vault-lab" {
 				t.Errorf("target should wrap slug as {name: ...}; got %v", raw["target"])
 			}
 			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: "x"})
@@ -329,7 +329,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := conn.Call(context.Background(), srv.URL, "x", "rdc-vault", nil); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "x", "vault-lab", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -451,7 +451,7 @@ func TestKVReadE2E(t *testing.T) {
 			if body.Params["mount"] != "secret" || body.Params["path"] != "meho/test/fed" {
 				t.Errorf("params: got %v", body.Params)
 			}
-			if body.Target["name"] != "rdc-vault" {
+			if body.Target["name"] != "vault-lab" {
 				t.Errorf("target: got %v", body.Target)
 			}
 			writeJSON(t, w, 200, CallResult{
@@ -469,7 +469,7 @@ func TestKVReadE2E(t *testing.T) {
 	root.SetErr(&out)
 	root.SetArgs([]string{
 		"kv", "read", "secret", "meho/test/fed",
-		"--target", "rdc-vault", "--backplane", srv.URL,
+		"--target", "vault-lab", "--backplane", srv.URL,
 	})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("kv read e2e: %v\noutput:\n%s", err, out.String())
@@ -516,7 +516,7 @@ func TestKVPutE2E(t *testing.T) {
 	root.SetArgs([]string{
 		"kv", "put", "secret", "app/db",
 		"--data", `{"password":"s3cr3t"}`, "--cas", "3",
-		"--target", "rdc-vault", "--backplane", srv.URL,
+		"--target", "vault-lab", "--backplane", srv.URL,
 	})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("kv put e2e: %v\noutput:\n%s", err, out.String())
@@ -551,7 +551,7 @@ func TestKVPutOmitsCasWhenNotPassed(t *testing.T) {
 	root.SetArgs([]string{
 		"kv", "put", "secret", "app/db",
 		"--data", `{"k":"v"}`,
-		"--target", "rdc-vault", "--backplane", srv.URL,
+		"--target", "vault-lab", "--backplane", srv.URL,
 	})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("kv put (no cas) e2e: %v\noutput:\n%s", err, out.String())
@@ -588,7 +588,7 @@ func TestKVDeleteE2E(t *testing.T) {
 	root.SetArgs([]string{
 		"kv", "delete", "secret", "app/db",
 		"--versions", "3,4,5",
-		"--target", "rdc-vault", "--backplane", srv.URL,
+		"--target", "vault-lab", "--backplane", srv.URL,
 	})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("kv delete e2e: %v\noutput:\n%s", err, out.String())
@@ -625,7 +625,7 @@ func TestSysHealthE2E(t *testing.T) {
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
-	root.SetArgs([]string{"sys", "health", "--target", "rdc-vault", "--backplane", srv.URL})
+	root.SetArgs([]string{"sys", "health", "--target", "vault-lab", "--backplane", srv.URL})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("sys health e2e: %v\noutput:\n%s", err, out.String())
 	}
@@ -663,7 +663,7 @@ func TestAuthUserpassReadE2E(t *testing.T) {
 	root.SetErr(&out)
 	root.SetArgs([]string{
 		"auth", "userpass-read", "svc-deploy",
-		"--target", "rdc-vault", "--backplane", srv.URL,
+		"--target", "vault-lab", "--backplane", srv.URL,
 	})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("auth userpass-read e2e: %v\noutput:\n%s", err, out.String())
@@ -699,7 +699,7 @@ func TestAuthApproleReadMapsRoleNameParam(t *testing.T) {
 	root.SetErr(&out)
 	root.SetArgs([]string{
 		"auth", "approle-read", "ci-runner",
-		"--target", "rdc-vault", "--backplane", srv.URL,
+		"--target", "vault-lab", "--backplane", srv.URL,
 	})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("auth approle-read e2e: %v\noutput:\n%s", err, out.String())
@@ -726,7 +726,7 @@ func TestErrorStatusExitsNonZero(t *testing.T) {
 	root.SetErr(&out)
 	root.SetArgs([]string{
 		"kv", "read", "secret", "x",
-		"--target", "rdc-vault", "--backplane", srv.URL,
+		"--target", "vault-lab", "--backplane", srv.URL,
 	})
 	if err := root.Execute(); err == nil {
 		t.Fatalf("status=error should propagate a non-nil RunE error")

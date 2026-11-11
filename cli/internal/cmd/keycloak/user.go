@@ -100,7 +100,7 @@ func newUserCreateCmd() *cobra.Command {
 			"returned.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example:       "  meho keycloak user create --target rdc-keycloak -f user-operator-a.json --password-secret-ref rdc-hetzner-dc/keycloak/operator-a",
+		Example:       "  meho keycloak user create --target keycloak-lab -f user-operator-a.json --password-secret-ref lab/keycloak/operator-a",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -146,7 +146,7 @@ func newUserResetPasswordCmd() *cobra.Command {
 			"pass --username for name→UUID resolution. Requires approval.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example:       "  meho keycloak user reset-password --target rdc-keycloak --username operator-a --password-secret-ref rdc-hetzner-dc/keycloak/operator-a",
+		Example:       "  meho keycloak user reset-password --target keycloak-lab --username operator-a --password-secret-ref lab/keycloak/operator-a",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -202,9 +202,9 @@ func newUserListCmd() *cobra.Command {
 			"role assignments; the internal uuid is the `id` field of a row.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho keycloak user list --target rdc-keycloak\n" +
-			"  meho keycloak user list --target rdc-keycloak --username operator-a\n" +
-			"  meho keycloak user list --target rdc-keycloak --json | jq '.result.rows[].id'",
+		Example: "  meho keycloak user list --target keycloak-lab\n" +
+			"  meho keycloak user list --target keycloak-lab --username operator-a\n" +
+			"  meho keycloak user list --target keycloak-lab --json | jq '.result.rows[].id'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

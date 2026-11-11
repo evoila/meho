@@ -55,6 +55,8 @@ __all__ = [
     "_AUTH_FLOW_COPY_PATH",
     "_AUTH_FLOW_EXECUTIONS_PATH",
     "_IDENTITY_PROVIDERS_PATH",
+    "_USER_CREDENTIALS_PATH",
+    "_USER_SESSIONS_PATH",
     "fill_path",
 ]
 

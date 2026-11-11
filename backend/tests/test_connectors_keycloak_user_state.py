@@ -18,7 +18,6 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.session import (
@@ -137,7 +136,6 @@ def _mount_token(mock: respx.MockRouter) -> None:
     )
 
 
-_ZERO_UUID = "00000000-0000-0000-0000-000000000000"
 _MS = 1_760_000_000_000  # 2025-10-09T08:53:20Z
 _ISO_MS = "2025-10-09T08:53:20Z"
 

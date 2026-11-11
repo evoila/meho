@@ -40,12 +40,17 @@ What the op does, on the target's managed realm:
 5. When the realm's browser flow sends people straight to the company login
    (a default on its Identity Provider Redirector step), give the redirect
    step of the touch flow the same default. Without it the console login
-   would stop going straight to the company login.
-6. Bind the flow as the client's browser flow, unless it already is. A
-   different browser flow on the client is replaced; the result names it.
+   would stop going straight to the company login. When the realm's flow
+   has no default, a default on the touch flow is removed.
+6. Bind the flow as the client's browser flow, unless it already is. Level
+   1 is a copy of Keycloak's built-in login, so the op binds only when the
+   realm's browser flow is ``browser`` or ``browser with passkeys`` and the
+   client has no browser flow of its own. Otherwise the flow is made but
+   not bound, and ``not_bound_reason`` says why. ``replace_custom_login``
+   binds it anyway.
 
 Safe to run twice. Risk level ``caution`` with approval: the op changes how
-people log in to the console. The normal login keeps its steps.
+people log in to the console.
 """
 
 from __future__ import annotations
@@ -66,6 +71,10 @@ from meho_backplane.connectors.keycloak._paths import (
     fill_path,
 )
 from meho_backplane.connectors.keycloak.ops_authflow import get_admin_list_strict
+from meho_backplane.connectors.keycloak.ops_authflow_passkey import (
+    BUILT_IN_BROWSER_FLOW,
+    PASSKEY_FLOW_ALIAS,
+)
 from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import (
     AMR_MAPPER,
     ENSURE_APPROVAL_TOUCH_OP_ID,
@@ -461,7 +470,8 @@ async def _ensure_redirect(
 ) -> bool:
     """Copy the company login default of the realm's browser flow onto the touch flow.
 
-    The chart's setup step does the same at each upgrade (core/company_login.py).
+    A realm without a default removes the touch flow's default. The chart's
+    setup step does the same at each upgrade (core/company_login.py).
     Whether this run changed it.
     """
     realm_rep = await connector._get_admin_json(
@@ -477,12 +487,17 @@ async def _ensure_redirect(
     wanted, _ = await _redirect_default(
         connector, operator, target, realm, [r for r in browser_rows if isinstance(r, dict)]
     )
-    if wanted is None:
-        return False
     have, body = await _redirect_default(connector, operator, target, realm, rows)
     if have == wanted:
         return False
-    if body is not None:
+    if wanted is None and body is not None:
+        # The realm no longer goes straight to the company login: drop the
+        # touch flow's old default too, as the chart's setup step does.
+        path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(str(body["id"]))})
+        await connector._write_admin(
+            target, "DELETE", path, operator=operator, idempotent_conflict=False
+        )
+    elif body is not None:
         config = body.get("config")
         merged = {**(config if isinstance(config, dict) else {}), "defaultProvider": wanted}
         path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(str(body["id"]))})
@@ -512,23 +527,64 @@ async def _ensure_redirect(
     if (await _redirect_default(connector, operator, target, realm, rows))[0] != wanted:
         raise KeycloakTouchFlowError(
             "check_failed",
-            "the company login default of the touch flow does not read back. "
-            "The flow was not bound.",
+            "the company login default of the touch flow does not read back as the "
+            "realm's. The flow was not bound.",
         )
     return True
+
+
+def _custom_login(browser: str, previous: Any, flow_id: str) -> str | None:
+    """Why binding would change the normal login, or ``None`` when it would not.
+
+    Level 1 of the touch flow is a copy of Keycloak's built-in login. A realm
+    or a client with its own login flow may ask for more checks; binding
+    would drop them.
+    """
+    if browser not in (BUILT_IN_BROWSER_FLOW, PASSKEY_FLOW_ALIAS):
+        return (
+            f"the realm's login flow is {browser!r}, not the built-in one; binding "
+            "would drop its steps from the console login"
+        )
+    if previous and previous != flow_id:
+        return (
+            f"the client has its own login flow {previous!r}; binding would drop its "
+            "steps from the console login"
+        )
+    return None
 
 
 async def _bind(
     connector: KeycloakConnector,
     operator: Operator,
     target: KeycloakTargetLike,
+    realm: str,
     client_path: str,
     flow_id: str,
+    *,
+    replace_custom_login: bool,
 ) -> dict[str, Any]:
-    """Make *flow_id* the client's browser flow, then read the client again."""
+    """Make *flow_id* the client's browser flow, then read the client again.
+
+    A realm or a client with its own login flow is not bound, unless
+    *replace_custom_login* is set; ``not_bound_reason`` then says why.
+    """
+    realm_rep = await connector._get_admin_json(
+        target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
+    )
+    browser = str(realm_rep.get("browserFlow") or BUILT_IN_BROWSER_FLOW)
     client = await connector._get_admin_json(target, client_path, operator=operator)
     overrides = client.get("authenticationFlowBindingOverrides")
     previous = overrides.get("browser") if isinstance(overrides, dict) else None
+    previous = previous or None
+    reason = _custom_login(browser, previous, flow_id)
+    if reason is not None and not replace_custom_login:
+        return {
+            "bound": False,
+            "not_bound_reason": reason,
+            "browser_flow_id": previous,
+            "previous_browser_flow_id": previous,
+            "binding_changed": False,
+        }
     changed = previous != flow_id
     if changed:
         merged = merge_representation(
@@ -546,6 +602,8 @@ async def _bind(
             f"the client's browser flow reads back as {read_back!r}, not the flow {flow_id!r}",
         )
     return {
+        "bound": True,
+        "not_bound_reason": None,
         "browser_flow_id": read_back,
         "previous_browser_flow_id": previous,
         "binding_changed": changed,
@@ -625,7 +683,15 @@ async def keycloak_authflow_ensure_approval_touch(
     client_path = fill_path(
         _CLIENT_PATH, {"realm": segment, "client-uuid": quote_segment(client_uuid)}
     )
-    binding = await _bind(self, operator, target, client_path, flow_id)
+    binding = await _bind(
+        self,
+        operator,
+        target,
+        segment,
+        client_path,
+        flow_id,
+        replace_custom_login=params.get("replace_custom_login") is True,
+    )
     return {
         "realm": realm,
         "flow_alias": TOUCH_FLOW_ALIAS,
@@ -645,14 +711,22 @@ async def keycloak_authflow_ensure_approval_touch(
 async def _touch_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Card for the op: the realm, the client, the new flow, who is affected."""
     client_id = str(ctx.params.get("client_id") or _DEFAULT_CLIENT_ID)
+    replace = ctx.params.get("replace_custom_login") is True
     return {
         "resource": "client_browser_flow",
         "realm": _managed_realm(ctx),
         "client_id": client_id,
         "new_flow": TOUCH_FLOW_ALIAS,
         "affects": (
-            f"Every login to client {client_id!r} uses the new flow. The normal login "
-            f"keeps its steps; a login that asks for {TOUCH_ACR!r} needs a passkey touch."
+            f"Every login to client {client_id!r} uses the new flow. A login that asks "
+            f"for {TOUCH_ACR!r} needs a passkey touch. "
+            + (
+                "The realm's or the client's own login flow is replaced, and its "
+                "steps no longer apply to the console."
+                if replace
+                else "When the realm or the client has its own login flow, the flow "
+                "is made but not bound, so the normal login keeps its steps."
+            )
         ),
         "way_back": (
             'keycloak.client.update with {"authenticationFlowBindingOverrides": {"browser": ""}}'

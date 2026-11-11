@@ -480,6 +480,108 @@ func TestBootstrap_TouchFlowRedirectToAnotherCompanyLoginIsUpdated(t *testing.T)
 	}
 }
 
+// Redirect on, run, redirect off, run again: the touch flow loses the
+// old default too, so the console stops going to that company login.
+func TestBootstrap_TouchFlowRedirectRemovedWithTheRealms(t *testing.T) {
+	fake := newFakeKeycloak()
+	seedBrowserRedirect(fake, "company")
+	seedConsoleClient(fake)
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if touchRedirectConfig(fake) == nil {
+		t.Fatal("the first run did not copy the redirect")
+	}
+	fake.flows["browser"].Steps[1].Config = ""
+	delete(fake.stepConfigs, "browser-redirect")
+
+	fake.calls = map[string]int{}
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("second Bootstrap: %v", err)
+	}
+	if got := touchRedirectConfig(fake); got != nil {
+		t.Errorf("touch flow still has redirect settings %v", got)
+	}
+	if fake.calls["DELETE /authentication/config/{id}"] != 1 {
+		t.Errorf("DELETE of the step settings = %d, want 1", fake.calls["DELETE /authentication/config/{id}"])
+	}
+	want := `[updated] login flow "meho approval touch" no longer goes straight to a company login, ` +
+		`like login flow "browser"`
+	if !slices.Contains(res.MapperEventsLog, want) {
+		t.Errorf("events miss %q: %v", want, res.MapperEventsLog)
+	}
+
+	fake.calls = map[string]int{}
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("third Bootstrap: %v", err)
+	}
+	if fake.calls["DELETE /authentication/config/{id}"] != 0 {
+		t.Error("third run removed the redirect settings again")
+	}
+}
+
+// A realm whose login flow is not the built-in one keeps its console
+// login: the touch flow is made but not bound.
+func TestBootstrap_TouchFlowNotBoundOverTheRealmsOwnLogin(t *testing.T) {
+	fake := newFakeKeycloak()
+	fake.flows["browser with extra checks"] = &fakeFlow{ID: "custom-flow", TopLevel: true}
+	fake.realm["browserFlow"] = "browser with extra checks"
+	console := seedConsoleClient(fake)
+
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if _, ok := fake.flows[touchFlowAlias]; !ok {
+		t.Error("the touch flow was not made")
+	}
+	if got := fake.clients[console.ID].AuthenticationFlowBindingOverrides["browser"]; got != "" {
+		t.Errorf("console bound to %q over the realm's own login flow", got)
+	}
+	if !slices.ContainsFunc(res.MapperEventsLog, func(e string) bool {
+		return strings.HasPrefix(e, `[skip] client "meho-web" not bound`) &&
+			strings.Contains(e, `"browser with extra checks"`)
+	}) {
+		t.Errorf("events miss the not-bound line: %v", res.MapperEventsLog)
+	}
+}
+
+// A console client with its own login flow keeps it.
+func TestBootstrap_TouchFlowNotBoundOverTheClientsOwnLogin(t *testing.T) {
+	fake := newFakeKeycloak()
+	console := seedConsoleClient(fake)
+	console.AuthenticationFlowBindingOverrides["browser"] = "client-own-flow"
+
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if got := fake.clients[console.ID].AuthenticationFlowBindingOverrides["browser"]; got != "client-own-flow" {
+		t.Errorf("console browser flow = %q, want client-own-flow", got)
+	}
+	if !slices.ContainsFunc(res.MapperEventsLog, func(e string) bool {
+		return strings.HasPrefix(e, `[skip] client "meho-web" not bound`) && strings.Contains(e, `"client-own-flow"`)
+	}) {
+		t.Errorf("events miss the not-bound line: %v", res.MapperEventsLog)
+	}
+}
+
+// The passkey copy of the built-in login is not a login of its own.
+func TestBootstrap_TouchFlowBoundOverThePasskeyCopy(t *testing.T) {
+	fake := newFakeKeycloak()
+	fake.flows["browser with passkeys"] = &fakeFlow{ID: "passkeys-flow", TopLevel: true}
+	fake.realm["browserFlow"] = "browser with passkeys"
+	console := seedConsoleClient(fake)
+
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if fake.clients[console.ID].AuthenticationFlowBindingOverrides["browser"] != fake.flows[touchFlowAlias].ID {
+		t.Error("the console client is not bound to the touch flow")
+	}
+}
+
 // A dry run says it would copy the redirect and changes nothing.
 func TestBootstrap_DryRunTouchFlowRedirect(t *testing.T) {
 	fake := newFakeKeycloak()

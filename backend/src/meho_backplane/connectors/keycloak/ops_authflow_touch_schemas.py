@@ -178,8 +178,10 @@ _WHEN_TO_USE = (
     "file only when the realm is new. The op makes the flow, maps the acr "
     "name 'meho-touch' to level 3 in the realm, adds the 'amr' mapper to the "
     "console client, and binds the flow as the console client's browser flow. "
-    "The normal console login stays the same; only a login that asks for "
-    "'meho-touch' needs a passkey. Safe to run twice. A flow with that name "
+    "It binds only when the realm uses Keycloak's built-in login and the client "
+    "has no login flow of its own, so the normal console login stays the same; "
+    "only a login that asks for 'meho-touch' needs a passkey. Safe to run twice. "
+    "A flow with that name "
     "but another shape is not changed: the op stops and names the difference. "
     "It needs approval."
 )
@@ -193,9 +195,17 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
             "maxLength": 255,
             "description": "The console client. Default 'meho-web'.",
         },
+        "replace_custom_login": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Bind the flow also when the realm or the client has its own login "
+                "flow. That login's own steps then no longer apply to the console."
+            ),
+        },
     },
     "additionalProperties": False,
-    "examples": [{}, {"client_id": "meho-web"}],
+    "examples": [{}, {"client_id": "meho-web"}, {"replace_custom_login": True}],
 }
 
 _RESPONSE_SCHEMA: dict[str, Any] = {
@@ -244,9 +254,20 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "client_id": {"type": "string", "description": "The client the flow is bound to."},
         "client_uuid": {"type": "string", "description": "Internal id of the client."},
+        "bound": {
+            "type": "boolean",
+            "description": "true: the flow is the client's browser flow after the run.",
+        },
+        "not_bound_reason": {
+            "type": ["string", "null"],
+            "description": (
+                "Why the flow was not bound: the realm or the client has its own "
+                "login flow. null when it was bound."
+            ),
+        },
         "browser_flow_id": {
-            "type": "string",
-            "description": "The client's browser flow, read back after the run.",
+            "type": ["string", "null"],
+            "description": "The client's browser flow after the run; null when it has none.",
         },
         "previous_browser_flow_id": {
             "type": ["string", "null"],
@@ -269,6 +290,8 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "redirect_default_copied",
         "client_id",
         "client_uuid",
+        "bound",
+        "not_bound_reason",
         "browser_flow_id",
         "previous_browser_flow_id",
         "binding_changed",
@@ -306,12 +329,18 @@ TOUCH_OPS: tuple[KeycloakOp, ...] = (
             ),
             "parameter_hints": {
                 "client_id": "Leave it out to use 'meho-web'.",
+                "replace_custom_login": (
+                    "Leave it out. Set it to true only after a person checked that "
+                    "the console may lose the steps of the realm's or the client's "
+                    "own login flow."
+                ),
             },
             "output_shape": (
                 "``{realm, flow_alias, flow_id, flow_created, flow_steps: "
                 "[{level, step, requirement}], loa_map_changed, amr_mapper_added, "
                 "amr_mapper_fixed, redirect_default_copied, client_id, client_uuid, "
-                "browser_flow_id, previous_browser_flow_id, binding_changed}``."
+                "bound, not_bound_reason, browser_flow_id, previous_browser_flow_id, "
+                "binding_changed}``."
             ),
             "next_step": (
                 "All six change flags false: the realm already had everything. An "
@@ -320,8 +349,10 @@ TOUCH_OPS: tuple[KeycloakOp, ...] = (
                 "An error with 'loa_conflict' means the realm maps 'meho-touch' to "
                 "another level. An error with 'verification_not_required' means the "
                 "realm's passkey policy does not ask for a PIN or fingerprint; a person "
-                "sets it to 'required' and runs again. A different browser flow on the "
-                "client is replaced; previous_browser_flow_id names it. The way back: "
+                "sets it to 'required' and runs again. bound false: the realm or the client "
+                "has its own login flow; not_bound_reason says which. The flow is made "
+                "but not used; a person decides, and runs again with "
+                "replace_custom_login true to bind it anyway. The way back: "
                 "keycloak.client.update with "
                 '{"authenticationFlowBindingOverrides": {"browser": ""}}.'
             ),

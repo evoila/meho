@@ -405,9 +405,17 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch 
 - The realm's browser flow sends people straight to the company login:
   MEHO gives the touch flow the same company login default before it
   binds the flow. So the console still goes straight to the company
-  login.
-- `meho-web` already has another browser flow: MEHO replaces it. The
-  result names the old one in `previous_browser_flow_id`.
+  login. When the realm's flow no longer has that default, MEHO removes
+  it from the touch flow too.
+- The realm uses its own browser flow (not `browser` or `browser with
+  passkeys`), or `meho-web` already has a browser flow of its own: MEHO
+  makes the flow but does not bind it, so the normal login keeps its
+  steps. The result has `bound: false` and says why in
+  `not_bound_reason`. `meho admin keycloak bootstrap-clients` does the
+  same. To bind the flow anyway, check that the console may lose the
+  steps of that login, then call the operation with
+  `--params '{"replace_custom_login": true}'`. The result names the old flow in
+  `previous_browser_flow_id`.
 - `meho-web` is missing, or the Keycloak is older than 26.4: MEHO
   stops before it changes anything.
 

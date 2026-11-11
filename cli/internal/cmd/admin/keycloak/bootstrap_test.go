@@ -166,6 +166,17 @@ func (f *fakeKeycloak) handleStepConfigs(w http.ResponseWriter, r *http.Request,
 			}
 			f.stepConfigs[id] = body
 			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete:
+			f.calls["DELETE /authentication/config/{id}"]++
+			delete(f.stepConfigs, id)
+			for _, flow := range f.flows {
+				for _, s := range flow.Steps {
+					if s.Config == id {
+						s.Config = ""
+					}
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
 		}

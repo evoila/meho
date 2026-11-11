@@ -2483,7 +2483,11 @@ asks for the touch level; nothing in the backplane reads it yet.
   user verification (`webAuthnPolicyPasswordlessUserVerificationRequirement`
   is `required`): otherwise a touch could pass without a PIN or a
   fingerprint. They also turn on the token settings of an `amr` mapper
-  that leaves the claim out of the ID token.
+  that leaves the claim out of the ID token. They do not bind it when
+  the realm's browser flow is not `browser` or `browser with passkeys`,
+  or when `meho-web` has a browser flow of its own: level 1 is a copy
+  of the built-in login, so binding would drop that login's steps. The
+  operation binds it anyway with `replace_custom_login: true`.
 * **Company login:** the realm stage sets the redirect default of the
   company login on the realm's browser flow and on `meho approval
   touch` (`core/company_login.py`), so the console still goes straight
@@ -2492,6 +2496,8 @@ asks for the touch level; nothing in the backplane reads it yet.
   bootstrap-clients` copy that default from the
   realm's browser flow onto the touch flow before they bind `meho-web`,
   so a running realm keeps the redirect before the next upgrade too.
+  When the realm's flow no longer has that default, they remove it from
+  the touch flow too.
 * **Tests:** `tests/test_core_keycloak_realm.py` (the file),
   `tests/test_connectors_keycloak_authflow_touch.py` (the operation),
   `tests/integration/test_core_keycloak_touch_flow.py` (a real

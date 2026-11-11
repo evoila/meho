@@ -131,7 +131,8 @@ func reconcileTouch(ctx context.Context, c *adminClient, webClientID string) ([]
 	if err != nil || !ok {
 		return events, err
 	}
-	bindEvents, err := bindTouchFlow(ctx, c, webClientID, flowID)
+	browser, _ := realm["browserFlow"].(string)
+	bindEvents, err := bindTouchFlow(ctx, c, webClientID, flowID, browser)
 	return append(events, bindEvents...), err
 }
 
@@ -395,10 +396,28 @@ func reconcileTouchLevel(ctx context.Context, c *adminClient) ([]string, bool, e
 	return []string{fmt.Sprintf("[updated] realm maps %s to level %d", touchACR, touchLevel)}, true, nil
 }
 
+// customLogin says why binding the touch flow would change the normal
+// login, or returns "". Level 1 of the flow is a copy of Keycloak's
+// built-in login; a realm or a client with its own login flow may ask
+// for more checks, and binding would drop them.
+func customLogin(realmBrowser, clientBrowser, flowID string) string {
+	if realmBrowser == "" {
+		realmBrowser = "browser"
+	}
+	if realmBrowser != "browser" && realmBrowser != "browser with passkeys" {
+		return fmt.Sprintf("the realm's login flow is %q, not the built-in one", realmBrowser)
+	}
+	if clientBrowser != "" && clientBrowser != flowID {
+		return fmt.Sprintf("the client has its own login flow %q", clientBrowser)
+	}
+	return ""
+}
+
 // bindTouchFlow gives the console client the `amr` mapper and binds the
 // flow as its browser flow. A realm without the client is skipped: the
-// bootstrap does not make the console client.
-func bindTouchFlow(ctx context.Context, c *adminClient, clientID, flowID string) ([]string, error) {
+// bootstrap does not make the console client. A realm or a client with
+// its own login flow is not bound (customLogin).
+func bindTouchFlow(ctx context.Context, c *adminClient, clientID, flowID, realmBrowser string) ([]string, error) {
 	client, err := c.findClient(ctx, clientID)
 	if err != nil {
 		return nil, err
@@ -415,6 +434,12 @@ func bindTouchFlow(ctx context.Context, c *adminClient, clientID, flowID string)
 	events = append(events, redirectEvents...)
 	if err != nil {
 		return events, err
+	}
+	if reason := customLogin(realmBrowser, client.AuthenticationFlowBindingOverrides["browser"], flowID); reason != "" {
+		return append(events, fmt.Sprintf(
+			"[skip] client %q not bound to login flow %q: %s, and binding would drop its steps "+
+				"from the console login; to bind it anyway, run keycloak.authflow.ensure_approval_touch "+
+				"with replace_custom_login", clientID, touchFlowAlias, reason)), nil
 	}
 	if client.AuthenticationFlowBindingOverrides["browser"] == flowID {
 		return append(events, fmt.Sprintf("[skip] client %q uses login flow %q", clientID, touchFlowAlias)), nil
@@ -539,8 +564,9 @@ func redirectDefault(ctx context.Context, c *adminClient, steps []map[string]any
 }
 
 // copyTouchRedirect gives the touch flow's redirect step the company
-// login default of the realm's browser flow. Without it, binding the
-// flow would stop the console from going straight to the company login.
+// login default of the realm's browser flow, or removes it when that
+// flow has none. Without it, binding the flow would stop the console
+// from going straight to the company login.
 // The chart's setup step does the same at each upgrade
 // (backend/src/meho_backplane/core/company_login.py).
 func copyTouchRedirect(ctx context.Context, c *adminClient, flowID string) ([]string, error) {
@@ -564,12 +590,19 @@ func copyTouchRedirect(ctx context.Context, c *adminClient, flowID string) ([]st
 		return nil, fmt.Errorf("decode the steps of login flow %q: %w", browser, err)
 	}
 	_, _, wanted, err := redirectDefault(ctx, c, browserSteps)
-	if err != nil || wanted == "" {
+	if err != nil {
 		return nil, err
 	}
 	event := fmt.Sprintf("[updated] login flow %q goes straight to the company login %q, like login flow %q",
 		touchFlowAlias, wanted, browser)
+	if wanted == "" {
+		event = fmt.Sprintf("[updated] login flow %q no longer goes straight to a company login, like login flow %q",
+			touchFlowAlias, browser)
+	}
 	if c.dryRun && flowID == dryRunNewID {
+		if wanted == "" {
+			return nil, nil
+		}
 		return []string{event}, nil
 	}
 	steps, err := readTouchSteps(ctx, c)
@@ -586,7 +619,15 @@ func copyTouchRedirect(ctx context.Context, c *adminClient, flowID string) ([]st
 	if have == wanted {
 		return nil, nil
 	}
-	if rep != nil {
+	if wanted == "" {
+		// The realm no longer goes straight to the company login: drop the
+		// touch flow's old default too, as the chart's setup step does.
+		id, _ := rep["id"].(string)
+		if _, err := c.flowCall(ctx, http.MethodDelete,
+			"authentication/config/"+url.PathEscape(id), nil, http.StatusNoContent); err != nil {
+			return nil, err
+		}
+	} else if rep != nil {
 		config, _ := rep["config"].(map[string]any)
 		config = maps.Clone(config)
 		if config == nil {
@@ -617,8 +658,8 @@ func copyTouchRedirect(ctx context.Context, c *adminClient, flowID string) ([]st
 		return nil, err
 	}
 	if have != wanted {
-		return nil, fmt.Errorf("the company login default of login flow %q does not read back; "+
-			"the console client is not bound to it", touchFlowAlias)
+		return nil, fmt.Errorf("the company login default of login flow %q does not read back as %q; "+
+			"the console client is not bound to it", touchFlowAlias, wanted)
 	}
 	return []string{event}, nil
 }

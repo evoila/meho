@@ -910,8 +910,8 @@ as a plain `write` in `connectors/keycloak/op_classes.py`.
 
 `keycloak.authflow.ensure_approval_touch` (`ops_authflow_touch.py`, the
 flow shape and metadata in `ops_authflow_touch_schemas.py`) — risk level
-`caution`, approval required, group `authflow_write`, param `client_id`
-(default `meho-web`). It gives a running realm what the chart's realm
+`caution`, approval required, group `authflow_write`, params `client_id`
+(default `meho-web`) and `replace_custom_login` (default `false`). It gives a running realm what the chart's realm
 file gives a new one: the login flow `meho approval touch` with level 1
 (the normal login) and level 3 (`acr_values=meho-touch`, a passkey every
 time; level 2 is kept for the approval sign-in, `meho-approve`). On the target's managed realm:
@@ -946,14 +946,21 @@ time; level 2 is kept for the approval sign-in, `meho-approve`). On the target's
    `meho-company-login-redirect-touch`, the name `core/company_login.py`
    uses, or a `PUT` of the config that is there; read back). Without it
    the console login stops going straight to the company login until the
-   next chart upgrade.
+   next chart upgrade. When the realm's flow has no default, a default on
+   the touch flow is removed (`DELETE` of its config, read back), as
+   `core/company_login.py` does.
 6. Bind the flow as the client's browser flow (full client `PUT`, read
-   back). This is the last write. A different browser flow on the client
-   is replaced; `previous_browser_flow_id` names it.
+   back). This is the last write. Level 1 is a copy of Keycloak's
+   built-in login, so the op binds only when the realm's browser flow is
+   `browser` or `browser with passkeys` and the client has no browser
+   flow of its own. Otherwise it makes the flow, does not bind it, and
+   returns `bound: false` with `not_bound_reason`. With
+   `replace_custom_login: true` it binds anyway;
+   `previous_browser_flow_id` names the flow it replaced.
 
 The result is `{realm, flow_alias, flow_id, flow_created, flow_steps,
 loa_map_changed, amr_mapper_added, amr_mapper_fixed, redirect_default_copied, client_id, client_uuid,
-browser_flow_id, previous_browser_flow_id, binding_changed}`. Errors
+bound, not_bound_reason, browser_flow_id, previous_browser_flow_id, binding_changed}`. Errors
 raise `KeycloakTouchFlowError` with a stable `code`. A test keeps the
 op's flow equal to the realm file's. The approval card names the realm,
 the client, the new flow, who is affected, and the way back:

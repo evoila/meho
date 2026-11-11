@@ -337,6 +337,14 @@ class FakeKeycloak:
         if request.method == "PUT":
             self.configs[config_id] = self._log(request)
             return httpx.Response(204)
+        if request.method == "DELETE":
+            self._log(request)
+            del self.configs[config_id]
+            for flow in self.flows.values():
+                for step in flow["steps"]:
+                    if step.get("config") == config_id:
+                        del step["config"]
+            return httpx.Response(204)
         return httpx.Response(200, json=self.configs[config_id])
 
     def redirect_to(self, provider: str) -> None:
@@ -538,13 +546,79 @@ async def test_realm_without_the_flow_gets_all_of_it_and_a_second_run_changes_no
 
 async def test_the_bind_is_the_last_write(kc: KeycloakConnector) -> None:
     """The console uses the flow only when the flow and its settings are complete."""
+    fake = FakeKeycloak(client=_client())
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run({})
+    assert result["status"] == "ok", result
+    assert result["result"]["bound"] is True
+    assert result["result"]["not_bound_reason"] is None
+    assert fake.writes[-1][1] == f"{_ADMIN}/clients/{_CLIENT_UUID}"
+
+
+# ---------------------------------------------------------------------------
+# A realm or a client with its own login flow is not bound
+# ---------------------------------------------------------------------------
+
+
+async def test_realm_with_its_own_login_flow_is_not_bound(kc: KeycloakConnector) -> None:
+    """Level 1 copies the built-in login; binding would drop the realm's extra steps."""
+    fake = FakeKeycloak(client=_client())
+    fake.flows["browser with extra checks"] = {"id": "custom-id", "top": True, "steps": []}
+    fake.realm["browserFlow"] = "browser with extra checks"
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run({})
+    assert result["status"] == "ok", result
+    out = result["result"]
+    assert out["flow_created"] is True
+    assert out["bound"] is False
+    assert "browser with extra checks" in out["not_bound_reason"]
+    assert out["binding_changed"] is False
+    assert out["browser_flow_id"] is None
+    assert fake.client is not None
+    assert "browser" not in fake.client["authenticationFlowBindingOverrides"]
+    assert ("PUT", f"{_ADMIN}/clients/{_CLIENT_UUID}") not in [(m, p) for m, p, _ in fake.writes]
+
+
+async def test_client_with_its_own_login_flow_is_not_bound(kc: KeycloakConnector) -> None:
     fake = FakeKeycloak(client=_client(browser="old-flow-id"))
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         fake.mount(mock)
         result = await _run({})
     assert result["status"] == "ok", result
-    assert result["result"]["previous_browser_flow_id"] == "old-flow-id"
+    out = result["result"]
+    assert out["bound"] is False
+    assert "old-flow-id" in out["not_bound_reason"]
+    assert out["browser_flow_id"] == "old-flow-id"
+    assert out["previous_browser_flow_id"] == "old-flow-id"
+    assert fake.client is not None
+    assert fake.client["authenticationFlowBindingOverrides"]["browser"] == "old-flow-id"
+
+
+async def test_replace_custom_login_binds_over_the_client_flow(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(client=_client(browser="old-flow-id"))
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run({"replace_custom_login": True})
+    assert result["status"] == "ok", result
+    out = result["result"]
+    assert out["bound"] is True
+    assert out["previous_browser_flow_id"] == "old-flow-id"
+    assert out["browser_flow_id"] == fake.flows[TOUCH_FLOW_ALIAS]["id"]
     assert fake.writes[-1][1] == f"{_ADMIN}/clients/{_CLIENT_UUID}"
+
+
+async def test_realm_with_the_passkey_copy_of_the_login_is_bound(kc: KeycloakConnector) -> None:
+    """MEHO's own 'browser with passkeys' copy keeps the built-in steps."""
+    fake = FakeKeycloak(client=_client())
+    fake.flows["browser with passkeys"] = {"id": "passkeys-id", "top": True, "steps": []}
+    fake.realm["browserFlow"] = "browser with passkeys"
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run({})
+    assert result["status"] == "ok", result
+    assert result["result"]["bound"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +682,29 @@ async def test_other_redirect_default_on_the_touch_flow_is_updated(
     assert result["result"]["redirect_default_copied"] is True
     assert fake.configs["old"]["config"] == {"defaultProvider": "company"}
     assert ("PUT", f"{_ADMIN}/authentication/config/old") in [(m, p) for m, p, _ in fake.writes]
+
+
+async def test_removed_company_login_default_is_removed_from_the_touch_flow(
+    kc: KeycloakConnector,
+) -> None:
+    """Redirect on, run, redirect off, run again: the console stops going to it too."""
+    fake = FakeKeycloak(client=_client())
+    fake.redirect_to("company")
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        assert (await _run({}))["status"] == "ok"
+        assert fake.touch_redirect() is not None
+        redirector = fake.flows["browser"]["steps"][1]
+        del redirector["config"]
+        del fake.configs["browser-redirect"]
+        fake.writes.clear()
+        second = await _run({})
+        third = await _run({})
+    assert second["status"] == "ok", second
+    assert second["result"]["redirect_default_copied"] is True
+    assert fake.touch_redirect() is None
+    assert [m for m, p, _ in fake.writes if "/authentication/config/" in p] == ["DELETE"]
+    assert third["result"]["redirect_default_copied"] is False
 
 
 async def test_missing_client_stops_before_any_write(kc: KeycloakConnector) -> None:

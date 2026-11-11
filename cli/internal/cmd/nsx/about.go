@@ -35,8 +35,8 @@ func newAboutCmd() *cobra.Command {
 			"  - 2   auth_expired\n" +
 			"  - 3   unreachable\n" +
 			"  - 4   unexpected response shape",
-		Example: "  meho nsx about --target rdc-nsx\n" +
-			"  meho nsx about --target rdc-nsx --json | jq .result",
+		Example: "  meho nsx about --target nsx-lab\n" +
+			"  meho nsx about --target nsx-lab --json | jq .result",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -49,7 +49,7 @@ func TestPrintTargetSummaryHappyPath(t *testing.T) {
 	tgt := &api.Target{
 		Id:              mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		TenantId:        mustUUID(t, "22222222-2222-2222-2222-222222222222"),
-		Name:            "rdc-vcenter",
+		Name:            "vcenter-lab",
 		Aliases:         []string{"vc-prod"},
 		Product:         "vcenter",
 		Host:            "vc.example",
@@ -72,7 +72,7 @@ func TestPrintTargetSummaryHappyPath(t *testing.T) {
 	printTargetSummary(&buf, tgt)
 	out := buf.String()
 	for _, want := range []string{
-		"name:", "rdc-vcenter",
+		"name:", "vcenter-lab",
 		"aliases:", "vc-prod",
 		"product:", "vcenter",
 		"host:", "vc.example",
@@ -166,7 +166,7 @@ func TestFormatScalarFloatVsInt(t *testing.T) {
 // the api.Target envelope.
 func TestRunDescribeHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/targets/rdc-vcenter", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/targets/vcenter-lab", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
 			t.Errorf("missing Authorization header")
 		}
@@ -184,7 +184,7 @@ func TestRunDescribeHappyPath(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(api.Target{
 			Id:              mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 			TenantId:        mustUUID(t, "22222222-2222-2222-2222-222222222222"),
-			Name:            "rdc-vcenter",
+			Name:            "vcenter-lab",
 			Aliases:         []string{"vc-prod"},
 			Product:         "vcenter",
 			Host:            "vc.example",
@@ -203,13 +203,13 @@ func TestRunDescribeHappyPath(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	cmd, stdout, stderr := newRunCmd(t)
-	err := runDescribe(cmd, describeOptions{Query: "rdc-vcenter", BackplaneOverride: srv.URL})
+	err := runDescribe(cmd, describeOptions{Query: "vcenter-lab", BackplaneOverride: srv.URL})
 	if err != nil {
 		t.Fatalf("runDescribe: %v; stderr=%s", err, stderr.String())
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"name:", "rdc-vcenter",
+		"name:", "vcenter-lab",
 		"aliases:", "vc-prod",
 		"fingerprint:", "vmware/vcenter", "9.0.0",
 		"preferred_impl_id:", "vsphere-rest-9.0",
@@ -230,7 +230,7 @@ func TestRunDescribeAlias(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(api.Target{
 			Id:        mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 			TenantId:  mustUUID(t, "22222222-2222-2222-2222-222222222222"),
-			Name:      "rdc-vcenter",
+			Name:      "vcenter-lab",
 			Aliases:   []string{"vc-prod"},
 			Product:   "vcenter",
 			Host:      "vc.example",
@@ -248,7 +248,7 @@ func TestRunDescribeAlias(t *testing.T) {
 	if err := runDescribe(cmd, describeOptions{Query: "vc-prod", BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("describe alias: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "rdc-vcenter") {
+	if !strings.Contains(stdout.String(), "vcenter-lab") {
 		t.Errorf("alias describe should return canonical name; got %q", stdout.String())
 	}
 }
@@ -262,8 +262,8 @@ func TestRunDescribe404RendersNearMisses(t *testing.T) {
 	mux.HandleFunc("/api/v1/targets/rdc-vc", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		fmt.Fprint(w, `{"detail":{"error":"no_target","query":"rdc-vc","matches":[
-            {"id":"id1","name":"rdc-vcenter","aliases":["vc-prod"],"product":"vcenter","host":"vc.example"},
-            {"id":"id2","name":"rdc-vsphere","aliases":[],"product":"vcenter","host":"vs.example"}
+            {"id":"id1","name":"vcenter-lab","aliases":["vc-prod"],"product":"vcenter","host":"vc.example"},
+            {"id":"id2","name":"vsphere-lab","aliases":[],"product":"vcenter","host":"vs.example"}
         ]}}`)
 	})
 	srv := httptest.NewServer(mux)
@@ -275,7 +275,7 @@ func TestRunDescribe404RendersNearMisses(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error on 404")
 	}
-	for _, want := range []string{"Target not found", "rdc-vcenter", "rdc-vsphere", "did you mean"} {
+	for _, want := range []string{"Target not found", "vcenter-lab", "vsphere-lab", "did you mean"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr missing %q in %q", want, stderr.String())
 		}

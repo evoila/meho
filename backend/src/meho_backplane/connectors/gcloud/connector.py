@@ -274,6 +274,9 @@ class GcloudConnector(WorkloadIdentityOps, WorkloadIdentityWriteOps, HttpConnect
     version = "1.0"
     impl_id = "gcloud-rest"
     supported_version_range: str | None = None
+    version_range_reason = (
+        "Google Cloud has no product version. Each call uses the versioned path of its API."
+    )
     priority = 1
 
     def __init__(

@@ -31,7 +31,7 @@ func newUserListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "list",
 		Short:         "List provider-plane system users on a VCFA appliance",
-		Example:       "  meho vcf-automation user list --target rdc-vcfa",
+		Example:       "  meho vcf-automation user list --target vcfa-lab",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

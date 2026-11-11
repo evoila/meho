@@ -121,6 +121,25 @@ For time-bounded elevations: same path, plus `expires_at` set on the row. The gr
 | Elevation active | As granted until expiry | Only if explicit grant (same cap) |
 | Elevation expired | Reverts to baseline | Denied |
 
+### The upgrade row (migration `0155`)
+
+Migration `0155_agent_read_everything_at_upgrade` gives every agent that
+exists at upgrade one row: `op_pattern="*"`, `target_scope="*"`,
+`verdict="auto-execute"`, `created_by_sub="meho:upgrade-read-everything"`.
+It goes to the `keycloak_client_id` of every agent principal that is not
+revoked, and to every other `principal_sub` that already has a row (for
+example a person's agent login), per tenant. A sub that already has the
+`*`/`*` key is skipped, so the step is safe to run twice.
+
+The row gives the same answers as having no row: `safe` runs at once, and
+the risk-level ceiling makes every other level wait for approval. A more
+specific row still wins, and a `*` row on one target ties with it, so the
+stricter verdict wins. The row matters only when a later switch makes
+"no grant" mean "no access": then existing agents keep working. The
+marker shows in `meho agent grant list` (the `CREATED_BY` column), and an
+admin removes the row like any other grant. The downgrade deletes only
+rows with the marker.
+
 ## Elevation sweeper (`agents/grant_expiry.py`)
 
 Background `asyncio.Task` registered in `main.py` lifespan, gated on `GRANT_EXPIRY_ENABLED` (default: true). Cadence: `GRANT_EXPIRY_TICK_INTERVAL_SECONDS` (default: 300 s).

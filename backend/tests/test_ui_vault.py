@@ -643,11 +643,16 @@ def test_vault_ui_read_shows_the_value_to_the_requester_after_approval(
         assert 'data-vault-secret="ok"' in shown.text
         assert _SECRET_VALUE in shown.text
         assert path in shown.text
+        # The answer with the value is never kept by a cache (#6273).
+        assert shown.headers["cache-control"] == "no-store"
+        assert shown.headers["pragma"] == "no-cache"
 
         again = _show_value(client, request_id)
         assert again.status_code == 200, again.text
         assert "reveal_already_used" in again.text
         assert _SECRET_VALUE not in again.text
+        assert "pragma" not in again.headers
+        assert "pragma" not in early.headers
 
     other, other_mock = _client_with_role(
         tenant_id=_TENANT_A, operator_sub="op-someone-else", role=TenantRole.OPERATOR

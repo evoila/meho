@@ -1656,10 +1656,20 @@ for the person who asked, not a run. The code is in
   something.
 - **The person who asked fetches the value.** `POST
   /api/v1/approvals/{id}/reveal` (`api/v1/approval_reveal.py`), the
-  console's "Show value" button (`POST /ui/vault/read/reveal`) and `meho
-  secret read --approval <id>` call `fetch_approved_reveal`. It runs the
+  console's "Show value" button (`POST /ui/vault/read/reveal`), `meho
+  secret read --approval <id>` and, with `MCP_REVEAL_FETCH` on,
+  `call_operation` with `approval_request_id` on MCP
+  ([mcp.md](mcp.md#getting-an-approved-secret-value-on-mcp-mcp_reveal_fetch-off-by-default))
+  call `fetch_approved_reveal`. It runs the
   operation through `resume_dispatch_after_approval(..., requester_fetch=True)`
   and gives the value only in that one answer.
+- **No cache keeps the answer with the value.** When the operation ran,
+  each of these answers says `Cache-Control: no-store` and `Pragma:
+  no-cache` (`no_store.py`). A refused fetch, the stored run result
+  (`GET /api/v1/approvals/{id}/result`) and the request view carry no
+  value and keep their usual headers. Tests:
+  `tests/test_approval_reveal_no_store.py`, `tests/test_ui_vault.py`,
+  `tests/test_mcp_reveal_fetch.py`.
 - **Once, and only for a short time.** The fetch must win the one-resumer
   claim, so a second fetch is refused (`reveal_already_used`). It must
   come within `APPROVAL_REVEAL_FETCH_WINDOW_SECONDS` (default 900, 15

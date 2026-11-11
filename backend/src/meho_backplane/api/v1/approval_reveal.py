@@ -14,12 +14,16 @@ HTTP status codes:
 * 200 -- the operation ran. It may be a read, or an operation that changes
   something (for example it creates a token). The body is the run result;
   ``status`` says how it ended (``ok`` with the value, or an error without
-  one).
+  one). The answer says ``Cache-Control: no-store`` and ``Pragma:
+  no-cache``, so no browser or proxy keeps the value
+  (:mod:`meho_backplane.no_store`).
 * 403 -- the caller did not send the request.
 * 404 -- no such request in the caller's tenant.
 * 409 -- the fetch is refused and nothing ran: the request is not a reveal,
   is not approved, was already fetched, its time passed, or its stored params
   no longer match. ``detail`` is ``reveal_<code>: <message>``.
+
+The 403, 404 and 409 answers carry no value, so they keep the usual headers.
 """
 
 from __future__ import annotations
@@ -28,12 +32,13 @@ import uuid
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Response
 from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.middleware import verify_jwt_and_bind
+from meho_backplane.no_store import set_no_store
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ResultAccessForbiddenError,
@@ -66,6 +71,7 @@ class ApprovalRevealResult(BaseModel):
 @router.post("/{request_id}/reveal", response_model=ApprovalRevealResult)
 async def reveal_approved_request(
     request_id: Annotated[uuid.UUID, Path()],
+    response: Response,
     operator: Operator = Depends(verify_jwt_and_bind),
 ) -> ApprovalRevealResult:
     """Run an approved secret reveal once and return the value to the person who asked."""
@@ -90,6 +96,8 @@ async def reveal_approved_request(
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT, detail=f"reveal_{exc.code}: {exc.message}"
         ) from exc
+    # The operation ran: the answer may hold the value, so no cache keeps it.
+    set_no_store(response)
     # Log only fields that hold no secret value.
     _log.info(
         "approval_reveal_fetched",

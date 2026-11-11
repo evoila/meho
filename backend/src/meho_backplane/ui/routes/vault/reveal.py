@@ -10,7 +10,10 @@ and renders the value like ``/ui/vault/read``. It is a POST because it uses
 up the one-time permission; the CSRF middleware checks it. A request of
 another person, of another tenant or of another operation is a 404. A
 refused fetch (not approved yet, already fetched, time passed) shows its
-reason and no value. MEHO stores no value; this page never logs one.
+reason and no value. MEHO stores no value; this page never logs one. When
+the read ran, the page says ``Cache-Control: no-store`` and ``Pragma:
+no-cache`` (:mod:`meho_backplane.no_store`), so no browser or proxy keeps the
+value.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.no_store import set_no_store
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ResultAccessForbiddenError,
@@ -71,9 +75,11 @@ async def render_approved_reveal(
     if row.op_id != _OP_READ or row.principal_sub != operator.sub:
         raise _not_found()
     params = row.params or {}
+    ran = False
     try:
         result = await fetch_approved_reveal(operator, request_id)
         envelope: dict[str, Any] = result.model_dump(mode="json")
+        ran = True
     except (ApprovalNotFoundError, ResultAccessForbiddenError) as exc:
         raise _not_found() from exc
     except RevealFetchRefusedError as exc:
@@ -103,4 +109,6 @@ async def render_approved_reveal(
         "target": "",
     }
     response = get_templates().TemplateResponse(request, "vault/_secret.html", context)
+    if ran:
+        set_no_store(response)
     return with_csrf_cookie(response, session)

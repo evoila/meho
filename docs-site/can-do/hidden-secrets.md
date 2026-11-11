@@ -32,11 +32,20 @@ More rules:
   person approves it. For every request with `reveal_secret` that waits
   for approval, also one that creates a credential, approving does not
   run the operation. The person who asked then runs it and gets the
-  value: with `POST /api/v1/approvals/<id>/reveal`, with "Show value" in
-  the console's Vault view, or with
-  `meho secret read --approval <id> --field <name>`. This works once, and
-  only for 15 minutes after the approval. The person who approved does
-  not see the value, and MEHO does not store it.
+  value. This works once, and only for 15 minutes after the approval. The
+  person who approved does not see the value, and MEHO does not store it.
+  No browser or proxy keeps the answer with the value: it says
+  `Cache-Control: no-store`.
+- How the person who asked gets the value:
+    - **Command line:** `meho secret read --approval <id> --field <name>`.
+    - **Console:** "Show value" in the Vault view.
+    - **REST:** `POST /api/v1/approvals/<id>/reveal`.
+    - **MCP (an AI tool such as Claude Code):** call `call_operation`
+      again with the same `connector_id` and `op_id`, and
+      `approval_request_id: <id>`. Send nothing else. This needs the
+      switch `MCP_REVEAL_FETCH`, which is off by default. With it off, a
+      person who works through MCP uses the command line or the console.
+    - A second try is refused, and it shows no value.
 - An operation that makes a new credential still gives it to the
   caller once.
 - A connector can mark a field that only looks secret, such as a date

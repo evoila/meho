@@ -125,9 +125,10 @@ def approval_classification(row: EndpointDescriptor) -> dict[str, Any]:
     ``category``, ``labels`` and ``classification_rule`` (the entry that
     set them) of *row*, as :func:`apply_effective_policy` or
     :func:`apply_step_classification` set them. ``category`` is ``None``
-    when two entries conflict.
+    when two entries conflict. A classified row always has a rule; a row
+    has none when the switch was off at lookup, so this reads no setting.
     """
-    if not classification_enabled():
+    if row.policy_rule_ref is None:
         return {}
     return {
         "category": row.policy_category,

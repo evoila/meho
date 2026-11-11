@@ -249,6 +249,7 @@ class _FakeStampDescriptor:
     op_id: str
     safety_level: str
     requires_approval: bool = True
+    policy_rule_ref: str | None = None
 
 
 @pytest.mark.asyncio

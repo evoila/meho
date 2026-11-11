@@ -407,17 +407,27 @@ func reconcileTouchLevel(ctx context.Context, c *adminClient) ([]string, bool, e
 
 // customLogin says why binding the touch flow would change the normal
 // login, or returns "". Level 1 of the flow is a copy of Keycloak's
-// built-in login; a realm or a client with its own login flow may ask
-// for more checks, and binding would drop them. "browser with passkeys"
-// can be edited, so its steps and settings are checked, not only its
-// name.
+// default login; a realm or a client with its own login flow may ask
+// for more checks, and binding would drop them. "browser" and "browser
+// with passkeys" can be edited, so their steps and settings are checked
+// (defaultlogin.go), not only their names.
 func customLogin(ctx context.Context, c *adminClient, realmBrowser, clientBrowser string) (string, error) {
 	if realmBrowser == "" {
 		realmBrowser = "browser"
 	}
 	switch realmBrowser {
-	case "browser":
-	case passkeyFlowAlias:
+	case defaultLoginFlow, passkeyFlowAlias:
+		diff, err := readDefaultLoginDifference(ctx, c)
+		if err != nil {
+			return "", err
+		}
+		if diff != "" {
+			return fmt.Sprintf("the realm's flow %q is not Keycloak's default login (%s)", defaultLoginFlow, diff), nil
+		}
+	default:
+		return fmt.Sprintf("the realm's login flow is %q, not the built-in one", realmBrowser), nil
+	}
+	if realmBrowser == passkeyFlowAlias {
 		diff, err := passkeyCopyDifference(ctx, c)
 		if err != nil {
 			return "", err
@@ -426,8 +436,6 @@ func customLogin(ctx context.Context, c *adminClient, realmBrowser, clientBrowse
 			return fmt.Sprintf("the realm's login flow %q is not the built-in login with the passkey step (%s)",
 				realmBrowser, diff), nil
 		}
-	default:
-		return fmt.Sprintf("the realm's login flow is %q, not the built-in one", realmBrowser), nil
 	}
 	if clientBrowser != "" {
 		return fmt.Sprintf("the client has its own login flow %q", clientBrowser), nil

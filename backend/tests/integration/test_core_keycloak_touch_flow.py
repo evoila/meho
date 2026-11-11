@@ -21,7 +21,10 @@ What is proven:
 * a plain login right after a touch does not have the touch level in
   ``acr``, so MEHO must never accept a touch on ``amr`` alone;
 * without a maximum age on the passkey step's ``amr`` setting, ``amr`` is
-  empty.
+  empty;
+* the realm's ``browser`` flow, as this Keycloak makes it, is one of the
+  default logins the touch flow op knows, and a changed requirement there
+  is named as a difference (then the op does not bind the console).
 
 Skips when Docker is missing or the container cannot start.
 """
@@ -47,6 +50,9 @@ import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from meho_backplane.connectors.keycloak.ops_authflow_default_login import (
+    default_login_difference,
+)
 from tests.integration.test_core_keycloak_realm_import import (
     _PUBLIC_URL,
     _bootstrap_headers,
@@ -415,3 +421,45 @@ def test_amr_is_empty_without_a_maximum_age_on_the_passkey_step(keycloak: _Keycl
         assert "hwk" not in claims.get("amr", [])
     finally:
         httpx.put(url, headers=_bootstrap_headers(keycloak), json=config).raise_for_status()
+
+
+def _browser_flow(kc: _Keycloak) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
+    headers = _bootstrap_headers(kc)
+    admin = f"{kc.base_url}/admin/realms/meho/authentication"
+    rows = httpx.get(f"{admin}/flows/browser/executions", headers=headers)
+    rows.raise_for_status()
+    steps: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+    for row in rows.json():
+        config = None
+        if row.get("authenticationConfig"):
+            body = httpx.get(f"{admin}/config/{row['authenticationConfig']}", headers=headers)
+            body.raise_for_status()
+            config = body.json().get("config") or {}
+        steps.append((row, config))
+    return steps
+
+
+def test_browser_flow_is_a_known_default_login_and_a_change_is_named(
+    keycloak: _Keycloak,
+) -> None:
+    """The op binds the console only over an unchanged ``browser`` flow."""
+    assert default_login_difference(_browser_flow(keycloak)) is None
+
+    headers = _bootstrap_headers(keycloak)
+    url = f"{keycloak.base_url}/admin/realms/meho/authentication/flows/browser/executions"
+    code = next(
+        row
+        for row, _ in _browser_flow(keycloak)
+        if row.get("authenticationFlow") is True
+        and str(row.get("displayName", "")).startswith("Browser - Conditional")
+        and row.get("requirement") == "CONDITIONAL"
+        and row.get("level") == 1
+    )
+    httpx.put(url, headers=headers, json={**code, "requirement": "REQUIRED"}).raise_for_status()
+    try:
+        difference = default_login_difference(_browser_flow(keycloak))
+        assert difference is not None
+        assert "(REQUIRED)" in difference
+    finally:
+        httpx.put(url, headers=_bootstrap_headers(keycloak), json=code).raise_for_status()
+    assert default_login_difference(_browser_flow(keycloak)) is None

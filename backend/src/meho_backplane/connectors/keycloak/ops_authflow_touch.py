@@ -12,7 +12,7 @@ This op adds it with one governed request.
 
 What the op does, on the target's managed realm:
 
-1. Find the client (default ``meho-web``). No client: stop before anything
+1. Find the client ``meho-web`` (the only client the op takes). No client: stop before anything
    is written. The realm's passkey policy must ask for user verification
    (``webAuthnPolicyPasswordlessUserVerificationRequirement`` is
    ``required``). Otherwise a touch would pass without a PIN or fingerprint,
@@ -43,10 +43,11 @@ What the op does, on the target's managed realm:
    would stop going straight to the company login. When the realm's flow
    has no default, a default on the touch flow is removed.
 6. Bind the flow as the client's browser flow, unless it already is. Level
-   1 is a copy of Keycloak's built-in login, so the op binds only when the
-   realm's browser flow is ``browser``, or ``browser with passkeys`` with
-   the steps and settings of ``browser`` plus the passkey step, and the
-   client has no browser flow of its own. Otherwise the flow is made but
+   1 is a copy of Keycloak's default login, so the op binds only when the
+   realm's browser flow is ``browser`` with the default steps, requirements
+   and settings (``ops_authflow_default_login``), or ``browser with
+   passkeys`` with the steps and settings of that ``browser`` plus the
+   passkey step, and the client has no browser flow of its own. Otherwise the flow is made but
    not bound, and ``not_bound_reason`` says why. ``replace_custom_login``
    binds it anyway. A client bound to the flow already stays bound.
 
@@ -72,6 +73,10 @@ from meho_backplane.connectors.keycloak._paths import (
     fill_path,
 )
 from meho_backplane.connectors.keycloak.ops_authflow import get_admin_list_strict
+from meho_backplane.connectors.keycloak.ops_authflow_default_login import (
+    DEFAULT_LOGIN_FLOW,
+    read_default_login_difference,
+)
 from meho_backplane.connectors.keycloak.ops_authflow_passkey import (
     BUILT_IN_BROWSER_FLOW,
     PASSKEY_FLOW_ALIAS,
@@ -547,13 +552,19 @@ async def _custom_login(
 
     Level 1 of the touch flow is a copy of Keycloak's built-in login. A realm
     or a client with its own login flow may ask for more checks; binding
-    would drop them. ``browser with passkeys`` can be edited, so its steps
-    and settings are checked, not only its name.
+    would drop them. ``browser`` and ``browser with passkeys`` can be
+    edited, so their steps and settings are checked, not only their names.
     """
     if browser not in (BUILT_IN_BROWSER_FLOW, PASSKEY_FLOW_ALIAS):
         return (
             f"the realm's login flow is {browser!r}, not the built-in one; binding "
             "would drop its steps from the console login"
+        )
+    difference = await read_default_login_difference(connector, operator, target, realm)
+    if difference is not None:
+        return (
+            f"the realm's flow {DEFAULT_LOGIN_FLOW!r} is not Keycloak's default login: "
+            f"{difference}; binding would drop that change from the console login"
         )
     if browser == PASSKEY_FLOW_ALIAS:
         difference = await passkey_copy_difference(connector, operator, target, realm)

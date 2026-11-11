@@ -20,6 +20,10 @@ What is proven:
   that maps ``meho-touch`` to another level stops it before the bind;
 * a realm whose passkey policy does not ask for user verification stops the
   op before anything is written;
+* a realm whose ``browser`` flow is not Keycloak's default login (a changed
+  requirement, an extra step, other settings) gets the flow, but the console
+  is not bound to it; an unchanged one is bound;
+* another client than ``meho-web`` is refused before any request;
 * an ``amr`` mapper that leaves the claim out of the ID token gets its token
   settings turned on before the bind;
 * the binding keeps the client's other settings and is read back;
@@ -196,10 +200,9 @@ class FakeKeycloak:
             self.realm[_POLICY_UV] = verification
         # alias -> {"id", "top", "steps": [step]}; a step is a dict with
         # "id", "provider" or "sub", "requirement", "config".
-        self.flows: dict[str, dict[str, Any]] = {
-            "browser": {"id": "browser-id", "top": True, "steps": []}
-        }
+        self.flows: dict[str, dict[str, Any]] = {}
         self.configs: dict[str, dict[str, Any]] = {}
+        _default_login(self)
         self.providers = {node.name for _, node in wanted_steps() if node.children is None}
         self.writes: list[tuple[str, str, Any]] = []
         self._ids = itertools.count(1)
@@ -354,15 +357,7 @@ class FakeKeycloak:
             "alias": "meho-company-login-redirect",
             "config": {"defaultProvider": provider},
         }
-        self.flows["browser"]["steps"] = [
-            {"id": "cookie", "provider": "auth-cookie", "requirement": "ALTERNATIVE"},
-            {
-                "id": "redirector",
-                "provider": "identity-provider-redirector",
-                "requirement": "ALTERNATIVE",
-                "config": "browser-redirect",
-            },
-        ]
+        self.flows["browser"]["steps"][2]["config"] = "browser-redirect"
 
     def touch_redirect(self) -> dict[str, Any] | None:
         """The settings of the touch flow's redirect step, or ``None``."""
@@ -373,6 +368,63 @@ class FakeKeycloak:
         )
         config_id = step.get("authenticationConfig")
         return self.configs[config_id] if config_id else None
+
+
+def _default_login(fake: FakeKeycloak) -> None:
+    """Give *fake* the ``browser`` flow a new realm gets in Keycloak 26.8."""
+
+    def step(provider: str, requirement: str, config: str | None = None) -> dict[str, Any]:
+        row = {"id": f"browser-{provider}", "provider": provider, "requirement": requirement}
+        return {**row, "config": config} if config else row
+
+    def sub(alias: str, requirement: str, steps: list[dict[str, Any]]) -> dict[str, Any]:
+        fake.flows[alias] = {"id": f"{alias}-id", "top": False, "steps": steps}
+        return {"id": f"browser-{alias}", "sub": alias, "requirement": requirement}
+
+    fake.configs["browser-conditional-credential"] = {
+        "id": "browser-conditional-credential",
+        "alias": "browser-conditional-credential",
+        "config": {"credentials": "webauthn-passwordless"},
+    }
+    organization = sub(
+        "Organization",
+        "ALTERNATIVE",
+        [
+            sub(
+                "Browser - Conditional Organization",
+                "CONDITIONAL",
+                [
+                    step("conditional-user-configured", "REQUIRED"),
+                    step("organization", "ALTERNATIVE"),
+                ],
+            )
+        ],
+    )
+    two_factor = sub(
+        "Browser - Conditional 2FA",
+        "CONDITIONAL",
+        [
+            step("conditional-user-configured", "REQUIRED"),
+            step("conditional-credential", "REQUIRED", "browser-conditional-credential"),
+            step("auth-otp-form", "ALTERNATIVE"),
+            step("webauthn-authenticator", "DISABLED"),
+            step("auth-recovery-authn-code-form", "DISABLED"),
+        ],
+    )
+    forms = sub(
+        "forms", "ALTERNATIVE", [step("auth-username-password-form", "REQUIRED"), two_factor]
+    )
+    fake.flows["browser"] = {
+        "id": "browser-id",
+        "top": True,
+        "steps": [
+            step("auth-cookie", "ALTERNATIVE"),
+            step("auth-spnego", "DISABLED"),
+            step("identity-provider-redirector", "ALTERNATIVE"),
+            organization,
+            forms,
+        ],
+    }
 
 
 def _client(browser: str | None = None) -> dict[str, Any]:
@@ -450,6 +502,14 @@ async def test_op_registers_as_caution_with_approval(kc: KeycloakConnector) -> N
 async def test_unknown_param_is_invalid(kc: KeycloakConnector) -> None:
     result = await _run({"realm": "master"})
     assert result["extras"]["error_code"] == "invalid_params"
+
+
+async def test_other_client_is_refused_before_any_request(kc: KeycloakConnector) -> None:
+    """Level 1 is the console's login: the op takes only ``meho-web``."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        result = await _run({"client_id": "meho-cli"})
+    assert result["extras"]["error_code"] == "invalid_params"
+    assert mock.calls.call_count == 0
 
 
 async def test_op_waits_for_approval_and_the_card_names_client_and_flow(
@@ -610,13 +670,19 @@ async def test_replace_custom_login_binds_over_the_client_flow(kc: KeycloakConne
 
 
 def _login_steps(fake: FakeKeycloak, alias: str, prefix: str = "") -> None:
-    """Give *fake* the built-in login as flow *alias*; a copy's sub-flows carry *prefix*."""
+    """Give *fake* the Keycloak 26.0 login as flow *alias*; a copy's sub-flows carry *prefix*."""
     forms, code = f"{prefix}forms", f"{prefix}Browser - Conditional OTP"
     fake.flows[alias] = {
         "id": f"{alias}-id",
         "top": True,
         "steps": [
             {"id": f"{alias}-cookie", "provider": "auth-cookie", "requirement": "ALTERNATIVE"},
+            {"id": f"{alias}-spnego", "provider": "auth-spnego", "requirement": "DISABLED"},
+            {
+                "id": f"{alias}-redirector",
+                "provider": "identity-provider-redirector",
+                "requirement": "ALTERNATIVE",
+            },
             {"id": f"{alias}-forms", "sub": forms, "requirement": "ALTERNATIVE"},
         ],
     }
@@ -716,6 +782,63 @@ async def test_edited_passkey_copy_of_the_login_is_not_bound(
     assert ("PUT", f"{_ADMIN}/clients/{_CLIENT_UUID}") not in [(m, p) for m, p, _ in fake.writes]
 
 
+@pytest.mark.parametrize(
+    "change",
+    ["code_required_for_everyone", "extra_required_step", "step_settings"],
+)
+async def test_changed_browser_flow_is_not_bound(kc: KeycloakConnector, change: str) -> None:
+    """Level 1 copies Keycloak's default login; a changed ``browser`` would be dropped."""
+    fake = FakeKeycloak(client=_client())
+    forms = fake.flows["forms"]["steps"]
+    if change == "code_required_for_everyone":
+        forms[1]["requirement"] = "REQUIRED"
+    elif change == "extra_required_step":
+        forms.append({"id": "extra", "provider": "auth-otp-form", "requirement": "REQUIRED"})
+    else:
+        fake.configs["pw-settings"] = {"id": "pw-settings", "alias": "x", "config": {"a": "b"}}
+        forms[0]["config"] = "pw-settings"
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run({})
+    assert result["status"] == "ok", result
+    out = result["result"]
+    assert out["flow_created"] is True
+    assert out["bound"] is False
+    assert "'browser' is not Keycloak's default login" in out["not_bound_reason"]
+    assert fake.client is not None
+    assert "browser" not in fake.client["authenticationFlowBindingOverrides"]
+    assert ("PUT", f"{_ADMIN}/clients/{_CLIENT_UUID}") not in [(m, p) for m, p, _ in fake.writes]
+
+
+async def test_passkey_copy_of_a_changed_browser_flow_is_not_bound(
+    kc: KeycloakConnector,
+) -> None:
+    """The copy matches ``browser``, but ``browser`` itself is not the default login."""
+    fake = FakeKeycloak(client=_client())
+    _passkey_copy(fake)
+    for flow in ("forms", "browser with passkeys forms"):
+        fake.flows[flow]["steps"][1]["requirement"] = "REQUIRED"
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run({})
+    assert result["status"] == "ok", result
+    assert result["result"]["bound"] is False
+    assert "'browser' is not Keycloak's default login" in result["result"]["not_bound_reason"]
+
+
+async def test_unchanged_browser_flow_with_company_login_default_is_bound(
+    kc: KeycloakConnector,
+) -> None:
+    """The company login default on ``browser`` is MEHO's own setting, not a change."""
+    fake = FakeKeycloak(client=_client())
+    fake.redirect_to("company")
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run({})
+    assert result["status"] == "ok", result
+    assert result["result"]["bound"] is True
+
+
 async def test_bound_client_stays_bound_on_a_run_without_replace_custom_login(
     kc: KeycloakConnector,
 ) -> None:
@@ -813,7 +936,7 @@ async def test_removed_company_login_default_is_removed_from_the_touch_flow(
         fake.mount(mock)
         assert (await _run({}))["status"] == "ok"
         assert fake.touch_redirect() is not None
-        redirector = fake.flows["browser"]["steps"][1]
+        redirector = fake.flows["browser"]["steps"][2]
         del redirector["config"]
         del fake.configs["browser-redirect"]
         fake.writes.clear()

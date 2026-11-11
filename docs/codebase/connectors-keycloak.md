@@ -911,7 +911,7 @@ as a plain `write` in `connectors/keycloak/op_classes.py`.
 `keycloak.authflow.ensure_approval_touch` (`ops_authflow_touch.py`, the
 flow shape and metadata in `ops_authflow_touch_schemas.py`) — risk level
 `caution`, approval required, group `authflow_write`, params `client_id`
-(default `meho-web`) and `replace_custom_login` (default `false`). It gives a running realm what the chart's realm
+(only `meho-web`; the schema refuses another client) and `replace_custom_login` (default `false`). It gives a running realm what the chart's realm
 file gives a new one: the login flow `meho approval touch` with level 1
 (the normal login) and level 3 (`acr_values=meho-touch`, a passkey every
 time; level 2 is kept for the approval sign-in, `meho-approve`). On the target's managed realm:
@@ -951,10 +951,17 @@ time; level 2 is kept for the approval sign-in, `meho-approve`). On the target's
    `core/company_login.py` does.
 6. Bind the flow as the client's browser flow (full client `PUT`, read
    back). This is the last write. Level 1 is a copy of Keycloak's
-   built-in login, so the op binds only when the realm's browser flow is
-   `browser`, or `browser with passkeys` with the steps and settings of
-   `browser` plus the passkey step (that flow can be edited, so the op
-   reads it), and the client has no browser flow of its own. Otherwise it
+   default login, so the op binds only when the realm's browser flow is
+   `browser` with the default steps, requirements and settings, or
+   `browser with passkeys` with the steps and settings of that `browser`
+   plus the passkey step, and the client has no browser flow of its own.
+   Both flows can be edited, so the op reads them. The default shapes
+   are in `ops_authflow_default_login.py` (the Go helper has the same
+   list in `cli/internal/cmd/admin/keycloak/defaultlogin.go`): Keycloak
+   26.0 to 26.2, 26.3 and newer, with or without the passkey condition,
+   WebAuthn, recovery codes and the organization step. The company
+   login default on the redirect step is allowed; it is MEHO's own
+   setting. Otherwise it
    makes the flow, does not bind it, and returns `bound: false` with
    `not_bound_reason`. With `replace_custom_login: true` it binds anyway;
    `previous_browser_flow_id` names the flow it replaced. A client bound

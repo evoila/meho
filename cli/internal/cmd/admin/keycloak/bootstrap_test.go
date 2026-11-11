@@ -65,7 +65,7 @@ type fakeKeycloak struct {
 }
 
 func newFakeKeycloak() *fakeKeycloak {
-	return &fakeKeycloak{
+	fake := &fakeKeycloak{
 		clients:        map[string]*clientRep{},
 		mappers:        map[string][]protocolMapperRep{},
 		defaultScopes:  map[string][]string{},
@@ -82,12 +82,11 @@ func newFakeKeycloak() *fakeKeycloak {
 			// #912).
 			{ID: "scope-offline-access", Name: "offline_access"},
 		},
-		groups:     map[string]*groupRep{},
-		users:      map[string]*userRep{},
-		userGroups: map[string][]string{},
-		passwords:  map[string]string{},
-		// Keycloak always has the built-in browser flow.
-		flows:       map[string]*fakeFlow{"browser": {ID: "browser-flow", TopLevel: true}},
+		groups:      map[string]*groupRep{},
+		users:       map[string]*userRep{},
+		userGroups:  map[string][]string{},
+		passwords:   map[string]string{},
+		flows:       map[string]*fakeFlow{},
 		stepConfigs: map[string]map[string]any{},
 		realm: map[string]any{
 			"realm": "r", "attributes": map[string]any{"frontendUrl": ""},
@@ -95,6 +94,9 @@ func newFakeKeycloak() *fakeKeycloak {
 		},
 		calls: map[string]int{},
 	}
+	// Keycloak always has the built-in browser flow.
+	seedDefaultLogin(fake)
+	return fake
 }
 
 // fakeFlow is one login flow of the fake realm with its steps.

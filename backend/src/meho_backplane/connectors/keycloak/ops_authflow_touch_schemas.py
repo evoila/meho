@@ -178,8 +178,8 @@ _WHEN_TO_USE = (
     "file only when the realm is new. The op makes the flow, maps the acr "
     "name 'meho-touch' to level 3 in the realm, adds the 'amr' mapper to the "
     "console client, and binds the flow as the console client's browser flow. "
-    "It binds only when the realm uses Keycloak's built-in login and the client "
-    "has no login flow of its own, so the normal console login stays the same; "
+    "It binds only when the realm uses Keycloak's default login, unchanged, and "
+    "the client has no login flow of its own, so the normal console login stays the same; "
     "only a login that asks for 'meho-touch' needs a passkey. Safe to run twice. "
     "A flow with that name "
     "but another shape is not changed: the op stops and names the difference. "
@@ -191,9 +191,11 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "client_id": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 255,
-            "description": "The console client. Default 'meho-web'.",
+            "enum": ["meho-web"],
+            "description": (
+                "The console client. Only 'meho-web': level 1 of the flow is the "
+                "console's normal login, and MEHO asks for the touch only there."
+            ),
         },
         "replace_custom_login": {
             "type": "boolean",
@@ -262,7 +264,8 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": (
                 "Why the flow was not bound: the realm or the client has its own "
-                "login flow. null when it was bound."
+                "login flow, or the realm's 'browser' flow is not Keycloak's default "
+                "login. null when it was bound."
             ),
         },
         "browser_flow_id": {
@@ -323,12 +326,12 @@ TOUCH_OPS: tuple[KeycloakOp, ...] = (
                 "check it: a second run changes nothing."
             ),
             "preconditions": (
-                "The console client (default 'meho-web') must exist in the "
+                "The console client 'meho-web' must exist in the "
                 "target's managed realm. The realm's passkey policy must ask for "
                 "user verification ('required'). People who approve need a passkey."
             ),
             "parameter_hints": {
-                "client_id": "Leave it out to use 'meho-web'.",
+                "client_id": "Leave it out. Only 'meho-web' is taken.",
                 "replace_custom_login": (
                     "Leave it out. Set it to true only after a person checked that "
                     "the console may lose the steps of the realm's or the client's "
@@ -350,8 +353,9 @@ TOUCH_OPS: tuple[KeycloakOp, ...] = (
                 "another level. An error with 'verification_not_required' means the "
                 "realm's passkey policy does not ask for a PIN or fingerprint; a person "
                 "sets it to 'required' and runs again. bound false: the realm or the client "
-                "has its own login flow, or 'browser with passkeys' has other steps than "
-                "the built-in login with the passkey step; not_bound_reason says which. "
+                "has its own login flow, the realm's 'browser' flow is not Keycloak's "
+                "default login, or 'browser with passkeys' has other steps than 'browser' "
+                "with the passkey step; not_bound_reason says which. "
                 "The flow is made but not used; a person decides, and runs again with "
                 "replace_custom_login true to bind it anyway. The way back: "
                 "keycloak.client.update with "

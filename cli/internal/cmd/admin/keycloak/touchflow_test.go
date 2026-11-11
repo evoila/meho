@@ -397,10 +397,7 @@ func seedBrowserRedirect(fake *fakeKeycloak, provider string) {
 		"id": "browser-redirect", "alias": "meho-company-login-redirect",
 		"config": map[string]any{"defaultProvider": provider},
 	}
-	fake.flows["browser"].Steps = []*fakeFlowStep{
-		{ID: "cookie", Provider: "auth-cookie", Requirement: "ALTERNATIVE"},
-		{ID: "redirector", Provider: redirectorType, Requirement: "ALTERNATIVE", Config: "browser-redirect"},
-	}
+	fake.flows["browser"].Steps[2].Config = "browser-redirect"
 }
 
 // touchRedirectConfig returns the settings of the touch flow's redirect
@@ -492,7 +489,7 @@ func TestBootstrap_TouchFlowRedirectRemovedWithTheRealms(t *testing.T) {
 	if touchRedirectConfig(fake) == nil {
 		t.Fatal("the first run did not copy the redirect")
 	}
-	fake.flows["browser"].Steps[1].Config = ""
+	fake.flows["browser"].Steps[2].Config = ""
 	delete(fake.stepConfigs, "browser-redirect")
 
 	fake.calls = map[string]int{}
@@ -567,12 +564,14 @@ func TestBootstrap_TouchFlowNotBoundOverTheClientsOwnLogin(t *testing.T) {
 	}
 }
 
-// seedLoginSteps gives the fake the built-in login as flow alias; the
-// sub-flows of a copy carry prefix in front of their names.
+// seedLoginSteps gives the fake the Keycloak 26.0 login as flow alias;
+// the sub-flows of a copy carry prefix in front of their names.
 func seedLoginSteps(fake *fakeKeycloak, alias, prefix string) {
 	forms, code := prefix+"forms", prefix+"Browser - Conditional OTP"
 	fake.flows[alias] = &fakeFlow{ID: alias + "-flow", TopLevel: true, Steps: []*fakeFlowStep{
 		{ID: alias + "-cookie", Provider: "auth-cookie", Requirement: "ALTERNATIVE"},
+		{ID: alias + "-spnego", Provider: "auth-spnego", Requirement: "DISABLED"},
+		{ID: alias + "-redirector", Provider: redirectorType, Requirement: "ALTERNATIVE"},
 		{ID: alias + "-forms", Subflow: forms, Requirement: "ALTERNATIVE"},
 	}}
 	fake.flows[forms] = &fakeFlow{ID: forms + "-flow", Steps: []*fakeFlowStep{
@@ -701,7 +700,7 @@ func TestBootstrap_DryRunTouchFlowRedirect(t *testing.T) {
 	if !slices.Contains(res.MapperEventsLog, want) {
 		t.Errorf("events miss %q: %v", want, res.MapperEventsLog)
 	}
-	if len(fake.stepConfigs) != 1 {
+	if len(fake.stepConfigs) != 2 {
 		t.Errorf("a dry run changed step settings: %v", fake.stepConfigs)
 	}
 }

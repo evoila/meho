@@ -651,6 +651,33 @@ BLOB_API_VERSION: Final[str] = "2026-10-06"
 USER_DELEGATION_KEY_PATH: Final[str] = "/?restype=service&comp=userdelegationkey"
 
 
+# ---- dns (Task #5368) ----
+#
+# Public DNS zones (Microsoft.Network/dnsZones), not the private zones of the
+# network family. The record set paths take a record type and a relative name.
+
+#: The API version of the public DNS calls (Microsoft.Network/dnsZones).
+DNS_API_VERSION: Final[str] = "2018-05-01"
+
+#: ``GET .../providers/Microsoft.Network/dnsZones``: every public DNS zone of
+#: the subscription (Zones - List).
+DNS_ZONES_PATH: Final[str] = "/subscriptions/{subscription_id}/providers/Microsoft.Network/dnsZones"
+
+#: ``GET .../dnsZones/{zone}/recordsets``: every record set of one zone, of
+#: every type (Record Sets - List By Dns Zone).
+DNS_RECORD_SETS_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Network/dnsZones/{zone}/recordsets"
+)
+
+#: ``/dnsZones/{zone}/{recordType}/{name}``: ``GET`` reads one record set,
+#: ``PUT`` creates or changes it, ``DELETE`` removes it.
+DNS_RECORD_SET_PATH: Final[str] = (
+    "/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    "/providers/Microsoft.Network/dnsZones/{zone}/{record_type}/{name}"
+)
+
+
 def subscription_path(subscription_id: str) -> str:
     """Return the path of one subscription.
 

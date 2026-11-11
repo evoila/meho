@@ -54,7 +54,9 @@ __all__ = [
     "_AUTH_FLOW_ADD_SUBFLOW_PATH",
     "_AUTH_FLOW_COPY_PATH",
     "_AUTH_FLOW_EXECUTIONS_PATH",
+    "_EVENTS_CONFIG_PATH",
     "_IDENTITY_PROVIDERS_PATH",
+    "_REQUIRED_ACTIONS_PATH",
     "_USER_CREDENTIALS_PATH",
     "_USER_SESSIONS_PATH",
     "fill_path",
@@ -112,6 +114,9 @@ _AUTH_EXECUTION_RAISE_PRIORITY_PATH = (
     "/admin/realms/{realm}/authentication/executions/{executionId}/raise-priority"
 )
 _IDENTITY_PROVIDERS_PATH = "/admin/realms/{realm}/identity-provider/instances"
+# Safe reads of the login setup: required actions and the event settings.
+_REQUIRED_ACTIONS_PATH = "/admin/realms/{realm}/authentication/required-actions"
+_EVENTS_CONFIG_PATH = "/admin/realms/{realm}/events/config"
 
 # -- dispatched, but outside the Admin REST spec's scope (see docstring) ----
 

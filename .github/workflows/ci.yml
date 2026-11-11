@@ -1061,6 +1061,11 @@ jobs:
         # perf-budget check below can never mask a red suite.
         shell: bash
         env:
+          # Time limits in tests (marker slow_runner_tolerant) do not fail
+          # this required job; the tests still run and their other checks
+          # still count. The non-required python-timing-tests job checks
+          # the limits (#6270, tests/_time_limits.py).
+          MEHO_SKIP_TIME_LIMITS: "1"
           # The chart render tests FAIL (not skip) when helm is missing,
           # so losing the Install Helm step above cannot hide them again.
           MEHO_REQUIRE_HELM: "1"
@@ -2447,6 +2452,12 @@ jobs:
         # -rs prints the reason of every skipped test. The k3s tests skip
         # when the cluster cannot pull an image; without the reason a green
         # lane hides that nothing ran on the cluster.
+        env:
+          # Time limits in tests (marker slow_runner_tolerant) do not fail
+          # this required job; the tests still run and their other checks
+          # still count. The non-required python-timing-tests job checks
+          # the limits (#6270, tests/_time_limits.py).
+          MEHO_SKIP_TIME_LIMITS: "1"
         run: |
           # Split by measured file time, the same tool as the unit shards
           # (tests/_unit_shard_split.py) with the integration measurements
@@ -2484,6 +2495,66 @@ jobs:
           path: backend/pytest-integration-shard.xml
           retention-days: 14
           if-no-files-found: warn
+
+  python-timing-tests:
+    name: Python timing tests (non-blocking)
+    # The tests marked slow_runner_tolerant compare real elapsed time with
+    # a wide fixed limit (#6270). On a busy runner such a limit can still
+    # fail, so the required jobs turn the limits off (MEHO_SKIP_TIME_LIMITS;
+    # the tests and their other checks still run there) and only this job
+    # checks them. This job is NOT a required check and has
+    # continue-on-error, so a red result shows a slowdown but never blocks
+    # a merge.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       needs.changes.outputs.docs_only != 'true' &&
+       needs.changes.outputs.backend_python != 'false')
+    needs: changes
+    runs-on: meho-runners-ci
+    continue-on-error: true
+    timeout-minutes: 20
+    env:
+      # See the python-integration-shard job: the secrets context is not
+      # readable in a step-level `if:`.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Docker Hub login (for testcontainers pulls)
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          # Pinned uv; see the python-lint job for why.
+          version: "0.13.0"
+          enable-cache: true
+          add-problem-matchers: false
+
+      - name: Sync Python environment (locked)
+        run: uv sync --locked --all-groups
+
+      - name: Pytest (timing tests only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t FILES < <(grep -rl --include='test_*.py' 'mark.slow_runner_tolerant' tests | sort)
+          echo "${#FILES[@]} test files hold timing tests"
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "::error::no test file is marked slow_runner_tolerant"
+            exit 1
+          fi
+          uv run pytest -rs -m slow_runner_tolerant \
+            --timeout=300 --timeout-method=signal "${FILES[@]}"
 
   python-integration:
     name: Python (integration testcontainers)

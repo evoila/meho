@@ -37,10 +37,12 @@ change worked (the new password is accepted, the old one refused) without a
 `keycloak.authflow.ensure_approval_flow` and the read
 `keycloak.identity_provider.list` (read surface **eleven**) set up the
 approval sign-in flow, and `keycloak.authflow.ensure_passkey_code_skip`
-changes the browser sign-in flow for passkeys. Two more reads,
-`keycloak.user.get` and `keycloak.user.sessions`, show one user's state after
-a logout or a password reset (read surface **thirteen**). In total the
-connector registers 34 operations: 13 `safe` reads and 21 writes that wait for
+changes the browser sign-in flow for passkeys. Three more safe reads show the
+login setup: `keycloak.auth_flow.step.list`, `keycloak.required_action.list`
+and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
+`keycloak.user.sessions`, show one user's state after a logout or a password
+reset (read surface **sixteen**). In total the connector registers 37
+operations: 16 `safe` reads and 21 writes that wait for
 approval (6 `caution`, 11 `dangerous`, 4 `destructive`).
 
 Registry v2 triple: `(product="keycloak", version="26.x",
@@ -55,7 +57,8 @@ fresh target with no asserted version still resolves.
   thin bound-method shim per read op (`realm_get`, `client_list`,
   `client_get`, `client_scope_list`, `user_list`, `role_mapping_get`,
   `role_list`, `role_users`, `group_list`, `group_member_list`,
-  `identity_provider_list`) and
+  `identity_provider_list`, `auth_flow_step_list`, `required_action_list`,
+  `events_config_get`) and
   per write op (`realm_create`/`realm_update`, `client_create`/
   `client_update`, `client_scope_create`, `protocol_mapper_create`,
   `user_create`/`user_reset_password`, `role_mapping_assign`,
@@ -239,8 +242,9 @@ rejects a whitespace-only secret rather than setting an empty password.
 
 Ten `safety_level="safe"` / `requires_approval=False` read ops in this
 table (an eleventh, `keycloak.identity_provider.list`, is described with the
-approval sign-in flow; a twelfth and thirteenth, `keycloak.user.get` and
-`keycloak.user.sessions`, are described with the user reads below), all
+approval sign-in flow; three more are in "Login setup reads" below, and two
+more, `keycloak.user.get` and `keycloak.user.sessions`, are described with the
+user reads below), all
 tagged `read-only`, all dispatching via the admin-auth path. The realm is
 the target's `managed_realm` (no per-op realm param):
 
@@ -788,6 +792,22 @@ Two ops in their own modules, registered by the same walk:
 Both ops read lists with `get_admin_list_strict`: a body that is not a JSON
 array raises `KeycloakUnexpectedResponseError`, so a failed read never looks
 like an empty list.
+
+### Login setup reads (`ops_flow_reads.py`)
+
+Three `safe` reads, group `login_setup`, for the checks before one-time codes
+or event saving are turned on. Each copies only a fixed list of fields (an
+allow-list). No step setting, no `config` map and no secret is returned.
+A failed read, or a body of the wrong shape, is an error, never an empty list.
+
+| op_id | Admin REST API | returns |
+|---|---|---|
+| `keycloak.auth_flow.step.list` | `GET .../authentication/flows/{flowAlias}/executions` | `{realm, flow, rows: [{level, index, displayName, requirement, providerId, authenticationFlow}], total}`. Param `flow` (alias); default: the realm's `browserFlow`. An unknown alias raises `KeycloakFlowNotFoundError` ("flow not found"). |
+| `keycloak.required_action.list` | `GET .../authentication/required-actions` | `{realm, rows: [{alias, name, enabled, defaultAction, priority}], total}`, sorted by `priority` (the order at login; no priority sorts last). |
+| `keycloak.events.config.get` | `GET .../events/config` | `{realm, eventsEnabled, eventsExpiration, eventsListeners, enabledEventTypes, adminEventsEnabled, adminEventsDetailsEnabled}`. Keycloak fills `enabledEventTypes` with its default list when the realm sets none; `keycloak.realm.get` shows `[]` then. |
+
+The first op is named `.step.list` and not `.executions`, because the event
+feed treats a name that ends in `.list` as a read.
 
 ### Skip the one-time code after a passkey (#5663)
 

@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0158_add_policy_classification``.
+"""Behavioural tests for ``0159_add_policy_classification``.
 
 The migration only adds: ``operation_policy_override.category`` and
 ``.labels`` (an old row reads ``NULL`` in both) and the ``tenant_policy``
 table (at most one row for the whole install, one per tenant).
 ``downgrade()`` removes them again and keeps the override rows.
 
-Every step targets this migration's own revision (``0158``) and its
-``down_revision`` (``0157``), never ``head``.
+Every step targets this migration's own revision (``0159``) and its
+``down_revision`` (``0158``), never ``head``.
 """
 
 from __future__ import annotations
@@ -28,15 +28,15 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0158"
-_DOWN_REVISION = "0157"
+_REVISION = "0159"
+_DOWN_REVISION = "0158"
 _OVERRIDE_ID = "a" * 32
 _TENANT_ID = "b" * 32
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0158.db"
+    db_path = tmp_path / "migration_0159.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

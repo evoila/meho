@@ -11,9 +11,9 @@ up the one-time permission; the CSRF middleware checks it. A request of
 another person, of another tenant or of another operation is a 404. A
 refused fetch (not approved yet, already fetched, time passed) shows its
 reason and no value. MEHO stores no value; this page never logs one. When
-the read ran, the page says ``Cache-Control: no-store`` and ``Pragma:
-no-cache`` (:mod:`meho_backplane.no_store`), so no browser or proxy keeps the
-value.
+the read ran (also when it ended with an error and shows no value), the page
+says ``Cache-Control: no-store`` and ``Pragma: no-cache``
+(:mod:`meho_backplane.no_store`), so no browser or proxy keeps the value.
 """
 
 from __future__ import annotations

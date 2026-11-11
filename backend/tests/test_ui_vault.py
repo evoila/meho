@@ -653,6 +653,8 @@ def test_vault_ui_read_shows_the_value_to_the_requester_after_approval(
         assert _SECRET_VALUE not in again.text
         assert "pragma" not in again.headers
         assert "pragma" not in early.headers
+        assert again.headers.get("cache-control") != "no-store"
+        assert early.headers.get("cache-control") != "no-store"
 
     other, other_mock = _client_with_role(
         tenant_id=_TENANT_A, operator_sub="op-someone-else", role=TenantRole.OPERATOR

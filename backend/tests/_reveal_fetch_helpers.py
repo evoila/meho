@@ -31,6 +31,9 @@ from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 SECRET_VALUE = "made-up" + "-password-6273"
 CONNECTOR_ID = "vault-1.x"
 READ_OP = "vault.kv.read"
+#: A plain read (not a credential read) whose answer has a secret-named field.
+#: A person's ``reveal_secret: true`` on it runs at once, with no approval.
+PLAIN_OP = "vault.app.config"
 
 
 class _VaultStub(Connector):
@@ -52,12 +55,40 @@ async def _read_handler(operator: Operator, target: Any, params: dict[str, Any])
     return {"data": {"password": SECRET_VALUE, "username": "app"}, "version": 1}
 
 
-async def register_vault_read() -> None:
-    """Register a ``vault.kv.read`` stand-in that answers with :data:`SECRET_VALUE`."""
+async def _plain_handler(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    return {"name": "app", "password": SECRET_VALUE}
+
+
+def _embedding_service() -> AsyncMock:
     service = AsyncMock()
     service.encode_one.return_value = [0.0] * EMBEDDING_DIMENSION
     service.encode.return_value = [[0.0] * EMBEDDING_DIMENSION]
     service.dimension = EMBEDDING_DIMENSION
+    return service
+
+
+async def register_plain_read() -> None:
+    """Register :data:`PLAIN_OP`, which answers with :data:`SECRET_VALUE` in ``password``.
+
+    Call after :func:`register_vault_read`, which registers the connector.
+    """
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=PLAIN_OP,
+        handler=_plain_handler,
+        summary="Read the app config.",
+        description="Read the app config.",
+        parameter_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        when_to_use=None,
+        embedding_service=_embedding_service(),
+    )
+
+
+async def register_vault_read() -> None:
+    """Register a ``vault.kv.read`` stand-in that answers with :data:`SECRET_VALUE`."""
+    service = _embedding_service()
     register_connector_v2(product="vault", version="", impl_id="", cls=_VaultStub)
     await register_typed_operation(
         product="vault",

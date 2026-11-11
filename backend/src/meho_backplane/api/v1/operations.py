@@ -53,6 +53,7 @@ from meho_backplane.api.v1._freetext_filter import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operation_picks.recorder import (
     recorded_background_call,
     recorded_call,
@@ -378,6 +379,11 @@ async def post_call(
     Caller gone (#3696): on the synchronous path a client that disconnects
     does not stop the operation. It runs to the end, and its audit row
     carries ``payload.caller_gone_at``. Use ``async: true`` for long work.
+
+    Revealed values (#6273): when the answer carries values a person asked
+    to see (``reveal_secret: true``), it says ``Cache-Control: no-store``
+    and ``Pragma: no-cache`` (:mod:`meho_backplane.no_store`). Other
+    answers keep their usual headers.
     """
     # Drop the transport-only ``async_`` control before it reaches the
     # dispatch arguments (``call_operation`` reads connector_id / op_id /
@@ -395,13 +401,19 @@ async def post_call(
         )
         response.status_code = http_status.HTTP_202_ACCEPTED
         return answer
-    async with watch_caller(request.receive):
-        return await recorded_call(
-            operator,
-            arguments,
-            transport="rest",
-            run=lambda: call_operation(operator, arguments),
-        )
+    # #6273: a person's ``reveal_secret: true`` answer carries the values,
+    # so no browser or proxy may keep it.
+    with answer_scope() as mark:
+        async with watch_caller(request.receive):
+            answer = await recorded_call(
+                operator,
+                arguments,
+                transport="rest",
+                run=lambda: call_operation(operator, arguments),
+            )
+    if mark.holds_secret:
+        set_no_store(response)
+    return answer
 
 
 class ResultQueryBody(BaseModel):

@@ -1667,7 +1667,13 @@ for the person who asked, not a run. The code is in
   each of these answers says `Cache-Control: no-store` and `Pragma:
   no-cache` (`no_store.py`). A refused fetch, the stored run result
   (`GET /api/v1/approvals/{id}/result`) and the request view carry no
-  value and keep their usual headers. Tests:
+  value and keep their usual headers. A person's `reveal_secret: true` on
+  a plain read runs at once, with no approval; its answer on `POST
+  /api/v1/operations/call` and on MCP `call_operation` says no-store as
+  well. The dispatcher marks it when it puts the values in
+  (`_protect_secret_values` calls `no_store.mark_answer_holds_secret`),
+  and both routes open `no_store.answer_scope` around the call. The same
+  call without `reveal_secret` keeps its usual headers. Tests:
   `tests/test_approval_reveal_no_store.py`, `tests/test_ui_vault.py`,
   `tests/test_mcp_reveal_fetch.py`.
 - **Once, and only for a short time.** The fetch must win the one-resumer

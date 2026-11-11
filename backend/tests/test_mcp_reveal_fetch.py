@@ -12,7 +12,10 @@ approved ``reveal_secret`` request once for the person who asked, behind the
 * with it on, an MCP client fetches the value once; the HTTP answer says
   ``Cache-Control: no-store``; a second fetch is refused with no value;
 * a wrong operation, extra inputs, another person and an agent are refused
-  and do not use up the one-time permission.
+  and do not use up the one-time permission;
+* a person's ``reveal_secret: true`` on a plain read runs at once, with the
+  switch on or off, and its HTTP answer says no-store; the same call
+  without ``reveal_secret`` does not.
 """
 
 from __future__ import annotations
@@ -34,9 +37,11 @@ from meho_backplane.operations.approved_reveal import fetch_approved_reveal
 from meho_backplane.settings import get_settings
 from tests._reveal_fetch_helpers import (
     CONNECTOR_ID,
+    PLAIN_OP,
     READ_OP,
     SECRET_VALUE,
     approved_reveal,
+    register_plain_read,
     register_vault_read,
 )
 from tests.mcp_test_fixtures import (
@@ -85,6 +90,7 @@ async def vault_read(client: TestClient) -> AsyncIterator[None]:
     clear_registry()
     reset_dispatcher_caches()
     await register_vault_read()
+    await register_plain_read()
     yield
     clear_registry()
     reset_dispatcher_caches()
@@ -279,3 +285,36 @@ async def test_another_person_or_an_agent_is_refused(
 
     assert _refusal(response)["extras"]["error_code"] == error_code
     await _value_still_there(request_id)
+
+
+@pytest.mark.usefixtures("vault_read")
+@pytest.mark.parametrize("switch_on", [False, True], ids=["switch-off", "switch-on"])
+@pytest.mark.parametrize("reveal", [True, False], ids=["reveal", "no-reveal"])
+async def test_an_immediate_reveal_says_no_store(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, reveal: bool, switch_on: bool
+) -> None:
+    _switch(monkeypatch, on=switch_on)
+    params: dict[str, Any] = {"reveal_secret": True} if reveal else {}
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "call_operation",
+                "arguments": {"connector_id": CONNECTOR_ID, "op_id": PLAIN_OP, "params": params},
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["isError"] is False, result
+    assert (SECRET_VALUE in response.text) is reveal
+    if reveal:
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["pragma"] == "no-cache"
+    else:
+        assert response.headers.get("cache-control") != "no-store"
+        assert "pragma" not in response.headers

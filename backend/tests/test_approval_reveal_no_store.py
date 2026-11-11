@@ -4,9 +4,11 @@
 """An answer that carries a revealed secret value says ``Cache-Control: no-store`` (#6273).
 
 ``POST /api/v1/approvals/{id}/reveal`` runs an approved reveal once and
-answers with the value. That answer must not be kept by a browser or a
-proxy. The answers around it that carry no value (a refused fetch, the
-stored run result, the request view) keep their usual headers.
+answers with the value. ``POST /api/v1/operations/call`` with
+``reveal_secret: true`` on a plain read answers with the value at once.
+Those answers must not be kept by a browser or a proxy. The answers that
+carry no value (a refused fetch, the stored run result, the same call
+without ``reveal_secret``) keep their usual headers.
 """
 
 from __future__ import annotations
@@ -24,7 +26,14 @@ from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.no_store import NO_STORE_HEADERS, answer_scope, mark_answer_holds_secret
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
-from tests._reveal_fetch_helpers import SECRET_VALUE, approved_reveal, register_vault_read
+from tests._reveal_fetch_helpers import (
+    CONNECTOR_ID,
+    PLAIN_OP,
+    SECRET_VALUE,
+    approved_reveal,
+    register_plain_read,
+    register_vault_read,
+)
 from tests.mcp_test_fixtures import OPERATOR_TENANT_ID
 
 _REQUESTER = Operator(
@@ -69,6 +78,7 @@ async def vault_read(client: TestClient) -> AsyncIterator[None]:
     clear_registry()
     reset_dispatcher_caches()
     await register_vault_read()
+    await register_plain_read()
     yield
     clear_registry()
     reset_dispatcher_caches()
@@ -108,6 +118,25 @@ async def test_rest_reveal_refused_before_approval_keeps_usual_headers(
     missing = client.post("/api/v1/approvals/00000000-0000-0000-0000-000000006273/reveal")
     assert missing.status_code == 404, missing.text
     assert not _says_no_store(missing)
+
+
+@pytest.mark.usefixtures("vault_read")
+@pytest.mark.parametrize("reveal", [True, False], ids=["reveal", "no-reveal"])
+async def test_rest_call_says_no_store_only_when_it_reveals(
+    client: TestClient, reveal: bool
+) -> None:
+    """A person's ``reveal_secret: true`` on a plain read runs at once and says no-store."""
+    params: dict[str, Any] = {"reveal_secret": True} if reveal else {}
+    answer = client.post(
+        "/api/v1/operations/call",
+        json={"connector_id": CONNECTOR_ID, "op_id": PLAIN_OP, "params": params},
+    )
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["status"] == "ok", answer.text
+    assert (SECRET_VALUE in answer.text) is reveal
+    assert _says_no_store(answer) is reveal
+    if not reveal:
+        assert "pragma" not in answer.headers
 
 
 def test_answer_scope_marks_only_inside_and_starts_unset() -> None:

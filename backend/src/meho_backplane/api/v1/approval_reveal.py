@@ -14,8 +14,9 @@ HTTP status codes:
 * 200 -- the operation ran. It may be a read, or an operation that changes
   something (for example it creates a token). The body is the run result;
   ``status`` says how it ended (``ok`` with the value, or an error without
-  one). The answer says ``Cache-Control: no-store`` and ``Pragma:
-  no-cache``, so no browser or proxy keeps the value
+  one). When the operation ran, the answer says ``Cache-Control:
+  no-store`` and ``Pragma: no-cache`` (also when it ended with an error and
+  holds no value), so no browser or proxy keeps the value
   (:mod:`meho_backplane.no_store`).
 * 403 -- the caller did not send the request.
 * 404 -- no such request in the caller's tenant.

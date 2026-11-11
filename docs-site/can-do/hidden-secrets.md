@@ -35,7 +35,8 @@ More rules:
   value. This works once, and only for 15 minutes after the approval. The
   person who approved does not see the value, and MEHO does not store it.
   No browser or proxy keeps the answer with the value: it says
-  `Cache-Control: no-store`.
+  `Cache-Control: no-store`. The same is true when a person sees the
+  values at once, on a read that needs no approval.
 - How the person who asked gets the value:
     - **Command line:** `meho secret read --approval <id> --field <name>`.
     - **Console:** "Show value" in the Vault view.

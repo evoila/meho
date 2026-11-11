@@ -4,20 +4,21 @@
 """Answers that carry a revealed secret value are never stored by a cache.
 
 A person who asked to see a secret value (``reveal_secret: true``) gets it
-once, in one answer, after a second person approved
-(:mod:`meho_backplane.operations.approved_reveal`). That answer must not be
-kept by a browser or a proxy. So it says ``Cache-Control: no-store`` (and
-``Pragma: no-cache`` for old HTTP/1.0 caches). Other answers keep their
-headers as they are.
+in one answer: at once for a plain read, or once after a second person
+approved (:mod:`meho_backplane.operations.approved_reveal`). That answer
+must not be kept by a browser or a proxy. So it says ``Cache-Control:
+no-store`` (and ``Pragma: no-cache`` for old HTTP/1.0 caches). Other answers
+keep their headers as they are.
 
 Two ways to mark an answer:
 
 * A route that builds its own response calls :func:`set_no_store` on it
   (``POST /api/v1/approvals/{id}/reveal``, the console's "Show value").
-* An MCP tool cannot reach the HTTP response. It calls
-  :func:`mark_answer_holds_secret`; the MCP route opens
-  :func:`answer_scope` around the tool call and sets the headers when the
-  tool marked its answer.
+* Code that cannot reach the HTTP response calls
+  :func:`mark_answer_holds_secret`. The dispatcher does this when it puts
+  the revealed values into an answer. ``POST /api/v1/operations/call`` and
+  the MCP route open :func:`answer_scope` around the call and set the
+  headers when the answer was marked.
 """
 
 from __future__ import annotations

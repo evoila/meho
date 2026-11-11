@@ -46,8 +46,8 @@ func newAppProjectListCmd() *cobra.Command {
 			"spec.destinations for the full allow-lists).\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho argocd appproject list --target rdc-argocd\n" +
-			"  meho argocd appproject list --target rdc-argocd --json | jq '.result.items[].spec.sourceRepos'",
+		Example: "  meho argocd appproject list --target argocd-lab\n" +
+			"  meho argocd appproject list --target argocd-lab --json | jq '.result.items[].spec.sourceRepos'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

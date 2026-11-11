@@ -126,7 +126,7 @@
           "version"
         ],
         "summary": "Version",
-        "description": "Return the build-identity payload and the installed connector packages.\n\nEach build field falls back to ``\"unknown\"`` when its env var is unset\nor empty, which keeps local development frictionless without ever\npretending an unknown build is a known one. ``connector_packages`` is\nempty for the plain public image.",
+        "description": "Return the build identity, the connector packages and the agent switches.\n\nEach build field falls back to ``\"unknown\"`` when its env var is unset\nor empty, which keeps local development frictionless without ever\npretending an unknown build is a known one. ``connector_packages`` is\nempty for the plain public image. ``agent_switches`` lists each\nagent-facing setting with its value.",
         "operationId": "version_version_get",
         "responses": {
           "200": {
@@ -7837,7 +7837,7 @@
           "audit"
         ],
         "summary": "Trace",
-        "description": "Fetch the flight-recorder trace for one dispatch, scoped to the tenant.\n\nThe **operator read surface** of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``): the ordered, already\nredacted+capped spans a governed dispatch produced. Read-only \u2014 it renders\nwhat the capture/redaction seams (#3213/#3214) stored and never\nre-processes, un-redacts, or writes.\n\nOperator plane keeps **full** access, independent of the agent gate: unlike\nthe agent read (a sibling task) this serves redaction-uncertain traces too,\nsurfacing ``trace.redaction_uncertain`` so an operator sees when a trace was\nwithheld from agents. Paired add-ons consume this same route with their\noperator principal \u2014 no separate add-on surface.\n\nAbsence has two levels. A missing / cross-tenant **audit row** is a 404\n(never 403), matching :func:`show`: the existence check runs through the\ntenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and\nexistence never leaks. An audit row that exists but carries **no trace** is\na 200 with ``trace_present=False`` \u2014 capture is a best-effort opt-in\n(F1/F7), so \"no trace\" is a normal observable state, not an error.\n\nTenant isolation is enforced twice: the existence check is tenant-scoped,\nand :func:`~meho_backplane.flight_recorder.load_trace` additionally filters\nthe trace header on ``tenant_id`` as defence in depth.\n\nOnly an ``operation_execution`` row resolves to the flight recorder\n(#3747); any other class answers ``trace_present=False``.",
+        "description": "Fetch the flight-recorder trace for one dispatch, scoped to the tenant.\n\nThe **operator read surface** of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``): the ordered, already\nredacted+capped spans a governed dispatch produced. Read-only \u2014 it renders\nwhat the capture/redaction seams stored and never\nre-processes, un-redacts, or writes.\n\nA person keeps **full** access, independent of the agent gate: this serves\nredaction-uncertain traces too, surfacing ``trace.redaction_uncertain`` so\nan operator sees when a trace was withheld from agents. Paired add-ons\nconsume this same route with their operator principal \u2014 no separate add-on\nsurface.\n\nAn **agent** login gets the same rules as the agent read\n(:mod:`meho_backplane.flight_recorder.agent_read`): no trace unless the\ntenant lets agents read traces\n(:func:`~meho_backplane.flight_recorder.should_expose_to_agent`), and\nnever a trace marked ``redaction_uncertain``. Both answer\n``trace_present=False``, like a dispatch with no trace.\n\nAbsence has two levels. A missing / cross-tenant **audit row** is a 404\n(never 403), matching :func:`show`: the existence check runs through the\ntenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and the\nanswer is the same as for an id that does not exist. An audit row that\nexists but carries **no trace** is a 200 with ``trace_present=False`` \u2014\ncapture is a best-effort opt-in\n(F1/F7), so \"no trace\" is a normal observable state, not an error.\n\nTenant isolation is enforced twice: the existence check is tenant-scoped,\nand :func:`~meho_backplane.flight_recorder.load_trace` additionally filters\nthe trace header on ``tenant_id`` as defence in depth.\n\nOnly an ``operation_execution`` row resolves to the flight recorder; any\nother class answers ``trace_present=False``.",
         "operationId": "trace_api_v1_audit__audit_id__trace_get",
         "parameters": [
           {
@@ -8501,6 +8501,182 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AgentGrantRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-budgets": {
+      "get": {
+        "tags": [
+          "agent-budgets"
+        ],
+        "summary": "Show Budgets",
+        "description": "Show the caps and the use so far of one principal (all windows, or one).",
+        "operationId": "show_budgets_api_v1_agent_budgets_get",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Principal Sub"
+            }
+          },
+          {
+            "name": "window",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/BudgetWindowKind",
+              "nullable": true,
+              "title": "Window"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentBudgetListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "agent-budgets"
+        ],
+        "summary": "Set Budget",
+        "description": "Set the limits of one window. A limit that is left out stays as it is.",
+        "operationId": "set_budget_api_v1_agent_budgets_put",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentBudgetSet"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentBudgetRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agent-budgets"
+        ],
+        "summary": "Clear Budget",
+        "description": "Remove all limits of one window. What is used so far is kept.",
+        "operationId": "clear_budget_api_v1_agent_budgets_delete",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Principal Sub"
+            }
+          },
+          {
+            "name": "window",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/BudgetWindowKind"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentBudgetRead"
                 }
               }
             }
@@ -25324,6 +25500,146 @@
         "title": "AffectedSensorModel",
         "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.AffectedSensor`.\n\nIdentity of one Sensor row pinning a reclassified op (#2702) \u2014\nenough for the operator to find and re-audit it."
       },
+      "AgentBudgetListResponse": {
+        "properties": {
+          "budgets": {
+            "items": {
+              "$ref": "#/components/schemas/AgentBudgetRead"
+            },
+            "type": "array",
+            "title": "Budgets"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "budgets"
+        ],
+        "title": "AgentBudgetListResponse",
+        "description": "The caps of one principal, one entry for each window."
+      },
+      "AgentBudgetRead": {
+        "properties": {
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "window": {
+            "$ref": "#/components/schemas/BudgetWindowKind"
+          },
+          "window_start": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Window Start"
+          },
+          "window_end": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Window End"
+          },
+          "token_limit": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Token Limit"
+          },
+          "tokens_consumed": {
+            "type": "integer",
+            "title": "Tokens Consumed"
+          },
+          "tokens_remaining": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Tokens Remaining"
+          },
+          "cost_limit": {
+            "type": "number",
+            "nullable": true,
+            "title": "Cost Limit"
+          },
+          "cost_consumed": {
+            "type": "number",
+            "title": "Cost Consumed"
+          },
+          "cost_remaining": {
+            "type": "number",
+            "nullable": true,
+            "title": "Cost Remaining"
+          },
+          "request_limit": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Request Limit"
+          },
+          "requests_consumed": {
+            "type": "integer",
+            "title": "Requests Consumed"
+          },
+          "requests_remaining": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Requests Remaining"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "principal_sub",
+          "window",
+          "window_start",
+          "window_end",
+          "token_limit",
+          "tokens_consumed",
+          "tokens_remaining",
+          "cost_limit",
+          "cost_consumed",
+          "cost_remaining",
+          "request_limit",
+          "requests_consumed",
+          "requests_remaining"
+        ],
+        "title": "AgentBudgetRead",
+        "description": "The caps of one window and what is used so far in it.\n\nA ``null`` limit means no cap on that value. ``*_remaining`` is\n``null`` when the limit is ``null``, and can be negative when a run\nwent over the cap. Costs are in USD."
+      },
+      "AgentBudgetSet": {
+        "properties": {
+          "principal_sub": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Principal Sub",
+            "description": "Login of the agent, e.g. agent:pod-reader"
+          },
+          "window": {
+            "$ref": "#/components/schemas/BudgetWindowKind"
+          },
+          "token_limit": {
+            "type": "integer",
+            "minimum": 0.0,
+            "nullable": true,
+            "title": "Token Limit"
+          },
+          "cost_limit": {
+            "type": "number",
+            "minimum": 0.0,
+            "nullable": true,
+            "title": "Cost Limit",
+            "description": "Cost cap in USD"
+          },
+          "request_limit": {
+            "type": "integer",
+            "minimum": 0.0,
+            "nullable": true,
+            "title": "Request Limit"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "principal_sub",
+          "window"
+        ],
+        "title": "AgentBudgetSet",
+        "description": "Body of ``PUT /api/v1/agent-budgets``."
+      },
       "AgentDefinitionCreate": {
         "properties": {
           "name": {
@@ -29759,6 +30075,16 @@
         ],
         "title": "BudgetStatus",
         "description": "Preamble budget status for the operator's tenant.\n\nSurfaced as a sub-document on every ``GET /api/v1/conventions``\ncall so the CLI's ``meho conventions list`` (T7 #1094) can warn\nwhen the tenant's ``kind='operational'`` set overflows the\npreamble budget and name the slugs that will be dropped from the\nagent session preamble. Without this surface, T3 #315's\n\"lowest-priority slugs that will be dropped\" acceptance\ncriterion is unsatisfiable from a single list call -- the\ndeferred AC the issue body folds back in.\n\nAll fields are populated by a single call to\n:func:`~meho_backplane.conventions.preamble.assemble_preamble_detailed`\nagainst the operator's tenant, so the budget arithmetic is\nend-to-end consistent with T4's preamble assembler (the same\nhelper that produces the MCP ``initialize`` ``instructions``\nfield). A divergence between the list surface's\n``estimated_tokens`` and the preamble actually delivered to\nagent sessions would be a silent contract drift; sharing the\nprimitive eliminates it by construction.\n\nFields:\n\n* ``max_tokens`` -- the budget the preamble assembler enforces.\n  Currently :data:`DEFAULT_MAX_PREAMBLE_TOKENS` (a module-level\n  constant; configurable via the assembler's ``max_tokens``\n  parameter in tests). Exposed on the list response so\n  operators can do the budget math without grepping the source.\n* ``estimated_tokens`` -- :func:`estimate_tokens` over the\n  rendered conventions band (header + guard + delimited kept\n  blocks). Empty tenant: 0. Otherwise at most ``max_tokens``\n  when any entry was kept (the packer drops entries whole until\n  the band fits).\n* ``over_budget`` -- convenience flag derived from\n  ``len(dropped_slugs) > 0``. Cheap derived value but worth\n  surfacing as a boolean so CLI / dashboard consumers branch on\n  one bit rather than a length-of-list check.\n* ``dropped_slugs`` -- slugs that did not fit, in the packer's\n  drop order (lowest-priority-first, ties broken by oldest-\n  first). The CLI prints these on stderr with an\n  \"insufficient_budget\" exit-code-5 warning so the operator\n  knows exactly which conventions never reach an agent\n  session.\n* ``included_slugs`` -- slugs in the band, in pack order. Each\n  operational slug is in exactly one of ``included_slugs`` or\n  ``dropped_slugs``. \"Included\" means MEHO sends it in the MCP\n  ``initialize`` instructions; a client may ignore instructions,\n  so it is not proof that an agent applied the rule.\n* ``oversize_slugs`` -- the dropped slugs that do not fit even as\n  the only entry (rows written before the rendered write check,\n  or by another path). The rest of ``dropped_slugs`` fit alone\n  but lost the room to higher-priority entries."
+      },
+      "BudgetWindowKind": {
+        "type": "string",
+        "enum": [
+          "daily",
+          "weekly",
+          "monthly"
+        ],
+        "title": "BudgetWindowKind",
+        "description": "Closed vocabulary of budget-window granularities.\n\nEach :class:`IdentityBudget` row is keyed in part on a\n:class:`BudgetWindowKind` \u2014 the budget answers \"what's the cap for\nthis principal *per day / per week / per month*\". The runtime\nincrements one row per active window-kind on every successful run\n(one daily bucket, one weekly bucket, one monthly bucket).\n\nThe vocabulary is intentionally closed (three values). A fourth\ngranularity would require both a code change and an Alembic\nmigration (the\n:class:`~meho_backplane.db.models.IdentityBudget.window_kind`\ncolumn carries a DB-level CHECK constraint backed by this enum),\nwhich is the cheapest way to prevent drift between the DB row, the\nconsumption service, and the enforcement gate (G11.5-C3-b, #1080).\n\nMembers:\n\n* :attr:`DAILY` \u2014 buckets start at 00:00 UTC and last 24 hours.\n* :attr:`WEEKLY` \u2014 ISO-week buckets, starting Monday 00:00 UTC.\n* :attr:`MONTHLY` \u2014 calendar-month buckets, starting the 1st at\n  00:00 UTC."
       },
       "CallOperationBody": {
         "properties": {
@@ -34399,6 +34725,19 @@
             },
             "type": "array",
             "title": "Dropped Ops"
+          },
+          "login_setup": {
+            "type": "string",
+            "enum": [
+              "registered",
+              "replaced",
+              "unchanged",
+              "served_by_connector_code",
+              "served_by_builtin_login_setup"
+            ],
+            "nullable": true,
+            "title": "Login Setup",
+            "description": "What happened to the login setup of an ingest with a login type. registered: the scope's calls use it now. replaced: it replaced a different login setup of the same scope (audited with the old and the new login type). unchanged: the same login setup was already in place. served_by_connector_code / served_by_builtin_login_setup: hand-written connector code or a shipped or built-in login setup serves this connector for every tenant, so this login setup is saved but not used. A tenant's login setup applies only to that tenant's calls. Null for an ingest without a login type."
           }
         },
         "type": "object",
@@ -35196,6 +35535,12 @@
           "first_correct_action_sessions": {
             "type": "integer",
             "title": "First Correct Action Sessions"
+          },
+          "search": {
+            "$ref": "#/components/schemas/RetrievalNumbers"
+          },
+          "recall": {
+            "$ref": "#/components/schemas/RetrievalNumbers"
           }
         },
         "type": "object",
@@ -35210,10 +35555,12 @@
           "precision_judged",
           "precision_right",
           "first_correct_action_median_seconds",
-          "first_correct_action_sessions"
+          "first_correct_action_sessions",
+          "search",
+          "recall"
         ],
         "title": "LearningMetrics",
-        "description": "The four numbers that show whether stored lessons help.\n\nFor one tenant and window. Each ratio comes with its count and its\nbase, and is ``null`` when the base is 0. The median time is in\nseconds."
+        "description": "The four numbers that show whether stored lessons help.\n\nFor one tenant and window. Each ratio comes with its count and its\nbase, and is ``null`` when the base is 0. The median time is in\nseconds. The flat hit rate and precision count every retrieval;\n``search`` counts search hits only, and ``recall`` only the entries\nMEHO showed before an operation."
       },
       "LivenessResponse": {
         "properties": {
@@ -37971,6 +38318,47 @@
         ],
         "title": "RetrievalHit",
         "description": "One document in a ranked retrieval response.\n\nFrozen pydantic v2 model: the retrieve helper builds these once\nand the API surface (T5) returns them unchanged. The per-signal\nscores + ranks are carried for observability -- callers tuning\nembedding model choice want to see whether the top hit had\ncontributions from both signals or just one.\n\n``fused_score`` is the RRF score the documents are sorted by;\n``bm25_score`` and ``cosine_score`` are the raw per-signal\nscores (None if the document didn't appear in that signal's\ntop-:data:`CANDIDATE_LIMIT`). Likewise ``bm25_rank`` /\n``cosine_rank`` are the 1-based ranks (1 = best) the document\nheld in each signal's list, None when absent.\n\n``created_at`` / ``updated_at`` mirror the persisted\n:class:`~meho_backplane.db.models.Document` columns so downstream\nconsumers (memory ``search_memory``, kb search projections) can\nsurface real write-time / mtime values instead of substituting a\nplaceholder. The retriever already issues a full ``SELECT * FROM\ndocuments WHERE id IN (...)`` for each top-fused row, so carrying\nthe columns through is a free pass-through, not an extra query."
+      },
+      "RetrievalNumbers": {
+        "properties": {
+          "hit_rate_pct": {
+            "type": "number",
+            "nullable": true,
+            "title": "Hit Rate Pct"
+          },
+          "hit_rate_retrievals": {
+            "type": "integer",
+            "title": "Hit Rate Retrievals"
+          },
+          "hit_rate_used": {
+            "type": "integer",
+            "title": "Hit Rate Used"
+          },
+          "precision_pct": {
+            "type": "number",
+            "nullable": true,
+            "title": "Precision Pct"
+          },
+          "precision_judged": {
+            "type": "integer",
+            "title": "Precision Judged"
+          },
+          "precision_right": {
+            "type": "integer",
+            "title": "Precision Right"
+          }
+        },
+        "type": "object",
+        "required": [
+          "hit_rate_pct",
+          "hit_rate_retrievals",
+          "hit_rate_used",
+          "precision_pct",
+          "precision_judged",
+          "precision_right"
+        ],
+        "title": "RetrievalNumbers",
+        "description": "The hit rate and the precision over the retrievals of one channel.\n\nEach ratio comes with its count and its base, and is ``null`` when the\nbase is 0."
       },
       "RetrieveRequest": {
         "properties": {
@@ -42808,6 +43196,12 @@
             "type": "boolean",
             "title": "Can Switch Tenant",
             "default": false
+          },
+          "client": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Client"
           }
         },
         "type": "object",
@@ -42966,6 +43360,14 @@
             "type": "array",
             "title": "Connector Packages",
             "default": []
+          },
+          "agent_switches": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object",
+            "title": "Agent Switches",
+            "default": {}
           }
         },
         "type": "object",
@@ -43304,6 +43706,10 @@
   "tags": [
     {
       "name": "addon-pairing",
+      "x-maturity": "experimental"
+    },
+    {
+      "name": "agent-budgets",
       "x-maturity": "experimental"
     },
     {

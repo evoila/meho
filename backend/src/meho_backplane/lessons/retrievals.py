@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Record which entries a search gave to a session, and find the ones it used.
+"""Record which entries a session was given, and find the ones it used.
 
 Recording
 ---------
@@ -12,10 +12,14 @@ entry becomes one :class:`~meho_backplane.db.models.LessonRetrieval` row,
 with the entry's header ``status`` and whether its ``expires_at`` had
 passed at that moment.
 
+Each row also names its channel: :data:`SEARCH_CHANNEL` for a search, and
+:data:`RECALL_CHANNEL` for an entry that MEHO showed in the
+``team_knowledge`` block before an operation (:mod:`meho_backplane.recall`).
+
 * Only a call with a session id is recorded. Without a session nothing
   can show later that the entry was used.
-* Recording never fails the search. An error is logged as
-  ``lesson_retrieval_record_failed`` and the search answers as before.
+* Recording never fails the search or the operation. An error is logged
+  as ``lesson_retrieval_record_failed`` and the answer goes out as before.
 
 Use
 ---
@@ -52,6 +56,8 @@ from meho_backplane.operations._audit import resolve_agent_session_id
 
 __all__ = [
     "DISPATCH_METHOD",
+    "RECALL_CHANNEL",
+    "SEARCH_CHANNEL",
     "SUCCESS_STATUS",
     "Retrieval",
     "Use",
@@ -68,6 +74,10 @@ _log = structlog.get_logger(__name__)
 DISPATCH_METHOD: Final[str] = "DISPATCH"
 #: Status of a dispatch audit row whose operation succeeded.
 SUCCESS_STATUS: Final[int] = 200
+#: ``channel`` of a row a search wrote.
+SEARCH_CHANNEL: Final[str] = "search"
+#: ``channel`` of a row for an entry shown before an operation.
+RECALL_CHANNEL: Final[str] = "recall"
 
 
 @dataclass(frozen=True)
@@ -83,6 +93,7 @@ class Retrieval:
     retrieved_at: datetime
     status: str | None
     expired: bool
+    channel: str
 
 
 @dataclass(frozen=True)
@@ -99,7 +110,10 @@ def aware(moment: datetime) -> datetime:
 
 
 async def record_kb_retrievals(
-    tenant_id: uuid.UUID, entries: Sequence[tuple[str, uuid.UUID | None]]
+    tenant_id: uuid.UUID,
+    entries: Sequence[tuple[str, uuid.UUID | None]],
+    *,
+    channel: str = SEARCH_CHANNEL,
 ) -> None:
     """Record the knowledge entries that a search of *tenant_id* returned.
 
@@ -133,10 +147,15 @@ async def record_kb_retrievals(
                 chosen[row.id] = row
         return list(chosen.values())
 
-    await _record(tenant_id, KB_SOURCE, query, choose)
+    await _record(tenant_id, KB_SOURCE, query, choose, channel)
 
 
-async def record_memory_retrievals(tenant_id: uuid.UUID, entry_ids: Sequence[uuid.UUID]) -> None:
+async def record_memory_retrievals(
+    tenant_id: uuid.UUID,
+    entry_ids: Sequence[uuid.UUID],
+    *,
+    channel: str = SEARCH_CHANNEL,
+) -> None:
     """Record the memory entries *entry_ids* that a search of *tenant_id* returned."""
     if not entry_ids:
         return
@@ -147,7 +166,7 @@ async def record_memory_retrievals(tenant_id: uuid.UUID, entry_ids: Sequence[uui
         Document.id.in_(set(entry_ids)),
         Document.tenant_id == tenant_id,
     )
-    await _record(tenant_id, MEMORY_SOURCE, query, list)
+    await _record(tenant_id, MEMORY_SOURCE, query, list, channel)
 
 
 async def _record(
@@ -155,6 +174,7 @@ async def _record(
     store: str,
     query: Any,
     choose: Callable[[Sequence[Any]], list[Any]],
+    channel: str,
 ) -> None:
     """Insert one row per entry that *choose* picks from *query*; log and swallow any error."""
     session_id = resolve_agent_session_id()
@@ -165,13 +185,14 @@ async def _record(
         async with get_sessionmaker()() as session:
             rows = (await session.execute(query)).all()
             for row in choose(rows):
-                session.add(_retrieval_row(tenant_id, store, session_id, row, now))
+                session.add(_retrieval_row(tenant_id, store, session_id, row, now, channel))
             await session.commit()
     except Exception as exc:
         _log.warning(
             "lesson_retrieval_record_failed",
             tenant_id=str(tenant_id),
             store=store,
+            channel=channel,
             error_type=type(exc).__name__,
         )
 
@@ -182,6 +203,7 @@ def _retrieval_row(
     session_id: uuid.UUID,
     row: Any,
     now: datetime,
+    channel: str,
 ) -> LessonRetrieval:
     metadata: Mapping[str, Any] = row.doc_metadata or {}
     status = metadata.get("status")
@@ -195,6 +217,7 @@ def _retrieval_row(
         retrieved_at=now,
         status=status if isinstance(status, str) else None,
         expired=expires_at is not None and expires_at < now,
+        channel=channel,
     )
 
 
@@ -223,6 +246,7 @@ async def fetch_retrievals(
             retrieved_at=aware(row.retrieved_at),
             status=row.status,
             expired=row.expired,
+            channel=row.channel,
         )
         for row in (await session.scalars(stmt)).all()
     ]

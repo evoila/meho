@@ -49,6 +49,8 @@ from meho_backplane.mcp.registry import (
     register_mcp_tool,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
+from meho_backplane.mcp.short_texts import with_short_text
+from meho_backplane.mcp.tools._short_tool_texts import RESULT_QUERY_SHORT
 from meho_backplane.operations.result_query import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
@@ -199,6 +201,7 @@ register_mcp_tool(
         name="result_query",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
+        for_settings=with_short_text(RESULT_QUERY_SHORT),
         description=(
             "Read the full data behind a result handle. When "
             "`call_operation` (or `list_targets`) returns a large list, you "

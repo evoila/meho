@@ -519,6 +519,7 @@ migrating.
 | `about` returns `status=error` with HTTP 401 / 403 | Kubeconfig's service-account cred is expired, deleted, or lacks RBAC. | Rotate the SA token in the cluster, re-export the kubeconfig, and re-stage in Vault. The failed call drops the cached client; the next call reads Vault again. |
 | `pod info <name>` returns `connector_error` with multiple candidates | Ambiguous prefix. | Pass the full pod name from a prior `pod list`. |
 | `logs <pod>` returns `connector_error` with `MultiContainerAmbiguityError` | Pod has multiple containers and `--container` was omitted. | Re-issue with `--container <name>`; the error message lists the candidate container names. |
+| `logs <pod>` returns `connector_error` with `ContainerNotFoundError` | The `--container` name is not a container of the pod. | Re-issue with one of the names the error message lists. |
 | `logs <pod>` returns `truncated=true` | Result hit the 1 MiB serialised cap. | Reduce `--tail` or scope `--since`; the cap is line-boundary from the front (most-recent kept). |
 | `configmap info` returns sensitive data on the broadcast feed | v0.2 audits at `op_class=read` with full detail. | Avoid using configmaps for secrets (use Vault); G6.3 will optionally upgrade sensitively-named configmaps to `sensitive-read` (aggregate-only on the feed). |
 | Probe ok but every op times out | Kubeconfig's `cluster.server` URL works for `/readyz` but not for the operator-facing endpoints (e.g. through a partial network ACL). | Reach the API server directly from the backplane host and re-test; not a MEHO bug. |

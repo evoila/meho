@@ -247,10 +247,11 @@ contributors run `make lint && make test` locally.
 
 Release builds are driven by [GoReleaser](https://goreleaser.com/)
 configured at [`.goreleaser.yaml`](./.goreleaser.yaml). On every
-`v*` tag push, `.github/workflows/cli-release.yml` builds four
+`v*` tag push, `.github/workflows/cli-release.yml` builds six
 static binaries — `linux/amd64`, `linux/arm64`, `darwin/amd64`,
-`darwin/arm64` — packages each as a `meho_<version>_<os>_<arch>.tar.gz`
-tarball containing the binary plus the top-level
+`darwin/arm64`, `windows/amd64`, `windows/arm64` — packages each as a
+`meho_<version>_<os>_<arch>.tar.gz` tarball (a `.zip` file on Windows)
+containing the binary plus the top-level
 [`LICENSE`](../LICENSE) and this README, computes a combined
 `SHA256SUMS` file, and publishes them as assets on a new draft
 GitHub Release at
@@ -258,7 +259,7 @@ GitHub Release at
 
 The release is created in **draft** mode — a maintainer flips it
 to public via the GitHub Releases UI after verifying the four
-tarballs + matching `.cosign.bundle` files are present and
+archives + matching `.cosign.bundle` files are present and
 `meho version` reports the expected tag. See the [Verify signatures](#verify-signatures)
 section below for the operator-side check.
 
@@ -280,6 +281,8 @@ dist/
 ├── meho_0.0.1-snapshot_darwin_arm64.tar.gz
 ├── meho_0.0.1-snapshot_linux_amd64.tar.gz
 ├── meho_0.0.1-snapshot_linux_arm64.tar.gz
+├── meho_0.0.1-snapshot_windows_amd64.zip
+├── meho_0.0.1-snapshot_windows_arm64.zip
 └── SHA256SUMS
 ```
 
@@ -301,6 +304,14 @@ curl -LO https://github.com/evoila/meho/releases/download/${TAG}/SHA256SUMS
 sha256sum -c SHA256SUMS                   # verify integrity
 tar xzf ${TARBALL} && ./meho version       # meho v0.1.0 (commit ..., built ...)
 ```
+
+On Windows, download the `.zip` file in PowerShell and unzip it with
+`Expand-Archive`. The full steps are in the
+[install guide](../docs-site/clients/cli.md#windows). After a release,
+the `windows-check` job of `cli-release.yml` downloads each Windows zip,
+checks its hash and runs `meho.exe version`. When the repository
+variable `MEHO_WINDOWS_ARM_CHECK` is `skip`, it checks only amd64, and
+the job summary asks for a check of the arm64 zip by hand.
 
 ### Verify signatures
 

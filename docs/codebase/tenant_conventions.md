@@ -553,6 +553,11 @@ class `read`, `in_sync` and the three counts; never a convention text.
 
 ### The drift check login
 
+Setup steps for an operator (the Keycloak client, the client secret and
+the CI call):
+[Lessons in your own wiki](../../docs-site/guides/memory-and-knowledge.md#step-2-create-the-three-machine-logins)
+in the operator guide. This section keeps the code detail.
+
 The route admits a `tenant_admin` or a `platform_admin` (for their own
 tenant), or a login whose token carries the claim
 `conventions_drift_only: true` (`Operator.conventions_drift_only`,

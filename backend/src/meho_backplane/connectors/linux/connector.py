@@ -83,6 +83,8 @@ _FP_HOSTNAME = "===MEHO_HOSTNAME==="
 _FP_KERNEL = "===MEHO_KERNEL==="
 _FP_INIT = "===MEHO_INIT==="
 _FP_OSRELEASE = "===MEHO_OSRELEASE==="
+_FP_UPTIME = "===MEHO_UPTIME==="
+_FP_LOADAVG = "===MEHO_LOADAVG==="
 
 #: The single fixed fingerprint round-trip. No operator value is
 #: interpolated. Init detection prefers the ``/run/systemd/system`` marker
@@ -95,7 +97,9 @@ _FINGERPRINT_CMD: str = (
     "if [ -d /run/systemd/system ]; then echo systemd; "
     "elif command -v systemctl >/dev/null 2>&1; then echo systemd; "
     "else (ps -p 1 -o comm= 2>/dev/null || echo unknown); fi; "
-    f"echo {_FP_OSRELEASE!r}; cat /etc/os-release 2>/dev/null"
+    f"echo {_FP_OSRELEASE!r}; cat /etc/os-release 2>/dev/null; "
+    f"echo {_FP_UPTIME!r}; cat /proc/uptime 2>/dev/null; "
+    f"echo {_FP_LOADAVG!r}; cat /proc/loadavg 2>/dev/null"
 )
 
 #: The probe's os-release read -- a distinct round-trip so a non-zero exit
@@ -158,10 +162,30 @@ def _derive_vendor(os_release: dict[str, str]) -> str:
     return distro_id or "linux"
 
 
+def _parse_float(token: str) -> float | None:
+    """Return *token* as a float, or ``None`` when it is not a number."""
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _parse_load_averages(line: str | None) -> tuple[float | None, float | None, float | None]:
+    """Return the 1, 5 and 15 minute load from a ``/proc/loadavg`` line.
+
+    Any value that is missing or not a number is ``None``.
+    """
+    tokens = line.split() if line else []
+    values = [_parse_float(tok) for tok in tokens[:3]]
+    values += [None] * (3 - len(values))
+    return values[0], values[1], values[2]
+
+
 def parse_fingerprint_output(stdout: str) -> dict[str, Any]:
     """Parse the fixed fingerprint round-trip into its component fields.
 
-    Returns ``{hostname, kernel, init_system, os_release}`` where
+    Returns ``{hostname, kernel, init_system, os_release, uptime_seconds,
+    load_averages}`` where
     ``os_release`` is the parsed ``/etc/os-release`` dict. Each section is
     delimited by a literal marker line; a missing section resolves to an
     empty value rather than raising.
@@ -173,6 +197,8 @@ def parse_fingerprint_output(stdout: str) -> dict[str, Any]:
         _FP_KERNEL: "kernel",
         _FP_INIT: "init",
         _FP_OSRELEASE: "osrelease",
+        _FP_UPTIME: "uptime",
+        _FP_LOADAVG: "loadavg",
     }
     for line in stdout.splitlines():
         if line in marker_of:
@@ -187,7 +213,11 @@ def parse_fingerprint_output(stdout: str) -> dict[str, Any]:
         return lines[0] if lines else None
 
     os_release = parse_os_release("\n".join(sections.get("osrelease", [])))
+    uptime_line = _first("uptime")
+    load_line = _first("loadavg")
     return {
+        "uptime_seconds": _parse_float(uptime_line.split()[0]) if uptime_line else None,
+        "load_averages": _parse_load_averages(load_line),
         "hostname": _first("hostname"),
         "kernel": _first("kernel"),
         "init_system": _first("init"),
@@ -218,6 +248,9 @@ class LinuxSshConnector(SshConnector):
     product = "linux"
     version = "1.x"
     impl_id = "linux-ssh"
+    version_range_reason = (
+        "Any Linux host that runs systemd fits. A rule for the distribution applies, not a range."
+    )
 
     async def fingerprint(
         self,
@@ -280,6 +313,10 @@ class LinuxSshConnector(SshConnector):
                 "kernel": parsed["kernel"],
                 "init_system": parsed["init_system"],
                 "distro_id": os_release.get("ID") or None,
+                "uptime_seconds": parsed["uptime_seconds"],
+                "load_1m": parsed["load_averages"][0],
+                "load_5m": parsed["load_averages"][1],
+                "load_15m": parsed["load_averages"][2],
             },
         )
 
@@ -380,6 +417,10 @@ class LinuxSshConnector(SshConnector):
             "os_pretty": result.extras.get("os_pretty"),
             "hostname": result.extras.get("hostname"),
             "init_system": result.extras.get("init_system"),
+            "uptime_seconds": result.extras.get("uptime_seconds"),
+            "load_1m": result.extras.get("load_1m"),
+            "load_5m": result.extras.get("load_5m"),
+            "load_15m": result.extras.get("load_15m"),
         }
 
     async def file_read(
@@ -458,6 +499,39 @@ class LinuxSshConnector(SshConnector):
         from meho_backplane.connectors.linux.ops_storage import linux_mount_list
 
         return await linux_mount_list(self, target, params, operator)
+
+    async def journal_tail(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.journal.tail`` (group ``log``)."""
+        from meho_backplane.connectors.linux.ops_inspect import linux_journal_tail
+
+        return await linux_journal_tail(self, target, params, operator)
+
+    async def fs_usage(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.fs.usage`` (group ``storage``)."""
+        from meho_backplane.connectors.linux.ops_inspect import linux_fs_usage
+
+        return await linux_fs_usage(self, target, params, operator)
+
+    async def dir_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.dir.list`` (group ``file``)."""
+        from meho_backplane.connectors.linux.ops_inspect import linux_dir_list
+
+        return await linux_dir_list(self, target, params, operator)
 
     async def file_write(
         self,

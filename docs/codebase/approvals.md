@@ -271,6 +271,12 @@ names (`proposed_effect.blast_radius.object`) with the live one
 - The card has no id or key: the live object must have the same fields,
   without counts and yes/no flags. pfSense alias, gateway and static-route
   deletes, DNS record deletes, a Vault secret path, a Kubernetes Secret.
+- The card lists the record values the call removes (children of kind
+  `record_value`: the BIND9 and Windows DNS delete and remove cards): the
+  live card must list the same values, in any order. `card_object` adds
+  them, sorted, to the object as `record_values`. So a delete approved for
+  value X is refused when the live value is Y. A BIND9 delete with a pinned
+  `rdata` removes only that value, so its other values do not count.
 - The card says the object is absent (`present: false`, an empty id, or a
   `match_count` of zero; the approver saw "nothing to delete"): the live
   card must say so too. An object that appeared under that name since the
@@ -957,6 +963,23 @@ Every approval records who approved (`reviewed_by`), whether it was a
 self-approval (`self_approved`), which rule allowed it (`approval_rule`)
 and how the person proved they were present (`approval_auth`: channel
 `web` or `rest`, method `fresh_sign_in` or `one_time_code`).
+
+With `AUDIT_CLIENT_IDENTITY` on (off by default), approvals also name the
+login client (see the `client` block in [audit_query.md](audit_query.md)):
+
+- The request keeps the requester's `client` block in its stored effect
+  (`proposed_effect["client"]`). No new column. A request made again for
+  an earlier requester (a step of a multi-step operation that waits again)
+  keeps that requester's block: `requester_of` reads it from the approved
+  request, and `ResumeRequester.client` carries it. The reviewer who runs
+  the step is never named there.
+- The `approval.decision` row of an approve adds `approver_azp` and
+  `approver_channel` (`web` or `token`) next to `approval_auth`.
+- For an approve over REST (`/approve` and `/decide`, so also `meho
+  approvals approve`), the row also keeps the `User-Agent` header, cut to
+  256 characters: `"approver_user_agent": {"value": "...",
+  "self_declared": true}`. The tool sends this text about itself, and MEHO
+  cannot check it.
 
 ## Changes of rights: the login is never its own approver
 

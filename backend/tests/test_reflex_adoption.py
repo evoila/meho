@@ -276,6 +276,35 @@ async def test_read_before_act_scores_first_call_vs_broadcast_recent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_before_act_counts_real_and_old_broadcast_tool_names() -> None:
+    """The real tool path and the old path both count as a broadcast read.
+
+    The paths are written out, not built from the module constants, so the
+    test fails if the constants drift from the registered MCP tool name.
+
+    * ``new`` ``meho_broadcast_recent`` before the first call → read-first.
+    * ``old`` ``broadcast_recent`` (old rows) before the first call → read-first.
+    * ``none`` a call with no broadcast read → not read-first.
+    """
+    await _seed_tenant(_TENANT_A)
+    new, old, none = (uuid.uuid4() for _ in range(3))
+    for path, at, session in (
+        ("/mcp/tools/call/meho_broadcast_recent", 10, new),
+        ("/mcp/tools/call/call_operation", 20, new),
+        ("/mcp/tools/call/broadcast_recent", 30, old),
+        ("/mcp/tools/call/call_operation", 40, old),
+        ("/mcp/tools/call/call_operation", 50, none),
+    ):
+        await _seed_audit(
+            tenant_id=_TENANT_A, path=path, occurred_at=_at(at), agent_session_id=session
+        )
+
+    agent = _surface(await _report(_TENANT_A), "agent")
+    assert agent.read_before_act_sessions == 3
+    assert agent.read_before_act_read_first == 2
+
+
+@pytest.mark.asyncio
 async def test_meta_tool_metrics_aggregate_from_request_usage_events() -> None:
     """#3734: ``source="request_usage"`` reads the meta-tool calls from usage events.
 

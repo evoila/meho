@@ -268,6 +268,50 @@ they store the row, so a row returned by the query API and the stored row
 agree on the `(op_id, op_class, result_status)` trio. Since #3758 no
 automatic Broadcast event is published for a row; the row is the record.
 
+### The `client` block: which login client made the call
+
+Switch: `AUDIT_CLIENT_IDENTITY` (`Settings.audit_client_identity`), off by
+default. With it off, no row gets the block and every row stays as before.
+
+With it on, every audit row gets one payload block `client`:
+
+```json
+{"azp": "meho-cli", "channel": "token", "principal_kind": "user", "sid_hash": "3f1c0a9b2d4e5f60"}
+```
+
+| Key | What it is |
+|---|---|
+| `azp` | The login client the token was made for (the `azp` claim). `null` when the token has none. |
+| `channel` | `web` for a call from a person's web console session, `token` for every call that came with a token (command line, MCP, REST, a service login). |
+| `principal_kind` | `user`, `agent`, `service` or `runner`. |
+| `sid_hash` | The first 16 hex characters of the SHA-256 of the `sid` claim (the sign-in session). It groups the rows of one sign-in. MEHO never stores the raw `sid`. `null` when the token has no `sid`. |
+
+One helper builds the block: `auth/client_identity.py`. The writers:
+
+- MCP rows (`mcp/audit.py:write_mcp_audit_row`), operation rows
+  (`operations/_audit.py:write_audit_row`) and approval rows
+  (`operations/approval_queue.py:_write_audit_row`) take the block from the
+  `Operator` they already have. The block always comes from the checked
+  login: a `client` key that came another way is replaced.
+- The REST request row (`audit.py:_write_audit_row`) is written by the audit
+  middleware, which has no `Operator`. The login check of the request
+  (`middleware.py:verify_jwt_and_bind`, and for the web console
+  `ui/auth/refresh.py:_verify_session_token`) keeps the block in a context
+  variable, and the middleware reads it. The middleware resets it at the
+  start of each request. A request without a checked login has no block.
+- A console page checks its stored token in the session middleware
+  (`ui/auth/revalidation.py:revalidate_read_session`), which runs before
+  the audit middleware's reset. So that check keeps the block per session,
+  next to the time of the last check. The session context
+  (`UISessionContext.client`) carries it, and the page dependency
+  `require_ui_session` binds it again. A page view that does not check the
+  token again (it was checked within the last few minutes) reuses the kept
+  block. With the switch on, the first page view after login checks the
+  token once to build the block.
+
+`meho audit show` prints it as `via: <client> (<channel>)` (`-` when the row
+has no block). The console audit detail shows it as "Via".
+
 ### `AuditQueryResult` — page
 
 `rows: list[AuditEntry]` plus `next_cursor: str | None`. `next_cursor` is None
@@ -453,7 +497,7 @@ tenant-scoping invariant is enforced one layer up.
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal_sub = operator.sub` (exact match on the user id, never the name filter); `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
-| `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read (#3215). Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). Only an `operation_execution` row reads a trace (#3747); any other class answers `trace_present=false` without a trace read. 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace, event_class}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. Operator plane keeps full access independent of the agent gate. | Flight-recorder trace (#3215). |
+| `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read. Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). Only an `operation_execution` row reads a trace; any other class answers `trace_present=false` without a trace read. 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace, event_class}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. A person keeps full access, independent of the agent gate. An agent login (`principal_kind=agent`) gets the agent rules: no trace unless `should_expose_to_agent` is true for the tenant (checked before the load), and never a trace marked `redaction_uncertain`. Both answer `trace_present=false` (`_load_trace_for`). | Flight-recorder trace. |
 | `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count, excluded_null_session_count, loose_row_count}`; `loose_row_count` is the nodes whose parent id names no row, #4670). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
 
 The replay route's **413 cap** is a cheap tenant-scoped

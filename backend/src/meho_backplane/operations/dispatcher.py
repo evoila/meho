@@ -142,13 +142,12 @@ Detail payloads land in ``extras``. Codes:
   ``unsupported_feature`` (fix the target config) from
   ``unreplaced_auto_shim`` (register the per-product subclass).
 * ``connector_http_403`` -- the connector raised
-  :exc:`httpx.HTTPStatusError` with a ``403`` status: the credential
-  reached the upstream and was authenticated but rejected on
-  authorization (e.g. a GitHub App with ``issues: read`` but not
-  ``issues: write``). G0.24-T4 (#1649), extending #1627's pattern to
-  the transport-error sibling. The ``error`` names the likely
-  insufficient-permission cause (connector-agnostically -- any upstream
-  403); ``extras`` carries ``http_status=403``, the upstream
+  :exc:`httpx.HTTPStatusError` with a ``403`` status: the upstream
+  refused the call (e.g. a GitHub App with ``issues: read`` but not
+  ``issues: write``, or a vendor that answers a wrong password or a
+  locked account with 403). G0.24-T4 (#1649), extending #1627's pattern
+  to the transport-error sibling. The ``error`` names both causes
+  (connector-agnostically -- any upstream 403); ``extras`` carries ``http_status=403``, the upstream
   ``upstream_message``, and any standard GitHub permission headers
   (``permission_headers``) that were present. The sibling
   ``connector_http_422`` (#1649) covers a ``422`` invalid-payload
@@ -218,6 +217,13 @@ Detail payloads land in ``extras``. Codes:
   that is *not* classified here is ``net.http_probe``'s mid-chain redirect
   re-gate -- the prior hop answered, so that stays a ``status="ok"``
   ``blocked_redirect`` observation and never reaches the dispatcher.
+* ``probe_pool_busy`` -- a ``net.*`` handler raised
+  :exc:`~meho_backplane.connectors.net.probe_pool.ProbePoolBusyError`: the
+  caller's tenant already had its share of the probe pool in use, or the
+  probe waited in the pool's queue longer than its own timeout. No socket
+  was opened. ``extras`` carries ``tenant_share`` / ``detail`` /
+  ``exception_class``. Narrowed out of the generic arm the same way as
+  ``connector_probe_refused``.
 * ``connector_error`` -- the connector / handler raised any other
   exception (any :exc:`httpx.HTTPStatusError` whose status is none of
   403 / 422 / the auth-class set, any non-TLS :exc:`httpx.ConnectError`
@@ -279,6 +285,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
 from meho_backplane.broadcast.reflex import build_reflex_advisory
@@ -320,6 +327,7 @@ from meho_backplane.operations._branches import (
 from meho_backplane.operations._catalog_guard import select_catalog_for_target
 from meho_backplane.operations._errors import (
     is_auth_failed_status,
+    is_probe_pool_busy,
     is_probe_refused,
     result_ambiguous_connector,
     result_announce_required,
@@ -347,6 +355,7 @@ from meho_backplane.operations._errors import (
     result_no_connector,
     result_preview_binding_required,
     result_preview_hash_mismatch,
+    result_probe_pool_busy,
     result_rate_limited,
     result_target_required,
     result_vault_credentials_read_error,
@@ -387,6 +396,7 @@ from meho_backplane.operations._preview import (
     build_proposed_effect,
     describe_preview_provenance,
 )
+from meho_backplane.operations._preview_steps import agent_no_grant_step_reason
 from meho_backplane.operations._request_preview import (
     compute_preview_hash,
     preview_dispatch,
@@ -587,7 +597,9 @@ async def _restore_saved_ingest_profiles(target: Any) -> None:
     A row whose key already has a class is skipped, so the read is cheap
     on the usual path. A database error is logged and the resolver runs
     on the classes this replica already has. A target without a product
-    slug is left to the resolver, which reports the miss.
+    slug is left to the resolver, which reports the miss. Only the built-in
+    rows and the rows of the target's tenant are read: the resolver sees no
+    other tenant's login setup.
     """
     from meho_backplane.operations.ingest.ingest_auth_store import (
         restore_ingested_profiled_connectors,
@@ -596,8 +608,11 @@ async def _restore_saved_ingest_profiles(target: Any) -> None:
     product = getattr(target, "product", None)
     if not isinstance(product, str) or not product:
         return
+    tenant_id = getattr(target, "tenant_id", None)
     try:
-        await restore_ingested_profiled_connectors(product=product)
+        await restore_ingested_profiled_connectors(
+            product=product, tenant_id=tenant_id if isinstance(tenant_id, uuid.UUID) else None
+        )
     except SQLAlchemyError:
         _log.warning("ingested_profile_restore_before_call_failed", exc_info=True)
 
@@ -1110,6 +1125,29 @@ def _agent_acts(operator: Operator) -> bool:
     return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
 
 
+async def _agent_no_grant_step_refusal(
+    *, operator: Operator, op_id: str, connector_id: str, target: Any
+) -> str | None:
+    """Refuse a multi-step call up front when a write step has no grant (#6189).
+
+    Only for an agent with ``AGENT_GRANT_REQUIRED`` not ``off`` and only at
+    the top level: the steps of the call are checked here, with the same
+    list the preview checks, so the call never stops half-way at a step the
+    switch refuses. With ``observe`` the check only writes the
+    ``agent_no_grant_would_deny`` line of each uncovered step and returns
+    ``None``, so the verdict stays as it was.
+    """
+    if (
+        get_settings().agent_grant_required == "off"
+        or not _agent_acts(operator)
+        or composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+    ):
+        return None
+    return await agent_no_grant_step_reason(
+        operator=operator, op_id=op_id, connector_id=connector_id, target=target
+    )
+
+
 def _reveal_waits_for_approval(operator: Operator, reveal_secret: bool) -> bool:
     """True when a ``reveal_secret: true`` call must wait for a person's approval.
 
@@ -1588,8 +1626,9 @@ async def _run_branch_with_error_handling(
 
     G0.24-T4 (#1649) adds ``connector_http_403`` / ``connector_http_422``
     catches for an upstream ``403`` / ``422`` :exc:`httpx.HTTPStatusError`
-    -- an insufficient-permission rejection (the credential authenticated
-    but lacks the op's required scope) and an invalid-payload rejection
+    -- a refused call (a missing permission, or a wrong password or
+    locked account on vendors that answer that with 403) and an
+    invalid-payload rejection
     (the upstream parsed the request but rejected its content), whose
     useful upstream body + GitHub permission headers / ``errors[]``
     validation array used to flatten into the same opaque
@@ -1985,13 +2024,15 @@ async def _run_branch_with_error_handling(
         # than in a dedicated ``except``: the exception type is only
         # resolvable through a deferred import (``is_probe_refused``), because
         # importing ``connectors.net`` at module scope would close a cycle
-        # back through ``operations/__init__``.
+        # back through ``operations/__init__``. A probe refused because its
+        # tenant's share of the probe pool was in use is narrowed the same way.
         duration_ms = _elapsed_ms(started)
-        exc_result = (
-            result_connector_probe_refused(op_id, exc, duration_ms)
-            if is_probe_refused(exc)
-            else result_connector_error(op_id, exc, duration_ms)
-        )
+        if is_probe_refused(exc):
+            exc_result = result_connector_probe_refused(op_id, exc, duration_ms)
+        elif is_probe_pool_busy(exc):
+            exc_result = result_probe_pool_busy(op_id, exc, duration_ms)
+        else:
+            exc_result = result_connector_error(op_id, exc, duration_ms)
         return await _audit_error_and_return(
             exc_result,
             audit_id=audit_id,
@@ -3647,36 +3688,38 @@ async def dispatch(
     for it and record it when it does not finish.
     """
     if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
-        return await _dispatch_now(
-            operator=operator,
-            connector_id=connector_id,
-            op_id=op_id,
-            target=target,
-            params=params,
-            _approved=_approved,
-            preview_hash=preview_hash,
-            idempotency_key=idempotency_key,
-        )
+        with agent_no_grant_log_scope():
+            return await _dispatch_now(
+                operator=operator,
+                connector_id=connector_id,
+                op_id=op_id,
+                target=target,
+                params=params,
+                _approved=_approved,
+                preview_hash=preview_hash,
+                idempotency_key=idempotency_key,
+            )
     if is_draining() and not _approved:
         _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
         return shutting_down_result(op_id)
-    async with track_operation(
-        op_id=op_id,
-        connector_id=connector_id,
-        operator_sub=operator.sub,
-        tenant_id=operator.tenant_id,
-        approved_run=_approved,
-    ):
-        return await _dispatch_now(
-            operator=operator,
-            connector_id=connector_id,
+    with agent_no_grant_log_scope(new=True):
+        async with track_operation(
             op_id=op_id,
-            target=target,
-            params=params,
-            _approved=_approved,
-            preview_hash=preview_hash,
-            idempotency_key=idempotency_key,
-        )
+            connector_id=connector_id,
+            operator_sub=operator.sub,
+            tenant_id=operator.tenant_id,
+            approved_run=_approved,
+        ):
+            return await _dispatch_now(
+                operator=operator,
+                connector_id=connector_id,
+                op_id=op_id,
+                target=target,
+                params=params,
+                _approved=_approved,
+                preview_hash=preview_hash,
+                idempotency_key=idempotency_key,
+            )
 
 
 async def _dispatch_now(
@@ -3951,6 +3994,12 @@ async def _dispatch_now(
             ):
                 _log.info("reveal_secret_waits_for_approval", op_id=op_id)
                 verdict = PermissionVerdict.NEEDS_APPROVAL
+            if verdict is not PermissionVerdict.DENY:
+                step_refusal = await _agent_no_grant_step_refusal(
+                    operator=operator, op_id=op_id, connector_id=connector_id, target=target
+                )
+                if step_refusal is not None:
+                    verdict, gate_reason = PermissionVerdict.DENY, step_refusal
             policy_decision_var.set(verdict.value)
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)

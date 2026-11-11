@@ -39,7 +39,7 @@ func newAlertListCmd() *cobra.Command {
 			"OperationResult envelope. Read-only in v0.5 — alert create / update / delete\n" +
 			"are deliberately excluded from the curated core.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example:       "  meho vcf-logs alert list --target rdc-vrli\n",
+		Example:       "  meho vcf-logs alert list --target vrli-lab\n",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

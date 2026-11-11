@@ -64,11 +64,17 @@ from meho_backplane.mcp.registry import (
     register_mcp_tool,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.short_texts import with_short_text
 from meho_backplane.mcp.tools._call_operation_async import poll_call, submit_async_call
 from meho_backplane.mcp.tools._operation_recall import (
     RECALL_OUTPUT_SCHEMA,
     recall_schema_for_settings,
     with_recall,
+)
+from meho_backplane.mcp.tools._short_tool_texts import (
+    CALL_OPERATION_SHORT,
+    PREVIEW_OPERATION_SHORT,
+    SEARCH_OPERATIONS_SHORT,
 )
 from meho_backplane.operation_picks.recorder import (
     recorded_background_call,
@@ -538,6 +544,7 @@ register_mcp_tool(
         name="search_operations",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
+        for_settings=with_short_text(SEARCH_OPERATIONS_SHORT),
         description=(
             "Hybrid BM25 + cosine retrieval over a connector's enabled "
             "operations. Use this AFTER `list_operation_groups` has "
@@ -876,7 +883,7 @@ register_mcp_tool(
         # full-detail shape for the envelope row — operators can still
         # see the request params on the SSE feed.
         op_class="tool_call",
-        for_settings=recall_schema_for_settings,
+        for_settings=with_short_text(CALL_OPERATION_SHORT, then=recall_schema_for_settings),
     ),
     handler=_call_operation_handler,
 )
@@ -1086,12 +1093,13 @@ register_mcp_tool(
             "required": ["status", "op_id", "connector_id"],
         },
         required_role=TenantRole.OPERATOR,
-        # A read-only request-shape inspection. No dispatch, no audit row,
-        # no mutation -- ``"read"`` matches the actual op-class (unlike
+        # A read-only request-shape inspection. No dispatch, no audit row
+        # for the operation, no mutation (the tool call itself gets the
+        # usual MCP request row) -- ``"read"`` matches the actual op-class (unlike
         # ``call_operation``'s ``"tool_call"`` envelope, which wraps a
         # dispatch whose true class lives on the inner DISPATCH row).
         op_class="read",
-        for_settings=recall_schema_for_settings,
+        for_settings=with_short_text(PREVIEW_OPERATION_SHORT, then=recall_schema_for_settings),
     ),
     handler=_preview_operation_handler,
 )

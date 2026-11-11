@@ -17,16 +17,20 @@ from unittest.mock import patch
 
 import jsonschema
 import pytest
+from sqlalchemy import select
 
 import meho_backplane.mcp.tools.operations as operations_tools
 from meho_backplane.agent.hosted_context import assemble_hosted_context
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import Document, LessonRetrieval
 from meho_backplane.kb.service import KbService
 from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.server import _session_instructions
 from meho_backplane.mcp.tools._operation_recall import with_recall
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
+from meho_backplane.operations._audit import agent_session_id_var
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.recall import (
     MAX_BAND_CHARS,
@@ -43,6 +47,7 @@ from tests._targets_helpers import _insert_target
 _TENANT = uuid.UUID("5729aaaa-0000-4000-8000-000000000001")
 _OTHER_TENANT = uuid.UUID("5729bbbb-0000-4000-8000-000000000002")
 _TARGET = "vc-1"
+_SESSION = uuid.UUID("5729cccc-0000-4000-8000-000000000003")
 
 
 @pytest.fixture(autouse=True)
@@ -107,6 +112,27 @@ async def _kb(slug: str, tenant_id: uuid.UUID = _TENANT, **metadata: object) -> 
     await KbService().create_entry(
         tenant_id=tenant_id, slug=slug, body=f"Body of {slug}.", metadata=dict(metadata)
     )
+
+
+@pytest.fixture
+def _in_session() -> Iterator[None]:
+    token = agent_session_id_var.set(_SESSION)
+    yield
+    agent_session_id_var.reset(token)
+
+
+async def _retrievals() -> list[LessonRetrieval]:
+    async with get_sessionmaker()() as session:
+        return list((await session.scalars(select(LessonRetrieval))).all())
+
+
+async def _kb_id(slug: str, tenant_id: uuid.UUID) -> uuid.UUID:
+    async with get_sessionmaker()() as session:
+        doc_id = await session.scalar(
+            select(Document.id).where(Document.source_id == slug, Document.tenant_id == tenant_id)
+        )
+    assert doc_id is not None
+    return doc_id
 
 
 def _args(target: Any = _TARGET) -> dict[str, Any]:
@@ -510,3 +536,99 @@ async def test_every_block_form_matches_the_output_schema(monkeypatch: pytest.Mo
         assert schema is not None
         for answer in answers:
             jsonschema.validate(answer[RECALL_KEY], schema["properties"][RECALL_KEY])
+
+
+@pytest.mark.usefixtures("_stub_operations", "_in_session")
+async def test_a_preview_records_each_shown_entry_as_a_recall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One retrieval row per shown entry, with ``channel=recall`` and the right owner."""
+    monkeypatch.setenv("KB_SHARED_TENANT_IDS", str(_OTHER_TENANT))
+    get_settings.cache_clear()
+    await _target()
+    # The tenant's own entry and a shared entry with the same slug: the own one is shown.
+    await _kb("ops-rule", product="vcenter", summary="The tenant's own rule.")
+    await _kb(
+        "ops-rule", tenant_id=_OTHER_TENANT, product="vcenter", shared=True, summary="Shared."
+    )
+    await _kb("shared-tip", tenant_id=_OTHER_TENANT, product="vcenter", shared=True, summary="Tip.")
+    note = await MemoryService().remember(
+        _operator(), MemoryScope.TARGET, "The admin port is closed.", "port", target_name=_TARGET
+    )
+
+    block = (await _preview())[RECALL_KEY]
+
+    assert block["shown"] == 3
+    rows = await _retrievals()
+    assert {(row.store, row.entry_id, row.entry_tenant_id) for row in rows} == {
+        ("kb", await _kb_id("ops-rule", _TENANT), _TENANT),
+        ("kb", await _kb_id("shared-tip", _OTHER_TENANT), _OTHER_TENANT),
+        ("memory", note.id, _TENANT),
+    }
+    assert all(row.channel == "recall" for row in rows)
+    assert all(row.agent_session_id == _SESSION and row.tenant_id == _TENANT for row in rows)
+
+
+@pytest.mark.usefixtures("_stub_operations", "_in_session")
+async def test_with_recall_off_no_retrieval_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TEAM_KNOWLEDGE_RECALL")
+    get_settings.cache_clear()
+    await _target()
+    await _kb("vc-tip", product="vcenter", summary="A tip.")
+
+    await _preview()
+    await operations_tools._call_operation_handler(_operator(), _args())
+
+    assert await _retrievals() == []
+
+
+@pytest.mark.usefixtures("_stub_operations")
+async def test_a_preview_without_a_session_records_nothing() -> None:
+    await _target()
+    await _kb("vc-tip", product="vcenter", summary="A tip.")
+
+    assert (await _preview())[RECALL_KEY]["shown"] == 1
+    assert await _retrievals() == []
+
+
+@pytest.mark.usefixtures("_stub_operations", "_in_session")
+async def test_entries_left_out_for_size_are_not_recorded() -> None:
+    await _target()
+    for number in range(3):
+        await _kb(f"vc-long-{number}", product="vcenter", summary="x" * 900, source="s" * 400)
+    for number in range(2):
+        await MemoryService().remember(
+            _operator(), MemoryScope.TARGET, "m" * 2000, f"long-{number}", target_name=_TARGET
+        )
+
+    block = (await _preview())[RECALL_KEY]
+
+    assert block["left_out"] >= 1
+    assert len(await _retrievals()) == block["shown"]
+
+
+@pytest.mark.usefixtures("_in_session")
+async def test_a_block_left_off_for_the_wire_limit_records_nothing() -> None:
+    await _target()
+    await _kb("vc-tip", product="vcenter", summary="A tip.")
+    answer = {"status": "ok", "op_id": "vm.power_off", "duration_ms": 1.0}
+    limit = measure_delivered_wire_bytes(answer) + 10
+
+    assert await with_recall(_operator(), _args(), answer, max_wire_bytes=limit) == answer
+    assert await _retrievals() == []
+
+
+@pytest.mark.usefixtures("_stub_operations", "_in_session")
+async def test_a_failed_recording_still_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    await _target()
+    await _kb("vc-tip", product="vcenter", summary="A tip.")
+
+    def broken() -> object:
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr("meho_backplane.lessons.retrievals.get_sessionmaker", broken)
+
+    answer = await _preview()
+
+    assert answer["status"] == "ok"
+    assert answer[RECALL_KEY]["status"] == "found"

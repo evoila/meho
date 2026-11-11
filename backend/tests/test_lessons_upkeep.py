@@ -26,6 +26,7 @@ from meho_backplane.db.models import AuditLog, LessonRetrieval, MemoryRevision
 from meho_backplane.kb.service import KbService
 from meho_backplane.kb.stale_revision import KbStaleRevisionError
 from meho_backplane.lessons import upkeep
+from meho_backplane.lessons.metrics import RetrievalNumbers
 from meho_backplane.lessons.upkeep import (
     SYSTEM_OPERATOR_SUB,
     UPKEEP_PATH,
@@ -256,9 +257,40 @@ async def test_a_used_candidate_is_listed_for_a_reviewer_and_never_confirmed() -
 
     (candidate,) = reports[TENANT].for_review
     assert (candidate.slug, candidate.sessions, candidate.targets) == ("idea", 3, 2)
+    assert (candidate.search_sessions, candidate.recall_sessions) == (3, 0)
     stored = await _status("idea")
     assert stored["status"] == "candidate"
     assert "confirmed_at" not in stored
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_counts_sessions_after_a_search_and_after_it_was_shown() -> None:
+    entry, _ = await KbService().create_entry(TENANT, "idea", "body", {"status": "candidate"})
+    searched, shown, both, unused = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    for session_id, channels in (
+        (searched, ("search",)),
+        (shown, ("recall",)),
+        (both, ("search", "recall")),
+        (unused, ("recall",)),
+    ):
+        for channel in channels:
+            await seed_retrieval(
+                tenant_id=TENANT,
+                entry_id=entry.id,
+                session_id=session_id,
+                at=NOW - timedelta(hours=2),
+                channel=channel,
+            )
+        if session_id != unused:
+            await seed_dispatch(
+                tenant_id=TENANT, session_id=session_id, at=NOW - timedelta(hours=1)
+            )
+
+    reports = await run_upkeep(now=NOW)
+
+    (candidate,) = reports[TENANT].for_review
+    assert candidate.sessions == 3
+    assert (candidate.search_sessions, candidate.recall_sessions) == (2, 2)
 
 
 @pytest.mark.asyncio
@@ -483,6 +515,14 @@ async def _upkeep_rows() -> dict[uuid.UUID, Any]:
 def test_report_lists_are_cut_but_counts_are_complete() -> None:
     changes = upkeep._Changes()
     changes.retired[TENANT] = [f"slug-{i:03}" for i in range(upkeep.REPORT_LIST_LIMIT + 5)]
+    empty = RetrievalNumbers(
+        hit_rate_pct=None,
+        hit_rate_retrievals=0,
+        hit_rate_used=0,
+        precision_pct=None,
+        precision_judged=0,
+        precision_right=0,
+    )
     numbers = upkeep.LearningMetrics(
         repeat_mistake_pct=None,
         repeat_mistake_failures=0,
@@ -495,6 +535,8 @@ def test_report_lists_are_cut_but_counts_are_complete() -> None:
         precision_right=0,
         first_correct_action_median_seconds=None,
         first_correct_action_sessions=0,
+        search=empty,
+        recall=empty,
     )
     report = upkeep._report(TENANT, changes, since=NOW, now=NOW, numbers=numbers)
     assert report.retired_count == upkeep.REPORT_LIST_LIMIT + 5

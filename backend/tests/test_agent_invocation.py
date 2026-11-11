@@ -467,7 +467,8 @@ async def test_poll_child_of_agent_own_run_shows_output_to_a_person(
     parent_trigger: AgentRunTrigger, depth: int
 ) -> None:
     """A child run under a scheduled or event run shows its output to people in the tenant."""
-    agent = _make_operator(sub="svc-agent", principal_kind=PrincipalKind.AGENT)
+    # The agent login owns the child definition (its identity_ref is "agent:child").
+    agent = _make_operator(sub="agent:child", principal_kind=PrincipalKind.AGENT)
     child_run_id = await _record_parent_and_child(
         parent_trigger=parent_trigger, starter=agent, depth=depth
     )
@@ -915,12 +916,29 @@ async def test_resolver_scopes_to_tenant_and_enabled() -> None:
     assert await _resolve_child_definition(op_b, "reader") is None  # cross-tenant
 
 
+async def test_resolver_applies_the_owner_rule_to_agent_logins() -> None:
+    """An agent login resolves only its own definition as a child, like a
+    direct run; a person resolves any enabled definition of the tenant."""
+    await _seed_definition(name="reader")
+    await _seed_definition(name="wide")
+    agent = _make_operator(sub="agent:reader", principal_kind=PrincipalKind.AGENT)
+
+    assert await _resolve_child_definition(agent, "wide") is None
+    own = await _resolve_child_definition(agent, "reader")
+    assert own is not None
+    assert own.name == "reader"
+
+    person = _make_operator()
+    wide = await _resolve_child_definition(person, "wide")
+    assert wide is not None
+
+
 async def test_invoker_composition_persists_child_run_with_lineage() -> None:
     """A parent run invoked through the live surface invokes a child; the child
     ``agent_run`` row is persisted with ``trigger=agent-invoked`` and a
     ``parent_run_id`` pointing at the parent run (cascade tree reconstructable)."""
     await _seed_definition(
-        name="parent", toolset={"meta_tools": []}, system_prompt="You are the PARENT."
+        name="parent", toolset={"meta_tools": ["invoke_agent"]}, system_prompt="You are the PARENT."
     )
     await _seed_definition(
         name="child", toolset={"meta_tools": []}, system_prompt="You are the CHILD-AGENT."
@@ -952,7 +970,7 @@ async def test_invoker_composition_depth_capped(monkeypatch: pytest.MonkeyPatch)
     ``agent_invoke_max_depth`` — the over-depth call never reaches the recorder."""
     monkeypatch.setenv("AGENT_INVOKE_MAX_DEPTH", "2")
     get_settings.cache_clear()
-    await _seed_definition(name="loop", toolset={"meta_tools": []})
+    await _seed_definition(name="loop", toolset={"meta_tools": ["invoke_agent"]})
     invoker = _composing_invoker_with(_always_invoke_model("loop"))
 
     outcome = await invoker.run(_make_operator(), "loop", "start")
@@ -971,7 +989,7 @@ async def test_invoker_composition_budget_capped(monkeypatch: pytest.MonkeyPatch
     run fails and the cascade stops well before the depth cap."""
     monkeypatch.setenv("AGENT_INVOKE_MAX_DEPTH", "8")
     get_settings.cache_clear()
-    await _seed_definition(name="loop", toolset={"meta_tools": []}, turn_budget=1)
+    await _seed_definition(name="loop", toolset={"meta_tools": ["invoke_agent"]}, turn_budget=1)
     invoker = _composing_invoker_with(_always_invoke_model("loop"))
 
     outcome = await invoker.run(_make_operator(), "loop", "start")
@@ -1035,7 +1053,7 @@ async def test_invoker_composition_finalizes_failed_child() -> None:
     independently of the parent's outcome.
     """
     await _seed_definition(
-        name="parent", toolset={"meta_tools": []}, system_prompt="You are the PARENT."
+        name="parent", toolset={"meta_tools": ["invoke_agent"]}, system_prompt="You are the PARENT."
     )
     await _seed_definition(
         name="child",

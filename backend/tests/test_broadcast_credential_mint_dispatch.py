@@ -115,9 +115,25 @@ _TARGET_HOST = "harbor.test.invalid"
 
 #: Harbor v2 robot endpoints the handler calls, against ``_base_url`` =
 #: ``https://<host>`` (port 443 omitted). ``robot_create`` POSTs to
-#: ``/api/v2.0/robots``; ``robot_delete`` DELETEs ``/api/v2.0/robots/{id}``.
+#: ``/api/v2.0/robots``; ``robot_delete`` reads ``/api/v2.0/robots/{id}`` to
+#: check the robot's project, then DELETEs it.
 _ROBOTS_URL = f"https://{_TARGET_HOST}/api/v2.0/robots"
 _ROBOT_7_URL = f"https://{_TARGET_HOST}/api/v2.0/robots/7"
+
+
+def _mock_robot_7_read(mock: respx.MockRouter) -> None:
+    """Harbor answers the read before the delete: robot 7 is a robot of ``proj``."""
+    mock.get(_ROBOT_7_URL).mock(
+        return_value=respx.MockResponse(
+            200,
+            json={
+                "id": 7,
+                "name": "robot$proj+ci",
+                "level": "project",
+                "permissions": [{"kind": "project", "namespace": "proj", "access": []}],
+            },
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +527,7 @@ async def test_robot_delete_is_audited_as_write(
     requester = _make_operator(sub="op-requester")
 
     with respx.mock() as mock:
+        _mock_robot_7_read(mock)
         mock.delete(_ROBOT_7_URL).mock(return_value=respx.MockResponse(200))
         request_id = await _park_robot_delete(stub_embedding_service, requester=requester)
         # Parking must not have written an executed row (nothing ran yet).
@@ -552,6 +569,7 @@ async def test_credential_mint_and_write_diverge_on_same_dispatch_path(
 
     with respx.mock() as mock:
         _mock_robot_create(mock)
+        _mock_robot_7_read(mock)
         mock.delete(_ROBOT_7_URL).mock(return_value=respx.MockResponse(200))
 
         # Governed destructive write: preview-bound park, then execute on approval.

@@ -113,6 +113,10 @@ TAG_FEATURE: Final[dict[str, str]] = {
     # field, and its import is a bulk write, so it rides the beta
     # ``write_surfaces`` tier rather than the GA tiers of what it carries.
     "settings": "write_surfaces",
+    # The policy file (policy: v1): validate / preview / import / export /
+    # history. New, behind the POLICY_CLASSIFICATION switch, and its import is
+    # a rights change, so it rides the beta ``write_surfaces`` tier too.
+    "policy": "write_surfaces",
     "targets": "targets",
     # The per-tenant flight-recorder capture policy (#3272) is the write-side
     # companion of the operator flight-recorder read surface, which rides the

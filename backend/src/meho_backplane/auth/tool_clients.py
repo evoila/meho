@@ -13,9 +13,10 @@ with the admin client (``KEYCLOAK_ADMIN_*``). MEHO lists only the clients
 it found. A tool whose client is not listed keeps the shared ``meho-mcp``
 client, which works as before.
 
-* When the check cannot run (the admin client is not set up, or Keycloak
-  does not answer), MEHO lists no client, and ``/ready`` says ``unknown``
-  with the reason. A failed check never reads as "all clients exist".
+* When the check cannot run (the admin client is not set up, Keycloak
+  does not answer, or it answers in a way MEHO does not expect), MEHO
+  lists no client, and ``/ready`` says ``unknown`` with the reason. A
+  failed check never reads as "all clients exist".
 * The answer is kept for :data:`CHECK_TTL_S` seconds. ``/auth-config``
   needs no login, so a caller must not be able to make MEHO call Keycloak
   on every request. One check runs at a time.
@@ -108,6 +109,13 @@ async def _run_check(settings: Settings) -> ToolClientCheck:
     except KeycloakAdminError as exc:
         _log.warning("mcp_tool_client_check_failed", error=str(exc))
         return ToolClientCheck(error=str(exc), checked_at=time.monotonic())
+    except Exception as exc:
+        # An answer MEHO did not expect (for example a token answer that is
+        # not a JSON object). Keep only the error type: the message could
+        # hold parts of the answer. The answer is kept like any other.
+        name = type(exc).__name__
+        _log.warning("mcp_tool_client_check_failed", error_type=name)
+        return ToolClientCheck(error=f"client check failed: {name}", checked_at=time.monotonic())
     missing = tuple(c for k, c in MCP_TOOL_CLIENTS.items() if k not in found)
     if missing:
         _log.warning("mcp_tool_clients_missing", missing=list(missing))

@@ -178,6 +178,40 @@ async def test_when_keycloak_fails_nothing_is_listed() -> None:
     assert "made-up-secret" not in str(report)
 
 
+@pytest.mark.parametrize(
+    "token_reply",
+    [
+        httpx.Response(200, text="<html>"),
+        httpx.Response(200, json=["not", "an", "object"]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_an_unexpected_token_answer_lists_nothing_and_is_kept(
+    token_reply: httpx.Response,
+) -> None:
+    with respx.mock as r:
+        token = r.post(_TOKEN_URL).mock(return_value=token_reply)
+        lookup = r.get(f"{_ADMIN_URL}/clients").mock(return_value=httpx.Response(200, json=[]))
+        assert await listed_tool_clients(get_settings()) == {}
+        assert await listed_tool_clients(get_settings()) == {}
+    # The failed answer is kept: the second call does not ask Keycloak again.
+    assert token.call_count == 1
+    assert lookup.call_count == 0
+    report = tool_clients_report(get_settings())
+    assert report is not None
+    assert report["state"] == "unknown"
+    assert report["detail"].startswith("client check failed: ")
+
+
+def test_auth_config_route_answers_200_when_the_token_answer_is_unexpected() -> None:
+    with respx.mock(assert_all_called=False) as r:
+        r.route(host="testserver").pass_through()
+        r.post(_TOKEN_URL).mock(return_value=httpx.Response(200, text="<html>"))
+        response = TestClient(app).get("/api/v1/auth-config")
+    assert response.status_code == 200
+    assert response.json()["mcp_clients"] == {}
+
+
 @pytest.mark.asyncio
 async def test_the_answer_is_kept_so_keycloak_is_not_asked_on_every_call() -> None:
     with respx.mock as r:

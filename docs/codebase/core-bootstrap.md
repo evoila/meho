@@ -173,9 +173,12 @@ Only a `master` admin can make users in realm `master`. So:
 groups (`docs/decisions/login-role-groups.md`). `MEHO-Platform-Admins` is
 not a role group: it carries only `platform_admin: true` and no tenant or
 role, so it does not change which group gives the tenant. The realm file
-puts the `platform-admin` User Attribute mapper on the three clients people
-log in with (`meho-cli`, `meho-mcp`, `meho-web`), the same way as the
-`approver` mapper. The backplane reads the boolean claim `platform_admin`.
+puts the `platform-admin` User Attribute mapper on the clients people
+log in with (`meho-cli`, `meho-mcp`, `meho-mcp-code`, `meho-mcp-desktop`,
+`meho-web`), the same way as the `approver` mapper. `meho-mcp-code` and
+`meho-mcp-desktop` (#6210) are copies of `meho-mcp` for the Claude Code
+plugin and the Claude Desktop extension; the realm stage adds them to a
+running realm like every other client of the realm file. The backplane reads the boolean claim `platform_admin`.
 
 ## Several tenants
 
@@ -186,7 +189,7 @@ guide (add a tenant, put a person in two tenants, switch): `docs-site/guides/sev
   `<tenant-uuid>:<tenant>:<Role>`, from the placeholders
   `${MEHO_REALM_TENANT_ID}` and `${MEHO_REALM_TENANT_NAME}`. The name comes
   from `coreKeycloak.tenantName` (default `main`).
-- The `meho-tenants` mapper on `meho-cli`, `meho-mcp` and `meho-web` lists
+- The `meho-tenants` mapper on `meho-cli`, the three MCP clients and `meho-web` lists
   the `meho_tenant` values of all the person's groups in the claim
   `meho_tenants` (Multivalued and Aggregate on).
 - `coreKeycloak.tenants` is a list of `{name, id}`. For each entry the Job

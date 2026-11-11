@@ -7448,6 +7448,77 @@ class ApprovalRequest(Base):
     )
 
 
+#: Where a passkey touch for an approval was started (#6214): the web
+#: console, a link the command line prints, or a link a REST answer carries.
+APPROVAL_PRESENCE_CHANNELS: tuple[str, ...] = ("web", "cli_link", "rest_link")
+
+
+class ApprovalPresenceChallenge(Base):
+    """One started passkey touch for an approval (#6214).
+
+    When a person clicks Approve on a request that needs a passkey touch,
+    MEHO makes this row. It names exactly what the approval will run, and
+    it can be used once, until ``expires_at``. Made and checked by
+    :mod:`meho_backplane.operations.approval_presence`. Nothing writes it
+    while the ``APPROVAL_PRESENCE_TOUCH`` switch is off.
+
+    Columns
+    -------
+
+    * ``tenant_id`` -- the tenant of the requests (no foreign key).
+    * ``approver_sub`` -- the person who started the touch. Only they can
+      use the row.
+    * ``request_ids`` -- the ids of the approval requests the touch
+      approves, in the order the person saw them (a JSON list of strings).
+    * ``binding_hash`` -- SHA-256 over the tenant, each request's stored
+      hashes and release, the ``card_hash`` and ``server_random``. MEHO
+      sends it to Keycloak as the ``nonce``.
+    * ``server_random`` -- 32 random bytes (hex) that MEHO made for this
+      row. Part of the binding hash, so the hash cannot be guessed and can
+      be built again to see if a request changed.
+    * ``card_hash`` -- SHA-256 over the approval card text the person saw.
+    * ``match_code`` -- 6 characters from the binding hash. The person sees
+      the same code in MEHO and next to the touch.
+    * ``created_at`` / ``expires_at`` -- when the row was made, and when it
+      ends (``created_at`` + ``APPROVAL_PRESENCE_TOUCH_VALID_SECONDS``).
+    * ``used_at`` -- when an approval used the row. NULL until then. Set
+      once.
+    * ``channel`` -- ``web``, ``cli_link`` or ``rest_link``.
+    * ``session_kind`` -- what kind of session started the touch.
+
+    A daily clean-up deletes rows that were never used and are older than
+    14 days. Added by migration ``0157``.
+    """
+
+    __tablename__ = "approval_presence_challenge"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    approver_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    request_ids: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False
+    )
+    binding_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    server_random: Mapped[str] = mapped_column(Text, nullable=False)
+    card_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    match_code: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    session_kind: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        Index("approval_presence_challenge_created_at_idx", "created_at"),
+        sa.CheckConstraint(
+            _ck_in("channel", APPROVAL_PRESENCE_CHANNELS),
+            name="ck_approval_presence_challenge_channel",
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Gateway command queue (Initiative #2415 / #2498)
 # ---------------------------------------------------------------------------

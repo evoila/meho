@@ -264,6 +264,14 @@ claim for audit parent-linkage (#3446), is never matched against this table).
    A matching row works as before, also with the switch on. Any other
    value of the switch stops MEHO at start.
 
+   A multi-step operation with the switch `on`: before the call waits for
+   approval or runs a step, the dispatcher checks every listed write step
+   of the operation for the agent (`agent_no_grant_step_reason` in
+   `operations/_preview_steps.py`, the same list the preview checks). When
+   one step has no grant, the whole call is refused with `agent_no_grant`,
+   no approval request is stored, and no step runs. So the call never
+   stops half-way at a step the switch refuses.
+
 4. **Apply safety-level ceiling.** A row's verdict can only tighten to the
    op's ceiling, never loosen beyond it:
 

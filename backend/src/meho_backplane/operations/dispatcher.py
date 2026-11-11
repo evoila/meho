@@ -397,6 +397,7 @@ from meho_backplane.operations._preview import (
     build_proposed_effect,
     describe_preview_provenance,
 )
+from meho_backplane.operations._preview_steps import agent_no_grant_step_reason
 from meho_backplane.operations._request_preview import (
     compute_preview_hash,
     preview_dispatch,
@@ -1123,6 +1124,27 @@ def _secret_view(*, makes_new_secret: bool, reveal_secret: bool) -> SecretView |
 def _agent_acts(operator: Operator) -> bool:
     """True when an agent makes this call: an agent principal, or a hosted agent run."""
     return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
+
+
+async def _agent_no_grant_step_refusal(
+    *, operator: Operator, op_id: str, connector_id: str, target: Any
+) -> str | None:
+    """Refuse a multi-step call up front when a write step has no grant (#6189).
+
+    Only for an agent with ``AGENT_GRANT_REQUIRED=on`` and only at the top
+    level: the steps of the call are checked here, with the same list the
+    preview checks, so the call never stops half-way at a step the switch
+    refuses.
+    """
+    if (
+        get_settings().agent_grant_required != "on"
+        or not _agent_acts(operator)
+        or composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+    ):
+        return None
+    return await agent_no_grant_step_reason(
+        operator=operator, op_id=op_id, connector_id=connector_id, target=target
+    )
 
 
 def _reveal_waits_for_approval(operator: Operator, reveal_secret: bool) -> bool:
@@ -3970,6 +3992,12 @@ async def _dispatch_now(
             ):
                 _log.info("reveal_secret_waits_for_approval", op_id=op_id)
                 verdict = PermissionVerdict.NEEDS_APPROVAL
+            if verdict is not PermissionVerdict.DENY:
+                step_refusal = await _agent_no_grant_step_refusal(
+                    operator=operator, op_id=op_id, connector_id=connector_id, target=target
+                )
+                if step_refusal is not None:
+                    verdict, gate_reason = PermissionVerdict.DENY, step_refusal
             policy_decision_var.set(verdict.value)
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)

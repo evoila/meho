@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -31,17 +32,32 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.permissions import agent_no_grant_log_scope, resolve_verdict
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentPermission, AuditLog, PermissionVerdict, Tenant
+from meho_backplane.db.models import (
+    AgentPermission,
+    ApprovalRequest,
+    AuditLog,
+    PermissionVerdict,
+    Target,
+    Tenant,
+)
 from meho_backplane.docs_search.target_scope import TargetDeniedError, _check_target_access
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._errors import result_denied
 from meho_backplane.operations._park_check import _PARK_CHECKS
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.operations._request_preview import preview_dispatch
+from meho_backplane.operations.approval_queue import (
+    approve_request,
+    resume_dispatch_after_approval,
+)
 from meho_backplane.operations.deny_reasons import (
     AGENT_GRANT_DENIED,
     AGENT_NO_GRANT,
     deny_reason_code,
+)
+from meho_backplane.operations.governed_subops import (
+    register_governed_subops,
+    reset_governed_subop_registry,
 )
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.settings import get_settings
@@ -91,9 +107,11 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _reset_state() -> Iterator[None]:
     clear_registry()
     reset_dispatcher_caches()
+    reset_governed_subop_registry()
     yield
     clear_registry()
     reset_dispatcher_caches()
+    reset_governed_subop_registry()
 
 
 @pytest.fixture
@@ -126,7 +144,12 @@ def _operator(
     )
 
 
-async def _grant(op_pattern: str, verdict: str, target_scope: str | None = None) -> None:
+async def _grant(
+    op_pattern: str,
+    verdict: str,
+    target_scope: str | None = None,
+    expires_at: datetime | None = None,
+) -> None:
     async with get_sessionmaker()() as session:
         if await session.get(Tenant, _TENANT) is None:
             session.add(Tenant(id=_TENANT, slug="t-grant", name="Tenant grant"))
@@ -138,6 +161,7 @@ async def _grant(op_pattern: str, verdict: str, target_scope: str | None = None)
                 verdict=verdict,
                 target_scope=target_scope,
                 created_by_sub="admin",
+                expires_at=expires_at,
             )
         )
         await session.commit()
@@ -390,6 +414,191 @@ async def test_preview_says_deny_with_the_same_code(
 
     assert envelope["policy_verdict"] == "deny", envelope
     assert envelope["policy_reason"].startswith("agent_no_grant: ")
+
+
+# --- Multi-step operations -------------------------------------------------------
+
+_MULTI_OP = "vault.kv.multi"
+_WRITE_STEP = "POST:/v1/secret/data/{path}"
+#: The calls of :func:`_multi_step_handler`; a refused call adds none.
+_MULTI_RUNS: list[dict[str, Any]] = []
+
+
+async def _multi_step_handler(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    """A multi-step op's handler; it records that it ran."""
+    del operator, target
+    _MULTI_RUNS.append(params)
+    return {"ran": True}
+
+
+async def _register_multi_step_op(stub: AsyncMock) -> None:
+    """A safe op that lists one read step and one write step."""
+    _MULTI_RUNS.clear()
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=_MULTI_OP,
+        handler=_multi_step_handler,
+        summary="Multi-step op.",
+        description="Reads, then writes.",
+        parameter_schema={"type": "object"},
+        safety_level="safe",
+        requires_approval=False,
+        when_to_use=None,
+        embedding_service=stub,
+    )
+    register_governed_subops(
+        composite_op_id=_MULTI_OP,
+        connector_id="vault-1.x",
+        sub_op_ids=("GET:/v1/secret/data/{path}", _WRITE_STEP),
+    )
+
+
+async def _seed_vault_target() -> Target:
+    """A stored target, so an approved call can load it again when it resumes."""
+    async with get_sessionmaker()() as session:
+        target = Target(
+            tenant_id=_TENANT,
+            name="vault-grant-test",
+            aliases=[],
+            product="vault",
+            host="vault.test",
+            port=8200,
+            fqdn=None,
+            secret_ref=None,
+            auth_model="shared_service_account",
+            vpn_required=False,
+            extras={},
+            fingerprint={"version": "1.15"},
+            notes="seeded by test_agent_grant_required",
+        )
+        session.add(target)
+        await session.commit()
+        await session.refresh(target)
+        session.expunge(target)
+        return target
+
+
+async def _approval_requests() -> list[ApprovalRequest]:
+    async with get_sessionmaker()() as session:
+        return list((await session.execute(select(ApprovalRequest))).scalars())
+
+
+@pytest.mark.parametrize("op_verdict", ["auto-execute", "needs-approval"])
+async def test_multi_step_op_with_an_uncovered_write_step_is_refused_up_front(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock, op_verdict: str
+) -> None:
+    """The op has a grant, its write step has none: refused before it waits or runs."""
+    _switch(monkeypatch, "on")
+    await _register_multi_step_op(stub_embedding_service)
+    await _grant(_MULTI_OP, op_verdict)
+
+    result = await _dispatch(_operator(), _MULTI_OP)
+
+    assert result.status == "denied", result
+    assert result.extras["error_code"] == AGENT_NO_GRANT
+    assert result.extras["reason_code"] == AGENT_NO_GRANT
+    assert _WRITE_STEP in result.error
+    assert _MULTI_RUNS == []
+    assert await _approval_requests() == []
+    preview = await preview_dispatch(
+        operator=_operator(),
+        connector_id="vault-1.x",
+        op_id=_MULTI_OP,
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+    if op_verdict == "auto-execute":
+        # The preview checks the same step list and gives the same answer.
+        assert preview["policy_verdict"] == "deny", preview
+        assert _WRITE_STEP in preview["policy_reason"]
+
+
+async def test_multi_step_op_runs_when_every_write_step_has_a_grant(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    _switch(monkeypatch, "on")
+    await _register_multi_step_op(stub_embedding_service)
+    await _grant(_MULTI_OP, "auto-execute")
+    await _grant(_WRITE_STEP, "auto-execute")
+
+    result = await _dispatch(_operator(), _MULTI_OP)
+
+    assert result.status == "ok", result.error
+    assert len(_MULTI_RUNS) == 1
+
+
+async def test_multi_step_op_with_the_switch_off_is_not_checked_up_front(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register_multi_step_op(stub_embedding_service)
+    await _grant(_MULTI_OP, "auto-execute")
+
+    result = await _dispatch(_operator(), _MULTI_OP)
+
+    assert result.status == "ok", result.error
+
+
+async def test_expired_grant_does_not_count_when_on(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    _switch(monkeypatch, "on")
+    await _register_op(stub_embedding_service)
+    await _grant("vault.kv.get", "auto-execute", expires_at=datetime.now(UTC) - timedelta(hours=1))
+
+    result = await _dispatch(_operator())
+
+    assert result.status == "denied"
+    assert result.extras["error_code"] == AGENT_NO_GRANT
+
+
+async def test_expired_step_grant_does_not_count_when_on(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    _switch(monkeypatch, "on")
+    await _register_multi_step_op(stub_embedding_service)
+    await _grant(_MULTI_OP, "auto-execute")
+    await _grant(_WRITE_STEP, "auto-execute", expires_at=datetime.now(UTC) - timedelta(hours=1))
+
+    result = await _dispatch(_operator(), _MULTI_OP)
+
+    assert result.status == "denied"
+    assert result.extras["error_code"] == AGENT_NO_GRANT
+    assert _MULTI_RUNS == []
+
+
+async def test_waiting_call_runs_after_a_person_approves_when_on(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    """A needs-approval grant makes the call wait; after the approval it runs."""
+    _switch(monkeypatch, "on")
+    await _register_multi_step_op(stub_embedding_service)
+    await _grant(_MULTI_OP, "needs-approval")
+    await _grant(_WRITE_STEP, "auto-execute")
+    target = await _seed_vault_target()
+
+    parked = await dispatch(
+        operator=_operator(), connector_id="vault-1.x", op_id=_MULTI_OP, target=target, params={}
+    )
+
+    assert parked.status == "awaiting_approval", parked
+    assert _MULTI_RUNS == []
+    approver = _operator(PrincipalKind.USER)
+    request_id = uuid.UUID(parked.extras["approval_request_id"])
+    async with get_sessionmaker()() as session:
+        await approve_request(session, request_id, operator=approver)
+        await session.commit()
+    async with get_sessionmaker()() as session:
+        request = await session.get(ApprovalRequest, request_id)
+        assert request is not None
+        result = await resume_dispatch_after_approval(operator=approver, request=request)
+
+    assert result.status == "ok", result.error
+    assert len(_MULTI_RUNS) == 1
 
 
 # --- Direct hosted-agent run ----------------------------------------------------

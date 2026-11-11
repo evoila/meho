@@ -17,7 +17,7 @@ Copyright (c) 2026 evoila Group
 
 This directory ships **sanitized example values files** for the MEHO Helm
 chart at [`deploy/charts/meho/`](../charts/meho/). Each file targets a
-specific deployment shape (today: the RDC Hetzner dogfooding lab) and is
+specific deployment shape (today: a single-cluster lab) and is
 designed to be copied into a private deploy repo, the placeholders
 substituted, and applied via `helm install` / `helm upgrade`.
 
@@ -132,7 +132,7 @@ chart expects the consumer to sync secrets from a backing store (Vault,
 1Password Connect, AWS Secrets Manager, …) into Kubernetes via
 [**External Secrets Operator (ESO)**](https://external-secrets.io/).
 
-The RDC lab uses ESO with **HashiCorp Vault** as the backend
+The example lab uses ESO with **HashiCorp Vault** as the backend
 ([provider docs](https://external-secrets.io/latest/provider/hashicorp-vault/)).
 Two resources combine to materialise a Secret the chart can consume:
 
@@ -151,7 +151,7 @@ Two resources combine to materialise a Secret the chart can consume:
     spec:
       provider:
         vault:
-          server: https://vault.evba.lab
+          server: https://vault.example.lab
           path: secret          # KV v2 mount
           version: v2
           auth:
@@ -169,7 +169,7 @@ Two resources combine to materialise a Secret the chart can consume:
 
     - **Default (consumer-managed):** the consumer's GitOps repo applies
       ExternalSecret manifests alongside (or before) the chart. The
-      chart references the resulting Secret by name. This is the RDC
+      chart references the resulting Secret by name. This is the example
       lab's convention and stays out of the chart entirely.
 
       ```yaml
@@ -909,7 +909,7 @@ addresses.
 
 > First-login auth-onramp for both `meho login` (CLI device-code) and
 > the MCP-client surface (`/mcp` over RFC 9728 + OAuth 2.1 + PKCE).
-> The 2026-05-21 RDC dogfood walked the realm from scratch and paid
+> The 2026-05-21 lab test walked the realm from scratch and paid
 > ~2.5 hours hitting four sequential walls — none of them documented
 > in one place at the time; a follow-up 2026-05-22 dogfood added a
 > fifth (W7, `offline_access` for Claude Code's MCP refresh-token
@@ -1540,28 +1540,28 @@ After `helm install` / `helm upgrade` and the realm steps above:
 
 ```bash
 # 1. Auth-config endpoint carries cli_client_id.
-curl -sf https://meho.evba.lab/api/v1/auth-config | jq .
+curl -sf https://meho.example.lab/api/v1/auth-config | jq .
 # {
-#   "keycloak_issuer": "https://keycloak.evba.lab/realms/evba",
+#   "keycloak_issuer": "https://keycloak.example.lab/realms/meho",
 #   "audience": "meho-backplane",
 #   "cli_client_id": "meho-cli"
 # }
 
 # 2. CLI device-code flow completes.
-meho login https://meho.evba.lab
-# Logged in to https://meho.evba.lab; token stored in keyring.
+meho login https://meho.example.lab
+# Logged in to https://meho.example.lab; token stored in keyring.
 
 # 3. Authenticated REST call succeeds.
-TOKEN=$(meho login --print-token https://meho.evba.lab)
+TOKEN=$(meho login --print-token https://meho.example.lab)
 curl -sf -H "Authorization: Bearer $TOKEN" \
-  https://meho.evba.lab/api/v1/health
+  https://meho.example.lab/api/v1/health
 # {"status": "ok"}
 
 # 4. MCP RFC 9728 metadata document is reachable.
-curl -sf https://meho.evba.lab/.well-known/oauth-protected-resource | jq .
+curl -sf https://meho.example.lab/.well-known/oauth-protected-resource | jq .
 # {
-#   "resource": "https://meho.evba.lab/mcp",
-#   "authorization_servers": ["https://keycloak.evba.lab/realms/evba"],
+#   "resource": "https://meho.example.lab/mcp",
+#   "authorization_servers": ["https://keycloak.example.lab/realms/meho"],
 #   ...
 # }
 ```
@@ -1570,7 +1570,7 @@ curl -sf https://meho.evba.lab/.well-known/oauth-protected-resource | jq .
 
 The deployer's first-login walk hits these walls in sequence; each
 surfaces with a different symptom but the cause-and-fix chain is
-bounded. W1–W4 came out of the 2026-05-21 RDC dogfood; **W7** was
+bounded. W1–W4 came out of the 2026-05-21 lab test; **W7** was
 added 2026-05-22 when the same operator's MCP client (Claude Code)
 hit `invalid_scope` after the W1–W4 fixes shipped. Walls are
 numbered for cross-reference with the originating dogfood reports.

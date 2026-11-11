@@ -88,8 +88,8 @@ func newReadCmd() *cobra.Command {
 			"is NOT recorded (extraction is client-side).\n\n" +
 			"Exit codes mirror meho operation call: 0=ok, 1=error/denied,\n" +
 			"2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho secret read --target rdc-vault secret app/db --field password | sshpass -f /dev/stdin ssh root@host\n" +
-			"  PW=$(meho secret read --target rdc-vault secret app/db --field password)",
+		Example: "  meho secret read --target vault-lab secret app/db --field password | sshpass -f /dev/stdin ssh root@host\n" +
+			"  PW=$(meho secret read --target vault-lab secret app/db --field password)",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,

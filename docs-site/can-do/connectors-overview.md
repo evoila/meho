@@ -13,8 +13,9 @@ for each vendor.
 
 MEHO has two kinds of connectors. Both work the same for the caller:
 
-- **Generic** connectors are built from a vendor's API file (OpenAPI,
-  GraphQL, WSDL or proto).
+- **Generic** connectors are built from a vendor's OpenAPI file (version
+  3.0 or 3.1). The command line converts a Swagger 2.0 file to OpenAPI 3
+  first.
 - **Typed** connectors are written by hand against a vendor library or
   a protocol, where no good API file exists.
 

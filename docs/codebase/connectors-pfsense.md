@@ -47,7 +47,7 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
 
 - **`PfSenseConnector`** (`connector.py`) — `SshConnector` subclass. Class
   attributes: `product="pfsense"`, `version="2.7"`, `impl_id="pfsense-ssh"`.
-  Inherits the per-target asyncssh connection pool and `aclose()` from the
+  Inherits the asyncssh connection pool (one login per caller and target) and `aclose()` from the
   adapter; overrides `_auth_config` to reject password auth, plus `fingerprint`,
   `probe`, `execute`, `about`, the read-op bound-method shims (the 7 T2 ops
   plus `dhcp_leases`, #2849), the write-op bound-method shims (`gateway_add`,
@@ -279,7 +279,7 @@ Two-phase registration, identical to the bind9 pattern:
   No `py.typed` marker; mypy uses `ignore_missing_imports` per the existing
   project-wide mypy config.
 - **`SshConnector`** (`connectors/adapters/ssh.py`) — parent class providing
-  the per-target connection pool, `_connect`, `_run_command`, and `aclose`.
+  the connection pool (one login per caller and target), `_connect`, `_run_command`, and `aclose`.
   `_connect` checks the target address again when it connects
   (`connect_checked` in `connectors/_shared/dial_guard.py`).
 - **`register_connector_v2`** / **`register_typed_op_registrar`**

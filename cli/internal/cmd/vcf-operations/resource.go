@@ -52,10 +52,10 @@ func newResourceListCmd() *cobra.Command {
 			"(resourceKind / adapterKind / name / page / pageSize); see the\n" +
 			"vROps suite-api docs for the full list.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vcf-operations resource list --target rdc-vrops\n" +
-			"  meho vcf-operations resource list --target rdc-vrops " +
+		Example: "  meho vcf-operations resource list --target vrops-lab\n" +
+			"  meho vcf-operations resource list --target vrops-lab " +
 			"--params '{\"resourceKind\":\"VirtualMachine\",\"pageSize\":50}'\n" +
-			"  meho vcf-operations resource list --target rdc-vrops --json",
+			"  meho vcf-operations resource list --target vrops-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -136,8 +136,8 @@ func newResourceGetCmd() *cobra.Command {
 			"resourceStatusStates summary; --json emits the full envelope.\n\n" +
 			"<id> is the resource UUID returned by `resource list`.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vcf-operations resource get 00000000-0000-4000-8000-000000000000 --target rdc-vrops\n" +
-			"  meho vcf-operations resource get <uuid> --target rdc-vrops --json",
+		Example: "  meho vcf-operations resource get 00000000-0000-4000-8000-000000000000 --target vrops-lab\n" +
+			"  meho vcf-operations resource get <uuid> --target vrops-lab --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

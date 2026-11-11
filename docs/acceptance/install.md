@@ -21,7 +21,7 @@ Copyright (c) 2026 evoila Group
 
 The chart, image, and CLI are produced here. The values overlay
 template
-[`deploy/values-examples/values-rdc-example.yaml`](../../deploy/values-examples/values-rdc-example.yaml),
+[`deploy/values-examples/values-example-lab.yaml`](../../deploy/values-examples/values-example-lab.yaml),
 the chart at
 [`deploy/charts/meho/`](../../deploy/charts/meho/), and the operator
 CLI shipped on Releases all originate from this repository. The
@@ -291,7 +291,7 @@ deploy + writes the closing artefact.
 - Producer artefacts the cold-deploy uses:
   - Image: `ghcr.io/evoila/meho:<tag>` ([chart `Chart.yaml`](../../deploy/charts/meho/Chart.yaml))
   - Chart: `oci://ghcr.io/evoila/meho-chart:<version>` ([publish workflow](../../.github/workflows/chart.yml))
-  - Values overlay template: [`deploy/values-examples/values-rdc-example.yaml`](../../deploy/values-examples/values-rdc-example.yaml)
+  - Values overlay template: [`deploy/values-examples/values-example-lab.yaml`](../../deploy/values-examples/values-example-lab.yaml)
   - CLI: [`https://github.com/evoila/meho/releases`](https://github.com/evoila/meho/releases)
 - PR-smoke (CI subset): [`scripts/ci/pr-smoke.sh`](../../scripts/ci/pr-smoke.sh)
 - Deploy surface deep-dive: [`docs/codebase/devops.md`](../codebase/devops.md)

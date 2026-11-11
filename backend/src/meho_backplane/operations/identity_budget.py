@@ -79,6 +79,7 @@ __all__ = [
     "PerMillionPricing",
     "TokenUsage",
     "apply_consumption",
+    "clear_limits",
     "compute_cost",
     "compute_run_cost",
     "get_remaining",
@@ -462,6 +463,33 @@ def compute_run_cost(
     return sum((compute_cost(usage, model_id, fallback=fallback) for usage in requests), Decimal(0))
 
 
+async def _latest_prior_bucket(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    principal_sub: str,
+    window_kind: BudgetWindowKind,
+    window_start: datetime,
+) -> IdentityBudget | None:
+    """Return the newest bucket of the same kind that starts before *window_start*.
+
+    A cap is set once and holds for every later window. Each window has
+    its own row, so a new row copies the limits of the row before it.
+    """
+    stmt = (
+        select(IdentityBudget)
+        .where(
+            IdentityBudget.tenant_id == tenant_id,
+            IdentityBudget.principal_sub == principal_sub,
+            IdentityBudget.window_kind == window_kind.value,
+            IdentityBudget.window_start < window_start,
+        )
+        .order_by(IdentityBudget.window_start.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 async def _get_or_create_bucket(
     session: AsyncSession,
     *,
@@ -479,11 +507,11 @@ async def _get_or_create_bucket(
     the caller's retry path (the runtime catches and re-issues this
     helper) lands on the now-existing row.
 
-    The bucket is created with zero consumption + NULL limits. A
-    seeding helper (:func:`set_limits`) is the only path that
-    populates ``token_limit`` / ``cost_limit`` / ``request_limit``
-    — limits are an out-of-band operator decision, not a runtime
-    side effect.
+    The bucket is created with zero consumption. Its limits are the
+    limits of the bucket before it (the cap carries over to the next
+    window), or ``NULL`` when there is none. :func:`set_limits` and
+    :func:`clear_limits` are the only paths that change a limit —
+    limits are an operator decision, not a runtime side effect.
     """
     window_start = window_start_for(window_kind, now)
     window_end = _window_end_for(window_kind, window_start)
@@ -496,12 +524,22 @@ async def _get_or_create_bucket(
     row = (await session.execute(stmt)).scalar_one_or_none()
     if row is not None:
         return row
+    prior = await _latest_prior_bucket(
+        session,
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        window_kind=window_kind,
+        window_start=window_start,
+    )
     row = IdentityBudget(
         tenant_id=tenant_id,
         principal_sub=principal_sub,
         window_kind=window_kind.value,
         window_start=window_start,
         window_end=window_end,
+        token_limit=prior.token_limit if prior is not None else None,
+        cost_limit=prior.cost_limit if prior is not None else None,
+        request_limit=prior.request_limit if prior is not None else None,
     )
     session.add(row)
     await session.flush()
@@ -625,6 +663,47 @@ async def set_limits(
     return bucket
 
 
+async def clear_limits(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    principal_sub: str,
+    window_kind: BudgetWindowKind,
+    when: datetime | None = None,
+) -> IdentityBudget:
+    """Remove all three limits of a (principal, window_kind) bucket.
+
+    The cap is gone for this window and for every later window, because
+    a new bucket copies the limits of the one before it. Consumption is
+    kept. Creates the current bucket if it does not exist, so the
+    removal also wins over a cap set in an earlier window.
+
+    Args:
+        session: Open :class:`AsyncSession`; flushed, not committed.
+        tenant_id: The tenant the bucket belongs to.
+        principal_sub: The principal sub the bucket is for.
+        window_kind: The window-kind to clear.
+        when: Override the bucket-resolution clock.
+
+    Returns:
+        The mutated, flushed bucket row.
+    """
+    now = when if when is not None else datetime.now(UTC)
+    bucket = await _get_or_create_bucket(
+        session,
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        window_kind=window_kind,
+        now=now,
+    )
+    bucket.token_limit = None
+    bucket.cost_limit = None
+    bucket.request_limit = None
+    bucket.updated_at = now
+    await session.flush()
+    return bucket
+
+
 async def get_remaining(
     session: AsyncSession,
     *,
@@ -635,8 +714,8 @@ async def get_remaining(
 ) -> BudgetReading:
     """Return the limits / consumption / remaining-headroom view for one bucket.
 
-    Returns a synthetic empty :class:`BudgetReading` (zero
-    consumption, no limits) when no row exists for the
+    Returns a synthetic :class:`BudgetReading` (zero consumption, the
+    limits of the window before it) when no row exists for the
     (principal, window_kind, period) — *"no budget configured"* is a
     distinct read from *"budget configured but unspent"*, but both
     are honest answers and the enforcement gate (C3-b) is the only
@@ -664,21 +743,32 @@ async def get_remaining(
     )
     row = (await session.execute(stmt)).scalar_one_or_none()
     if row is None:
+        # No run yet in this window: the cap of the window before it still holds.
+        prior = await _latest_prior_bucket(
+            session,
+            tenant_id=tenant_id,
+            principal_sub=principal_sub,
+            window_kind=window_kind,
+            window_start=window_start,
+        )
+        token_limit = prior.token_limit if prior is not None else None
+        cost_limit = prior.cost_limit if prior is not None else None
+        request_limit = prior.request_limit if prior is not None else None
         return BudgetReading(
             tenant_id=tenant_id,
             principal_sub=principal_sub,
             window_kind=window_kind,
             window_start=window_start,
             window_end=window_end,
-            token_limit=None,
+            token_limit=token_limit,
             tokens_consumed=Decimal(0),
-            tokens_remaining=None,
-            cost_limit=None,
+            tokens_remaining=token_limit,
+            cost_limit=cost_limit,
             cost_consumed=Decimal(0),
-            cost_remaining=None,
-            request_limit=None,
+            cost_remaining=cost_limit,
+            request_limit=request_limit,
             requests_consumed=0,
-            requests_remaining=None,
+            requests_remaining=request_limit,
         )
     tokens_remaining: Decimal | None = (
         row.token_limit - row.tokens_consumed if row.token_limit is not None else None

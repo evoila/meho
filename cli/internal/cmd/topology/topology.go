@@ -422,7 +422,7 @@ func renderHTTPStatus(
 		// Only `refresh` can 404 — resolve_target's structured
 		// `{"error":"no_target","query":...,"matches":[...]}`
 		// envelope. Render near-miss suggestions when present so the
-		// operator sees "did you mean rdc-vcenter?". This is also the
+		// operator sees "did you mean vcenter-lab?". This is also the
 		// cross-tenant boundary surface for refresh: a target in
 		// another tenant resolves to no_target, identical to a typo.
 		return output.RenderError(cmd.ErrOrStderr(),

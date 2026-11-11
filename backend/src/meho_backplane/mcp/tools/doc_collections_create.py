@@ -8,7 +8,7 @@ The write sibling of the ``list_doc_collections`` catalogue tool
 docs can I search?"; this tool registers a new collection so an operator /
 agent can seed one without a raw ``INSERT INTO doc_collections`` — closing
 the validated, audited create-half gap Ops hit on the first co-located
-corpus round-trip (claude-rdc-hetzner-dc#975).
+corpus round-trip (the lab repo).
 
 Two gates, mirroring the lifecycle write fronts
 ================================================

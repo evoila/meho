@@ -110,6 +110,7 @@ from meho_backplane.audit_query import (
     query_audit,
     replay_session,
 )
+from meho_backplane.auth.client_identity import via_label
 from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session, get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, Tenant
@@ -497,6 +498,8 @@ async def _build_drawer_context(
         # ops are aggregate-only without a second hard-coded list.
         "gated_op_classes": sorted(AGGREGATE_ONLY_OP_CLASSES),
         "references": references,
+        # The login client and channel of the row (AUDIT_CLIENT_IDENTITY).
+        "via_label": via_label(row.payload),
     }
 
 

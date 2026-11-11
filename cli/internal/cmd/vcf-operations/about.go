@@ -38,8 +38,8 @@ func newAboutCmd() *cobra.Command {
 			"  - 2   auth_expired\n" +
 			"  - 3   unreachable\n" +
 			"  - 4   unexpected response shape",
-		Example: "  meho vcf-operations about --target rdc-vrops\n" +
-			"  meho vcf-operations about --target rdc-vrops --json | jq .result",
+		Example: "  meho vcf-operations about --target vrops-lab\n" +
+			"  meho vcf-operations about --target vrops-lab --json | jq .result",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

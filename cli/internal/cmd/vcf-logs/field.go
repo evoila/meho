@@ -38,7 +38,7 @@ func newFieldListCmd() *cobra.Command {
 			"Renders name / type / source for human eyes; --json emits the full\n" +
 			"OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example:       "  meho vcf-logs field list --target rdc-vrli\n",
+		Example:       "  meho vcf-logs field list --target vrli-lab\n",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

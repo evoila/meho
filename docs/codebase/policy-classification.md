@@ -144,9 +144,11 @@ The change is the operation `policy.classify` on the connector
 
 ## Known limits
 
-- The edit surfaces (REST, CLI, console, edit by pattern) and the policy
-  file import come in later changes. They use `policy.classify` or the same
-  rights-change mark.
+- The edit surfaces (REST, CLI, console, edit by pattern) come in a later
+  change. They use `policy.classify` or the same rights-change mark.
+- The policy file import (`policy.apply`, see [policy.md](policy.md))
+  replaces the whole document of a tenant or the install, also the entries
+  that `policy.classify` wrote.
 - Search hits, the call contract and the approval request do not show the
   category yet.
 - The flight-recorder check (`test_flight_recorder_typed_spans.py`) runs

@@ -20,13 +20,21 @@ import datetime as dt
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 LEVELS = {"read", "change"}
 TEST_KEYS = {"product_version", "level", "date", "meho_release"}
 _RELEASE_HEADING = re.compile(r"^## \[(\d+\.\d+\.\d+)\]", re.MULTILINE)
-_VERSION = re.compile(r"\d+(?:\.\d+){0,3}")
+# Digits and dots, with an optional suffix without dots, like "2.7.2-RELEASE".
+# A suffix has no dot, so a host name or URL cannot hide in it.
+_VERSION = re.compile(r"v?\d+(?:\.\d+){0,3}(?:[-+_][A-Za-z0-9]+)*")
+# A connector id, like "vmware-rest-9.0" or "k8s-1.x". Its version part looks
+# like a host name to _HOST, so a key that matches this is not checked for one.
+_CONNECTOR_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*-v?\d+(?:\.(?:\d+|x))*")
+# A file name a comment may point to, like "CHANGELOG.md".
+_FILE_REFERENCE = re.compile(r"[\w/-]+\.(?:md|py|yaml|yml)")
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
 _URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://|\bwww\.", re.IGNORECASE)
 # A name with a dot whose last part has a letter, like "name.example.org".
@@ -39,12 +47,41 @@ def changelog_releases(changelog_text: str) -> set[str]:
     return set(_RELEASE_HEADING.findall(changelog_text))
 
 
-def _lab_detail(text: str, *, comment: bool = False) -> str | None:
-    # A comment may name a file, like "CHANGELOG.md", so it is not checked for host names.
+class _UniqueKeyLoader(yaml.SafeLoader):  # type: ignore[misc]  # yaml has no stubs here
+    """A safe loader that refuses a key listed twice in one mapping.
+
+    ``yaml.safe_load`` keeps only the last of two equal keys, so a second block
+    for the same connector would replace the first one without a word.
+    """
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> Any:
+        seen: set[object] = set()
+        for key_node, _value in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    None, None, f"key {key!r} is listed twice; keep one", key_node.start_mark
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
+def load_record(raw_text: str) -> Any:
+    """Parse the record. Raises ``yaml.YAMLError`` on bad YAML or a repeated key."""
+    # A SafeLoader subclass, so it makes no Python objects.
+    return yaml.load(raw_text, Loader=_UniqueKeyLoader)
+
+
+def _lab_detail(text: str, *, allowed: re.Pattern[str] | None = None) -> str | None:
+    """Name the first URL, address or host name in *text*.
+
+    A host name that fully matches *allowed* does not count.
+    """
     checks = (("URL", _URL), ("IPv4 address", _IPV4), ("host name", _HOST))
-    for kind, pattern in checks[:2] if comment else checks:
-        match = pattern.search(text)
-        if match:
+    for kind, pattern in checks:
+        for match in pattern.finditer(text):
+            if kind == "host name" and allowed and allowed.fullmatch(match.group(0)):
+                continue
             return f"{kind} {match.group(0)!r}"
     return None
 
@@ -73,7 +110,9 @@ def _check_test(
     problems = [f"{label}: unknown field {key!r}" for key in sorted(set(test) - TEST_KEYS)]
     version = test.get("product_version")
     if not isinstance(version, str) or not _VERSION.fullmatch(version):
-        problems.append(f'{label}: product_version must be quoted text like "8.0.3"')
+        problems.append(
+            f'{label}: product_version must be quoted text like "8.0.3" or "2.7.2-RELEASE"'
+        )
     elif version in seen:
         problems.append(f"{label}: product_version {version} is listed twice; keep one entry")
     else:
@@ -110,9 +149,11 @@ def _check_connector(
     connector_id: object, entry: object, releases: set[str], today: dt.date
 ) -> list[str]:
     label = f"connector {connector_id}"
-    if not isinstance(entry, dict):
-        return [f"{label}: must be a mapping"]
     problems: list[str] = []
+    if not isinstance(connector_id, str) or not _CONNECTOR_ID.fullmatch(connector_id):
+        problems.append(f'{label}: the id must look like "vmware-rest-9.0" or "k8s-1.x"')
+    if not isinstance(entry, dict):
+        return [*problems, f"{label}: must be a mapping"]
     product = entry.get("product")
     if not isinstance(product, str) or not product.strip():
         problems.append(f"{label}: product must be non-empty text")
@@ -128,12 +169,14 @@ def _check_connector(
 def _check_lab_details(data: object, raw_text: str) -> list[str]:
     problems: list[str] = []
     for path, text in _strings(data, "file"):
-        detail = _lab_detail(text)
+        # A connector id like "k8s-1.x" looks like a host name; its form is checked elsewhere.
+        is_id = path.startswith("file.connectors.<key ")
+        detail = _lab_detail(text, allowed=_CONNECTOR_ID if is_id else None)
         if detail:
             problems.append(f"{path}: lab detail not allowed ({detail})")
     for number, line in enumerate(raw_text.splitlines(), start=1):
         if "#" in line:
-            detail = _lab_detail(line.split("#", 1)[1], comment=True)
+            detail = _lab_detail(line.split("#", 1)[1], allowed=_FILE_REFERENCE)
             if detail:
                 problems.append(f"line {number}: lab detail not allowed in a comment ({detail})")
     return problems
@@ -163,7 +206,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         raw = args.file.read_text(encoding="utf-8")
-        data = yaml.safe_load(raw)
+        data = load_record(raw)
         changelog = args.changelog.read_text(encoding="utf-8")
     except (OSError, yaml.YAMLError) as exc:
         print(f"live test record: cannot read: {exc}", file=sys.stderr)

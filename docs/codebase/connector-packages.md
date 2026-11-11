@@ -912,7 +912,9 @@ tested on a real system. It is one small file for every connector family.
   anywhere in the file.
 - **The checks.** `backend/scripts/validate_live_tests.py` checks the file
   (level, date, MEHO release in `CHANGELOG.md`, one entry for each
-  connector id and product version, no lab details).
+  connector id and product version, no lab details). A product version is
+  digits and dots, with an optional suffix like `2.7.2-RELEASE`. A connector
+  id listed twice is refused, also when YAML would keep only the last one.
   `backend/tests/test_live_tests_record.py` checks that every connector id
   exists in the registry or in the enterprise pack list. The VCF manifest
   (`vcf-api-contract-manifest.yaml`) accepts a `live-verified` row only when

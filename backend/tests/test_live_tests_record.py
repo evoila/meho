@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 import yaml
 from scripts.generate_reference_docs import _ENTERPRISE_PACK, _eager_import_connectors
-from scripts.validate_live_tests import validate_live_tests
+from scripts.validate_live_tests import load_record, validate_live_tests
 
 from meho_backplane.connectors.registry import all_connectors_v2
 
@@ -91,6 +91,7 @@ def test_script_exits_non_zero_on_a_bad_file(tmp_path: Path) -> None:
         (_with_test(meho_release="9.9.9"), "not a '## [X.Y.Z]' heading"),
         (_with_test(meho_release="Unreleased"), "not a '## [X.Y.Z]' heading"),
         (_with_test(product_version=8.0), "product_version must be quoted text"),
+        (_with_test(product_version="2.7.2-lab.example.org"), "product_version must be quoted"),
         (_with_test(extra="x"), "unknown field"),
     ],
 )
@@ -131,9 +132,64 @@ def test_lab_details_are_refused_in_a_comment() -> None:
     assert any("in a comment" in problem for problem in problems)
 
 
+def test_host_name_in_a_comment_is_refused() -> None:
+    problems = _problems(GOOD, "connectors: {}  # tested on name.example.org\n")
+    assert any("in a comment" in problem and "host name" in problem for problem in problems)
+
+
+def test_file_reference_in_a_comment_is_allowed() -> None:
+    raw = "# See CHANGELOG.md and backend/scripts/validate_live_tests.py\nconnectors: {}\n"
+    assert _problems(GOOD, raw) == []
+
+
+def test_checked_in_comments_pass() -> None:
+    raw = RECORD.read_text(encoding="utf-8")
+    assert _problems(GOOD, raw) == []
+
+
 def test_four_part_product_version_is_not_an_address() -> None:
     data = _with_test(product_version="5.1.1.0")
     assert _problems(data) == []
+
+
+def test_product_version_with_a_suffix_passes() -> None:
+    """The pfSense connector reports versions like "2.7.2-RELEASE"."""
+    data = _with_test(product_version="2.7.2-RELEASE")
+    assert _problems(data) == []
+
+
+def test_wildcard_version_connector_id_passes() -> None:
+    """A registered id like "k8s-1.x" is not taken for a host name."""
+    data = deepcopy(GOOD)
+    data["connectors"]["k8s-1.x"] = {"product": "Kubernetes", "tests": []}
+    assert _problems(data) == []
+
+
+@pytest.mark.parametrize("connector_id", ["name.example.org", "k8s-10.20.30.40"])
+def test_lab_detail_as_a_connector_id_is_refused(connector_id: str) -> None:
+    data = deepcopy(GOOD)
+    data["connectors"][connector_id] = {"product": "Demo Product", "tests": []}
+    assert _problems(data) != []
+
+
+def test_repeated_connector_block_is_refused(tmp_path: Path) -> None:
+    raw = (
+        "connectors:\n"
+        "  demo-rest-1.0: {product: Demo, tests: []}\n"
+        "  demo-rest-1.0: {product: Demo, tests: []}\n"
+    )
+    with pytest.raises(yaml.YAMLError, match="listed twice"):
+        load_record(raw)
+    bad = tmp_path / "repeated.yaml"
+    bad.write_text(raw, encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--file", str(bad)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "listed twice" in result.stderr
 
 
 def test_every_connector_id_exists() -> None:
@@ -146,7 +202,8 @@ def test_every_connector_id_exists() -> None:
     }
     for _product, ids, _versions, _what in _ENTERPRISE_PACK:
         known.update(part.strip() for part in ids.split(","))
-    data = yaml.safe_load(RECORD.read_text(encoding="utf-8"))
+    data = load_record(RECORD.read_text(encoding="utf-8"))
+    assert isinstance(data, dict)
     unknown = sorted(set(data["connectors"]) - known)
     assert not unknown, f"connector ids not in the registry or the enterprise pack: {unknown}"
 

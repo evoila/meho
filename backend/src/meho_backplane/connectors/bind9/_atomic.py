@@ -345,6 +345,13 @@ PYEOF
             find "$BIND_ROOT" -mindepth 1 -delete > /dev/null 2>&1 || true
         fi
         tar -xzf "$SNAPSHOT_PATH" -C / > /dev/null 2>&1 || true
+        # A multi-file apply loaded new zone files. The restored files keep
+        # their old times, so named would skip them as "not newer". Touch
+        # them so the reload below loads the restored content.
+        if [ -n "${{BIND9_STAGED_TAR_B64:-}}" ] && [ -n "$BIND_ROOT" ] \\
+            && [ "$BIND_ROOT" != "/" ]; then
+            find "$BIND_ROOT" -type f -exec touch {{}} + > /dev/null 2>&1 || true
+        fi
 
         # Force named to re-read the restored zonefile regardless
         # of its SOA serial. A plain ``rndc reload`` is a no-op

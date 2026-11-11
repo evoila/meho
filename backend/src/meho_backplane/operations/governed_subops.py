@@ -15,10 +15,16 @@ referenced — never re-typed), and the operator reads them off a discovery
 surface (``GET /api/v1/operations/governed-subops``).
 
 It is deliberately connector-agnostic — it knows nothing about vmware; it
-only holds op-id → child-op-id tuples a connector declared. Two parts:
+only holds op-id → child-op-id tuples a connector declared. Three parts:
 
 * :func:`register_governed_subops` — the declaration seam a connector calls
   once per composite at registration time, passing its manifest tuple.
+* :func:`declare_no_governed_subops` — the declaration of a composite
+  that makes its change without a step that MEHO checks on its own. With
+  :func:`composites_without_declared_steps`, a CI check makes sure every
+  composite that changes something declares its steps one way or the
+  other (#6285): the up-front step check of an agent call
+  (:mod:`~meho_backplane.operations._preview_steps`) reads this list.
 * :func:`classify_subop_grantability` — the per-child grantability verdict.
   It single-sources the delete-shaped classification through
   :mod:`meho_backplane.operations.service_grants` (the same rule
@@ -31,6 +37,7 @@ only holds op-id → child-op-id tuples a connector declared. Two parts:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Final, NamedTuple
 from uuid import UUID
 
@@ -44,6 +51,8 @@ __all__ = [
     "SubopGrantability",
     "build_governed_subops_response",
     "classify_subop_grantability",
+    "composites_without_declared_steps",
+    "declare_no_governed_subops",
     "governed_subops_for",
     "register_governed_subops",
     "registered_governed_subop_surfaces",
@@ -130,6 +139,39 @@ def registered_governed_subop_surfaces() -> dict[str, GovernedSubopSurface]:
 def reset_governed_subop_registry() -> None:
     """Clear the registry. Test seam only — never called in production."""
     _REGISTRY.clear()
+
+
+#: Composites that declared they have no step MEHO checks on its own.
+#: Filled at connector import. Not cleared by
+#: :func:`reset_governed_subop_registry`: it is fixed by the code, and a
+#: test that clears the step lists must not lose it.
+_NO_STEPS: Final[set[str]] = set()
+
+
+def declare_no_governed_subops(composite_op_ids: Iterable[str]) -> None:
+    """Declare composites that make their change without a checked step.
+
+    Such a composite does its work in calls on the connector's own
+    session and never calls
+    :func:`~meho_backplane.operations.composite.enforce_subop_policy`.
+    MEHO checks policy once, for the whole call, so there is no step that
+    can be refused half-way. Safe to call twice.
+    """
+    _NO_STEPS.update(composite_op_ids)
+
+
+def composites_without_declared_steps(composite_op_ids: Iterable[str]) -> list[str]:
+    """Return the composites in *composite_op_ids* that declared no steps, sorted.
+
+    A composite declares its steps with :func:`register_governed_subops`,
+    or declares that it has none with :func:`declare_no_governed_subops`.
+    The CI check passes the composites that change something.
+    """
+    return sorted(
+        op_id
+        for op_id in set(composite_op_ids)
+        if op_id not in _REGISTRY and op_id not in _NO_STEPS
+    )
 
 
 def classify_subop_grantability(op_id: str) -> SubopGrantability:

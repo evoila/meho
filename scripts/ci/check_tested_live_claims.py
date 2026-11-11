@@ -10,8 +10,10 @@ the record. This check covers the text that people write by hand: any page
 under ``docs-site/``, and the newest sections of ``CHANGELOG.md``.
 
 A line that says "tested live" (or "live-tested", "live tested", "tested on a
-real system") must name a connector id and a product version that have a
-test in the record. The check skips the generated parts: the connector
+real system") must name a connector id and a product version. Each version
+must have a test in the record for the connector id before it. Ids and
+versions match only in full: ``4.2.1`` does not back ``4.2.1-rc1``, and
+``nsx-rest-4.2`` does not back ``nsx-rest-4.20``. The check skips the generated parts: the connector
 inventory page and any block between ``<!-- live-tests:start -->`` and
 ``<!-- live-tests:end -->``.
 
@@ -39,6 +41,12 @@ _GENERATED_PAGES = {"docs-site/reference/connectors.md"}
 _SECTION = re.compile(r"^## \[", re.MULTILINE)
 _FIX = "add a row to docs/compatibility/live-tests.yaml or change the text"
 _RECORD = "docs/compatibility/live-tests.yaml"
+# A complete version with its suffix, such as 4.2.1, 4.2.1-rc1 or v9.0.0+build.5.
+_VERSION = re.compile(
+    r"(?<![\w.-])v?"
+    r"(\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.+-]*[0-9A-Za-z])?)"
+    r"(?![\w-]|\.\w)"
+)
 
 
 def recorded_tests(record: Any) -> dict[str, set[str]]:
@@ -57,20 +65,46 @@ def recorded_tests(record: Any) -> dict[str, set[str]]:
     return tested
 
 
-def _has_token(text: str, token: str) -> bool:
-    """True when *token* is in *text* and is not part of a longer version or word."""
-    return re.search(rf"(?<![\w.]){re.escape(token)}(?![\w]|\.\d)", text) is not None
+def _connector_spans(line: str, connector_ids: set[str]) -> list[tuple[int, int, str]]:
+    """Return ``(start, end, id)`` for each complete connector id in *line*.
+
+    ``nsx-rest-4.2`` does not match inside ``nsx-rest-4.20`` or ``my-nsx-rest-4.2``.
+    """
+    spans: list[tuple[int, int, str]] = []
+    for connector_id in connector_ids:
+        pattern = rf"(?<![\w.-]){re.escape(connector_id)}(?![\w-]|\.\w)"
+        spans.extend((m.start(), m.end(), connector_id) for m in re.finditer(pattern, line))
+    return sorted(spans)
+
+
+def claimed_pairs(line: str, connector_ids: set[str]) -> list[tuple[str, str]] | None:
+    """Return each ``(connector id, version)`` that *line* claims, or None.
+
+    A version belongs to the nearest connector id before it, or to the first id
+    when no id comes before it. None means the line names no known connector,
+    names no version, or names a connector with no version.
+    """
+    spans = _connector_spans(line, connector_ids)
+    if not spans:
+        return None
+    pairs: list[tuple[str, str]] = []
+    # The text before the first id, between two ids, and after the last id.
+    # The ids themselves are left out, so "4.2" in "nsx-rest-4.2" is no version.
+    owners = [spans[0][2]] + [connector_id for _, _, connector_id in spans]
+    starts = [start for start, _, _ in spans] + [len(line)]
+    ends = [0] + [end for _, end, _ in spans]
+    for owner, start, end in zip(owners, ends, starts, strict=True):
+        pairs.extend((owner, match.group(1)) for match in _VERSION.finditer(line[start:end]))
+    named = {connector_id for _, _, connector_id in spans}
+    if named - {connector_id for connector_id, _ in pairs}:
+        return None
+    return pairs
 
 
 def line_is_recorded(line: str, tested: dict[str, set[str]]) -> bool:
-    """True when *line* names a connector id and a version that the record has."""
-    for connector_id, versions in tested.items():
-        if connector_id not in line:
-            continue
-        rest = line.replace(connector_id, " ")
-        if any(_has_token(rest, version) for version in versions):
-            return True
-    return False
+    """True when every connector version that *line* claims has a test in the record."""
+    pairs = claimed_pairs(line, set(tested))
+    return pairs is not None and all(version in tested[c] for c, version in pairs)
 
 
 def claim_lines(text: str) -> list[tuple[int, str]]:

@@ -70,6 +70,41 @@ def test_claim_with_the_wrong_version_fails(tmp_path: Path) -> None:
     assert _run(_tree(tmp_path, record=_RECORD_WITH_ROW, page=page)).returncode == 1
 
 
+@pytest.mark.parametrize(
+    "page",
+    [
+        "Tested live on `nsx-rest-4.2` 4.2.1 and 4.2.2.\n",
+        "Tested live on `nsx-rest-4.2` 4.2.1-rc1.\n",
+        "Tested live on `nsx-rest-4.2` 4.2.1.5.\n",
+        "Tested live on `nsx-rest-4.20` 4.2.1.\n",
+        "Tested live on `my-nsx-rest-4.2` 4.2.1.\n",
+        "Tested live on `nsx-rest-4.2` 4.2.1 and `vmware-rest-9.0` 9.0.1.\n",
+        "Tested live on `nsx-rest-4.2`.\n",
+    ],
+)
+def test_claim_with_an_unrecorded_pair_fails(tmp_path: Path, page: str) -> None:
+    assert _run(_tree(tmp_path, record=_RECORD_WITH_ROW, page=page)).returncode == 1
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        "Tested live on `nsx-rest-4.2` v4.2.1.\n",
+        "Tested live: 4.2.1 on `nsx-rest-4.2`.\n",
+        "Tested live on `nsx-rest-4.2` 4.2.1 and 4.2.2.\n",
+    ],
+)
+def test_claim_with_only_recorded_pairs_passes(tmp_path: Path, page: str) -> None:
+    record = _RECORD_WITH_ROW + (
+        '      - product_version: "4.2.2"\n'
+        "        level: read\n"
+        "        date: 2026-11-07\n"
+        '        meho_release: "0.45.0"\n'
+    )
+    result = _run(_tree(tmp_path, record=record, page=page))
+    assert result.returncode == 0, result.stderr
+
+
 def test_claim_with_a_row_without_tests_fails(tmp_path: Path) -> None:
     record = _RECORD_HEAD + "connectors:\n  nsx-rest-4.2:\n    product: NSX\n    tests: []\n"
     assert _run(_tree(tmp_path, record=record, page=_CLAIM)).returncode == 1

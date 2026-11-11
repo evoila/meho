@@ -893,6 +893,33 @@ not declared stays hidden, so a forgotten declaration never shows a secret.
 Details: `docs/codebase/redaction.md`, "Secret-named fields in every
 answer".
 
+## Record a live test
+
+`docs/compatibility/live-tests.yaml` says which connector versions were
+tested on a real system. It is one small file for every connector family.
+
+- **Levels.** `read`: a read operation ran through MEHO against a real
+  system of that version. `change`: a change operation ran, with approval.
+  A `change` test also counts as a `read` test, so the file keeps only the
+  highest level for each product version.
+- **What a row means.** A connector id with tests was tested live. A
+  connector id with `tests: []` is built (code and CI tests only), not yet
+  tested live. A connector id that is not in the file is not yet recorded.
+- **Who adds a row.** The person who ran the live test opens a pull request
+  that adds one entry (product version, level, date, MEHO release). The pull
+  request says where the evidence is kept.
+- **No lab names or host names.** No IP address, no host name and no URL
+  anywhere in the file.
+- **The checks.** `backend/scripts/validate_live_tests.py` checks the file
+  (level, date, MEHO release in `CHANGELOG.md`, one entry for each
+  connector id and product version, no lab details). A product version is
+  digits and dots, with an optional suffix like `2.7.2-RELEASE`. A connector
+  id listed twice is refused, also when YAML would keep only the last one.
+  `backend/tests/test_live_tests_record.py` checks that every connector id
+  exists in the registry or in the enterprise pack list. The VCF manifest
+  (`vcf-api-contract-manifest.yaml`) accepts a `live-verified` row only when
+  this file has a test for that component at that version.
+
 ## Known limits
 
 - Code that Python runs before MEHO starts, for example from a `.pth` file

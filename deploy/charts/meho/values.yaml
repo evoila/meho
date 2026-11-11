@@ -720,6 +720,12 @@ config:
   # `"true"`, the biggest tools on the default MCP tool list send a short
   # text. The inputs they accept stay the same. See `docs/codebase/mcp.md`.
   mcpShortToolTexts: "false"
+  # -- `mcpClientPerToolKind` is rendered into `MCP_CLIENT_PER_TOOL_KIND`.
+  # When `"true"`, Claude Code and Claude Desktop sign in with their own
+  # login client (`meho-mcp-code`, `meho-mcp-desktop`). MEHO lists a client
+  # only when it finds it in Keycloak, through the admin client. See
+  # `docs-site/install/keycloak-realm.md`.
+  mcpClientPerToolKind: "false"
   # -- Tenants whose knowledge entries marked `shared` every tenant on
   # this instance can read. Comma-separated tenant ids. Rendered into
   # `KB_SHARED_TENANT_IDS`. Empty (the default): no tenant may share, and

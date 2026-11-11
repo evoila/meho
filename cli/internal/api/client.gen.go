@@ -69,6 +69,15 @@ const (
 	ApprovalResultStateUncertain  ApprovalResultState = "uncertain"
 )
 
+// Defines values for ApprovalSignInStatusState.
+const (
+	ApprovalSignInStatusStateFlowDiffers ApprovalSignInStatusState = "flow_differs"
+	ApprovalSignInStatusStateFlowMissing ApprovalSignInStatusState = "flow_missing"
+	ApprovalSignInStatusStateNotBound    ApprovalSignInStatusState = "not_bound"
+	ApprovalSignInStatusStateNotChecked  ApprovalSignInStatusState = "not_checked"
+	ApprovalSignInStatusStateOk          ApprovalSignInStatusState = "ok"
+)
+
 // Defines values for AuditEventClass.
 const (
 	AuditEventClassApprovalDecision   AuditEventClass = "approval_decision"
@@ -1978,6 +1987,17 @@ type ApprovalRevealResult_Result struct {
 	union json.RawMessage
 }
 
+// ApprovalSignInStatus The state of the approval sign-in flow and its binding (#6280).
+type ApprovalSignInStatus struct {
+	Client string                    `json:"client"`
+	Detail *string                   `json:"detail"`
+	Flow   *string                   `json:"flow,omitempty"`
+	State  ApprovalSignInStatusState `json:"state"`
+}
+
+// ApprovalSignInStatusState defines model for ApprovalSignInStatus.State.
+type ApprovalSignInStatusState string
+
 // ApprovalsStatus The approval settings in force (#4830).
 //
 // “custody“ is the state of the approval key: “configured“,
@@ -1987,11 +2007,16 @@ type ApprovalRevealResult_Result struct {
 // “delegated_decision_posture“ says whether a decision made on
 // someone else's instruction is allowed. The three values come from
 // :func:`meho_backplane.features.build_features_block`; they are state
-// words only, never a key value.
+// words only, never a key value. “sign_in“ is the state of the
+// approval client's own login flow in Keycloak (#6280,
+// :mod:`meho_backplane.auth.approval_sign_in_flow`).
 type ApprovalsStatus struct {
 	Custody                  string `json:"custody"`
 	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
 	EffectivePosture         string `json:"effective_posture"`
+
+	// SignIn The state of the approval sign-in flow and its binding (#6280).
+	SignIn *ApprovalSignInStatus `json:"sign_in,omitempty"`
 }
 
 // ApproveRequestBody POST body for “…/approve“.
@@ -6601,7 +6626,9 @@ type HealthResponse struct {
 	// ``delegated_decision_posture`` says whether a decision made on
 	// someone else's instruction is allowed. The three values come from
 	// :func:`meho_backplane.features.build_features_block`; they are state
-	// words only, never a key value.
+	// words only, never a key value. ``sign_in`` is the state of the
+	// approval client's own login flow in Keycloak (#6280,
+	// :mod:`meho_backplane.auth.approval_sign_in_flow`).
 	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 

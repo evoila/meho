@@ -51,6 +51,7 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations.approval_queue import (
+    ApprovalGroupForbiddenError,
     approve_request,
     resume_dispatch_after_approval,
 )
@@ -74,16 +75,21 @@ _ACTIONS_PATH = f"/admin/realms/{_REALM}/authentication/required-actions"
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000003852")
 
 
-def _operator(sub: str = "kc-otp-requester") -> Operator:
+def _operator(sub: str = "kc-otp-requester", role: TenantRole = TenantRole.OPERATOR) -> Operator:
     return Operator(
         sub=sub,
         name="Keycloak OTP Test Operator",
         email=None,
         raw_jwt="<kc-otp-raw-jwt>",
         tenant_id=_TENANT_ID,
-        tenant_role=TenantRole.OPERATOR,
+        tenant_role=role,
         principal_kind=PrincipalKind.USER,
     )
+
+
+def _approver() -> Operator:
+    # The write is dangerous: only a tenant admin or a MEHO-SA-Operator may approve it.
+    return _operator("kc-otp-approver", TenantRole.TENANT_ADMIN)
 
 
 def _creds_loader(_target: KeycloakTargetLike, _operator: Operator) -> Any:
@@ -222,7 +228,7 @@ async def test_ops_register_with_the_right_risk_level(kc: KeycloakConnector) -> 
                 )
             ).scalars()
         }
-    assert rows[_OP_ID].safety_level == "caution"
+    assert rows[_OP_ID].safety_level == "dangerous"
     assert rows[_OP_ID].requires_approval is True
     assert rows[_OTP_OP_ID].safety_level == "safe"
     assert rows[_OTP_OP_ID].requires_approval is False
@@ -410,7 +416,7 @@ async def test_a_failed_write_is_an_error(kc: KeycloakConnector) -> None:
 async def test_write_waits_for_approval_and_the_card_shows_the_change(
     kc: KeycloakConnector,
 ) -> None:
-    requester, approver = _operator("kc-otp-requester"), _operator("kc-otp-approver")
+    requester, approver = _operator("kc-otp-requester"), _approver()
     args = {
         "connector_id": _CONNECTOR_ID,
         "op_id": _OP_ID,
@@ -462,7 +468,7 @@ async def _park(params: dict[str, Any]) -> uuid.UUID:
 
 
 async def _approve_and_resume(request_id: uuid.UUID) -> Any:
-    approver = _operator("kc-otp-approver")
+    approver = _approver()
     async with get_sessionmaker()() as session:
         await approve_request(session, request_id, operator=approver, params=None)
         await session.commit()
@@ -488,6 +494,18 @@ async def test_approved_run_acts_on_the_user_id_on_the_card(kc: KeycloakConnecto
     assert put.call_count == 1
     assert not other_get.called
     assert not other_put.called
+
+
+async def test_a_plain_operator_cannot_approve_the_write(kc: KeycloakConnector) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _, put = _mount(mock, ["CONFIGURE_TOTP"])
+        request_id = await _park({"username": "event-guest", "remove": ["CONFIGURE_TOTP"]})
+        async with get_sessionmaker()() as session:
+            with pytest.raises(ApprovalGroupForbiddenError):
+                await approve_request(
+                    session, request_id, operator=_operator("kc-otp-approver"), params=None
+                )
+    assert not put.called
 
 
 async def test_approved_run_is_refused_when_the_card_has_no_user_id(

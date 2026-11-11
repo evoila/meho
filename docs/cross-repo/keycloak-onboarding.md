@@ -121,7 +121,7 @@ approves it through the queue.
 | `group_write` | `keycloak.group.delete` | `DELETE .../groups/{group-id}` | destructive |
 | `realm_write` | `keycloak.realm.delete` | `DELETE /admin/realms/{realm}` | destructive |
 | `user_write` | `keycloak.user.logout` | `POST .../users/{id}/logout` | caution |
-| `user_write` | `keycloak.user.required_actions.update` | `PUT .../users/{id}` (add or remove required actions, for example `CONFIGURE_TOTP`) | caution |
+| `user_write` | `keycloak.user.required_actions.update` | `PUT .../users/{id}` (add or remove required actions, for example `CONFIGURE_TOTP`) | dangerous |
 | `user_login_check` | `keycloak.user.check_login` | `POST /realms/{realm}/protocol/openid-connect/token` | caution |
 | `authflow_write` | `keycloak.authflow.ensure_approval_flow` | `.../authentication/flows` and `PUT .../clients/{id}` | caution |
 | `authflow_write` | `keycloak.authflow.ensure_passkey_code_skip` | `.../authentication/flows` and `PUT /admin/realms/{realm}` | caution |

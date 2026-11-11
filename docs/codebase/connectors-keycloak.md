@@ -45,7 +45,7 @@ and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
 `keycloak.user.sessions`, show one user's state after a logout or a password
 reset (read surface **sixteen**). In total the connector registers 41
 operations: 17 `safe` reads and 24 writes that wait for
-approval (7 `caution`, 13 `dangerous`, 4 `destructive`).
+approval (6 `caution`, 14 `dangerous`, 4 `destructive`).
 `keycloak.user.required_actions.update` makes a user set up a one-time code
 (OTP) at the next login, and `keycloak.user.otp_status` shows who has one
 (see "One-time code set-up").
@@ -379,11 +379,12 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.authflow.ensure_passkey_code_skip` | caution | `POST .../authentication/flows/browser/copy`, then `PUT .../realms/{realm}` |
 | `keycloak.authflow.ensure_approval_flow` | caution | `.../authentication/flows` and the client `PUT` (see "Approval sign-in flow and identity providers") |
 | `keycloak.user.check_login` | caution | `POST /realms/{realm}/protocol/openid-connect/token` (see "Login test") |
-| `keycloak.user.required_actions.update` | caution | `PUT .../users/{user-id}` (see "One-time code set-up") |
+| `keycloak.user.required_actions.update` | dangerous | `PUT .../users/{user-id}` (see "One-time code set-up") |
 
-Five more writes are `dangerous` because they can change who gets which
-tenant rights. MEHO reads the rights from the login token, and these
-writes change what goes into it, or who can sign in as whom:
+Six more writes are `dangerous` because they can change who gets which
+tenant rights, or how strong a sign-in is. MEHO reads the rights from the
+login token, and these writes change what goes into it, who can sign in as
+whom, or what a sign-in asks for:
 
 - `user.create`: the new user can carry a `groups` list and attributes.
 - `client.create` and `client.update`: a client carries the mappers and
@@ -391,12 +392,15 @@ writes change what goes into it, or who can sign in as whom:
 - `protocol_mapper.create`: a mapper decides the claims, also `tenant_id`
   and `tenant_role`.
 - `user.reset_password`: it sets the password of any user of the realm.
+- `user.required_actions.update`: taking a required action away (for
+  example the one-time code set-up) makes a user's sign-in weaker.
 
 At `dangerous`, only a MEHO-SA-Operator or a tenant admin may approve
 another person's request. The single-operator self-approval switch
 (`APPROVAL_ALLOW_SELF_APPROVAL`) does not cover them. The test
 `backend/tests/test_keycloak_identity_write_approvers.py` checks both rules
-against the registered levels.
+against the registered levels of the first five. The test of the one-time
+code set-up checks that `user.required_actions.update` is `dangerous`.
 
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
 + membership drive the backplane's tenant claims (`tenant_id` /
@@ -644,7 +648,7 @@ Two ops in `ops_user_required_actions.py`. The usual use is to make users
 set up a one-time code (OTP) app: Keycloak then asks for a code at every
 login.
 
-- `keycloak.user.required_actions.update` (caution, approval required,
+- `keycloak.user.required_actions.update` (dangerous, approval required,
   group `user_write`). Params: the user (`id` or `username`) and an `add`
   and/or a `remove` list of required action names, for example
   `{"username": "alice", "add": ["CONFIGURE_TOTP"]}`.

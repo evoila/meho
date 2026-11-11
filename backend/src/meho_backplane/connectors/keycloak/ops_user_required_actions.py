@@ -236,7 +236,7 @@ USER_REQUIRED_ACTION_OPS: tuple[KeycloakOp, ...] = (
         response_schema=_UPDATE_RESPONSE_SCHEMA,
         group_key="user_write",
         tags=("write", "user", "otp", "keycloak"),
-        safety_level="caution",
+        safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_UPDATE,

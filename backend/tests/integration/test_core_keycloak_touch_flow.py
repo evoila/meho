@@ -275,7 +275,16 @@ def _is_password_page(page: httpx.Response) -> bool:
 
 
 def _is_passkey_page(page: httpx.Response) -> bool:
-    return page.status_code == 200 and _form_action(page.text, "webauth") is not None
+    """The page that asks only for a passkey.
+
+    The password page has the passkey form too (the browser can offer a
+    passkey there), so a page with the password form is never this page.
+    """
+    return (
+        page.status_code == 200
+        and _form_action(page.text, "webauth") is not None
+        and not _is_password_page(page)
+    )
 
 
 def _log_in_with_password(browser: _Browser, person: _Person, **extra: str) -> dict[str, Any]:
@@ -396,7 +405,12 @@ def test_amr_is_empty_without_a_maximum_age_on_the_passkey_step(keycloak: _Keycl
         person = _add_person_with_passkey(keycloak, f"no-max-age-{uuid.uuid4().hex[:6]}")
         browser = _Browser(keycloak)
         _log_in_with_password(browser, person)
-        claims, _, _ = _step_up(browser, person)
+        page, state = browser.start(acr_values=_TOUCH, nonce=_b64url(secrets.token_bytes(16)))
+        redirect = _touch(browser, person, page)
+        # Without a maximum age the value counts only in the second of the
+        # touch itself; the console swaps the code a moment later.
+        time.sleep(2)
+        claims = browser.id_token(redirect, state)
         assert claims["acr"] == _TOUCH
         assert "hwk" not in claims.get("amr", [])
     finally:

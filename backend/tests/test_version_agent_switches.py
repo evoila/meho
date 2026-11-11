@@ -76,6 +76,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "approval_one_time_code_acr_values",
         "approval_outcome_unknown_after_minutes",
         "approval_presence_touch_valid_seconds",
+        "audit_client_identity",
         "audit_wrapper_rows_retired",
         "backplane_url",
         "bedrock_default_model",

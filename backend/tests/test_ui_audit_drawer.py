@@ -818,3 +818,23 @@ def test_drawer_shows_withdraw_row_as_withdrawn_not_as_a_run() -> None:
     )
     assert " ran vsphere.vm.delete" not in body
     assert "→ OK" not in body
+
+
+def test_drawer_shows_via_from_the_client_block() -> None:
+    """A row with a ``client`` block shows "Via: <client> (<channel>)"."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    with_block = _seed_audit_row(
+        tenant_id=_TENANT_A,
+        payload_extra={"client": {"azp": "meho-mcp", "channel": "token"}},
+    )
+    without_block = _seed_audit_row(tenant_id=_TENANT_A, second=1)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        shown = client.get(f"/ui/audit/show/{with_block}")
+        older = client.get(f"/ui/audit/show/{without_block}")
+
+    assert shown.status_code == 200, shown.text
+    assert "<dd data-via>meho-mcp (token)</dd>" in shown.text
+    assert older.status_code == 200, older.text
+    assert "data-via" not in older.text

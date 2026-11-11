@@ -100,6 +100,7 @@ import structlog
 from fastapi import Depends, HTTPException, Request, status
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from meho_backplane.auth.client_identity import bind_request_client
 from meho_backplane.auth.conventions_drift_login import reject_conventions_drift_only_elsewhere
 from meho_backplane.auth.current_tenant import bind_tenant_role_source
 from meho_backplane.auth.jwt import verify_jwt
@@ -573,6 +574,7 @@ async def verify_jwt_and_bind(
         target_id=None,  # slot; resolve_target mutates on success (G0.3-T4)
     )
     bind_tenant_role_source(operator)
+    bind_request_client(operator)
     # Negative runner cage: runs after contextvar binding so a 403 is
     # attributable in the audit trail, and before tenant seeding so a caged
     # request does no DB write. See :func:`_reject_runner_outside_gateway`.

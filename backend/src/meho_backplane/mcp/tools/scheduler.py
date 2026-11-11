@@ -73,6 +73,7 @@ from meho_backplane.scheduler.schemas import (
 )
 from meho_backplane.scheduler.service import (
     AgentDefinitionMissingError,
+    CheckSourceNotFoundError,
     SchedulerAdminService,
 )
 
@@ -264,6 +265,8 @@ async def _create_handler(
         )
     except AgentDefinitionMissingError as exc:
         raise McpInvalidParamsError("agent_definition_not_found") from exc
+    except CheckSourceNotFoundError as exc:
+        raise McpInvalidParamsError("check_source_not_found") from exc
     structlog.contextvars.bind_contextvars(audit_trigger_id=str(entry.id))
     return {"trigger_id": str(entry.id), "trigger": _row_to_dict(entry)}
 
@@ -282,7 +285,11 @@ register_mcp_tool(
             "kind=one_off), or event_filter (object for kind=event). A "
             "kind=event trigger fires whenever a MEHO event's payload "
             "contains its event_filter (payload @> event_filter); it is "
-            "dispatched by the event drain, not the clock. For "
+            "dispatched by the event drain, not the clock. Instead of "
+            "event_filter, check_source ({kind: sensor|dashboard, id or "
+            "name, only_worsening}) starts the agent on a Sensor or "
+            "Dashboard change; no id and no name means any; it needs "
+            "CHECKS_AGENT_EVENTS on to fire. For "
             "kind=cron/one_off, inputs (JSON object) is REQUIRED and must "
             "render a non-empty prompt (a 'prompt' string, or any non-empty "
             "object; inputs: {} is rejected); it is optional for kind=event "
@@ -325,6 +332,22 @@ register_mcp_tool(
                 "event_filter": {
                     "type": ["object", "null"],
                     "description": "Event-match filter (required when kind=event).",
+                },
+                "check_source": {
+                    "type": ["object", "null"],
+                    "description": (
+                        "Only for kind=event, not with event_filter. Pick a "
+                        "Sensor or Dashboard: {kind: 'sensor'|'dashboard', "
+                        "id or name (none = any), only_worsening (bool)}."
+                    ),
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["sensor", "dashboard"]},
+                        "id": {"type": ["string", "null"], "format": "uuid"},
+                        "name": {"type": ["string", "null"]},
+                        "only_worsening": {"type": "boolean"},
+                    },
+                    "required": ["kind"],
+                    "additionalProperties": False,
                 },
                 "timezone": {
                     "type": "string",

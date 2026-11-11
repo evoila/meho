@@ -48,20 +48,26 @@ from meho_backplane.agents.schemas import AgentDefinitionCreate, AgentModelTier
 from meho_backplane.agents.service import AgentDefinitionService
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.checks.events import publish_dashboard_changed
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentPrincipal,
     AuditLog,
+    CheckDashboard,
+    EventOutbox,
     ScheduledTrigger,
     ScheduledTriggerKind,
     ScheduledTriggerStatus,
+    Sensor,
     Tenant,
 )
+from meho_backplane.events.matcher import _matching_event_triggers
 from meho_backplane.main import app
 from meho_backplane.mcp.registry import get_tool
 from meho_backplane.scheduler.schemas import ScheduledTriggerCreate
 from meho_backplane.scheduler.service import (
     AgentDefinitionMissingError,
+    CheckSourceNotFoundError,
     SchedulerAdminService,
 )
 from meho_backplane.settings import get_settings
@@ -1376,3 +1382,303 @@ async def test_durability_trigger_survives_scheduler_restart(
     second_tick_fires = await run_one_tick()
     assert second_tick_fires == 0
     assert fire_calls.count(entry.id) == 1
+
+
+# ---------------------------------------------------------------------------
+# check_source: pick a Sensor or a Dashboard as the trigger source (#6182)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_sensor(tenant_id: UUID, name: str) -> UUID:
+    sensor_id = uuid4()
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as session:
+        session.add(
+            Sensor(
+                id=sensor_id,
+                tenant_id=tenant_id,
+                name=name,
+                connector_id="vmware-rest-9.0",
+                op_id="vmware.vm.list",
+                target=None,
+                params={},
+                assertion={
+                    "select": {"path": "$.count"},
+                    "compare": {"type": "threshold", "op": "lt", "critical": 10},
+                },
+                status="active",
+                cadence_kind="interval",
+                interval_seconds=60,
+                cron_expr=None,
+                timezone="UTC",
+                next_fire_at=now + timedelta(seconds=60),
+                severity="critical",
+                for_seconds=0,
+                last_state="unknown",
+                identity_sub="__sensor__",
+                created_by_sub="op-admin",
+            )
+        )
+        await session.commit()
+    return sensor_id
+
+
+async def _seed_dashboard(tenant_id: UUID, name: str) -> UUID:
+    dashboard_id = uuid4()
+    async with get_sessionmaker()() as session:
+        session.add(
+            CheckDashboard(
+                id=dashboard_id,
+                tenant_id=tenant_id,
+                name=name,
+                description=None,
+                notify_email=None,
+                notify_min_state="critical",
+                created_by_sub="op-admin",
+            )
+        )
+        await session.commit()
+    return dashboard_id
+
+
+def _check_source_payload(def_id: UUID, **source: object) -> ScheduledTriggerCreate:
+    return ScheduledTriggerCreate.model_validate(
+        {"kind": "event", "agent_definition_id": def_id, "check_source": source}
+    )
+
+
+def test_check_source_rejected_for_cron_kind() -> None:
+    with pytest.raises(ValueError, match="only allowed for event"):
+        ScheduledTriggerCreate.model_validate(
+            {
+                "kind": "cron",
+                "agent_definition_id": uuid4(),
+                "cron_expr": "*/5 * * * *",
+                "inputs": {"prompt": "x"},
+                "check_source": {"kind": "sensor"},
+            }
+        )
+
+
+def test_check_source_rejected_for_one_off_kind() -> None:
+    with pytest.raises(ValueError, match="only allowed for event"):
+        ScheduledTriggerCreate.model_validate(
+            {
+                "kind": "one_off",
+                "agent_definition_id": uuid4(),
+                "fire_at": datetime.now(UTC) + timedelta(hours=1),
+                "inputs": {"prompt": "x"},
+                "check_source": {"kind": "sensor"},
+            }
+        )
+
+
+def test_check_source_rejected_with_event_filter() -> None:
+    with pytest.raises(ValueError, match="cannot be used together"):
+        ScheduledTriggerCreate.model_validate(
+            {
+                "kind": "event",
+                "agent_definition_id": uuid4(),
+                "event_filter": {"a": 1},
+                "check_source": {"kind": "sensor"},
+            }
+        )
+
+
+def test_check_source_rejects_id_and_name_together_and_bad_kind() -> None:
+    with pytest.raises(ValueError, match="id or a name"):
+        _check_source_payload(uuid4(), kind="sensor", id=uuid4(), name="web")
+    with pytest.raises(ValueError):
+        _check_source_payload(uuid4(), kind="target")
+    with pytest.raises(ValueError):
+        _check_source_payload(uuid4(), kind="sensor", name="")
+
+
+@pytest.mark.asyncio
+async def test_service_check_source_dashboard_name_stores_id_and_worsening() -> None:
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="cs-dash")
+    dashboard_id = await _seed_dashboard(_TENANT_A, "web")
+    entry = await SchedulerAdminService().create(
+        tenant_id=_TENANT_A,
+        created_by_sub="op-admin",
+        payload=_check_source_payload(def_id, kind="dashboard", name="web", only_worsening=True),
+    )
+    assert entry.event_filter == {
+        "source": {"kind": "dashboard", "id": str(dashboard_id)},
+        "worsening": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_service_check_source_sensor_id_and_any() -> None:
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="cs-sensor")
+    sensor_id = await _seed_sensor(_TENANT_A, "disk")
+    service = SchedulerAdminService()
+    by_id = await service.create(
+        tenant_id=_TENANT_A,
+        created_by_sub="op-admin",
+        payload=_check_source_payload(def_id, kind="sensor", id=sensor_id),
+    )
+    assert by_id.event_filter == {"source": {"kind": "sensor", "id": str(sensor_id)}}
+    # The switch is off by default, so the answer says the trigger will not fire yet.
+    assert by_id.notice is not None
+    assert "will not fire" in by_id.notice
+    anyone = await service.create(
+        tenant_id=_TENANT_A,
+        created_by_sub="op-admin",
+        payload=_check_source_payload(def_id, kind="sensor"),
+    )
+    assert anyone.event_filter == {"source": {"kind": "sensor"}}
+
+
+@pytest.mark.asyncio
+async def test_service_check_source_unknown_and_other_tenant_refused() -> None:
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="cs-refuse")
+    await _seed_tenant(_TENANT_B, "tenant-b")
+    other_sensor = await _seed_sensor(_TENANT_B, "foreign")
+    service = SchedulerAdminService()
+    for source in (
+        {"kind": "sensor", "name": "no-such-sensor"},
+        {"kind": "sensor", "name": "foreign"},
+        {"kind": "sensor", "id": other_sensor},
+        {"kind": "dashboard", "name": "no-such-dashboard"},
+    ):
+        with pytest.raises(CheckSourceNotFoundError):
+            await service.create(
+                tenant_id=_TENANT_A,
+                created_by_sub="op-admin",
+                payload=_check_source_payload(def_id, **source),
+            )
+    assert await service.list_(_TENANT_A) == []
+
+
+@pytest.mark.asyncio
+async def test_check_source_trigger_matches_only_its_dashboard_event() -> None:
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="cs-fire")
+    web = await _seed_dashboard(_TENANT_A, "web")
+    db = await _seed_dashboard(_TENANT_A, "db")
+    entry = await SchedulerAdminService().create(
+        tenant_id=_TENANT_A,
+        created_by_sub="op-admin",
+        payload=_check_source_payload(def_id, kind="dashboard", name="web", only_worsening=True),
+    )
+    for dashboard_id, name in ((web, "web"), (db, "db")):
+        await publish_dashboard_changed(
+            tenant_id=_TENANT_A,
+            dashboard_id=dashboard_id,
+            dashboard_name=name,
+            previous_state="green",
+            state="critical",
+            worsening=True,
+            group_key="g1",
+        )
+    async with get_sessionmaker()() as session:
+        events = list((await session.execute(select(EventOutbox))).scalars().all())
+    matched = {
+        event.payload["source"]["name"]: [t.id for t in await _matching_event_triggers(event)]
+        for event in events
+    }
+    assert matched == {"web": [entry.id], "db": []}
+
+
+@pytest.mark.asyncio
+async def test_rest_check_source_unknown_returns_422_and_known_stores_filter(
+    client: TestClient,
+) -> None:
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="cs-rest")
+    sensor_id = await _seed_sensor(_TENANT_A, "rest-sensor")
+    key = make_rsa_keypair("kid-cs-rest")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        bad = client.post(
+            "/api/v1/scheduler/triggers",
+            json={
+                "kind": "event",
+                "agent_definition_id": str(def_id),
+                "check_source": {"kind": "sensor", "name": "missing"},
+            },
+            headers=headers,
+        )
+        assert bad.status_code == 422
+        assert bad.json()["detail"] == "check_source_not_found"
+        cron = client.post(
+            "/api/v1/scheduler/triggers",
+            json={
+                "kind": "cron",
+                "agent_definition_id": str(def_id),
+                "cron_expr": "*/5 * * * *",
+                "inputs": {"prompt": "x"},
+                "check_source": {"kind": "sensor"},
+            },
+            headers=headers,
+        )
+        assert cron.status_code == 422
+        good = client.post(
+            "/api/v1/scheduler/triggers",
+            json={
+                "kind": "event",
+                "agent_definition_id": str(def_id),
+                "check_source": {"kind": "sensor", "name": "rest-sensor"},
+            },
+            headers=headers,
+        )
+        assert good.status_code == 201, good.text
+        assert good.json()["event_filter"] == {"source": {"kind": "sensor", "id": str(sensor_id)}}
+
+
+@pytest.mark.asyncio
+async def test_mcp_create_check_source_stores_same_filter() -> None:
+    from meho_backplane.mcp.server import McpInvalidParamsError
+    from meho_backplane.mcp.tools.scheduler import _create_handler  # type: ignore[attr-defined]
+
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="cs-mcp")
+    dashboard_id = await _seed_dashboard(_TENANT_A, "web")
+    operator = Operator(
+        sub="mcp-admin",
+        raw_jwt="dummy",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+    result = await _create_handler(
+        operator,
+        {
+            "kind": "event",
+            "agent_definition_id": str(def_id),
+            "check_source": {"kind": "dashboard", "name": "web", "only_worsening": True},
+        },
+    )
+    assert result["trigger"]["event_filter"] == {
+        "source": {"kind": "dashboard", "id": str(dashboard_id)},
+        "worsening": True,
+    }
+    with pytest.raises(McpInvalidParamsError, match="check_source_not_found"):
+        await _create_handler(
+            operator,
+            {
+                "kind": "event",
+                "agent_definition_id": str(def_id),
+                "check_source": {"kind": "dashboard", "name": "nope"},
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_describe_check_source_filter_names_the_source() -> None:
+    from meho_backplane.scheduler.check_source import describe_check_source_filter
+
+    await _seed_tenant(_TENANT_A, "tenant-a")
+    dashboard_id = await _seed_dashboard(_TENANT_A, "web")
+    async with get_sessionmaker()() as session:
+        named = await describe_check_source_filter(
+            session,
+            _TENANT_A,
+            {"source": {"kind": "dashboard", "id": str(dashboard_id)}, "worsening": True},
+        )
+        anyone = await describe_check_source_filter(
+            session, _TENANT_A, {"source": {"kind": "sensor"}}
+        )
+        custom = await describe_check_source_filter(session, _TENANT_A, {"connector_id": "x"})
+    assert named == "Dashboard web, only when it gets worse"
+    assert anyone == "any Sensor"
+    assert custom is None

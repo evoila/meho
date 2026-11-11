@@ -17,8 +17,11 @@ versions match only in full: ``4.2.1`` does not back ``4.2.1-rc1``, and
 count: ``v4.2.1`` and ``4.2.1`` are the same version. Every word shaped like a
 connector id (such as ``nsx-typed-4.2``) counts, also when the record does not
 know it. Every number on the line counts as a version, so write other numbers
-in words. The check skips the generated parts: the connector inventory page and
-any block between ``<!-- live-tests:start -->`` and ``<!-- live-tests:end -->``.
+in words. A version is read as a whole word: a word that starts with a number
+but has no version shape the record accepts (such as ``4.2.1+build.5`` or
+``4.2.2-rc.1``) fails the line. The check skips the generated parts: the
+connector inventory page and any block between ``<!-- live-tests:start -->``
+and ``<!-- live-tests:end -->``.
 
 It also runs ``backend/scripts/validate_live_tests.py`` on the record.
 
@@ -52,7 +55,11 @@ CONNECTOR_ID_SHAPE = r"[a-z0-9]+(?:-[a-z0-9]+)*-v?\d+(?:\.(?:\d+|x))*"
 # Only complete words: "4.2" in "4.2.1" or "nsx-rest-4.2" in "nsx-rest-4.20" is none.
 _BEFORE = r"(?<![\w.-])"
 _AFTER = r"(?![\w-]|\.\w)"
-_VERSION = re.compile(_BEFORE + VERSION_SHAPE + _AFTER)
+_VERSION = re.compile(VERSION_SHAPE)
+# A whole word that starts with a number. The end of a sentence ("4.2.1.") is
+# not part of it.
+_NUMBER_WORD = re.compile(r"(?<![\w.+-])v?\d[\w.+-]*")
+_WORD_END = ".+-"
 _CONNECTOR_ID = re.compile(_BEFORE + r"(?=[a-z])" + CONNECTOR_ID_SHAPE + _AFTER)
 # A list marker at the start of a line, like "- " or "1. ", is no version.
 _LIST_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
@@ -111,7 +118,10 @@ def claimed_pairs(line: str, connector_ids: set[str]) -> list[tuple[str, str]] |
     starts = [start for start, _, _ in spans] + [len(line)]
     ends = [0] + [end for _, end, _ in spans]
     for owner, start, end in zip(owners, ends, starts, strict=True):
-        pairs.extend((owner, match.group()) for match in _VERSION.finditer(line[start:end]))
+        versions = [m.group().rstrip(_WORD_END) for m in _NUMBER_WORD.finditer(line[start:end])]
+        if not all(_VERSION.fullmatch(version) for version in versions):
+            return None
+        pairs.extend((owner, version) for version in versions)
     named = {connector_id for _, _, connector_id in spans}
     if named - {connector_id for connector_id, _ in pairs}:
         return None

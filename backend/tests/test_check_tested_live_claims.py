@@ -85,6 +85,9 @@ def test_claim_with_the_wrong_version_fails(tmp_path: Path) -> None:
         "Tested live on `nsx-rest-4.2` 4.2.1 and `nsx-typed-4.2` 4.2.1.\n",
         "Tested live on `nsx-typed-4.2` 4.2.1 and `nsx-rest-4.2` 4.2.1.\n",
         "Tested live on nsx-typed-4.2 and `nsx-rest-4.2` 4.2.1.\n",
+        "Tested live on `nsx-rest-4.2` 4.2.1+build.5.\n",
+        "Tested live on `nsx-rest-4.2` 4.2.1 and 4.2.2-rc.1.\n",
+        "Tested live on `nsx-rest-4.2` 4.2.1 and 2x.\n",
     ],
 )
 def test_claim_with_an_unrecorded_pair_fails(tmp_path: Path, page: str) -> None:
@@ -122,6 +125,7 @@ def _record_with_version(version: str) -> str:
         ("v4.2.1", "v4.2.1"),
         ("v4.2.1", "4.2.1"),
         ("2.7.2-RELEASE", "2.7.2-RELEASE"),
+        ("4.2.1+build5", "4.2.1+build5"),
     ],
 )
 def test_claim_in_every_record_version_format_passes(

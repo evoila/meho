@@ -3420,6 +3420,12 @@ operations you register, not <code>execute</code>.</p>
 <li><strong>Errors.</strong> Raise <code>kit.ConnectorUpstreamError</code> when the vendor answers
   with an error, and <code>kit.ConnectorAuthError</code> when it refuses the
   credential. A failed read must never look like an empty answer.</li>
+<li><strong>Version range.</strong> Set <code>supported_version_range</code> (for example
+  <code>"&gt;=1.0,&lt;2.0"</code>) to the product versions the connector is built for. When no
+  range applies, for example for a cloud API with no product version, leave
+  it out and set <code>version_range_reason</code> to one plain sentence. The template
+  has a test, <code>tests/test_version_range.py</code>, that fails when a connector has
+  neither.</li>
 <li><strong>Caches.</strong> Key a cache you keep across calls, for example a login
   token, with <code>kit.target_cache_key(target)</code>.</li>
 </ul>

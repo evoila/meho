@@ -29,7 +29,6 @@ import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations.approval_presence as presence_module
 from meho_backplane.auth.approval_sign_in import ApprovalAuth, TouchBinding, TouchPresence
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -39,11 +38,15 @@ from meho_backplane.db.models import (
     ApprovalRequestStatus,
     Tenant,
 )
+from meho_backplane.loop_schedule import FIRST_RUN_DELAY_SECONDS
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_presence import (
     BINDING_ALGORITHM,
+    CLEANUP_INTERVAL_SECONDS,
     MATCH_CODE_ALPHABET,
     TouchChallengeError,
+    _binding_still_holds,
+    _cleanup_loop,
     approval_card_text,
     compute_binding_hash,
     compute_card_hash,
@@ -59,6 +62,8 @@ from meho_backplane.operations.approval_queue import (
     create_pending_request,
 )
 from meho_backplane.settings import get_settings
+
+_MODULE = "meho_backplane.operations.approval_presence"
 
 _PARAMS: dict[str, Any] = {"name": "vm-01"}
 
@@ -506,7 +511,7 @@ async def test_use_touch_takes_the_approval_lock_on_the_row(
     async def _spy(session: AsyncSession, scope: str, key: str) -> None:
         calls.append((scope, key))
 
-    monkeypatch.setattr(presence_module, "take_approval_lock", _spy)
+    monkeypatch.setattr(f"{_MODULE}.take_approval_lock", _spy)
     await _use(challenge, _person(tenant_id))
     assert calls == [("approval-presence-touch", str(challenge.id))]
 
@@ -517,7 +522,7 @@ async def test_two_racing_uses_of_one_row_have_exactly_one_winner() -> None:
     request_id = await _park(tenant_id)
     challenge = await _start(tenant_id, [request_id])
     both_checked = asyncio.Barrier(2)
-    real_check = presence_module._binding_still_holds
+    real_check = _binding_still_holds
 
     async def _check_then_wait(session: AsyncSession, row: ApprovalPresenceChallenge) -> bool:
         holds = await real_check(session, row)
@@ -536,7 +541,7 @@ async def test_two_racing_uses_of_one_row_have_exactly_one_winner() -> None:
         return "ok"
 
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(presence_module, "_binding_still_holds", _check_then_wait)
+        patch.setattr(f"{_MODULE}._binding_still_holds", _check_then_wait)
         async with get_sessionmaker()() as first, get_sessionmaker()() as second:
             outcomes = await asyncio.gather(_attempt(first), _attempt(second))
 
@@ -634,3 +639,34 @@ async def test_cleanup_deletes_only_old_unused_rows() -> None:
         left = set((await session.execute(select(ApprovalPresenceChallenge.id))).scalars().all())
     assert old_unused.id not in left
     assert {old_used.id, recent_unused.id} <= left
+
+
+async def test_cleanup_loop_first_run_does_not_wait_a_full_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first clean-up comes one minute after start, then once a day."""
+    events: list[tuple[str, float]] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        events.append(("sleep", seconds))
+        if len(events) > 3:
+            raise asyncio.CancelledError
+
+    async def _fake_cleanup() -> int:
+        events.append(("cleanup", 0))
+        return 0
+
+    monkeypatch.setattr(f"{_MODULE}.asyncio.sleep", _fake_sleep)
+    monkeypatch.setattr(f"{_MODULE}.delete_unused_challenges", _fake_cleanup)
+    monkeypatch.setattr(f"{_MODULE}.note_loop_tick", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _cleanup_loop()
+
+    assert events == [
+        ("sleep", FIRST_RUN_DELAY_SECONDS),
+        ("cleanup", 0),
+        ("sleep", CLEANUP_INTERVAL_SECONDS),
+        ("cleanup", 0),
+        ("sleep", CLEANUP_INTERVAL_SECONDS),
+    ]

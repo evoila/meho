@@ -2525,8 +2525,12 @@ it). `audit_payload` writes `"presence"` and `"binding"` only when they
 are set, so an approve without a touch writes the same block as before.
 
 **Clean-up.** A loop that the app starts (`start_presence_challenge_cleanup`)
-runs once a day and deletes rows that were never used and are older than
-14 days. Used rows stay: the audit row names them by `challenge_id`.
+first runs one minute after start (`FIRST_RUN_DELAY_SECONDS`), then once a
+day. So a deployment that restarts often still cleans the table. Each run
+deletes rows that were never used and are older than 14 days. Used rows
+stay: the audit row names them by `challenge_id`. The table has no foreign
+key to the tenant, so rows of a deleted tenant stay until this clean-up
+removes them (used rows stay for good). The rows hold only hashes.
 
 ## Catalog `safety_level` on every envelope (#1855)
 

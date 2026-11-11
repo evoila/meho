@@ -57,6 +57,7 @@ from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
 )
+from meho_backplane.loop_schedule import FIRST_RUN_DELAY_SECONDS
 from meho_backplane.metrics import note_loop_tick
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
@@ -427,9 +428,14 @@ async def delete_unused_challenges(*, now: datetime | None = None) -> int:
 
 
 async def _cleanup_loop() -> None:
-    """Sleep one day, clean up, repeat. Cancellation stops the loop."""
+    """Clean up shortly after start, then once a day. Cancellation stops the loop.
+
+    The first run comes after ``FIRST_RUN_DELAY_SECONDS`` (one minute), not
+    after a full day. So a deployment that restarts more often than once a
+    day still cleans the table. The delete is cheap and safe to run twice.
+    """
+    await asyncio.sleep(FIRST_RUN_DELAY_SECONDS)
     while True:
-        await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
         try:
             await delete_unused_challenges()
         except asyncio.CancelledError:
@@ -437,6 +443,7 @@ async def _cleanup_loop() -> None:
         except Exception:
             _log().warning("approval_touch_cleanup_failed", exc_info=True)
         note_loop_tick("approval_presence_cleanup", CLEANUP_INTERVAL_SECONDS)
+        await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
 
 
 def start_presence_challenge_cleanup() -> asyncio.Task[None]:

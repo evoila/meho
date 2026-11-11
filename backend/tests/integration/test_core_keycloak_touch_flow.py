@@ -38,6 +38,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from http.cookies import SimpleCookie
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -178,13 +179,37 @@ def _add_person_with_passkey(kc: _Keycloak, username: str) -> _Person:
 
 @dataclass
 class _Browser:
-    """One browser of the console: it keeps Keycloak's login cookie."""
+    """One browser of the console: it keeps Keycloak's login cookie.
+
+    It keeps its own cookies by name and path: Keycloak marks its cookies
+    ``Secure`` when the host is ``localhost``, and httpx would then not send
+    them over plain HTTP.
+    """
 
     kc: _Keycloak
     client: httpx.Client = field(init=False)
+    cookies: dict[tuple[str, str], str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.client = httpx.Client(follow_redirects=False, timeout=30.0)
+
+    def _send(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        path = urlsplit(url).path
+        cookie = "; ".join(f"{n}={v}" for (n, p), v in self.cookies.items() if path.startswith(p))
+        headers = {"Cookie": cookie} if cookie else {}
+        response = self.client.request(method, url, headers=headers, **kwargs)
+        self.client.cookies.clear()
+        for raw in response.headers.get_list("set-cookie"):
+            parsed: SimpleCookie = SimpleCookie()
+            parsed.load(raw)
+            for name, morsel in parsed.items():
+                key = (name, morsel["path"] or "/")
+                gone = morsel["max-age"] == "0" or "1970" in morsel["expires"]
+                if gone or not morsel.value:
+                    self.cookies.pop(key, None)
+                else:
+                    self.cookies[key] = morsel.value
+        return response
 
     def start(self, **extra: str) -> tuple[httpx.Response, dict[str, str]]:
         """Open the console's authorization request; return the page and the PKCE state."""
@@ -200,17 +225,17 @@ class _Browser:
             "code_challenge_method": "S256",
             **extra,
         }
-        page = self.client.get(
-            f"{self.kc.base_url}/realms/meho/protocol/openid-connect/auth", params=params
+        page = self._send(
+            "GET", f"{self.kc.base_url}/realms/meho/protocol/openid-connect/auth", params=params
         )
         return page, state
 
     def post(self, action: str, data: dict[str, str]) -> httpx.Response:
-        return self.client.post(action, data=data)
+        return self._send("POST", action, data=data)
 
     def id_token(self, redirect: httpx.Response, state: dict[str, str]) -> dict[str, Any]:
         """Take the code from Keycloak's redirect back to the console, and swap it."""
-        assert redirect.status_code == 302, redirect.text[:500]
+        assert redirect.status_code == 302, _page_text(redirect.text)
         location = redirect.headers["location"]
         assert location.startswith(_REDIRECT), location
         query = parse_qs(urlsplit(location).query)
@@ -228,6 +253,15 @@ class _Browser:
         )
         assert tokens.status_code == 200, tokens.text
         return _token_claims(tokens.json()["id_token"])
+
+
+def _page_text(page: str) -> str:
+    """The title and the visible text of a page, for a failure message."""
+    title = re.search(r"<title>(.*?)</title>", page, re.S)
+    text = " ".join(
+        re.sub(r"<[^>]+>", " ", re.sub(r"<script.*?</script>", " ", page, flags=re.S)).split()
+    )
+    return f"{title.group(1).strip() if title else '?'}: {text[:1500]}"
 
 
 def _form_action(page: str, form_id: str) -> str | None:
@@ -248,7 +282,7 @@ def _is_passkey_page(page: httpx.Response) -> bool:
 
 def _log_in_with_password(browser: _Browser, person: _Person, **extra: str) -> dict[str, Any]:
     page, state = browser.start(**extra)
-    assert _is_password_page(page), page.text[:2000]
+    assert _is_password_page(page), _page_text(page.text)
     action = _form_action(page.text, "kc-form-login")
     assert action is not None
     done = browser.post(action, {"username": person.username, "password": person.password})
@@ -257,12 +291,12 @@ def _log_in_with_password(browser: _Browser, person: _Person, **extra: str) -> d
 
 def _touch(browser: _Browser, person: _Person, page: httpx.Response) -> httpx.Response:
     """Answer Keycloak's passkey page with the person's passkey."""
-    assert _is_passkey_page(page), page.text[:2000]
+    assert _is_passkey_page(page), _page_text(page.text)
     action = _form_action(page.text, "webauth")
     assert action is not None
     challenge = re.search(r"challenge\s*:\s*[\"']([^\"']+)[\"']", page.text)
     rp_id = re.search(r"rpId\s*:\s*[\"']([^\"']+)[\"']", page.text)
-    assert challenge is not None and rp_id is not None, page.text[:2000]
+    assert challenge is not None and rp_id is not None, _page_text(page.text)
     base = urlsplit(browser.kc.base_url)
     answer = person.passkey.answer(
         challenge=challenge.group(1),

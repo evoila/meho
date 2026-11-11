@@ -114,6 +114,8 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_examples_r4_local_claude.py",
     "tests/test_features_doc_consistency.py",
     "tests/test_inventory_shapes.py",
+    "tests/test_live_test_cells.py",
+    "tests/test_live_tests_record.py",
     "tests/test_maturity_surface_drift.py",
     "tests/test_mcp_surface_conformance.py",
     "tests/test_operations_connector_auth_failed.py",

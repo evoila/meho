@@ -256,8 +256,9 @@ meho status
 
 VKS is the Kubernetes that VMware Cloud Foundation (VCF) runs on a
 vSphere Supervisor. MEHO is tested on a VKS cluster with Kubernetes
-v1.35.5 on VCF 9.1. The chart needs no change for VKS. The steps above
-stay the same, with these differences:
+v1.35.5 on VCF 9.1. The chart needs no change for VKS. Every command,
+step by step, is on [Install MEHO on VKS by hand](form-3-vks.md). The
+steps above stay the same, with these differences:
 
 - **The way in.** VKS brings no ingress controller. The cluster admin
   installs [Traefik](https://doc.traefik.io/traefik/) from its Helm

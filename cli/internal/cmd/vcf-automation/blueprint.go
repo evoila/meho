@@ -31,7 +31,7 @@ func newBlueprintListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "list",
 		Short:         "List tenant-plane catalog blueprints",
-		Example:       "  meho vcf-automation blueprint list --target rdc-vcfa",
+		Example:       "  meho vcf-automation blueprint list --target vcfa-lab",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

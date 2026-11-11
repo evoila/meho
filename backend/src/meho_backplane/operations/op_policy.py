@@ -44,6 +44,9 @@ The rules:
 * **Caller address.** An operation with a parameter that holds an address
   MEHO connects to (:mod:`meho_backplane.operations.caller_address`) is at
   least ``caution`` and waits for approval. No override removes this.
+* **Credential read.** An operation that shows a secret value
+  (:mod:`meho_backplane.operations.credential_read`) is at least
+  ``caution`` and waits for approval. No override removes this.
 
 Dispatch, preview, search and the operation contract all read the
 effective values through :func:`apply_effective_policy` /
@@ -68,6 +71,7 @@ from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
 )
+from meho_backplane.operations.credential_read import raise_for_credential_read
 
 __all__ = [
     "SAFETY_RANK",
@@ -232,14 +236,14 @@ async def effective_policy_map(
 ) -> dict[OpKey, EffectivePolicy]:
     """Return the effective policy of every row in *rows* for *tenant_id*.
 
-    The caller-address floor runs last, after the overrides: an operation
-    with a parameter that holds an address MEHO connects to stays at least
-    ``caution`` with approval, also when an override turned approval off,
-    and also for a row stored before the marker floor existed.
+    The two floors run last, after the overrides: a credential read and an
+    operation with a parameter that holds an address MEHO connects to stay
+    at least ``caution`` with approval, also when an override turned
+    approval off, and also for a row stored before the floor existed.
     """
     overrides = await load_overrides(session, tenant_id=tenant_id, keys=map(OpKey.of, rows))
     return {
-        OpKey.of(row): _with_caller_address_floor(
+        OpKey.of(row): _with_floors(
             row,
             effective_policy(
                 row.safety_level, row.requires_approval, overrides.get(OpKey.of(row), [])
@@ -249,12 +253,17 @@ async def effective_policy_map(
     }
 
 
-def _with_caller_address_floor(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectivePolicy:
-    """Raise *policy* for a row with a caller-address parameter."""
-    safety_level, requires_approval = raise_for_caller_address(
-        row.parameter_schema,
+def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectivePolicy:
+    """Raise *policy* for a credential read and for a caller-address parameter."""
+    safety_level, requires_approval = raise_for_credential_read(
+        row.op_id,
         safety_level=policy.safety_level,
         requires_approval=policy.requires_approval,
+    )
+    safety_level, requires_approval = raise_for_caller_address(
+        row.parameter_schema,
+        safety_level=safety_level,
+        requires_approval=requires_approval,
     )
     return EffectivePolicy(safety_level=safety_level, requires_approval=requires_approval)
 
@@ -794,7 +803,7 @@ async def list_overrides(
 async def _scope_policy(session: AsyncSession, row: OperationPolicyOverride) -> EffectivePolicy:
     """Return the effective policy of *row*'s operation in *row*'s scope.
 
-    Like dispatch, the caller-address floor runs last, so the report never
+    Like dispatch, the two floors run last, so the report never
     lists approval as off for an operation that still waits for it. With no
     descriptor (the operation is gone) the lowest values apply, so only the
     overrides count.
@@ -805,7 +814,7 @@ async def _scope_policy(session: AsyncSession, row: OperationPolicyOverride) -> 
     if descriptor is None:
         return effective_policy("safe", False, overrides)
     policy = effective_policy(descriptor.safety_level, descriptor.requires_approval, overrides)
-    return _with_caller_address_floor(descriptor, policy)
+    return _with_floors(descriptor, policy)
 
 
 async def _classification(

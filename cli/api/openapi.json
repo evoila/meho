@@ -126,7 +126,7 @@
           "version"
         ],
         "summary": "Version",
-        "description": "Return the build-identity payload and the installed connector packages.\n\nEach build field falls back to ``\"unknown\"`` when its env var is unset\nor empty, which keeps local development frictionless without ever\npretending an unknown build is a known one. ``connector_packages`` is\nempty for the plain public image.",
+        "description": "Return the build identity, the connector packages and the agent switches.\n\nEach build field falls back to ``\"unknown\"`` when its env var is unset\nor empty, which keeps local development frictionless without ever\npretending an unknown build is a known one. ``connector_packages`` is\nempty for the plain public image. ``agent_switches`` lists each\nagent-facing setting with its value.",
         "operationId": "version_version_get",
         "responses": {
           "200": {
@@ -148,7 +148,7 @@
           "auth"
         ],
         "summary": "Auth Config",
-        "description": "Return Keycloak issuer, audience, and the CLI's two public client ids.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is returned exactly\nas configured, trailing slash included. Keycloak publishes its\nissuer without one; providers such as authentik publish theirs\nwith one, and a client that compares the value against the\ndiscovery document (RFC 8414 \u00a73.3) needs the published form. The\nCLI strips the slash itself before it builds\n``<issuer>/.well-known/openid-configuration``.",
+        "description": "Return Keycloak issuer, audience, and the public client ids.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is returned exactly\nas configured, trailing slash included. Keycloak publishes its\nissuer without one; providers such as authentik publish theirs\nwith one, and a client that compares the value against the\ndiscovery document (RFC 8414 \u00a73.3) needs the published form. The\nCLI strips the slash itself before it builds\n``<issuer>/.well-known/openid-configuration``.",
         "operationId": "auth_config_api_v1_auth_config_get",
         "responses": {
           "200": {
@@ -8518,6 +8518,182 @@
         }
       }
     },
+    "/api/v1/agent-budgets": {
+      "get": {
+        "tags": [
+          "agent-budgets"
+        ],
+        "summary": "Show Budgets",
+        "description": "Show the caps and the use so far of one principal (all windows, or one).",
+        "operationId": "show_budgets_api_v1_agent_budgets_get",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Principal Sub"
+            }
+          },
+          {
+            "name": "window",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/BudgetWindowKind",
+              "nullable": true,
+              "title": "Window"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentBudgetListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "agent-budgets"
+        ],
+        "summary": "Set Budget",
+        "description": "Set the limits of one window. A limit that is left out stays as it is.",
+        "operationId": "set_budget_api_v1_agent_budgets_put",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentBudgetSet"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentBudgetRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agent-budgets"
+        ],
+        "summary": "Clear Budget",
+        "description": "Remove all limits of one window. What is used so far is kept.",
+        "operationId": "clear_budget_api_v1_agent_budgets_delete",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Principal Sub"
+            }
+          },
+          {
+            "name": "window",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/BudgetWindowKind"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentBudgetRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents/{name}/run": {
       "post": {
         "tags": [
@@ -12298,6 +12474,60 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DecideAcceptedBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/approvals/{request_id}/reveal": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Reveal Approved Request",
+        "description": "Run an approved secret reveal once and return the value to the person who asked.",
+        "operationId": "reveal_approved_request_api_v1_approvals__request_id__reveal_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRevealResult"
                 }
               }
             }
@@ -24807,6 +25037,50 @@
         }
       }
     },
+    "/ui/vault/read/reveal": {
+      "post": {
+        "tags": [
+          "ui-vault"
+        ],
+        "summary": "Vault Read Reveal",
+        "description": "Run the approved read once for the person who asked and render the value.\n\nReveal-gated like ``/ui/vault/read``. Before the approval, the\nwaiting panel comes back.",
+        "operationId": "vault_read_reveal_ui_vault_read_reveal_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/vault/versions": {
       "get": {
         "tags": [
@@ -25323,6 +25597,146 @@
         ],
         "title": "AffectedSensorModel",
         "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.AffectedSensor`.\n\nIdentity of one Sensor row pinning a reclassified op (#2702) \u2014\nenough for the operator to find and re-audit it."
+      },
+      "AgentBudgetListResponse": {
+        "properties": {
+          "budgets": {
+            "items": {
+              "$ref": "#/components/schemas/AgentBudgetRead"
+            },
+            "type": "array",
+            "title": "Budgets"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "budgets"
+        ],
+        "title": "AgentBudgetListResponse",
+        "description": "The caps of one principal, one entry for each window."
+      },
+      "AgentBudgetRead": {
+        "properties": {
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "window": {
+            "$ref": "#/components/schemas/BudgetWindowKind"
+          },
+          "window_start": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Window Start"
+          },
+          "window_end": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Window End"
+          },
+          "token_limit": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Token Limit"
+          },
+          "tokens_consumed": {
+            "type": "integer",
+            "title": "Tokens Consumed"
+          },
+          "tokens_remaining": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Tokens Remaining"
+          },
+          "cost_limit": {
+            "type": "number",
+            "nullable": true,
+            "title": "Cost Limit"
+          },
+          "cost_consumed": {
+            "type": "number",
+            "title": "Cost Consumed"
+          },
+          "cost_remaining": {
+            "type": "number",
+            "nullable": true,
+            "title": "Cost Remaining"
+          },
+          "request_limit": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Request Limit"
+          },
+          "requests_consumed": {
+            "type": "integer",
+            "title": "Requests Consumed"
+          },
+          "requests_remaining": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Requests Remaining"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "principal_sub",
+          "window",
+          "window_start",
+          "window_end",
+          "token_limit",
+          "tokens_consumed",
+          "tokens_remaining",
+          "cost_limit",
+          "cost_consumed",
+          "cost_remaining",
+          "request_limit",
+          "requests_consumed",
+          "requests_remaining"
+        ],
+        "title": "AgentBudgetRead",
+        "description": "The caps of one window and what is used so far in it.\n\nA ``null`` limit means no cap on that value. ``*_remaining`` is\n``null`` when the limit is ``null``, and can be negative when a run\nwent over the cap. Costs are in USD."
+      },
+      "AgentBudgetSet": {
+        "properties": {
+          "principal_sub": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Principal Sub",
+            "description": "Login of the agent, e.g. agent:pod-reader"
+          },
+          "window": {
+            "$ref": "#/components/schemas/BudgetWindowKind"
+          },
+          "token_limit": {
+            "type": "integer",
+            "minimum": 0.0,
+            "nullable": true,
+            "title": "Token Limit"
+          },
+          "cost_limit": {
+            "type": "number",
+            "minimum": 0.0,
+            "nullable": true,
+            "title": "Cost Limit",
+            "description": "Cost cap in USD"
+          },
+          "request_limit": {
+            "type": "integer",
+            "minimum": 0.0,
+            "nullable": true,
+            "title": "Request Limit"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "principal_sub",
+          "window"
+        ],
+        "title": "AgentBudgetSet",
+        "description": "Body of ``PUT /api/v1/agent-budgets``."
       },
       "AgentDefinitionCreate": {
         "properties": {
@@ -26197,6 +26611,16 @@
             "title": "Reveal Secret",
             "default": false
           },
+          "waits_for_requester": {
+            "type": "boolean",
+            "title": "Waits For Requester",
+            "default": false
+          },
+          "reveal_changes_something": {
+            "type": "boolean",
+            "title": "Reveal Changes Something",
+            "default": false
+          },
           "status": {
             "$ref": "#/components/schemas/ApprovalRequestStatus"
           },
@@ -26414,6 +26838,59 @@
         ],
         "title": "ApprovalResumeOutcomeView",
         "description": "What happened when an approved request ran (#3543).\n\nA summary read off the stored result envelope. The result body and the\nfree-text error stay on the owner-only ``/result`` read."
+      },
+      "ApprovalRevealResult": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "nullable": true,
+            "title": "Result"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Audit Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "status",
+          "op_id",
+          "result",
+          "error",
+          "audit_id"
+        ],
+        "title": "ApprovalRevealResult",
+        "description": "The run result of an approved reveal, for the person who asked."
       },
       "ApprovalsStatus": {
         "properties": {
@@ -27154,6 +27631,13 @@
             "type": "string",
             "title": "Cli Approve Client Id",
             "default": ""
+          },
+          "mcp_clients": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Mcp Clients"
           }
         },
         "type": "object",
@@ -29759,6 +30243,16 @@
         ],
         "title": "BudgetStatus",
         "description": "Preamble budget status for the operator's tenant.\n\nSurfaced as a sub-document on every ``GET /api/v1/conventions``\ncall so the CLI's ``meho conventions list`` (T7 #1094) can warn\nwhen the tenant's ``kind='operational'`` set overflows the\npreamble budget and name the slugs that will be dropped from the\nagent session preamble. Without this surface, T3 #315's\n\"lowest-priority slugs that will be dropped\" acceptance\ncriterion is unsatisfiable from a single list call -- the\ndeferred AC the issue body folds back in.\n\nAll fields are populated by a single call to\n:func:`~meho_backplane.conventions.preamble.assemble_preamble_detailed`\nagainst the operator's tenant, so the budget arithmetic is\nend-to-end consistent with T4's preamble assembler (the same\nhelper that produces the MCP ``initialize`` ``instructions``\nfield). A divergence between the list surface's\n``estimated_tokens`` and the preamble actually delivered to\nagent sessions would be a silent contract drift; sharing the\nprimitive eliminates it by construction.\n\nFields:\n\n* ``max_tokens`` -- the budget the preamble assembler enforces.\n  Currently :data:`DEFAULT_MAX_PREAMBLE_TOKENS` (a module-level\n  constant; configurable via the assembler's ``max_tokens``\n  parameter in tests). Exposed on the list response so\n  operators can do the budget math without grepping the source.\n* ``estimated_tokens`` -- :func:`estimate_tokens` over the\n  rendered conventions band (header + guard + delimited kept\n  blocks). Empty tenant: 0. Otherwise at most ``max_tokens``\n  when any entry was kept (the packer drops entries whole until\n  the band fits).\n* ``over_budget`` -- convenience flag derived from\n  ``len(dropped_slugs) > 0``. Cheap derived value but worth\n  surfacing as a boolean so CLI / dashboard consumers branch on\n  one bit rather than a length-of-list check.\n* ``dropped_slugs`` -- slugs that did not fit, in the packer's\n  drop order (lowest-priority-first, ties broken by oldest-\n  first). The CLI prints these on stderr with an\n  \"insufficient_budget\" exit-code-5 warning so the operator\n  knows exactly which conventions never reach an agent\n  session.\n* ``included_slugs`` -- slugs in the band, in pack order. Each\n  operational slug is in exactly one of ``included_slugs`` or\n  ``dropped_slugs``. \"Included\" means MEHO sends it in the MCP\n  ``initialize`` instructions; a client may ignore instructions,\n  so it is not proof that an agent applied the rule.\n* ``oversize_slugs`` -- the dropped slugs that do not fit even as\n  the only entry (rows written before the rendered write check,\n  or by another path). The rest of ``dropped_slugs`` fit alone\n  but lost the room to higher-priority entries."
+      },
+      "BudgetWindowKind": {
+        "type": "string",
+        "enum": [
+          "daily",
+          "weekly",
+          "monthly"
+        ],
+        "title": "BudgetWindowKind",
+        "description": "Closed vocabulary of budget-window granularities.\n\nEach :class:`IdentityBudget` row is keyed in part on a\n:class:`BudgetWindowKind` \u2014 the budget answers \"what's the cap for\nthis principal *per day / per week / per month*\". The runtime\nincrements one row per active window-kind on every successful run\n(one daily bucket, one weekly bucket, one monthly bucket).\n\nThe vocabulary is intentionally closed (three values). A fourth\ngranularity would require both a code change and an Alembic\nmigration (the\n:class:`~meho_backplane.db.models.IdentityBudget.window_kind`\ncolumn carries a DB-level CHECK constraint backed by this enum),\nwhich is the cheapest way to prevent drift between the DB row, the\nconsumption service, and the enforcement gate (G11.5-C3-b, #1080).\n\nMembers:\n\n* :attr:`DAILY` \u2014 buckets start at 00:00 UTC and last 24 hours.\n* :attr:`WEEKLY` \u2014 ISO-week buckets, starting Monday 00:00 UTC.\n* :attr:`MONTHLY` \u2014 calendar-month buckets, starting the 1st at\n  00:00 UTC."
       },
       "CallOperationBody": {
         "properties": {
@@ -36975,7 +37469,7 @@
           "runner"
         ],
         "title": "PrincipalKind",
-        "description": "Discriminator that distinguishes what authenticated this request.\n\nG11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,\naudit, and the approval gate can tell a human operator apart from\na service account or an agent without re-examining the JWT payload.\n\nValues are the literal strings the Keycloak ``principal_kind``\nprotocol mapper emits on the agent client (or that the v0.3 token\nexchange layer will emit). Existing tokens that carry no\n``principal_kind`` claim default to :attr:`USER` \u2014 the graceful-\nfallback contract means all pre-G11.2 human-operator flows are\nunaffected.\n\nMembers:\n\n* :attr:`USER` \u2014 a human operator authenticated via the interactive\n  device-code flow. Default when no claim is present.\n* :attr:`SERVICE` \u2014 a non-interactive service account client that\n  uses client-credentials flow but is not a MEHO-managed agent.\n* :attr:`AGENT` \u2014 a Keycloak client registered by\n  ``meho agent-principal register``; the token carries\n  ``principal_kind=agent``. G11.2-T2 (RFC 8693 delegation) and\n  G11.2-T3 (per-principal permission model) branch on this value\n  to apply agent-specific authz.\n* :attr:`RUNNER` \u2014 a satellite runner's service principal registered\n  by ``meho runner-principal register`` (Initiative #2415, #2502);\n  the token carries ``principal_kind=runner`` plus a ``runner_id``\n  claim. A runner is a dumb, push-only executor with a **read-only**\n  credential scope: its token is fail-closed 403'd on every\n  authenticated route outside the gateway allowlist prefixes\n  (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)\n  and on the MCP surface. The unforgeable discriminator is what the\n  negative cage keys on, so a runner client missing any other mapper\n  still cannot roam the read API."
+        "description": "Discriminator that distinguishes what authenticated this request.\n\nG11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,\naudit, and the approval gate can tell a human operator apart from\na service account or an agent without re-examining the JWT payload.\n\nValues are the literal strings the Keycloak ``principal_kind``\nprotocol mapper emits on the agent client (or that the v0.3 token\nexchange layer will emit). Existing tokens that carry no\n``principal_kind`` claim default to :attr:`USER` \u2014 the graceful-\nfallback contract means all pre-G11.2 human-operator flows are\nunaffected.\n\nMembers:\n\n* :attr:`USER` \u2014 a person who signed in. There are three ways: the\n  command line (``meho-cli`` client, device code), an MCP client\n  (``meho-mcp`` client, sign-in in the browser), and the web console\n  (``meho-web`` client). Default when no claim is present.\n* :attr:`SERVICE` \u2014 a non-interactive service account client that\n  uses client-credentials flow but is not a MEHO-managed agent.\n* :attr:`AGENT` \u2014 a Keycloak client registered by\n  ``meho agent-principal register``; the token carries\n  ``principal_kind=agent``. G11.2-T2 (RFC 8693 delegation) and\n  G11.2-T3 (per-principal permission model) branch on this value\n  to apply agent-specific authz.\n* :attr:`RUNNER` \u2014 a satellite runner's service principal registered\n  by ``meho runner-principal register`` (Initiative #2415, #2502);\n  the token carries ``principal_kind=runner`` plus a ``runner_id``\n  claim. A runner is a dumb, push-only executor with a **read-only**\n  credential scope: its token is fail-closed 403'd on every\n  authenticated route outside the gateway allowlist prefixes\n  (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)\n  and on the MCP surface. The unforgeable discriminator is what the\n  negative cage keys on, so a runner client missing any other mapper\n  still cannot roam the read API."
       },
       "PromoteBody": {
         "properties": {
@@ -42870,6 +43364,12 @@
             "type": "boolean",
             "title": "Can Switch Tenant",
             "default": false
+          },
+          "client": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Client"
           }
         },
         "type": "object",
@@ -43028,6 +43528,14 @@
             "type": "array",
             "title": "Connector Packages",
             "default": []
+          },
+          "agent_switches": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object",
+            "title": "Agent Switches",
+            "default": {}
           }
         },
         "type": "object",
@@ -43366,6 +43874,10 @@
   "tags": [
     {
       "name": "addon-pairing",
+      "x-maturity": "experimental"
+    },
+    {
+      "name": "agent-budgets",
       "x-maturity": "experimental"
     },
     {

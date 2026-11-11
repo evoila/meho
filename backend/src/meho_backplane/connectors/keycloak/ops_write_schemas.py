@@ -50,6 +50,7 @@ from meho_backplane.connectors.keycloak.ops_write_groups_schemas import (
     WHEN_TO_USE_GROUP_WRITE,
 )
 from meho_backplane.connectors.keycloak.ops_write_realm_smtp import SMTP_PASSWORD_SECRET_PROPS
+from meho_backplane.connectors.keycloak.ops_write_user_enabled_schemas import USER_ENABLED_OPS
 
 __all__ = ["WHEN_TO_USE_WRITE_BY_GROUP", "WRITE_OPS"]
 
@@ -117,7 +118,10 @@ _WHEN_TO_USE_USER_WRITE = (
     "role group with ``keycloak.group.member.add``. "
     "``keycloak.user.delete`` removes a user for good (destructive: a second "
     "person must approve, preview first). ``keycloak.user.logout`` ends all "
-    "live sessions of one user now (requires approval)."
+    "live sessions of one user now (requires approval). "
+    "``keycloak.user.disable`` / ``keycloak.user.enable`` turn an account off "
+    "and on without deleting it (dangerous); disable does not end open "
+    "sessions, so run ``keycloak.user.logout`` after it."
 )
 
 _WHEN_TO_USE_USER_LOGOUT = (
@@ -612,6 +616,9 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
     # Governed user / group / client deletes (#3944) — rows in
     # ``ops_write_delete_schemas``, handlers in ``ops_write_delete``.
     *DELETE_WRITE_OPS,
+    # Turn a user off and on (``user.disable`` / ``user.enable``) -- rows in
+    # ``ops_write_user_enabled_schemas``, handlers in ``ops_write_user_enabled``.
+    *USER_ENABLED_OPS,
     # Client roles, user details and one stored credential -- rows in
     # ``ops_write_account_schemas``, handlers in the ``ops_write_client_role``,
     # ``ops_write_user_update`` and ``ops_write_user_credential`` modules.

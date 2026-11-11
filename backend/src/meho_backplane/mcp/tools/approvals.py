@@ -131,8 +131,9 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
     ``result_state`` and ``resume_outcome`` (#3486, #3543) match the REST
     view: whether an approved request ran, and a short summary of how the
     run ended. The result body stays on the owner-only REST ``/result``.
-    ``reveal_secret`` matches the REST view too: ``True`` when the approved
-    run returns the hidden values of the answer to the requester.
+    ``reveal_secret`` matches the REST view too: ``True`` when the requester
+    asked for the hidden values of the answer. The run happens when the
+    requester gets the values.
     """
     result_state = approval_result_state(row)
     outcome = resume_outcome(row)
@@ -149,8 +150,9 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
         "connector_id": row.connector_id,
         "target_id": str(row.target_id) if row.target_id else None,
         "proposed_effect": row.proposed_effect,
-        # True when the approved run returns the hidden values of the answer
-        # to the requester (the requester sent ``reveal_secret: true``).
+        # True when the requester asked for the hidden values of the answer
+        # (``reveal_secret: true``). The operation runs when the requester
+        # gets the values, not on approve.
         "reveal_secret": bool(row.reveal_secret),
         "status": row.status,
         "result_state": result_state.value if result_state is not None else None,
@@ -399,8 +401,9 @@ register_mcp_tool(
             "Operator-level. Returns the full detail including "
             "proposed_effect (human-readable description of what the op "
             "would do) so an operator can decide before approving. "
-            "`reveal_secret: true` means the approved run returns the "
-            "hidden values of the answer to the requester. "
+            "`reveal_secret: true` means the requester asked for the "
+            "hidden values of the answer. Approving runs nothing: the "
+            "operation runs once, when the requester gets the values. "
             "Cross-tenant / absent ids return approval_request_not_found. "
             "Pass either `approval_request_id` (canonical name) "
             "or the deprecated `id` alias."

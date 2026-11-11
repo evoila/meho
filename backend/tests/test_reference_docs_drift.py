@@ -32,8 +32,13 @@ import pytest
 from scripts.generate_reference_docs import (
     CONNECTORS_RELPATH,
     MCP_TOOLS_RELPATH,
+    OVERVIEW_END,
+    OVERVIEW_RELPATH,
+    OVERVIEW_START,
     render_connector_index,
     render_mcp_tool_index,
+    render_overview_block,
+    splice_overview_block,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -85,3 +90,32 @@ def test_reference_page_carries_no_internal_reference(relpath: str, render) -> N
         "`_redact` / `_INTERNAL_REF` in "
         "backend/scripts/generate_reference_docs.py to strip them."
     )
+
+
+def test_overview_block_is_fresh() -> None:
+    """The generated block of the overview page must equal the fresh block.
+
+    The block comes from the live test record, so a change to the record
+    without building the pages again fails here.
+    """
+    committed = (_REPO_ROOT / OVERVIEW_RELPATH).read_text(encoding="utf-8")
+    assert committed == splice_overview_block(committed, render_overview_block()), (
+        f"The generated block of {OVERVIEW_RELPATH} is stale. Regenerate "
+        "with `uv run python scripts/generate_reference_docs.py` from "
+        "backend/ and commit the result."
+    )
+
+
+def test_overview_block_carries_no_internal_reference() -> None:
+    """The overview block follows the same public-safety rule as the other pages."""
+    block = render_overview_block()
+    assert block.startswith(OVERVIEW_START)
+    assert block.endswith(OVERVIEW_END)
+    for pattern in _FORBIDDEN_PATTERNS:
+        assert not re.search(pattern, block), pattern
+
+
+def test_splice_replaces_only_the_text_between_the_markers() -> None:
+    page = f"before\n{OVERVIEW_START}\nold\n{OVERVIEW_END}\nafter\n"
+    new_block = f"{OVERVIEW_START}\nnew\n{OVERVIEW_END}"
+    assert splice_overview_block(page, new_block) == f"before\n{new_block}\nafter\n"

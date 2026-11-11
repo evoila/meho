@@ -98,6 +98,8 @@ EXPECTED_WRITE_OP_IDS: tuple[str, ...] = (
     "keycloak.client.delete",
     "keycloak.user.logout",
     "keycloak.realm.delete",
+    "keycloak.user.disable",
+    "keycloak.user.enable",
     "keycloak.role_mapping.client.assign",
     "keycloak.role_mapping.client.remove",
     "keycloak.user.update",
@@ -130,6 +132,8 @@ EXPECTED_SAFETY: dict[str, str] = {
     "keycloak.client.delete": "destructive",
     "keycloak.user.logout": "caution",
     "keycloak.realm.delete": "destructive",
+    "keycloak.user.disable": "dangerous",
+    "keycloak.user.enable": "dangerous",
     "keycloak.role_mapping.client.assign": "dangerous",
     "keycloak.role_mapping.client.remove": "dangerous",
     "keycloak.user.update": "caution",
@@ -280,10 +284,10 @@ async def _dispatch(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_write_ops_registration_set() -> None:
-    """WRITE_OPS carries the twenty-two write ops (eighteen, plus four account writes)."""
+    """WRITE_OPS carries 24 write ops (eighteen, disable and enable, four account writes)."""
     op_ids = {op.op_id for op in WRITE_OPS}
     assert op_ids == set(EXPECTED_WRITE_OP_IDS)
-    assert len(WRITE_OPS) == 22
+    assert len(WRITE_OPS) == 24
 
 
 def test_write_ops_safety_levels_and_approval() -> None:

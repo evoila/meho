@@ -21,7 +21,11 @@ declare_op_classes(
     # write suffix, so it needs this pin.
     # ``.ensure_passkey_code_skip`` copies and binds the realm's browser flow;
     # its params are empty, so it is a plain write too.
+    # ``.disable`` and ``.enable`` turn a user off and on. Their params hold
+    # only a user id or username, so they are plain writes.
     write=(
+        "keycloak.user.disable",
+        "keycloak.user.enable",
         "keycloak.authflow.ensure_approval_flow",
         "keycloak.authflow.ensure_passkey_code_skip",
     ),

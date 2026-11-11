@@ -159,7 +159,7 @@ func TestCallBakesConnectorIDAndDictTarget(t *testing.T) {
 		},
 	})
 	c := New("vault-1.x")
-	if _, err := c.Call(context.Background(), "https://bp", "vault.kv.read", "rdc-vault", map[string]any{"path": "p"}); err != nil {
+	if _, err := c.Call(context.Background(), "https://bp", "vault.kv.read", "vault-lab", map[string]any{"path": "p"}); err != nil {
 		t.Fatalf("Call: %v", err)
 	}
 	if f.lastCallBody == nil {
@@ -175,8 +175,8 @@ func TestCallBakesConnectorIDAndDictTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AsCallOperationBodyTarget1: %v", err)
 	}
-	if got["name"] != "rdc-vault" {
-		t.Fatalf("Call should encode target as dict {\"name\": \"rdc-vault\"}; got %+v", got)
+	if got["name"] != "vault-lab" {
+		t.Fatalf("Call should encode target as dict {\"name\": \"vault-lab\"}; got %+v", got)
 	}
 	if f.lastCallBody.Params == nil || (*f.lastCallBody.Params)["path"] != "p" {
 		t.Fatalf("params not threaded: %+v", f.lastCallBody.Params)

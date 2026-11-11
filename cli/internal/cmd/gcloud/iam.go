@@ -60,8 +60,8 @@ func newIamSaListCmd() *cobra.Command {
 			"account with email, unique_id, display_name, description, and\n" +
 			"disabled status.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho gcloud iam sa list --target rdc-gcp-dev\n" +
-			"  meho gcloud iam sa list --target rdc-gcp-dev --json | jq '.result.rows[].email'",
+		Example: "  meho gcloud iam sa list --target gcp-dev-lab\n" +
+			"  meho gcloud iam sa list --target gcp-dev-lab --json | jq '.result.rows[].email'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -160,8 +160,8 @@ func newIamPolicyReadCmd() *cobra.Command {
 			"Use to audit who has which roles before investigating a\n" +
 			"permission-denied failure or before assigning new roles.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho gcloud iam policy read --target rdc-gcp-dev\n" +
-			"  meho gcloud iam policy read --target rdc-gcp-dev --json | jq '.result.bindings'",
+		Example: "  meho gcloud iam policy read --target gcp-dev-lab\n" +
+			"  meho gcloud iam policy read --target gcp-dev-lab --json | jq '.result.bindings'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

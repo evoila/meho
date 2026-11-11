@@ -487,7 +487,7 @@ func postIngest(ctx context.Context, authed *api.AuthedClient, body api.IngestRe
 //     capped error message as unexpected_response (exit 4), the
 //     same family the sync path's pipeline failures land in. A
 //     degraded job (the pipeline ran but persisted nothing
-//     dispatchable — claude-rdc-hetzner-dc#1136) renders the same
+//     dispatchable — the lab repo) renders the same
 //     way so a non-dispatchable ingest is never mistaken for success.
 //
 // The progress notice goes to stderr in both output modes: stdout
@@ -581,7 +581,7 @@ func renderIngestTerminal(
 		)
 	case api.IngestJobStatusResponseStatusDegraded:
 		// The pipeline ran to completion but left the connector
-		// non-dispatchable (claude-rdc-hetzner-dc#1136): a bare
+		// non-dispatchable (the lab repo): a bare
 		// "succeeded" here was the false-success the server now refuses
 		// to report. Surface it as an error (non-zero exit) carrying the
 		// structured error_class + detail so the operator knows the

@@ -37,7 +37,7 @@ func mustUUID(t *testing.T, s string) openapi_types.UUID {
 // verb + path and the rendered count summary.
 func TestRefreshHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/topology/refresh/rdc-vcenter", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/topology/refresh/vcenter-lab", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method: got %s; want POST", r.Method)
 		}
@@ -56,11 +56,11 @@ func TestRefreshHappyPath(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	cmd, stdout, stderr := newRunCmd(t)
-	if err := runRefresh(cmd, refreshOptions{Target: "rdc-vcenter", BackplaneOverride: srv.URL}); err != nil {
+	if err := runRefresh(cmd, refreshOptions{Target: "vcenter-lab", BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runRefresh: %v; stderr=%s", err, stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"rdc-vcenter", "+3", "-1", "~2", "+4"} {
+	for _, want := range []string{"vcenter-lab", "+3", "-1", "~2", "+4"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("refresh summary missing %q in %q", want, out)
 		}

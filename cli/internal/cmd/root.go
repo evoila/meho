@@ -383,7 +383,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// vRLI core verbs (about, query, aggregated, field list, host list,
 	// content-pack list, alert list) plus operation search/call
 	// meta-tool wrappers. `meho vcf-logs query --time-range 1h
-	// --target rdc-vrli` replaces the consumer's `./scripts/vcf-logs.sh`
+	// --target vrli-lab` replaces the consumer's `./scripts/vcf-logs.sh`
 	// wrapper. Registered before registerDynamicSubcommands so the
 	// backplane manifest cannot shadow the built-in `vcf-logs` parent.
 	root.AddCommand(vcflogs.NewRootCmd())
@@ -428,7 +428,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// (read/list/put/versions/delete), sys (health/seal-status/mounts-
 	// list/auth-list), and auth (userpass/approle list+read) verbs over
 	// the typed ops registered by G3.3-T1/T2/T3 (#545/#546/#547).
-	// `meho vault kv read --target rdc-vault secret <path>` replaces the
+	// `meho vault kv read --target vault-lab secret <path>` replaces the
 	// consumer's `_secret-read.sh` wrapper. Registered before
 	// registerDynamicSubcommands so the backplane manifest cannot shadow
 	// the built-in `vault` parent.
@@ -477,7 +477,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// esx-dc6.evba.lab 10.5.50.25 --zone evba.lab --target
 	// vcf-router-bind9` replaces the consumer's
 	// `bind9-dns.sh --add-a-record` wrapper (the 2026-05-04 / 2026-05-05
-	// credential-leak surface — evoila-bosnia/claude-rdc-hetzner-dc#86).
+	// credential surface).
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `bind9` parent.
 	root.AddCommand(bind9.NewRootCmd())

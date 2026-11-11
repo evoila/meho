@@ -41,8 +41,8 @@ func newFirewallGetCmd() *cobra.Command {
 			"is applied (operator source allowed on the expected ports, final\n" +
 			"default-discard). --json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho hetzner-robot firewall get 1.2.3.4 --target rdc-robot\n" +
-			"  meho hetzner-robot firewall get 1.2.3.4 --target rdc-robot --json | jq '.result.firewall.rules.input[]'",
+		Example: "  meho hetzner-robot firewall get 1.2.3.4 --target robot-lab\n" +
+			"  meho hetzner-robot firewall get 1.2.3.4 --target robot-lab --json | jq '.result.firewall.rules.input[]'",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

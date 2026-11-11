@@ -1548,14 +1548,14 @@ Three properties make this the right contract:
 `helm lint` against the unmodified `values.yaml` **deliberately fails**
 with the safe-by-default empty fields. The chart's `validate` job in
 [`.github/workflows/chart.yml`](../../.github/workflows/chart.yml) and
-[`deploy/values-examples/values-rdc-example.yaml`](../../deploy/values-examples/values-rdc-example.yaml)
+[`deploy/values-examples/values-example-lab.yaml`](../../deploy/values-examples/values-example-lab.yaml)
 both supply the required overrides; ad-hoc lint invocations pass them via
 `--set` or `-f`.
 
 ### Example values + ESO patterns
 
 A sanitized example values file lives at
-[`deploy/values-examples/values-rdc-example.yaml`](../../deploy/values-examples/values-rdc-example.yaml).
+[`deploy/values-examples/values-example-lab.yaml`](../../deploy/values-examples/values-example-lab.yaml).
 It targets a lab with PostgreSQL, Vault and Keycloak inside the cluster
 and an ingress-nginx controller, and is structured so that other Vault-+-Keycloak-+-Postgres-shaped labs can
 copy it, substitute the `<REPLACE: ...>` placeholders, and apply it.
@@ -3070,7 +3070,7 @@ Steps, in order:
    Labels the namespace with `meho.io/managed-by=pr-smoke` and
    `meho.io/pr-number=<n>` for consumer-side audit-log filtering.
 8. **Helm install** — `helm upgrade --install meho deploy/charts/meho/
-   -f deploy/values-examples/values-rdc-example.yaml
+   -f deploy/values-examples/values-example-lab.yaml
    --set image.tag=pr-<n>-<sha> --wait --timeout 5m`. Uses the
    in-tree example overlay as the base (real-target fixture layout)
    with the PR-tagged image as the only override.

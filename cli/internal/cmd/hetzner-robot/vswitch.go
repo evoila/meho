@@ -39,8 +39,8 @@ func newVswitchListCmd() *cobra.Command {
 			"Use 'meho hetzner-robot vswitch info <id>' for full member server detail.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho hetzner-robot vswitch list --target rdc-robot\n" +
-			"  meho hetzner-robot vswitch list --target rdc-robot --json | jq '.result[].vswitch.id'",
+		Example: "  meho hetzner-robot vswitch list --target robot-lab\n" +
+			"  meho hetzner-robot vswitch list --target robot-lab --json | jq '.result[].vswitch.id'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -118,8 +118,8 @@ func newVswitchInfoCmd() *cobra.Command {
 			"<vswitch-id> is the numeric ID from 'meho hetzner-robot vswitch list'.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho hetzner-robot vswitch info 4321 --target rdc-robot\n" +
-			"  meho hetzner-robot vswitch info 4321 --target rdc-robot --json",
+		Example: "  meho hetzner-robot vswitch info 4321 --target robot-lab\n" +
+			"  meho hetzner-robot vswitch info 4321 --target robot-lab --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

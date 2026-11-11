@@ -540,7 +540,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "gcloud.about", "rdc-gcp-dev", nil)
+	r, err := dispatchOp(context.Background(), srv.URL, "gcloud.about", "gcp-dev-lab", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -562,7 +562,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 				return
 			}
 			tgt, _ := raw["target"].(map[string]any)
-			if tgt == nil || tgt["name"] != "rdc-gcp-dev" {
+			if tgt == nil || tgt["name"] != "gcp-dev-lab" {
 				t.Errorf("target should wrap slug as {name: ...}; got %v", raw["target"])
 			}
 			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: "gcloud.about"})
@@ -571,7 +571,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "gcloud.about", "rdc-gcp-dev", nil); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "gcloud.about", "gcp-dev-lab", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -606,7 +606,7 @@ func TestDispatchOpServicesListSendsEnabledOnlyParam(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{"enabled_only": false}
-	if _, err := dispatchOp(context.Background(), srv.URL, "gcloud.services.list", "rdc-gcp-dev", params); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "gcloud.services.list", "gcp-dev-lab", params); err != nil {
 		t.Fatalf("dispatchOp services.list: %v", err)
 	}
 }
@@ -639,7 +639,7 @@ func TestDispatchOpComputeInstancesListSendsZoneParam(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{"zone": "europe-west3-a"}
-	if _, err := dispatchOp(context.Background(), srv.URL, "gcloud.compute.instances.list", "rdc-gcp-dev", params); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "gcloud.compute.instances.list", "gcp-dev-lab", params); err != nil {
 		t.Fatalf("dispatchOp instances.list: %v", err)
 	}
 }
@@ -672,7 +672,7 @@ func TestDispatchOpComputeSubnetsListSendsRegionParam(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{"region": "europe-west3"}
-	if _, err := dispatchOp(context.Background(), srv.URL, "gcloud.compute.subnetworks.list", "rdc-gcp-dev", params); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "gcloud.compute.subnetworks.list", "gcp-dev-lab", params); err != nil {
 		t.Fatalf("dispatchOp subnetworks.list: %v", err)
 	}
 }
@@ -707,8 +707,8 @@ func TestDispatchOpAllEightOps(t *testing.T) {
 					if body.OpID != opID {
 						t.Errorf("[%s] op_id: got %q want %q", opID, body.OpID, opID)
 					}
-					if tgt, _ := body.Target["name"].(string); tgt != "rdc-gcp-dev" {
-						t.Errorf("[%s] target.name: got %q want rdc-gcp-dev", opID, tgt)
+					if tgt, _ := body.Target["name"].(string); tgt != "gcp-dev-lab" {
+						t.Errorf("[%s] target.name: got %q want gcp-dev-lab", opID, tgt)
 					}
 					writeJSON(t, w, 200, CallResult{Status: "ok", OpID: opID})
 				},
@@ -716,7 +716,7 @@ func TestDispatchOpAllEightOps(t *testing.T) {
 			defer srv.Close()
 			primeToken(t, srv.URL)
 
-			if _, err := dispatchOp(context.Background(), srv.URL, opID, "rdc-gcp-dev", nil); err != nil {
+			if _, err := dispatchOp(context.Background(), srv.URL, opID, "gcp-dev-lab", nil); err != nil {
 				t.Fatalf("[%s] dispatchOp: %v", opID, err)
 			}
 		})

@@ -19,6 +19,7 @@ import getpass
 import json
 import logging
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -124,6 +125,7 @@ def test_ref_in_the_owner_home_passes_the_lexical_check() -> None:
         "/home/agent/.config/meho/key",
         "agent",
     )
+    assert parse_linux_secret_ref("seat-host/root/.config/key#root")[1] == "/root/.config/key"
 
 
 @pytest.mark.parametrize(
@@ -145,6 +147,11 @@ def test_ref_in_the_owner_home_passes_the_lexical_check() -> None:
         "seat-host/var/log/x#app",
         "seat-host/tmp/x#app",
         "seat-host/etc/a\\nb#app",  # backslash
+        "seat-host/root/key#app",  # the home of another user
+        "seat-host/home/other/key#app",
+        "seat-host/home/app#app",  # the home itself is not a file in it
+        "seat-host/home/apple/key#app",  # only a name that starts like the owner
+        "seat-host/data/app/key#app",  # neither a write root nor /home/<owner>
     ],
 )
 def test_bad_refs_are_refused_before_any_ssh(ref: str) -> None:
@@ -160,13 +167,14 @@ def test_write_roots_inside_never_roots_stay_allowed(ref: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_refused_path_opens_no_ssh_connection() -> None:
+@pytest.mark.parametrize("ref", ["seat-host/etc/../root/key#app", "seat-host/root/key#app"])
+async def test_a_refused_path_opens_no_ssh_connection(ref: str) -> None:
     connect = AsyncMock()
     with (
         patch.object(LinuxSshConnector, "_connect", connect),
         pytest.raises(LinuxSecretRefError),
     ):
-        endpoint = LinuxSecretSinkEndpoint("seat-host/etc/../root/key#app")
+        endpoint = LinuxSecretSinkEndpoint(ref)
         await endpoint.write_secret(_OPERATOR, SecretMaterial(_SENTINEL))
     connect.assert_not_awaited()
 
@@ -185,25 +193,49 @@ async def test_reading_a_linux_ref_fails_without_a_value() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_script(script: str, *, home: Path | None = None) -> subprocess.CompletedProcess[str]:
+#: The owner's user id as the fake ``id`` and ``stat`` report it.
+_FAKE_OWNER_UID = "99999"
+
+
+def _fake_tool(fake_bin: Path, name: str, body: str) -> None:
+    tool = fake_bin / name
+    tool.write_text("#!/bin/sh\n" + body)
+    tool.chmod(0o755)
+
+
+def _run_script(
+    script: str, *, home: Path | None = None, owner_dirs: tuple[Path, ...] = ()
+) -> subprocess.CompletedProcess[str]:
     """Run *script* with the local bash.
 
     A fake ``getent`` answers with *home*. A fake ``runuser`` writes its owner
     argument to ``runuser.log`` next to the home, then runs the command (the
-    test user already is the owner).
+    test user already is the owner). The test user plays root. A fake ``id``
+    gives the owner the user id :data:`_FAKE_OWNER_UID`, and a fake ``stat``
+    reports that id for the folders in *owner_dirs*.
     """
     env = dict(os.environ)
     if home is not None:
         fake_bin = home.parent / f"{home.name}-bin"
         fake_bin.mkdir(exist_ok=True)
-        getent = fake_bin / "getent"
-        getent.write_text(f"#!/bin/sh\necho 'x:x:1:1::{home}:/bin/sh'\n")
-        getent.chmod(0o755)
-        runuser = fake_bin / "runuser"
-        runuser.write_text(
-            f'#!/bin/sh\necho "$2" >> "{fake_bin}/runuser.log"\nshift 3\nexec "$@"\n'
+        _fake_tool(fake_bin, "getent", f"echo 'x:x:1:1::{home}:/bin/sh'\n")
+        _fake_tool(
+            fake_bin, "runuser", f'echo "$2" >> "{fake_bin}/runuser.log"\nshift 3\nexec "$@"\n'
         )
-        runuser.chmod(0o755)
+        _fake_tool(
+            fake_bin,
+            "id",
+            f'[ "$1" = -u ] && [ "$2" = -- ] && {{ echo {_FAKE_OWNER_UID}; exit 0; }}\n'
+            f'exec {shutil.which("id")} "$@"\n',
+        )
+        (fake_bin / "owner-dirs").write_text("".join(f"{d}\n" for d in owner_dirs))
+        _fake_tool(
+            fake_bin,
+            "stat",
+            f'out=$({shutil.which("stat")} "$@") || exit 1\n'
+            f'if grep -qxF -- "$4" "{fake_bin}/owner-dirs"; then '
+            f'echo "{_FAKE_OWNER_UID} ${{out#* }}"; else echo "$out"; fi\n',
+        )
         env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
     return subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True, check=False, env=env
@@ -304,9 +336,9 @@ def test_script_has_no_root_step_for_a_home_path() -> None:
     assert "runuser -u" in before_roots
     # Root-only steps come after the owner branch has exited.
     owner_branch, _, root_part = script.partition("exit 0;;")
-    assert "install -d" not in owner_branch.split('if [ -n "$realhome" ]')[1]
+    assert "mkdir -m" not in owner_branch.split('if [ -n "$realhome" ]')[1]
     assert "chown" not in owner_branch.split('if [ -n "$realhome" ]')[1]
-    assert "install -d" in root_part
+    assert "mkdir -m 0700" in root_part
 
 
 @_NEEDS_LINUX
@@ -333,6 +365,98 @@ def test_script_refuses_an_unknown_owner(tmp_path: Path) -> None:
     assert proc.returncode == 5
     assert "===MEHO_SINK_ERR:owner===" in proc.stderr
     assert not (home / "key").exists()
+
+
+def _write_root(tmp_path: Path) -> tuple[Path, Path]:
+    """A write root that belongs to "root" (the test user), and an unrelated home."""
+    root = tmp_path / "etc"
+    root.mkdir()
+    root.chmod(0o755)
+    home = tmp_path / "home" / "seat"
+    home.mkdir(parents=True)
+    return root, home
+
+
+def _runuser_log(home: Path) -> list[str]:
+    log = home.parent / f"{home.name}-bin" / "runuser.log"
+    return log.read_text().split() if log.exists() else []
+
+
+@_NEEDS_LINUX
+def test_write_root_new_folders_are_made_by_root_then_written_as_the_owner(
+    tmp_path: Path,
+) -> None:
+    root, home = _write_root(tmp_path)
+    target = root / "app" / "sub" / "key"
+    owner = getpass.getuser()
+    script = build_secret_sink_script(str(target), owner, b"v", roots=(str(root),))
+    proc = _run_script(script, home=home)
+    assert proc.returncode == 0, proc.stderr
+    assert target.read_bytes() == b"v"
+    assert _mode(target) == 0o600
+    assert _mode(target.parent) == 0o700
+    assert _mode(target.parent.parent) == 0o700
+    # Root hands the new folders to the owner, so the write runs as the owner.
+    assert _runuser_log(home) == [owner]
+
+
+@_NEEDS_LINUX
+def test_write_root_folder_of_root_is_written_by_root(tmp_path: Path) -> None:
+    root, home = _write_root(tmp_path)
+    (root / "app").mkdir(mode=0o755)
+    target = root / "app" / "key"
+    script = build_secret_sink_script(str(target), getpass.getuser(), b"v", roots=(str(root),))
+    proc = _run_script(script, home=home)
+    assert proc.returncode == 0, proc.stderr
+    assert target.read_bytes() == b"v"
+    assert _mode(target) == 0o600
+    assert _runuser_log(home) == []
+
+
+@_NEEDS_LINUX
+@pytest.mark.parametrize("sub", ["key", "sub/key"])
+def test_write_root_folder_of_the_owner_is_written_as_the_owner(tmp_path: Path, sub: str) -> None:
+    root, home = _write_root(tmp_path)
+    app = root / "app"
+    app.mkdir(mode=0o700)
+    target = app / sub
+    owner = getpass.getuser()
+    script = build_secret_sink_script(str(target), owner, b"v", roots=(str(root),))
+    proc = _run_script(script, home=home, owner_dirs=(app,))
+    assert proc.returncode == 0, proc.stderr
+    assert target.read_bytes() == b"v"
+    # The owner controls the folder, so the write runs as the owner.
+    assert _runuser_log(home) == [owner]
+
+
+@_NEEDS_LINUX
+def test_write_root_refuses_a_root_folder_inside_a_folder_of_the_owner(tmp_path: Path) -> None:
+    root, home = _write_root(tmp_path)
+    app = root / "app"
+    (app / "sub").mkdir(parents=True, mode=0o755)
+    app.chmod(0o755)
+    target = app / "sub" / "key"
+    script = build_secret_sink_script(str(target), getpass.getuser(), b"v", roots=(str(root),))
+    proc = _run_script(script, home=home, owner_dirs=(app,))
+    assert proc.returncode == 6
+    assert "===MEHO_SINK_ERR:place===" in proc.stderr
+    assert not target.exists()
+    assert _runuser_log(home) == []
+
+
+@_NEEDS_LINUX
+def test_write_root_refuses_a_folder_that_others_can_write(tmp_path: Path) -> None:
+    root, home = _write_root(tmp_path)
+    app = root / "app"
+    app.mkdir()
+    app.chmod(0o777)
+    target = app / "key"
+    script = build_secret_sink_script(str(target), getpass.getuser(), b"v", roots=(str(root),))
+    proc = _run_script(script, home=home)
+    assert proc.returncode == 6
+    assert "===MEHO_SINK_ERR:place===" in proc.stderr
+    assert not target.exists()
+    assert _runuser_log(home) == []
 
 
 def test_script_carries_the_value_as_base64_only() -> None:

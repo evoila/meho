@@ -21,22 +21,24 @@ mode 0600 and the named owner. A missing parent directory is made with mode
 
 Allowed paths: the write roots of ``linux.file.write``
 (:data:`~meho_backplane.connectors.linux.ops_write.LINUX_WRITE_ROOTS`), or a
-place inside the home directory of ``<owner>``. MEHO reads that home directory
-from the host (``getent passwd``) in the same root script that writes the file.
+place inside the home directory of ``<owner>``.
 
-Two checks run before MEHO opens any SSH connection: the path is absolute,
-has no ``..`` and no control character, and it is not in a system tree that
-can never hold a home directory (``/proc``, ``/sys``, ``/dev``, ``/boot``,
-``/bin``, ``/sbin``, ``/lib*``, ``/tmp``, and ``/usr`` and ``/var`` outside the
-write roots). The root script then resolves the real path (symbolic links
-included) and refuses it unless it is still under a write root or the owner's
-home.
+Before MEHO opens any SSH connection, it checks that the path is absolute,
+has no ``..`` and no control character, and is under a write root or under
+``/home/<owner>`` (``/root`` for the owner ``root``). A home directory in
+another place can be used only when it is under a write root. The root script
+then reads the owner's real home from the host (``getent passwd``), resolves
+the real path (symbolic links included) and refuses it unless it is still under
+a write root or that home.
 
-Links are not followed by root. For a path inside the owner's home, the folders,
-the temp file and the rename are all made **as the owner** (``runuser -u
-<owner>``), not as root. The owner controls those folders, so a link placed
-there can only affect what the owner can already change. Root writes only in
-the root-owned write roots.
+Root never writes in a folder that another user can change. For a path inside
+the owner's home, the folders, the temp file and the rename are all made **as
+the owner** (``runuser -u <owner>``). Under a write root, root writes only when
+every folder from the write root down belongs to root and is not writable by
+group or others. When the parent folder belongs to the owner, or root has just
+made it for the owner, the write runs as the owner. Any other folder is
+refused. So a link that someone places in a folder can only affect what that
+person can already change.
 
 How the value travels
 =====================
@@ -94,24 +96,6 @@ _log = structlog.get_logger(__name__)
 #: allows by default. It goes into a shell script, so the set is narrow.
 _OWNER_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
-#: System trees that can never hold a home directory. A path here is refused
-#: before any SSH connection, unless a write root (``/usr/local``,
-#: ``/var/lib``) covers it first.
-_NEVER_ROOTS: tuple[str, ...] = (
-    "/proc",
-    "/sys",
-    "/dev",
-    "/boot",
-    "/bin",
-    "/sbin",
-    "/lib",
-    "/lib32",
-    "/lib64",
-    "/usr",
-    "/var",
-    "/tmp",
-)
-
 #: Runs as the owner (never as root) for a path inside the owner's home. The
 #: value comes on standard input; ``$1`` is the target path. Every folder,
 #: the temp file and the rename are made by the owner.
@@ -122,6 +106,18 @@ _OWNER_WRITE_SCRIPT = (
     'if ! base64 -d > "$tmp"; then rm -f "$tmp"; exit 4; fi; '
     'if ! chmod 0600 "$tmp"; then rm -f "$tmp"; exit 4; fi; '
     'if ! mv -f -T -- "$tmp" "$real"; then rm -f "$tmp"; exit 4; fi'
+)
+
+#: Shell helpers for the write-root branch. ``ownedby DIR UID``: *DIR* is a real
+#: folder (not a link) that belongs to *UID* and is not writable by group or
+#: others. ``safe DIR``: that holds for *DIR* and every folder above it up to
+#: ``$root``, for the user that runs the script (``$me``).
+_FOLDER_CHECKS = (
+    'ownedby() { [ -d "$1" ] && [ ! -L "$1" ] || return 1; '
+    'set -- "$2" $(stat -c \'%u %a\' -- "$1") || return 1; '
+    '[ "$1" = "$2" ] && (( (8#$3 & 8#022) == 0 )); }\n'
+    'safe() { local c=$1; while :; do ownedby "$c" "$me" || return 1; '
+    '[ "$c" = "$root" ] && return 0; c="$(dirname -- "$c")"; done; }'
 )
 
 _SINK_OK = "===MEHO_SINK_OK==="
@@ -148,13 +144,18 @@ def _is_under(path: str, root: str) -> bool:
     return path == root or path.startswith(root + "/")
 
 
-def confine_secret_sink_path(requested: str) -> str:
+def _home_roots(owner: str) -> tuple[str, ...]:
+    """The home directories MEHO accepts for *owner* before it connects."""
+    return ("/root",) if owner == "root" else (f"/home/{owner}",)
+
+
+def confine_secret_sink_path(requested: str, owner: str) -> str:
     """Return the normalised *requested* path, or raise :class:`LinuxSecretRefError`.
 
-    Pure check, no SSH. Refuses a relative path, ``..``, a control character and
-    a system tree that can never hold a home directory. A path under a write
-    root passes here. Any other absolute path passes only this lexical check;
-    the root script then proves it is inside the owner's home.
+    Pure check, no SSH. Refuses a relative path, ``..`` and a control
+    character. The path must be under a write root, or inside the usual home
+    directory of *owner* (``/home/<owner>``, or ``/root`` for ``root``). The
+    root script then checks the real path against the home the host reports.
     """
     if not isinstance(requested, str) or not requested.startswith("/"):
         raise LinuxSecretRefError(f"linux secret path {requested!r} must be absolute")
@@ -171,12 +172,13 @@ def confine_secret_sink_path(requested: str) -> str:
         raise LinuxSecretRefError(f"linux secret path {requested!r} must name a file")
     if any(_is_under(path, root) for root in LINUX_WRITE_ROOTS):
         return path
-    if any(_is_under(path, root) for root in _NEVER_ROOTS):
-        raise LinuxSecretRefError(
-            f"linux secret path {path!r} is outside the allowed places: "
-            f"{list(LINUX_WRITE_ROOTS)!r} or the home directory of the owner"
-        )
-    return path
+    homes = _home_roots(owner)
+    if any(path.startswith(home + "/") for home in homes):
+        return path
+    raise LinuxSecretRefError(
+        f"linux secret path {path!r} is outside the allowed places: "
+        f"{[*LINUX_WRITE_ROOTS, *homes]!r}"
+    )
 
 
 def parse_linux_secret_ref(ref: str) -> tuple[str, str, str]:
@@ -204,24 +206,27 @@ def parse_linux_secret_ref(ref: str) -> tuple[str, str, str]:
             f"malformed linux secret ref {ref!r}: expected a '<target>/<absolute path>' "
             "address before '#<owner>'"
         )
-    path = confine_secret_sink_path("/" + rest.lstrip("/"))
+    path = confine_secret_sink_path("/" + rest.lstrip("/"), owner)
     return target_name, path, owner
 
 
-def build_secret_sink_script(path: str, owner: str, value: bytes) -> str:
+def build_secret_sink_script(
+    path: str, owner: str, value: bytes, *, roots: tuple[str, ...] = LINUX_WRITE_ROOTS
+) -> str:
     """Render the root bash script that writes *value* to *path* for *owner*.
 
     *path* and *owner* are already checked by :func:`parse_linux_secret_ref`;
     both are ``shlex.quote``d anyway. The value is base64-carried. The script
     stops with a marker and a non-zero exit when the owner is unknown, when the
     resolved path is outside the allowed places, or when a step fails. It prints
-    :data:`_SINK_OK` at the end.
+    :data:`_SINK_OK` at the end. *roots* is the list of write roots; tests set
+    it to a temporary folder.
     """
     q_path = shlex.quote(path)
     q_owner = shlex.quote(owner)
     q_b64 = shlex.quote(base64.b64encode(value).decode("ascii"))
     q_inner = shlex.quote(_OWNER_WRITE_SCRIPT)
-    roots = " ".join(shlex.quote(r) for r in LINUX_WRITE_ROOTS)
+    q_roots = " ".join(shlex.quote(r) for r in roots)
     err = _SINK_ERR_PREFIX
     lines = [
         "set -u",
@@ -233,7 +238,7 @@ def build_secret_sink_script(path: str, owner: str, value: bytes) -> str:
         # Resolve links in the existing part of the path, then check the result.
         f'real="$(realpath -m -- "$path")" || {{ echo "{err}path===" >&2; exit 6; }}',
         "ok=0",
-        f"for r in {roots}; do",
+        f"for r in {q_roots}; do",
         '  case "$real" in "$r"/*) ok=1;; esac',
         "done",
         'realhome=""',
@@ -253,10 +258,48 @@ def build_secret_sink_script(path: str, owner: str, value: bytes) -> str:
         f'    echo "{_SINK_OK}"; exit 0;;',
         "  esac",
         "fi",
-        # Write roots are root-owned folders: root writes there.
-        'mk() { [ -d "$1" ] && return 0; mk "$(dirname -- "$1")" || return 1; '
-        'install -d -m 0700 -o "$owner" -g "$grp" -- "$1"; }',
-        f'mk "$dir" || {{ echo "{err}mkdir===" >&2; exit 4; }}',
+        # Under a write root. Root writes only in folders that no one else can
+        # change: each folder from the write root down to "$dir" belongs to the
+        # user that runs this script (root) and is not writable by group or
+        # others. A folder of the owner gets the write as the owner. Any other
+        # folder is refused.
+        "me=$(id -u)",
+        f'ouid="$(id -u -- "$owner")" || {{ echo "{err}owner===" >&2; exit 5; }}',
+        _FOLDER_CHECKS,
+        'root=""',
+        f"for r in {q_roots}; do",
+        '  case "$real" in "$r"/*) root=$r;; esac',
+        "done",
+        f'[ -d "$root" ] || {{ echo "{err}mkdir===" >&2; exit 4; }}',
+        'base="$dir"; missing=()',
+        'while [ ! -e "$base" ] && [ ! -L "$base" ]; do',
+        '  missing=("$base" ${missing[@]+"${missing[@]}"}); base="$(dirname -- "$base")"',
+        "done",
+        "as_owner=0",
+        'if safe "$base"; then',
+        # New folders are made by root inside root-only folders. Then they go
+        # to the owner from the deepest one up, so each one changes hands while
+        # its parent still belongs to root.
+        '  for m in ${missing[@]+"${missing[@]}"}; do',
+        f'    mkdir -m 0700 -- "$m" || {{ echo "{err}mkdir===" >&2; exit 4; }}',
+        "  done",
+        "  for (( i=${#missing[@]}-1; i>=0; i-- )); do",
+        '    chown -h "$owner:$grp" -- "${missing[$i]}" '
+        f'|| {{ echo "{err}mkdir===" >&2; exit 4; }}',
+        "  done",
+        '  [ "${#missing[@]}" -gt 0 ] && as_owner=1',
+        'elif [ "$base" != "$root" ] && ownedby "$base" "$ouid" '
+        '&& safe "$(dirname -- "$base")"; then',
+        "  as_owner=1",
+        "else",
+        f'  echo "{err}place===" >&2; exit 6',
+        "fi",
+        'if [ "$as_owner" = 1 ]; then',
+        f'  printf %s {q_b64} | runuser -u "$owner" -- bash -c {q_inner} meho-sink "$real" '
+        f'|| {{ echo "{err}write===" >&2; exit 4; }}',
+        f'  echo "{_SINK_OK}"; exit 0',
+        "fi",
+        # "$dir" and every folder above it up to the write root belong to root.
         f'tmp="$(mktemp "$dir/.meho-sink.XXXXXX")" || {{ echo "{err}mktemp===" >&2; exit 4; }}',
         f'if ! printf %s {q_b64} | base64 -d > "$tmp"; then '
         f'rm -f "$tmp"; echo "{err}decode===" >&2; exit 4; fi',

@@ -407,19 +407,24 @@ What MEHO does on the host:
   with mode 0700 and the same owner.
 - Allowed places: the write roots of `linux.file.write` (`/etc`, `/var/lib`,
   `/run`, `/opt`, `/srv`, `/usr/local`), or inside the home directory of
-  `<owner>`. MEHO reads that home directory from the host (`getent passwd`).
-- MEHO refuses these before it opens any SSH connection: a relative path,
-  `..`, a control character, and the system trees that can never hold a
-  home directory (`/proc`, `/sys`, `/dev`, `/boot`, `/bin`, `/sbin`,
-  `/lib*`, `/tmp`, and `/usr` and `/var` outside the write roots).
-- On the host, the script resolves symbolic links and refuses a path that
-  ends up outside the allowed places.
-- Root does not follow links in the owner's home. For a path inside the
-  owner's home, the folders, the temp file and the rename are all done as the
-  owner (`runuser -u <owner>`), not as root. Root writes only in the
-  root-owned write roots.
-- The pre-check before SSH is a fixed list of system trees. Any other absolute
-  path is decided only on the host, by the script.
+  `<owner>`.
+- Before it opens any SSH connection, MEHO refuses a relative path, `..`, a
+  control character, and every path that is not under a write root or under
+  `/home/<owner>` (`/root` for the owner `root`). A home directory in another
+  place works only when it is under a write root.
+- On the host, the script reads the owner's real home (`getent passwd`),
+  resolves symbolic links and refuses a path that ends up outside a write root
+  or that home.
+- Root never writes in a folder that another user can change:
+  - Inside the owner's home, the folders, the temp file and the rename are
+    all done as the owner (`runuser -u <owner>`), not as root.
+  - Under a write root, root writes only when every folder from the write
+    root down belongs to root and is not writable by group or others.
+  - When the parent folder belongs to the owner, the write runs as the owner.
+    Missing folders are made by root (each one while its parent still belongs
+    to root), handed to the owner, and then the write runs as the owner.
+  - Any other folder (one that group or others can write, or a root folder
+    inside a folder of the owner) is refused with the reason `place`.
 - The value travels only inside the SSH channel (standard input), through
   the same sudo helper as `linux.file.write`. It is never in the remote
   command line, a log line, or an error text. An error names only a short

@@ -20,12 +20,20 @@ How the write works
 
 Keycloak's ``PUT /users/{id}`` replaces the whole ``requiredActions`` list.
 So the op reads the user first, builds the new list (other actions stay),
-and writes the full user back with the same read-merge-write step the
-update ops use (:func:`~meho_backplane.connectors.keycloak.ops_write_merge.read_merge_write`).
+and writes that same read back with the new list, with the read-merge-write
+step the update ops use
+(:func:`~meho_backplane.connectors.keycloak.ops_write_merge.read_merge_write`).
+The list is built from the read that is written, so no second read can
+bring in actions the new list does not have.
 Each name to add must be an **enabled** required action of the realm
 (``GET .../authentication/required-actions``). An unknown or disabled name
 is refused before anything is written, and the error lists the allowed names.
 When the list would not change, nothing is written.
+
+After approval, the op acts on the user id shown on the approval card. It
+does not look the username up again, so a name that moved to another
+account while the request waited cannot redirect the write. A card with no
+user id is refused.
 
 Why a new read, not ``keycloak.user.list``
 ==========================================
@@ -61,7 +69,11 @@ from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.ops_write_preview import _managed_realm, _opt_str
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
-from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+from meho_backplane.operations._preview import (
+    PreviewContext,
+    approved_preview,
+    register_preview_builder,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -347,6 +359,26 @@ def _parse_change(params: dict[str, Any]) -> tuple[list[str], list[str]]:
     return add, remove
 
 
+def _approved_user_id() -> str | None:
+    """The user id on the approval card, during the approved run of this op.
+
+    ``None`` when the call is not the approved run of a request. An approved
+    run whose card shows no user id is refused: MEHO cannot tell which user
+    the approver saw, and looking the username up again could find another
+    account.
+    """
+    preview = approved_preview(REQUIRED_ACTIONS_UPDATE_OP_ID)
+    if preview is None:
+        return None
+    uuid = _opt_str(preview.get("id"))
+    if uuid is None:
+        raise ValueError(
+            f"{REQUIRED_ACTIONS_UPDATE_OP_ID}: the approval card shows no user id, so MEHO "
+            "cannot tell which user was approved. Nothing was changed. Send a new request."
+        )
+    return uuid
+
+
 async def _read_user(
     self: KeycloakConnector,
     operator: Operator,
@@ -358,8 +390,10 @@ async def _read_user(
     Raises :exc:`KeycloakUserNotFoundError` for a user that does not exist.
     """
     realm = resolve_realm_config(target).managed_realm
-    uuid = _opt_str(params.get("id"))
+    uuid = _approved_user_id()
     username = _opt_str(params.get("username"))
+    if uuid is None:
+        uuid = _opt_str(params.get("id"))
     if uuid is None:
         if username is None:
             raise ValueError(f"{REQUIRED_ACTIONS_UPDATE_OP_ID} requires either 'id' or 'username'")
@@ -411,14 +445,14 @@ async def keycloak_user_required_actions_update(
     """
     realm = resolve_realm_config(target).managed_realm
     add, remove = _parse_change(params)
+    if add:
+        await _refuse_unusable_names(self, operator, target, add)
     uuid, path, user = await _read_user(self, operator, target, params)
     current = _string_list(user.get("requiredActions"))
     if current is None:
         raise KeycloakUnexpectedResponseError(
             f"user {uuid!r} came back without a usable requiredActions list; nothing was written"
         )
-    if add:
-        await _refuse_unusable_names(self, operator, target, add)
     resulting = _apply(current, add, remove)
     result: dict[str, Any] = {
         "id": uuid,
@@ -434,7 +468,7 @@ async def keycloak_user_required_actions_update(
     if resulting == current:
         return result
     outcome = await read_merge_write(
-        self, operator, target, path=path, requested={"requiredActions": resulting}
+        self, operator, target, path=path, requested={"requiredActions": resulting}, before=user
     )
     result["unrequested_changes"] = outcome["unrequested_changes"]
     result["read_back_checked"] = outcome["read_back_checked"]
@@ -501,7 +535,11 @@ async def keycloak_user_otp_status(
     if username is not None:
         query["username"] = username
     users = await self._get_admin_list(
-        target, fill_path(_USERS_PATH, {"realm": realm}), operator=operator, params=query
+        target,
+        fill_path(_USERS_PATH, {"realm": realm}),
+        operator=operator,
+        params=query,
+        strict=True,
     )
     truncated = len(users) > limit
     kept = [

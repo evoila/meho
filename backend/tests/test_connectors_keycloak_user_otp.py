@@ -139,22 +139,6 @@ async def kc() -> AsyncIterator[KeycloakConnector]:
     await connector.aclose()
 
 
-async def _run(params: dict[str, Any]) -> dict[str, Any]:
-    """Run the op as an already-approved call (the handler path)."""
-    async with get_sessionmaker()() as session:
-        target = await resolve_target(session, _TENANT_ID, _TARGET_NAME)
-    result = await dispatch(
-        operator=_operator(),
-        connector_id=_CONNECTOR_ID,
-        op_id=_OP_ID,
-        target=target,
-        params=params,
-        _approved=True,
-    )
-    dumped: dict[str, Any] = result.model_dump(mode="json")
-    return dumped
-
-
 def _mount_token(mock: respx.MockRouter) -> None:
     mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
         200, json={"access_token": "kc-admin-token", "expires_in": 300}
@@ -385,6 +369,31 @@ async def test_user_without_a_required_actions_list_is_an_error_not_an_empty_lis
     assert not put.called
 
 
+async def test_the_write_uses_the_read_it_built_the_list_from(kc: KeycloakConnector) -> None:
+    # Each read of the user answers a different list and first name, as if
+    # someone changed the user between reads. The written body must be the
+    # read the new list was built from, so no action of that read is lost.
+    reads = [["VERIFY_EMAIL"], ["UPDATE_PASSWORD"], ["UPDATE_PASSWORD", "CONFIGURE_TOTP"]]
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        get, put = _mount(mock, [])
+        puts_seen: list[int] = []
+
+        def _answer(_request: httpx.Request) -> httpx.Response:
+            index = min(len(puts_seen), len(reads) - 1)
+            puts_seen.append(put.call_count)
+            return httpx.Response(200, json={**_user(reads[index]), "firstName": f"read-{index}"})
+
+        get.mock(side_effect=_answer)
+        result = await _run(_OP_ID, {"id": _USER_UUID, "add": ["CONFIGURE_TOTP"]})
+    assert result["status"] == "ok", result
+    # One read before the write, one read-back after it.
+    assert puts_seen == [0, 1]
+    body = json.loads(put.calls.last.request.content)
+    assert body["firstName"] == "read-0"
+    assert body["requiredActions"] == ["VERIFY_EMAIL", "CONFIGURE_TOTP"]
+    assert result["result"]["required_actions"] == body["requiredActions"]
+
+
 async def test_a_failed_write_is_an_error(kc: KeycloakConnector) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _, put = _mount(mock, [])
@@ -438,6 +447,61 @@ async def test_write_waits_for_approval_and_the_card_shows_the_change(
             )
     assert resumed.status == "ok", resumed
     assert put.call_count == 1
+
+
+_OTHER_UUID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+
+async def _park(params: dict[str, Any]) -> uuid.UUID:
+    call = await call_operation(
+        _operator("kc-otp-requester"),
+        {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": _TARGET_NAME, "params": params},
+    )
+    assert call["status"] == "awaiting_approval", call
+    return uuid.UUID(call["extras"]["approval_request_id"])
+
+
+async def _approve_and_resume(request_id: uuid.UUID) -> Any:
+    approver = _operator("kc-otp-approver")
+    async with get_sessionmaker()() as session:
+        await approve_request(session, request_id, operator=approver, params=None)
+        await session.commit()
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+        assert row is not None
+        return await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+
+
+async def test_approved_run_acts_on_the_user_id_on_the_card(kc: KeycloakConnector) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _, put = _mount(mock, ["VERIFY_EMAIL"], after=["VERIFY_EMAIL", "CONFIGURE_TOTP"])
+        request_id = await _park({"username": "event-guest", "add": ["CONFIGURE_TOTP"]})
+        # While the request waits, the username moves to another account.
+        mock.get(f"/admin/realms/{_REALM}/users").respond(
+            200, json=[{"id": _OTHER_UUID, "username": "event-guest"}]
+        )
+        other_path = f"/admin/realms/{_REALM}/users/{_OTHER_UUID}"
+        other_get = mock.get(other_path).respond(200, json={**_user([]), "id": _OTHER_UUID})
+        other_put = mock.put(other_path).respond(204)
+        resumed = await _approve_and_resume(request_id)
+    assert resumed.status == "ok", resumed
+    assert put.call_count == 1
+    assert not other_get.called
+    assert not other_put.called
+
+
+async def test_approved_run_is_refused_when_the_card_has_no_user_id(
+    kc: KeycloakConnector,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _, put = _mount(mock, [])
+        lookup = mock.get(f"/admin/realms/{_REALM}/users").respond(500)
+        request_id = await _park({"username": "event-guest", "add": ["CONFIGURE_TOTP"]})
+        lookup.respond(200, json=[{"id": _USER_UUID, "username": "event-guest"}])
+        resumed = await _approve_and_resume(request_id)
+    assert resumed.status != "ok"
+    assert "approval card shows no user id" in str(resumed.model_dump(mode="json"))
+    assert not put.called
 
 
 async def test_card_still_shows_the_request_when_the_user_cannot_be_read(
@@ -582,6 +646,15 @@ async def test_status_empty_realm_and_missing_actions_field(kc: KeycloakConnecto
     assert row["required_actions"] is None
     assert row["otp_setup_pending"] is None
     assert row["has_otp"] is True
+
+
+async def test_status_user_list_that_is_not_a_list_is_an_error(kc: KeycloakConnector) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(f"/admin/realms/{_REALM}/users").respond(200, json={"error": "odd body"})
+        result = await _run(_OTP_OP_ID, {})
+    assert result["status"] != "ok"
+    assert "expected a JSON array" in str(result)
 
 
 async def test_status_user_list_failure_is_an_error(kc: KeycloakConnector) -> None:

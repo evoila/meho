@@ -588,7 +588,12 @@ login.
   `{"username": "alice", "add": ["CONFIGURE_TOTP"]}`.
   - Keycloak's `PUT .../users/{id}` replaces the whole `requiredActions`
     list. So the op reads the user, builds the new list (other actions
-    stay), and writes the full user back with `read_merge_write`.
+    stay), and writes that same read back with `read_merge_write`
+    (`before=` the read). There is no second read before the write, so
+    the written list and the rest of the user come from one read.
+  - After approval, the op uses the user id shown on the approval card.
+    It does not look the username up again. A card without a user id is
+    refused, and nothing is written.
   - Each name in `add` must be an enabled required action of the realm
     (`GET .../authentication/required-actions`). An unknown or disabled
     name is refused before any write, and the error lists the allowed
@@ -611,7 +616,8 @@ login.
   username, enabled, required_actions, has_otp, otp_setup_pending}], total,
   unknown, truncated}`. `has_otp` is `null` (unknown) when the credentials
   of that user could not be read. `truncated` is `true` when more users
-  exist than `max`. No credential value, label or other credential field
+  exist than `max`. A user list answer that is not a list is an error,
+  not an empty list. No credential value, label or other credential field
   is ever returned.
 
 ### Login test

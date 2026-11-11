@@ -14,7 +14,9 @@
   the "Active sessions" card signs out a browser.
 
   The CSRF header comes from the enclosing ``<section hx-headers>`` of the
-  page.
+  page. The buttons open and close the confirm box through
+  ``data-open-dialog`` / ``data-close-dialog`` (``app/modal-dialogs.js``),
+  with no script in this template.
 -#}
 <div
   id="account-tools"
@@ -61,7 +63,7 @@
             type="button"
             class="btn btn-xs btn-ghost text-error"
             data-action="open-tool-sign-out"
-            onclick="document.getElementById('account-tool-modal-{{ t.key }}').showModal()"
+            data-open-dialog="account-tool-modal-{{ t.key }}"
           >
             Sign out this tool
           </button>
@@ -85,7 +87,7 @@
                   hx-vals='{"tool": "{{ t.key }}"}'
                   hx-target="#account-tools"
                   hx-swap="outerHTML"
-                  onclick="document.getElementById('account-tool-modal-{{ t.key }}').close()"
+                  data-close-dialog
                 >
                   Sign out
                 </button>

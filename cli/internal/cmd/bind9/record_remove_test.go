@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -95,5 +97,42 @@ func TestRecordRemoveStopsWhenPreviewFails(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "zone is not managed") {
 		t.Errorf("output should show the preview error:\n%s", out.String())
+	}
+}
+
+// TestConfigApplyViewsSendsVerifySource — `--verify-source` reaches the
+// call as verify_source, next to verify_fqdn.
+func TestConfigApplyViewsSendsVerifySource(t *testing.T) {
+	var callBody map[string]any
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
+			callBody = decodeBody(t, r)
+			writeJSON(t, w, 200, map[string]any{"status": "ok", "op_id": "bind9.config.apply_views"})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	dir := t.TempDir()
+	viewsConf := filepath.Join(dir, "views.conf")
+	zonesDir := filepath.Join(dir, "zones")
+	if err := os.MkdirAll(zonesDir, 0o755); err != nil {
+		t.Fatalf("mkdir zones: %v", err)
+	}
+	if err := os.WriteFile(viewsConf, []byte("// views\n"), 0o644); err != nil {
+		t.Fatalf("write views: %v", err)
+	}
+	var out bytes.Buffer
+	cmd := newConfigApplyViewsCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{viewsConf, zonesDir, "--verify-fqdn", "www.example.test",
+		"--verify-source", "192.0.2.53", "--target", "dns", "--backplane", srv.URL})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("apply-views: %v\n%s", err, out.String())
+	}
+	params, _ := callBody["params"].(map[string]any)
+	if params["verify_fqdn"] != "www.example.test" || params["verify_source"] != "192.0.2.53" {
+		t.Errorf("verify params not sent: %v", params)
 	}
 }

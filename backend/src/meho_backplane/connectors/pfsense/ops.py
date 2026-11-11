@@ -134,8 +134,9 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     ``pfsense.filter.rule.delete``, #3850) + ``MGMT_FLOW_OPS`` (the
     management-plane flow classifier ``pfsense.mgmt_flow.summary``) +
     ``USER_WRITE_OPS`` (``pfsense.user.disable`` / ``pfsense.user.enable``,
-    #3937) + ``DIAG_OPS`` (the read ``pfsense.diag.ping``, #3965).
-    Twenty-four ops total.
+    #3937) + ``DIAG_OPS`` (the read ``pfsense.diag.ping``, #3965) + ``OPENVPN_OPS`` (the reads
+    ``pfsense.openvpn.clients`` / ``pfsense.openvpn.log``, #4093).
+    Twenty-six ops total.
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -154,6 +155,7 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     from meho_backplane.connectors.pfsense.ops_diag import DIAG_OPS
     from meho_backplane.connectors.pfsense.ops_filter_rule import FILTER_RULE_OPS
     from meho_backplane.connectors.pfsense.ops_mgmt_flow import MGMT_FLOW_OPS
+    from meho_backplane.connectors.pfsense.ops_openvpn_meta import OPENVPN_OPS
     from meho_backplane.connectors.pfsense.ops_read import READ_OPS
     from meho_backplane.connectors.pfsense.ops_user_write import USER_WRITE_OPS
     from meho_backplane.connectors.pfsense.ops_write import WRITE_OPS
@@ -168,6 +170,7 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
         *MGMT_FLOW_OPS,
         *USER_WRITE_OPS,
         *DIAG_OPS,
+        *OPENVPN_OPS,
     )
 
 

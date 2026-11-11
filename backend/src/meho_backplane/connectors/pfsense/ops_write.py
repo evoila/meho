@@ -36,7 +36,12 @@ before staging any change. Adding a gateway whose ``name`` already exists,
 or a route whose (canonicalised) ``network`` already exists, is reported as
 a structured already-present outcome (``existed_before=True``,
 ``applied=False``, ``existing`` carrying the pre-existing row) and stages
-no playback -- no duplicate is ever appended. A gateway add that is
+no playback -- no duplicate is ever appended. That holds only when the
+existing object has the same settings (gateway: same ``interface`` and
+address; route: same ``gateway``). With other settings the wanted state is
+not true, so the handler raises :class:`PfSenseRefusedError` with code
+``conflict`` and changes nothing: the call, its audit record and its
+approval say "failed" (#5138). A gateway add that is
 actually applied is read back afterwards; a fragment that failed to persist
 (non-zero playback exit, or a silent ``write_config`` failure that leaves
 the entry absent) raises rather than reporting a false success.
@@ -82,6 +87,7 @@ References
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import ipaddress
 import re
@@ -92,6 +98,7 @@ from defusedxml.ElementTree import ParseError, fromstring
 
 from meho_backplane.connectors.pfsense.ops import PfSenseOp
 from meho_backplane.connectors.pfsense.ops_read import parse_gateways_xml
+from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -290,6 +297,19 @@ def _find_gateway(xml_text: str, name: str) -> dict[str, Any] | None:
         if row.get("name") == name:
             return row
     return None
+
+
+def _gateway_differences(existing: dict[str, Any], interface: str, gateway: str) -> str:
+    """Say how an existing gateway differs from the requested one (empty when the same)."""
+    parts: list[str] = []
+    if existing.get("interface") != interface:
+        parts.append(f"interface {existing.get('interface')!r}, not {interface!r}")
+    stored = (existing.get("gateway") or "").strip()
+    with contextlib.suppress(ValueError):
+        stored = str(ipaddress.ip_address(stored))
+    if stored != gateway:
+        parts.append(f"address {existing.get('gateway')!r}, not {gateway!r}")
+    return "; ".join(parts)
 
 
 def _find_static_route(xml_text: str, network: str) -> dict[str, Any] | None:
@@ -601,6 +621,15 @@ async def pfsense_gateway_add(
         "descr": descr,
     }
     if existing is not None:
+        different = _gateway_differences(existing, interface, gateway)
+        if different:
+            raise PfSenseRefusedError(
+                "pfsense.gateway.add",
+                "conflict",
+                f"a gateway named {name!r} already exists with other settings "
+                f"({different}); nothing changed. Use another name, or delete "
+                "the existing gateway first",
+            )
         return {**result, "existed_before": True, "applied": False, "existing": existing}
 
     body = _build_gateway_playback(
@@ -678,6 +707,14 @@ async def pfsense_route_static_add(
         "descr": descr,
     }
     if existing is not None:
+        if existing.get("gateway") != gateway:
+            raise PfSenseRefusedError(
+                "pfsense.route.static.add",
+                "conflict",
+                f"a static route for {network!r} already exists with gateway "
+                f"{existing.get('gateway')!r}, not {gateway!r}; nothing changed. "
+                "Delete the existing route first",
+            )
         return {**result, "existed_before": True, "applied": False, "existing": existing}
 
     body = _build_route_playback(network=network, gateway=gateway, descr=descr)
@@ -825,8 +862,11 @@ _GATEWAY_ADD_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
         "Add a named routing gateway to pfSense. Guarded + idempotent: the "
         "handler reads ``config.xml`` first and, if a gateway with the same "
-        "``name`` already exists, returns ``existed_before=true`` / "
-        "``applied=false`` without appending a duplicate. WARNING: "
+        "``name`` already exists with the same ``interface`` and address, "
+        "returns ``existed_before=true`` / ``applied=false`` without "
+        "appending a duplicate. A gateway with that name but another "
+        "``interface`` or address is a refusal: the call fails with "
+        "``conflict`` and nothing changes. WARNING: "
         "``write_config()`` persists to the live ``config.xml`` for the whole "
         "firewall. safety_level=caution. The op is surgical -- it never "
         "touches interface config, so it will not stun the operator's own "
@@ -851,8 +891,9 @@ _GATEWAY_ADD_LLM_INSTRUCTIONS: dict[str, Any] = {
         "gateway, ipprotocol, monitor_disable, descr, existed_before, applied, "
         "existing}``. ``ipprotocol`` is ``inet`` / ``inet6`` from the IP "
         "family. When ``existed_before`` is true, ``applied`` is false and "
-        "``existing`` carries the pre-existing gateway row (whose interface "
-        "/ IP may differ from the request); otherwise ``existing`` is null."
+        "``existing`` carries the pre-existing gateway row (same interface and "
+        "IP as the request); otherwise ``existing`` is null. A gateway with "
+        "the same name and other settings fails with ``conflict``."
     ),
 }
 
@@ -924,8 +965,10 @@ _ROUTE_ADD_LLM_INSTRUCTIONS: dict[str, Any] = {
         "(``write_config()`` + ``system_routing_configure()``). Guarded + "
         "idempotent: the handler reads ``config.xml`` first, requires the "
         "named gateway to already exist, and returns ``existed_before=true`` "
-        "/ ``applied=false`` when a route for the same network is already "
-        "present rather than appending a duplicate. WARNING: this changes "
+        "/ ``applied=false`` when a route for the same network and gateway is "
+        "already present rather than appending a duplicate. A route for the "
+        "same network with another gateway fails with ``conflict`` and "
+        "nothing changes. WARNING: this changes "
         "the live routing table for the whole firewall. safety_level=caution. "
         "Surgical -- it touches only the static-route config, never "
         "interfaces."
@@ -947,7 +990,8 @@ _ROUTE_ADD_LLM_INSTRUCTIONS: dict[str, Any] = {
         "canonical CIDR. A route that already exists keeps its own "
         "description; ``existing.descr`` shows it. When ``existed_before`` is true, ``applied`` is "
         "false and ``existing`` carries the pre-existing route row; "
-        "otherwise ``existing`` is null."
+        "otherwise ``existing`` is null. A route for the same network with "
+        "another gateway fails with ``conflict``."
     ),
 }
 
@@ -968,9 +1012,10 @@ WRITE_OPS: tuple[PfSenseOp, ...] = (
             "(interface, gateway IP, name, ``ipprotocol`` from the IP family, "
             "optional ``monitor_disable`` for a pre-staged gateway) and calls "
             "``write_config()``, then reads the config back to confirm the "
-            "row landed. A name that already exists is a reported no-op "
-            "(``existed_before=true``, ``applied=false``) -- never a "
-            "duplicate. Surgical: touches only ``gateways/gateway_item``, "
+            "row landed. A name that already exists with the same settings is a "
+            "reported no-op (``existed_before=true``, ``applied=false``) -- "
+            "never a duplicate; with other settings the call fails with "
+            "``conflict``. Surgical: touches only ``gateways/gateway_item``, "
             "never interface config. Inputs are validated (name / interface "
             "allowlist, IP parsed) before any SSH round-trip. "
             "safety_level=caution; recoverable by removing the gateway_item "
@@ -995,9 +1040,10 @@ WRITE_OPS: tuple[PfSenseOp, ...] = (
             "playback`` fragment that appends one (network -> gateway name), "
             "calls ``write_config()`` then ``system_routing_configure()`` to "
             "apply it, and reads the config back to confirm. A route for a "
-            "network already present is a reported no-op "
+            "network already present with the same gateway is a reported no-op "
             "(``existed_before=true``, ``applied=false``) -- never a "
-            "duplicate. Surgical: touches only ``staticroutes/route``. The "
+            "duplicate; with another gateway the call fails with ``conflict``. "
+            "Surgical: touches only ``staticroutes/route``. The "
             "CIDR is parsed and canonicalised, the gateway name allowlisted, "
             "before any SSH round-trip. safety_level=caution."
         ),

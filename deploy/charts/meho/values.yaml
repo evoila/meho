@@ -726,6 +726,14 @@ config:
   # only when it finds it in Keycloak, through the admin client. See
   # `docs-site/install/keycloak-realm.md`.
   mcpClientPerToolKind: "false"
+  # -- Policy switches. `policy.classification` is rendered into
+  # `POLICY_CLASSIFICATION`. When `"true"`, each connector, operation
+  # group and operation can carry a category, labels and an "always wait"
+  # mark, and an operation takes the values of its group and connector.
+  # When `"false"` (the default), MEHO reads none of it and behaves as
+  # before. See `docs/codebase/policy-classification.md`.
+  policy:
+    classification: "false"
   # -- Tenants whose knowledge entries marked `shared` every tenant on
   # this instance can read. Comma-separated tenant ids. Rendered into
   # `KB_SHARED_TENANT_IDS`. Empty (the default): no tenant may share, and

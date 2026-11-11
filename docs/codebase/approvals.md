@@ -1113,8 +1113,11 @@ decides: not the requester, a person in a chosen tenant, and an admin
 - The park step (`create_pending_request`) sets it for a group or role
   change in MEHO's own login realm (`grant_facts`, see above). A request
   outside the login realm keeps the usual rules.
+- An operation registered with `register_rights_change_op` is a rights
+  change on every request. `policy.classify` (a change of a category,
+  labels or the "always wait" mark, see
+  [policy-classification.md](policy-classification.md)) is one.
 - Any other caller passes `rights_change=True` to `create_pending_request`.
-  The category and label edits and the policy file import use this.
 
 A request parked before the column existed has no stored mark. It counts
 through the same `is_rights_change` check, so an upgrade weakens nothing.

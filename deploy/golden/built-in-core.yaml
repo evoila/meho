@@ -2198,7 +2198,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: bf085158d8ceebf3fa9d1491a3676a2b0ee0cf7b8bd2f8cbbb870868944fdafe
+        checksum/config: 0b8bf1934d542dae3cef712efdd35556080073c1a1b1075685d802c9021c12a9
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.
@@ -3475,6 +3475,9 @@ data:
   MCP_SHORT_TOOL_TEXTS: "false"
   # Claude Code and Claude Desktop sign in with their own login client.
   MCP_CLIENT_PER_TOOL_KIND: "false"
+  # Category, labels and "always wait" on connectors, groups and
+  # operations. Off by default.
+  POLICY_CLASSIFICATION: "false"
   # The shared knowledge scope and the weekly knowledge upkeep. Rendered
   # always; the defaults match the backplane's own defaults (nothing
   # shared, upkeep on, once a week).

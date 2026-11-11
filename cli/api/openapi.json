@@ -148,7 +148,7 @@
           "auth"
         ],
         "summary": "Auth Config",
-        "description": "Return Keycloak issuer, audience, and the CLI's two public client ids.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is returned exactly\nas configured, trailing slash included. Keycloak publishes its\nissuer without one; providers such as authentik publish theirs\nwith one, and a client that compares the value against the\ndiscovery document (RFC 8414 \u00a73.3) needs the published form. The\nCLI strips the slash itself before it builds\n``<issuer>/.well-known/openid-configuration``.",
+        "description": "Return Keycloak issuer, audience, and the public client ids.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is returned exactly\nas configured, trailing slash included. Keycloak publishes its\nissuer without one; providers such as authentik publish theirs\nwith one, and a client that compares the value against the\ndiscovery document (RFC 8414 \u00a73.3) needs the published form. The\nCLI strips the slash itself before it builds\n``<issuer>/.well-known/openid-configuration``.",
         "operationId": "auth_config_api_v1_auth_config_get",
         "responses": {
           "200": {
@@ -27470,6 +27470,13 @@
             "type": "string",
             "title": "Cli Approve Client Id",
             "default": ""
+          },
+          "mcp_clients": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Mcp Clients"
           }
         },
         "type": "object",

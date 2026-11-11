@@ -2427,7 +2427,7 @@ jobs:
         # go-lint-test lane.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: '1.26'
+          go-version: '1.26.11'
           check-latest: true
           cache-dependency-path: cli/go.sum
 
@@ -2728,7 +2728,7 @@ jobs:
           # check-latest: the runner image can cache an older 1.26.x
           # (it had 1.26.9 when go.mod moved to 1.26.10), and setup-go
           # uses a cached match unless asked to check for a newer one.
-          go-version: '1.26'
+          go-version: '1.26.11'
           check-latest: true
           cache-dependency-path: cli/go.sum
 
@@ -2901,7 +2901,7 @@ jobs:
         # shape as the go-lint-test lane.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: '1.26'
+          go-version: '1.26.11'
           check-latest: true
           cache-dependency-path: cli/go.sum
 

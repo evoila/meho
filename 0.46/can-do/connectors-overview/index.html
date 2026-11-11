@@ -3138,15 +3138,17 @@ for each vendor.</p>
 <p>You can add your own connector as a package. See
 <a href="../../extend/connector-kit/">Write a connector package</a>.</p>
 <h2 id="product-versions">Product versions<a class="headerlink" href="#product-versions" title="Permanent link">&para;</a></h2>
-<p>The tables below group the connectors by what they manage. The exact
-version ranges are on the <a href="../../reference/connectors/">connector inventory</a>.</p>
+<p>The tables below group the connectors by what they manage. <strong>Built for</strong>
+is the range the code declares and CI tests. The exact ranges, and the
+versions that were tested on a real system, are on the
+<a href="../../reference/connectors/">connector inventory</a>.</p>
 <h3 id="in-the-public-image">In the public image<a class="headerlink" href="#in-the-public-image" title="Permanent link">&para;</a></h3>
 <table>
 <thead>
 <tr>
 <th>Area</th>
 <th>Systems</th>
-<th>Versions</th>
+<th>Built for</th>
 </tr>
 </thead>
 <tbody>
@@ -3195,9 +3197,132 @@ version ranges are on the <a href="../../reference/connectors/">connector invent
 <h3 id="in-evoilas-enterprise-pack">In evoila's enterprise pack<a class="headerlink" href="#in-evoilas-enterprise-pack" title="Permanent link">&para;</a></h3>
 <p>The enterprise pack is a commercial add-on. It brings the VMware and
 VCF connectors, and connectors for Fortinet and CrowdStrike products,
-as a signed package on top of the public image. It covers, for example,
-vCenter 8.0 and 9.x, NSX 4.x and 9.x, VCF 5.x and 9.x, HCX, Site
-Recovery Manager and Cloud Director. To get the pack, contact evoila.</p>
+as a signed package on top of the public image. To get the pack,
+contact evoila.</p>
+<!-- live-tests:start -->
+<table>
+<thead>
+<tr>
+<th>Product</th>
+<th>Built for</th>
+<th>Tested live on</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>VMware vCenter and vSphere</td>
+<td>8.0, 9.x</td>
+<td><code>vmware-rest-9.0</code>: not yet recorded. <code>vmware-rest-8.0</code>: not yet recorded.</td>
+</tr>
+<tr>
+<td>VMware NSX</td>
+<td>4.x, 9.x</td>
+<td><code>nsx-rest-9.0</code>: not yet recorded. <code>nsx-rest-4.2</code>: not yet recorded.</td>
+</tr>
+<tr>
+<td>VCF SDDC Manager</td>
+<td>5.x, 9.x</td>
+<td><code>sddc-rest-9.0</code>: not yet recorded. <code>sddc-vcf5-5.0</code>: not yet recorded.</td>
+</tr>
+<tr>
+<td>VCF Installer and Cloud Builder</td>
+<td>5.x, 9.x</td>
+<td><code>installer-rest-9.1</code>: not yet recorded. <code>installer-cb-5.0</code>: not yet recorded.</td>
+</tr>
+<tr>
+<td>VCF fleet management and Aria Suite Lifecycle</td>
+<td>8.x, 9.x</td>
+<td><code>fleet-lcm-9.0</code>: not yet recorded. <code>fleet-rest-9.0</code>: not yet recorded.</td>
+</tr>
+<tr>
+<td>VCF Automation and Aria Automation</td>
+<td>8.x, 9.x</td>
+<td><code>vcfa-rest-9.0</code>: not yet recorded. <code>vcfa-vra8-8.0</code>: not yet recorded.</td>
+</tr>
+<tr>
+<td>VCF Operations and Aria Operations</td>
+<td>8.x, 9.x</td>
+<td><code>vrops-rest-9.0</code>: not yet recorded. <code>vrops-vrops8-8.0</code>: not yet recorded.</td>
+</tr>
+<tr>
+<td>VCF Operations for logs and Aria Operations for Logs</td>
+<td>8.x, 9.x</td>
+<td><code>vrli-rest-9.0</code>: not yet recorded. <code>vrli-vrli8-8.0</code>: not yet recorded.</td>
+</tr>
+<tr>
+<td>VCF Operations orchestrator</td>
+<td>8.x, 9.x</td>
+<td>not yet recorded</td>
+</tr>
+<tr>
+<td>VCF Identity Broker and Workspace ONE Access</td>
+<td>3.3, 9.x</td>
+<td><code>idb-rest-9.0</code>: not yet recorded. <code>idb-wsa-3.3</code>: not yet recorded.</td>
+</tr>
+<tr>
+<td>VMware Cloud Director</td>
+<td>10.x</td>
+<td>not yet recorded</td>
+</tr>
+<tr>
+<td>VMware HCX</td>
+<td>4.7 to 9.x</td>
+<td>not yet recorded</td>
+</tr>
+<tr>
+<td>VMware Site Recovery Manager</td>
+<td>8.8 to 9.x</td>
+<td>not yet recorded</td>
+</tr>
+<tr>
+<td>VMware vSphere Replication</td>
+<td>8.8 to 9.x</td>
+<td>not yet recorded</td>
+</tr>
+<tr>
+<td>VMware Aria Automation Config (Salt)</td>
+<td>8.x, 9.x</td>
+<td>not yet recorded</td>
+</tr>
+<tr>
+<td>VMware Holodeck</td>
+<td>9.0</td>
+<td>not yet recorded</td>
+</tr>
+<tr>
+<td>Fortinet FortiGate</td>
+<td>7.2 to 7.x</td>
+<td>not yet recorded</td>
+</tr>
+<tr>
+<td>Fortinet FortiManager</td>
+<td>7.2 to 7.x</td>
+<td>not yet recorded</td>
+</tr>
+<tr>
+<td>Fortinet FortiAnalyzer</td>
+<td>7.2 to 7.x</td>
+<td>not yet recorded</td>
+</tr>
+<tr>
+<td>Fortinet FortiMail</td>
+<td>7.2 to 7.x</td>
+<td>not yet recorded</td>
+</tr>
+<tr>
+<td>Fortinet FortiSIEM</td>
+<td>7.4 to 7.x</td>
+<td><code>fortisiem-rest-7.5</code>: not yet recorded. <code>fortisiem-rest-7.4</code>: not yet recorded.</td>
+</tr>
+<tr>
+<td>CrowdStrike Falcon</td>
+<td>cloud service</td>
+<td>not yet recorded</td>
+</tr>
+</tbody>
+</table>
+<!-- live-tests:end -->
+
 <h2 id="state">State<a class="headerlink" href="#state" title="Permanent link">&para;</a></h2>
 <ul>
 <li>The public connectors are <strong>shipped</strong>. The

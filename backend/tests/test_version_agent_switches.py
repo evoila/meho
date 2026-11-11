@@ -56,6 +56,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "agent_approval_wait_timeout_seconds",
         "agent_budget_degrade_threshold",
         "agent_default_model",
+        "agent_grant_required",
         "agent_invoke_max_depth",
         "agent_max_output_tokens",
         "agent_model_backend",

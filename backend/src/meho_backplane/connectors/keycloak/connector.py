@@ -1172,6 +1172,36 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_authflow_ensure_passkey_code_skip(self, operator, target, params)
 
+    async def auth_flow_step_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.auth_flow.step.list``."""
+        from meho_backplane.connectors.keycloak.ops_flow_reads import (
+            keycloak_auth_flow_step_list,
+        )
+
+        return await keycloak_auth_flow_step_list(self, operator, target, params)
+
+    async def required_action_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.required_action.list``."""
+        from meho_backplane.connectors.keycloak.ops_flow_reads import (
+            keycloak_required_action_list,
+        )
+
+        return await keycloak_required_action_list(self, operator, target, params)
+
+    async def events_config_get(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.events.config.get``."""
+        from meho_backplane.connectors.keycloak.ops_flow_reads import (
+            keycloak_events_config_get,
+        )
+
+        return await keycloak_events_config_get(self, operator, target, params)
+
     async def identity_provider_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1227,6 +1257,10 @@ class KeycloakConnector(HttpConnector):
         from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import (
             PASSKEY_CODE_SKIP_OPS,
         )
+        from meho_backplane.connectors.keycloak.ops_flow_reads import (
+            FLOW_READ_OPS,
+            WHEN_TO_USE_FLOW_READ_BY_GROUP,
+        )
         from meho_backplane.connectors.keycloak.ops_identity_provider import (
             IDENTITY_PROVIDER_OPS,
             WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP,
@@ -1254,6 +1288,7 @@ class KeycloakConnector(HttpConnector):
             **WHEN_TO_USE_LOGIN_CHECK_BY_GROUP,
             **WHEN_TO_USE_AUTHFLOW_BY_GROUP,
             **WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP,
+            **WHEN_TO_USE_FLOW_READ_BY_GROUP,
         }
 
         bindings: list[tuple[Any, Any]] = []
@@ -1264,6 +1299,7 @@ class KeycloakConnector(HttpConnector):
             *APPROVAL_FLOW_OPS,
             *PASSKEY_CODE_SKIP_OPS,
             *IDENTITY_PROVIDER_OPS,
+            *FLOW_READ_OPS,
         ):
             handler = getattr(cls, op.handler_attr, None)
             if handler is None:

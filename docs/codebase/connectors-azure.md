@@ -5,7 +5,7 @@ subscription. The connector logs in to Microsoft Entra ID with a login (a
 service principal) from Vault, keeps the access token in its own cache, and
 calls Azure Resource Manager (Azure's management API) with it.
 
-The connector has 71 operations in 12 groups. The group `account` holds
+The connector has 79 operations in 13 groups. The group `account` holds
 `azure.about`, `azure.location.list` and `azure.operation.status`. The other
 groups are the families (inventory, compute, network, storage, cost and
 more), each with its own section at the end of this page. Every family builds
@@ -25,7 +25,7 @@ Package: `backend/src/meho_backplane/connectors/azure/`. Shared login code:
 | Connector ID | `azure-arm-2026.10` (implementation `azure-arm`, version `2026.10`) |
 | Registration | the versioned row plus the wildcard row `("azure", "", "")` |
 | Kind | typed operations only; nothing is ingested from a spec |
-| Operations | 71 in 12 groups: `account`, `aks`, `arc`, `automation`, `avs`, `compute`, `cost`, `inventory`, `migrate`, `network`, `security`, `storage` |
+| Operations | 79 in 13 groups: `account`, `aks`, `arc`, `automation`, `avs`, `compute`, `cost`, `dns`, `inventory`, `migrate`, `network`, `security`, `storage` |
 | Spec path check | `backend/tests/test_connectors_azure_spec_reconcile.py` against the shelf folder `azure-arm-2026.10` |
 | Onboarding | [`docs/cross-repo/azure-onboarding.md`](../cross-repo/azure-onboarding.md) |
 
@@ -1556,6 +1556,138 @@ proof must still show:
   <https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/assign-access-acm-data>
 - The evidenced exclusion of the price list from the spec path check:
   `docs/decisions/spec-reconcile-guards-standard.md`.
+
+## dns
+
+Public DNS zones (`Microsoft.Network/dnsZones`), not the private zones of the
+network family. Five operations in the group `dns`: three `safe` reads and two
+writes that wait for a person's approval.
+
+Modules: `dns.py` (group text, guidance for the AI, the operation table, the
+`DnsOps` mixin and the registration of the approval cards), `dns_schemas.py`
+(parameter and response schemas), `dns_parse.py` (name checks and the body of
+a write), `dns_rows.py` (rows from Azure's answers), `dns_reads.py` and
+`dns_writes.py` (the bodies).
+
+| Operation | Risk level | What it does | Parameters |
+|---|---|---|---|
+| `azure.network.dns.zone.list` | `safe` | every public zone: resource group, record set count, name servers | none |
+| `azure.network.dns.recordset.list` | `safe` | every record set of one zone, of every type: name, type, TTL, etag, values as texts | `resource_group`, `zone` |
+| `azure.network.dns.recordset.show` | `safe` | one record set with its records in Azure's fields, metadata and etag | `resource_group`, `zone`, `record_type`, `name` |
+| `azure.network.dns.recordset.upsert` | `dangerous`, waits for approval | creates a record set, or changes one | the four above, `ttl`, `records`, optional `etag` |
+| `azure.network.dns.recordset.delete` | `destructive`, waits for approval | deletes one record set | the four above and `etag` |
+
+All calls use API version `2018-05-01`:
+
+- `GET /subscriptions/{id}/providers/Microsoft.Network/dnsZones`
+- `GET .../resourceGroups/{rg}/providers/Microsoft.Network/dnsZones/{zone}/recordsets`
+- `GET`, `PUT`, `DELETE .../dnsZones/{zone}/{recordType}/{name}`
+
+The built-in role "DNS Zone Contributor" on the zone's resource group is
+enough for all of them. The subscription in every path is the target's.
+
+### Why a delete is in this program
+
+The Initiative says "no resource deletes". A stale public record was found on
+a consumer lab: an A record pointed to an address outside the consumer's own
+hosting, so a server the consumer does not control could answer under its
+name. MEHO had no DNS operation, so the delete ran outside MEHO's approval
+queue and audit log. The delete is in scope because the alternative is the
+same delete without governance. It is limited to one record set, it is
+`destructive`, a second person must approve it, and the approval card shows
+the current values.
+
+### The delete
+
+- `etag` is required. The caller reads the record set with
+  `azure.network.dns.recordset.show` and passes its etag.
+- The approval card (`delete_card`, shown when the call waits for approval)
+  reads the record set then and shows its name, type, TTL, etag and values,
+  with "permanent: Azure DNS keeps no copy of a deleted record set". When the
+  record set has another etag than the one in the call, there is no card and
+  the call is refused, so nobody approves values that are gone.
+- When the call runs, MEHO reads the record set again. A different etag: it
+  deletes nothing. The same etag: it sends `DELETE` with `If-Match: <etag>`,
+  so Azure refuses too when the record set changed in between.
+- The answer holds `previous`: the record set as it was just before the
+  delete. That is the copy to recreate it from. The audit row of the call
+  also holds these values as `state_before`. The approval request (the card
+  above) and the answer hold them too.
+- No record set (404 on the read, or 204 on the delete): nothing is deleted
+  and `already_absent` is true.
+- MEHO never deletes `SOA`, or the `NS` record set at the zone name (`@`).
+
+### The write
+
+- Types: `A`, `AAAA`, `CAA`, `CNAME`, `MX`, `PTR`, `SRV`, `TXT`. `NS` and
+  `SOA` are left out: they say which servers answer for the zone.
+- `records` has one entry per record: an address text for `A` and `AAAA`
+  (checked as IPv4 or IPv6), a name text for `CNAME` (exactly one) and `PTR`,
+  a text of at most 255 characters for `TXT`, and an object for `MX`
+  (`preference`, `exchange`), `SRV` (`priority`, `weight`, `port`, `target`)
+  and `CAA` (`flags`, `tag`, `value`).
+- Without `etag` the call sends `If-None-Match: *`: it creates a record set
+  and Azure refuses when the name and type exist. With `etag` it sends
+  `If-Match`: it replaces the records and TTL of that version. A write never
+  overwrites by accident. `etag` must be one specific etag: `*` (any version)
+  is refused by the schema and by the code.
+- The change runs only as the approved run of a request whose card shows the
+  current record set. When the card is missing, or its read failed, MEHO sends
+  nothing and says so. The audit row holds the old values (`state_before`,
+  from the card) and the new ones (`state_after`).
+- Azure answers 412 when the etag does not match. MEHO shows it as an error
+  that says nothing was changed. A lost answer is not sent again (a write is
+  repeated only after a 429 or a 401). Look with `show` before you try again.
+- A change replaces the whole record set, also what the card does not list
+  (for example metadata). Caches may serve the old values
+  until the old TTL runs out.
+- The approval card (`upsert_card`) shows the current values next to the new
+  ones, and whether the call only creates.
+
+### Names in paths
+
+`zone`, `resource_group`, `name` and `record_type` are checked before they go
+into a path (letters, digits, `_`, `-`, `.`, and `@` and `*` in a record
+name; a name never starts or ends with a period). The names are percent
+encoded in the path, so none can move it to another zone or subscription.
+
+### What is not secret
+
+DNS record values are public data, so the rows are not masked. MEHO reads no
+other field than the ones listed here.
+
+### Proven live
+
+Nothing yet. The operations are built from Microsoft's documented answers and
+tested with mocked HTTP (`backend/tests/test_connectors_azure_dns.py`). The
+lab proof must still show:
+
+- the record sets of a test zone list the same as the portal;
+- a test record is created, then deleted, with approval, and the approval
+  request of the delete holds its old values (the card, and `previous` in the
+  answer), and the audit row shows them as `state_before`;
+- the audit row, the approval card and the answer hold the values and no
+  other field of the zone.
+
+### Known limits
+
+- The zone list shows public zones only (`dnsZones`). Private zones are in
+  `azure.network.privatedns.list`.
+- A TXT record is one string of at most 255 characters per record. Longer
+  text must be split into several records by the caller.
+- Azure DNS has no change history. `previous` in the delete answer and the
+  approval card are the only copy.
+
+### References
+
+- Zones - List (API version 2018-05-01):
+  <https://learn.microsoft.com/en-us/rest/api/dns/zones/list>
+- Record Sets - List By Dns Zone:
+  <https://learn.microsoft.com/en-us/rest/api/dns/record-sets/list-by-dns-zone>
+- Record Sets - Create Or Update:
+  <https://learn.microsoft.com/en-us/rest/api/dns/record-sets/create-or-update>
+- Record Sets - Delete:
+  <https://learn.microsoft.com/en-us/rest/api/dns/record-sets/delete>
 
 ## inventory
 

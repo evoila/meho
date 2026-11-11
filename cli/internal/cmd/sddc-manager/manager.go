@@ -35,8 +35,8 @@ func newManagerListCmd() *cobra.Command {
 		Short: "List SDDC Manager appliances (FQDN, IP, version, management domain)",
 		Long: "list dispatches sddc.manager.list against connector_id=\"sddc-rest-9.0\".\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho sddc-manager manager list --target rdc-sddc-manager\n" +
-			"  meho sddc-manager manager list --target rdc-sddc-manager --json",
+		Example: "  meho sddc-manager manager list --target sddc-manager-lab\n" +
+			"  meho sddc-manager manager list --target sddc-manager-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -51,9 +51,9 @@ func newQueryCmd() *cobra.Command {
 			"output prints a summary plus the handle id when the dispatcher reduces the\n" +
 			"payload into a ResultHandle. --json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho vcf-logs query --target rdc-vrli\n" +
-			"  meho vcf-logs query \"text/CONTAINS+error\" --target rdc-vrli --limit 100\n" +
-			"  meho vcf-logs query --target rdc-vrli --json | jq .result",
+		Example: "  meho vcf-logs query --target vrli-lab\n" +
+			"  meho vcf-logs query \"text/CONTAINS+error\" --target vrli-lab --limit 100\n" +
+			"  meho vcf-logs query --target vrli-lab --json | jq .result",
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

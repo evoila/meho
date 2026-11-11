@@ -49,7 +49,7 @@ func newProtocolMapperCreateCmd() *cobra.Command {
 			"approval; a 409 already-exists is an idempotent success.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example:       "  meho keycloak protocol-mapper create --target rdc-keycloak --client-id meho-web -f mapper-tenant-id.json",
+		Example:       "  meho keycloak protocol-mapper create --target keycloak-lab --client-id meho-web -f mapper-tenant-id.json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

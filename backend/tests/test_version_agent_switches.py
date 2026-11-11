@@ -38,6 +38,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
     {
         "agent_operation_tools_from_mcp",
         "agent_reads_custom_description",
+        "checks_agent_events",
         "jsonflux_answer_ready",
         "kb_similar_check",
         "mcp_short_tool_texts",
@@ -234,6 +235,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "sensor_runner_tick_interval_seconds",
         "service_grant_delete_shaped_patterns",
         "shutdown_drain_seconds",
+        "spaces_enabled",
         "test_amortize_typed_op_registrars",
         "test_fail_start_after_registration",
         "test_stub_descriptor_embedding",

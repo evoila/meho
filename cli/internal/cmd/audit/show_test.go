@@ -59,7 +59,7 @@ func TestRunShowHappyPath(t *testing.T) {
 		if r.URL.Path != expected {
 			t.Errorf("path: got %q; want %q", r.URL.Path, expected)
 		}
-		tname := "rdc-vcenter"
+		tname := "vcenter-lab"
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.AuditEntry{
 			Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
@@ -91,7 +91,7 @@ func TestRunShowHappyPath(t *testing.T) {
 	for _, want := range []string{
 		"id:", "11111111-1111-1111-1111-111111111111",
 		"principal_sub:", "damir",
-		"target_name:", "rdc-vcenter",
+		"target_name:", "vcenter-lab",
 		"op_id:", "vsphere.vm.list",
 		"op_class:", "read",
 		"result_status:", "ok",
@@ -265,7 +265,7 @@ func TestPrintEntrySummaryShowsActor(t *testing.T) {
 func TestPrintEntrySummaryRendersUUIDsAndOptionals(t *testing.T) {
 	var buf bytes.Buffer
 	pname := "Damir"
-	tname := "rdc-vcenter"
+	tname := "vcenter-lab"
 	tenantName := "team-a"
 	dur := "12.3"
 	printEntrySummary(&buf, &api.AuditEntry{
@@ -296,7 +296,7 @@ func TestPrintEntrySummaryRendersUUIDsAndOptionals(t *testing.T) {
 		"tenant_name:       team-a",
 		"principal_name:    Damir",
 		"target_id:         33333333-3333-3333-3333-333333333333",
-		"target_name:       rdc-vcenter",
+		"target_name:       vcenter-lab",
 		"request_id:        44444444-4444-4444-4444-444444444444",
 		"duration_ms:       12.3",
 		"parent_audit_id:   55555555-5555-5555-5555-555555555555",

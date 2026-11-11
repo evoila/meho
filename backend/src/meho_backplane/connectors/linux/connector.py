@@ -218,6 +218,9 @@ class LinuxSshConnector(SshConnector):
     product = "linux"
     version = "1.x"
     impl_id = "linux-ssh"
+    version_range_reason = (
+        "Any Linux host that runs systemd fits. A rule for the distribution applies, not a range."
+    )
 
     async def fingerprint(
         self,

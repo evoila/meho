@@ -81,6 +81,9 @@ class ExampleWidgetConnector(HttpConnector):
     product = PRODUCT
     version = VERSION
     impl_id = IMPL_ID
+    #: The widget versions this connector is built for. When no range applies,
+    #: leave this out and set ``version_range_reason`` to say why.
+    supported_version_range = ">=1.0,<2.0"
 
     async def auth_headers(self, target: Target, operator: Operator) -> dict[str, str]:
         """Read the token from the target's secret in Vault, as the caller."""

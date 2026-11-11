@@ -32,7 +32,9 @@ What the op does, on the target's managed realm:
      and name the first difference. Nothing is written.
 
 3. Name the level: the realm attribute ``acr.loa.map`` gets
-   ``"meho-approve": 2``, next to the names it has.
+   ``"meho-approve": 2``, next to the names it has. The op stops before
+   it writes when another name already has level 2, or when the client
+   has its own ``acr.loa.map`` (Keycloak would then use the client's map).
 4. Bind the flow as the client's browser flow
    (``authenticationFlowBindingOverrides.browser``), unless it already is.
    The client is read, the one key is put on top, and the full client is
@@ -71,6 +73,14 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import merge_representation
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.core.keycloak_levels import (
+    APPROVAL_LEVEL,
+    APPROVAL_LEVEL_NAME,
+    LEVEL_MAP,
+    client_level_map,
+    level_conflict,
+    parse_level_map,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -80,6 +90,8 @@ if TYPE_CHECKING:
 __all__ = [
     "APPROVAL_FLOW_ALIAS",
     "APPROVAL_FLOW_OPS",
+    "APPROVAL_LEVEL_CONFIG",
+    "APPROVAL_LEVEL_STEP",
     "ENSURE_APPROVAL_FLOW_OP_ID",
     "WHEN_TO_USE_AUTHFLOW_BY_GROUP",
     "KeycloakApprovalFlowError",
@@ -103,14 +115,10 @@ _SUBFLOW_DESCRIPTIONS = {
     ),
     _CODE_FLOW_ALIAS: "Asks for the one-time code when the person has set one up.",
 }
-#: The realm attribute that names sign-in levels, and the name of the approval level.
-LEVEL_MAP_ATTRIBUTE = "acr.loa.map"
-APPROVAL_LEVEL_NAME = "meho-approve"
-APPROVAL_LEVEL = 2
 #: The settings of the level step: level 2, asked for at every sign-in.
 _LEVEL_CONFIG_ALIAS = _LEVEL_FLOW_ALIAS
-_LEVEL_CONFIG = {"loa-condition-level": str(APPROVAL_LEVEL), "loa-max-age": "0"}
-_LEVEL_STEP = "conditional-level-of-authentication"
+APPROVAL_LEVEL_CONFIG = {"loa-condition-level": str(APPROVAL_LEVEL), "loa-max-age": "0"}
+APPROVAL_LEVEL_STEP = "conditional-level-of-authentication"
 
 
 @dataclass(frozen=True)
@@ -127,7 +135,7 @@ class _Step:
 #: The steps in the order Keycloak lists them (a sub-flow's steps follow it).
 _STEPS: tuple[_Step, ...] = (
     _Step(0, _LEVEL_FLOW_ALIAS, "CONDITIONAL", APPROVAL_FLOW_ALIAS, subflow=True),
-    _Step(1, _LEVEL_STEP, "REQUIRED", _LEVEL_FLOW_ALIAS),
+    _Step(1, APPROVAL_LEVEL_STEP, "REQUIRED", _LEVEL_FLOW_ALIAS),
     _Step(1, "auth-username-password-form", "REQUIRED", _LEVEL_FLOW_ALIAS),
     _Step(1, _CODE_FLOW_ALIAS, "CONDITIONAL", _LEVEL_FLOW_ALIAS, subflow=True),
     _Step(2, "conditional-user-configured", "REQUIRED", _CODE_FLOW_ALIAS),
@@ -141,7 +149,9 @@ class KeycloakApprovalFlowError(RuntimeError):
     ``client_not_found``: the client does not exist. ``other_steps``: a flow
     with the name exists with other steps, or its level step has other
     settings. ``levels_not_object``: the realm's ``acr.loa.map`` is not a
-    JSON object. ``check_failed``: the flow or the
+    JSON object. ``level_taken``: another name already has level 2 in the
+    realm's ``acr.loa.map``. ``client_level_map``: the client has its own
+    ``acr.loa.map``. ``check_failed``: the flow or the
     binding did not read back as written. ``flow_not_found``: the new flow
     could not be found after it was made.
     """
@@ -324,18 +334,20 @@ async def _ensure_level_setting(
     ``other_steps``. Runs on a flow whose steps match :data:`_STEPS`.
     """
     rows = await _read_steps(connector, operator, target, realm, APPROVAL_FLOW_ALIAS)
-    step = next(row for row in rows if isinstance(row, dict) and _step_name(row) == _LEVEL_STEP)
+    step = next(
+        row for row in rows if isinstance(row, dict) and _step_name(row) == APPROVAL_LEVEL_STEP
+    )
     config_id = step.get("authenticationConfig")
     if config_id:
         path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(str(config_id))})
         have = await connector._get_admin_json(target, path, operator=operator)
         config = have.get("config")
         values: dict[str, Any] = config if isinstance(config, dict) else {}
-        if any(values.get(key) != value for key, value in _LEVEL_CONFIG.items()):
+        if any(values.get(key) != value for key, value in APPROVAL_LEVEL_CONFIG.items()):
             raise KeycloakApprovalFlowError(
                 "other_steps",
                 f"the level step of flow {APPROVAL_FLOW_ALIAS!r} has the settings {values!r}; "
-                f"wanted {_LEVEL_CONFIG!r}. Nothing was changed.",
+                f"wanted {APPROVAL_LEVEL_CONFIG!r}. Nothing was changed.",
             )
         return False
     path = fill_path(
@@ -347,10 +359,57 @@ async def _ensure_level_setting(
         "POST",
         path,
         operator=operator,
-        json={"alias": _LEVEL_CONFIG_ALIAS, "config": dict(_LEVEL_CONFIG)},
+        json={"alias": _LEVEL_CONFIG_ALIAS, "config": dict(APPROVAL_LEVEL_CONFIG)},
         idempotent_conflict=False,
     )
     return True
+
+
+async def _read_levels(
+    connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, path: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The realm's attributes and its level map; stops when the map cannot take level 2.
+
+    It stops when the map is not a JSON object, or when another name already
+    has level 2.
+    """
+    rep = await connector._get_admin_json(target, path, operator=operator)
+    attributes = dict(rep.get("attributes") or {})
+    levels = parse_level_map(attributes.get(LEVEL_MAP))
+    if levels is None:
+        raise KeycloakApprovalFlowError(
+            "levels_not_object",
+            f"the realm attribute {LEVEL_MAP!r} is not a JSON object; "
+            "nothing was changed. Fix it in the Keycloak admin console first.",
+        )
+    conflict = level_conflict(levels, {APPROVAL_LEVEL_NAME: APPROVAL_LEVEL})
+    if conflict is not None:
+        raise KeycloakApprovalFlowError(
+            "level_taken",
+            f"{conflict}. Nothing was changed. Give that name another level in the "
+            "Keycloak admin console (Realm settings, Sign-in levels), then run again.",
+        )
+    return attributes, levels
+
+
+async def _check_levels(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    realm: str,
+    client_path: str,
+) -> None:
+    """Stop before any write when the realm or the client cannot give the approval level."""
+    client = await connector._get_admin_json(target, client_path, operator=operator)
+    own_map = client_level_map(client)
+    if own_map is not None:
+        raise KeycloakApprovalFlowError(
+            "client_level_map",
+            f"{own_map}, so Keycloak would not use the realm's approval level. Nothing was "
+            f"changed. Remove the client's {LEVEL_MAP} in the Keycloak admin console "
+            "(the client's advanced settings), then run again.",
+        )
+    await _read_levels(connector, operator, target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}))
 
 
 async def _ensure_level_name(
@@ -362,22 +421,11 @@ async def _ensure_level_name(
     back, because Keycloak drops realm attributes a write leaves out.
     """
     path = fill_path(_ADMIN_REALM_PATH, {"realm": realm})
-    rep = await connector._get_admin_json(target, path, operator=operator)
-    attributes = dict(rep.get("attributes") or {})
-    try:
-        levels = json.loads(attributes.get(LEVEL_MAP_ATTRIBUTE) or "{}")
-    except ValueError:
-        levels = None
-    if not isinstance(levels, dict):
-        raise KeycloakApprovalFlowError(
-            "levels_not_object",
-            f"the realm attribute {LEVEL_MAP_ATTRIBUTE!r} is not a JSON object; "
-            "nothing was changed. Fix it in the Keycloak admin console first.",
-        )
+    attributes, levels = await _read_levels(connector, operator, target, path)
     if levels.get(APPROVAL_LEVEL_NAME) == APPROVAL_LEVEL:
         return False
     levels[APPROVAL_LEVEL_NAME] = APPROVAL_LEVEL
-    attributes[LEVEL_MAP_ATTRIBUTE] = json.dumps(levels, separators=(",", ":"))
+    attributes[LEVEL_MAP] = json.dumps(levels, separators=(",", ":"))
     await connector._write_admin(
         target,
         "PUT",
@@ -438,6 +486,10 @@ async def keycloak_authflow_ensure_approval_flow(
         raise KeycloakApprovalFlowError(
             "client_not_found", f"no client {client_id!r} in realm {realm!r}; nothing was changed"
         )
+    client_path = fill_path(
+        _CLIENT_PATH, {"realm": realm_segment, "client-uuid": quote_segment(client_uuid)}
+    )
+    await _check_levels(self, operator, target, realm_segment, client_path)
 
     flow_id = await _find_flow_id(self, operator, target, realm_segment)
     created = flow_id is None
@@ -467,9 +519,6 @@ async def keycloak_authflow_ensure_approval_flow(
 
     setting_added = await _ensure_level_setting(self, operator, target, realm_segment)
     level_changed = await _ensure_level_name(self, operator, target, realm_segment)
-    client_path = fill_path(
-        _CLIENT_PATH, {"realm": realm_segment, "client-uuid": quote_segment(client_uuid)}
-    )
     binding = await _bind(self, operator, target, client_path, flow_id)
     return {
         "realm": realm,

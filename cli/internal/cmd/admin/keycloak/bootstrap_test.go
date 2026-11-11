@@ -2241,3 +2241,54 @@ func TestBootstrap_GivesTheLevelStepItsSettings(t *testing.T) {
 		}
 	}
 }
+
+// The bootstrap stops before it changes the flow or the levels when
+// another name already has the approval level (#6281).
+func TestBootstrap_StopsWhenAnotherNameHasTheApprovalLevel(t *testing.T) {
+	fake := newFakeKeycloak()
+	fake.realmAttrs[levelMapAttribute] = `{"gold":2}`
+	_, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err == nil || !strings.Contains(err.Error(), `the name "gold" already has level 2 in acr.loa.map`) {
+		t.Fatalf("Bootstrap error = %v, want the level conflict", err)
+	}
+	if fake.realmAttrs[levelMapAttribute] != `{"gold":2}` {
+		t.Errorf("acr.loa.map changed: %q", fake.realmAttrs[levelMapAttribute])
+	}
+	if n := fake.calls["POST /authentication/flows"] + fake.calls["POST /authentication/flows..."]; n != 0 {
+		t.Errorf("made the flow (%d calls) before the stop", n)
+	}
+}
+
+// The bootstrap stops when the approval client has its own acr.loa.map:
+// Keycloak would then not use the realm's approval level (#6281). An
+// empty map is fine.
+func TestBootstrap_StopsWhenTheApprovalClientHasItsOwnLevelMap(t *testing.T) {
+	for _, tc := range []struct {
+		own     string
+		wantErr bool
+	}{
+		{own: `{"gold":1}`, wantErr: true},
+		{own: `{}`, wantErr: false},
+	} {
+		t.Run(tc.own, func(t *testing.T) {
+			fake := newFakeKeycloak()
+			old := fullOpts().withDefaults().desiredCLIApproveClient()
+			old.ID = "uuid-existing-approve"
+			old.Attributes[levelMapAttribute] = tc.own
+			fake.clients[old.ID] = old
+			_, _, err := runBootstrapOnce(t, fake, fullOpts())
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("Bootstrap: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "the client meho-cli-approve has its own acr.loa.map") {
+				t.Fatalf("Bootstrap error = %v, want the client level map stop", err)
+			}
+			if _, ok := fake.realmAttrs[levelMapAttribute]; ok {
+				t.Errorf("acr.loa.map was set: %q", fake.realmAttrs[levelMapAttribute])
+			}
+		})
+	}
+}

@@ -40,7 +40,7 @@ from meho_backplane.core.keycloak import (
     load_plan,
     load_realm_file,
 )
-from meho_backplane.core.keycloak_flows import NO_FLOW_RIGHT
+from meho_backplane.core.keycloak_flows import NO_FLOW_RIGHT, bound_clients, stage_flows
 
 _REALM_FILE = (
     Path(__file__).resolve().parents[2]
@@ -1156,6 +1156,62 @@ async def test_a_level_map_that_is_not_an_object_stops_the_stage() -> None:
 
     with pytest.raises(RealmStageError, match=r"acr\.loa\.map is not a JSON object"):
         await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+
+async def test_another_name_on_the_approval_level_stops_the_stage() -> None:
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(_realm_as_imported())
+    kc.realm_attributes["acr.loa.map"] = '{"gold":2}'
+
+    with pytest.raises(RealmStageError, match="the name 'gold' already has level 2"):
+        await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+    assert kc.realm_attributes["acr.loa.map"] == '{"gold":2}'
+
+
+async def test_an_approval_client_with_its_own_level_map_stops_the_stage() -> None:
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(_realm_as_imported())
+    attributes = kc.clients["meho-cli-approve"].setdefault("attributes", {})
+    attributes["acr.loa.map"] = '{"gold":1}'
+    before = json.loads(json.dumps(kc.realm_attributes))
+
+    with pytest.raises(
+        RealmStageError, match=r"the client meho-cli-approve has its own acr\.loa\.map"
+    ):
+        await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+    assert kc.realm_attributes == before
+
+
+def test_the_stage_makes_no_flow_for_the_console_client(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A flow bound only to ``meho-web``, or to no client, is left to its own explicit step.
+
+    For example the passkey touch flow: its steps need settings, and the
+    stage must not make or bind it on ``meho-web`` by itself.
+    """
+    flows = [
+        {"id": "f-approve", "alias": "approve", "topLevel": True},
+        {"id": "f-touch", "alias": "touch", "topLevel": True},
+        {"id": "f-free", "alias": "free", "topLevel": True},
+        {"id": "f-sub", "alias": "touch - level 3", "topLevel": False},
+    ]
+    clients = [
+        {
+            "clientId": "meho-cli-approve",
+            "authenticationFlowBindingOverrides": {"browser": "f-approve"},
+        },
+        {"clientId": "meho-web", "authenticationFlowBindingOverrides": {"browser": "f-touch"}},
+        {"clientId": "meho-cli"},
+    ]
+
+    kept = stage_flows(flows, clients)
+
+    assert [flow["alias"] for flow in kept] == ["approve", "touch - level 3"]
+    assert bound_clients(clients) == ["meho-cli-approve", "meho-web"]
+    out = capfd.readouterr().out
+    assert "login flow touch: not made here" in out
+    assert "login flow free: not made here" in out
 
 
 async def test_a_level_step_without_its_settings_gets_them(

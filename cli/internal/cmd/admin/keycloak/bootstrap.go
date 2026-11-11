@@ -786,6 +786,9 @@ func Bootstrap(
 
 	// --- Approval sign-in client (#5515) ------------------------------------
 
+	if err := checkApprovalLevel(ctx, c, opts.CLIApproveClientID); err != nil {
+		return nil, fmt.Errorf("name sign-in level %q: %w", approvalLevelName, err)
+	}
 	flowID, flowEvents, err := reconcileApprovalFlow(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile login flow %q: %w", approvalFlowAlias, err)

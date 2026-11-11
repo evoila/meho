@@ -27,7 +27,15 @@ than the file makes the flow one with other steps (#6281).
 
 :func:`ensure_levels` adds the named sign-in levels of the realm file
 (the realm attribute ``acr.loa.map``) to the realm. Names the realm has
-already are kept, so a level another part added stays (#6281).
+already are kept, so a level another part added stays (#6281). It stops
+before it writes when another name already has one of the levels, or when
+a client bound to a flow of the realm file has its own ``acr.loa.map``.
+
+:func:`stage_flows` picks the flows this stage makes: a top-level flow only
+when a client of the realm file other than ``meho-web`` binds it. A login
+flow of the console client (such as the passkey touch flow) is never made or
+bound here; it has its own explicit step. :func:`bound_clients` names the
+clients that bind a flow.
 
 :func:`flow_overrides` turns a client's ``authenticationFlowBindingOverrides``
 from the realm file (flow ids of the file) into flow ids of the realm.
@@ -36,7 +44,7 @@ from the realm file (flow ids of the file) into flow ids of the realm.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import quote
 
@@ -48,14 +56,22 @@ from meho_backplane.core.keycloak_api import (
     expect,
     id_from,
 )
+from meho_backplane.core.keycloak_levels import (
+    LEVEL_MAP,
+    client_level_map,
+    level_conflict,
+    parse_level_map,
+)
 
 __all__ = [
     "LEVEL_MAP",
     "NO_FLOW_RIGHT",
     "OVERRIDES",
+    "bound_clients",
     "ensure_flows",
     "ensure_levels",
     "flow_overrides",
+    "stage_flows",
 ]
 
 #: The client field that binds a client to its own login flow.
@@ -63,8 +79,8 @@ OVERRIDES = "authenticationFlowBindingOverrides"
 
 _BASE = f"/admin/realms/{REALM}/authentication"
 
-#: The realm attribute that names sign-in levels: a JSON object, name -> level.
-LEVEL_MAP = "acr.loa.map"
+#: The console client. The stage never makes or binds a login flow for it.
+_WEB_CLIENT = "meho-web"
 
 #: The settings of a step, by the alias the realm file gives them.
 _Configs = Mapping[str, Mapping[str, Any]]
@@ -364,19 +380,44 @@ async def ensure_flows(
     return ids
 
 
-async def ensure_levels(admin: Admin, wanted: Mapping[str, Any]) -> None:
+async def _check_client_levels(admin: Admin, clients: Sequence[str]) -> None:
+    """Stop when one of *clients* has its own ``acr.loa.map``; a missing client is fine."""
+    for client_id in clients:
+        reply = await admin.call(
+            "GET", f"/admin/realms/{REALM}/clients", params={"clientId": client_id}
+        )
+        if reply.status == 403:
+            raise RealmStageError(f"sign-in levels: {NO_FLOW_RIGHT}")
+        for client in expect(reply, 200, what=f"cannot read client {client_id}").data:
+            own_map = client_level_map(client)
+            if own_map is not None:
+                raise RealmStageError(
+                    f"sign-in levels: {own_map}, so Keycloak would not use the realm's "
+                    f"levels for it. Remove the client's {LEVEL_MAP} in the Keycloak admin "
+                    "console (the client's advanced settings) and run again"
+                )
+
+
+async def ensure_levels(
+    admin: Admin, wanted: Mapping[str, Any], clients: Sequence[str] = ()
+) -> None:
     """Add the named sign-in levels of the realm file to the realm (#6281).
 
     *wanted* is the ``attributes`` of the realm file. Its ``acr.loa.map``
     names levels, such as ``{"meho-approve": 2}``. A name the realm lacks,
     or has with another level, is set; other names of the realm are kept.
     Keycloak puts this name in the ``acr`` claim of a sign-in that reached
-    the level. Changing the realm needs ``manage-realm``; without it the
-    stage stops with :data:`NO_FLOW_RIGHT`.
+    the level. The stage stops before it writes when another name of the
+    realm already has one of the levels, or when one of *clients* (the
+    clients the realm file binds to a flow) has its own ``acr.loa.map``:
+    the ``acr`` claim would then not match the levels of the realm file.
+    Changing the realm needs ``manage-realm``; without it the stage stops
+    with :data:`NO_FLOW_RIGHT`.
     """
     levels = json.loads(wanted.get(LEVEL_MAP) or "{}")
     if not levels:
         return
+    await _check_client_levels(admin, clients)
     url = f"/admin/realms/{REALM}"
     reply = await admin.call("GET", url)
     if reply.status == 403:
@@ -384,14 +425,17 @@ async def ensure_levels(admin: Admin, wanted: Mapping[str, Any]) -> None:
     attributes = dict(
         expect(reply, 200, what=f"cannot read realm {REALM}").data.get("attributes") or {}
     )
-    try:
-        have = json.loads(attributes.get(LEVEL_MAP) or "{}")
-    except ValueError:
-        have = None
-    if not isinstance(have, dict):
+    have = parse_level_map(attributes.get(LEVEL_MAP))
+    if have is None:
         raise RealmStageError(
             f"the realm attribute {LEVEL_MAP} is not a JSON object; fix it in the "
             "Keycloak admin console (Realm settings, Sign-in levels) and run again"
+        )
+    conflict = level_conflict(have, levels)
+    if conflict is not None:
+        raise RealmStageError(
+            f"sign-in levels: {conflict}. Give that name another level in the Keycloak "
+            "admin console (Realm settings, Sign-in levels) and run again"
         )
     if all(have.get(name) == level for name, level in levels.items()):
         _say(f"sign-in levels: kept ({', '.join(sorted(levels))})")
@@ -402,6 +446,38 @@ async def ensure_levels(admin: Admin, wanted: Mapping[str, Any]) -> None:
         raise RealmStageError(f"sign-in levels: {NO_FLOW_RIGHT}")
     expect(reply, 204, what=f"cannot set the sign-in levels of realm {REALM}")
     _say(f"sign-in levels: set ({', '.join(sorted(levels))})")
+
+
+def bound_clients(clients: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The ``clientId`` of every client of the realm file that binds a login flow."""
+    return [client["clientId"] for client in clients if client.get(OVERRIDES)]
+
+
+def stage_flows(
+    flows: Sequence[Mapping[str, Any]], clients: Sequence[Mapping[str, Any]]
+) -> list[Mapping[str, Any]]:
+    """The login flows of the realm file that this stage makes and checks.
+
+    A top-level flow is kept only when a client of the realm file other
+    than ``meho-web`` binds it; sub-flows are kept. A flow left out gets one
+    line: no client is bound to it by this stage.
+    """
+    bound = {
+        flow_id
+        for client in clients
+        if client.get("clientId") != _WEB_CLIENT
+        for flow_id in (client.get(OVERRIDES) or {}).values()
+    }
+    kept: list[Mapping[str, Any]] = []
+    for flow in flows:
+        if flow.get("topLevel") and flow.get("id") not in bound:
+            _say(
+                f"login flow {flow['alias']}: not made here (no client of the realm file "
+                f"but {_WEB_CLIENT} binds it); no client is bound to it by this stage"
+            )
+            continue
+        kept.append(flow)
+    return kept
 
 
 def flow_overrides(want: Mapping[str, Any], flow_ids: Mapping[str, str]) -> dict[str, str]:

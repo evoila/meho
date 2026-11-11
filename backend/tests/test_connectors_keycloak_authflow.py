@@ -475,6 +475,51 @@ async def test_level_map_that_is_not_an_object_stops(kc: KeycloakConnector) -> N
     assert fake.writes == []
 
 
+@pytest.mark.parametrize("steps", [None, "good"], ids=["flow missing", "flow present"])
+@pytest.mark.parametrize(
+    ("levels", "client_attributes", "code", "named"),
+    [
+        ('{"gold":2}', {}, "level_taken", "the name 'gold' already has level 2"),
+        (
+            '{"meho-approve":2}',
+            {"acr.loa.map": '{"gold":1}'},
+            "client_level_map",
+            "the client meho-cli-approve has its own acr.loa.map",
+        ),
+    ],
+    ids=["another name on level 2", "client has its own level map"],
+)
+async def test_a_level_conflict_stops_before_any_write(
+    kc: KeycloakConnector,
+    steps: str | None,
+    levels: str,
+    client_attributes: dict[str, str],
+    code: str,
+    named: str,
+) -> None:
+    client = _client()
+    client["attributes"].update(client_attributes)
+    fake = FakeKeycloak(flow_steps=_good_steps() if steps else None, client=client, levels=levels)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run(_FLOW_OP, {})
+    assert result["status"] != "ok"
+    dumped = json.dumps(result)
+    assert code in dumped
+    assert named in dumped
+    assert fake.writes == []
+
+
+async def test_an_empty_client_level_map_is_no_conflict(kc: KeycloakConnector) -> None:
+    client = _client()
+    client["attributes"]["acr.loa.map"] = "{}"
+    fake = FakeKeycloak(flow_steps=_good_steps(), client=client)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run(_FLOW_OP, {})
+    assert result["status"] == "ok", result
+
+
 async def test_same_steps_and_other_binding_only_binds(kc: KeycloakConnector) -> None:
     fake = FakeKeycloak(flow_steps=_good_steps(), client=_client(browser="old-flow-id"))
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:

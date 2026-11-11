@@ -373,21 +373,18 @@ func ensureApprovalLevelSettings(ctx context.Context, c *adminClient) (string, e
 	return "set", nil
 }
 
-// ensureApprovalLevel names level 2 meho-approve in the realm attribute
-// acr.loa.map, next to the names the realm has (#6281). Keycloak puts
-// the name in the acr claim of a sign-in that reached the level. The
-// whole attribute map is written back: Keycloak drops the realm
-// attributes a write leaves out.
-func ensureApprovalLevel(ctx context.Context, c *adminClient) ([]string, error) {
+// readLevelMap reads the realm's attributes and its acr.loa.map. It
+// stops when the map is not a JSON object.
+func readLevelMap(ctx context.Context, c *adminClient) (map[string]string, map[string]any, error) {
 	body, err := c.flowCall(ctx, http.MethodGet, "", nil, http.StatusOK)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var realm struct {
 		Attributes map[string]string `json:"attributes"`
 	}
 	if err := json.Unmarshal(body, &realm); err != nil {
-		return nil, fmt.Errorf("decode the realm: %w", err)
+		return nil, nil, fmt.Errorf("decode the realm: %w", err)
 	}
 	if realm.Attributes == nil {
 		realm.Attributes = map[string]string{}
@@ -395,8 +392,55 @@ func ensureApprovalLevel(ctx context.Context, c *adminClient) ([]string, error) 
 	levels := map[string]any{}
 	if raw := realm.Attributes[levelMapAttribute]; raw != "" {
 		if err := json.Unmarshal([]byte(raw), &levels); err != nil {
-			return nil, fmt.Errorf("the realm attribute %s is not a JSON object; fix it in the Keycloak admin console and run again", levelMapAttribute)
+			return nil, nil, fmt.Errorf("the realm attribute %s is not a JSON object; fix it in the Keycloak admin console and run again", levelMapAttribute)
 		}
+	}
+	return realm.Attributes, levels, nil
+}
+
+// checkApprovalLevel stops the bootstrap before it changes the flow or
+// the levels when the realm or the approval client cannot give the
+// approval level (#6281): another name already has level 2 in the
+// realm's acr.loa.map, or the approval client has its own acr.loa.map
+// (Keycloak would then use the client's map, not the realm's).
+func checkApprovalLevel(ctx context.Context, c *adminClient, clientID string) error {
+	client, err := c.findClient(ctx, clientID)
+	if err != nil {
+		return err
+	}
+	if client != nil {
+		if raw := client.Attributes[levelMapAttribute]; raw != "" {
+			var own map[string]any
+			if err := json.Unmarshal([]byte(raw), &own); err != nil || len(own) != 0 {
+				return fmt.Errorf("the client %s has its own %s, so Keycloak would not use the realm's approval level; "+
+					"remove it in the Keycloak admin console (the client's advanced settings) and run again",
+					clientID, levelMapAttribute)
+			}
+		}
+	}
+	_, levels, err := readLevelMap(ctx, c)
+	if err != nil {
+		return err
+	}
+	for name, level := range levels {
+		if name != approvalLevelName && fmt.Sprint(level) == fmt.Sprint(approvalLevel) {
+			return fmt.Errorf("the name %q already has level %d in %s; MEHO needs that level for %q. "+
+				"Give that name another level in the Keycloak admin console (Realm settings, Sign-in levels) and run again",
+				name, approvalLevel, levelMapAttribute, approvalLevelName)
+		}
+	}
+	return nil
+}
+
+// ensureApprovalLevel names level 2 meho-approve in the realm attribute
+// acr.loa.map, next to the names the realm has (#6281). Keycloak puts
+// the name in the acr claim of a sign-in that reached the level. The
+// whole attribute map is written back: Keycloak drops the realm
+// attributes a write leaves out.
+func ensureApprovalLevel(ctx context.Context, c *adminClient) ([]string, error) {
+	attributes, levels, err := readLevelMap(ctx, c)
+	if err != nil {
+		return nil, err
 	}
 	if level, ok := levels[approvalLevelName].(float64); ok && level == approvalLevel {
 		return []string{fmt.Sprintf("[skip] sign-in level %q exists", approvalLevelName)}, nil
@@ -406,8 +450,8 @@ func ensureApprovalLevel(ctx context.Context, c *adminClient) ([]string, error) 
 	if err != nil {
 		return nil, err
 	}
-	realm.Attributes[levelMapAttribute] = string(encoded)
-	if _, err := c.flowCall(ctx, http.MethodPut, "", map[string]any{"attributes": realm.Attributes}, http.StatusNoContent); err != nil {
+	attributes[levelMapAttribute] = string(encoded)
+	if _, err := c.flowCall(ctx, http.MethodPut, "", map[string]any{"attributes": attributes}, http.StatusNoContent); err != nil {
 		return nil, err
 	}
 	return []string{fmt.Sprintf("[updated] sign-in level %q: level %d of the realm", approvalLevelName, approvalLevel)}, nil

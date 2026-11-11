@@ -1236,6 +1236,10 @@ class Settings(BaseModel):
         private key. It proves that push messages come from this MEHO. The
         install makes it in the Secret ``<release>-core-web-push``. Never
         logged and never shown. Env ``WEB_PUSH_VAPID_PRIVATE_KEY``.
+    spaces_enabled:
+        Off by default. Turns on spaces (who owns which system inside a
+        tenant, :mod:`meho_backplane.spaces`). The tables always exist; with
+        this off, nothing in an install changes. Env ``SPACES_ENABLED``.
     approval_allow_self_approval:
         Self-approval **emergency break-glass** switch (G11.7-T1 #1401).
         Default ``False`` (fail-closed): a person who is not a
@@ -2035,6 +2039,8 @@ class Settings(BaseModel):
     # The push feature (web_push/) and its key; see the docstring.
     web_push_enabled: bool = False
     web_push_vapid_private_key: str = Field(default="", repr=False)
+    # Spaces (spaces/); see the docstring.
+    spaces_enabled: bool = False
     # G10.1-T3 #869 — BFF sliding-session knobs for the broadcast
     # wall-monitor's long-display requirement. The sliding extension
     # keeps an actively-viewed session alive past its login-time
@@ -3269,6 +3275,7 @@ def get_settings() -> Settings:
         params_hash_key=os.environ.get("PARAMS_HASH_KEY", "").strip(),
         web_push_enabled=parse_bool_env(os.environ.get("WEB_PUSH_ENABLED", "false")),
         web_push_vapid_private_key=os.environ.get("WEB_PUSH_VAPID_PRIVATE_KEY", "").strip(),
+        spaces_enabled=parse_bool_env(os.environ.get("SPACES_ENABLED", "false")),
         ui_session_sliding_extension_seconds=int(
             os.environ.get("UI_SESSION_SLIDING_EXTENSION_SECONDS", "3600"),
         ),

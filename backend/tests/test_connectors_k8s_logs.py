@@ -48,6 +48,7 @@ from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 from meho_backplane.connectors.kubernetes.ops_logs import (
     MAX_BODY_BYTES,
     MAX_TAIL_LINES,
+    ContainerNotFoundError,
     MultiContainerAmbiguityError,
     PodNotFoundError,
     k8s_logs,
@@ -371,6 +372,28 @@ async def test_k8s_logs_multi_container_without_container_param_errors() -> None
             {"pod_name": "istio-pilot-1", "namespace": "istio"},
         )
     assert exc.value.containers == ["discovery", "istio-proxy"]
+    assert "has multiple containers; specify --container" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_k8s_logs_unknown_container_in_single_container_pod_names_the_wrong_name() -> None:
+    """A wrong name on a one-container pod says the name is wrong, not that the pod is ambiguous."""
+    connector = _make_connector()
+    pods = _pod_list([_pod_obj("api-1", ["backplane"])])
+    config_patch, core_v1_patch, core_v1 = _patch_api(list_pods=pods, log_body="x\n")
+    with config_patch, core_v1_patch, pytest.raises(ContainerNotFoundError) as exc:
+        await k8s_logs(
+            connector,
+            _TARGET,
+            _make_operator(),
+            {"pod_name": "api-1", "namespace": "app", "container": "wrong"},
+        )
+    assert str(exc.value.args[0]) == (
+        "pod 'api-1' has no container named 'wrong'; its containers are: backplane"
+    )
+    assert "multiple containers" not in str(exc.value)
+    assert exc.value.containers == ["backplane"]
+    core_v1.read_namespaced_pod_log.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -378,7 +401,7 @@ async def test_k8s_logs_unknown_container_in_multi_container_pod_errors() -> Non
     connector = _make_connector()
     multi = _pod_list([_pod_obj("istio-pilot-1", ["discovery", "istio-proxy"])])
     config_patch, core_v1_patch, _core_v1 = _patch_api(list_pods=multi, log_body="x\n")
-    with config_patch, core_v1_patch, pytest.raises(MultiContainerAmbiguityError) as exc:
+    with config_patch, core_v1_patch, pytest.raises(ContainerNotFoundError) as exc:
         await k8s_logs(
             connector,
             _TARGET,
@@ -390,6 +413,9 @@ async def test_k8s_logs_unknown_container_in_multi_container_pod_errors() -> Non
             },
         )
     assert exc.value.containers == ["discovery", "istio-proxy"]
+    assert "has no container named 'nope'; its containers are: discovery, istio-proxy" in str(
+        exc.value
+    )
 
 
 @pytest.mark.asyncio
@@ -411,11 +437,11 @@ async def test_k8s_logs_init_container_name_is_accepted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_k8s_logs_ambiguity_error_lists_init_containers_after_app_containers() -> None:
+async def test_k8s_logs_unknown_container_lists_init_containers_after_app_containers() -> None:
     connector = _make_connector()
     pods = _pod_list([_pod_obj("api-1", ["api", "proxy"], init_containers=["migrate"])])
     config_patch, core_v1_patch, _core_v1 = _patch_api(list_pods=pods, log_body="x\n")
-    with config_patch, core_v1_patch, pytest.raises(MultiContainerAmbiguityError) as exc:
+    with config_patch, core_v1_patch, pytest.raises(ContainerNotFoundError) as exc:
         await k8s_logs(
             connector,
             _TARGET,
@@ -446,7 +472,7 @@ async def test_resolve_pod_and_container_rejects_init_container_by_default() -> 
     core_v1.list_namespaced_pod = AsyncMock(
         return_value=_pod_list([_pod_obj("api-1", ["api"], init_containers=["migrate"])])
     )
-    with pytest.raises(MultiContainerAmbiguityError) as exc:
+    with pytest.raises(ContainerNotFoundError) as exc:
         await resolve_pod_and_container(core_v1, "app", "api-1", "migrate")
     assert exc.value.containers == ["api"]
 

@@ -21,7 +21,7 @@ The other values have defaults:
   period of a tenant that did not set its own.
 * ``SESSION_STORE_MAX_UPLOAD_BYTES`` (25 MiB) -- the largest compressed
   archive MEHO takes.
-* ``SESSION_STORE_MAX_UNPACKED_BYTES`` (256 MiB) and
+* ``SESSION_STORE_MAX_UNPACKED_BYTES`` (64 MiB) and
   ``SESSION_STORE_MAX_FILES`` (2000) -- the limits of one unpacked
   archive.
 * ``SESSION_STORE_CLEANUP_ENABLED`` (``true``) and
@@ -82,7 +82,7 @@ def load_config() -> SessionStoreConfig:
         region=os.environ.get("SESSION_STORE_REGION", "").strip() or "us-east-1",
         retention_days_default=_int("SESSION_STORE_RETENTION_DAYS_DEFAULT", 90),
         max_upload_bytes=_int("SESSION_STORE_MAX_UPLOAD_BYTES", 25 * _MIB),
-        max_unpacked_bytes=_int("SESSION_STORE_MAX_UNPACKED_BYTES", 256 * _MIB),
+        max_unpacked_bytes=_int("SESSION_STORE_MAX_UNPACKED_BYTES", 64 * _MIB),
         max_files=_int("SESSION_STORE_MAX_FILES", 2000),
         cleanup_enabled=parse_bool_env(os.environ.get("SESSION_STORE_CLEANUP_ENABLED", "true")),
         cleanup_interval_seconds=_int("SESSION_STORE_CLEANUP_INTERVAL_SECONDS", 3600, minimum=60),

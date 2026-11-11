@@ -21,6 +21,8 @@ from meho_backplane.connectors.github.op_classes import TICKET_WRITE_OP_IDS
 from meho_backplane.connectors.registry import _eager_import_connectors
 from meho_backplane.op_classes import (
     declare_op_classes,
+    declare_per_call_approval,
+    declare_root_shell,
     declare_safe_writes,
     declared_op_class,
     declared_op_ids,
@@ -37,6 +39,9 @@ def fresh_registry() -> Iterator[None]:
     """Empty the registry for one test and put the real declarations back after."""
     saved = dict(op_classes._DECLARED)
     saved_safe_writes = set(op_classes._SAFE_WRITES)
+    saved_root_shell = set(op_classes._ROOT_SHELL)
+    saved_per_call = set(op_classes._PER_CALL_APPROVAL)
+    saved_no_secret_value = set(op_classes._NO_SECRET_VALUE)
     op_classes._reset_declared_op_classes_for_testing()
     try:
         yield
@@ -44,6 +49,9 @@ def fresh_registry() -> Iterator[None]:
         op_classes._reset_declared_op_classes_for_testing()
         op_classes._DECLARED.update(saved)
         op_classes._SAFE_WRITES.update(saved_safe_writes)
+        op_classes._ROOT_SHELL.update(saved_root_shell)
+        op_classes._PER_CALL_APPROVAL.update(saved_per_call)
+        op_classes._NO_SECRET_VALUE.update(saved_no_secret_value)
 
 
 def test_declared_class_wins_over_the_pattern_rules(fresh_registry: None) -> None:
@@ -125,3 +133,80 @@ def test_the_only_safe_writes_are_the_github_ticket_writes() -> None:
     assert set(TICKET_WRITE_OP_IDS) == op_classes._SAFE_WRITES
     assert declared_op_class("k8s.secret.create") == "credential_write"
     assert not op_classes.is_safe_write("k8s.secret.create")
+
+
+def test_root_shell_mark_is_separate_from_the_op_class(fresh_registry: None) -> None:
+    # #6092 -- one op id has one class, and it can carry the root mark too.
+    declare_op_classes(credential_write=("example.script.run",))
+    declare_root_shell(("example.script.run",))
+    declare_root_shell(("example.script.run",))
+    assert op_classes.is_root_shell("example.script.run")
+    assert declared_op_class("example.script.run") == "credential_write"
+    assert not op_classes.is_root_shell("example.script.list")
+
+
+def test_per_call_approval_mark_is_separate_from_the_op_class(fresh_registry: None) -> None:
+    declare_op_classes(write=("example.group.add",))
+    declare_per_call_approval(("example.group.add",))
+    declare_per_call_approval(("example.group.add",))
+    assert op_classes.needs_per_call_approval("example.group.add")
+    assert declared_op_class("example.group.add") == "write"
+    assert not op_classes.needs_per_call_approval("example.group.list")
+
+
+def test_msad_marks_its_member_writes_at_import() -> None:
+    _eager_import_connectors()
+    assert op_classes.needs_per_call_approval("msad.group.add-member")
+    assert op_classes.needs_per_call_approval("msad.group.remove-member")
+    assert not op_classes.needs_per_call_approval("msad.group.create")
+
+
+def test_ssh_connectors_mark_their_root_writes_at_import() -> None:
+    # #6092 -- every write that runs a command as root on the host is marked.
+    _eager_import_connectors()
+    for op_id in (
+        "linux.file.write",
+        "linux.service.control",
+        "linux.script.run",
+        "linux.sysctl.write",
+        "linux.firewall.load",
+        "linux.firewall.confirm",
+        "bind9.record.add",
+        "bind9.record.remove",
+        "bind9.record.delete",
+        "bind9.config.apply_file",
+        "bind9.config.apply_views",
+        "bind9.config.backup",
+        "bind9.config.reload",
+        "rke2.token.rotate",
+        "rke2.node.service.restart",
+        "rke2.node.config.update",
+        "rke2.etcd-snapshot.save",
+        "pfsense.gateway.add",
+        "pfsense.route.static.add",
+        "pfsense.filter.rule.add",
+        "pfsense.filter.rule.delete",
+        "pfsense.user.enable",
+        "pfsense.user.disable",
+        "pfsense.gateway.delete",
+        "pfsense.route.static.delete",
+        "pfsense.alias.delete",
+        "pfsense.alias.member.remove",
+        "pfsense.nat.delete",
+    ):
+        assert op_classes.is_root_shell(op_id), op_id
+    # A read with a fixed command never waits for approval, so it has no mark.
+    assert not op_classes.is_root_shell("linux.firewall.show")
+    assert not op_classes.is_root_shell("linux.file.read")
+    assert not op_classes.is_root_shell("pfsense.config.show")
+    assert not op_classes.is_root_shell("pfsense.diag.ping")
+
+
+def test_no_secret_value_mark(fresh_registry: None) -> None:
+    assert not op_classes.returns_no_secret_value("example.secret.names")
+
+    op_classes.declare_no_secret_value(("example.secret.names",))
+    op_classes.declare_no_secret_value(("example.secret.names",))
+
+    assert op_classes.returns_no_secret_value("example.secret.names")
+    assert not op_classes.returns_no_secret_value("example.secret.read")

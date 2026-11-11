@@ -231,13 +231,17 @@ def test_cheap_tier_definition_payload_parses_against_live_schema() -> None:
         "R1 cheap tier must stay on the fast tier; see Initiative #807 R1 -- "
         "the pattern's name is 'cheap-tier on a schedule, escalating to deep'."
     )
-    # The cheap tier's toolset is deliberately narrow: only the
-    # call_operation meta-tool is registered; invoke_agent is
-    # auto-appended by the runtime when child composition is wired.
-    # An accidental broadening (e.g. opening list_operation_groups
-    # / search_operations) would let the model do its own discovery
-    # on every firing, which is a deep-tier shape.
-    assert parsed.toolset.get("meta_tools") == ["call_operation"]
+    # The cheap tier names invoke_agent, so it can hand events to the deep tier. A child run
+    # gets only the tools both toolsets allow, so the cheap tier also names
+    # the three tools the deep tier investigates with, and has no
+    # connector limit. Its system prompt keeps it from doing discovery itself.
+    assert parsed.toolset.get("meta_tools") == [
+        "list_operation_groups",
+        "search_operations",
+        "call_operation",
+        "invoke_agent",
+    ]
+    assert parsed.toolset.get("connectors") is None
 
 
 def test_deep_tier_definition_payload_parses_against_live_schema() -> None:
@@ -269,6 +273,27 @@ def test_deep_tier_definition_payload_parses_against_live_schema() -> None:
     # PolicyDecision Pydantic class still reads.
     required = parsed.output_schema.get("required", [])
     assert set(required) == {"alert_class", "verdict", "re_escalate", "summary", "evidence"}
+
+
+def test_both_tiers_are_owned_by_the_scheduled_agent_login() -> None:
+    """Both definitions name the login the cron trigger runs as.
+
+    A scheduled run runs as its agent login, and an agent login hands off
+    only to a definition whose ``identity_ref`` is its own client id. The
+    deep tier must therefore be owned by the same login as the cheap tier,
+    or the scheduled hand-off finds no deep tier.
+    """
+    cheap = json.loads(
+        (EXAMPLE_DIR / "agent.cheap-tier-classifier.json").read_text(encoding="utf-8"),
+    )
+    deep = json.loads(
+        (EXAMPLE_DIR / "agent.deep-tier-investigator.json").read_text(encoding="utf-8"),
+    )
+    trigger = json.loads(
+        (EXAMPLE_DIR / "scheduler.cron.json").read_text(encoding="utf-8"),
+    )
+    assert cheap["identity_ref"] == trigger["identity_sub"]
+    assert deep["identity_ref"] == trigger["identity_sub"]
 
 
 def test_scheduler_payload_parses_against_live_schema() -> None:
@@ -420,6 +445,18 @@ def test_identity_budget_seed_script_imports_and_parses_args() -> None:
     assert ns.tenant_id == uuid.UUID("11111111-1111-1111-1111-111111111111")
     assert ns.cheap_sub == "agent:r1-cheap-tier-classifier"
     assert ns.deep_sub == "agent:r1-deep-tier-investigator"
+
+    # GUIDE Step 4 passes only the one agent login both tiers run under.
+    ns_one_login = module._parse_args(
+        [
+            "--tenant-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--cheap-sub",
+            "agent:r1-cheap-tier-classifier",
+        ]
+    )
+    assert ns_one_login.cheap_sub == "agent:r1-cheap-tier-classifier"
+    assert ns_one_login.deep_sub is None
 
 
 # ---------------------------------------------------------------------------

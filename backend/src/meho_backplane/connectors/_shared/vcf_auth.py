@@ -487,6 +487,7 @@ class ConnectorAuthError(SessionLoginError):
         secret_ref: str | None = None,
         remediation: str | None = None,
         stage: Literal["establish", "call", "after_relogin"] = "establish",
+        over_http: bool = True,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -506,6 +507,11 @@ class ConnectorAuthError(SessionLoginError):
         # connector already logged in again and retried the call once, and
         # the fresh session was still rejected.
         self.stage = stage
+        # ``True``: ``status_code`` is the HTTP status the server sent.
+        # ``False``: the connector does not use HTTP (a database login, for
+        # example), so ``status_code`` only names the kind of failure, and
+        # the error text must not say "HTTP <status>".
+        self.over_http = over_http
 
 
 def session_establish_auth_error(

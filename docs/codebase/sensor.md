@@ -90,7 +90,14 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
 
 1. The wire schema validates the cadence union (`interval_seconds`
    5..86400 XOR `cron_expr` + timezone), parses the `assertion` into
-   `AssertionSpec`, and caps its serialized size (≤ 8 KiB).
+   `AssertionSpec`, and caps its serialized size (≤ 8 KiB). It also
+   refuses `reveal_secret` in `params` (`SensorParams` in
+   `checks/schemas.py`; the edit body and the dashboard file use the same
+   type). A Sensor runs with no person at the call and stores what it
+   reads where operators, agents and service logins see it, so it always
+   reads the default view, with secret values hidden. The runner takes the
+   flag off the params of a stored row before each run, and
+   `meho dashboard export` leaves it out of the file.
 2. **Identity-attribution guard (#2699)**: `identity_sub` is the `sub` the
    runner dispatches — and audit-attributes (`AuditLog.operator_sub` /
    broadcast `principal_sub`) — every evaluation under. The service accepts
@@ -289,6 +296,14 @@ healthy tick's evidence is byte-for-byte unchanged. The sample rides the same
 evidence dict every surface already renders — the latest-result projection, the
 per-tick `sensor_results` rows, the sensor detail view, notification mails
 (clipped), and the investigator briefing — so no consumer needed a change.
+
+### Changes as events (#6180)
+
+With `CHECKS_AGENT_EVENTS` on, `_persist_outcome` writes one
+`check.sensor.changed` event in the same transaction as `last_state` when the
+confirmed state changed. A reading held by the re-check window writes none.
+With the switch off nothing is written. Payload: `docs/codebase/events.md`,
+"Check events".
 
 ### Per-tick evidence history (#2756)
 

@@ -5,7 +5,7 @@
   Keycloak create-user confirm modal (Initiative #1943, Task #1960).
 
   Swapped into ``#keycloak-user-modal-container`` by the "Create user" button.
-  Dispatches ``keycloak.user.create`` (``safety_level="caution"``,
+  Dispatches ``keycloak.user.create`` (``safety_level="dangerous"``,
   ``requires_approval=True``) -- a state-changing write, so the confirm is
   UNMISSABLE.
 
@@ -36,16 +36,16 @@
       </button>
     </div>
 
-    <div role="alert" class="alert alert-warning mt-4 items-start" data-keycloak-confirm="caution">
+    <div role="alert" class="alert alert-error mt-4 items-start" data-keycloak-confirm="dangerous">
       {{ icon("shield-check", class="size-5 shrink-0") }}
       <div>
         <h4 class="text-sm font-semibold">State-changing operation</h4>
         <p class="text-xs">
-          Creating a user is approval-gated: confirming parks a request for a
-          reviewer rather than executing immediately.
+          Creating a user is approval-gated: confirming parks a request that a
+          MEHO-SA-Operator or a tenant admin must approve.
         </p>
         <div class="mt-2 flex flex-wrap items-center gap-2">
-          <span class="badge badge-warning badge-sm" data-keycloak-safety>safety: caution</span>
+          <span class="badge badge-error badge-sm" data-keycloak-safety>safety: dangerous</span>
           <span class="badge badge-outline badge-sm" data-keycloak-requires-approval>requires approval</span>
         </div>
       </div>

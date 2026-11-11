@@ -24,7 +24,10 @@ whose preview *raises* is refused ``blast_radius_required`` and can never be
 approved, so a network-dependent read would turn a transient Harbor blip into a
 permanent inability to govern-delete) and surgical (no new dispatched HTTP path
 for the spec-reconcile lane to reconcile). The reviewer still sees the robot
-identity + its project scope + the honest irreversibility class.
+identity + its project scope + the honest irreversibility class. The project
+on the card holds at run time: the handler reads the robot before the delete
+and refuses one that is not a project robot of that project
+(:mod:`~meho_backplane.connectors.harbor.robot_scope`).
 
 The returned ``{"blast_radius": {...}}`` sub-dict is promoted by the dispatcher
 to the top of ``ApprovalRequest.proposed_effect`` (#3197), so a ``destructive``

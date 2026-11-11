@@ -129,7 +129,9 @@ from meho_backplane.agent.tool_audit import ToolCallAudit
 from meho_backplane.agent.toolset import (
     ToolsetResolution,
     capability_versions,
+    narrow_child_toolset,
     resolve_agent_toolset,
+    toolset_admits_invoke_agent,
 )
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.identity_budget import TokenUsage
@@ -1124,9 +1126,9 @@ class PydanticAgentRun:
     #: configured multi-provider routing yet. See
     #: :mod:`meho_backplane.agent.models` for the resolver shape.
     model_resolver: ModelResolver | None = None
-    #: Optional child-agent resolver (G11.1-T5 #812). When set, every built
-    #: agent additionally carries the ``invoke_agent`` meta-tool, so a running
-    #: agent can invoke another definition in its tenant as a depth-capped,
+    #: Optional child-agent resolver. When set, a built agent
+    #: whose toolset spec names ``invoke_agent`` also carries that tool, so a
+    #: running agent can invoke another definition in its tenant as a depth-capped,
     #: budget-aware, audited child run. ``None`` (the default) means
     #: composition is off -- the T1/T3 surface is unchanged. Injected at the
     #: edge by the T4 invocation surface, which owns the
@@ -1175,12 +1177,14 @@ class PydanticAgentRun:
         therefore log distinguishable receipts even with usage collection
         off, when the receipt itself has no correlation id.
 
-        When this runtime carries a :attr:`child_agent_resolver` (G11.1-T5),
-        the ``invoke_agent`` composition tool is appended to whichever surface
-        the definition selected, so a running agent can invoke another
-        definition. The tool is bound to :meth:`run_child` as its
-        :class:`~meho_backplane.agent.invoke.ChildRunner`, so the child loop
-        runs with the parent's shared usage budget.
+        When this runtime carries a :attr:`child_agent_resolver` (G11.1-T5)
+        and the definition's toolset spec names ``invoke_agent``
+        (:func:`~meho_backplane.agent.toolset.toolset_admits_invoke_agent`),
+        the ``invoke_agent`` composition tool is appended, so a running agent
+        can invoke another definition. The child loop runs through
+        :meth:`run_child` with the parent's shared usage budget, and with the
+        child's toolset spec limited to the parent's
+        (:func:`~meho_backplane.agent.toolset.narrow_child_toolset`).
 
         Model selection (G11.5-T1): when both :attr:`model_resolver` is wired
         *and* ``definition.tier`` is set, the model comes from the resolver
@@ -1191,7 +1195,7 @@ class PydanticAgentRun:
         """
         if model is None:
             model = self._resolve_model(definition, operator)
-        invoke_tool = self._maybe_build_invoke_tool()
+        invoke_tool = self._maybe_build_invoke_tool(definition)
         if definition.toolset is not None:
             resolution = resolve_agent_toolset(definition.toolset, operator)
             tools = resolution.tools
@@ -1236,7 +1240,7 @@ class PydanticAgentRun:
             deps_type=Operator,
             system_prompt=definition.system_prompt,
             output_type=definition.output_type if definition.output_type is not None else str,
-            tools=[invoke_tool] if invoke_tool is not None else [],
+            tools=[],
             capabilities=[ToolCallAudit()],
         )
         _register_default_meta_tools(agent)
@@ -1293,19 +1297,38 @@ class PydanticAgentRun:
                 ) from exc
         return self.model_factory()
 
-    def _maybe_build_invoke_tool(self) -> Tool[Operator] | None:
-        """Build the ``invoke_agent`` tool when composition is wired, else ``None``.
+    def _maybe_build_invoke_tool(self, parent: AgentDefinition) -> Tool[Operator] | None:
+        """Build the ``invoke_agent`` tool for *parent*, or ``None``.
 
-        Composition is on exactly when a :attr:`child_agent_resolver` is
-        injected. The tool's :class:`~meho_backplane.agent.invoke.ChildRunner`
-        is :meth:`run_child` (bound to this instance), so the child loop shares
-        the parent's usage budget and the framework stays confined here.
+        The tool is built when a :attr:`child_agent_resolver` is injected and
+        *parent*'s toolset spec names ``invoke_agent``. Its
+        :class:`~meho_backplane.agent.invoke.ChildRunner` gives each child the
+        toolset spec both specs allow, then calls :meth:`run_child`, so the
+        child loop shares the parent's usage budget and the framework stays
+        confined here. The child's own ``invoke_agent`` tool is built from the
+        limited spec, so a grandchild is limited by it in turn.
         """
-        if self.child_agent_resolver is None:
+        if self.child_agent_resolver is None or not toolset_admits_invoke_agent(parent.toolset):
             return None
+        parent_toolset = parent.toolset
+
+        async def _run_limited_child(
+            *,
+            definition: AgentDefinition,
+            operator: Operator,
+            inputs: str,
+            usage: RunUsage,
+        ) -> ChildRunResult:
+            limited = definition.model_copy(
+                update={"toolset": narrow_child_toolset(parent_toolset, definition.toolset)},
+            )
+            return await self.run_child(
+                definition=limited, operator=operator, inputs=inputs, usage=usage
+            )
+
         return make_invoke_agent_tool(
             resolver=self.child_agent_resolver,
-            child_runner=self.run_child,
+            child_runner=_run_limited_child,
             recorder=self.child_run_recorder,
             finalizer=self.child_run_finalizer,
         )

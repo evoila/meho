@@ -361,14 +361,16 @@ def _audit_replay_block(settings: Settings) -> dict[str, Any]:
     }
 
 
-def _mcp_block() -> dict[str, Any]:
+def _mcp_block(settings: Settings) -> dict[str, Any]:
     """MCP-layer runtime visibility for ``/ready``.
 
-    Today the only field is ``protocol_version`` — the spec revision the
-    server pins (currently :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`).
-    The block exists so an unauthenticated deploy operator can answer
-    "which MCP revision will this server negotiate with my clients?"
-    from a single GET, without an authenticated ``/api/v1/health`` call.
+    ``short_tool_texts`` is the ``MCP_SHORT_TOOL_TEXTS`` switch (#4172), so
+    a benchmark knows its state. ``client_per_tool_kind`` is the
+    ``MCP_CLIENT_PER_TOOL_KIND`` switch: when on, Claude Code and Claude
+    Desktop sign in with their own login client. ``protocol_version`` is the spec revision
+    the server pins (:data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`),
+    so a deploy operator can answer "which MCP revision will this server
+    negotiate with my clients?" from a single GET without a login.
     Mirrors the ``mcp_session_id_capture`` precedent (G0.14-T6 #1147):
     single-field operator visibility into the MCP layer's runtime
     state, with the matching field on
@@ -409,6 +411,8 @@ def _mcp_block() -> dict[str, Any]:
     return {
         "configured": True,
         "protocol_version": PROTOCOL_VERSION,
+        "short_tool_texts": settings.mcp_short_tool_texts,
+        "client_per_tool_kind": settings.mcp_client_per_tool_kind,
         "missing_env": [],
     }
 
@@ -581,7 +585,8 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
           "vault_tenant_scope": {"configured": <bool>, "missing_env": [...],
                                  "docs": "docs/codebase/connectors-vault-tenant-scope.md",
                                  "maturity": "ga"},
-          "mcp":            {"configured": true,   "protocol_version": "...", "missing_env": []}
+          "mcp":            {"configured": true,   "protocol_version": "...",
+                             "short_tool_texts": <bool>, "missing_env": []}
         }
     """
     block: dict[str, dict[str, Any]] = {
@@ -591,7 +596,7 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
         "approval_queue": _approval_queue_block(settings),
         "approval_custody": _approval_custody_block(settings),
         "vault_tenant_scope": _vault_tenant_scope_block(settings),
-        "mcp": _mcp_block(),
+        "mcp": _mcp_block(settings),
     }
     for entry_name, feature_key in _READY_ENTRY_FEATURE.items():
         block[entry_name].update(FEATURE_MATURITY[feature_key])

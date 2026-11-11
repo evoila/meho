@@ -134,6 +134,45 @@ client identity should file a follow-up Task on
 [`evoila/meho`](https://github.com/evoila/meho) describing the
 mismatch pattern and what behaviour change would unblock them.
 
+## Session start row (`AUDIT_CLIENT_IDENTITY`, #6209)
+
+With `AUDIT_CLIENT_IDENTITY=true` (off by default), MEHO writes one
+audit row when an MCP session starts. The log can then name the tool,
+for example "claude-code 2.1", next to the person.
+
+- **When.** A successful `initialize` request that gets a new
+  `Mcp-Session-Id` from MEHO. A failed `initialize`, a notification, or
+  a resumed session (the client sent its own session id) writes no row.
+  A session with no current tenant (a login with several tenants that
+  sent no `Meho-Tenant` header) writes no row either: no audit row may
+  name a tenant the person did not choose.
+- **What.** `event_class = security_event`, `method = MCP`,
+  `path = /mcp/initialize`, `payload.op_id = mcp.session_open`. The
+  payload also holds `client_name` and `client_version` (from
+  `clientInfo`), `user_agent` (the HTTP header) and
+  `"self_declared": true`. Like every audit row with the switch on, it
+  also holds the `client` block: the login client (`azp`), the channel
+  and a short hash of the sign-in session.
+- **Link.** The row's `agent_session_id` is the new session id. Every
+  later row of the same session has the same `agent_session_id`.
+- **Clean text.** Control and format characters, line and paragraph
+  separators (U+2028, U+2029) and lone surrogates are removed, and each
+  text is cut to 200 characters. A client that sends such a character
+  still gets its session. A value that is not a string is stored
+  as `null`.
+- **Fail closed.** The row commits before the response goes back. If
+  the write fails, the client gets a JSON-RPC internal error (`-32603`)
+  and no session id, as for every other MCP audit write.
+- **Find the rows.** `meho audit query --op-id mcp.session_open`.
+
+**The client name is what the tool says about itself.** MEHO cannot
+check it. Any program with a valid login can send any name and version.
+Use it to read the log, not to decide who may do what.
+
+Code: `_audit_session_open` in `mcp/server.py`,
+`write_mcp_session_open_row` in `mcp/audit.py`. Tests:
+`tests/test_mcp_session_open_audit.py`.
+
 ## Tool naming grammar and deprecation aliases
 
 Multi-verb tool families on the MCP surface are named with the
@@ -1061,7 +1100,7 @@ The lists are in `mcp/profiles.py`.
 How it works:
 
 - The MCP route reads the `profile` URL parameter
-  (`_dispatch_mcp_request` in `mcp/server.py`) and stores it on the
+  (`_apply_url_options` in `mcp/server.py`) and stores it on the
   request's `Operator` as `mcp_tool_profile`. Only this route sets it.
 - `all_tools_for` (`mcp/registry.py`) runs the four gates above first,
   then keeps only the profile's tools. So a profile only removes tools.
@@ -1211,7 +1250,7 @@ add-on-family gate.
 
 | Tool | Role | Extra gate | What it does |
 |---|---|---|---|
-| `add_to_knowledge` | operator, or a `read_only` person who can decide approvals (`approver_may_call`) | — | Write a distilled entry to the tenant knowledge base. A new slug with similar entries is not written; the answer lists them (`create_anyway` writes anyway, `dry_run` writes nothing). On a tenant that keeps its lessons in its own wiki, `wiki` says if the lesson also goes there. |
+| `add_to_knowledge` | operator, or a `read_only` person who can decide approvals (`approver_may_call`) | — | Write a distilled entry to the tenant knowledge base. With `KB_SIMILAR_CHECK` on (off by default), a new slug with similar entries is not written; the answer lists them (`create_anyway` writes anyway, `dry_run` writes nothing). With it off, the tool has no text about this and no `create_anyway` input. On a tenant that keeps its lessons in its own wiki, `wiki` says if the lesson also goes there. |
 | `add_to_memory` | operator | — | Save a scoped memory entry (user / tenant / target). |
 | `ask_docs` | operator | `meho-docs` | Synthesized, cited answer over a vendor-document collection. |
 | `call_operation` | operator | — | Invoke a resolved connector operation against a target. |
@@ -1618,6 +1657,159 @@ The redaction helper is `redacted_audit_uri(template)` in
 `mcp/registry.py`. New query-bearing resources reuse the same flag +
 contextvar pattern rather than special-casing the dispatcher per
 resource.
+
+## Tool text that follows a switch (#6077)
+
+Some features are behind a switch that is off by default. While a switch
+is off, the tools say nothing about its feature, so an agent does not read
+about a feature it cannot use, and a model test of the off state measures
+the off state.
+
+* A tool can set `ToolDefinition.for_settings`: a function that gets the
+  registered tool and returns the tool as it is shown under the current
+  settings. `tool_for_settings` (`mcp/registry.py`) applies it.
+* `all_tools_for` applies it, so `tools/list` shows the switched form. The
+  CLI reads the same list (`meho doctor` calls `tools/list`).
+* `handle_tools_call` applies it before the `inputSchema` check, so a call
+  is checked against the schema the list showed. An argument that is not
+  in that schema is refused with `-32602`, and the message names it.
+* With the switch on, the tool is the registered one, unchanged.
+* `get_tool` returns the registered tool. The hosted-run tools are built
+  from it once, when the process starts, so they keep the full text.
+
+Two switches take text away while they are off:
+
+| Switch (off by default) | Tool | With the switch off |
+| --- | --- | --- |
+| `KB_SIMILAR_CHECK` | `add_to_knowledge` | No text about the similar-entry check, no `create_anyway` input, and `dry_run` says nothing about similar entries (`mcp/tools/_kb_similar_text.py`). |
+| `TEAM_KNOWLEDGE_RECALL` | `call_operation`, `preview_operation` | No `team_knowledge` field in the `outputSchema` (`mcp/tools/_operation_recall.py`). |
+
+`tests/test_mcp_surface_conformance.py` checks both states of each switch.
+
+A third switch works the other way: `MCP_SHORT_TOOL_TEXTS` (off by
+default) gives the biggest tools a short text while it is on. One session
+can also ask for these texts. See "Short tool texts" below.
+
+## Short tool texts (`MCP_SHORT_TOOL_TEXTS`, off by default)
+
+The biggest tools on the default list have a short text. A session sees it
+when the `MCP_SHORT_TOOL_TEXTS` switch is on (Helm:
+`config.mcpShortToolTexts`), or when the session asks for it (see "One
+session asks for the short texts" below). The switch stays off until a
+model test shows it helps: a small model scores better, and Claude does
+not score worse.
+
+- **Off (default):** every tool shows its full text, byte for byte as
+  before, unless the session asks for the short texts.
+- **On:** 14 tools show a short description and short input texts, in
+  every session. The whole default list goes from 67,865 to 46,067
+  characters (32% less). No other tool changes.
+
+### One session asks for the short texts (#6293)
+
+A client adds `?texts=short` to the MCP URL, for example
+`https://<meho-host>/mcp?texts=short`. That session then sees the short
+texts, also while the switch is off. Other sessions keep the full texts.
+This lets a person try the short texts in daily work without changing
+them for everyone.
+
+- The MCP route reads the `texts` URL parameter (`_apply_url_options`
+  in `mcp/server.py`, `parse_tool_texts` in `mcp/short_texts.py`) and
+  sets `mcp_short_tool_texts` on the request's `Operator`. Only this
+  route sets it.
+- `short_texts_shown(operator)` is true when the switch is on or the
+  session asked. Every `for_settings` function gets the session's
+  `Operator` (`tool_for_settings(definition, operator)` in
+  `mcp/registry.py`). So `tools/list` and the `tools/call` input check
+  use the same texts.
+- No `texts`, or an empty `texts=`, gives the default texts. Any value
+  other than `short` (not case-sensitive) is refused with HTTP 400
+  before the body is read, like an unknown profile. There is no
+  `texts=full`: with the switch on, every session sees the short texts.
+- It works with a profile: `?profile=operate&texts=short`.
+- The `tools/call` audit row of such a session has
+  `"tool_texts": "short"` in its payload, so a measurement can tell these
+  sessions apart. Other rows do not have the key.
+- The request usage event of every request of such a session has
+  `tool_texts = short` (column added by migration `0158`). With
+  `AUDIT_WRAPPER_ROWS_RETIRED=true`, a read or `call_operation` writes no
+  audit row, so this event is then the record of the choice. See
+  [request-usage.md](request-usage.md).
+- Like the profile, the parameter is read on each request. A client
+  sends the same URL with every request, so the whole session sees the
+  same texts.
+
+What stays the same in both states:
+
+- The tools on the list, in every profile and surface.
+- The inputs each tool accepts. Only `description` strings change. Every
+  property, type, enum, default, limit and `required` list stays, so the
+  `tools/call` input check accepts and refuses the same calls.
+- The output schema and annotations.
+
+What a short text keeps: what the tool is for, when to call it, its
+arguments, and the rules that stop wrong calls. What it leaves out:
+return-shape details the output schema or the answer already gives,
+examples, and background. The full text stays the registered one, so
+the reference docs and the hosted-run tools keep it.
+
+How it works:
+
+- `mcp/short_texts.py` has `ShortText` (a description, and short texts per
+  input path such as `query.filter.value`; `None` drops an input's
+  description) and `with_short_text(short, then=...)`. The result is the
+  tool's `for_settings` function (see the section above).
+- `then` is a tool's other `for_settings` step. It runs first. So with
+  `KB_SIMILAR_CHECK` off, `add_to_knowledge` still has no `create_anyway`
+  input. The short text of the similar-entry check sits on
+  `create_anyway`, so it shows only while that input exists.
+- The short text keeps the tool's maturity label (`[beta]`).
+- The texts are in `mcp/tools/_short_tool_texts.py`.
+
+| Tool | Full | Short |
+| --- | ---: | ---: |
+| `query_topology` | 4,655 | 3,191 |
+| `meho_runbook_next` | 3,791 | 1,378 |
+| `add_to_knowledge` | 3,726 | 1,452 |
+| `result_query` | 3,491 | 2,496 |
+| `preview_operation` | 3,377 | 1,341 |
+| `read_docs` | 3,351 | 1,631 |
+| `search_operations` | 3,309 | 1,486 |
+| `meho_broadcast_recent` | 3,234 | 1,791 |
+| `call_operation` | 3,212 | 2,075 |
+| `meho_broadcast_announce` | 3,181 | 1,926 |
+| `search_knowledge` | 3,013 | 2,142 |
+| `list_targets` | 2,945 | 1,116 |
+| `search_docs` | 2,943 | 1,563 |
+| `meho_broadcast_watch` | 2,701 | 1,543 |
+
+Sizes are characters as `tests/test_mcp_tool_text_budget.py` counts them
+(name, description and input schema), with the similar-entry check off.
+The first ten are the ten biggest tools. The next four are needed to
+reach 30% less. `query_topology` and `result_query` stay larger because
+their input schemas are large.
+
+Tests:
+
+- `tests/test_mcp_short_tool_texts.py`: with the switch off, every listed
+  tool equals the tool as listed before; with it on, each changed tool is
+  shorter and takes the same inputs, and no other tool changes.
+- `tests/test_mcp_tool_text_budget.py`: with the switch on, the whole
+  default list is at most 47,000 characters and at least 30% smaller.
+- `tests/test_mcp_surface_conformance.py` runs every test in both states.
+- `tests/test_mcp_tool_profiles.py`: a profile shows the short texts only
+  with the switch on.
+- `tests/test_mcp_short_tool_texts_session.py`: `?texts=short` gives one
+  session the short texts while the switch is off; two sessions at the
+  same time each see their own texts; `tools/call` uses the same texts
+  and its audit row names the choice; the usage event names the choice
+  also when no audit row is written; an unknown value is refused.
+- `/ready` shows the switch as `features.mcp.short_tool_texts`.
+
+How to measure it: run the same benchmark task set twice against one
+build, once with `MCP_SHORT_TOOL_TEXTS=false` and once with `true`, with a
+small model and with Claude. `/ready` tells which state a run used.
+Compare the task scores and the tokens used before the first answer.
 
 ## Empty optional text on read tools (#4110)
 

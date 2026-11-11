@@ -14,8 +14,8 @@ present". Takes no operator parameters (a fixed command). Returns
 * ``kind="export"`` -- an exported path (``path`` / ``clients``), from
   ``exportfs -s`` (preferred) or ``showmount -e``.
 
-Block-topology and capacity reporting (``df`` / ``lsblk``) is out of scope
--- a separate op if a concrete need arises. The row list spills to a
+Capacity of one path is ``linux.fs.usage``; block topology (``lsblk``) is
+out of scope. The row list spills to a
 ``result_query`` handle above the JSONFlux threshold.
 """
 
@@ -177,8 +177,8 @@ _MOUNT_LIST_OP = LinuxOp(
         "carries a ``kind`` discriminator: ``mount`` (``source`` / "
         "``target`` / ``fstype`` / ``options``) or ``export`` (``path`` / "
         "``clients``). Takes no parameters. Read-only -- it never mounts, "
-        "unmounts, or edits an export. Block-topology / capacity (``df`` / "
-        "``lsblk``) is out of scope. Above the JSONFlux threshold the rows "
+        "unmounts, or edits an export. For free space use linux.fs.usage. "
+        "Above the JSONFlux threshold the rows "
         "spill to a handle paged with ``result_query(handle_id, offset, "
         "limit)``."
     ),

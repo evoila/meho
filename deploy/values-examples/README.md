@@ -17,7 +17,7 @@ Copyright (c) 2026 evoila Group
 
 This directory ships **sanitized example values files** for the MEHO Helm
 chart at [`deploy/charts/meho/`](../charts/meho/). Each file targets a
-specific deployment shape (today: the RDC Hetzner dogfooding lab) and is
+specific deployment shape (today: a single-cluster lab) and is
 designed to be copied into a private deploy repo, the placeholders
 substituted, and applied via `helm install` / `helm upgrade`.
 
@@ -36,23 +36,26 @@ request.
 
 ## Files
 
-Every file here except `values-openshift.yaml` brings its own PostgreSQL,
+Every file here except `values-openshift.yaml` and `values-vks.yaml` brings
+its own PostgreSQL,
 Keycloak and Vault (or GSM), so each sets `corePostgres.enabled`,
 `coreKeycloak.enabled` and `coreVault.enabled` to `false`. Since chart
 0.2.0 the three built-in parts are on by default (#4047); a values file of
 your own that brings its own parts needs the same three lines. For the
 built-in core, start from `deploy/linux-server/values-single-node.yaml`
-instead, or from `values-openshift.yaml` on OpenShift.
+instead, from `values-openshift.yaml` on OpenShift, or from
+`values-vks.yaml` on VKS.
 
 | File | Targets | Backed by |
 | --- | --- | --- |
-| [`values-rdc-example.yaml`](./values-rdc-example.yaml) | The RDC Hetzner lab (`*.evba.lab` hosts, rke2-infra ingress-nginx, cluster-internal Postgres + Vault + Keycloak). | The actual, private file lives in `evoila-bosnia/claude-rdc-hetzner-dc`'s `manifests/meho/values-rdc.yaml`; this file is the sanitized template for other Vault-+-Keycloak-+-Postgres-shaped labs. |
+| [`values-example-lab.yaml`](./values-example-lab.yaml) | A lab with its own ingress-nginx and cluster-internal Postgres + Vault + Keycloak. | The actual file is private and lives in the operator's own repo as `values-site.yaml`; this file is the sanitized template for other Vault-+-Keycloak-+-Postgres-shaped labs. |
 | [`values-gsm-example.yaml`](./values-gsm-example.yaml) | A **Vault-free, GCP-native** install (Initiative #2227) — credentials + the `/api/v1/health` federation proof resolve through GCP Secret Manager (`config.credentialBackend: gsm`) instead of Vault. `vault.address` is left blank; the schema requires it only when `credentialBackend: vault`. | The GSM SA-direct backend (#2230, Phase 1). `gsm.workloadIdentityFederation.*` is left empty here — for the per-operator token-exchange (WIF) shape see `values-gsm-wif-example.yaml`. |
 | [`values-gsm-wif-example.yaml`](./values-gsm-wif-example.yaml) | The GSM backend with **per-operator Workload Identity Federation** (#2232, Phase 2) — credential reads run under the calling operator's Keycloak identity, and the `gsm.workloadIdentityFederation.*` keys render first-class as `GSM_WIF_*` (no `extraEnv`, #2667). Targets the on-prem/no-ambient-identity shape, so it also enables the `checkRunner` service principal (#2642) that background dispatch needs. | The GSM WIF path (#2232); the `GSM_WIF_*` chart rendering landed in #2659. |
 | [`values-openshift.yaml`](./values-openshift.yaml) | **OpenShift** with the built-in core, installed by an admin of one project under the default security rule `restricted-v2` (#4102). `global.openshift: true` lets OpenShift pick every pod's user id; the router turns the Ingress into Routes. The network rules stay off until the chart lets the router in (#4050). | Tested on a single-node OpenShift 4.22 in the lab on 2026-11-04. Your own values file adds `image.tag`, `ingress.host`, `coreKeycloak.hostname` and `coreKeycloak.firstTenantId`. |
+| [`values-vks.yaml`](./values-vks.yaml) | **VKS** (vSphere Kubernetes Service) with the built-in core, installed by an admin of one namespace under the enforced pod security rule `restricted` (#5833). VKS brings no ingress controller: the cluster admin installs Traefik into the namespace `traefik` first. VKS enforces network rules, so the file also turns on the rules of the built-in OpenBao and Keycloak (off by default) and lets Traefik into Keycloak. It turns on the web console (off by default) and keeps the Ingress on Traefik's HTTPS entry point, so nothing answers on plain HTTP. | Tested on a VKS cluster with Kubernetes v1.35.5 (VCF 9.1) in the lab on 2026-11-09. Your own values file adds `image.tag`, `ingress.host`, `coreKeycloak.hostname`, `coreKeycloak.firstTenantId` and `networkPolicy.extraEgress` (the vCenter and NSX networks). |
 | [`values-bring-your-own-fixture.yaml`](./values-bring-your-own-fixture.yaml) | **Not a template — a test fixture** (#4039). With the built-in core parts off, `helm template` of this file must stay the same from one chart version to the next; `backend/tests/test_chart_bring_your_own_render.py` compares it with a saved copy. | Built from the non-secret parts of the values file of our own bring-your-own install, with example host names and addresses. |
 
-## Using `values-rdc-example.yaml`
+## Using `values-example-lab.yaml`
 
 1. **Copy** the file into your private deploy repo. Do not put real
    CIDRs / hostnames / image tags into a public repo.
@@ -82,7 +85,7 @@ instead, or from `values-openshift.yaml` on OpenShift.
     ```bash
     helm upgrade --install meho ./deploy/charts/meho/ \
       --namespace meho --create-namespace \
-      -f values-rdc.yaml
+      -f values-site.yaml
     ```
 
 5. **Verify** the release came up clean:
@@ -95,7 +98,7 @@ instead, or from `values-openshift.yaml` on OpenShift.
 
 ### Security baseline these values carry
 
-`values-rdc-example.yaml` ships the hardened posture as its default; the
+`values-example-lab.yaml` ships the hardened posture as its default; the
 inline comments mark each control. When you copy it, keep these at their
 secure state (each is stated once, in full, on the published docs site's
 [deployment-shapes baseline table](https://evoila.github.io/meho/latest/deployment-shapes/#the-hardening-baseline-every-production-shape-inherits)):
@@ -129,7 +132,7 @@ chart expects the consumer to sync secrets from a backing store (Vault,
 1Password Connect, AWS Secrets Manager, …) into Kubernetes via
 [**External Secrets Operator (ESO)**](https://external-secrets.io/).
 
-The RDC lab uses ESO with **HashiCorp Vault** as the backend
+The example lab uses ESO with **HashiCorp Vault** as the backend
 ([provider docs](https://external-secrets.io/latest/provider/hashicorp-vault/)).
 Two resources combine to materialise a Secret the chart can consume:
 
@@ -148,7 +151,7 @@ Two resources combine to materialise a Secret the chart can consume:
     spec:
       provider:
         vault:
-          server: https://vault.evba.lab
+          server: https://vault.example.lab
           path: secret          # KV v2 mount
           version: v2
           auth:
@@ -166,7 +169,7 @@ Two resources combine to materialise a Secret the chart can consume:
 
     - **Default (consumer-managed):** the consumer's GitOps repo applies
       ExternalSecret manifests alongside (or before) the chart. The
-      chart references the resulting Secret by name. This is the RDC
+      chart references the resulting Secret by name. This is the example
       lab's convention and stays out of the chart entirely.
 
       ```yaml
@@ -906,7 +909,7 @@ addresses.
 
 > First-login auth-onramp for both `meho login` (CLI device-code) and
 > the MCP-client surface (`/mcp` over RFC 9728 + OAuth 2.1 + PKCE).
-> The 2026-05-21 RDC dogfood walked the realm from scratch and paid
+> The 2026-05-21 lab test walked the realm from scratch and paid
 > ~2.5 hours hitting four sequential walls — none of them documented
 > in one place at the time; a follow-up 2026-05-22 dogfood added a
 > fifth (W7, `offline_access` for Claude Code's MCP refresh-token
@@ -968,7 +971,7 @@ In the Keycloak realm that hosts `meho-backplane`, create a new
 
 | Setting | Value | Why |
 | --- | --- | --- |
-| Client ID | `meho-cli` (suggested) | Matches the default in `values-rdc-example.yaml`. Any short identifier works — set `config.keycloakCliClientId` (`KEYCLOAK_CLI_CLIENT_ID`) to whatever you choose. |
+| Client ID | `meho-cli` (suggested) | Matches the default in `values-example-lab.yaml`. Any short identifier works — set `config.keycloakCliClientId` (`KEYCLOAK_CLI_CLIENT_ID`) to whatever you choose. |
 | Client authentication | **Off** (public client) | The device grant cannot be completed by a confidential client; the CLI has nowhere to store a secret. Confidential client + device-grant → `401 unauthorized_client` from Keycloak's device endpoint (Wall #1). |
 | Authentication flow → Standard flow | **On**, PKCE method empty (or `S256` once every person runs CLI 0.44.0 or later) | Older CLI versions use it for the fresh browser sign-in an approval needs (#3979); the current CLI uses `meho-cli-approve`. `meho login` uses the device grant. From CLI 0.44.0 it sends PKCE (`S256`) there; older versions send none. Keycloak checks PKCE at the device login too, so a required PKCE method refuses `meho login` of older versions. |
 | Authentication flow → Direct access grants | Off | Resource-owner password is explicitly out of scope. |
@@ -1537,28 +1540,28 @@ After `helm install` / `helm upgrade` and the realm steps above:
 
 ```bash
 # 1. Auth-config endpoint carries cli_client_id.
-curl -sf https://meho.evba.lab/api/v1/auth-config | jq .
+curl -sf https://meho.example.lab/api/v1/auth-config | jq .
 # {
-#   "keycloak_issuer": "https://keycloak.evba.lab/realms/evba",
+#   "keycloak_issuer": "https://keycloak.example.lab/realms/meho",
 #   "audience": "meho-backplane",
 #   "cli_client_id": "meho-cli"
 # }
 
 # 2. CLI device-code flow completes.
-meho login https://meho.evba.lab
-# Logged in to https://meho.evba.lab; token stored in keyring.
+meho login https://meho.example.lab
+# Logged in to https://meho.example.lab; token stored in keyring.
 
 # 3. Authenticated REST call succeeds.
-TOKEN=$(meho login --print-token https://meho.evba.lab)
+TOKEN=$(meho login --print-token https://meho.example.lab)
 curl -sf -H "Authorization: Bearer $TOKEN" \
-  https://meho.evba.lab/api/v1/health
+  https://meho.example.lab/api/v1/health
 # {"status": "ok"}
 
 # 4. MCP RFC 9728 metadata document is reachable.
-curl -sf https://meho.evba.lab/.well-known/oauth-protected-resource | jq .
+curl -sf https://meho.example.lab/.well-known/oauth-protected-resource | jq .
 # {
-#   "resource": "https://meho.evba.lab/mcp",
-#   "authorization_servers": ["https://keycloak.evba.lab/realms/evba"],
+#   "resource": "https://meho.example.lab/mcp",
+#   "authorization_servers": ["https://keycloak.example.lab/realms/meho"],
 #   ...
 # }
 ```
@@ -1567,7 +1570,7 @@ curl -sf https://meho.evba.lab/.well-known/oauth-protected-resource | jq .
 
 The deployer's first-login walk hits these walls in sequence; each
 surfaces with a different symptom but the cause-and-fix chain is
-bounded. W1–W4 came out of the 2026-05-21 RDC dogfood; **W7** was
+bounded. W1–W4 came out of the 2026-05-21 lab test; **W7** was
 added 2026-05-22 when the same operator's MCP client (Claude Code)
 hit `invalid_scope` after the W1–W4 fixes shipped. Walls are
 numbered for cross-reference with the originating dogfood reports.
@@ -1732,12 +1735,12 @@ kubectl exec meho-db-1 -n meho -c postgres -- \
 # 4. Apply the chart.
 helm upgrade --install meho ./deploy/charts/meho/ \
   --namespace meho --create-namespace \
-  -f values-rdc.yaml
+  -f values-site.yaml
 ```
 
 ## Out of scope for v0.1
 
-- The actual `values-rdc.yaml` (private, lives in the consumer's repo).
+- The actual `values-site.yaml` (private, lives in the consumer's repo).
 - The `ClusterSecretStore` / `SecretStore` manifest itself — consumer-owned.
 - Multi-environment overlays (staging, prod) — v0.1 ships only the lab shape.
 - Helm `--values=secret://` plugin integration — v0.2 if the dual-source
@@ -1748,7 +1751,7 @@ helm upgrade --install meho ./deploy/charts/meho/ \
 
 - Parent Goal: #11 — Deployable v0.1
 - Parent Initiative: #36 — G2.5 Helm chart
-- This task: #40 — values-rdc-example.yaml + ESO sync patterns documented
+- This example: values-example-lab.yaml with ESO sync patterns documented
 - External Secrets Operator: <https://external-secrets.io/>
 - ESO Vault provider: <https://external-secrets.io/latest/provider/hashicorp-vault/>
 - ESO ExternalSecret API: <https://external-secrets.io/latest/api/externalsecret/>

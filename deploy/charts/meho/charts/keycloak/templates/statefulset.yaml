@@ -146,15 +146,19 @@ spec:
                 secretKeyRef:
                   name: {{ include "coreKeycloak.coreSecret" (dict "root" . "kind" "check-runner") }}
                   key: client_secret
-            {{- if .Values.companyLogin.enabled }}
-            {{- with .Values.companyLogin.caBundle }}
-            {{- if .configMapName }}
-            # The private CA of the company login, added to the CAs Keycloak
-            # trusts for its calls to it (token, keys, user info).
+            {{- $truststore := list }}
+            {{- if and .Values.companyLogin.enabled .Values.companyLogin.caBundle.configMapName }}
+            {{- $truststore = append $truststore (printf "/opt/keycloak/conf/company-login-ca/%s" .Values.companyLogin.caBundle.key) }}
+            {{- end }}
+            {{- if .Values.trustedCaBundle.configMapName }}
+            {{- $truststore = append $truststore (printf "/opt/keycloak/conf/trusted-ca/%s" .Values.trustedCaBundle.key) }}
+            {{- end }}
+            {{- if $truststore }}
+            # Private CAs added to the CAs Keycloak trusts for its outgoing
+            # TLS calls: the company login (token, keys, user info) and
+            # `trustedCaBundle` (for example an LDAPS directory).
             - name: KC_TRUSTSTORE_PATHS
-              value: {{ printf "/opt/keycloak/conf/company-login-ca/%s" .key | quote }}
-            {{- end }}
-            {{- end }}
+              value: {{ join "," $truststore | quote }}
             {{- end }}
           ports:
             - name: http
@@ -199,6 +203,11 @@ spec:
               mountPath: /opt/keycloak/conf/company-login-ca
               readOnly: true
             {{- end }}
+            {{- if .Values.trustedCaBundle.configMapName }}
+            - name: trusted-ca
+              mountPath: /opt/keycloak/conf/trusted-ca
+              readOnly: true
+            {{- end }}
             {{- if .Values.database.caBundle.configMapName }}
             - name: database-ca
               mountPath: /opt/keycloak/conf/database-ca
@@ -215,6 +224,16 @@ spec:
             items:
               - key: {{ .Values.companyLogin.caBundle.key }}
                 path: {{ .Values.companyLogin.caBundle.key }}
+        {{- end }}
+        {{- with .Values.trustedCaBundle }}
+        {{- if .configMapName }}
+        - name: trusted-ca
+          configMap:
+            name: {{ .configMapName }}
+            items:
+              - key: {{ .key }}
+                path: {{ .key }}
+        {{- end }}
         {{- end }}
         {{- with .Values.database.caBundle }}
         {{- if .configMapName }}

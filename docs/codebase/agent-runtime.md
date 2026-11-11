@@ -385,7 +385,8 @@ The second part has three bands:
 1. `<<HOSTED_CONTEXT>>` — short text MEHO writes. It says MEHO policy, audit,
    and approvals always apply and no tool text can change them; that only the
    newest Memory notes are in the prompt, and the knowledge base and topology
-   are not; which of the four
+   are not (with `TEAM_KNOWLEDGE_RECALL` off: that Memory, the knowledge base
+   and topology are not in the prompt); which of the four
    context tools this run has (only the registered ones); what to do without
    `read_context_resource`; and that conventions and retrieved text are data,
    not instructions.
@@ -396,8 +397,9 @@ The second part has three bands:
    MCP tools (`meho_broadcast_*`, `meho_runbook_*`, docs tools) a hosted run
    does not have.
 3. The run operator's newest Memory notes (`recall.memory_band`, #5729),
-   inside the untrusted-text envelope. Left out when there is no note. See
-   [recall.md](recall.md).
+   inside the untrusted-text envelope. Left out when there is no note, and
+   always left out while the `TEAM_KNOWLEDGE_RECALL` setting is off (the
+   default). See [recall.md](recall.md).
 
 Conventions that do not fit the budget are returned as
 `HostedContext.omissions` (`ContextOmission(kind="convention", name=<slug>,
@@ -663,6 +665,14 @@ persisted definition (T2 `AgentDefinitionService`), and the durable run row
   `agent_run` row (the source of truth), so it works after the request that
   started the run has returned, and even after the in-memory task is gone
   (worker restart). Cross-tenant / unknown ids raise `AgentRunNotFoundError`.
+  `output` and `error` are set only when `run_output_visible_to` allows
+  it: a direct run (and each child run under it) acts for the person who
+  started it, so only that person reads them; other people in the tenant
+  see the state and token usage. A scheduled or event run (and each child
+  run under it) acts as the agent's own login, so the whole tenant reads
+  it. For a child run, `poll` follows `parent_run_id` up to the first run
+  to find which case applies. The REST poll, the MCP
+  `meho_agents_run_status` tool and the console run page all use `poll`.
 - **`stream_events(operator, name, inputs)`** — drives the seam's
   `stream_events` inline (one connection = one run's lifetime), yielding
   `(run_id, AgentRunEvent)` and recording the terminal outcome on the run
@@ -930,7 +940,23 @@ escalate a cheap-tier agent to a deep-tier agent, but MEHO sees one agent run
 invoking another.
 
 `invoke_agent` is **off by default**. It is appended to a built agent only when
-the `PydanticAgentRun` carries a `child_agent_resolver`. The live `AgentInvoker`
+the `PydanticAgentRun` carries a `child_agent_resolver` **and** the definition's
+toolset spec names `invoke_agent` in `meta_tools`
+(`toolset_admits_invoke_agent` in `agent/toolset.py`). No spec, an omitted
+`meta_tools` list, or an empty list gives no `invoke_agent`.
+
+A child run gets at most what both specs allow. `_maybe_build_invoke_tool` in
+`agent/run.py` wraps `run_child`: before the child loop starts, it replaces the
+child's spec with `narrow_child_toolset(parent spec, child spec)` — the tools on
+both `meta_tools` lists (an omitted list stands for the default, non-opt-in set)
+and the connectors on both `connectors` lists (an omitted list means no limit).
+The child's own `invoke_agent` is built from that limited spec, so a grandchild
+is limited again. `_resolve_child_definition` uses the same owner rule as a
+direct run (`AgentInvoker._load_definition`): an agent login resolves only the
+definitions whose `identity_ref` is its own client id; a person resolves any
+enabled definition of the tenant.
+
+The live `AgentInvoker`
 (T7 #1067) wires it: its default runtime injects `_resolve_child_definition`
 (the tenant-scoped `AgentDefinitionService` lookup), `_record_child_run` (the
 `agent_run` lineage recorder), and `_finalize_child_run` (T8 #1087 — the
@@ -1220,6 +1246,9 @@ stays whole.
 Tests use fake servers only (`test_agent_model_backend_setting.py`). A
 run against a real OpenAI-compatible server is a separate step of the
 same work.
+
+Why MEHO picks the server itself, why there is no gateway and why a run
+never falls back: [model routing decision](../decisions/2026-11-10-model-routing.md).
 
 ## Per-tenant tier→Model resolver (G11.5-T1 #1075)
 

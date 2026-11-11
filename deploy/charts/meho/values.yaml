@@ -705,6 +705,36 @@ config:
   # `APPROVAL_ONE_TIME_CODE_ACR_VALUES`. Empty (the default) turns the
   # one-time code step off. The sign-in must still be recent.
   approvalOneTimeCodeAcrValues: ""
+  # -- Switches for what the agent sees. Each is off (`"false"`) by default
+  # and stays off until model tests show it helps.
+  # `teamKnowledgeRecall` is rendered into `TEAM_KNOWLEDGE_RECALL`. When
+  # `"true"`, `preview_operation` and `call_operation` show what the team
+  # knows about a known target, and the MCP start text and hosted runs
+  # carry the caller's newest Memory notes. See `docs/codebase/recall.md`.
+  teamKnowledgeRecall: "false"
+  # -- `kbSimilarCheck` is rendered into `KB_SIMILAR_CHECK`. When `"true"`,
+  # a new knowledge entry is not written while similar entries exist; the
+  # writer gets the list instead. See `docs/codebase/kb.md`.
+  kbSimilarCheck: "false"
+  # -- `mcpShortToolTexts` is rendered into `MCP_SHORT_TOOL_TEXTS`. When
+  # `"true"`, the biggest tools on the default MCP tool list send a short
+  # text. The inputs they accept stay the same. See `docs/codebase/mcp.md`.
+  mcpShortToolTexts: "false"
+  # -- Tenants whose knowledge entries marked `shared` every tenant on
+  # this instance can read. Comma-separated tenant ids. Rendered into
+  # `KB_SHARED_TENANT_IDS`. Empty (the default): no tenant may share, and
+  # no entry is shared. Only the owner tenant can change a shared entry.
+  # See `docs/codebase/kb.md`.
+  kbSharedTenantIds: ""
+  # -- The weekly knowledge upkeep job. It merges duplicate entries,
+  # retires expired ones and writes one report per tenant.
+  # `knowledgeUpkeepEnabled` is rendered into `KNOWLEDGE_UPKEEP_ENABLED`;
+  # `"false"` does not start the job. `knowledgeUpkeepIntervalSeconds` is
+  # rendered into `KNOWLEDGE_UPKEEP_INTERVAL_SECONDS`: how often it runs,
+  # from 60 to 604800 seconds (one week, the default). See
+  # `docs/codebase/kb.md`.
+  knowledgeUpkeepEnabled: "true"
+  knowledgeUpkeepIntervalSeconds: 604800
   # -- Operator-console (`/ui/*`) OAuth client_id (#2594, Goal #336). The
   # browser BFF login (`GET /ui/auth/login`) runs an OAuth 2.1
   # authorization-code + PKCE grant server-side against the operator's
@@ -723,6 +753,37 @@ config:
   # requires all of them (the console is all-or-nothing). See
   # `deploy/values-examples/README.md` § operator-console (browser BFF).
   uiKeycloakClientId: ""
+  # -- Agent session store: MEHO keeps the agent sessions that people
+  # upload, in S3-compatible object storage that you bring. It is off
+  # until `endpoint`, `bucket` and `credentialsVaultPath` are all set.
+  # Each value is rendered into its `SESSION_STORE_*` variable. An empty
+  # value renders nothing, so MEHO uses its own default (in brackets).
+  # Numbers are strings, like the other values here. Operator guide:
+  # docs-site/guides/agent-sessions.md. Code: `session_store/config.py`.
+  sessionStore:
+    # -- URL of the object storage, for example `https://objects.example.com`.
+    endpoint: ""
+    # -- The bucket (the top folder) for the session files.
+    bucket: ""
+    # -- Vault KV-v2 API path (`secret/data/...`) of a secret with the
+    # fields `access_key_id` and `secret_access_key`. MEHO reads it with
+    # its scheduler token. With the built-in OpenBao use
+    # `secret/data/services/session-store`: the scheduler policy allows it.
+    credentialsVaultPath: ""
+    # -- Region name sent to the store (`us-east-1`).
+    region: ""
+    # -- Days a tenant's sessions are kept when the tenant set no period (`90`).
+    retentionDaysDefault: ""
+    # -- Largest compressed archive in bytes (`26214400`, 25 MiB).
+    maxUploadBytes: ""
+    # -- Largest unpacked archive in bytes (`268435456`, 256 MiB).
+    maxUnpackedBytes: ""
+    # -- Most entries (files and folders) in one archive (`2000`).
+    maxFiles: ""
+    # -- `"true"` or `"false"`: run the cleanup job (`true`).
+    cleanupEnabled: ""
+    # -- Seconds between cleanup runs, at least 60 (`3600`).
+    cleanupIntervalSeconds: ""
 
 # Memory layer (G5.2 #374). The backplane ships an in-process
 # memory-expiry sweeper that runs in the FastAPI lifespan and removes
@@ -1567,6 +1628,16 @@ coreKeycloak:
     caBundle:
       configMapName: ""
       key: ca.crt
+  # -- A private CA that Keycloak trusts for every outgoing TLS call, also
+  # with the company login off. Use it when an AD or LDAP directory (LDAPS
+  # or StartTLS) has a certificate from your own CA. A ConfigMap in the
+  # release namespace with the CA certificate (PEM), for example
+  # `kubectl create configmap directory-ca --from-file=ca.crt=<CA file>`.
+  # Empty `configMapName` = off. With `companyLogin.caBundle` too, Keycloak
+  # trusts both. Keycloak keeps trusting the usual public CAs.
+  trustedCaBundle:
+    configMapName: ""
+    key: ca.crt
 
 coreVault:
   # -- Built-in OpenBao, the password safe (ADR 0008). When on, the install

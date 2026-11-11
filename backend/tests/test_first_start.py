@@ -49,6 +49,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     monkeypatch.setenv("BACKPLANE_URL", _SITE)
+    monkeypatch.setenv("PARAMS_HASH_KEY", "made-up-test-key-of-this-install")
     get_settings.cache_clear()
     first_start.reset_public_run_for_testing()
     yield
@@ -268,6 +269,7 @@ def test_unreachable_target_gives_one_red_line(monkeypatch: pytest.MonkeyPatch) 
 
 def test_public_answer_runs_fresh_after_a_repair(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_green(monkeypatch)
+    monkeypatch.setattr(first_start, "_PUBLIC_RESULT_HOLD_S", 0.0)
     up = {"esx-2": False}
 
     async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
@@ -296,8 +298,46 @@ async def test_overlapping_public_calls_share_one_run(monkeypatch: pytest.Monkey
     )
     assert first is second
     assert calls == 2  # two systems, one run
-    await first_start.run_public_first_start_checks()
-    assert calls == 4  # the next call runs again
+
+
+async def test_repeated_public_calls_in_the_hold_time_start_one_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_green(monkeypatch)
+    calls = 0
+
+    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
+        nonlocal calls
+        calls += 1
+        return "up"
+
+    monkeypatch.setattr(first_start, "_probe_one", probe)
+    first = await first_start.run_public_first_start_checks()
+    for _ in range(5):
+        assert await first_start.run_public_first_start_checks() is first
+    assert calls == 2  # two systems, one run
+    monkeypatch.setattr(first_start, "_PUBLIC_RESULT_HOLD_S", 0.0)
+    assert await first_start.run_public_first_start_checks() is not first
+    assert calls == 4  # after the hold time, the next call runs again
+
+
+async def test_public_run_that_fails_is_not_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_green(monkeypatch)
+    runs = 0
+
+    async def failing_once() -> first_start.FirstStartResponse:
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            raise RuntimeError("first run failed")
+        return first_start.FirstStartResponse(ok=True, checks=[])
+
+    monkeypatch.setattr(first_start, "run_first_start_checks", failing_once)
+    with pytest.raises(RuntimeError):
+        await first_start.run_public_first_start_checks()
+    result = await first_start.run_public_first_start_checks()
+    assert result.ok is True
+    assert runs == 2
 
 
 async def test_names_show_only_when_asked_and_only_for_the_tenant(

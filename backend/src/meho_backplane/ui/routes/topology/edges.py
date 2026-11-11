@@ -120,6 +120,7 @@ from meho_backplane.topology.annotate import (
     unannotate_edge,
 )
 from meho_backplane.topology.resolvers import AmbiguousNodeError, NodeNotFoundError
+from meho_backplane.ui.auth.human import ensure_ui_human
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals.render import set_csrf_cookie
@@ -232,6 +233,10 @@ async def _require_topology_admin(
     so a non-admin session — even one that forged the request past the
     soft-hidden controls — is rejected server-side. The role probe used for
     the drawer's soft-hide is UX only; this gate is the authority.
+
+    After the role check it asks for a person: a console session of a
+    machine login (agent, service or runner) gets 403
+    ``human_principal_required``, the same as on the REST graph writes.
     """
     operator = await lift_operator_from_session(session_ctx)
     if operator.tenant_role != TenantRole.TENANT_ADMIN:
@@ -239,6 +244,7 @@ async def _require_topology_admin(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="curated-edge writes require tenant_admin",
         )
+    ensure_ui_human(operator)
     return operator
 
 

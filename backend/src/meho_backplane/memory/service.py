@@ -689,6 +689,17 @@ class MemoryService:
         doc = await self._fetch_by_id(operator, document_id)
         if doc is None:
             return None
+        return self.readable_entry(operator, doc)
+
+    def readable_entry(
+        self, operator: Operator, doc: Document, *, include_expired: bool = False
+    ) -> MemoryEntry | None:
+        """Return *doc* as an entry when *operator* may read it, else ``None``.
+
+        *doc* is a memory row of the operator's tenant. The checks are
+        the ones :meth:`read_by_id` lists. With *include_expired*, an
+        expired row passes too.
+        """
         try:
             scope = scope_for_kind(doc.kind)
         except ValueError:
@@ -717,7 +728,7 @@ class MemoryService:
         if not readable:
             return None
         entry = document_to_entry(doc)
-        if entry.expires_at is not None and is_expired(entry.expires_at):
+        if not include_expired and entry.expires_at is not None and is_expired(entry.expires_at):
             return None
         return entry
 

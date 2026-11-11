@@ -93,6 +93,7 @@ from meho_backplane.api.v1.targets import (
     soft_delete_target,
 )
 from meho_backplane.auth.operator import PrincipalKind, TenantRole
+from meho_backplane.connectors.targets.register_secret_ref import machine_secret_ref_refusal
 from meho_backplane.connectors.targets.schemas import (
     TARGETS_REGISTER_PARAMETER_SCHEMA,
     TARGETS_REGISTER_RESPONSE_SCHEMA,
@@ -175,7 +176,11 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         "name": "Required. Unique within the tenant; the dispatch handle.",
         "product": "Required. A registered connector product token (e.g. 'rke2').",
         "host": "Required. Dialable host/IP; SSRF-screened.",
-        "secret_ref": "Optional. Must sit in the tenant's Vault subtree; omit to derive it.",
+        "secret_ref": (
+            "Optional. Must sit in the tenant's Vault subtree; omit to derive it. "
+            "An agent or service login whose call runs without a person's approval "
+            "may give only the new target's own path, tenants/<tenant_id>/<name>."
+        ),
     },
     "output_shape": "{'target_id', 'name', 'product', 'host', 'tenant_id', 'next_step'}",
     "next_step": (
@@ -200,6 +205,10 @@ async def targets_register(
     re-implements none of it. ``tenant_id`` comes from *operator* inside
     the service — never from *params*.
 
+    A machine login's call that no person approved may give only the new
+    target's own credential path, or none
+    (:func:`~meho_backplane.connectors.targets.register_secret_ref.machine_secret_ref_refusal`).
+
     ``create_target`` relies on the caller's transaction (it ``flush``-es
     but does not commit), so the call is wrapped in ``session.begin()``.
     Model / service validation failures are re-raised as
@@ -214,6 +223,9 @@ async def targets_register(
     sessionmaker = get_sessionmaker()
     try:
         async with sessionmaker() as session, session.begin():
+            refusal = await machine_secret_ref_refusal(session, operator, body)
+            if refusal is not None:
+                raise ValueError(refusal)
             created = await create_target(body=body, operator=operator, session=session)
     except HTTPException as exc:
         raise ValueError(_http_exception_message(exc)) from exc

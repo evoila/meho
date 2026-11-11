@@ -196,7 +196,10 @@ class HetznerRobotConnector(HttpConnector):
     product = "hetzner"
     version = "2026.04"
     impl_id = "hetzner-rest"
-    supported_version_range = None  # Webservice API versioned by date, not semver
+    supported_version_range = None
+    version_range_reason = (
+        "Hetzner Robot has no product version. The connector version 2026.04 is a date."
+    )
     priority = 1
     # This class serves the operations of its ingested catalog.
     accepts_ingested_operations = True

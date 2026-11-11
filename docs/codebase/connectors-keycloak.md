@@ -29,7 +29,9 @@ ends is then audited, and a second person must approve it. #3851 adds
 sessions of one user, so their refresh tokens stop working at once. #3886 adds a
 fourth destructive delete, `realm.delete` (write surface **eighteen**), so a
 short-lived realm (a test run, a demo, a failed set-up) is removed through
-MEHO too, not by a direct API call.
+MEHO too, not by a direct API call. #4940 adds `user.disable` and
+`user.enable` (write surface **twenty**): they turn an account off and on
+without deleting it.
 `user.check_login` tests one login with a password from Vault and answers
 only `accepted`, `refused` or `error`, so an operator can prove a password
 change worked (the new password is accepted, the old one refused) without a
@@ -37,9 +39,13 @@ change worked (the new password is accepted, the old one refused) without a
 `keycloak.authflow.ensure_approval_flow` and the read
 `keycloak.identity_provider.list` (read surface **eleven**) set up the
 approval sign-in flow, and `keycloak.authflow.ensure_passkey_code_skip`
-changes the browser sign-in flow for passkeys. In total the connector
-registers 32 operations: 11 `safe` reads and 21 writes that wait for
-approval (11 `caution`, 6 `dangerous`, 4 `destructive`).
+changes the browser sign-in flow for passkeys. Three more safe reads show the
+login setup: `keycloak.auth_flow.step.list`, `keycloak.required_action.list`
+and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
+`keycloak.user.sessions`, show one user's state after a logout or a password
+reset (read surface **sixteen**). In total the connector registers 39
+operations: 16 `safe` reads and 23 writes that wait for
+approval (6 `caution`, 13 `dangerous`, 4 `destructive`).
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -53,13 +59,14 @@ fresh target with no asserted version still resolves.
   thin bound-method shim per read op (`realm_get`, `client_list`,
   `client_get`, `client_scope_list`, `user_list`, `role_mapping_get`,
   `role_list`, `role_users`, `group_list`, `group_member_list`,
-  `identity_provider_list`) and
+  `identity_provider_list`, `auth_flow_step_list`, `required_action_list`,
+  `events_config_get`) and
   per write op (`realm_create`/`realm_update`, `client_create`/
   `client_update`, `client_scope_create`, `protocol_mapper_create`,
   `user_create`/`user_reset_password`, `role_mapping_assign`,
   `group_create`, `group_update_attributes`, `group_member_add`,
   `group_member_remove`, `user_delete`, `group_delete`, `client_delete`,
-  `user_logout`, `realm_delete`, `user_check_login`,
+  `user_logout`, `user_disable`, `user_enable`, `realm_delete`, `user_check_login`,
   `authflow_ensure_approval_flow`, `authflow_ensure_passkey_code_skip`),
   the `_get_admin_json` / `_get_admin_list` GET
   helpers (object vs array responses), and the `_write_admin` mutating
@@ -87,7 +94,9 @@ fresh target with no asserted version still resolves.
 - `WRITE_OPS` (`connectors/keycloak/ops_write_schemas.py`, re-exported by
   `ops_write.py`) + the write handlers (`connectors/keycloak/ops_write.py`) —
   the nine original approval-gated write ops plus `user.logout` (#3851),
-  with `GROUP_WRITE_OPS` and `DELETE_WRITE_OPS` spliced in,
+  with `GROUP_WRITE_OPS`, `DELETE_WRITE_OPS` and `USER_ENABLED_OPS`
+  (`ops_write_user_enabled_schemas.py`; handlers in
+  `ops_write_user_enabled.py`) spliced in,
   reusing the `KeycloakOp` dataclass.
   Every op is `requires_approval=True`; a create treats HTTP 409 as an
   idempotent success; `user.create`/`user.reset_password` source the
@@ -237,7 +246,9 @@ rejects a whitespace-only secret rather than setting an empty password.
 
 Ten `safety_level="safe"` / `requires_approval=False` read ops in this
 table (an eleventh, `keycloak.identity_provider.list`, is described with the
-approval sign-in flow), all
+approval sign-in flow; three more are in "Login setup reads" below, and two
+more, `keycloak.user.get` and `keycloak.user.sessions`, are described with the
+user reads below), all
 tagged `read-only`, all dispatching via the admin-auth path. The realm is
 the target's `managed_realm` (no per-op realm param):
 
@@ -248,6 +259,8 @@ the target's `managed_realm` (no per-op realm param):
 | `keycloak.client.get` | `GET .../clients/{id}` | one client (flows, redirect URIs, mappers) |
 | `keycloak.client_scope.list` | `GET .../client-scopes` | `{rows, total}` |
 | `keycloak.user.list` | `GET .../users` (`?username=`/`?max=`) | `{rows, total}`, no credentials |
+| `keycloak.user.get` | `GET .../users/{user-id}` and `.../credentials` | one user's state, credential type and date only |
+| `keycloak.user.sessions` | `GET .../users/{user-id}/sessions` | `{count, sessions}`, no session id, no token |
 | `keycloak.role_mapping.get` | `GET .../users/{id}/role-mappings` | realm + client role mappings |
 | `keycloak.role.list` | `GET .../roles` | `{rows, total}` — realm role catalogue |
 | `keycloak.role.users` | `GET .../roles/{role-name}/users` | `{rows, total}`, no credentials — role members |
@@ -305,6 +318,31 @@ and masks secret-named fields by name as well.
 `keycloak.client.get` with the recorder on and checks that a made-up client
 secret is in neither the stored trace nor the agent copy.
 
+## User state reads (`ops_user_state.py`)
+
+Two `safe` reads in the `user` group. Both take `id` (the user's UUID) or
+`username` (an exact match, not the "contains" search of `user.list`). A user
+that does not exist raises `KeycloakUserNotFoundError` ("user not found").
+
+- `keycloak.user.get` reads `GET .../users/{user-id}` and
+  `GET .../users/{user-id}/credentials`. The result is `{id, username,
+  enabled, emailVerified, requiredActions, notBefore, createdTimestamp,
+  credentialDates: [{type, createdDate}]}`. Only these fields are copied out
+  (an allow-list): never `secretData`, `credentialData` or `value`. The list
+  is named `credentialDates` because MEHO hides every answer field named
+  `credentials`. For a `password` credential, `createdDate` is when the
+  password was last set.
+- `keycloak.user.sessions` reads `GET .../users/{user-id}/sessions`. The
+  result is `{userId, count, sessions: [{started, lastAccess, ipAddress,
+  clients}]}`. No session id and no token. A user with no session gives
+  `count: 0`. Offline sessions are not read.
+
+All times are ISO 8601 in UTC. Keycloak gives `notBefore` in seconds and the
+other times in milliseconds; a `notBefore` of 0 (never set) is `null`. Use
+both after `keycloak.user.logout` or `keycloak.user.reset_password` to check
+the result. A failed read, or a body of the wrong shape, is an error, never
+an empty answer.
+
 ## Write ops (G3.13-T4, extended by #3280)
 
 Approval-gated write ops (`requires_approval=True`), all
@@ -314,12 +352,12 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 |---|---|---|
 | `keycloak.realm.create` | dangerous | `POST /admin/realms` |
 | `keycloak.realm.update` | caution | `PUT .../realms/{realm}` |
-| `keycloak.client.create` | caution | `POST .../realms/{realm}/clients` |
-| `keycloak.client.update` | caution | `PUT .../clients/{id}` |
+| `keycloak.client.create` | dangerous | `POST .../realms/{realm}/clients` |
+| `keycloak.client.update` | dangerous | `PUT .../clients/{id}` |
 | `keycloak.client_scope.create` | caution | `POST .../client-scopes` |
-| `keycloak.protocol_mapper.create` | caution | `POST .../clients/{id}/protocol-mappers/models` |
-| `keycloak.user.create` | caution | `POST .../realms/{realm}/users` |
-| `keycloak.user.reset_password` | caution | `PUT .../users/{id}/reset-password` |
+| `keycloak.protocol_mapper.create` | dangerous | `POST .../clients/{id}/protocol-mappers/models` |
+| `keycloak.user.create` | dangerous | `POST .../realms/{realm}/users` |
+| `keycloak.user.reset_password` | dangerous | `PUT .../users/{id}/reset-password` |
 | `keycloak.role_mapping.assign` | dangerous | `POST .../users/{id}/role-mappings/realm` |
 | `keycloak.group.create` | dangerous | `POST .../groups` (or `.../groups/{group-id}/children`) |
 | `keycloak.group.update_attributes` | dangerous | `PUT .../groups/{group-id}` |
@@ -329,10 +367,29 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.group.delete` | destructive | `DELETE .../groups/{group-id}` |
 | `keycloak.client.delete` | destructive | `DELETE .../clients/{client-uuid}` |
 | `keycloak.user.logout` | caution | `POST .../users/{user-id}/logout` |
+| `keycloak.user.disable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: false`) |
+| `keycloak.user.enable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: true`) |
 | `keycloak.realm.delete` | destructive | `DELETE /admin/realms/{realm}` |
 | `keycloak.authflow.ensure_passkey_code_skip` | caution | `POST .../authentication/flows/browser/copy`, then `PUT .../realms/{realm}` |
 | `keycloak.authflow.ensure_approval_flow` | caution | `.../authentication/flows` and the client `PUT` (see "Approval sign-in flow and identity providers") |
 | `keycloak.user.check_login` | caution | `POST /realms/{realm}/protocol/openid-connect/token` (see "Login test") |
+
+Five more writes are `dangerous` because they can change who gets which
+tenant rights. MEHO reads the rights from the login token, and these
+writes change what goes into it, or who can sign in as whom:
+
+- `user.create`: the new user can carry a `groups` list and attributes.
+- `client.create` and `client.update`: a client carries the mappers and
+  scopes that fill the token.
+- `protocol_mapper.create`: a mapper decides the claims, also `tenant_id`
+  and `tenant_role`.
+- `user.reset_password`: it sets the password of any user of the realm.
+
+At `dangerous`, only a MEHO-SA-Operator or a tenant admin may approve
+another person's request. The single-operator self-approval switch
+(`APPROVAL_ALLOW_SELF_APPROVAL`) does not cover them. The test
+`backend/tests/test_keycloak_identity_write_approvers.py` checks both rules
+against the registered levels.
 
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
 + membership drive the backplane's tenant claims (`tenant_id` /
@@ -552,6 +609,29 @@ for example at the end of an event or when someone leaves.
   `broadcast/events.py::_WRITE_OPS`, because `.logout` is not a write suffix).
 - CLI: `meho keycloak user logout (--id|--username)`.
 
+### Turn a user off and on (#4940)
+
+`keycloak.user.disable` and `keycloak.user.enable` set `enabled` to false or
+true on one user. The account and its history stay. A disabled person can no
+longer sign in to any app that uses this realm.
+
+- Pass `id` (the user's UUID) or `username` (exact match, looked up with
+  `_find_user_uuid`).
+- The op reads the user, puts `enabled` on top and writes the whole user back
+  (`read_merge_write`), so no other field is reset. It reads the user again
+  and names any field that changed without being asked
+  (`unrequested_changes`, names only).
+- Safe to run twice: setting `enabled` to the value it already has succeeds.
+  A user that does not exist raises `KeycloakUserNotFoundError` and nothing
+  is written.
+- **Disabling does not end sessions that are already open.** To cut access at
+  once, run `keycloak.user.disable`, then `keycloak.user.logout`.
+- Risk level `dangerous`, approval required, group `user_write`. On the
+  broadcast feed both are a plain `write` (declared in `op_classes.py`,
+  because `.disable` and `.enable` are not write suffixes).
+- The result is `{id, username, enabled, unrequested_changes, read_back_checked}`
+  and carries no credential.
+
 ### Login test
 
 `keycloak.user.check_login` tries one login for one user and answers only
@@ -742,6 +822,22 @@ Both ops read lists with `get_admin_list_strict`: a body that is not a JSON
 array raises `KeycloakUnexpectedResponseError`, so a failed read never looks
 like an empty list.
 
+### Login setup reads (`ops_flow_reads.py`)
+
+Three `safe` reads, group `login_setup`, for the checks before one-time codes
+or event saving are turned on. Each copies only a fixed list of fields (an
+allow-list). No step setting, no `config` map and no secret is returned.
+A failed read, or a body of the wrong shape, is an error, never an empty list.
+
+| op_id | Admin REST API | returns |
+|---|---|---|
+| `keycloak.auth_flow.step.list` | `GET .../authentication/flows/{flowAlias}/executions` | `{realm, flow, rows: [{level, index, displayName, requirement, providerId, authenticationFlow}], total}`. Param `flow` (alias); default: the realm's `browserFlow`. An unknown alias raises `KeycloakFlowNotFoundError` ("flow not found"). |
+| `keycloak.required_action.list` | `GET .../authentication/required-actions` | `{realm, rows: [{alias, name, enabled, defaultAction, priority}], total}`, sorted by `priority` (the order at login; no priority sorts last). |
+| `keycloak.events.config.get` | `GET .../events/config` | `{realm, eventsEnabled, eventsExpiration, eventsListeners, enabledEventTypes, adminEventsEnabled, adminEventsDetailsEnabled}`. Keycloak fills `enabledEventTypes` with its default list when the realm sets none; `keycloak.realm.get` shows `[]` then. |
+
+The first op is named `.step.list` and not `.executions`, because the event
+feed treats a name that ends in `.list` as a read.
+
 ### Skip the one-time code after a passkey (#5663)
 
 Keycloak 26.4 and newer puts the step `conditional-credential`
@@ -871,10 +967,10 @@ Keycloak spec quirk). The lane
 [`backend/tests/test_connectors_keycloak_spec_reconcile.py`](../../backend/tests/test_connectors_keycloak_spec_reconcile.py)
 (the #2980 harness; parse-only, runs in the required unit sweep, uniform
 skip when the shelf is unconfigured) introspects those live constants and
-asserts all 48 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
+asserts all 49 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
 paths at #3280, +4 delete paths at #3944, +1 user logout path at #3851,
 +3 realm-delete paths at #3886, +8 login flow and identity provider
-paths at #5621, +3 passkey step paths) are served by the pinned
+paths at #5621, +3 passkey step paths, +1 user PUT path at #4940) are served by the pinned
 `keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
 Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
 `org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Three dispatched

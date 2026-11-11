@@ -173,6 +173,22 @@ Your Keycloak's own checks stay in place: its password policy, MFA and
 blocked accounts. They run when MEHO's Keycloak sends the person to
 yours.
 
+**Passkeys.** With a company login, the person signs in at your
+Keycloak, so passkeys (Face ID, Touch ID, a fingerprint or Windows
+Hello) are turned on there, not in MEHO's realm. In your Keycloak 26.4
+or newer, in the realm of your people, set the passkey rows of the
+table in
+[Remember the browser, and passkeys](../keycloak-realm.md#remember-the-browser-and-passkeys):
+**Enable Passkeys** on, and in the **Webauthn Passwordless Policy**
+**User verification requirement** and **Discoverable credential** at
+**Required**. A realm made before Keycloak 26.4 also needs the step that
+skips the one-time code after a passkey (see
+[A realm that already runs](../keycloak-realm.md#a-realm-that-already-runs)).
+Your people then add a passkey on your Keycloak's account page. For a
+company login of another kind (Entra ID, authentik), turn passkeys on in
+that system. When you use your Keycloak in place of MEHO's, set the same
+rows in the realm `meho`.
+
 ## The rules
 
 - **One MEHO group per person.** Put each person in one of your MEHO

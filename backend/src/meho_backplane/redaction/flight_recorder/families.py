@@ -85,6 +85,7 @@ from pydantic import BaseModel, ConfigDict
 from meho_backplane.delete_names import destructive_action_name_in_op_id
 
 __all__ = [
+    "NO_TRACE_BODY_TAG",
     "SECRET_FAMILY_PATTERNS",
     "SECRET_FAMILY_TAGS",
     "SECRET_FAMILY_WORDS",
@@ -201,6 +202,14 @@ SECRET_FAMILY_TAGS: Final[frozenset[str]] = frozenset(
 )
 
 
+#: The tag a connector author puts on an operation to keep its request body
+#: out of the trace. It only hides the body: the risk level, the approval and
+#: grant rules and the vendor error text ignore it (it is not in
+#: :data:`SECRET_FAMILY_TAGS`). Matched like the other tags: case and
+#: separators do not matter (``No_Trace_Body`` matches).
+NO_TRACE_BODY_TAG: Final = "no-trace-body"
+
+
 def _tag_tokens(tag: str) -> set[str]:
     """Split a tag into lowercase alphanumeric tokens.
 
@@ -209,6 +218,12 @@ def _tag_tokens(tag: str) -> set[str]:
     token; ``"read-only"`` -> ``{"read", "only"}`` matches nothing.
     """
     return {token for token in re.split(r"[^a-z0-9]+", tag.lower()) if token}
+
+
+def _has_no_trace_body_tag(tags: Iterable[str]) -> bool:
+    """Whether one of *tags* is :data:`NO_TRACE_BODY_TAG`, ignoring case and separators."""
+    wanted = NO_TRACE_BODY_TAG.split("-")
+    return any(re.split(r"[^a-z0-9]+", tag.lower().strip("-_ .")) == wanted for tag in tags)
 
 
 def secret_tag_tokens(tags: Iterable[str]) -> set[str]:
@@ -344,6 +359,14 @@ def classify_body_exclusion(
                     f"{word!r} (any case); body never recorded"
                 ),
             )
+
+    # --- marked by the connector author: no body in the trace ----------
+    if _has_no_trace_body_tag(tag_set):
+        return BodyExclusion(
+            excluded=True,
+            family="marked-no-body",
+            reason=(f"op {op_id!r} carries the {NO_TRACE_BODY_TAG!r} tag; body never recorded"),
+        )
 
     # --- destructive / delete-shaped (single-sourced) ------------------
     destructive = _destructive_exclusion(

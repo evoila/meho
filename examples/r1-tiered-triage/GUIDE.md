@@ -18,9 +18,10 @@ primitives. No new server-side endpoint is introduced.
 
 - Two hosted agent definitions: `r1-cheap-tier-classifier`
   (`model_tier=fast`) and `r1-deep-tier-investigator`
-  (`model_tier=deep`).
-- A `*/15 * * * *` cron trigger that fires the cheap tier under its
-  own Keycloak identity.
+  (`model_tier=deep`). Both are owned by one agent login,
+  `agent:r1-cheap-tier-classifier`.
+- A `*/15 * * * *` cron trigger that fires the cheap tier under that
+  agent login.
 - An RBAC posture where the cheap tier can read broadcast events +
   escalate to the deep tier (and nothing else), and the deep tier
   is read-only across discovery connectors (write ops route through
@@ -74,17 +75,18 @@ You have, in this order:
    [`settings.py:722-723`](../../backend/src/meho_backplane/settings.py)
    and emitted by the Keycloak protocol mappers documented in
    [`deploy/values-examples/README.md` § Auth onramp recipe](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp).
-4. **Two agent principals registered**, one per tier
+4. **One agent principal registered** for both tiers
    ([G11.2-T1 #815](https://github.com/evoila/meho/issues/815)):
    ```bash
    meho agent-principal register r1-cheap-tier-classifier --json | jq -r .keycloak_client_id
-   meho agent-principal register r1-deep-tier-investigator --json | jq -r .keycloak_client_id
    # expect: agent:r1-cheap-tier-classifier
-   #         agent:r1-deep-tier-investigator
    ```
    The `keycloak_client_id` field is the principal's OIDC `sub` —
    the registry sets it to `agent:<name>` so it matches the
-   `identity_ref` already on each `agent.*.json`. There is no
+   `identity_ref` on both `agent.*.json` files. Both tiers use this
+   one login because the cron trigger runs the cheap tier as this
+   agent login, and an agent login can hand off only to a
+   definition it owns (see the note in Step 2). There is no
    per-principal `show` verb in v0.2; `register` is the place the
    sub is surfaced. Re-run `meho agent-principal list --json | jq
    '.principals[] | {name, keycloak_client_id}'` to enumerate them
@@ -113,7 +115,7 @@ meho agent create r1-cheap-tier-classifier \
 
 jq .toolset examples/r1-tiered-triage/agent.deep-tier-investigator.json | \
 meho agent create r1-deep-tier-investigator \
-  --identity-ref "agent:r1-deep-tier-investigator" \
+  --identity-ref "agent:r1-cheap-tier-classifier" \
   --model-tier deep \
   --turn-budget 25 \
   --system-prompt "$(jq -r .system_prompt examples/r1-tiered-triage/agent.deep-tier-investigator.json)" \
@@ -138,7 +140,7 @@ Verify:
 ```bash
 meho agent list | grep r1-
 # expect:
-# r1-cheap-tier-classifier   model=fast  enabled=true  toolset.meta_tools=[call_operation]
+# r1-cheap-tier-classifier   model=fast  enabled=true  toolset.meta_tools=[list_operation_groups,search_operations,call_operation,invoke_agent]
 # r1-deep-tier-investigator  model=deep  enabled=true  output_schema=set
 ```
 
@@ -188,6 +190,17 @@ meho scheduler list --json | jq '.triggers[] | select(.identity_sub=="agent:r1-c
 # expect: kind=cron cron_expr=*/15 * * * * identity_sub=agent:r1-cheap-tier-classifier in_flight_policy=fail_into_audit
 ```
 
+> **Who owns the deep tier.** The trigger runs the cheap tier as
+> its agent login (`agent:r1-cheap-tier-classifier`). An agent
+> login can start, and hand off to, only the definitions whose
+> `identity_ref` is its own client id. So the deep tier's
+> `identity_ref` is also `agent:r1-cheap-tier-classifier`. If the
+> deep tier names another login, the cheap tier's `invoke_agent`
+> call answers `no agent definition named 'r1-deep-tier-investigator'`
+> on every scheduled firing. A person who runs the cheap tier with
+> `meho agent run` can hand off to any enabled definition of the
+> tenant, so a manual smoke test alone does not show this.
+
 > The `--json` response is the envelope `{"triggers": [...]}` per
 > [`cli/internal/cmd/scheduler/scheduler.go:175-177`](../../cli/internal/cmd/scheduler/scheduler.go),
 > mirroring the backend's `ScheduledTriggerListResponse` Pydantic
@@ -208,7 +221,10 @@ meho scheduler list --json | jq '.triggers[] | select(.identity_sub=="agent:r1-c
 
 The [`permissions.json`](./permissions.json) file documents four
 `AgentPermission` rows that wire the RBAC posture for
-`call_operation` dispatch:
+`call_operation` dispatch. The deep tier runs inside the cheap
+tier's run, under the same agent login, so all four rows go to
+that one login. The file keeps a separate placeholder per tier
+only to show which tier each row is for:
 
 - Cheap tier: read `meho_broadcast_recent` (the triage signal source).
 - Deep tier: read across `*.read` / `*.list` op patterns;
@@ -220,9 +236,14 @@ The [`permissions.json`](./permissions.json) file documents four
 > to the deep tier is **not** checked against the agent-grants table.
 > The runtime path (see
 > [`backend/src/meho_backplane/agent/invoke.py:307-477`](../../backend/src/meho_backplane/agent/invoke.py))
-> permits the call when (a) the depth cap is not exceeded and
-> (b) the `child_agent_resolver` returns a definition for the
-> requested name. The in-process harness in
+> permits the call when (a) the cheap tier's toolset names
+> `invoke_agent`, (b) the depth cap is not exceeded and
+> (c) the `child_agent_resolver` returns a definition for the
+> requested name. In a running backplane the resolver applies the
+> same owner rule as a direct run: for an agent login it returns
+> only the definitions that login owns (see the note in Step 2).
+> The deep tier then runs with only the tools and
+> connectors that both toolsets allow. The in-process harness in
 > [`workflow.py`](./workflow.py) (`_name_resolver`) installs a
 > single-edge resolver that returns the deep tier's definition for
 > `r1-deep-tier-investigator` and `None` for everything else — so
@@ -237,11 +258,11 @@ there is no batch `apply`/`resolve` verb. Loop over the rows in
 `permissions.json` and post each one with `meho agent grant create`:
 
 ```bash
-# Principal subs match the keycloak_client_id values surfaced by
-# `meho agent-principal register` in the prereqs. Both follow the
-# `agent:<name>` convention recorded as identity_ref on each agent.
+# The principal sub matches the keycloak_client_id value surfaced by
+# `meho agent-principal register` in the prereqs. Both tiers run
+# under this one login, so both placeholders get the same sub.
 CHEAP_SUB="agent:r1-cheap-tier-classifier"
-DEEP_SUB="agent:r1-deep-tier-investigator"
+DEEP_SUB="$CHEAP_SUB"
 
 # Substitute the placeholders, strip the doc-only `_*` keys, and
 # emit one `meho agent grant create` invocation per row.
@@ -277,18 +298,20 @@ catches the validation error and returns HTTP 422), and `--verdict`
 a permanent grant — the four rows above are baseline RBAC posture,
 not a time-bounded elevation.
 
-Verify the grants landed by listing them for the cheap tier:
+Verify the grants landed by listing them for the agent login:
 
 ```bash
 meho agent grant list --principal "$CHEAP_SUB" --json | \
   jq '.grants[] | {op_pattern, target_scope, verdict}'
-# expect (one row):
+# expect (four rows):
 #   {op_pattern: "meho_broadcast_recent", target_scope: "*", verdict: "auto-execute"}
+#   {op_pattern: "*.read", target_scope: "*", verdict: "auto-execute"}
+#   {op_pattern: "*.list", target_scope: "*", verdict: "auto-execute"}
+#   {op_pattern: "*.write", target_scope: "*", verdict: "needs-approval"}
 ```
 
-The cheap tier holds no `meho.invoke_agent` grant by design — see
-the v0.2 note above. The same verification for the deep tier
-should show the three `*.read`, `*.list`, and `*.write` rows.
+The login holds no `meho.invoke_agent` grant by design — see
+the v0.2 note above.
 
 ## Step 4 — Seed the per-identity daily budgets
 
@@ -298,21 +321,26 @@ feed can creep up over a 24-hour cycle. The
 writes a single daily `identity_budget` row per principal via
 [`set_limits`](../../backend/src/meho_backplane/operations/identity_budget.py).
 
-Run it once per agent principal (or pass both subs as the script
-does). The `$TENANT_ID` was captured in the prereqs step from the
-JWT payload of `credentials.json`:
+Both tiers run under the one agent login, so one row covers a
+whole firing: the deep tier's model calls run inside the cheap
+tier's run and count against the same row. The `$TENANT_ID` was
+captured in the prereqs step from the JWT payload of
+`credentials.json`:
 
 ```bash
 cd backend
 uv run python ../examples/r1-tiered-triage/identity_budget_seed.py \
   --tenant-id "$TENANT_ID" \
-  --cheap-sub "$CHEAP_SUB" \
-  --deep-sub "$DEEP_SUB"
-# expect: seeded daily budgets: cheap=... (cost_limit=$2.00, requests=200), deep=... (cost_limit=$10.00, requests=100)
+  --cheap-sub "$CHEAP_SUB"
+# expect: seeded daily budgets: cheap=... (cost_limit=$2.00, requests=200)
 ```
 
-The seed values are deliberately small (`$2/day` cheap, `$10/day`
-deep) so a real-world consumer copying this example has to think
+`--deep-sub` is optional. Pass it only if you run the deep tier
+under a login of its own; the script then also writes a
+`$10/day` row for that login.
+
+The seed value is deliberately small (`$2/day`, and `$10/day`
+for an optional separate deep-tier login) so a real-world consumer copying this example has to think
 about the numbers rather than land on a multi-thousand-dollar cap
 by accident. Tune for your tenant's expected event throughput +
 your provider's published rates
@@ -494,12 +522,12 @@ Walk the audit again (same `agent_session_id` pattern as Step 5):
 
 ```bash
 SESSION_ID="$(meho audit query --principal "$CHEAP_SUB" --limit 1 --json | jq -r '.rows[0].agent_session_id')"
-# Count the deep-tier dispatches in this session — the cheap tier
-# itself contributes its own audit rows, so filter by the deep
-# principal's sub.
+# Count the hand-offs to the deep tier in this session. Both tiers
+# write rows under the same login, so count the cheap tier's
+# invoke_agent rows instead of filtering by principal.
 meho audit query --session-id "$SESSION_ID" --json | \
-  jq --arg ds "$DEEP_SUB" '[.rows[] | select(.principal_sub == $ds)] | length'
-# expect: 0 (no deep-tier dispatch — the cheap tier saw the policy and skipped)
+  jq '[.rows[] | select(.op_id == "invoke_agent")] | length'
+# expect: 0 (no deep-tier hand-off — the cheap tier saw the policy and skipped)
 ```
 
 You should see **no** child deep-tier dispatch — the cheap tier
@@ -539,13 +567,20 @@ Likely causes:
 
 - The broadcast feed has no events that meet the interestingness
   rules. Stage one manually (Step 5).
-- The harness's `child_agent_resolver` returns `None` for the
-  deep tier's name (a typo, the deep tier's `AgentDefinition` failed
-  to load, or a consumer-side override). The runtime surfaces this
-  as a `ModelRetry` (`"no agent definition named ..."`); check the
-  cheap-tier audit row for that text. The resolver is the only
-  gate on agent-to-agent dispatch in v0.2 — see the v0.2 note in
-  Step 3.
+- The `child_agent_resolver` returns `None` for the deep tier's
+  name (a typo, the deep tier's `AgentDefinition` is disabled or
+  failed to load, or a consumer-side override). The runtime
+  surfaces this as a `ModelRetry` (`"no agent definition named
+  ..."`); check the cheap-tier audit row for that text. The
+  resolver is the only gate on agent-to-agent dispatch in v0.2 —
+  see the v0.2 note in Step 3.
+- Only the scheduled firings fail to hand off, while `meho agent
+  run` by a person works: the deep tier's `identity_ref` is not
+  the cheap tier's agent login. A scheduled run runs as that agent
+  login, and an agent login hands off only to definitions it owns.
+  Set the deep tier's `identity_ref` to
+  `agent:r1-cheap-tier-classifier` (Step 1 and the note in
+  Step 2).
 - The cheap tier's structured input doesn't match the prompt's
   expected section headings (`## Known policy` / `## Recent events`).
   The harness builds these correctly; a custom consumer-side

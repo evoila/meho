@@ -38,8 +38,8 @@ func newIPListCmd() *cobra.Command {
 			"and renders a table of IP addresses with lock status and server routing.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho hetzner-robot ip list --target rdc-robot\n" +
-			"  meho hetzner-robot ip list --target rdc-robot --json | jq '.result[].ip.ip'",
+		Example: "  meho hetzner-robot ip list --target robot-lab\n" +
+			"  meho hetzner-robot ip list --target robot-lab --json | jq '.result[].ip.ip'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -121,8 +121,8 @@ func newSubnetListCmd() *cobra.Command {
 			"and renders a table of CIDR, gateway, IP version, and routed server.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho hetzner-robot subnet list --target rdc-robot\n" +
-			"  meho hetzner-robot subnet list --target rdc-robot --json",
+		Example: "  meho hetzner-robot subnet list --target robot-lab\n" +
+			"  meho hetzner-robot subnet list --target robot-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -216,8 +216,8 @@ func newFailoverListCmd() *cobra.Command {
 			"When server_ip != active_server_ip the failover is currently routed away.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho hetzner-robot failover list --target rdc-robot\n" +
-			"  meho hetzner-robot failover list --target rdc-robot --json",
+		Example: "  meho hetzner-robot failover list --target robot-lab\n" +
+			"  meho hetzner-robot failover list --target robot-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -301,8 +301,8 @@ func newRdnsListCmd() *cobra.Command {
 			"Only IPs with explicitly set PTR records appear in the output.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho hetzner-robot rdns list --target rdc-robot\n" +
-			"  meho hetzner-robot rdns list --target rdc-robot --json",
+		Example: "  meho hetzner-robot rdns list --target robot-lab\n" +
+			"  meho hetzner-robot rdns list --target robot-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -35,6 +35,8 @@ __all__ = [
     "API_VERSION",
     "AUTOMEMBER_ADD_COMMAND",
     "AUTOMEMBER_ADD_CONDITION_COMMAND",
+    "GROUP_ADD_COMMAND",
+    "GROUP_ADD_MEMBER_COMMAND",
     "GROUP_FIND_COMMAND",
     "GROUP_SHOW_COMMAND",
     "HBACRULE_ADD_COMMAND",
@@ -58,6 +60,8 @@ __all__ = [
     "PING_COMMAND",
     "PWPOLICY_MOD_COMMAND",
     "PWPOLICY_SHOW_COMMAND",
+    "ROLE_ADD_MEMBER_COMMAND",
+    "ROLE_DEL_COMMAND",
     "ROLE_FIND_COMMAND",
     "ROLE_SHOW_COMMAND",
     "SUDOCMD_ADD_COMMAND",
@@ -67,7 +71,11 @@ __all__ = [
     "SUDORULE_ADD_USER_COMMAND",
     "SUDORULE_FIND_COMMAND",
     "SUDORULE_SHOW_COMMAND",
+    "USER_ADD_COMMAND",
+    "USER_DEL_COMMAND",
+    "USER_DISABLE_COMMAND",
     "USER_FIND_COMMAND",
+    "USER_MOD_COMMAND",
     "USER_SHOW_COMMAND",
     "FreeipaAnswer",
     "FreeipaCommandError",
@@ -121,6 +129,14 @@ HBACRULE_ADD_HOST_COMMAND: Final[str] = "hbacrule_add_host"
 HBACRULE_ADD_SERVICE_COMMAND: Final[str] = "hbacrule_add_service"
 HBACRULE_DISABLE_COMMAND: Final[str] = "hbacrule_disable"
 PWPOLICY_MOD_COMMAND: Final[str] = "pwpolicy_mod"
+USER_ADD_COMMAND: Final[str] = "user_add"
+USER_MOD_COMMAND: Final[str] = "user_mod"
+USER_DISABLE_COMMAND: Final[str] = "user_disable"
+USER_DEL_COMMAND: Final[str] = "user_del"
+GROUP_ADD_COMMAND: Final[str] = "group_add"
+GROUP_ADD_MEMBER_COMMAND: Final[str] = "group_add_member"
+ROLE_ADD_MEMBER_COMMAND: Final[str] = "role_add_member"
+ROLE_DEL_COMMAND: Final[str] = "role_del"
 
 #: Longest error text from the server kept in an error message.
 _ERROR_TEXT_LIMIT: Final[int] = 500

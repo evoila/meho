@@ -37,6 +37,7 @@ way an event is built. It allows:
 | `outcome` | `ok`, `client_error`, `denied`, `not_found`, `rate_limited`, `server_error`. |
 | `duration_ms` | How long the request took. |
 | `correlation_id` | Only on `context_selected` events. |
+| `tool_texts` | `short` when the MCP session asked for the short tool texts (`?texts=short`); empty otherwise. The MCP route sets it with `note_request_tool_texts`. |
 
 The schema refuses anything else (`extra="forbid"`). So an event can never
 hold a request or response body, a token, a query string, tool arguments,

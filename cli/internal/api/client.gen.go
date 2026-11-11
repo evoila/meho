@@ -124,6 +124,13 @@ const (
 	BroadcastOverrideCreateScopeFieldTargetName BroadcastOverrideCreateScopeField = "target_name"
 )
 
+// Defines values for BudgetWindowKind.
+const (
+	BudgetWindowKindDaily   BudgetWindowKind = "daily"
+	BudgetWindowKindMonthly BudgetWindowKind = "monthly"
+	BudgetWindowKindWeekly  BudgetWindowKind = "weekly"
+)
+
 // Defines values for CandidateHintConfidence.
 const (
 	CandidateHintConfidenceHigh   CandidateHintConfidence = "high"
@@ -432,6 +439,15 @@ const (
 	IngestRequestAuthSchemeSessionLoginBasic IngestRequestAuthScheme = "session_login_basic"
 	IngestRequestAuthSchemeSessionLoginToken IngestRequestAuthScheme = "session_login_token"
 	IngestRequestAuthSchemeStaticHeader      IngestRequestAuthScheme = "static_header"
+)
+
+// Defines values for IngestionResultModelLoginSetup.
+const (
+	IngestionResultModelLoginSetupRegistered                IngestionResultModelLoginSetup = "registered"
+	IngestionResultModelLoginSetupReplaced                  IngestionResultModelLoginSetup = "replaced"
+	IngestionResultModelLoginSetupServedByBuiltinLoginSetup IngestionResultModelLoginSetup = "served_by_builtin_login_setup"
+	IngestionResultModelLoginSetupServedByConnectorCode     IngestionResultModelLoginSetup = "served_by_connector_code"
+	IngestionResultModelLoginSetupUnchanged                 IngestionResultModelLoginSetup = "unchanged"
 )
 
 // Defines values for KbExportRemovalStatus.
@@ -1079,6 +1095,90 @@ type AffectedSensorModel struct {
 	TenantId openapi_types.UUID `json:"tenant_id"`
 }
 
+// AgentBudgetListResponse The caps of one principal, one entry for each window.
+type AgentBudgetListResponse struct {
+	Budgets []AgentBudgetRead `json:"budgets"`
+}
+
+// AgentBudgetRead The caps of one window and what is used so far in it.
+//
+// A “null“ limit means no cap on that value. “*_remaining“ is
+// “null“ when the limit is “null“, and can be negative when a run
+// went over the cap. Costs are in USD.
+type AgentBudgetRead struct {
+	CostConsumed      float32  `json:"cost_consumed"`
+	CostLimit         *float32 `json:"cost_limit"`
+	CostRemaining     *float32 `json:"cost_remaining"`
+	PrincipalSub      string   `json:"principal_sub"`
+	RequestLimit      *int     `json:"request_limit"`
+	RequestsConsumed  int      `json:"requests_consumed"`
+	RequestsRemaining *int     `json:"requests_remaining"`
+	TokenLimit        *int     `json:"token_limit"`
+	TokensConsumed    int      `json:"tokens_consumed"`
+	TokensRemaining   *int     `json:"tokens_remaining"`
+
+	// Window Closed vocabulary of budget-window granularities.
+	//
+	// Each :class:`IdentityBudget` row is keyed in part on a
+	// :class:`BudgetWindowKind` — the budget answers "what's the cap for
+	// this principal *per day / per week / per month*". The runtime
+	// increments one row per active window-kind on every successful run
+	// (one daily bucket, one weekly bucket, one monthly bucket).
+	//
+	// The vocabulary is intentionally closed (three values). A fourth
+	// granularity would require both a code change and an Alembic
+	// migration (the
+	// :class:`~meho_backplane.db.models.IdentityBudget.window_kind`
+	// column carries a DB-level CHECK constraint backed by this enum),
+	// which is the cheapest way to prevent drift between the DB row, the
+	// consumption service, and the enforcement gate (G11.5-C3-b, #1080).
+	//
+	// Members:
+	//
+	// * :attr:`DAILY` — buckets start at 00:00 UTC and last 24 hours.
+	// * :attr:`WEEKLY` — ISO-week buckets, starting Monday 00:00 UTC.
+	// * :attr:`MONTHLY` — calendar-month buckets, starting the 1st at
+	//   00:00 UTC.
+	Window      BudgetWindowKind `json:"window"`
+	WindowEnd   time.Time        `json:"window_end"`
+	WindowStart time.Time        `json:"window_start"`
+}
+
+// AgentBudgetSet Body of “PUT /api/v1/agent-budgets“.
+type AgentBudgetSet struct {
+	// CostLimit Cost cap in USD
+	CostLimit *float32 `json:"cost_limit"`
+
+	// PrincipalSub Login of the agent, e.g. agent:pod-reader
+	PrincipalSub string `json:"principal_sub"`
+	RequestLimit *int   `json:"request_limit"`
+	TokenLimit   *int   `json:"token_limit"`
+
+	// Window Closed vocabulary of budget-window granularities.
+	//
+	// Each :class:`IdentityBudget` row is keyed in part on a
+	// :class:`BudgetWindowKind` — the budget answers "what's the cap for
+	// this principal *per day / per week / per month*". The runtime
+	// increments one row per active window-kind on every successful run
+	// (one daily bucket, one weekly bucket, one monthly bucket).
+	//
+	// The vocabulary is intentionally closed (three values). A fourth
+	// granularity would require both a code change and an Alembic
+	// migration (the
+	// :class:`~meho_backplane.db.models.IdentityBudget.window_kind`
+	// column carries a DB-level CHECK constraint backed by this enum),
+	// which is the cheapest way to prevent drift between the DB row, the
+	// consumption service, and the enforcement gate (G11.5-C3-b, #1080).
+	//
+	// Members:
+	//
+	// * :attr:`DAILY` — buckets start at 00:00 UTC and last 24 hours.
+	// * :attr:`WEEKLY` — ISO-week buckets, starting Monday 00:00 UTC.
+	// * :attr:`MONTHLY` — calendar-month buckets, starting the 1st at
+	//   00:00 UTC.
+	Window BudgetWindowKind `json:"window"`
+}
+
 // AgentDefinitionCreate POST body -- the inputs “create“ consumes. Pydantic v2 strict.
 //
 // “extra="forbid"“ rejects unknown fields with 422 (catches a client
@@ -1709,10 +1809,11 @@ type ApprovalRequestView struct {
 	//
 	// A summary read off the stored result envelope. The result body and the
 	// free-text error stay on the owner-only ``/result`` read.
-	ResumeOutcome  *ApprovalResumeOutcomeView `json:"resume_outcome,omitempty"`
-	RevealSecret   *bool                      `json:"reveal_secret,omitempty"`
-	ReviewedBy     *string                    `json:"reviewed_by"`
-	ReviewedByName *string                    `json:"reviewed_by_name"`
+	ResumeOutcome          *ApprovalResumeOutcomeView `json:"resume_outcome,omitempty"`
+	RevealChangesSomething *bool                      `json:"reveal_changes_something,omitempty"`
+	RevealSecret           *bool                      `json:"reveal_secret,omitempty"`
+	ReviewedBy             *string                    `json:"reviewed_by"`
+	ReviewedByName         *string                    `json:"reviewed_by_name"`
 
 	// ReviewerContext Redacted, human-legible context for judging a parked request (#3353).
 	//
@@ -1726,6 +1827,7 @@ type ApprovalRequestView struct {
 	// The console modal renders from the same resolver, so the two surfaces
 	// never drift. Populated on ``GET /{id}`` only; the list view omits it.
 	ReviewerContext *ReviewerContextView `json:"reviewer_context,omitempty"`
+	RightsChange    *bool                `json:"rights_change,omitempty"`
 	RunId           *openapi_types.UUID  `json:"run_id"`
 
 	// Status Closed lifecycle status of an :class:`ApprovalRequest`.
@@ -1757,12 +1859,13 @@ type ApprovalRequestView struct {
 	// drift guard
 	// :func:`tests.migrations.test_migration_0119_approval_withdrawn.test_status_check_matches_enum`
 	// asserts equality at unit-test time.
-	Status         ApprovalRequestStatus `json:"status"`
-	TargetId       *openapi_types.UUID   `json:"target_id"`
-	TenantId       openapi_types.UUID    `json:"tenant_id"`
-	WithdrawReason *string               `json:"withdraw_reason"`
-	WithdrawnAt    *string               `json:"withdrawn_at"`
-	WorkRef        *string               `json:"work_ref"`
+	Status            ApprovalRequestStatus `json:"status"`
+	TargetId          *openapi_types.UUID   `json:"target_id"`
+	TenantId          openapi_types.UUID    `json:"tenant_id"`
+	WaitsForRequester *bool                 `json:"waits_for_requester,omitempty"`
+	WithdrawReason    *string               `json:"withdraw_reason"`
+	WithdrawnAt       *string               `json:"withdrawn_at"`
+	WorkRef           *string               `json:"work_ref"`
 }
 
 // ApprovalResultState Whether an approved request has run yet (#3486).
@@ -1852,6 +1955,27 @@ type ApprovalResumeOutcomeView struct {
 	Guidance         *string             `json:"guidance"`
 	ResultStatus     *string             `json:"result_status"`
 	ResumedAt        *string             `json:"resumed_at"`
+}
+
+// ApprovalRevealResult The run result of an approved reveal, for the person who asked.
+type ApprovalRevealResult struct {
+	ApprovalRequestId openapi_types.UUID           `json:"approval_request_id"`
+	AuditId           *openapi_types.UUID          `json:"audit_id"`
+	Error             *string                      `json:"error"`
+	OpId              string                       `json:"op_id"`
+	Result            *ApprovalRevealResult_Result `json:"result"`
+	Status            string                       `json:"status"`
+}
+
+// ApprovalRevealResultResult0 defines model for .
+type ApprovalRevealResultResult0 map[string]interface{}
+
+// ApprovalRevealResultResult1 defines model for .
+type ApprovalRevealResultResult1 = []interface{}
+
+// ApprovalRevealResult_Result defines model for ApprovalRevealResult.Result.
+type ApprovalRevealResult_Result struct {
+	union json.RawMessage
 }
 
 // ApprovalsStatus The approval settings in force (#4830).
@@ -2296,10 +2420,11 @@ type AuditTraceResult struct {
 // empty-string from absent-key and emits the same actionable
 // public-client error in both cases.
 type AuthConfigResponse struct {
-	Audience           string  `json:"audience"`
-	CliApproveClientId *string `json:"cli_approve_client_id,omitempty"`
-	CliClientId        string  `json:"cli_client_id"`
-	KeycloakIssuer     string  `json:"keycloak_issuer"`
+	Audience           string             `json:"audience"`
+	CliApproveClientId *string            `json:"cli_approve_client_id,omitempty"`
+	CliClientId        string             `json:"cli_client_id"`
+	KeycloakIssuer     string             `json:"keycloak_issuer"`
+	McpClients         *map[string]string `json:"mcp_clients,omitempty"`
 }
 
 // AuthModel Per-target identity model per v0.1-spec L447-454.
@@ -3835,6 +3960,30 @@ type BudgetStatus struct {
 	// OversizeSlugs Dropped slugs that do not fit the budget even as the only entry. The other dropped slugs fit alone but lost the room to higher-priority entries.
 	OversizeSlugs []string `json:"oversize_slugs"`
 }
+
+// BudgetWindowKind Closed vocabulary of budget-window granularities.
+//
+// Each :class:`IdentityBudget` row is keyed in part on a
+// :class:`BudgetWindowKind` — the budget answers "what's the cap for
+// this principal *per day / per week / per month*". The runtime
+// increments one row per active window-kind on every successful run
+// (one daily bucket, one weekly bucket, one monthly bucket).
+//
+// The vocabulary is intentionally closed (three values). A fourth
+// granularity would require both a code change and an Alembic
+// migration (the
+// :class:`~meho_backplane.db.models.IdentityBudget.window_kind`
+// column carries a DB-level CHECK constraint backed by this enum),
+// which is the cheapest way to prevent drift between the DB row, the
+// consumption service, and the enforcement gate (G11.5-C3-b, #1080).
+//
+// Members:
+//
+//   - :attr:`DAILY` — buckets start at 00:00 UTC and last 24 hours.
+//   - :attr:`WEEKLY` — ISO-week buckets, starting Monday 00:00 UTC.
+//   - :attr:`MONTHLY` — calendar-month buckets, starting the 1st at
+//     00:00 UTC.
+type BudgetWindowKind string
 
 // CallOperationBody Request body for the “POST /api/v1/operations/call“ route.
 //
@@ -6908,16 +7057,22 @@ type IngestResponse struct {
 // likewise additive with empty defaults — “0“ / “[]“ for every
 // product that declares no ingest op allowlist.
 type IngestionResultModel struct {
-	ConnectorId         string               `json:"connector_id"`
-	ConnectorRegistered bool                 `json:"connector_registered"`
-	DroppedCount        *int                 `json:"dropped_count,omitempty"`
-	DroppedOps          *[]DroppedOpModel    `json:"dropped_ops,omitempty"`
-	InsertedCount       int                  `json:"inserted_count"`
-	OperationsGrouped   bool                 `json:"operations_grouped"`
-	SafetyChanges       *[]SafetyChangeModel `json:"safety_changes,omitempty"`
-	SkippedCount        int                  `json:"skipped_count"`
-	UpdatedCount        int                  `json:"updated_count"`
+	ConnectorId         string            `json:"connector_id"`
+	ConnectorRegistered bool              `json:"connector_registered"`
+	DroppedCount        *int              `json:"dropped_count,omitempty"`
+	DroppedOps          *[]DroppedOpModel `json:"dropped_ops,omitempty"`
+	InsertedCount       int               `json:"inserted_count"`
+
+	// LoginSetup What happened to the login setup of an ingest with a login type. registered: the scope's calls use it now. replaced: it replaced a different login setup of the same scope (audited with the old and the new login type). unchanged: the same login setup was already in place. served_by_connector_code / served_by_builtin_login_setup: hand-written connector code or a shipped or built-in login setup serves this connector for every tenant, so this login setup is saved but not used. A tenant's login setup applies only to that tenant's calls. Null for an ingest without a login type.
+	LoginSetup        *IngestionResultModelLoginSetup `json:"login_setup"`
+	OperationsGrouped bool                            `json:"operations_grouped"`
+	SafetyChanges     *[]SafetyChangeModel            `json:"safety_changes,omitempty"`
+	SkippedCount      int                             `json:"skipped_count"`
+	UpdatedCount      int                             `json:"updated_count"`
 }
+
+// IngestionResultModelLoginSetup What happened to the login setup of an ingest with a login type. registered: the scope's calls use it now. replaced: it replaced a different login setup of the same scope (audited with the old and the new login type). unchanged: the same login setup was already in place. served_by_connector_code / served_by_builtin_login_setup: hand-written connector code or a shipped or built-in login setup serves this connector for every tenant, so this login setup is saved but not used. A tenant's login setup applies only to that tenant's calls. Null for an ingest without a login type.
+type IngestionResultModelLoginSetup string
 
 // KbEntry One kb entry -- mirrors a row in the “documents“ table.
 //
@@ -7236,7 +7391,9 @@ type KindFilterValue string
 //
 // For one tenant and window. Each ratio comes with its count and its
 // base, and is “null“ when the base is 0. The median time is in
-// seconds.
+// seconds. The flat hit rate and precision count every retrieval;
+// “search“ counts search hits only, and “recall“ only the entries
+// MEHO showed before an operation.
 type LearningMetrics struct {
 	FirstCorrectActionMedianSeconds *float32 `json:"first_correct_action_median_seconds"`
 	FirstCorrectActionSessions      int      `json:"first_correct_action_sessions"`
@@ -7246,9 +7403,21 @@ type LearningMetrics struct {
 	PrecisionJudged                 int      `json:"precision_judged"`
 	PrecisionPct                    *float32 `json:"precision_pct"`
 	PrecisionRight                  int      `json:"precision_right"`
-	RepeatMistakeFailures           int      `json:"repeat_mistake_failures"`
-	RepeatMistakePct                *float32 `json:"repeat_mistake_pct"`
-	RepeatMistakeRepeats            int      `json:"repeat_mistake_repeats"`
+
+	// Recall The hit rate and the precision over the retrievals of one channel.
+	//
+	// Each ratio comes with its count and its base, and is ``null`` when the
+	// base is 0.
+	Recall                RetrievalNumbers `json:"recall"`
+	RepeatMistakeFailures int              `json:"repeat_mistake_failures"`
+	RepeatMistakePct      *float32         `json:"repeat_mistake_pct"`
+	RepeatMistakeRepeats  int              `json:"repeat_mistake_repeats"`
+
+	// Search The hit rate and the precision over the retrievals of one channel.
+	//
+	// Each ratio comes with its count and its base, and is ``null`` when the
+	// base is 0.
+	Search RetrievalNumbers `json:"search"`
 }
 
 // LivenessResponse “GET /api/v1/health/live“ response body.
@@ -8377,8 +8546,10 @@ type PreviewOperationResponseStatus string
 //
 // Members:
 //
-//   - :attr:`USER` — a human operator authenticated via the interactive
-//     device-code flow. Default when no claim is present.
+//   - :attr:`USER` — a person who signed in. There are three ways: the
+//     command line (“meho-cli“ client, device code), an MCP client
+//     (“meho-mcp“ client, sign-in in the browser), and the web console
+//     (“meho-web“ client). Default when no claim is present.
 //   - :attr:`SERVICE` — a non-interactive service account client that
 //     uses client-credentials flow but is not a MEHO-managed agent.
 //   - :attr:`AGENT` — a Keycloak client registered by
@@ -8545,7 +8716,9 @@ type ReflexReport struct {
 	//
 	// For one tenant and window. Each ratio comes with its count and its
 	// base, and is ``null`` when the base is 0. The median time is in
-	// seconds.
+	// seconds. The flat hit rate and precision count every retrieval;
+	// ``search`` counts search hits only, and ``recall`` only the entries
+	// MEHO showed before an operation.
 	Learning LearningMetrics     `json:"learning"`
 	Since    time.Time           `json:"since"`
 	Surfaces []SurfaceMetrics    `json:"surfaces"`
@@ -8900,6 +9073,19 @@ type RetrievalHit struct {
 	UpdatedAt   time.Time              `json:"updated_at"`
 }
 
+// RetrievalNumbers The hit rate and the precision over the retrievals of one channel.
+//
+// Each ratio comes with its count and its base, and is “null“ when the
+// base is 0.
+type RetrievalNumbers struct {
+	HitRatePct        *float32 `json:"hit_rate_pct"`
+	HitRateRetrievals int      `json:"hit_rate_retrievals"`
+	HitRateUsed       int      `json:"hit_rate_used"`
+	PrecisionJudged   int      `json:"precision_judged"`
+	PrecisionPct      *float32 `json:"precision_pct"`
+	PrecisionRight    int      `json:"precision_right"`
+}
+
 // RetrieveRequest POST body for “/api/v1/retrieve“.
 //
 // Field validation is the load-bearing first gate: empty queries
@@ -9210,8 +9396,10 @@ type RunnerPrincipal struct {
 	//
 	// Members:
 	//
-	// * :attr:`USER` — a human operator authenticated via the interactive
-	//   device-code flow. Default when no claim is present.
+	// * :attr:`USER` — a person who signed in. There are three ways: the
+	//   command line (``meho-cli`` client, device code), an MCP client
+	//   (``meho-mcp`` client, sign-in in the browser), and the web console
+	//   (``meho-web`` client). Default when no claim is present.
 	// * :attr:`SERVICE` — a non-interactive service account client that
 	//   uses client-credentials flow but is not a MEHO-managed agent.
 	// * :attr:`AGENT` — a Keycloak client registered by
@@ -11672,13 +11860,14 @@ type TraceView struct {
 // the tenant picker. “can_switch_tenant“ makes the sidebar tenant box
 // a switch.
 type UISessionContext struct {
-	CanSwitchTenant *bool              `json:"can_switch_tenant,omitempty"`
-	OperatorSub     string             `json:"operator_sub"`
-	SessionId       openapi_types.UUID `json:"session_id"`
-	TenantChosen    *bool              `json:"tenant_chosen,omitempty"`
-	TenantId        openapi_types.UUID `json:"tenant_id"`
-	TenantName      *string            `json:"tenant_name"`
-	TenantSlug      *string            `json:"tenant_slug"`
+	CanSwitchTenant *bool                   `json:"can_switch_tenant,omitempty"`
+	Client          *map[string]interface{} `json:"client"`
+	OperatorSub     string                  `json:"operator_sub"`
+	SessionId       openapi_types.UUID      `json:"session_id"`
+	TenantChosen    *bool                   `json:"tenant_chosen,omitempty"`
+	TenantId        openapi_types.UUID      `json:"tenant_id"`
+	TenantName      *string                 `json:"tenant_name"`
+	TenantSlug      *string                 `json:"tenant_slug"`
 }
 
 // UsageReport Top-level shape returned by :func:`compute_usage` + the API route.
@@ -11748,6 +11937,7 @@ type VaultStatus struct {
 
 // VersionResponse “GET /version“ response body.
 type VersionResponse struct {
+	AgentSwitches     *map[string]bool    `json:"agent_switches,omitempty"`
 	BuildDate         string              `json:"build_date"`
 	ChartVersion      *string             `json:"chart_version"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
@@ -12030,6 +12220,25 @@ type HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ClearBudgetApiV1AgentBudgetsDeleteParams defines parameters for ClearBudgetApiV1AgentBudgetsDelete.
+type ClearBudgetApiV1AgentBudgetsDeleteParams struct {
+	PrincipalSub  string           `form:"principal_sub" json:"principal_sub"`
+	Window        BudgetWindowKind `form:"window" json:"window"`
+	Authorization *string          `json:"authorization,omitempty"`
+}
+
+// ShowBudgetsApiV1AgentBudgetsGetParams defines parameters for ShowBudgetsApiV1AgentBudgetsGet.
+type ShowBudgetsApiV1AgentBudgetsGetParams struct {
+	PrincipalSub  string            `form:"principal_sub" json:"principal_sub"`
+	Window        *BudgetWindowKind `form:"window,omitempty" json:"window,omitempty"`
+	Authorization *string           `json:"authorization,omitempty"`
+}
+
+// SetBudgetApiV1AgentBudgetsPutParams defines parameters for SetBudgetApiV1AgentBudgetsPut.
+type SetBudgetApiV1AgentBudgetsPutParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListAgentPrincipalsApiV1AgentPrincipalsGetParams defines parameters for ListAgentPrincipalsApiV1AgentPrincipalsGet.
 type ListAgentPrincipalsApiV1AgentPrincipalsGetParams struct {
 	Limit          *int    `form:"limit,omitempty" json:"limit,omitempty"`
@@ -12207,6 +12416,11 @@ type RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostParams struct {
 
 // GetApprovalResultApiV1ApprovalsRequestIdResultGetParams defines parameters for GetApprovalResultApiV1ApprovalsRequestIdResultGet.
 type GetApprovalResultApiV1ApprovalsRequestIdResultGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams defines parameters for RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost.
+type RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -13735,6 +13949,11 @@ type VaultReadUiVaultReadGetParams struct {
 	Path   *string `form:"path,omitempty" json:"path,omitempty"`
 }
 
+// VaultReadRevealUiVaultReadRevealPostParams defines parameters for VaultReadRevealUiVaultReadRevealPost.
+type VaultReadRevealUiVaultReadRevealPostParams struct {
+	RequestId openapi_types.UUID `form:"request_id" json:"request_id"`
+}
+
 // VaultVersionsUiVaultVersionsGetParams defines parameters for VaultVersionsUiVaultVersionsGet.
 type VaultVersionsUiVaultVersionsGetParams struct {
 	Target *string `form:"target,omitempty" json:"target,omitempty"`
@@ -13747,6 +13966,9 @@ type PairAddonApiV1AddonsPairingsPostJSONRequestBody = PairAddonRequest
 
 // DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody defines body for DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPut for application/json ContentType.
 type DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody = DeclareCapabilitiesRequest
+
+// SetBudgetApiV1AgentBudgetsPutJSONRequestBody defines body for SetBudgetApiV1AgentBudgetsPut for application/json ContentType.
+type SetBudgetApiV1AgentBudgetsPutJSONRequestBody = AgentBudgetSet
 
 // RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody defines body for RegisterAgentPrincipalApiV1AgentPrincipalsPost for application/json ContentType.
 type RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody = AgentPrincipalCreate
@@ -14698,6 +14920,68 @@ func (a PreviewOperationResponse) MarshalJSON() ([]byte, error) {
 		}
 	}
 	return json.Marshal(object)
+}
+
+// AsApprovalRevealResultResult0 returns the union data inside the ApprovalRevealResult_Result as a ApprovalRevealResultResult0
+func (t ApprovalRevealResult_Result) AsApprovalRevealResultResult0() (ApprovalRevealResultResult0, error) {
+	var body ApprovalRevealResultResult0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromApprovalRevealResultResult0 overwrites any union data inside the ApprovalRevealResult_Result as the provided ApprovalRevealResultResult0
+func (t *ApprovalRevealResult_Result) FromApprovalRevealResultResult0(v ApprovalRevealResultResult0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeApprovalRevealResultResult0 performs a merge with any union data inside the ApprovalRevealResult_Result, using the provided ApprovalRevealResultResult0
+func (t *ApprovalRevealResult_Result) MergeApprovalRevealResultResult0(v ApprovalRevealResultResult0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsApprovalRevealResultResult1 returns the union data inside the ApprovalRevealResult_Result as a ApprovalRevealResultResult1
+func (t ApprovalRevealResult_Result) AsApprovalRevealResultResult1() (ApprovalRevealResultResult1, error) {
+	var body ApprovalRevealResultResult1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromApprovalRevealResultResult1 overwrites any union data inside the ApprovalRevealResult_Result as the provided ApprovalRevealResultResult1
+func (t *ApprovalRevealResult_Result) FromApprovalRevealResultResult1(v ApprovalRevealResultResult1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeApprovalRevealResultResult1 performs a merge with any union data inside the ApprovalRevealResult_Result, using the provided ApprovalRevealResultResult1
+func (t *ApprovalRevealResult_Result) MergeApprovalRevealResultResult1(v ApprovalRevealResultResult1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t ApprovalRevealResult_Result) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *ApprovalRevealResult_Result) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
 }
 
 // AsApproveResponseBodyDispatchResult0 returns the union data inside the ApproveResponseBody_DispatchResult as a ApproveResponseBodyDispatchResult0
@@ -16155,6 +16439,17 @@ type ClientInterface interface {
 	// HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost request
 	HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ClearBudgetApiV1AgentBudgetsDelete request
+	ClearBudgetApiV1AgentBudgetsDelete(ctx context.Context, params *ClearBudgetApiV1AgentBudgetsDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowBudgetsApiV1AgentBudgetsGet request
+	ShowBudgetsApiV1AgentBudgetsGet(ctx context.Context, params *ShowBudgetsApiV1AgentBudgetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetBudgetApiV1AgentBudgetsPutWithBody request with any body
+	SetBudgetApiV1AgentBudgetsPutWithBody(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SetBudgetApiV1AgentBudgetsPut(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, body SetBudgetApiV1AgentBudgetsPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListAgentPrincipalsApiV1AgentPrincipalsGet request
 	ListAgentPrincipalsApiV1AgentPrincipalsGet(ctx context.Context, params *ListAgentPrincipalsApiV1AgentPrincipalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -16259,6 +16554,9 @@ type ClientInterface interface {
 
 	// GetApprovalResultApiV1ApprovalsRequestIdResultGet request
 	GetApprovalResultApiV1ApprovalsRequestIdResultGet(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalResultApiV1ApprovalsRequestIdResultGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost request
+	RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost(ctx context.Context, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody request with any body
 	WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -17855,6 +18153,9 @@ type ClientInterface interface {
 	// VaultReadUiVaultReadGet request
 	VaultReadUiVaultReadGet(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// VaultReadRevealUiVaultReadRevealPost request
+	VaultReadRevealUiVaultReadRevealPost(ctx context.Context, params *VaultReadRevealUiVaultReadRevealPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// VaultStatusUiVaultStatusGet request
 	VaultStatusUiVaultStatusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -17999,6 +18300,54 @@ func (c *Client) ListStepEventsApiV1AddonsPairingsNameEventsGet(ctx context.Cont
 
 func (c *Client) HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClearBudgetApiV1AgentBudgetsDelete(ctx context.Context, params *ClearBudgetApiV1AgentBudgetsDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClearBudgetApiV1AgentBudgetsDeleteRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowBudgetsApiV1AgentBudgetsGet(ctx context.Context, params *ShowBudgetsApiV1AgentBudgetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowBudgetsApiV1AgentBudgetsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetBudgetApiV1AgentBudgetsPutWithBody(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetBudgetApiV1AgentBudgetsPutRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetBudgetApiV1AgentBudgetsPut(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, body SetBudgetApiV1AgentBudgetsPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetBudgetApiV1AgentBudgetsPutRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -18467,6 +18816,18 @@ func (c *Client) RerunApprovalRequestApiV1ApprovalsRequestIdRerunPost(ctx contex
 
 func (c *Client) GetApprovalResultApiV1ApprovalsRequestIdResultGet(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalResultApiV1ApprovalsRequestIdResultGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetApprovalResultApiV1ApprovalsRequestIdResultGetRequest(c.Server, requestId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost(ctx context.Context, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostRequest(c.Server, requestId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -25629,6 +25990,18 @@ func (c *Client) VaultReadUiVaultReadGet(ctx context.Context, params *VaultReadU
 	return c.Client.Do(req)
 }
 
+func (c *Client) VaultReadRevealUiVaultReadRevealPost(ctx context.Context, params *VaultReadRevealUiVaultReadRevealPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultReadRevealUiVaultReadRevealPostRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) VaultStatusUiVaultStatusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewVaultStatusUiVaultStatusGetRequest(c.Server)
 	if err != nil {
@@ -26142,6 +26515,209 @@ func NewHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostRequest(server strin
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewClearBudgetApiV1AgentBudgetsDeleteRequest generates requests for ClearBudgetApiV1AgentBudgetsDelete
+func NewClearBudgetApiV1AgentBudgetsDeleteRequest(server string, params *ClearBudgetApiV1AgentBudgetsDeleteParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agent-budgets")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal_sub", runtime.ParamLocationQuery, params.PrincipalSub); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "window", runtime.ParamLocationQuery, params.Window); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowBudgetsApiV1AgentBudgetsGetRequest generates requests for ShowBudgetsApiV1AgentBudgetsGet
+func NewShowBudgetsApiV1AgentBudgetsGetRequest(server string, params *ShowBudgetsApiV1AgentBudgetsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agent-budgets")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal_sub", runtime.ParamLocationQuery, params.PrincipalSub); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if params.Window != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "window", runtime.ParamLocationQuery, *params.Window); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewSetBudgetApiV1AgentBudgetsPutRequest calls the generic SetBudgetApiV1AgentBudgetsPut builder with application/json body
+func NewSetBudgetApiV1AgentBudgetsPutRequest(server string, params *SetBudgetApiV1AgentBudgetsPutParams, body SetBudgetApiV1AgentBudgetsPutJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetBudgetApiV1AgentBudgetsPutRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewSetBudgetApiV1AgentBudgetsPutRequestWithBody generates requests for SetBudgetApiV1AgentBudgetsPut with any type of body
+func NewSetBudgetApiV1AgentBudgetsPutRequestWithBody(server string, params *SetBudgetApiV1AgentBudgetsPutParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agent-budgets")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -27927,6 +28503,55 @@ func NewGetApprovalResultApiV1ApprovalsRequestIdResultGetRequest(server string, 
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostRequest generates requests for RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost
+func NewRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostRequest(server string, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/approvals/%s/reveal", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -51180,6 +51805,51 @@ func NewVaultReadUiVaultReadGetRequest(server string, params *VaultReadUiVaultRe
 	return req, nil
 }
 
+// NewVaultReadRevealUiVaultReadRevealPostRequest generates requests for VaultReadRevealUiVaultReadRevealPost
+func NewVaultReadRevealUiVaultReadRevealPostRequest(server string, params *VaultReadRevealUiVaultReadRevealPostParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/read/reveal")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "request_id", runtime.ParamLocationQuery, params.RequestId); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewVaultStatusUiVaultStatusGetRequest generates requests for VaultStatusUiVaultStatusGet
 func NewVaultStatusUiVaultStatusGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -51392,6 +52062,17 @@ type ClientWithResponsesInterface interface {
 	// HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse request
 	HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse, error)
 
+	// ClearBudgetApiV1AgentBudgetsDeleteWithResponse request
+	ClearBudgetApiV1AgentBudgetsDeleteWithResponse(ctx context.Context, params *ClearBudgetApiV1AgentBudgetsDeleteParams, reqEditors ...RequestEditorFn) (*ClearBudgetApiV1AgentBudgetsDeleteResponse, error)
+
+	// ShowBudgetsApiV1AgentBudgetsGetWithResponse request
+	ShowBudgetsApiV1AgentBudgetsGetWithResponse(ctx context.Context, params *ShowBudgetsApiV1AgentBudgetsGetParams, reqEditors ...RequestEditorFn) (*ShowBudgetsApiV1AgentBudgetsGetResponse, error)
+
+	// SetBudgetApiV1AgentBudgetsPutWithBodyWithResponse request with any body
+	SetBudgetApiV1AgentBudgetsPutWithBodyWithResponse(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetBudgetApiV1AgentBudgetsPutResponse, error)
+
+	SetBudgetApiV1AgentBudgetsPutWithResponse(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, body SetBudgetApiV1AgentBudgetsPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetBudgetApiV1AgentBudgetsPutResponse, error)
+
 	// ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse request
 	ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse(ctx context.Context, params *ListAgentPrincipalsApiV1AgentPrincipalsGetParams, reqEditors ...RequestEditorFn) (*ListAgentPrincipalsApiV1AgentPrincipalsGetResponse, error)
 
@@ -51496,6 +52177,9 @@ type ClientWithResponsesInterface interface {
 
 	// GetApprovalResultApiV1ApprovalsRequestIdResultGetWithResponse request
 	GetApprovalResultApiV1ApprovalsRequestIdResultGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalResultApiV1ApprovalsRequestIdResultGetParams, reqEditors ...RequestEditorFn) (*GetApprovalResultApiV1ApprovalsRequestIdResultGetResponse, error)
+
+	// RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse request
+	RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams, reqEditors ...RequestEditorFn) (*RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse, error)
 
 	// WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse request with any body
 	WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse, error)
@@ -53092,6 +53776,9 @@ type ClientWithResponsesInterface interface {
 	// VaultReadUiVaultReadGetWithResponse request
 	VaultReadUiVaultReadGetWithResponse(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*VaultReadUiVaultReadGetResponse, error)
 
+	// VaultReadRevealUiVaultReadRevealPostWithResponse request
+	VaultReadRevealUiVaultReadRevealPostWithResponse(ctx context.Context, params *VaultReadRevealUiVaultReadRevealPostParams, reqEditors ...RequestEditorFn) (*VaultReadRevealUiVaultReadRevealPostResponse, error)
+
 	// VaultStatusUiVaultStatusGetWithResponse request
 	VaultStatusUiVaultStatusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultStatusUiVaultStatusGetResponse, error)
 
@@ -53323,6 +54010,75 @@ func (r HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse) Status() s
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ClearBudgetApiV1AgentBudgetsDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentBudgetRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ClearBudgetApiV1AgentBudgetsDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ClearBudgetApiV1AgentBudgetsDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowBudgetsApiV1AgentBudgetsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentBudgetListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowBudgetsApiV1AgentBudgetsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowBudgetsApiV1AgentBudgetsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SetBudgetApiV1AgentBudgetsPutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentBudgetRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r SetBudgetApiV1AgentBudgetsPutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetBudgetApiV1AgentBudgetsPutResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -53943,6 +54699,29 @@ func (r GetApprovalResultApiV1ApprovalsRequestIdResultGetResponse) Status() stri
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetApprovalResultApiV1ApprovalsRequestIdResultGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ApprovalRevealResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -63059,6 +63838,28 @@ func (r VaultReadUiVaultReadGetResponse) StatusCode() int {
 	return 0
 }
 
+type VaultReadRevealUiVaultReadRevealPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultReadRevealUiVaultReadRevealPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultReadRevealUiVaultReadRevealPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type VaultStatusUiVaultStatusGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -63228,6 +64029,41 @@ func (c *ClientWithResponses) HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPo
 		return nil, err
 	}
 	return ParseHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse(rsp)
+}
+
+// ClearBudgetApiV1AgentBudgetsDeleteWithResponse request returning *ClearBudgetApiV1AgentBudgetsDeleteResponse
+func (c *ClientWithResponses) ClearBudgetApiV1AgentBudgetsDeleteWithResponse(ctx context.Context, params *ClearBudgetApiV1AgentBudgetsDeleteParams, reqEditors ...RequestEditorFn) (*ClearBudgetApiV1AgentBudgetsDeleteResponse, error) {
+	rsp, err := c.ClearBudgetApiV1AgentBudgetsDelete(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClearBudgetApiV1AgentBudgetsDeleteResponse(rsp)
+}
+
+// ShowBudgetsApiV1AgentBudgetsGetWithResponse request returning *ShowBudgetsApiV1AgentBudgetsGetResponse
+func (c *ClientWithResponses) ShowBudgetsApiV1AgentBudgetsGetWithResponse(ctx context.Context, params *ShowBudgetsApiV1AgentBudgetsGetParams, reqEditors ...RequestEditorFn) (*ShowBudgetsApiV1AgentBudgetsGetResponse, error) {
+	rsp, err := c.ShowBudgetsApiV1AgentBudgetsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowBudgetsApiV1AgentBudgetsGetResponse(rsp)
+}
+
+// SetBudgetApiV1AgentBudgetsPutWithBodyWithResponse request with arbitrary body returning *SetBudgetApiV1AgentBudgetsPutResponse
+func (c *ClientWithResponses) SetBudgetApiV1AgentBudgetsPutWithBodyWithResponse(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetBudgetApiV1AgentBudgetsPutResponse, error) {
+	rsp, err := c.SetBudgetApiV1AgentBudgetsPutWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetBudgetApiV1AgentBudgetsPutResponse(rsp)
+}
+
+func (c *ClientWithResponses) SetBudgetApiV1AgentBudgetsPutWithResponse(ctx context.Context, params *SetBudgetApiV1AgentBudgetsPutParams, body SetBudgetApiV1AgentBudgetsPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetBudgetApiV1AgentBudgetsPutResponse, error) {
+	rsp, err := c.SetBudgetApiV1AgentBudgetsPut(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetBudgetApiV1AgentBudgetsPutResponse(rsp)
 }
 
 // ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse request returning *ListAgentPrincipalsApiV1AgentPrincipalsGetResponse
@@ -63567,6 +64403,15 @@ func (c *ClientWithResponses) GetApprovalResultApiV1ApprovalsRequestIdResultGetW
 		return nil, err
 	}
 	return ParseGetApprovalResultApiV1ApprovalsRequestIdResultGetResponse(rsp)
+}
+
+// RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse request returning *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse
+func (c *ClientWithResponses) RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams, reqEditors ...RequestEditorFn) (*RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse, error) {
+	rsp, err := c.RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost(ctx, requestId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse(rsp)
 }
 
 // WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse request with arbitrary body returning *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse
@@ -68740,6 +69585,15 @@ func (c *ClientWithResponses) VaultReadUiVaultReadGetWithResponse(ctx context.Co
 	return ParseVaultReadUiVaultReadGetResponse(rsp)
 }
 
+// VaultReadRevealUiVaultReadRevealPostWithResponse request returning *VaultReadRevealUiVaultReadRevealPostResponse
+func (c *ClientWithResponses) VaultReadRevealUiVaultReadRevealPostWithResponse(ctx context.Context, params *VaultReadRevealUiVaultReadRevealPostParams, reqEditors ...RequestEditorFn) (*VaultReadRevealUiVaultReadRevealPostResponse, error) {
+	rsp, err := c.VaultReadRevealUiVaultReadRevealPost(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultReadRevealUiVaultReadRevealPostResponse(rsp)
+}
+
 // VaultStatusUiVaultStatusGetWithResponse request returning *VaultStatusUiVaultStatusGetResponse
 func (c *ClientWithResponses) VaultStatusUiVaultStatusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultStatusUiVaultStatusGetResponse, error) {
 	rsp, err := c.VaultStatusUiVaultStatusGet(ctx, reqEditors...)
@@ -69059,6 +69913,105 @@ func ParseHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse(rsp *http
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest PairedAddonRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseClearBudgetApiV1AgentBudgetsDeleteResponse parses an HTTP response from a ClearBudgetApiV1AgentBudgetsDeleteWithResponse call
+func ParseClearBudgetApiV1AgentBudgetsDeleteResponse(rsp *http.Response) (*ClearBudgetApiV1AgentBudgetsDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ClearBudgetApiV1AgentBudgetsDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentBudgetRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowBudgetsApiV1AgentBudgetsGetResponse parses an HTTP response from a ShowBudgetsApiV1AgentBudgetsGetWithResponse call
+func ParseShowBudgetsApiV1AgentBudgetsGetResponse(rsp *http.Response) (*ShowBudgetsApiV1AgentBudgetsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowBudgetsApiV1AgentBudgetsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentBudgetListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetBudgetApiV1AgentBudgetsPutResponse parses an HTTP response from a SetBudgetApiV1AgentBudgetsPutWithResponse call
+func ParseSetBudgetApiV1AgentBudgetsPutResponse(rsp *http.Response) (*SetBudgetApiV1AgentBudgetsPutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetBudgetApiV1AgentBudgetsPutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentBudgetRead
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -69943,6 +70896,39 @@ func ParseGetApprovalResultApiV1ApprovalsRequestIdResultGetResponse(rsp *http.Re
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ApprovalResultView
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse parses an HTTP response from a RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse call
+func ParseRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse(rsp *http.Response) (*RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ApprovalRevealResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -81421,6 +82407,32 @@ func ParseVaultReadUiVaultReadGetResponse(rsp *http.Response) (*VaultReadUiVault
 	}
 
 	response := &VaultReadUiVaultReadGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseVaultReadRevealUiVaultReadRevealPostResponse parses an HTTP response from a VaultReadRevealUiVaultReadRevealPostWithResponse call
+func ParseVaultReadRevealUiVaultReadRevealPostResponse(rsp *http.Response) (*VaultReadRevealUiVaultReadRevealPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultReadRevealUiVaultReadRevealPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

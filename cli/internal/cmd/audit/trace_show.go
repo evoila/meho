@@ -149,7 +149,7 @@ func printTraceSummary(w io.Writer, r *api.AuditTraceResult) {
 			"the trace was already deleted (7 days by default), "+
 			"or the row is not an operation run.")
 		if ec := strDeref(r.EventClass); ec != "" {
-			fmt.Fprintf(w, "%-22s %s\n", "event_class:", ec)
+			fmt.Fprintf(w, "%-22s %s\n", "event_class:", output.SafeText(ec))
 		}
 		return
 	}
@@ -172,11 +172,11 @@ func printTraceSummary(w io.Writer, r *api.AuditTraceResult) {
 	for _, span := range t.Spans {
 		fmt.Fprintf(w, "%-4d %-16s %-40s %-8s %-12s %s\n",
 			span.Seq,
-			truncate(span.SpanKind, 16),
-			truncate(span.Name, 40),
-			truncate(strOrDash(strDeref(span.Status)), 8),
-			strOrDash(strDeref(span.DurationMs)),
-			strOrDash(vendorCall(span.Attributes)),
+			truncate(output.SafeText(span.SpanKind), 16),
+			truncate(output.SafeText(span.Name), 40),
+			truncate(output.SafeText(strOrDash(strDeref(span.Status))), 8),
+			output.SafeText(strOrDash(strDeref(span.DurationMs))),
+			output.SafeText(strOrDash(vendorCall(span.Attributes))),
 		)
 	}
 }

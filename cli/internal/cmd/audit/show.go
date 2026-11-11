@@ -165,34 +165,60 @@ func getEntry(
 
 // printEntrySummary renders the full audit row as a stable
 // key-value summary. Optional fields are shown as "-" when null so
-// the layout stays grep-able and predictable across rows.
+// the layout stays grep-able and predictable across rows. Every value
+// is server text, so it goes through output.SafeText: a control code
+// in a stored request path shows as a visible escape and cannot move
+// the cursor or write a line of its own.
 func printEntrySummary(w io.Writer, e *api.AuditEntry) {
-	fmt.Fprintf(w, "%-18s %s\n", "id:", e.Id.String())
-	fmt.Fprintf(w, "%-18s %s\n", "ts:", formatTS(e.Ts))
-	fmt.Fprintf(w, "%-18s %s\n", "tenant_id:", strOrDash(uuidDeref(e.TenantId)))
-	fmt.Fprintf(w, "%-18s %s\n", "tenant_name:", strOrDash(strDeref(e.TenantName)))
-	fmt.Fprintf(w, "%-18s %s\n", "principal_sub:", e.PrincipalSub)
-	fmt.Fprintf(w, "%-18s %s\n", "principal_name:", strOrDash(strDeref(e.PrincipalName)))
-	fmt.Fprintf(w, "%-18s %s\n", "actor_sub:", strOrDash(strDeref(e.ActorSub)))
-	fmt.Fprintf(w, "%-18s %s\n", "actor_name:", strOrDash(strDeref(e.ActorName)))
-	fmt.Fprintf(w, "%-18s %s\n", "target_id:", strOrDash(uuidDeref(e.TargetId)))
-	fmt.Fprintf(w, "%-18s %s\n", "target_name:", strOrDash(strDeref(e.TargetName)))
-	fmt.Fprintf(w, "%-18s %s\n", "method:", e.Method)
-	fmt.Fprintf(w, "%-18s %s\n", "path:", e.Path)
-	fmt.Fprintf(w, "%-18s %d\n", "status_code:", e.StatusCode)
-	fmt.Fprintf(w, "%-18s %s\n", "request_id:", strOrDash(uuidDeref(e.RequestId)))
-	fmt.Fprintf(w, "%-18s %s\n", "duration_ms:", strOrDash(strDeref(e.DurationMs)))
-	fmt.Fprintf(w, "%-18s %s\n", "op_id:", e.OpId)
-	fmt.Fprintf(w, "%-18s %s\n", "op_class:", e.OpClass)
-	fmt.Fprintf(w, "%-18s %s\n", "result_status:", e.ResultStatus)
-	fmt.Fprintf(w, "%-18s %s\n", "parent_audit_id:", strOrDash(uuidDeref(e.ParentAuditId)))
-	fmt.Fprintf(w, "%-18s %s\n", "agent_session_id:", strOrDash(uuidDeref(e.AgentSessionId)))
-	fmt.Fprintf(w, "%-18s %s\n", "broadcast_event_id:", strOrDash(uuidDeref(e.BroadcastEventId)))
-	if len(e.Payload) > 0 {
-		fmt.Fprintf(w, "%-18s %s\n", "payload:", formatPayload(e.Payload))
-	} else {
-		fmt.Fprintf(w, "%-18s -\n", "payload:")
+	field := func(label, value string) {
+		fmt.Fprintf(w, "%-18s %s\n", label, output.SafeText(value))
 	}
+	field("id:", e.Id.String())
+	field("ts:", formatTS(e.Ts))
+	field("tenant_id:", strOrDash(uuidDeref(e.TenantId)))
+	field("tenant_name:", strOrDash(strDeref(e.TenantName)))
+	field("principal_sub:", e.PrincipalSub)
+	field("principal_name:", strOrDash(strDeref(e.PrincipalName)))
+	field("via:", strOrDash(viaLabel(e.Payload)))
+	field("actor_sub:", strOrDash(strDeref(e.ActorSub)))
+	field("actor_name:", strOrDash(strDeref(e.ActorName)))
+	field("target_id:", strOrDash(uuidDeref(e.TargetId)))
+	field("target_name:", strOrDash(strDeref(e.TargetName)))
+	field("method:", e.Method)
+	field("path:", e.Path)
+	field("status_code:", fmt.Sprintf("%d", e.StatusCode))
+	field("request_id:", strOrDash(uuidDeref(e.RequestId)))
+	field("duration_ms:", strOrDash(strDeref(e.DurationMs)))
+	field("op_id:", e.OpId)
+	field("op_class:", e.OpClass)
+	field("result_status:", e.ResultStatus)
+	field("parent_audit_id:", strOrDash(uuidDeref(e.ParentAuditId)))
+	field("agent_session_id:", strOrDash(uuidDeref(e.AgentSessionId)))
+	field("broadcast_event_id:", strOrDash(uuidDeref(e.BroadcastEventId)))
+	if len(e.Payload) > 0 {
+		field("payload:", formatPayload(e.Payload))
+	} else {
+		field("payload:", "-")
+	}
+}
+
+// viaLabel renders the login client and channel of a row as
+// "<client> (<channel>)", from the payload's "client" block. MEHO writes
+// the block only when AUDIT_CLIENT_IDENTITY is on, so older rows have
+// none and get "".
+func viaLabel(payload map[string]any) string {
+	block, ok := payload["client"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	client, _ := block["azp"].(string)
+	if client == "" {
+		client = "unknown client"
+	}
+	if channel, _ := block["channel"].(string); channel != "" {
+		return fmt.Sprintf("%s (%s)", client, channel)
+	}
+	return client
 }
 
 // strOrDash returns "-" when s is empty, otherwise s. Used by the

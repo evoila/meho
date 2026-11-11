@@ -79,7 +79,9 @@ def stub_dispatch_seams(monkeypatch: pytest.MonkeyPatch) -> dict[str, AsyncMock]
     monkeypatch.setattr(
         dispatcher,
         "get_settings",
-        lambda: SimpleNamespace(dispatch_concurrency_slot_ttl_seconds=3600),
+        lambda: SimpleNamespace(
+            dispatch_concurrency_slot_ttl_seconds=3600, agent_grant_required="off"
+        ),
     )
     # Both writers answer with the id of the row they committed (#4669).
     audit = AsyncMock(return_value=_RECEIPT)

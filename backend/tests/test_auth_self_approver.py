@@ -514,3 +514,55 @@ def test_verify_jwt_reads_the_flag_from_a_signed_token() -> None:
     assert sa.status_code == 200, sa.text
     assert sa.json() == {"may_self_approve": True}
     assert plain.json() == {"may_self_approve": False}
+
+
+def _rights_approver(
+    sub: str = "second-admin",
+    *,
+    role: TenantRole = TenantRole.TENANT_ADMIN,
+    platform_admin: bool = False,
+    kind: PrincipalKind = PrincipalKind.USER,
+    tenant_chosen: bool = True,
+    self_approver: bool = False,
+) -> Operator:
+    return Operator(
+        sub=sub,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=uuid.uuid4(),
+        tenant_role=role,
+        platform_admin=platform_admin,
+        principal_kind=kind,
+        tenant_chosen=tenant_chosen,
+        self_approver=self_approver,
+    )
+
+
+def test_a_second_admin_may_approve_a_rights_change() -> None:
+    assert _rights_approver().may_approve_rights_change("requester") is True
+
+
+def test_a_platform_admin_may_approve_a_rights_change() -> None:
+    operator = _rights_approver(role=TenantRole.OPERATOR, platform_admin=True)
+    assert operator.may_approve_rights_change("requester") is True
+
+
+@pytest.mark.parametrize("sub", ["requester", "REQUESTER"])
+def test_the_requester_never_approves_their_own_rights_change(sub: str) -> None:
+    operator = _rights_approver(sub, platform_admin=True, self_approver=True)
+    assert operator.may_approve_rights_change("requester") is False
+
+
+@pytest.mark.parametrize(
+    "operator",
+    [
+        _rights_approver(role=TenantRole.OPERATOR),
+        _rights_approver(role=TenantRole.OPERATOR, self_approver=True),
+        _rights_approver(role=TenantRole.READ_ONLY),
+        _rights_approver(kind=PrincipalKind.AGENT),
+        _rights_approver(kind=PrincipalKind.SERVICE, platform_admin=True),
+        _rights_approver(tenant_chosen=False),
+    ],
+    ids=["operator", "sa-operator", "reader", "agent", "service", "no-tenant-chosen"],
+)
+def test_others_may_not_approve_a_rights_change(operator: Operator) -> None:
+    assert operator.may_approve_rights_change("requester") is False

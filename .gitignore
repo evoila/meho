@@ -64,6 +64,12 @@ venv/
 backend/.model-preseed/*
 !backend/.model-preseed/.gitkeep
 
+# Tailwind binary staged into the backend Docker build context by CI (see
+# .github/actions/stage-tailwind). Only the ``.gitkeep`` sentinel is tracked,
+# so a local ``docker build backend/`` downloads the binary as before.
+backend/.tool-preseed/*
+!backend/.tool-preseed/.gitkeep
+
 # =============================================================================
 # JavaScript / Frontend
 # =============================================================================

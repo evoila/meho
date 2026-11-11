@@ -110,6 +110,12 @@ from meho_backplane.mcp.registry import (
     register_mcp_tool,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
+from meho_backplane.mcp.short_texts import with_short_text
+from meho_backplane.mcp.tools._short_tool_texts import (
+    BROADCAST_ANNOUNCE_SHORT,
+    BROADCAST_RECENT_SHORT,
+    BROADCAST_WATCH_SHORT,
+)
 
 __all__: list[str] = []
 
@@ -206,6 +212,7 @@ register_mcp_tool(
         name="meho_broadcast_recent",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
+        for_settings=with_short_text(BROADCAST_RECENT_SHORT),
         description=(
             "Read the agent announcements in your tenant: what other "
             "agents said they are starting, doing or have finished. "
@@ -651,6 +658,7 @@ register_mcp_tool(
         feature="broadcast",
         name="meho_broadcast_announce",
         surface=ToolSurface.WORKING,
+        for_settings=with_short_text(BROADCAST_ANNOUNCE_SHORT),
         description=(
             "Agents only: post a short note to your tenant's broadcast feed "
             "so others see what you are doing. A person's login cannot post "
@@ -893,6 +901,7 @@ register_mcp_tool(
         name="meho_broadcast_watch",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
+        for_settings=with_short_text(BROADCAST_WATCH_SHORT),
         description=(
             "Wait for new agent announcements in your tenant after "
             "'cursor'. Get the first cursor from `meho_broadcast_recent`'s "

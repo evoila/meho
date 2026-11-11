@@ -110,7 +110,9 @@ TARGETS_REGISTER_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Optional Vault path to the target's credential. Must lie "
                 "within the tenant's secret subtree — an out-of-scope ref "
-                "is rejected. Omitting it derives the per-tenant default."
+                "is rejected. Omitting it derives the per-tenant default. "
+                "An agent or service login whose call runs without a "
+                "person's approval may give only that default path."
             ),
         },
         "auth_model": {

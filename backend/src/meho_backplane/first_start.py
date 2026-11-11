@@ -12,6 +12,8 @@ checks are:
   ``GET /first-start/destination`` through ``BACKPLANE_URL`` with a random
   nonce and checks the proof in the answer. The proof is a keyed hash under
   a key of this install, so another server, or another MEHO, cannot give it.
+  The key comes from ``PARAMS_HASH_KEY`` only. Without it, the destination
+  route answers 404 and the DNS line is a ``warn`` that names the setting.
 * **Certificate** - MEHO opens a TLS connection to ``BACKPLANE_URL`` and
   checks the chain, the name and the end date (at least 30 days left).
 * **Clock** - the time of this process against the time Keycloak and
@@ -61,7 +63,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import structlog
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, text
 
@@ -193,15 +195,22 @@ async def check_dns(backplane_url: str) -> FirstStartLine:
     return _line("dns", "ok", f"The host name {host} resolves.")
 
 
-def _destination_key() -> bytes:
-    from meho_backplane.operations._validate import derive_install_key
+def _destination_key() -> bytes | None:
+    """The key of the destination proof, or ``None`` without ``PARAMS_HASH_KEY``."""
+    from meho_backplane.operations._validate import InstallKeyMissingError, derive_install_key
 
-    return derive_install_key(_DESTINATION_KEY_LABEL)
+    try:
+        return derive_install_key(_DESTINATION_KEY_LABEL)
+    except InstallKeyMissingError:
+        return None
 
 
-def _destination_proof(nonce: str) -> str:
-    """The proof this install gives for *nonce*."""
-    return hmac.new(_destination_key(), nonce.encode("ascii"), hashlib.sha256).hexdigest()
+def _destination_proof(nonce: str) -> str | None:
+    """The proof this install gives for *nonce*, or ``None`` without ``PARAMS_HASH_KEY``."""
+    key = _destination_key()
+    if key is None:
+        return None
+    return hmac.new(key, nonce.encode("ascii"), hashlib.sha256).hexdigest()
 
 
 async def _fetch_destination_proof(backplane_url: str, nonce: str) -> str | None:
@@ -229,7 +238,8 @@ async def check_destination(
 
     Runs after the certificate check, so a bad certificate gives one red
     line (the certificate), not two. A red DNS line from the resolve step
-    stays as it is.
+    stays as it is. Without ``PARAMS_HASH_KEY`` there is no proof to compare,
+    so the line is a ``warn`` and MEHO does not call the address.
     """
     site = _site_host_port(backplane_url)
     if site is None or not dns.ok:
@@ -243,8 +253,17 @@ async def check_destination(
             "Where it points is checked once the certificate check is green.",
         )
     nonce = secrets.token_hex(_NONCE_BYTES)
+    expected = _destination_proof(nonce)
+    if expected is None:
+        return _line(
+            "dns",
+            "warn",
+            f"The host name {host} resolves. Where it points is not checked, because "
+            "PARAMS_HASH_KEY is not set. Set it to at least 32 random characters "
+            "(chart: paramsHashKey.secretName).",
+        )
     proof = await _fetch_destination_proof(backplane_url, nonce)
-    if proof is None or not hmac.compare_digest(proof, _destination_proof(nonce)):
+    if proof is None or not hmac.compare_digest(proof, expected):
         return _line(
             "dns",
             "fail",
@@ -603,25 +622,47 @@ async def run_first_start_checks(
     return FirstStartResponse(ok=all(line.ok for line in lines), checks=lines)
 
 
+#: Seconds the public list keeps the result of its last run.
+_PUBLIC_RESULT_HOLD_S: float = 30.0
+
 _public_run: asyncio.Task[FirstStartResponse] | None = None
+_public_run_ended_at: float = 0.0
 
 
 def reset_public_run_for_testing() -> None:
-    """Forget a public run in progress."""
-    global _public_run
+    """Forget the public run and its kept result."""
+    global _public_run, _public_run_ended_at
     _public_run = None
+    _public_run_ended_at = 0.0
+
+
+async def _public_run_once() -> FirstStartResponse:
+    global _public_run_ended_at
+    try:
+        return await run_first_start_checks()
+    finally:
+        _public_run_ended_at = time.monotonic()
 
 
 async def run_public_first_start_checks() -> FirstStartResponse:
-    """The public list: counts only, and run again on every call.
+    """The public list: counts only, from at most one run per hold time.
 
     Calls that arrive while a run is in progress share that run instead of
-    starting one more. The next call after the run has ended starts a new
-    run, so a fix shows on the very next call.
+    starting one more. After the run ends, its result is kept for
+    ``_PUBLIC_RESULT_HOLD_S`` seconds: calls in that time get it and start
+    no run. The first call after that starts a new run. A run that ended
+    with an error is not kept: the next call starts a new run.
     """
     global _public_run
-    if _public_run is None or _public_run.done():
-        _public_run = asyncio.create_task(run_first_start_checks())
+    if _public_run is None or (
+        _public_run.done()
+        and (
+            _public_run.cancelled()
+            or _public_run.exception() is not None
+            or time.monotonic() - _public_run_ended_at >= _PUBLIC_RESULT_HOLD_S
+        )
+    ):
+        _public_run = asyncio.create_task(_public_run_once())
     return await asyncio.shield(_public_run)
 
 
@@ -635,5 +676,11 @@ async def first_start() -> FirstStartResponse:
 async def first_start_destination(
     nonce: str = Query(pattern=_NONCE_PATTERN, description="32 hex characters"),
 ) -> DestinationProof:
-    """The proof that this address serves this MEHO. Used by the DNS check only."""
-    return DestinationProof(proof=_destination_proof(nonce))
+    """The proof that this address serves this MEHO. Used by the DNS check only.
+
+    404 when ``PARAMS_HASH_KEY`` is not set: the proof is made only with that key.
+    """
+    proof = _destination_proof(nonce)
+    if proof is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return DestinationProof(proof=proof)

@@ -113,6 +113,7 @@ from meho_backplane.mcp.registry import (
     redacted_audit_uri,
     role_at_least,
     surface_visible,
+    tool_for_settings,
     tool_role_gate_met,
     tool_surface,
 )
@@ -122,6 +123,7 @@ from meho_backplane.mcp.server import (
     McpPermissionDeniedError,
     register_method,
 )
+from meho_backplane.mcp.short_texts import SHORT_TEXTS_VALUE
 from meho_backplane.mcp.tenant_gate import STATUS_TOOL
 from meho_backplane.operations._errors import status_code_for_result
 from meho_backplane.operations._validate import compute_audit_params_hash
@@ -421,6 +423,10 @@ async def handle_tools_call(
         "params_hash": "",
         "op_class": "unknown",
     }
+    # #6293: name the session's choice of short tool texts, so a later
+    # measurement can tell these sessions apart.
+    if operator.mcp_short_tool_texts:
+        audit_payload["tool_texts"] = SHORT_TEXTS_VALUE
     status_code = 500
     audit_name = name if isinstance(name, str) and name else "<empty>"
     #: Argument keys the resolved tool keeps off the broadcast feed (#3948).
@@ -455,6 +461,9 @@ async def handle_tools_call(
             status_code = 404
             raise McpInvalidParamsError(f"unknown tool: {name!r}")
         defn, handler = entry
+        # The tool as tools/list shows it to this session under the current
+        # settings, so the input check below uses the listed schema.
+        defn = tool_for_settings(defn, operator)
         # Request usage (#3734): label the request with the registered tool.
         note_request_route(f"tool:{name}")
         audit_payload["op_class"] = resolve_op_class(name, defn.op_class)

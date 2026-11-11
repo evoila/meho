@@ -77,7 +77,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.connectors.registry import all_connectors_v2, registered_product_tokens
+from meho_backplane.connectors.registry import connectors_for_tenant, registered_product_tokens
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import (
@@ -171,7 +171,7 @@ def _build_connector_id(target: TargetORM) -> _ConnectorResolution:
     # descriptor rows the dispatcher would dispatch to.
     versioned: tuple[str, str, str] | None = None
     wildcard: tuple[str, str, str] | None = None
-    for key, registered_cls in all_connectors_v2().items():
+    for key, registered_cls in connectors_for_tenant(target.tenant_id).items():
         if registered_cls is not cls:
             continue
         product, version, impl_id = key

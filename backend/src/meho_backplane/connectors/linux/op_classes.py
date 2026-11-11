@@ -7,7 +7,7 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 """
 
-from meho_backplane.op_classes import declare_op_classes
+from meho_backplane.op_classes import declare_op_classes, declare_root_shell
 
 declare_op_classes(
     credential_write=(
@@ -29,4 +29,19 @@ declare_op_classes(
         # and env-var NAMES, never any value.
         "linux.script.run",
     ),
+)
+
+# Every write that runs through the sudo helper (``_sudo.py``) runs a command
+# as root on the host. A run approval never covers these: a person approves
+# each call. ``linux.firewall.show`` also uses the helper, but it is a read
+# with a fixed command and never waits for approval.
+declare_root_shell(
+    (
+        "linux.file.write",
+        "linux.service.control",
+        "linux.script.run",
+        "linux.sysctl.write",
+        "linux.firewall.load",
+        "linux.firewall.confirm",
+    )
 )

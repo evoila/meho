@@ -82,7 +82,8 @@ follows (Vault, bind9 and pfSense use the same pattern).
   `K8S_LOGS_RESPONSE_SCHEMA`), the `K8S_LOGS_LLM_INSTRUCTIONS` blob, and helpers
   (`parse_duration`, `resolve_pod_and_container`,
   `truncate_lines_to_byte_cap`, the `PodNotFoundError` /
-  `MultiContainerAmbiguityError` exception types).
+  `MultiContainerAmbiguityError` / `ContainerNotFoundError` exception
+  types).
 
 ## Control flow
 
@@ -144,11 +145,13 @@ follows (Vault, bind9 and pfSense use the same pattern).
    `(tenant_id, id)` key) and builds a `client.CoreV1Api(api_client)`.
 4. `resolve_pod_and_container()` lists pods in the namespace, picks
    the exact match if present, falls back to prefix match. Multi-
-   container pods without `container`, or a `container` the pod does
-   not have, raise `MultiContainerAmbiguityError`. `k8s.logs` counts
+   container pods without `container` raise
+   `MultiContainerAmbiguityError`. A `container` the pod does not have
+   raises `ContainerNotFoundError`; its message names the wrong name and
+   lists the pod's containers. `k8s.logs` counts
    init containers as valid `container` values (listed after the app
    containers) but never auto-picks one; pod-not-found / ambiguous prefix
-   raises `PodNotFoundError`. Both carry the candidate list in
+   raises `PodNotFoundError`. All three carry the candidate list in
    `args[1]` so the dispatcher's `connector_error` envelope can
    surface a "did-you-mean".
 5. `parse_duration()` resolves `since` (e.g. `"5m"`) to

@@ -52,8 +52,9 @@ Vault failure is cut so it cannot carry it.
 The delete steps
 ----------------
 
-The handler reads ``config.xml`` (refuses ``not_found``, ``ambiguous`` and
-the built-in admin account). It refuses ``rules_remain`` while a firewall
+The handler reads ``config.xml``. A user that is already gone is a normal
+answer (``not_found``); a duplicate name (``ambiguous``) and the built-in
+admin account (``protected``) are refused. It refuses ``rules_remain`` while a firewall
 rule carries the user's tag ``meho-vpn-user:<name>`` (see
 :mod:`~meho_backplane.connectors.pfsense.ops_openvpn_rule`), even with
 ``force``: such a rule grants access by tunnel address, and the delete
@@ -68,6 +69,11 @@ read counts as unknown, not as "nobody connected": the call is refused
 (``connection_unknown``) unless ``force`` is given. After the write the
 handler reads ``config.xml`` again and checks that the user and its
 overrides are gone and every other user and override is unchanged.
+
+A refusal changes nothing and fails the call: the handler raises
+:class:`~meho_backplane.connectors.pfsense.refusal.PfSenseRefusedError` with
+the reason as its code. ``pfsense.openvpn.user.create`` does the same for
+``ambiguous``; its ``exists`` stays a normal answer (safe to run twice).
 
 Both handlers hold the appliance's write lock
 (:func:`~meho_backplane.connectors.pfsense.ops_write.serialized_config_write`).
@@ -104,6 +110,7 @@ from meho_backplane.connectors.pfsense.ops_write import (
     _validate_descr,
     serialized_config_write,
 )
+from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 from meho_backplane.connectors.vault.tenant_scope import enforce_tenant_scope
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
@@ -140,6 +147,7 @@ _VAULT_PATH_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
 _VAULT_FIELD_RE: Final = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _DEFAULT_MOUNT: Final = "secret"
 _DEFAULT_FIELD: Final = "password"
+_DELETE_OP_ID: Final = "pfsense.openvpn.user.delete"
 
 
 # ---------------------------------------------------------------------------
@@ -402,11 +410,11 @@ async def pfsense_openvpn_user_create(
     before = _user_rows(await _read_config_xml(self, target, operator))
     same = [r for r in before if r["name"] == name]
     if len(same) > 1:
-        return {
-            **result,
-            "status": "ambiguous",
-            "guidance": f"{len(same)} local users share the name {name!r}; nothing changed",
-        }
+        raise PfSenseRefusedError(
+            "pfsense.openvpn.user.create",
+            "ambiguous",
+            f"{len(same)} local users share the name {name!r}; nothing changed",
+        )
     if same:
         return {
             **result,
@@ -592,20 +600,15 @@ def _tagged_rules(xml_text: str, name: str) -> list[str]:
     return [str(r.get("tracker")) for r in stored if (r.get("descr") or "").strip() == tag]
 
 
-def _rules_remain(
-    result: dict[str, Any], name: str, count: int, trackers: list[str]
-) -> dict[str, Any]:
+def _rules_remain(name: str, count: int, trackers: list[str]) -> PfSenseRefusedError:
     ids = f" (ridentifier {', '.join(trackers)})" if trackers else ""
-    return {
-        **result,
-        "status": "rules_remain",
-        "tagged_rules": trackers,
-        "guidance": (
-            f"{count} firewall rule(s) tagged {rule_tag(name)!r}{ids} still grant access by the "
-            "user's tunnel address; nothing changed. Remove them with pfsense.filter.rule.delete "
-            "first. force does not skip this check."
-        ),
-    }
+    return PfSenseRefusedError(
+        _DELETE_OP_ID,
+        "rules_remain",
+        f"{count} firewall rule(s) tagged {rule_tag(name)!r}{ids} still grant access by the "
+        "user's tunnel address; nothing changed. Remove them with pfsense.filter.rule.delete "
+        "first. force does not skip this check.",
+    )
 
 
 def _csc_rows(entries: list[CscEntry], name: str) -> list[dict[str, Any]]:
@@ -638,7 +641,6 @@ async def pfsense_openvpn_user_delete(
         "force": force,
         "connected_sessions": None,
         "overrides_removed": 0,
-        "tagged_rules": [],
         "applied": False,
         "verified": False,
         "guidance": None,
@@ -646,11 +648,13 @@ async def pfsense_openvpn_user_delete(
     before_xml = await _read_config_xml(self, target, operator)
     rows = _user_rows(before_xml)
     status, guidance = _refusal(rows, name)
-    if status is not None:
+    if status == "not_found":
         return {**result, "status": status, "guidance": guidance}
+    if status is not None:
+        raise PfSenseRefusedError(_DELETE_OP_ID, status, guidance or "")
     trackers = _tagged_rules(before_xml, name)
     if trackers:
-        return _rules_remain(result, name, len(trackers), trackers)
+        raise _rules_remain(name, len(trackers), trackers)
     entries = parse_csc_entries(before_xml)
     mine = [e for e in entries if e.common_name == name]
     result["overrides_removed"] = len(mine)
@@ -658,21 +662,19 @@ async def pfsense_openvpn_user_delete(
         sessions = await _connected_sessions(self, target, name, operator, before_xml)
         result["connected_sessions"] = sessions
         if sessions is None:
-            return {
-                **result,
-                "status": "connection_unknown",
-                "guidance": (
-                    "could not read the connected clients of every OpenVPN server; nothing "
-                    "changed. Use force to delete anyway."
-                ),
-            }
+            raise PfSenseRefusedError(
+                _DELETE_OP_ID,
+                "connection_unknown",
+                "could not read the connected clients of every OpenVPN server; nothing "
+                "changed. Use force to delete anyway.",
+            )
         if sessions > 0:
-            return {
-                **result,
-                "status": "connected",
-                "guidance": f"{name!r} is connected ({sessions} session); nothing changed. "
+            raise PfSenseRefusedError(
+                _DELETE_OP_ID,
+                "connected",
+                f"{name!r} is connected ({sessions} session); nothing changed. "
                 "Use force to delete anyway.",
-            }
+            )
 
     played = await _apply_playback(
         self,
@@ -683,7 +685,7 @@ async def pfsense_openvpn_user_delete(
     )
     remain = _RULES_REMAIN_RE.search(played)
     if remain is not None:
-        return _rules_remain(result, name, int(remain.group(1)), [])
+        raise _rules_remain(name, int(remain.group(1)), [])
     after_xml = await _read_config_xml(self, target, operator)
     after_rows = _user_rows(after_xml)
     others_ok = _other_users(after_rows, name) == _other_users(rows, name)
@@ -822,7 +824,7 @@ _CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "op_class": {"type": "string", "enum": ["write"]},
         "resource": {"type": "string", "enum": ["openvpn_user"]},
-        "status": {"type": "string", "enum": ["created", "exists", "ambiguous"]},
+        "status": {"type": "string", "enum": ["created", "exists"]},
         "name": {"type": "string"},
         "nothing_to_do": {"type": "boolean"},
         "applied": {"type": "boolean"},
@@ -861,21 +863,12 @@ _DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
         "resource": {"type": "string", "enum": ["openvpn_user"]},
         "status": {
             "type": "string",
-            "enum": [
-                "deleted",
-                "not_found",
-                "ambiguous",
-                "protected",
-                "connected",
-                "connection_unknown",
-                "rules_remain",
-            ],
+            "enum": ["deleted", "not_found"],
         },
         "name": {"type": "string"},
         "force": {"type": "boolean"},
         "connected_sessions": {"type": ["integer", "null"]},
         "overrides_removed": {"type": "integer"},
-        "tagged_rules": {"type": "array", "items": {"type": "string"}},
         "applied": {"type": "boolean"},
         "verified": {"type": "boolean"},
         "guidance": {"type": ["string", "null"]},
@@ -888,7 +881,6 @@ _DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
         "force",
         "connected_sessions",
         "overrides_removed",
-        "tagged_rules",
         "applied",
         "verified",
         "guidance",
@@ -957,9 +949,9 @@ OPENVPN_USER_OPS: tuple[PfSenseOp, ...] = (
         summary="Delete a VPN user and its overrides (needs approval; refused while connected).",
         description=(
             "Removes one local user and the OpenVPN client overrides with its name. "
-            "Refused for an unknown name, a duplicate name and the admin account. Refused "
-            "while the user is connected, or when that cannot be read, unless force is true. "
-            "Always refused while firewall rules tagged with the user remain."
+            "A user already gone is not_found. Fails, changing nothing, for a duplicate "
+            "name, the admin account, a connected user or an unknown state (unless "
+            "force), and while tagged firewall rules remain."
         ),
         parameter_schema={
             **_DELETE_PARAMETER_SCHEMA,
@@ -987,9 +979,12 @@ OPENVPN_USER_OPS: tuple[PfSenseOp, ...] = (
                 },
                 "output_shape": (
                     "``{status, name, force, connected_sessions, overrides_removed, "
-                    "tagged_rules, applied, verified, guidance}``. ``status`` is ``deleted`` "
-                    "after a verified removal, else the reason it was refused. "
-                    "``rules_remain`` lists the tagged rules in ``tagged_rules``."
+                    "applied, verified, guidance}``. ``status`` is ``deleted`` after a "
+                    "verified removal, or ``not_found`` when the user is already gone. A "
+                    "refusal (``ambiguous``, ``protected``, ``connected``, "
+                    "``connection_unknown``, ``rules_remain``) fails the call and changes "
+                    "nothing; the error names the reason and, for ``rules_remain``, the "
+                    "``ridentifier`` of each tagged rule."
                 ),
                 "next_step": "Check the result with ``pfsense.user.list``.",
             }

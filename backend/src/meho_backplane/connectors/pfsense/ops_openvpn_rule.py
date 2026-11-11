@@ -27,7 +27,9 @@ How the sync works
    ``create``. A tagged rule of a named user that matches no wanted rule is
    ``not_wanted``: the op reports it and leaves it (remove it with
    ``pfsense.filter.rule.delete`` and its ``ridentifier``). A refused rule
-   stops the whole call.
+   stops the whole call. Outside compare-only mode the call then fails with
+   :class:`~meho_backplane.connectors.pfsense.refusal.PfSenseRefusedError`
+   (code ``refused``) that names each refused rule.
 2. In compare-only mode the call returns the plan and stops.
 3. Otherwise the handler saves a rollback copy of ``config.xml`` (mode
    0600), plays back one fragment and reads ``config.xml`` again. The
@@ -75,6 +77,7 @@ from meho_backplane.connectors.pfsense.ops_write import (
     _read_config_xml,
     serialized_config_write,
 )
+from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -430,6 +433,18 @@ async def pfsense_openvpn_rule_sync(
         "guidance": None,
     }
     if counts["refused"]:
+        if not compare_only:
+            refused = "; ".join(
+                f"{r['name']} ({r['source']} to {r['destination']}): {r['reason']}"
+                for r in plan
+                if r["action"] == "refused"
+            )
+            raise PfSenseRefusedError(
+                _OP_ID,
+                "refused",
+                f"nothing was written. Refused rules: {refused}. Run with compare_only to "
+                "see the whole plan.",
+            )
         return {
             **result,
             "status": "refused",
@@ -667,7 +682,9 @@ OPENVPN_RULE_OPS: tuple[PfSenseOp, ...] = (
                 "``{status, compare_only, applied, verified, counts, rules, rollback_copy, "
                 "guidance}``. ``rules`` has one row per wanted rule (``create``, "
                 "``unchanged``, ``refused``) and one per tagged rule nobody asked for "
-                "(``not_wanted``, with its ``ridentifier``)."
+                "(``not_wanted``, with its ``ridentifier``). ``status`` ``refused`` comes "
+                "only with ``compare_only``; otherwise a refused rule fails the call and "
+                "the error names each refused rule."
             ),
             "next_step": (
                 "Remove a ``not_wanted`` rule with ``pfsense.filter.rule.delete`` and its "

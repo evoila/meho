@@ -37,6 +37,7 @@ from meho_backplane.connectors.pfsense.ops_openvpn_rule import (
     build_rule_sync_playback,
     rule_tag,
 )
+from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 from meho_backplane.op_classes import is_root_shell
 
 _OP = OPENVPN_RULE_OPS[0]
@@ -178,7 +179,17 @@ async def test_a_tagged_rule_with_another_port_is_not_the_same_rule() -> None:
 
 async def test_an_unknown_user_is_refused_and_nothing_is_written() -> None:
     fake = _Fake([_config()])
-    out = await _sync(fake, [_want(), _want(name="nobody")])
+    with pytest.raises(PfSenseRefusedError) as info:
+        await _sync(fake, [_want(), _want(name="nobody")])
+    assert info.value.code == "refused"
+    assert "nobody (" in info.value.guidance and "user_not_found" in info.value.guidance
+    assert "guest-1 (" not in info.value.guidance
+    assert not fake.played
+
+
+async def test_compare_only_with_an_unknown_user_is_a_normal_answer() -> None:
+    fake = _Fake([_config()])
+    out = await _sync(fake, [_want(), _want(name="nobody")], compare_only=True)
     assert out["status"] == "refused"
     assert [r["reason"] for r in out["rules"]] == [None, "user_not_found"]
     assert not fake.played

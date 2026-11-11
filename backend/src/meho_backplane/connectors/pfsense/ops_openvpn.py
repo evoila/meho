@@ -25,7 +25,9 @@ How the sync works
 1. Every wanted entry is checked first (server exists and logs users in,
    the address is inside the server's network and free, the existing entry
    has no other address). One refused entry stops the whole call: nothing
-   is written.
+   is written, and outside compare-only mode the call fails with
+   :class:`~meho_backplane.connectors.pfsense.refusal.PfSenseRefusedError`
+   (code ``refused``) that names each refused entry.
 2. In compare-only mode the call returns the plan and stops: which entries
    would be created, updated, or are already right.
 3. Otherwise the handler saves a copy of ``config.xml`` (the rollback copy,
@@ -96,6 +98,7 @@ from meho_backplane.connectors.pfsense.ops_write import (
     _validate_descr,
     serialized_config_write,
 )
+from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -651,6 +654,18 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in row.items() if k not in ("description", "_expect")}
 
 
+def _refused_guidance(plan: list[dict[str, Any]]) -> str:
+    refused = "; ".join(
+        f"{r['name']} on server {r['server_vpnid']}: {r['reason']} ({r['detail']})"
+        for r in plan
+        if r["action"] == "refused"
+    )
+    return (
+        f"nothing was written. Refused entries: {refused}. Run with compare_only to see "
+        "the whole plan."
+    )
+
+
 @serialized_config_write
 async def pfsense_openvpn_csc_sync(
     self: PfSenseConnector,
@@ -679,6 +694,10 @@ async def pfsense_openvpn_csc_sync(
         "guidance": None,
     }
     if counts["refused"]:
+        if not compare_only:
+            raise PfSenseRefusedError(
+                "pfsense.openvpn.csc.sync", "refused", _refused_guidance(plan)
+            )
         return {
             **result,
             "status": "refused",
@@ -987,7 +1006,9 @@ OPENVPN_OPS: tuple[PfSenseOp, ...] = (
                 "output_shape": (
                     "``{status, compare_only, applied, verified, counts, entries, "
                     "rollback_copy, guidance}``. ``status`` is ``compared``, ``synced``, "
-                    "``nothing_to_do`` or ``refused`` (``entries`` then says why)."
+                    "``nothing_to_do`` or, with ``compare_only``, ``refused`` (``entries`` "
+                    "then says why). Without ``compare_only`` a refused entry fails the call "
+                    "and the error names each refused entry."
                 ),
                 "next_step": (
                     "Check the user with ``pfsense.user.list``. Add the per-user firewall "

@@ -1051,9 +1051,11 @@ per-user rule sync). Checked against the pfSense
 - **Override sync.** One entry per user and server: `name`, `server_vpnid`,
   `tunnel_address` (needed for a new entry), `routes`. All entries are checked
   first (server, address in range and free, no other address on an existing
-  entry); one refusal stops the whole call. With `compare_only` the call
-  returns the plan (`create`, `update`, `unchanged`, `refused` per entry) and
-  writes nothing. Otherwise it saves a rollback copy of `config.xml`
+  entry); one refusal stops the whole call. Without `compare_only` a refusal
+  fails the call: it raises `PfSenseRefusedError` (code `refused`) and the
+  error names each refused entry and why. With `compare_only` the call
+  returns the plan (`create`, `update`, `unchanged`, `refused` per entry) as a
+  normal answer and writes nothing. Otherwise it saves a rollback copy of `config.xml`
   (`/cf/conf/meho-rollback-csc-sync-<time>.xml`, mode 0600; it is not removed
   by MEHO), plays back one fragment, and reads `config.xml` again: success
   only when the entries hold the wanted values and nothing else changed. It
@@ -1068,7 +1070,9 @@ per-user rule sync). Checked against the pfSense
   entry it extends). When one changed, for example a route added in the web
   page meanwhile, it writes nothing and the op fails with "run again".
 - **User create.** The handler checks the Vault path against the tenant path
-  first. An existing user is left alone (`exists`). The fragment makes a
+  first. An existing user is left alone (`exists`, a normal answer: safe to
+  run twice). Two users with the name fail the call (`ambiguous`, raised as
+  `PfSenseRefusedError`). The fragment makes a
   24-character password (letters and digits, `random_int`), sets it with
   `local_user_set_password()`, adds the user to the group `all` and prints the
   new `uid` and the password once. When the name was taken since the first
@@ -1080,13 +1084,16 @@ per-user rule sync). Checked against the pfSense
   is. The password is never in the answer, the approval, an error or a log.
   When the Vault write fails, the user is removed again, by name and `uid`;
   overrides with the name stay. The broadcast class is `credential_mint`.
-- **User delete.** Refused for `not_found`, `ambiguous` and the built-in admin
-  account. It is refused (`rules_remain`) while a firewall rule carries the
+- **User delete.** A user that is already gone is a normal answer
+  (`not_found`). Every refusal below changes nothing and fails the call: it
+  raises `PfSenseRefusedError` with the reason as its code. Refused for a
+  duplicate name (`ambiguous`) and the built-in admin account (`protected`).
+  It is refused (`rules_remain`) while a firewall rule carries the
   user's tag `meho-vpn-user:<name>`, also with `force`. Such a rule grants
   access by tunnel address, and the delete frees that address, so
   `pfsense.openvpn.address.next_free` could give it to the next user. Remove
-  the rules with `pfsense.filter.rule.delete` first; the answer lists their
-  `ridentifier` in `tagged_rules`. The fragment counts the tagged rules again
+  the rules with `pfsense.filter.rule.delete` first; the error lists their
+  `ridentifier`. The fragment counts the tagged rules again
   and changes nothing when it finds one. It asks every enabled user-login server for its connected clients
   (management socket, `status 2`). A session counts when the login name
   (`Username` column) or the certificate name (`Common Name`) is the user, so
@@ -1102,7 +1109,9 @@ per-user rule sync). Checked against the pfSense
   tagged rule already does is `unchanged`; else `create`. A tagged rule of a
   named user that nobody asked for is `not_wanted`: reported with its
   `ridentifier`, never removed (use `pfsense.filter.rule.delete`). An unknown
-  user is `refused` and stops the call. With `compare_only` it writes
+  user is `refused` and stops the call: without `compare_only` the call
+  fails with `PfSenseRefusedError` (code `refused`) that names each refused
+  rule. With `compare_only` the plan is a normal answer and it writes
   nothing. Otherwise it saves a rollback copy
   (`/cf/conf/meho-rollback-rule-sync-<time>.xml`), and one fragment checks
   that the tagged rules are still as the plan saw them, adds the new rules

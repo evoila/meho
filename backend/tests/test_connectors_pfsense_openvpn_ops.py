@@ -56,6 +56,7 @@ from meho_backplane.connectors.pfsense.ops_openvpn_user import (
     build_user_delete_playback,
     build_user_undo_playback,
 )
+from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 from meho_backplane.op_classes import is_root_shell
 from meho_backplane.settings import get_settings
 
@@ -502,14 +503,16 @@ async def test_compare_only_counts_when_every_entry_is_fine() -> None:
 
 async def test_one_refused_entry_stops_the_whole_call() -> None:
     fake = _Fake([_config()])
-    out = await _sync(
-        fake,
-        [_entry("a", tunnel_address="198.51.100.9"), _entry("b", tunnel_address="192.0.2.9")],
-    )
-    assert out["status"] == "refused"
-    assert out["applied"] is False
+    with pytest.raises(PfSenseRefusedError) as info:
+        await _sync(
+            fake,
+            [_entry("a", tunnel_address="198.51.100.9"), _entry("b", tunnel_address="192.0.2.9")],
+        )
+    assert info.value.code == "refused"
+    assert "b on server 1: address_outside_network" in info.value.guidance
+    assert "a on server" not in info.value.guidance
     assert not fake.wrote
-    assert [e["reason"] for e in out["entries"]] == [None, "address_outside_network"]
+    assert not any("cp /cf/conf/config.xml" in c for c in fake.commands)
 
 
 async def test_sync_writes_saves_a_rollback_copy_first_and_verifies() -> None:
@@ -965,9 +968,9 @@ async def test_create_leaves_an_existing_user_alone(vault: _FakeVault) -> None:
 
 async def test_create_refuses_a_duplicate_name(vault: _FakeVault) -> None:
     fake = _Fake([_config(users=_user("guest-1", "2000") + _user("guest-1", "2001"))])
-    out = await _create(fake)
-    assert out["status"] == "ambiguous"
-    assert not fake.wrote
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(ambiguous\)"):
+        await _create(fake)
+    assert not fake.wrote and vault.opened == 0
 
 
 async def test_vault_failure_removes_the_user_again_and_hides_the_message(
@@ -1224,8 +1227,8 @@ async def test_delete_removes_the_user_and_its_overrides() -> None:
 
 async def test_delete_is_refused_while_the_user_is_connected() -> None:
     fake = _Fake([_vpn_config()], sockets={"1": (_session("guest-1"), 0), "2": _SOCK_EMPTY})
-    out = await _delete(fake)
-    assert out["status"] == "connected" and out["connected_sessions"] == 1
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(connected\).*1 session"):
+        await _delete(fake)
     assert not fake.wrote
 
 
@@ -1234,8 +1237,8 @@ async def test_delete_is_refused_when_the_login_name_differs_from_the_certificat
     servers = _server("1", _NET_UDP, mode="server_tls_user")
     config = _config(servers=servers, users=_user("guest-1", "2000"))
     fake = _Fake([config], sockets={"1": (_session("guest-1", common_name="laptop-77"), 0)})
-    out = await _delete(fake)
-    assert out["status"] == "connected" and out["connected_sessions"] == 1
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(connected\).*1 session"):
+        await _delete(fake)
     assert not fake.wrote
 
 
@@ -1244,13 +1247,15 @@ async def test_a_certificate_named_like_the_user_counts_too() -> None:
         [_vpn_config()],
         sockets={"1": (_session("someone", common_name="guest-1"), 0), "2": _SOCK_EMPTY},
     )
-    assert (await _delete(fake))["status"] == "connected"
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(connected\)"):
+        await _delete(fake)
 
 
 async def test_a_client_row_without_a_username_column_is_unknown() -> None:
     answer = ("TITLE,x\nCLIENT_LIST,other,203.0.113.77:1194\nEND\n", 0)
     fake = _Fake([_vpn_config()], sockets={"1": answer, "2": _SOCK_EMPTY})
-    assert (await _delete(fake))["status"] == "connection_unknown"
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(connection_unknown\)"):
+        await _delete(fake)
     assert not fake.wrote
 
 
@@ -1267,8 +1272,9 @@ async def test_delete_is_refused_when_the_connection_state_is_unknown(
     answer: tuple[str, int],
 ) -> None:
     fake = _Fake([_vpn_config()], sockets={"1": _SOCK_EMPTY, "2": answer})
-    out = await _delete(fake)
-    assert out["status"] == "connection_unknown" and out["connected_sessions"] is None
+    with pytest.raises(PfSenseRefusedError) as info:
+        await _delete(fake)
+    assert info.value.code == "connection_unknown"
     assert not fake.wrote
 
 
@@ -1287,20 +1293,25 @@ async def test_delete_skips_a_disabled_server() -> None:
     assert not any("/server2/sock" in c for c in fake.commands)
 
 
-@pytest.mark.parametrize(
-    ("name", "status"),
-    [("nobody", "not_found"), ("admin", "protected")],
-)
-async def test_delete_refusals_change_nothing(name: str, status: str) -> None:
+async def test_delete_of_a_user_that_is_already_gone_is_a_normal_answer() -> None:
     fake = _Fake([_vpn_config()])
-    out = await fake.openvpn_user_delete(None, {"name": name}, _operator())  # type: ignore[arg-type]
-    assert out["status"] == status and not fake.wrote
+    out = await fake.openvpn_user_delete(None, {"name": "nobody"}, _operator())  # type: ignore[arg-type]
+    assert out["status"] == "not_found" and not out["applied"] and not fake.wrote
+    Draft202012Validator(user_module._DELETE_RESPONSE_SCHEMA).validate(out)
+
+
+async def test_delete_refuses_the_admin_account() -> None:
+    fake = _Fake([_vpn_config()])
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(protected\)"):
+        await fake.openvpn_user_delete(None, {"name": "admin"}, _operator())  # type: ignore[arg-type]
+    assert not fake.wrote
 
 
 async def test_delete_refuses_a_duplicate_name() -> None:
     config = _config(users=_user("guest-1", "2000") + _user("guest-1", "2001"))
     fake = _Fake([config])
-    assert (await _delete(fake))["status"] == "ambiguous"
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(ambiguous\)"):
+        await _delete(fake)
     assert not fake.wrote
 
 
@@ -1313,11 +1324,12 @@ async def test_delete_is_refused_while_tagged_rules_remain(force: bool) -> None:
         [_config(users=users, csc=_csc("guest-1", "1", "198.51.100.5/24"), rules=rule)],
         sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY},
     )
-    out = await _delete(fake, force=force)
-    assert out["status"] == "rules_remain" and out["tagged_rules"] == ["123456789"]
-    assert not out["applied"] and "pfsense.filter.rule.delete" in out["guidance"]
+    with pytest.raises(PfSenseRefusedError) as info:
+        await _delete(fake, force=force)
+    assert info.value.code == "rules_remain"
+    assert "ridentifier 123456789" in info.value.guidance
+    assert "pfsense.filter.rule.delete" in info.value.guidance
     assert not fake.wrote
-    Draft202012Validator(user_module._DELETE_RESPONSE_SCHEMA).validate(out)
 
 
 async def test_a_refused_delete_keeps_the_address_away_from_the_next_user() -> None:
@@ -1329,7 +1341,8 @@ async def test_a_refused_delete_keeps_the_address_away_from_the_next_user() -> N
         rules=rule,
     )
     fake = _Fake([config], sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY})
-    assert (await _delete(fake))["status"] == "rules_remain"
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(rules_remain\)"):
+        await _delete(fake)
     free = await _next_free(fake)
     assert free["status"] == "found" and free["address_offset"] == 3
 
@@ -1342,7 +1355,7 @@ async def test_a_tagged_rule_of_another_user_does_not_block_the_delete() -> None
         sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY},
     )
     out = await _delete(fake)
-    assert out["status"] == "deleted" and out["tagged_rules"] == []
+    assert out["status"] == "deleted" and out["applied"]
 
 
 async def test_delete_is_refused_when_the_fragment_finds_a_new_tagged_rule() -> None:
@@ -1351,8 +1364,8 @@ async def test_delete_is_refused_when_the_fragment_finds_a_new_tagged_rule() -> 
         sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY},
         playback_out="MEHO_VPN_RULES_REMAIN=1\n",
     )
-    out = await _delete(fake)
-    assert out["status"] == "rules_remain" and not out["applied"]
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(rules_remain\)"):
+        await _delete(fake)
     assert len(fake.played) == 1
 
 

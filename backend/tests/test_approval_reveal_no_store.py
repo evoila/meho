@@ -38,6 +38,7 @@ from tests._reveal_fetch_helpers import (
     approved_reveal,
     register_plain_read,
     register_vault_read,
+    run_without_value,
 )
 from tests.mcp_test_fixtures import OPERATOR_TENANT_ID
 
@@ -123,6 +124,22 @@ async def test_rest_reveal_refused_before_approval_keeps_usual_headers(
     missing = client.post("/api/v1/approvals/00000000-0000-0000-0000-000000006273/reveal")
     assert missing.status_code == 404, missing.text
     assert not _says_no_store(missing)
+
+
+@pytest.mark.usefixtures("vault_read")
+@pytest.mark.parametrize("how", ["failed", "refused"])
+async def test_rest_reveal_run_without_a_value_keeps_usual_headers(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    """The approved run ends with an error or is refused: no value, no no-store."""
+    request_id = await run_without_value(monkeypatch, _REQUESTER, how)
+
+    answer = client.post(f"/api/v1/approvals/{request_id}/reveal")
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["status"] != "ok", answer.text
+    assert SECRET_VALUE not in answer.text
+    assert not _says_no_store(answer)
+    assert "pragma" not in answer.headers
 
 
 @pytest.mark.usefixtures("vault_read")

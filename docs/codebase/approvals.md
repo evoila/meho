@@ -1663,19 +1663,22 @@ for the person who asked, not a run. The code is in
   call `fetch_approved_reveal`. It runs the
   operation through `resume_dispatch_after_approval(..., requester_fetch=True)`
   and gives the value only in that one answer.
-- **No cache keeps the answer with the value.** When the operation ran,
-  each of these answers says `Cache-Control: no-store` and `Pragma:
-  no-cache` (`no_store.py`). A refused fetch, the stored run result
-  (`GET /api/v1/approvals/{id}/result`) and the request view carry no
-  value and keep their usual headers. A person's `reveal_secret: true` on
-  a plain read runs at once, with no approval; its answer on `POST
-  /api/v1/operations/call` and on MCP `call_operation` says no-store as
-  well. The dispatcher marks it when it puts the values in
-  (`_protect_secret_values` calls `no_store.mark_answer_holds_secret`),
-  and both routes open `no_store.answer_scope` around the call. The same
-  call without `reveal_secret` keeps its usual headers. Tests:
-  `tests/test_approval_reveal_no_store.py`, `tests/test_ui_vault.py`,
-  `tests/test_mcp_reveal_fetch.py`.
+- **No cache keeps the answer with the value.** An answer that holds the
+  value says `Cache-Control: no-store` and `Pragma: no-cache`
+  (`no_store.py`). The dispatcher decides: it marks the answer when it
+  puts the values in (`_protect_secret_values` calls
+  `no_store.mark_answer_holds_secret`). Each route opens
+  `no_store.answer_scope` around the run and sets the headers only when
+  the answer was marked: `POST /api/v1/approvals/{id}/reveal`, `POST
+  /api/v1/operations/call`, MCP, and the console's operation page, Vault
+  read page and "Show value" button. So these keep their usual headers: a
+  refused fetch, a run that was refused (for example the target changed)
+  or ended with an error, the stored run result
+  (`GET /api/v1/approvals/{id}/result`), the request view, and the same
+  call without `reveal_secret`. A person's `reveal_secret: true` on a
+  plain read runs at once, with no approval, and says no-store too.
+  Tests: `tests/test_approval_reveal_no_store.py`, `tests/test_ui_vault.py`,
+  `tests/test_ui_operations.py`, `tests/test_mcp_reveal_fetch.py`.
 - **A reveal call cannot run in the background.** `reveal_secret: true`
   together with `async: true` is refused before any run starts: HTTP 422
   `reveal_secret_with_async` on `POST /api/v1/operations/call`, and bad

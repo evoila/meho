@@ -14,12 +14,15 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import pytest
+
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.operations import dispatch, register_typed_operation
+from meho_backplane.db.models import ApprovalRequest
+from meho_backplane.operations import approval_queue, dispatch, register_typed_operation
 from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
@@ -34,6 +37,8 @@ READ_OP = "vault.kv.read"
 #: A plain read (not a credential read) whose answer has a secret-named field.
 #: A person's ``reveal_secret: true`` on it runs at once, with no approval.
 PLAIN_OP = "vault.app.config"
+#: A path whose read fails: the approved run ends with an error and no value.
+BROKEN_PATH = "app/broken"
 
 
 class _VaultStub(Connector):
@@ -52,6 +57,8 @@ class _VaultStub(Connector):
 
 
 async def _read_handler(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    if params.get("path") == BROKEN_PATH:
+        raise RuntimeError("the read failed")
     return {"data": {"password": SECRET_VALUE, "username": "app"}, "version": 1}
 
 
@@ -109,22 +116,22 @@ async def register_vault_read() -> None:
     )
 
 
-async def parked_reveal(requester: Operator) -> UUID:
-    """*requester* asks to see the value; the call waits for approval."""
+async def parked_reveal(requester: Operator, path: str = "app/db") -> UUID:
+    """*requester* asks to see the value at *path*; the call waits for approval."""
     parked = await dispatch(
         operator=requester,
         connector_id=CONNECTOR_ID,
         op_id=READ_OP,
         target=None,
-        params={"path": "app/db", "reveal_secret": True},
+        params={"path": path, "reveal_secret": True},
     )
     assert parked.status == "awaiting_approval", parked.error
     return UUID(parked.extras["approval_request_id"])
 
 
-async def approved_reveal(requester: Operator) -> UUID:
+async def approved_reveal(requester: Operator, path: str = "app/db") -> UUID:
     """*requester*'s reveal waits; another person of the tenant approves it. Nothing runs."""
-    request_id = await parked_reveal(requester)
+    request_id = await parked_reveal(requester, path)
     reviewer = requester.model_copy(update={"sub": "reviewer-6273"})
     async with get_sessionmaker()() as session:
         approved = await approve_request(session, request_id, operator=reviewer)
@@ -132,4 +139,28 @@ async def approved_reveal(requester: Operator) -> UUID:
     answer = await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
     assert answer.status == WAITING_FOR_REQUESTER, answer
     assert SECRET_VALUE not in answer.model_dump_json()
+    return request_id
+
+
+async def run_without_value(monkeypatch: pytest.MonkeyPatch, requester: Operator, how: str) -> UUID:
+    """An approved reveal whose run gives no value: it *how* = ``failed`` or ``refused``.
+
+    ``failed``: the read runs and raises. ``refused``: the saved target
+    changed after the approval, so the run is refused and nothing runs.
+    """
+    if how == "failed":
+        return await approved_reveal(requester, BROKEN_PATH)
+    request_id = await approved_reveal(requester)
+
+    async def _target_changed(
+        operator: Operator, request: ApprovalRequest
+    ) -> tuple[Any, OperationResult | None]:
+        return None, OperationResult(
+            status="denied",
+            op_id=request.op_id,
+            error="target_changed_since_approval",
+            duration_ms=0.0,
+        )
+
+    monkeypatch.setattr(approval_queue, "refuse_resume_if_target_changed", _target_changed)
     return request_id

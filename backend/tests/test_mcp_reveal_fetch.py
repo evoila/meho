@@ -48,6 +48,7 @@ from tests._reveal_fetch_helpers import (
     approved_reveal,
     register_plain_read,
     register_vault_read,
+    run_without_value,
 )
 from tests.mcp_test_fixtures import (
     build_operator,
@@ -196,6 +197,23 @@ async def test_mcp_client_fetches_the_value_once_and_a_second_fetch_is_refused(
     assert second["extras"]["error_code"] == "reveal_already_used"
     assert second["extras"]["approval_request_id"] == str(request_id)
     assert "already fetched" in second["error"]
+
+
+@pytest.mark.usefixtures("vault_read")
+@pytest.mark.parametrize("how", ["failed", "refused"])
+async def test_a_fetch_whose_run_gives_no_value_keeps_usual_headers(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    """The approved run ends with an error or is refused: no value, no no-store."""
+    _switch(monkeypatch, on=True)
+    request_id = await run_without_value(monkeypatch, _REQUESTER, how)
+
+    response = _fetch(client, request_id)
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["structuredContent"]["status"] != "ok"
+    assert SECRET_VALUE not in response.text
+    assert "pragma" not in response.headers
+    assert response.headers.get("cache-control") != "no-store"
 
 
 @pytest.mark.usefixtures("vault_read")

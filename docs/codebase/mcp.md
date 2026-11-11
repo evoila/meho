@@ -1724,10 +1724,11 @@ call_operation(connector_id, op_id, approval_request_id)
   (`reveal_already_used`), within the time limit (`reveal_window_passed`).
 - A refused fetch answers `status: "denied"` (`isError: true`) with
   `extras.error_code` and `extras.approval_request_id`. Nothing ran.
-- When the operation ran, the tool marks the answer
+- When the answer holds the value, the dispatcher marks it
   (`no_store.mark_answer_holds_secret`), and the `/mcp` route sends it
   with `Cache-Control: no-store` and `Pragma: no-cache`
-  (`no_store.answer_scope`).
+  (`no_store.answer_scope`). A run that was refused or ended with an
+  error holds no value and keeps the usual headers.
 - With the switch off, a person who works through MCP gets the value on
   the command line (`meho secret read --approval <id> --field <name>`), in
   the console ("Show value") or with `POST /api/v1/approvals/{id}/reveal`.

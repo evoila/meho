@@ -11,9 +11,10 @@ up the one-time permission; the CSRF middleware checks it. A request of
 another person, of another tenant or of another operation is a 404. A
 refused fetch (not approved yet, already fetched, time passed) shows its
 reason and no value. MEHO stores no value; this page never logs one. When
-the read ran (also when it ended with an error and shows no value), the page
-says ``Cache-Control: no-store`` and ``Pragma: no-cache``
-(:mod:`meho_backplane.no_store`), so no browser or proxy keeps the value.
+the page shows the value, it says ``Cache-Control: no-store`` and
+``Pragma: no-cache`` (:mod:`meho_backplane.no_store`), so no browser or
+proxy keeps it. A run that was refused or ended with an error shows no
+value and keeps the usual headers.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.no_store import set_no_store
+from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ResultAccessForbiddenError,
@@ -75,11 +76,10 @@ async def render_approved_reveal(
     if row.op_id != _OP_READ or row.principal_sub != operator.sub:
         raise _not_found()
     params = row.params or {}
-    ran = False
     try:
-        result = await fetch_approved_reveal(operator, request_id)
+        with answer_scope() as mark:
+            result = await fetch_approved_reveal(operator, request_id)
         envelope: dict[str, Any] = result.model_dump(mode="json")
-        ran = True
     except (ApprovalNotFoundError, ResultAccessForbiddenError) as exc:
         raise _not_found() from exc
     except RevealFetchRefusedError as exc:
@@ -109,6 +109,6 @@ async def render_approved_reveal(
         "target": "",
     }
     response = get_templates().TemplateResponse(request, "vault/_secret.html", context)
-    if ran:
+    if mark.holds_secret:
         set_no_store(response)
     return with_csrf_cookie(response, session)

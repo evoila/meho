@@ -665,6 +665,37 @@ def test_vault_ui_read_shows_the_value_to_the_requester_after_approval(
     assert _SECRET_VALUE not in refused.text
 
 
+def test_vault_ui_show_value_of_a_failed_read_keeps_usual_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """The approved read runs but fails: the page shows no value and says no no-store."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault(_stub_embedding_service)
+    install_fake_client(monkeypatch, read_exc=RuntimeError("secret missing"))
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        waiting = client.get(
+            "/ui/vault/read",
+            params={"mount": "secret", "path": _tenant_path(_TENANT_A, "app/db")},
+            headers={"HX-Request": "true"},
+        )
+        assert waiting.status_code == 200, waiting.text
+        assert "pragma" not in waiting.headers
+        match = re.search(r"data-approval-request-id>([0-9a-f-]{36})<", waiting.text)
+        assert match is not None, waiting.text
+        _approve(match.group(1))
+
+        failed = _show_value(client, match.group(1))
+    assert failed.status_code == 200, failed.text
+    assert 'data-vault-secret="ok"' not in failed.text
+    assert "pragma" not in failed.headers
+    assert failed.headers.get("cache-control") != "no-store"
+
+
 def test_vault_ui_show_value_needs_the_csrf_token() -> None:
     """The "Show value" POST uses up the permission, so it is CSRF-checked."""
     client, mock = _client_with_role(

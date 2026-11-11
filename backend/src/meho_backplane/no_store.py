@@ -10,15 +10,14 @@ must not be kept by a browser or a proxy. So it says ``Cache-Control:
 no-store`` (and ``Pragma: no-cache`` for old HTTP/1.0 caches). Other answers
 keep their headers as they are.
 
-Two ways to mark an answer:
-
-* A route that builds its own response calls :func:`set_no_store` on it
-  (``POST /api/v1/approvals/{id}/reveal``, the console's "Show value").
-* Code that cannot reach the HTTP response calls
-  :func:`mark_answer_holds_secret`. The dispatcher does this when it puts
-  the revealed values into an answer. ``POST /api/v1/operations/call`` and
-  the MCP route open :func:`answer_scope` around the call and set the
-  headers when the answer was marked.
+The dispatcher decides. When it puts revealed values into an answer, it
+calls :func:`mark_answer_holds_secret`. Each route that runs an operation
+for a person opens :func:`answer_scope` around the run and calls
+:func:`set_no_store` on its response only when the answer was marked:
+``POST /api/v1/operations/call``, ``POST /api/v1/approvals/{id}/reveal``,
+the MCP route, and the console's operation and Vault pages. So a run that
+was refused or ended with an error, and holds no value, keeps the usual
+headers.
 """
 
 from __future__ import annotations

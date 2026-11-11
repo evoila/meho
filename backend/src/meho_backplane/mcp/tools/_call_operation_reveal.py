@@ -23,8 +23,10 @@ gives the same way to a person who works through an AI tool over MCP:
 * The rest is :func:`~meho_backplane.operations.approved_reveal.fetch_approved_reveal`:
   same person and tenant, once, within the fetch window after the approval.
   Each try writes an ``approval.reveal`` audit row.
-* When the operation ran, the HTTP answer says ``Cache-Control: no-store``
-  (:mod:`meho_backplane.no_store`).
+* When the answer holds the value, the HTTP answer says ``Cache-Control:
+  no-store`` (:mod:`meho_backplane.no_store`): the dispatcher marks it, and
+  the MCP route sets the headers. A refused or failed run keeps the usual
+  headers.
 
 A refused fetch answers ``status="denied"`` with ``extras.error_code``
 (``approval_request_not_found``, ``not_request_owner``,
@@ -46,7 +48,6 @@ from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.mcp.registry import ToolDefinition
 from meho_backplane.mcp.server import McpInvalidParamsError
-from meho_backplane.no_store import mark_answer_holds_secret
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ResultAccessForbiddenError,
@@ -194,7 +195,6 @@ async def fetch_reveal_over_mcp(operator: Operator, arguments: dict[str, Any]) -
         )
     except RevealFetchRefusedError as exc:
         return _refused(op_id, request_id, f"reveal_{exc.code}", exc.message)
-    mark_answer_holds_secret()
     # Log only fields that hold no secret value.
     _log.info(
         "mcp_approval_reveal_fetched",

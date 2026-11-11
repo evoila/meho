@@ -747,8 +747,8 @@ async def test_preview_credential_class_writes_show_own_plan_with_switch_on(
     # No secret rides in the envelope. The script body is the one text that
     # shows: it is the change the approver decides on, and it is not a secret
     # value (the builder's own rule).
-    for leaked in (_CONTENT_CANARY, _ARG_CANARY):
-        assert leaked not in str(envelope)
+    for secret in (_CONTENT_CANARY, _ARG_CANARY):
+        assert secret not in str(envelope)
     assert (_SCRIPT_CANARY in str(envelope)) == (op_id == "linux.script.run")
 
 

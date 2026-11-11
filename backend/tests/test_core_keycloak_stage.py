@@ -16,7 +16,7 @@ import copy
 import json
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -513,7 +513,8 @@ class FakeKeycloak:
         if match := re.fullmatch(
             r"/admin/realms/meho/authentication/flows/([^/]+)/executions", path
         ):
-            assert self.flow_rights
+            if not (self.flow_rights and self.flow_write_rights):
+                return Reply(403, {"error": "HTTP 403 Forbidden"})
             for flow in self.flows.values():
                 for step in flow["executions"]:
                     if step["id"] == body["id"]:
@@ -960,6 +961,74 @@ async def test_a_login_flow_with_other_steps_is_kept_and_not_bound(
         and "browser" not in c[1]
         and "required-actions" not in c[1]
     ]
+
+
+def _move_the_code_step_to_the_top(kc: FakeKeycloak) -> None:
+    sub = kc.flows[f"{_APPROVAL_FLOW} - one-time code"]["executions"]
+    kc.flows[_APPROVAL_FLOW]["executions"].append(sub.pop())
+
+
+def _add_the_password_step_twice(kc: FakeKeycloak) -> None:
+    kc._add_step(_APPROVAL_FLOW, "auth-username-password-form", None)
+    kc.flows[_APPROVAL_FLOW]["executions"][-1]["requirement"] = "REQUIRED"
+
+
+def _swap_the_top_steps(kc: FakeKeycloak) -> None:
+    kc.flows[_APPROVAL_FLOW]["executions"].reverse()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [_move_the_code_step_to_the_top, _add_the_password_step_twice, _swap_the_top_steps],
+    ids=["step-in-the-wrong-sub-flow", "step-twice", "steps-in-the-wrong-order"],
+)
+async def test_a_login_flow_with_the_right_names_in_the_wrong_shape_is_not_bound(
+    change: Callable[[FakeKeycloak], None], capfd: pytest.CaptureFixture[str]
+) -> None:
+    """Order, level and count count too: such a flow is kept and binds no client."""
+    old = _realm_as_imported()
+    approve = next(c for c in old["clients"] if c["clientId"] == "meho-cli-approve")
+    del approve["authenticationFlowBindingOverrides"]
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(old)
+    change(kc)
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    assert _steps(kc, _APPROVAL_FLOW) != _APPROVAL_STEPS
+    assert (
+        f"login flow {_APPROVAL_FLOW}: kept, but its steps differ from the realm file; "
+        "no client is bound to it"
+    ) in capfd.readouterr().out
+    assert "authenticationFlowBindingOverrides" not in kc.clients["meho-cli-approve"]
+
+
+def _drop_the_code_step(kc: FakeKeycloak) -> None:
+    kc.flows[f"{_APPROVAL_FLOW} - one-time code"]["executions"].pop()
+
+
+def _turn_the_password_step_off(kc: FakeKeycloak) -> None:
+    kc.flows[_APPROVAL_FLOW]["executions"][0]["requirement"] = "DISABLED"
+
+
+@pytest.mark.parametrize(
+    "change", [_drop_the_code_step, _turn_the_password_step_off], ids=["step-missing", "step-off"]
+)
+async def test_an_unfinished_flow_without_the_right_to_change_it_names_the_role(
+    change: Callable[[FakeKeycloak], None],
+) -> None:
+    """``meho-admin`` may read login flows but not change them: the stop names manage-realm."""
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(_realm_as_imported())
+    change(kc)
+    kc.flow_write_rights = False
+
+    with pytest.raises(RealmStageError) as stopped:
+        await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    assert str(stopped.value).startswith(f"login flow {_APPROVAL_FLOW}")
+    assert str(stopped.value).endswith(NO_FLOW_RIGHT)
+    assert "HTTP 403" not in str(stopped.value)
 
 
 async def test_upgrade_sets_the_token_settings_of_an_existing_approval_client(

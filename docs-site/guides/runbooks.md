@@ -146,8 +146,10 @@ meho runbook next 7c2a…
 `confirm` verify asks you to confirm; an `operation_call` verify
 dispatches its op and checks the result against `expect`. The run only
 advances when verify passes. A failing verify marks the step `failed`.
-A failed step cannot be retried: abort the run, fix the cause, and
-start a new run. Over MCP the same call is
+To try a failed step again, fix the cause and run
+`meho runbook next --retry` (over MCP: `"retry": true`). The step's
+`verify` runs again. If it passes, the run goes on. Every attempt stays
+on record. You can also abort the run instead. Over MCP the same call is
 `meho_runbook_next {"run_id": "…", "last_verified": true}`. For a
 `confirm` step, also send
 `"verify_response": {"type": "confirm", "answer": "yes"}`; any other
@@ -168,7 +170,7 @@ state (run-level only — never step contents) with `meho runbook runs`.
 
 | Symptom | What it means | Fix |
 |---|---|---|
-| `next` refuses: "previous step … is in 'failed' state; abort the run" | The step's `verify` did not pass (a `confirm` you did not answer `yes`, or an `operation_call` whose result didn't match `expect`). A failed step cannot be retried. | Abort the run, fix the underlying condition, and start a new run. |
+| `next` refuses: "previous step … is in 'failed' state; retry the step (retry=true) or abort the run" | The step's `verify` did not pass (a `confirm` you did not answer `yes`, or an `operation_call` whose result didn't match `expect`). | Fix the underlying condition, then run `meho runbook next --retry`. Or abort the run. |
 | The step's operation returns `awaiting_approval` instead of running | You ran a `requires_approval` op with `call_operation` — a runbook step waits for approval like any other call. | Clear it on the approvals surface ([Approvals and break-glass](approvals-and-break-glass.md)), then continue. |
 | `show-template` returns `-32603` / 500 with `template_body_validation_failed` | A stored template predates a schema tightening (e.g. an empty step body from before the non-empty-body rule) and fails read-time re-validation. | A tenant_admin re-edits the offending step; on-prem deploys apply the backfill migration named in the error. |
 | `draft-template` rejected — "disallowed substitution in op_id" | A step or verify tried to parameterise the `op_id` itself. Params may be substituted; the operation identity may not. | Hard-code `op_id`; use `params` for the variable parts. |

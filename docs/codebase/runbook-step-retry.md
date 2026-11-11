@@ -24,7 +24,13 @@ the run. Now the assignee can fix the cause and try the step again.
   writes its usual audit row for every attempt. A `confirm` step writes an
   audit row (`runbook.confirm`) for every attempt, pass or fail, in the
   same transaction as the step change. A failed confirm plus a retry
-  leaves two rows.
+  leaves two rows. Each row carries the session it ran in
+  (`agent_session_id`: the agent run, or the MCP session), so session
+  replay shows every attempt.
+- The write locks the run row (`SELECT ... FOR UPDATE`). Two calls on the
+  same run at the same time write one after the other. The second one reads
+  what the first one wrote: it adds its attempt to the list, or refuses
+  when the first one already passed the step.
 
 ## History
 
@@ -32,6 +38,10 @@ the run. Now the assignee can fix the cause and try the step again.
 attempt, oldest first: `at`, `passed` and `verify_response`. A retry adds
 an entry. No entry is replaced. `verify_response` still holds the latest
 result.
+
+A step that failed before the upgrade has no list yet (NULL). Its failed
+`verify_response` becomes the first entry on the first retry, with
+`at: null` because the time of that attempt is not known.
 
 ## References
 

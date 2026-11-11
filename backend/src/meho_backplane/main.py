@@ -209,6 +209,10 @@ from meho_backplane.operations.approval_expiry import (
     start_approval_expiry_sweeper,
     stop_approval_expiry_sweeper,
 )
+from meho_backplane.operations.approval_presence import (
+    start_presence_challenge_cleanup,
+    stop_presence_challenge_cleanup,
+)
 from meho_backplane.operations.approval_restart_recovery import recover_interrupted_approvals
 from meho_backplane.operations.ingest import (
     build_anthropic_ingest_llm_client,
@@ -609,6 +613,7 @@ class _BackgroundTasks:
     audit_raw_payload_retention: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
     approval_expiry: asyncio.Task[None] | None
+    approval_presence_cleanup: asyncio.Task[None]
     scheduler: asyncio.Task[None] | None
     sensor_runner: asyncio.Task[None] | None
     sensor_watchdog: asyncio.Task[None] | None
@@ -714,6 +719,9 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
     approval_expiry: asyncio.Task[None] | None = None
     if settings.approval_expiry_enabled:
         approval_expiry = start(start_approval_expiry_sweeper)
+    # #6214 -- always on: once a day, delete passkey touch challenges that
+    # were never used and are older than 14 days.
+    approval_presence_cleanup = start(start_presence_challenge_cleanup)
     # G11.3-T2 #823 — cron + one-off agent-trigger scheduler. Gated on
     # SCHEDULER_ENABLED so operators using an external orchestrator
     # (or running the test path without a scheduler) can opt out.
@@ -792,6 +800,7 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
         audit_raw_payload_retention=audit_raw_payload_retention,
         grant_expiry=grant_expiry,
         approval_expiry=approval_expiry,
+        approval_presence_cleanup=approval_presence_cleanup,
         scheduler=scheduler,
         sensor_runner=sensor_runner,
         sensor_watchdog=sensor_watchdog,
@@ -848,6 +857,7 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_sensor_runner(tasks.sensor_runner)
     if tasks.scheduler is not None:
         await stop_scheduler(tasks.scheduler)
+    await stop_presence_challenge_cleanup(tasks.approval_presence_cleanup)
     if tasks.approval_expiry is not None:
         await stop_approval_expiry_sweeper(tasks.approval_expiry)
     if tasks.grant_expiry is not None:

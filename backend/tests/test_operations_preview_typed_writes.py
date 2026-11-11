@@ -41,6 +41,7 @@ from meho_backplane.operations._preview import (
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.redaction import clear_overrides
 from meho_backplane.settings import get_settings
+from tests.mcp_test_fixtures import build_operator
 from tests.test_operations_request_preview import (
     _FakeTarget,
     _handler_returning_ok,
@@ -121,7 +122,7 @@ async def _preview(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
 async def test_caution_write_without_requires_approval_previews(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """``targets.register`` runs at once for a person, but it still previews."""
+    """``targets.register`` runs at once only from the web interface, and it still previews."""
     await _register(stub_embedding_service, "targets.register", safety_level="caution")
     params = {"name": "lab-a", "product": "demo"}
 
@@ -311,7 +312,7 @@ async def test_switch_does_not_change_gated_or_destructive_previews(
 
 def _shown_preview_tool() -> dict[str, Any]:
     definition = mcp_registry._TOOLS["preview_operation"][0]
-    return tool_for_settings(definition).to_wire()
+    return tool_for_settings(definition, build_operator()).to_wire()
 
 
 @pytest.mark.parametrize("short", [False, True], ids=["full-text", "short-text"])

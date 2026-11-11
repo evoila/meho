@@ -12,16 +12,18 @@ shows its registered text, unchanged.
 
 :func:`preview_tool_for_settings` is the tool's ``for_settings`` function.
 It runs the team-knowledge step first, then swaps the typed-write parts of
-the description, then applies the short text when ``MCP_SHORT_TOOL_TEXTS``
-is on (the short text that matches this switch).
+the description, then applies the short text when the session sees short
+texts (:func:`~meho_backplane.mcp.short_texts.short_texts_shown`; the short
+text that matches this switch).
 """
 
 from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.registry import ToolDefinition
-from meho_backplane.mcp.short_texts import ShortText, apply_short_text
+from meho_backplane.mcp.short_texts import ShortText, apply_short_text, short_texts_shown
 from meho_backplane.mcp.tools._operation_recall import recall_schema_for_settings
 from meho_backplane.mcp.tools._short_tool_texts import PREVIEW_OPERATION_SHORT
 from meho_backplane.settings import get_settings
@@ -64,8 +66,8 @@ PREVIEW_OPERATION_TYPED_WRITES_SHORT: Final = ShortText(
 )
 
 
-def preview_tool_for_settings(definition: ToolDefinition) -> ToolDefinition:
-    """Return ``preview_operation`` as it is shown under the current settings."""
+def preview_tool_for_settings(definition: ToolDefinition, operator: Operator) -> ToolDefinition:
+    """Return ``preview_operation`` as *operator*'s session sees it under the current settings."""
     shown = recall_schema_for_settings(definition)
     settings = get_settings()
     if settings.preview_typed_writes:
@@ -73,7 +75,7 @@ def preview_tool_for_settings(definition: ToolDefinition) -> ToolDefinition:
         for old, new in TYPED_WRITE_TEXT_SWAPS:
             description = description.replace(old, new)
         shown = shown.model_copy(update={"description": description})
-    if not settings.mcp_short_tool_texts:
+    if not short_texts_shown(operator):
         return shown
     short = (
         PREVIEW_OPERATION_TYPED_WRITES_SHORT

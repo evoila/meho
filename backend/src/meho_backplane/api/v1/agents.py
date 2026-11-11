@@ -63,6 +63,7 @@ from fastapi import status as http_status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.agents.grant_sets import StartingGrantsError, audit_fields
 from meho_backplane.agents.schemas import (
     AgentDefinitionCreate,
     AgentDefinitionRead,
@@ -179,12 +180,15 @@ async def create_agent(
     ``agent_already_exists`` (the per-tenant name natural-key contract
     the ``agent_definition_tenant_name_idx`` unique index enforces).
     The system prompt / toolset content is never bound to the audit row;
-    only the agent name is.
+    only the agent name and the starting grant pick are. A missing pick
+    (while the switch is not ``off`` and the agent has no grant) or an
+    unknown target name returns 422 and writes nothing.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_AGENT_OP_IDS["create"],
         audit_op_class="write",
         audit_agent_name=body.name,
+        **audit_fields(body.starting_grants),
     )
     service = AgentDefinitionService()
     try:
@@ -207,6 +211,11 @@ async def create_agent(
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="identity_ref_unknown",
+        ) from exc
+    except StartingGrantsError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
         ) from exc
 
 

@@ -4,7 +4,7 @@ G11.2-T6 (#819) under Initiative #803 (the P3 agent identity + RBAC + approval g
 
 ## Overview
 
-A newly-registered agent starts with **no** `agent_permission` rows. Without an explicit grant, the agent operates under `safety_level`-based defaults: safe ops auto-execute; caution, dangerous and destructive ops wait for a person's approval (#3980). Agents never approve, not their own requests and not anyone else's. Admin-class ops are never auto-granted.
+A newly-registered agent starts with the rows of the starting grant set a person picked (see "Starting grant sets" below), or with **no** `agent_permission` rows. Without an explicit grant, the agent operates under `safety_level`-based defaults: safe ops auto-execute; caution, dangerous and destructive ops wait for a person's approval (#3980). Agents never approve, not their own requests and not anyone else's. Admin-class ops are never auto-granted.
 
 Operators (`tenant_admin`) issue grants to extend agent access for a specific op-pattern on an optional target scope. Grants are permanent by default; supply `expires_at` to create a **time-bounded elevation** (change window) that reverts automatically: the permission resolver (T3 `auth/permissions.py`) ignores rows past their `expires_at` **immediately at expiry**, and the expiry sweeper deletes them on its periodic tick (the sweep is the durable cleanup; the resolver filter makes the revert exact).
 
@@ -139,6 +139,48 @@ stricter verdict wins. The row matters only when a later switch makes
 marker shows in `meho agent grant list` (the `CREATED_BY` column), and an
 admin removes the row like any other grant. The downgrade deletes only
 rows with the marker.
+
+## Starting grant sets (`agents/grant_sets.py`, #6191)
+
+When a person registers an agent principal or creates an agent
+definition, they pick the agent's first grants in the field
+`starting_grants: {set, targets}`:
+
+| `set` | Rows written | What the agent can do |
+|---|---|---|
+| `none` | no row | Nothing runs until an admin adds a grant (with `AGENT_GRANT_REQUIRED=on`). Discovery tools still work. |
+| `read-everything` | one row: `op_pattern="*"`, `target_scope="*"`, `auto-execute` | `safe` operations run at once on every target. Everything above `safe` waits for a person (the risk-level ceiling). |
+| `read-targets` | one row per named target: `op_pattern="*"`, `target_scope=<target id>`, `auto-execute` | The same, but only on those targets. |
+
+Rules:
+
+- `targets` is a list of target names (or aliases), used only by
+  `read-targets`. They are resolved in the caller's tenant with
+  `targets/resolver.py::resolve_target`. A name that matches no target,
+  or more than one, gives 422 (`starting_grants_target_unknown` /
+  `starting_grants_target_ambiguous`) and writes nothing. The same target
+  named twice gives one row.
+- While `AGENT_GRANT_REQUIRED` is `observe` or `on`, register refuses a
+  request without the field: 422 `starting_grants_required`, with the
+  three choices in the text. With `off` the field may be left out.
+- For a definition the field is required only when the agent that
+  `identity_ref` names has no live (not expired) grant yet. The rows go
+  to that agent principal. A row the agent already has is skipped.
+- Register resolves the names before it creates the Keycloak client, so
+  a bad pick creates nothing. The rows go in the same database
+  transaction as the principal row; if they fail, the principal row is
+  not written and the Keycloak client is deleted again.
+- Each row has `created_by_sub` = the person who created the agent. The
+  rows are ordinary grants: they show in `meho agent grant list`, and an
+  admin removes them like any other grant.
+- The audit row of the creation carries `starting_grants` (the set, or
+  `not-chosen` when no set was picked) and, for `read-targets`,
+  `starting_grant_targets` (the names as sent).
+
+Surfaces: `POST /api/v1/agent-principals`, `POST /api/v1/agents`, and
+the admin MCP tools `meho_agent_principals_register` and
+`meho_agents_create`. The CLI flags and the console pick come later
+(#6192).
 
 ## Elevation sweeper (`agents/grant_expiry.py`)
 

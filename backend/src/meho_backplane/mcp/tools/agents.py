@@ -55,6 +55,11 @@ from typing import Any, Final
 import structlog
 from pydantic import ValidationError
 
+from meho_backplane.agents.grant_sets import (
+    STARTING_GRANTS_JSON_SCHEMA,
+    StartingGrantsError,
+    audit_fields,
+)
 from meho_backplane.agents.schemas import (
     AgentDefinitionCreate,
     AgentDefinitionRead,
@@ -211,6 +216,7 @@ async def _create_handler(
         audit_op_id=_AGENT_OP_IDS["create"],
         audit_op_class="write",
         audit_agent_name=payload.name,
+        **audit_fields(payload.starting_grants),
     )
     service = AgentDefinitionService()
     try:
@@ -223,6 +229,8 @@ async def _create_handler(
         raise McpInvalidParamsError("agent_already_exists") from exc
     except AgentIdentityRefInvalidError as exc:
         raise McpInvalidParamsError("identity_ref_unknown") from exc
+    except StartingGrantsError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
     return {"name": entry.name, "agent": _row_to_dict(entry)}
 
 
@@ -242,6 +250,9 @@ register_mcp_tool(
             "duplicate name returns an error with detail "
             "'agent_already_exists'; an unknown / cross-tenant / revoked "
             "identity_ref returns 'identity_ref_unknown'. "
+            "starting_grants picks the first grants of that agent; it is "
+            "required while AGENT_GRANT_REQUIRED is not 'off' and the agent "
+            "has no grant yet. "
             "Response: {name, agent: {...}}."
         ),
         inputSchema={
@@ -288,6 +299,7 @@ register_mcp_tool(
                     "type": "boolean",
                     "description": "Soft on/off switch (default true).",
                 },
+                "starting_grants": STARTING_GRANTS_JSON_SCHEMA,
             },
             "required": [
                 "name",

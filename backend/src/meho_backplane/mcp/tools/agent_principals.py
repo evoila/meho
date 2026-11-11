@@ -52,7 +52,13 @@ from __future__ import annotations
 from typing import Any, Final
 
 import structlog
+from pydantic import ValidationError
 
+from meho_backplane.agents.grant_sets import (
+    STARTING_GRANTS_JSON_SCHEMA,
+    StartingGrants,
+    audit_fields,
+)
 from meho_backplane.auth.agent_principals import (
     AgentPrincipalCreate,
     AgentPrincipalExistsError,
@@ -92,6 +98,15 @@ def _require_name(arguments: dict[str, Any]) -> str:
     if not isinstance(name, str) or not name:
         raise McpInvalidParamsError("name is required and must be a non-empty string")
     return name
+
+
+def _parse_starting_grants(raw: object) -> StartingGrants | None:
+    if raw is None:
+        return None
+    try:
+        return StartingGrants.model_validate(raw)
+    except ValidationError as exc:
+        raise McpInvalidParamsError(f"invalid starting_grants: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -160,17 +175,19 @@ async def _register_handler(
     owner_sub: str | None = arguments.get("owner_sub") or None
     if owner_sub is not None and not isinstance(owner_sub, str):
         raise McpInvalidParamsError("owner_sub must be a string when provided")
+    starting = _parse_starting_grants(arguments.get("starting_grants"))
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_IDS["register"],
         audit_op_class="write",
         audit_agent_principal_name=name,
+        **audit_fields(starting),
     )
     service = AgentPrincipalService()
     try:
         entry = await service.register(
             tenant_id=operator.tenant_id,
             created_by_sub=operator.sub,
-            payload=AgentPrincipalCreate(name=name, owner_sub=owner_sub),
+            payload=AgentPrincipalCreate(name=name, owner_sub=owner_sub, starting_grants=starting),
         )
     except AgentPrincipalExistsError as exc:
         raise McpInvalidParamsError(
@@ -213,6 +230,8 @@ register_mcp_tool(
             "and inserts a DB row. "
             "Returns the created principal record. "
             "409 when a principal with the same name already exists. "
+            "starting_grants picks the agent's first grants; it is required "
+            "while AGENT_GRANT_REQUIRED is not 'off'. "
             "Requires tenant_admin."
         ),
         inputSchema={
@@ -244,6 +263,7 @@ register_mcp_tool(
                         "(kill-switch owner). Defaults to the caller's sub."
                     ),
                 },
+                "starting_grants": STARTING_GRANTS_JSON_SCHEMA,
             },
             "required": ["name"],
             "additionalProperties": False,

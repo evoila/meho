@@ -761,6 +761,13 @@ const (
 	ShowTemplateResponseStatusPublished  ShowTemplateResponseStatus = "published"
 )
 
+// Defines values for StartingGrantSet.
+const (
+	StartingGrantSetNone           StartingGrantSet = "none"
+	StartingGrantSetReadEverything StartingGrantSet = "read-everything"
+	StartingGrantSetReadTargets    StartingGrantSet = "read-targets"
+)
+
 // Defines values for StatusFilterValue.
 const (
 	StatusFilterValueActive    StatusFilterValue = "active"
@@ -1212,9 +1219,12 @@ type AgentDefinitionCreate struct {
 	ModelTier    AgentModelTier          `json:"model_tier"`
 	Name         string                  `json:"name"`
 	OutputSchema *map[string]interface{} `json:"output_schema"`
-	SystemPrompt string                  `json:"system_prompt"`
-	Toolset      *map[string]interface{} `json:"toolset,omitempty"`
-	TurnBudget   int                     `json:"turn_budget"`
+
+	// StartingGrants The first grants of a new agent, picked when it is registered or defined.
+	StartingGrants *StartingGrants         `json:"starting_grants,omitempty"`
+	SystemPrompt   string                  `json:"system_prompt"`
+	Toolset        *map[string]interface{} `json:"toolset,omitempty"`
+	TurnBudget     int                     `json:"turn_budget"`
 }
 
 // AgentDefinitionListResponse Response envelope for “GET /api/v1/agents“.
@@ -1473,6 +1483,9 @@ type AgentModelTier string
 type AgentPrincipalCreate struct {
 	Name     string  `json:"name"`
 	OwnerSub *string `json:"owner_sub"`
+
+	// StartingGrants The first grants of a new agent, picked when it is registered or defined.
+	StartingGrants *StartingGrants `json:"starting_grants,omitempty"`
 }
 
 // AgentPrincipalListResponse Response envelope for “GET /api/v1/agent-principals“.
@@ -10737,6 +10750,18 @@ type StartRunRequest struct {
 	Target       string                  `json:"target"`
 	TemplateSlug string                  `json:"template_slug"`
 	WorkRef      *string                 `json:"work_ref"`
+}
+
+// StartingGrantSet The three starting grant sets a person can pick.
+type StartingGrantSet string
+
+// StartingGrants The first grants of a new agent, picked when it is registered or defined.
+type StartingGrants struct {
+	// Set The three starting grant sets a person can pick.
+	Set StartingGrantSet `json:"set"`
+
+	// Targets Target names. Only for 'read-targets', and required there.
+	Targets *[]string `json:"targets,omitempty"`
 }
 
 // StatusFilterValue Closed enum of the trigger “status“ values exposed in the filter URL.

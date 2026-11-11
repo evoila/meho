@@ -1046,7 +1046,13 @@ per-user rule sync). Checked against the pfSense
   When the Vault write fails, the user is removed again, by name and `uid`;
   overrides with the name stay. The broadcast class is `credential_mint`.
 - **User delete.** Refused for `not_found`, `ambiguous` and the built-in admin
-  account. It asks every enabled user-login server for its connected clients
+  account. It is refused (`rules_remain`) while a firewall rule carries the
+  user's tag `meho-vpn-user:<name>`, also with `force`. Such a rule grants
+  access by tunnel address, and the delete frees that address, so
+  `pfsense.openvpn.address.next_free` could give it to the next user. Remove
+  the rules with `pfsense.filter.rule.delete` first; the answer lists their
+  `ridentifier` in `tagged_rules`. The fragment counts the tagged rules again
+  and changes nothing when it finds one. It asks every enabled user-login server for its connected clients
   (management socket, `status 2`). A session counts when the login name
   (`Username` column) or the certificate name (`Common Name`) is the user, so
   a server that also checks a certificate is covered. It refuses while the

@@ -121,12 +121,22 @@ _NET_TCP = "203.0.113.0/24"
 _SERVERS = _server("1", _NET_UDP) + _server("2", _NET_TCP)
 
 
-def _config(*, servers: str = _SERVERS, csc: str = "", users: str = "") -> str:
+def _config(*, servers: str = _SERVERS, csc: str = "", users: str = "", rules: str = "") -> str:
     return (
         "<pfsense><system>"
         f"<group><name>all</name><member>0</member></group>{_user('admin', '0', scope='system')}"
-        f"{users}</system>"
+        f"{users}</system><filter>{rules}</filter>"
         f"<openvpn>{servers}{csc}</openvpn></pfsense>"
+    )
+
+
+def _tagged_rule(tracker: str, name: str, source: str) -> str:
+    """A pass rule on the OpenVPN tab with the tag of ``pfsense.openvpn.rule.sync``."""
+    return (
+        f"<rule><tracker>{tracker}</tracker><type>pass</type><interface>openvpn</interface>"
+        f"<ipprotocol>inet</ipprotocol><source><address>{source}</address></source>"
+        "<destination><address>192.0.2.0/24</address></destination>"
+        f"<descr>meho-vpn-user:{name}</descr></rule>"
     )
 
 
@@ -1294,6 +1304,66 @@ async def test_delete_refuses_a_duplicate_name() -> None:
     assert not fake.wrote
 
 
+@pytest.mark.parametrize("force", [False, True])
+async def test_delete_is_refused_while_tagged_rules_remain(force: bool) -> None:
+    """A tagged rule grants access by address; the delete would free that address."""
+    rule = _tagged_rule("123456789", "guest-1", "198.51.100.5")
+    users = _user("guest-1", "2000") + _user("other", "2001")
+    fake = _Fake(
+        [_config(users=users, csc=_csc("guest-1", "1", "198.51.100.5/24"), rules=rule)],
+        sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY},
+    )
+    out = await _delete(fake, force=force)
+    assert out["status"] == "rules_remain" and out["tagged_rules"] == ["123456789"]
+    assert not out["applied"] and "pfsense.filter.rule.delete" in out["guidance"]
+    assert not fake.wrote
+    Draft202012Validator(user_module._DELETE_RESPONSE_SCHEMA).validate(out)
+
+
+async def test_a_refused_delete_keeps_the_address_away_from_the_next_user() -> None:
+    """After the refused delete, next_free does not hand out the old user's address."""
+    rule = _tagged_rule("123456789", "guest-1", "198.51.100.2")
+    config = _config(
+        users=_user("guest-1", "2000"),
+        csc=_csc("guest-1", "1", "198.51.100.2/24"),
+        rules=rule,
+    )
+    fake = _Fake([config], sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY})
+    assert (await _delete(fake))["status"] == "rules_remain"
+    free = await _next_free(fake)
+    assert free["status"] == "found" and free["address_offset"] == 3
+
+
+async def test_a_tagged_rule_of_another_user_does_not_block_the_delete() -> None:
+    rule = _tagged_rule("123456789", "other", "198.51.100.6")
+    after = _config(users=_user("other", "2001"), rules=rule)
+    fake = _Fake(
+        [_config(users=_user("guest-1", "2000") + _user("other", "2001"), rules=rule), after],
+        sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY},
+    )
+    out = await _delete(fake)
+    assert out["status"] == "deleted" and out["tagged_rules"] == []
+
+
+async def test_delete_is_refused_when_the_fragment_finds_a_new_tagged_rule() -> None:
+    fake = _Fake(
+        [_vpn_config()],
+        sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY},
+        playback_out="MEHO_VPN_RULES_REMAIN=1\n",
+    )
+    out = await _delete(fake)
+    assert out["status"] == "rules_remain" and not out["applied"]
+    assert len(fake.played) == 1
+
+
+async def test_delete_fails_when_the_rule_list_cannot_be_read() -> None:
+    config = _vpn_config().replace("<filter></filter>", "")
+    fake = _Fake([config], sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY})
+    with pytest.raises(RuntimeError, match="firewall rules could not be read"):
+        await _delete(fake)
+    assert not fake.wrote
+
+
 async def test_delete_fails_when_the_user_is_still_there_after_the_write() -> None:
     fake = _Fake([_vpn_config()], sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY})
     with pytest.raises(RuntimeError, match="verification failed"):
@@ -1349,6 +1419,26 @@ def test_delete_fragment_run_in_php(tmp_path: Path) -> None:
         ["local_user_del", "guest-1"],
         ["write_config", "meho: delete VPN user guest-1"],
     ]
+
+
+@_needs_php
+def test_delete_fragment_run_in_php_writes_nothing_while_a_tagged_rule_remains(
+    tmp_path: Path,
+) -> None:
+    users = [
+        {"name": "admin", "uid": "0", "scope": "system"},
+        {"name": "guest-1", "uid": "2000", "scope": "user"},
+    ]
+    before = _php_config([_csc_row("guest-1", "1", "198.51.100.5/24")], users)
+    before["filter"] = {
+        "rule": [
+            {"tracker": "1", "descr": "meho-vpn-user:other"},
+            {"tracker": "2", "descr": " meho-vpn-user:guest-1 "},
+        ]
+    }
+    printed, out = _run_php(tmp_path, before, build_user_delete_playback("guest-1"))
+    assert printed.strip() == "MEHO_VPN_RULES_REMAIN=1"
+    assert out["config"] == before and out["calls"] == []
 
 
 @_needs_php

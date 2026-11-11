@@ -16,7 +16,8 @@ approval) for the local-database users that OpenVPN servers in the mode
   only that it was stored.
 * ``pfsense.openvpn.user.delete`` -- removes the user and the client
   overrides that carry its name. Refused while the user is connected,
-  unless ``force`` is given.
+  unless ``force`` is given, and always while pass rules tagged with the
+  user's name remain.
 
 The create steps
 ----------------
@@ -52,9 +53,15 @@ The delete steps
 ----------------
 
 The handler reads ``config.xml`` (refuses ``not_found``, ``ambiguous`` and
-the built-in admin account), asks every enabled user-login OpenVPN server
+the built-in admin account). It refuses ``rules_remain`` while a firewall
+rule carries the user's tag ``meho-vpn-user:<name>`` (see
+:mod:`~meho_backplane.connectors.pfsense.ops_openvpn_rule`), even with
+``force``: such a rule grants access by tunnel address, and the delete
+frees that address for the next user. Then it asks every enabled user-login OpenVPN server
 for its connected clients through the server's management socket
-(``status 2``), then plays back one fragment: ``openvpn_delete_csc()`` and
+(``status 2``), then plays back one fragment. The fragment counts the tagged rules again
+and changes nothing when there are any (``MEHO_VPN_RULES_REMAIN``). Else
+it does ``openvpn_delete_csc()`` and
 removal of each override with that common name, ``local_user_del()``,
 removal of the user, ``write_config()``. A server whose answer cannot be
 read counts as unknown, not as "nobody connected": the call is refused
@@ -82,6 +89,8 @@ from meho_backplane.connectors.pfsense.openvpn_config import (
     parse_openvpn_servers,
 )
 from meho_backplane.connectors.pfsense.ops import PfSenseOp
+from meho_backplane.connectors.pfsense.ops_filter_rule import parse_filter_rules_xml
+from meho_backplane.connectors.pfsense.ops_openvpn_rule import rule_tag
 from meho_backplane.connectors.pfsense.ops_user_write import (
     USER_NAME_RE,
     _refusal,
@@ -123,6 +132,8 @@ _CREATED_RE: Final = re.compile(rf"^{_CREATED_MARKER}([0-9]{{1,10}})\s*$", re.MU
 _EXISTS_MARKER: Final = "MEHO_VPN_EXISTS"
 _EXISTS_RE: Final = re.compile(rf"^{_EXISTS_MARKER}\s*$", re.MULTILINE)
 _UID_RE: Final = re.compile(r"^[0-9]{1,10}$")
+_RULES_REMAIN_MARKER: Final = "MEHO_VPN_RULES_REMAIN="
+_RULES_REMAIN_RE: Final = re.compile(rf"^{_RULES_REMAIN_MARKER}([0-9]+)\s*$", re.MULTILINE)
 
 _MOUNT_RE: Final = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _VAULT_PATH_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
@@ -232,7 +243,9 @@ def build_user_create_playback(name: str, descr: str) -> str:
 def build_user_delete_playback(name: str) -> str:
     """Return the fragment that removes ONE local user and the overrides with its name.
 
-    Acts only when exactly one user has the name and it is not uid 0.
+    Acts only when exactly one user has the name, it is not uid 0, and no
+    firewall rule carries the user's tag. When tagged rules remain, it
+    prints ``MEHO_VPN_RULES_REMAIN=<count>`` and changes nothing.
     """
     return _build_user_remove_playback(name, uid=None)
 
@@ -252,9 +265,23 @@ def _build_user_remove_playback(name: str, *, uid: str | None) -> str:
     name = _validate_user_name(name)
     users = "$config['system']['user']"
     csc = "$config['openvpn']['openvpn-csc']"
+    rules = "$config['filter']['rule']"
     guard = f"$meho_found === 1 && (string){users}[$meho_idx]['uid'] !== '0'"
     if uid is not None:
         guard += f" && (string){users}[$meho_idx]['uid'] === {_php_squote(uid)}"
+    else:
+        guard += " && $meho_tagged === 0"
+    tagged = [
+        "$meho_tagged = 0;",
+        f"if (isset({rules}) && is_array({rules})) {{",
+        f"  foreach ({rules} as $meho_r) {{",
+        "    if (isset($meho_r['descr'])",
+        f"        && trim((string)$meho_r['descr']) === {_php_squote(rule_tag(name))}) {{",
+        "      $meho_tagged++;",
+        "    }",
+        "  }",
+        "}",
+    ]
     overrides = [
         f"  if (isset({csc}) && is_array({csc})) {{",
         f"    foreach ({csc} as $meho_j => $meho_e) {{",
@@ -283,6 +310,7 @@ def _build_user_remove_playback(name: str, *, uid: str | None) -> str:
         "    }",
         "  }",
         "}",
+        *(tagged if uid is None else []),
         f"if ({guard}) {{",
         f"  $meho_user = {users}[$meho_idx];",
         *(overrides if uid is None else []),
@@ -293,6 +321,12 @@ def _build_user_remove_playback(name: str, *, uid: str | None) -> str:
         f"  write_config({_php_squote(f'meho: {what} {name}')});",
         "}",
     ]
+    if uid is None:
+        lines += [
+            "if ($meho_tagged > 0) {",
+            f"  echo '{_RULES_REMAIN_MARKER}' . $meho_tagged . \"\\n\";",
+            "}",
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -543,6 +577,37 @@ async def _connected_sessions(
     return total
 
 
+def _tagged_rules(xml_text: str, name: str) -> list[str]:
+    """Return the ``ridentifier`` of every firewall rule tagged as *name*'s VPN rule.
+
+    Raises when the rule list cannot be read: unknown is not "no rules".
+    """
+    try:
+        stored = parse_filter_rules_xml(xml_text)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"openvpn.user.delete: the firewall rules could not be read: {exc}"
+        ) from exc
+    tag = rule_tag(name)
+    return [str(r.get("tracker")) for r in stored if (r.get("descr") or "").strip() == tag]
+
+
+def _rules_remain(
+    result: dict[str, Any], name: str, count: int, trackers: list[str]
+) -> dict[str, Any]:
+    ids = f" (ridentifier {', '.join(trackers)})" if trackers else ""
+    return {
+        **result,
+        "status": "rules_remain",
+        "tagged_rules": trackers,
+        "guidance": (
+            f"{count} firewall rule(s) tagged {rule_tag(name)!r}{ids} still grant access by the "
+            "user's tunnel address; nothing changed. Remove them with pfsense.filter.rule.delete "
+            "first. force does not skip this check."
+        ),
+    }
+
+
 def _csc_rows(entries: list[CscEntry], name: str) -> list[dict[str, Any]]:
     return [
         {
@@ -573,6 +638,7 @@ async def pfsense_openvpn_user_delete(
         "force": force,
         "connected_sessions": None,
         "overrides_removed": 0,
+        "tagged_rules": [],
         "applied": False,
         "verified": False,
         "guidance": None,
@@ -582,6 +648,9 @@ async def pfsense_openvpn_user_delete(
     status, guidance = _refusal(rows, name)
     if status is not None:
         return {**result, "status": status, "guidance": guidance}
+    trackers = _tagged_rules(before_xml, name)
+    if trackers:
+        return _rules_remain(result, name, len(trackers), trackers)
     entries = parse_csc_entries(before_xml)
     mine = [e for e in entries if e.common_name == name]
     result["overrides_removed"] = len(mine)
@@ -605,13 +674,16 @@ async def pfsense_openvpn_user_delete(
                 "Use force to delete anyway.",
             }
 
-    await _apply_playback(
+    played = await _apply_playback(
         self,
         target,
         script_name=f"meho_openvpn_user_delete_{re.sub(r'[^A-Za-z0-9]', '_', name)}",
         script_body=build_user_delete_playback(name),
         operator=operator,
     )
+    remain = _RULES_REMAIN_RE.search(played)
+    if remain is not None:
+        return _rules_remain(result, name, int(remain.group(1)), [])
     after_xml = await _read_config_xml(self, target, operator)
     after_rows = _user_rows(after_xml)
     others_ok = _other_users(after_rows, name) == _other_users(rows, name)
@@ -675,7 +747,8 @@ async def _delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "overrides_removed": None,
         "note": (
             "Deletes the login and the client overrides with this name. Refused while the "
-            "user is connected unless force is set (checked when the op runs)."
+            "user is connected unless force is set (checked when the op runs), and while "
+            "firewall rules tagged with the user remain."
         ),
     }
     if ctx.connector_instance is None:
@@ -688,6 +761,8 @@ async def _delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     status, _ = _refusal(_user_rows(xml_text), name)
     if status is not None:
         return {**preview, "refusal": status}
+    if _tagged_rules(xml_text, name):
+        return {**preview, "refusal": "rules_remain"}
     return {**preview, "overrides_removed": _csc_rows(parse_csc_entries(xml_text), name)}
 
 
@@ -793,12 +868,14 @@ _DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "protected",
                 "connected",
                 "connection_unknown",
+                "rules_remain",
             ],
         },
         "name": {"type": "string"},
         "force": {"type": "boolean"},
         "connected_sessions": {"type": ["integer", "null"]},
         "overrides_removed": {"type": "integer"},
+        "tagged_rules": {"type": "array", "items": {"type": "string"}},
         "applied": {"type": "boolean"},
         "verified": {"type": "boolean"},
         "guidance": {"type": ["string", "null"]},
@@ -811,6 +888,7 @@ _DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
         "force",
         "connected_sessions",
         "overrides_removed",
+        "tagged_rules",
         "applied",
         "verified",
         "guidance",
@@ -880,7 +958,8 @@ OPENVPN_USER_OPS: tuple[PfSenseOp, ...] = (
         description=(
             "Removes one local user and the OpenVPN client overrides with its name. "
             "Refused for an unknown name, a duplicate name and the admin account. Refused "
-            "while the user is connected, or when that cannot be read, unless force is true."
+            "while the user is connected, or when that cannot be read, unless force is true. "
+            "Always refused while firewall rules tagged with the user remain."
         ),
         parameter_schema={
             **_DELETE_PARAMETER_SCHEMA,
@@ -898,17 +977,19 @@ OPENVPN_USER_OPS: tuple[PfSenseOp, ...] = (
                     "login and keep the account, use ``pfsense.user.disable``."
                 ),
                 "preconditions": (
-                    "The user is known (``pfsense.user.list``). Use ``force`` only when the "
-                    "user may be cut off."
+                    "The user is known (``pfsense.user.list``). The user's tagged pass rules "
+                    "are removed first (``pfsense.filter.rule.delete``). Use ``force`` only "
+                    "when the user may be cut off."
                 ),
                 "parameter_hints": {
                     "name": "Required. Exact user name.",
                     "force": "Optional. Delete even when connected or when that is unknown.",
                 },
                 "output_shape": (
-                    "``{status, name, force, connected_sessions, overrides_removed, applied, "
-                    "verified, guidance}``. ``status`` is ``deleted`` after a verified "
-                    "removal, else the reason it was refused."
+                    "``{status, name, force, connected_sessions, overrides_removed, "
+                    "tagged_rules, applied, verified, guidance}``. ``status`` is ``deleted`` "
+                    "after a verified removal, else the reason it was refused. "
+                    "``rules_remain`` lists the tagged rules in ``tagged_rules``."
                 ),
                 "next_step": "Check the result with ``pfsense.user.list``.",
             }

@@ -1062,12 +1062,13 @@ async def test_pfsense_dhcp_leases_response_schema_matches_handler_rows() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_pfsense_ops_has_twenty_four_entries() -> None:
+def test_pfsense_ops_has_twenty_six_entries() -> None:
     """canary + 7 reads + dhcp.leases (#2849) + 2 writes (#3090) + 2 deletes (#3232)
     + 3 teardown-inverse deletes (#3313) + mgmt_flow.summary
     + user.list / route.static.list (#3954) + filter.rule.add / .delete (#3850)
-    + user.disable / user.enable (#3937) + diag.ping (#3965) = 24."""
-    assert len(PFSENSE_OPS) == 24
+    + user.disable / user.enable (#3937) + diag.ping (#3965)
+    + openvpn.clients / openvpn.log (#4093) = 26."""
+    assert len(PFSENSE_OPS) == 26
 
 
 def test_pfsense_ops_about_is_first() -> None:
@@ -1166,6 +1167,8 @@ def test_pfsense_ops_covers_expected_op_ids() -> None:
         "pfsense.user.disable",
         "pfsense.user.enable",
         "pfsense.diag.ping",
+        "pfsense.openvpn.clients",
+        "pfsense.openvpn.log",
     }
     assert op_ids == expected
 

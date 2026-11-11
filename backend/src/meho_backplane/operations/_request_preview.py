@@ -102,6 +102,7 @@ from meho_backplane.operations._preview_steps import (
     agent_no_grant_step_reason,
     preview_step_verdict,
 )
+from meho_backplane.operations._secret_values import split_reveal_secret
 from meho_backplane.operations._target_connector_match import mismatch_preview_envelope
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
@@ -110,6 +111,7 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
+from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
@@ -854,6 +856,11 @@ async def preview_dispatch(
     if isinstance(resolved, dict):
         return resolved  # the op or the target did not resolve (see _resolve_descriptor)
     descriptor, connector_id = resolved
+    # ``reveal_secret`` is a dispatch control, not an op param: the
+    # dispatcher strips it before the schema check and the hash, and a call
+    # that asks for the hidden values of a secret read gets the floor.
+    params, reveal_secret = split_reveal_secret(params)
+    raise_descriptor_for_reveal(descriptor, reveal_secret=reveal_secret)
     # The park check and the governance fields each run the policy gate.
     with agent_no_grant_log_scope():
         envelope = await _park_check_envelope(

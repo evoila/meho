@@ -199,7 +199,8 @@ def project_request_to_view(
     ``StrictUndefined``-safe.
 
     ``reveal_secret`` is ``True`` when the requester asked for the hidden
-    values of the answer: the approved run returns them to the requester.
+    values of the answer. Approving runs nothing: the operation runs once,
+    when the requester gets the values.
 
     ``withdrawn_at`` / ``withdraw_reason`` (#4987) say when and why the
     sender withdrew the request; both are ``None`` on any other row.

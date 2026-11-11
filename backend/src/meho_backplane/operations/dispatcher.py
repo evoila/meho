@@ -434,6 +434,7 @@ from meho_backplane.operations.composite import (
     composite_depth_var,
     get_dispatch_child,
 )
+from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.deny_reasons import (
     AGENT_REVEAL_REFUSED,
     POLICY_DENIED,
@@ -448,6 +449,7 @@ from meho_backplane.operations.dispatch_limits import (
 )
 from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.operations.reducer import (
+    SECRET_REVEAL_CONTEXT_KEY,
     PassThroughReducer,
     Reducer,
     full_result_capture_var,
@@ -2917,6 +2919,9 @@ def _build_reducer_context(
         "audit_id": str(audit_id),
         "source_kind": descriptor.source_kind,
     }
+    # A reveal's answer holds secret values: the reducer keeps no copy of it.
+    if reveal_secret_var.get() is True:
+        reducer_context[SECRET_REVEAL_CONTEXT_KEY] = True
     # G0.20-T7 (#1507): carry the operator's tenant id so the reducer can
     # spill the full materialized set into the tenant-scoped
     # :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -3960,6 +3965,9 @@ async def _dispatch_now(
                 params_hash=params_hash,
                 started=started,
             )
+        # A credential read that shows the hidden values only on request
+        # (vault.kv.read) waits for approval when the call asks for them.
+        raise_descriptor_for_reveal(descriptor, reveal_secret=reveal_secret)
         if not _approved:
             # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
             # / deny). The call site signature is unchanged; the function now

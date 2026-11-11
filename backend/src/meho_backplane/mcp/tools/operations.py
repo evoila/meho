@@ -725,8 +725,9 @@ register_mcp_tool(
                         "refused. Secret-named fields are hidden by default, "
                         "and a secret read hides every value. "
                         "`reveal_secret: true` returns the values to a "
-                        "person (audited). A service login's call waits for "
-                        "a person's approval first; an agent is refused."
+                        "person (audited). A service login's call, and a "
+                        "reveal on a secret read, waits for a person's "
+                        "approval first; an agent is refused."
                     ),
                 },
                 "work_ref": {

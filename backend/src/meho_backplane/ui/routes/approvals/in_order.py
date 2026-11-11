@@ -163,8 +163,8 @@ _NOT_ENDED: Final[str] = (
 )
 
 _SIGN_IN_AGAIN: Final[str] = (
-    "This step needs a new sign-in: an approval needs a recent sign-in that asked "
-    "for your password, and a destructive step needs a sign-in of its own. "
+    "This step needs a new sign-in: an approval needs a recent sign-in with your "
+    "password or a passkey, and a destructive step needs a sign-in of its own. "
     "Sign in again, then start this run again. The steps that ran OK are skipped."
 )
 

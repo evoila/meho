@@ -115,9 +115,10 @@ sign-in:
 - the sign-in is at most 15 minutes old (the `auth_time` claim). Inside
   these 15 minutes one sign-in may approve several waiting changes. Each
   approval is still a separate decision about one request;
-- the sign-in asked for the password (the `acr` claim is set and is not
-  `0`). Keycloak gives `acr` `1` to a sign-in that asked for the
-  password, and `0` to one that did not;
+- the sign-in asked for the password or a passkey (the `acr` claim is
+  set and is not `0`). Keycloak gives `acr` `1` to a sign-in that asked
+  for the password or a passkey, and `0` to one that came only from the
+  browser's remembered login;
 - an operation marked `destructive` needs a sign-in of its own, at most
   5 minutes old. After it, that sign-in approves nothing more.
 
@@ -129,7 +130,8 @@ window. When the token runs out, the CLI says so and asks for a new
 sign-in. Reject needs no new sign-in.
 
 The web interface applies the same age rules to the sign-in behind the
-console session, and it checks that this sign-in asked for the password.
+console session, and it checks that this sign-in asked for the password
+or a passkey.
 When the sign-in is too old, the console shows **Sign in to approve**
 and asks for the password again (see
 [The web console session](#the-web-console-session)).
@@ -725,7 +727,7 @@ The two MEHO settings are `UI_SESSION_SLIDING_EXTENSION_SECONDS`
 **Approving in the console needs a recent sign-in.** The console session
 may be hours old, but an approval needs the sign-in behind it to be at
 most 15 minutes old (`FRESH_SIGN_IN_MAX_AGE_SECONDS`) and to have asked
-for the password (the `acr` claim). A `destructive` operation needs a
+for the password or a passkey (the `acr` claim). A `destructive` operation needs a
 sign-in of its own, at most 5 minutes old. When the sign-in is too old,
 the request shows **Sign in to approve** in place of **Approve**. That
 link starts a console login with `prompt=login` and `max_age=0`, so
@@ -827,8 +829,9 @@ Keycloak 26.7 replaced the old setting **Require discoverable credential**
 - **Approvals in the console need the same recent sign-in.** The console
   checks the sign-in behind the console session: at most 15 minutes old,
   5 minutes for a `destructive` operation, and it must have asked for the
-  password. When it is older, the request shows **Sign in to approve**,
-  and that login asks for the password also in a remembered browser (see
+  password or a passkey. When it is older, the request shows **Sign in to
+  approve**, and that login asks for the password or a passkey also in a
+  remembered browser (see
   [The web console session](#the-web-console-session)). Deny needs no new
   sign-in.
 - **The console keeps its own limit.** MEHO ends a console session after
@@ -861,10 +864,24 @@ clicks **Sign in with Passkey**, or picks the passkey that the browser
 offers in the user name field. When a passkey was used, Keycloak skips the
 one-time code.
 
-A passkey also works for the fresh sign-in of an approval: the password
-page shows **Sign in with Passkey** too. If you set
-`APPROVAL_ONE_TIME_CODE_ACR_VALUES`, MEHO records a passkey approval as a
-normal fresh sign-in, because the code step did not run.
+A passkey also counts as the fresh sign-in of an approval. MEHO checks
+the same things as after a password: the sign-in time in the token, and
+that Keycloak asked for the password or a passkey (`acr` is `1`). So one
+tap with Face ID, Touch ID, a fingerprint or Windows Hello is enough:
+
+- **In the console**, **Sign in to approve** opens the normal login page.
+  A passkey there skips the one-time code.
+- **On the command line**, `meho approvals approve` uses its own login
+  flow, `meho approval sign-in`. Its password page shows **Sign in with
+  Passkey** too. This flow has no step that skips the code after a
+  passkey, so a person who has set up a one-time code still types the
+  code after the passkey.
+
+If you set `APPROVAL_ONE_TIME_CODE_ACR_VALUES`, MEHO records a passkey
+approval as a normal fresh sign-in, not as a one-time code.
+
+The steps to add a passkey on each kind of device are on the page
+[MEHO on your phone and laptop](../guides/phone-and-laptop.md#sign-in-with-a-passkey).
 
 **Lost passkey.** The person logs in with password and code, as before.
 Or an admin removes the passkey in the Keycloak admin console (Users → the

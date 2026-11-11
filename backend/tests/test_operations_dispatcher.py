@@ -989,7 +989,7 @@ async def test_dispatch_typed_invokes_handler_and_returns_result(
         product="vault",
         version="1.x",
         impl_id="vault",
-        op_id="vault.kv.read",
+        op_id="vault.kv.versions",
         handler=_module_handler_returning_dict,
         summary="Read a KV v2 secret.",
         description="Read a secret.",
@@ -1004,10 +1004,9 @@ async def test_dispatch_typed_invokes_handler_and_returns_result(
     result = await dispatch(
         operator=operator,
         connector_id="vault-1.x",
-        op_id="vault.kv.read",
+        op_id="vault.kv.versions",
         target=target,
-        # vault.kv.read hides values by default; the echo needs them.
-        params={"key": "value", "reveal_secret": True},
+        params={"key": "value"},
     )
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)
@@ -1018,19 +1017,19 @@ async def test_dispatch_typed_invokes_handler_and_returns_result(
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
         rows = (
-            (await fresh.execute(select(AuditLog).where(AuditLog.path == "vault.kv.read")))
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "vault.kv.versions")))
             .scalars()
             .all()
         )
     assert len(rows) == 1
     row = rows[0]
     assert row.method == "DISPATCH"
-    assert row.path == "vault.kv.read"
+    assert row.path == "vault.kv.versions"
     assert row.status_code == 200
     assert row.operator_sub == operator.sub
     assert row.tenant_id == operator.tenant_id
     assert row.target_id == target.id
-    assert row.payload["op_id"] == "vault.kv.read"
+    assert row.payload["op_id"] == "vault.kv.versions"
     assert row.payload["source_kind"] == "typed"
     assert row.payload["result_status"] == "ok"
     assert "params_hash" in row.payload

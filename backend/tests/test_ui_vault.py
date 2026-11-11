@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -52,7 +53,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import VaultConnector
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
@@ -60,6 +61,11 @@ from meho_backplane.connectors.vault.ops_sys import register_vault_sys_typed_ope
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup, Tenant
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations.approval_queue import (
+    approve_request,
+    resume_dispatch_after_approval,
+)
+from meho_backplane.operations.approved_reveal import WAITING_FOR_REQUESTER
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -71,10 +77,10 @@ from meho_backplane.ui.auth.session_store import (
     create_session,
     reset_fernet_cache_for_testing,
 )
-from meho_backplane.ui.csrf import CSRFMiddleware
+from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
-from meho_backplane.ui.templating import reset_templating_for_testing
+from meho_backplane.ui.templating import get_templates, reset_templating_for_testing
 from tests._oidc_jwt_helpers import AUDIENCE as _DEFAULT_AUDIENCE
 from tests._oidc_jwt_helpers import ISSUER as _DEFAULT_ISSUER
 from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
@@ -494,16 +500,15 @@ def test_vault_ui_list_handle_renders_metadata_not_blob(
 # ---------------------------------------------------------------------------
 
 
-def test_vault_ui_read_renders_values_reveal_gated_and_unlogged(
+def test_vault_ui_read_waits_for_approval_and_shows_no_value(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     _stub_embedding_service: AsyncMock,
 ) -> None:
-    """``GET /ui/vault/read`` renders the secret reveal-gated; the value is never logged.
+    """``GET /ui/vault/read`` asks to see the values, so it waits for approval.
 
-    The redaction invariant: the secret value reaches the response body
-    (reveal-on-click), but no secret value string is written to a log or
-    audit row during the request.
+    The partial says so and links to the request. No secret value reaches
+    the response body, a log record or a visible audit payload.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_vault_descriptor()
@@ -521,14 +526,12 @@ def test_vault_ui_read_renders_values_reveal_gated_and_unlogged(
         )
     assert response.status_code == 200, response.text
     body = response.text
-    # The secret render is present + reveal-gated.
-    assert 'data-vault-secret="ok"' in body
-    assert "data-vault-reveal" in body
-    assert "data-vault-secret-value" in body
-    # The value reaches the browser (the deliberate, scoped un-redaction).
-    assert _SECRET_VALUE in body
-    # The version chip renders.
-    assert "version 4" in body
+    # The read waits for a second person's approval; nothing ran yet.
+    assert 'data-vault-error="awaiting_approval"' in body
+    assert "data-approval-request-id" in body
+    assert "data-approval-deep-link" in body
+    assert 'data-vault-secret="ok"' not in body
+    assert _SECRET_VALUE not in body
     # REDACTION INVARIANT (1): the secret value must NOT appear in any
     # MEHO application log record emitted during the request -- the BFF
     # route logs only the op-id / status / handle-presence, never the
@@ -559,16 +562,117 @@ def test_vault_ui_read_renders_values_reveal_gated_and_unlogged(
     # concern, not this BFF's.)
     for payload in _audit_visible_payloads():
         assert _SECRET_VALUE not in payload, "secret value leaked into a visible audit payload"
-    # The BFF itself wrote no extra audit row beyond the dispatcher's
-    # single DISPATCH row.
-    assert _count_audit_rows() == audit_before + 1
+    # The BFF itself wrote no audit row; the rows are the dispatcher's.
+    assert _count_audit_rows() > audit_before
 
 
-def test_vault_ui_read_secret_value_does_not_break_out_of_x_data_attr(
+def _approve(request_id: str) -> None:
+    """A second person approves the waiting read. The approve runs nothing."""
+
+    async def _do() -> None:
+        reviewer = Operator(
+            sub="op-reviewer",
+            raw_jwt="header.payload.signature",
+            tenant_id=_TENANT_A,
+            tenant_role=TenantRole.OPERATOR,
+            principal_kind=PrincipalKind.USER,
+        )
+        async with get_sessionmaker()() as session:
+            approved = await approve_request(session, uuid.UUID(request_id), operator=reviewer)
+            await session.commit()
+        result = await resume_dispatch_after_approval(
+            operator=reviewer, request=approved, params=None
+        )
+        assert result.status == WAITING_FOR_REQUESTER, result.error
+        assert _SECRET_VALUE not in result.model_dump_json()
+
+    asyncio.run(_do())
+
+
+def _show_value(client: TestClient, request_id: str) -> Any:
+    """Click "Show value": the POST carries the CSRF token of the session."""
+    token = mint_csrf_token(str(client.cookies.get(SESSION_COOKIE_NAME)))
+    client.cookies.set(CSRF_COOKIE_NAME, token)
+    return client.post(
+        "/ui/vault/read/reveal",
+        params={"request_id": request_id},
+        headers={"X-CSRF-Token": token, "HX-Request": "true"},
+    )
+
+
+def test_vault_ui_read_shows_the_value_to_the_requester_after_approval(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
     _stub_embedding_service: AsyncMock,
 ) -> None:
+    """Request, approval, then "Show value" runs the read once for the person who asked.
+
+    Before the approval the button shows the waiting panel again. A second
+    click is refused with no value. Another person gets a 404, not the value.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault(_stub_embedding_service)
+    install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE}, kv_version=4)
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    path = _tenant_path(_TENANT_A, "app/db")
+    with mock:
+        waiting = client.get(
+            "/ui/vault/read",
+            params={"mount": "secret", "path": path},
+            headers={"HX-Request": "true"},
+        )
+        assert waiting.status_code == 200, waiting.text
+        assert "data-vault-show-value" in waiting.text
+        assert 'hx-post="/ui/vault/read/reveal' in waiting.text
+        match = re.search(r"data-approval-request-id>([0-9a-f-]{36})<", waiting.text)
+        assert match is not None, waiting.text
+        request_id = match.group(1)
+
+        early = _show_value(client, request_id)
+        assert early.status_code == 200, early.text
+        assert 'data-vault-error="awaiting_approval"' in early.text
+        assert 'data-approval-status="pending"' in early.text
+        assert _SECRET_VALUE not in early.text
+
+        _approve(request_id)
+
+        shown = _show_value(client, request_id)
+        assert shown.status_code == 200, shown.text
+        assert 'data-vault-secret="ok"' in shown.text
+        assert _SECRET_VALUE in shown.text
+        assert path in shown.text
+
+        again = _show_value(client, request_id)
+        assert again.status_code == 200, again.text
+        assert "reveal_already_used" in again.text
+        assert _SECRET_VALUE not in again.text
+
+    other, other_mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub="op-someone-else", role=TenantRole.OPERATOR
+    )
+    with other_mock:
+        refused = _show_value(other, request_id)
+    assert refused.status_code == 404
+    assert _SECRET_VALUE not in refused.text
+
+
+def test_vault_ui_show_value_needs_the_csrf_token() -> None:
+    """The "Show value" POST uses up the permission, so it is CSRF-checked."""
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/vault/read/reveal",
+            params={"request_id": str(uuid.uuid4())},
+            headers={"HX-Request": "true"},
+        )
+    assert response.status_code == 403
+
+
+def test_vault_secret_value_does_not_break_out_of_x_data_attr() -> None:
     """A ``"``-containing secret value cannot break out of the ``x-data`` attribute.
 
     Regression for the reflected-XSS / attribute-breakout class fixed on PR
@@ -582,24 +686,17 @@ def test_vault_ui_read_secret_value_does_not_break_out_of_x_data_attr(
     initialiser.
 
     A KV value is operator-writable, so any tenant writer controls this
-    reflection point -- on a secrets console this is high severity.
+    reflection point -- on a secrets console this is high severity. The
+    console read waits for approval, so this renders the partial's value
+    branch directly.
     """
     payload = '"><img src=x onerror=alert(1)>'
-    _seed_tenant(_TENANT_A, "tenant-a")
-    _seed_vault_descriptor()
-    _register_vault(_stub_embedding_service)
-    install_fake_client(monkeypatch, secret={"breakout": payload}, kv_version=1)
-    client, mock = _client_with_role(
-        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    envelope = {"status": "ok", "result": {"data": {"breakout": payload}, "version": 1}}
+    body = (
+        get_templates()
+        .get_template("vault/_secret.html")
+        .render(error=None, envelope=envelope, mount="secret", path="app/db", target="")
     )
-    with caplog.at_level(logging.DEBUG), mock:
-        response = client.get(
-            "/ui/vault/read",
-            params={"mount": "secret", "path": _tenant_path(_TENANT_A, "app/db")},
-            headers={"HX-Request": "true"},
-        )
-    assert response.status_code == 200, response.text
-    body = response.text
     assert 'data-vault-secret="ok"' in body
 
     # The reveal-gated row is rendered with a SINGLE-quoted x-data initialiser
@@ -619,20 +716,6 @@ def test_vault_ui_read_secret_value_does_not_break_out_of_x_data_attr(
     # No live ``<img`` element reaches the markup at all (the payload's ``<``
     # is unicode-escaped inside the JS string, not emitted as a tag).
     assert "<img" not in body
-
-    # The redaction invariant still holds for this payload: it must not leak
-    # into any application log record (driver-level SQL echo excluded, as in
-    # the sibling read test).
-    _driver_loggers = ("aiosqlite", "sqlalchemy")
-    for record in caplog.records:
-        if record.name.split(".")[0] in _driver_loggers:
-            continue
-        assert payload not in record.getMessage(), (
-            f"secret value leaked into a log record message: {record.name}/{record.levelname}"
-        )
-    # ...and not into any audit-trail-visible payload.
-    for visible in _audit_visible_payloads():
-        assert payload not in visible, "secret value leaked into a visible audit payload"
 
 
 # ---------------------------------------------------------------------------

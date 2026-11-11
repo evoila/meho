@@ -48,8 +48,8 @@ func newRecommendationListCmd() *cobra.Command {
 			"Filter via --params with one of the documented query parameters\n" +
 			"(id (repeatable) / page / pageSize).\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vcf-operations recommendation list --target rdc-vrops\n" +
-			"  meho vcf-operations recommendation list --target rdc-vrops --json",
+		Example: "  meho vcf-operations recommendation list --target vrops-lab\n" +
+			"  meho vcf-operations recommendation list --target vrops-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

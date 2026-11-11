@@ -176,6 +176,29 @@ writeFileSync(
 );
 const WITHOUT_INJECT_API = ["--import", pathToFileURL(HIDE_INJECT_API).href];
 
+// The launcher asks MEHO for the login client of Claude Desktop
+// (GET /api/v1/auth-config, tool-client.mjs, #6210). No network in this
+// suite: every launcher run preloads this fetch stub. It answers
+// STUB_AUTH_CONFIG (a JSON body) and writes each requested URL to
+// STUB_FETCH_LOG. Without STUB_AUTH_CONFIG it answers {} like an older MEHO;
+// with STUB_FETCH_FAIL it fails like an unreachable MEHO.
+const FETCH_STUB = join(BUNDLE, "fetch-stub.mjs");
+writeFileSync(
+  FETCH_STUB,
+  [
+    'import { appendFileSync } from "node:fs";',
+    "globalThis.fetch = async (url) => {",
+    "  if (process.env.STUB_FETCH_LOG) appendFileSync(process.env.STUB_FETCH_LOG, `${url}\\n`);",
+    '  if (process.env.STUB_FETCH_FAIL) throw new TypeError("fetch failed");',
+    '  return new Response(process.env.STUB_AUTH_CONFIG ?? "{}", {',
+    '    headers: { "content-type": "application/json" },',
+    "  });",
+    "};",
+    "",
+  ].join("\n"),
+);
+const WITH_FETCH_STUB = ["--import", pathToFileURL(FETCH_STUB).href];
+
 after(() => rmSync(BUNDLE, { recursive: true, force: true }));
 
 // Run the launcher with a controlled env; PATH defaults to the minimal set.
@@ -183,7 +206,7 @@ after(() => rmSync(BUNDLE, { recursive: true, force: true }));
 // ppid equals our pid proves mcp-remote ran in the launcher (in-process),
 // not in a grandchild the launcher spawned.
 function runLauncher(args, extraEnv = {}, nodeArgs = []) {
-  return spawnSync(process.execPath, [...nodeArgs, INDEX, ...args], {
+  return spawnSync(process.execPath, [...WITH_FETCH_STUB, ...nodeArgs, INDEX, ...args], {
     encoding: "utf8",
     env: { PATH: MINIMAL_PATH, MCP_REMOTE_CONFIG_DIR: AUTH_DIR, ...extraEnv },
   });
@@ -191,7 +214,7 @@ function runLauncher(args, extraEnv = {}, nodeArgs = []) {
 
 // Like runLauncher, but does not block, so several launchers can run at once.
 function startLauncher(args, extraEnv = {}) {
-  const child = spawn(process.execPath, [INDEX, ...args], {
+  const child = spawn(process.execPath, [...WITH_FETCH_STUB, INDEX, ...args], {
     env: { PATH: MINIMAL_PATH, MCP_REMOTE_CONFIG_DIR: AUTH_DIR, ...extraEnv },
   });
   let stdout = "";
@@ -446,6 +469,100 @@ test("guard: an empty client_id falls back to meho-mcp", () => {
   assert.equal(res.status, 0, res.stderr);
   const diag = JSON.parse(res.stdout);
   assert.deepEqual(JSON.parse(diag.argv[4]), { client_id: "meho-mcp" });
+});
+
+// The login client of Claude Desktop (#6210). With MCP_CLIENT_PER_TOOL_KIND
+// on, MEHO lists one client per tool kind; the launcher then signs in with
+// the claude-desktop client and sends "Meho-Tool: claude-desktop", so Claude
+// Desktop keeps a saved login of its own.
+const TOOL_LIST = JSON.stringify({
+  mcp_clients: { "claude-code": "meho-mcp-code", "claude-desktop": "meho-mcp-desktop" },
+});
+
+test("tool client: MEHO lists a client for Claude Desktop, so the launcher uses it and sends Meho-Tool", () => {
+  const fetchLog = join(BUNDLE, "fetch-listed.log");
+  const res = runLauncher(["https://meho.internal.example/mcp"], {
+    STUB_AUTH_CONFIG: TOOL_LIST,
+    STUB_FETCH_LOG: fetchLog,
+  });
+  assert.equal(res.status, 0, res.stderr);
+  const diag = JSON.parse(res.stdout);
+  assert.deepEqual(JSON.parse(diag.argv[4]), { client_id: "meho-mcp-desktop" });
+  assert.deepEqual(diag.argv.slice(7), ["--header", "Meho-Tool: claude-desktop"]);
+  assert.equal(diag.mehoClientId, null);
+  assert.deepEqual(readFileSync(fetchLog, "utf8").trim().split("\n"), [
+    "https://meho.internal.example/api/v1/auth-config",
+  ]);
+});
+
+test("tool client: no client for Claude Desktop in the list means meho-mcp and no header", () => {
+  for (const body of [{}, { mcp_clients: {} }, { mcp_clients: { "claude-code": "meho-mcp-code" } }]) {
+    const res = runLauncher(["https://meho.internal.example/mcp"], {
+      STUB_AUTH_CONFIG: JSON.stringify(body),
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const diag = JSON.parse(res.stdout);
+    assert.deepEqual(JSON.parse(diag.argv[4]), { client_id: "meho-mcp" }, JSON.stringify(body));
+    assert.equal(diag.argv.length, 7, JSON.stringify(body));
+  }
+});
+
+test("tool client: MEHO does not answer, so the launcher keeps meho-mcp and still starts", () => {
+  const res = runLauncher(["https://meho.internal.example/mcp"], { STUB_FETCH_FAIL: "1" });
+  assert.equal(res.status, 0, res.stderr);
+  const diag = JSON.parse(res.stdout);
+  assert.deepEqual(JSON.parse(diag.argv[4]), { client_id: "meho-mcp" });
+  assert.equal(diag.argv.length, 7);
+  assert.match(res.stderr, /meho-claude-desktop: could not read the login client list from MEHO/);
+});
+
+test("tool client: a client_id setting wins over the list, and MEHO is not asked", () => {
+  const fetchLog = join(BUNDLE, "fetch-override.log");
+  const res = runLauncher(["https://meho.internal.example/mcp"], {
+    STUB_AUTH_CONFIG: TOOL_LIST,
+    STUB_FETCH_LOG: fetchLog,
+    MEHO_MCP_CLIENT_ID: "my-mcp",
+  });
+  assert.equal(res.status, 0, res.stderr);
+  const diag = JSON.parse(res.stdout);
+  assert.deepEqual(JSON.parse(diag.argv[4]), { client_id: "my-mcp" });
+  assert.equal(diag.argv.length, 7);
+  assert.equal(existsSync(fetchLog), false, "MEHO must not be asked");
+});
+
+test("tool client: an unset client_id setting (empty, placeholder, or the old default meho-mcp) uses the list", () => {
+  for (const value of ["", "  ", "${user_config.client_id}", "meho-mcp"]) {
+    const res = runLauncher(["https://meho.internal.example/mcp"], {
+      STUB_AUTH_CONFIG: TOOL_LIST,
+      MEHO_MCP_CLIENT_ID: value,
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const diag = JSON.parse(res.stdout);
+    assert.deepEqual(JSON.parse(diag.argv[4]), { client_id: "meho-mcp-desktop" }, value);
+    assert.deepEqual(diag.argv.slice(7), ["--header", "Meho-Tool: claude-desktop"], value);
+  }
+});
+
+test("tool client: the tenant header and the tool header are both sent", () => {
+  const res = runLauncher(["https://meho.internal.example/mcp"], {
+    STUB_AUTH_CONFIG: TOOL_LIST,
+    MEHO_TENANT: "tenant-b",
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.deepEqual(JSON.parse(res.stdout).argv.slice(7), [
+    "--header",
+    "Meho-Tenant: tenant-b",
+    "--header",
+    "Meho-Tool: claude-desktop",
+  ]);
+});
+
+test("manifest: the client_id setting has no default, so MEHO can name the client", () => {
+  const { client_id: clientId } = MANIFEST.user_config;
+  assert.equal(clientId.type, "string");
+  assert.equal(clientId.required, false);
+  assert.equal(clientId.default, undefined);
+  assert.equal(MANIFEST.server.mcp_config.env.MEHO_MCP_CLIENT_ID, "${user_config.client_id}");
 });
 
 test("guard: scopes override applied to metadata and MEHO_MCP_SCOPES scrubbed", () => {

@@ -148,7 +148,7 @@
           "auth"
         ],
         "summary": "Auth Config",
-        "description": "Return Keycloak issuer, audience, and the CLI's two public client ids.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is returned exactly\nas configured, trailing slash included. Keycloak publishes its\nissuer without one; providers such as authentik publish theirs\nwith one, and a client that compares the value against the\ndiscovery document (RFC 8414 \u00a73.3) needs the published form. The\nCLI strips the slash itself before it builds\n``<issuer>/.well-known/openid-configuration``.",
+        "description": "Return Keycloak issuer, audience, and the public client ids.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is returned exactly\nas configured, trailing slash included. Keycloak publishes its\nissuer without one; providers such as authentik publish theirs\nwith one, and a client that compares the value against the\ndiscovery document (RFC 8414 \u00a73.3) needs the published form. The\nCLI strips the slash itself before it builds\n``<issuer>/.well-known/openid-configuration``.",
         "operationId": "auth_config_api_v1_auth_config_get",
         "responses": {
           "200": {
@@ -12474,6 +12474,60 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DecideAcceptedBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/approvals/{request_id}/reveal": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Reveal Approved Request",
+        "description": "Run an approved secret reveal once and return the value to the person who asked.",
+        "operationId": "reveal_approved_request_api_v1_approvals__request_id__reveal_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRevealResult"
                 }
               }
             }
@@ -24983,6 +25037,50 @@
         }
       }
     },
+    "/ui/vault/read/reveal": {
+      "post": {
+        "tags": [
+          "ui-vault"
+        ],
+        "summary": "Vault Read Reveal",
+        "description": "Run the approved read once for the person who asked and render the value.\n\nReveal-gated like ``/ui/vault/read``. Before the approval, the\nwaiting panel comes back.",
+        "operationId": "vault_read_reveal_ui_vault_read_reveal_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/vault/versions": {
       "get": {
         "tags": [
@@ -26513,6 +26611,16 @@
             "title": "Reveal Secret",
             "default": false
           },
+          "waits_for_requester": {
+            "type": "boolean",
+            "title": "Waits For Requester",
+            "default": false
+          },
+          "reveal_changes_something": {
+            "type": "boolean",
+            "title": "Reveal Changes Something",
+            "default": false
+          },
           "status": {
             "$ref": "#/components/schemas/ApprovalRequestStatus"
           },
@@ -26731,6 +26839,95 @@
         "title": "ApprovalResumeOutcomeView",
         "description": "What happened when an approved request ran (#3543).\n\nA summary read off the stored result envelope. The result body and the\nfree-text error stay on the owner-only ``/result`` read."
       },
+      "ApprovalRevealResult": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "nullable": true,
+            "title": "Result"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Audit Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "status",
+          "op_id",
+          "result",
+          "error",
+          "audit_id"
+        ],
+        "title": "ApprovalRevealResult",
+        "description": "The run result of an approved reveal, for the person who asked."
+      },
+      "ApprovalSignInStatus": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "flow_missing",
+              "flow_differs",
+              "not_bound",
+              "not_checked"
+            ],
+            "title": "State"
+          },
+          "flow": {
+            "type": "string",
+            "title": "Flow",
+            "default": "meho approval sign-in"
+          },
+          "client": {
+            "type": "string",
+            "title": "Client"
+          },
+          "detail": {
+            "type": "string",
+            "nullable": true,
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state",
+          "client"
+        ],
+        "title": "ApprovalSignInStatus",
+        "description": "The state of the approval sign-in flow and its binding (#6280)."
+      },
       "ApprovalsStatus": {
         "properties": {
           "custody": {
@@ -26744,6 +26941,10 @@
           "delegated_decision_posture": {
             "type": "string",
             "title": "Delegated Decision Posture"
+          },
+          "sign_in": {
+            "$ref": "#/components/schemas/ApprovalSignInStatus",
+            "nullable": true
           }
         },
         "type": "object",
@@ -26753,7 +26954,7 @@
           "delegated_decision_posture"
         ],
         "title": "ApprovalsStatus",
-        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value."
+        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`)."
       },
       "ApproveRequestBody": {
         "properties": {
@@ -27470,6 +27671,13 @@
             "type": "string",
             "title": "Cli Approve Client Id",
             "default": ""
+          },
+          "mcp_clients": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Mcp Clients"
           }
         },
         "type": "object",
@@ -37301,7 +37509,7 @@
           "runner"
         ],
         "title": "PrincipalKind",
-        "description": "Discriminator that distinguishes what authenticated this request.\n\nG11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,\naudit, and the approval gate can tell a human operator apart from\na service account or an agent without re-examining the JWT payload.\n\nValues are the literal strings the Keycloak ``principal_kind``\nprotocol mapper emits on the agent client (or that the v0.3 token\nexchange layer will emit). Existing tokens that carry no\n``principal_kind`` claim default to :attr:`USER` \u2014 the graceful-\nfallback contract means all pre-G11.2 human-operator flows are\nunaffected.\n\nMembers:\n\n* :attr:`USER` \u2014 a human operator authenticated via the interactive\n  device-code flow. Default when no claim is present.\n* :attr:`SERVICE` \u2014 a non-interactive service account client that\n  uses client-credentials flow but is not a MEHO-managed agent.\n* :attr:`AGENT` \u2014 a Keycloak client registered by\n  ``meho agent-principal register``; the token carries\n  ``principal_kind=agent``. G11.2-T2 (RFC 8693 delegation) and\n  G11.2-T3 (per-principal permission model) branch on this value\n  to apply agent-specific authz.\n* :attr:`RUNNER` \u2014 a satellite runner's service principal registered\n  by ``meho runner-principal register`` (Initiative #2415, #2502);\n  the token carries ``principal_kind=runner`` plus a ``runner_id``\n  claim. A runner is a dumb, push-only executor with a **read-only**\n  credential scope: its token is fail-closed 403'd on every\n  authenticated route outside the gateway allowlist prefixes\n  (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)\n  and on the MCP surface. The unforgeable discriminator is what the\n  negative cage keys on, so a runner client missing any other mapper\n  still cannot roam the read API."
+        "description": "Discriminator that distinguishes what authenticated this request.\n\nG11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,\naudit, and the approval gate can tell a human operator apart from\na service account or an agent without re-examining the JWT payload.\n\nValues are the literal strings the Keycloak ``principal_kind``\nprotocol mapper emits on the agent client (or that the v0.3 token\nexchange layer will emit). Existing tokens that carry no\n``principal_kind`` claim default to :attr:`USER` \u2014 the graceful-\nfallback contract means all pre-G11.2 human-operator flows are\nunaffected.\n\nMembers:\n\n* :attr:`USER` \u2014 a person who signed in. There are three ways: the\n  command line (``meho-cli`` client, device code), an MCP client\n  (``meho-mcp`` client, sign-in in the browser), and the web console\n  (``meho-web`` client). Default when no claim is present.\n* :attr:`SERVICE` \u2014 a non-interactive service account client that\n  uses client-credentials flow but is not a MEHO-managed agent.\n* :attr:`AGENT` \u2014 a Keycloak client registered by\n  ``meho agent-principal register``; the token carries\n  ``principal_kind=agent``. G11.2-T2 (RFC 8693 delegation) and\n  G11.2-T3 (per-principal permission model) branch on this value\n  to apply agent-specific authz.\n* :attr:`RUNNER` \u2014 a satellite runner's service principal registered\n  by ``meho runner-principal register`` (Initiative #2415, #2502);\n  the token carries ``principal_kind=runner`` plus a ``runner_id``\n  claim. A runner is a dumb, push-only executor with a **read-only**\n  credential scope: its token is fail-closed 403'd on every\n  authenticated route outside the gateway allowlist prefixes\n  (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)\n  and on the MCP surface. The unforgeable discriminator is what the\n  negative cage keys on, so a runner client missing any other mapper\n  still cannot roam the read API."
       },
       "PromoteBody": {
         "properties": {
@@ -43196,6 +43404,12 @@
             "type": "boolean",
             "title": "Can Switch Tenant",
             "default": false
+          },
+          "client": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Client"
           }
         },
         "type": "object",

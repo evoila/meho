@@ -467,7 +467,9 @@ class ToolDefinition(BaseModel):
     RBAC fields.
 
     ``for_settings`` is an optional function that gives the tool as it is
-    shown under the current settings. A tool whose text or input talks about
+    shown under the current settings, to the session of the given
+    :class:`Operator` (a session can ask for the short tool texts, see
+    :mod:`meho_backplane.mcp.short_texts`). A tool whose text or input talks about
     a feature behind a switch uses it to leave that text out while the
     switch is off, so an agent reads nothing about a feature that is off.
     :func:`all_tools_for` and the ``tools/call`` handler apply it (through
@@ -498,7 +500,7 @@ class ToolDefinition(BaseModel):
     broadcast_omit_args: frozenset[str] = frozenset()
     approver_may_call: bool = False
     caller_check: Callable[[Operator], None] | None = None
-    for_settings: Callable[[ToolDefinition], ToolDefinition] | None = None
+    for_settings: Callable[[ToolDefinition, Operator], ToolDefinition] | None = None
     annotations: ToolAnnotations | None = None
     meta: dict[str, Any] | None = None
 
@@ -768,11 +770,11 @@ def get_tool(name: str) -> tuple[ToolDefinition, ToolHandler] | None:
     return _TOOLS.get(name)
 
 
-def tool_for_settings(definition: ToolDefinition) -> ToolDefinition:
-    """Return *definition* as it is shown under the current settings (``for_settings``)."""
+def tool_for_settings(definition: ToolDefinition, operator: Operator) -> ToolDefinition:
+    """Return *definition* as *operator*'s session sees it under the current settings."""
     if definition.for_settings is None:
         return definition
-    return definition.for_settings(definition)
+    return definition.for_settings(definition, operator)
 
 
 def registered_tool_names() -> frozenset[str]:
@@ -842,7 +844,7 @@ def all_tools_for(
     :attr:`ToolDefinition.for_settings`).
     """
     return [
-        tool_for_settings(defn)
+        tool_for_settings(defn, operator)
         for defn, _ in _TOOLS.values()
         if tool_role_gate_met(operator, defn)
         and capability_satisfied(operator, defn.required_capability)

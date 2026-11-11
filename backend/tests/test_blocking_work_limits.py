@@ -36,6 +36,7 @@ from meho_backplane.ui.auth.verifier_store import MAX_PENDING_FLOWS, PKCEVerifie
 from meho_backplane.ui.routes.connectors.import_view import ImportParseError, _parse_targets_yaml
 from meho_backplane.ui.routes.topology.batch_parse import BulkParseError, parse_bulk_rows
 from meho_backplane.ui.safe_yaml import load_yaml_no_alias
+from tests._time_limits import check_time_limit
 
 _ALIAS_BOMB = """
 a: &a [x, x, x, x, x, x, x, x, x, x]
@@ -74,6 +75,7 @@ def test_tenant_share_is_below_the_number_of_threads() -> None:
     assert PROBE_TENANT_SHARE < PROBE_POOL_WORKERS
 
 
+@pytest.mark.slow_runner_tolerant
 async def test_waiting_probes_leave_the_default_thread_pool_free() -> None:
     release = threading.Event()
     running: list[int] = []
@@ -92,7 +94,9 @@ async def test_waiting_probes_leave_the_default_thread_pool_free() -> None:
         await _wait_until(lambda: len(running) == PROBE_POOL_WORKERS)
         begin = time.monotonic()
         assert await asyncio.to_thread(lambda: "login ok") == "login ok"
-        assert time.monotonic() - begin < 0.1
+        # A blocked pool would hold this call for the full 10 s.
+        waited = time.monotonic() - begin
+        check_time_limit(waited, 2.0, f"the default thread pool held the call {waited:.2f} s")
         assert not queued.done()
     finally:
         release.set()

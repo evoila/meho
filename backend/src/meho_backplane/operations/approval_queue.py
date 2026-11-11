@@ -91,6 +91,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.approval_sign_in import ApprovalAuth, approval_sign_in_max_age
+from meho_backplane.auth.client_identity import (
+    CLIENT_PAYLOAD_KEY,
+    apply_client_block,
+    build_client_block,
+    channel_of,
+    client_identity_enabled,
+)
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
@@ -148,6 +155,11 @@ from meho_backplane.operations.approval_resume_checks import (
     park_time_target_hash,
     preview_changed_since_request,
     target_changed_since_request,
+)
+from meho_backplane.operations.approved_reveal import (
+    is_secret_reveal,
+    result_waiting_for_requester,
+    without_secret_values,
 )
 from meho_backplane.operations.grant_approval import (
     RIGHTS_CHANGE_REFUSAL,
@@ -221,6 +233,7 @@ __all__ = [
     "request_waits_only_for_token_call",
     "result_state_of_envelope",
     "resume_dispatch_after_approval",
+    "take_approval_lock",
     "withdraw_request",
 ]
 
@@ -1330,6 +1343,10 @@ async def _write_audit_row(
         payload["principal_name"] = principal_name
     # #5239: the role of a platform admin without a group in this tenant.
     payload.update(tenant_role_source_payload(operator))
+    # The login client of the person who acted on this row (the requester on
+    # a "request" row, the reviewer on a "decision" row), when
+    # AUDIT_CLIENT_IDENTITY is on.
+    apply_client_block(payload, operator)
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
@@ -1409,6 +1426,9 @@ class ResumeRequester(NamedTuple):
     #: The requester's ``principal_kind`` (#3885). ``None`` on a row parked
     #: before migration 0149.
     kind: str | None = None
+    #: The requester's ``client`` block from the stored effect
+    #: (AUDIT_CLIENT_IDENTITY). ``None`` when the request has none.
+    client: dict[str, Any] | None = None
 
 
 #: The requester of the approval request whose composite is being re-run
@@ -1563,6 +1583,14 @@ async def create_pending_request(
         }
         if target_id is not None:
             proposed_effect["target_id"] = str(target_id)
+    # The requester's login client and channel (AUDIT_CLIENT_IDENTITY), so
+    # every approval surface can say through which tool the change was asked
+    # for. A re-park on behalf of an earlier requester keeps that requester's
+    # block: *operator* is then the reviewer, not the requester.
+    if client_identity_enabled():
+        client = build_client_block(operator) if requester is None else requester.client
+        if client is not None:
+            proposed_effect = {**proposed_effect, CLIENT_PAYLOAD_KEY: client}
 
     # RFC 8693 ``act`` (#1481): the agent principal acting on the human
     # subject's behalf on a delegated run, read from the same
@@ -1574,7 +1602,10 @@ async def create_pending_request(
     # dead code — ``Operator`` has no such field, so it was always ``None``.
     principal_act: str | None = resolve_actor_sub()
     if requester is not None:
-        principal_sub, principal_act, principal_name, principal_kind = requester
+        principal_sub = requester.sub
+        principal_act = requester.act
+        principal_name = requester.name
+        principal_kind = requester.kind
     else:
         principal_sub = operator.sub
         principal_name = await principal_display_name(session, operator)
@@ -1688,16 +1719,32 @@ async def create_pending_request(
     return request
 
 
-def _sign_in_lock_key(sign_in_key: str) -> int:
-    """Map a sign-in key to a stable, non-negative 63-bit advisory-lock key.
+def _approval_lock_key(scope: str, key: str) -> int:
+    """Map *key* under *scope* to a stable, non-negative 63-bit advisory-lock key.
 
     A blake2b digest under its own prefix, masked to 63 bits so it fits the
     ``bigint`` that ``pg_advisory_xact_lock`` takes. The same shape as the
     other advisory-lock keys in the code base.
     """
-    label = f"meho:approval-sign-in\0{sign_in_key}"
+    label = f"meho:{scope}\0{key}"
     digest = hashlib.blake2b(label.encode(), digest_size=8).digest()
     return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+async def take_approval_lock(session: AsyncSession, scope: str, key: str) -> None:
+    """Take the transaction-level advisory lock of an approval step.
+
+    Two approves that use the same proof (one sign-in, or one passkey touch)
+    can run at the same moment, on two replicas. Each takes this lock first,
+    so the second waits until the first commits or rolls back. PostgreSQL
+    releases the lock with the transaction. On other databases (the
+    single-writer SQLite test path) there is no lock.
+    """
+    conn = await session.connection()
+    if conn.dialect.name == "postgresql":
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"), {"k": _approval_lock_key(scope, key)}
+        )
 
 
 def _is_destructive(request: ApprovalRequest) -> bool:
@@ -1753,11 +1800,7 @@ async def _check_sign_in_use(
             max_age_seconds=max_age,
         )
         raise ApprovalSignInTooOldError(request.id, max_age_seconds=max_age)
-    conn = await session.connection()
-    if conn.dialect.name == "postgresql":
-        await session.execute(
-            text("SELECT pg_advisory_xact_lock(:k)"), {"k": _sign_in_lock_key(key)}
-        )
+    await take_approval_lock(session, "approval-sign-in", key)
     since = datetime.fromtimestamp(approval_auth.auth_time - CLOCK_SKEW_SECONDS - 1, UTC)
     rows = await session.execute(
         select(AuditLog.payload).where(
@@ -1781,6 +1824,33 @@ async def _check_sign_in_use(
     return destructive
 
 
+#: The longest ``User-Agent`` value stored on a decision row.
+_USER_AGENT_MAX_LENGTH: Final[int] = 256
+
+
+def _approver_client_fields(operator: Operator, user_agent: str | None) -> dict[str, Any]:
+    """Name the approver's login client on the decision row (AUDIT_CLIENT_IDENTITY).
+
+    ``approver_azp`` and ``approver_channel`` come from the checked login.
+    ``approver_user_agent`` is the ``User-Agent`` header of a REST approve,
+    cut to 256 characters. The tool sends it about itself and MEHO cannot
+    check it, so it is marked ``"self_declared": true``. Empty when the
+    switch is off.
+    """
+    if not client_identity_enabled():
+        return {}
+    fields: dict[str, Any] = {
+        "approver_azp": operator.azp,
+        "approver_channel": channel_of(operator),
+    }
+    if user_agent:
+        fields["approver_user_agent"] = {
+            "value": user_agent[:_USER_AGENT_MAX_LENGTH],
+            "self_declared": True,
+        }
+    return fields
+
+
 # code-quality-allow: 101 lines but ~70 are the Args/Raises docstring documenting
 # the four preconditions + the params/reason contract; the executable body is ~15
 # lines. Splitting it would scatter one linear approve flow for a line-count win.
@@ -1792,6 +1862,7 @@ async def approve_request(
     params: dict[str, Any] | None = None,
     reason: str = "",
     approval_auth: ApprovalAuth | None = None,
+    user_agent: str | None = None,
 ) -> ApprovalRequest:
     """Approve a pending request.
 
@@ -1861,6 +1932,9 @@ async def approve_request(
             Inside the approval window one sign-in may approve several
             requests; a ``destructive`` request needs a sign-in of its own
             (#5515). Every production approve path passes it.
+        user_agent: The ``User-Agent`` header of a REST approve. With
+            ``AUDIT_CLIENT_IDENTITY`` on it is stored on the decision row,
+            marked as what the tool says about itself. ``None`` elsewhere.
 
     Returns:
         The updated, flushed :class:`ApprovalRequest`.
@@ -1926,6 +2000,7 @@ async def approve_request(
         extra["reason"] = reason
     if approval_auth is not None:
         extra["approval_auth"] = approval_auth.audit_payload(operator.sub, single_use=single_use)
+    extra.update(_approver_client_fields(operator, user_agent))
     _record_delegation(extra, delegation, request=request, operator=operator, decision="approved")
 
     approve_audit_id = uuid.uuid4()
@@ -2339,6 +2414,7 @@ async def resume_dispatch_after_approval(
     operator: Operator,
     request: ApprovalRequest,
     params: dict[str, Any] | None = None,
+    requester_fetch: bool = False,
 ) -> Any:
     """Re-hydrate the stored target and re-dispatch an approved op (#1503, G11.7-T1).
 
@@ -2405,11 +2481,19 @@ async def resume_dispatch_after_approval(
     hash must still build the same preview
     (:func:`refuse_resume_if_preview_changed`). Either change refuses the
     run, and the requester asks again.
+
+    A secret reveal (``reveal_secret`` on the row) does not run here on an
+    approve: the answer is :func:`result_waiting_for_requester`, and nothing
+    is claimed. Only the fetch of the person who asked runs it
+    (*requester_fetch*,
+    :func:`~meho_backplane.operations.approved_reveal.fetch_approved_reveal`).
     """
     # #5024: a stopping pod starts no new run. The claim stays free, so
     # nothing is used up and nothing was sent.
     if is_draining():
         return shutting_down_result(request.op_id)
+    if is_secret_reveal(request) and not requester_fetch:
+        return result_waiting_for_requester(request)
     # The requester's reveal choice is on the request row, outside the
     # params and the hash (``create_pending_request``). It goes on the
     # params of the run only.
@@ -2850,12 +2934,14 @@ async def _refuse_resume_params_unavailable(
 
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:
-    """The requester saved on *request* (#4217)."""
+    """The requester saved on *request* (#4217), with the requester's ``client`` block."""
+    client = (request.proposed_effect or {}).get(CLIENT_PAYLOAD_KEY)
     return ResumeRequester(
         request.principal_sub,
         request.principal_act,
         request.principal_name,
         request.principal_kind,
+        client if isinstance(client, dict) else None,
     )
 
 
@@ -3100,7 +3186,9 @@ async def _dispatch_resume_with_bound_context(
     # instead of a second submit (#3209). Reached only by the exactly-one-resumer
     # winner, so the capture runs at most once; fail-soft, never breaks the
     # approve path.
-    await persist_resume_result(request.id, result, parked_op_id=request.op_id)
+    # A reveal keeps its values only in the answer to the person who asked.
+    stored = without_secret_values(result) if reveal_secret else result
+    await persist_resume_result(request.id, stored, parked_op_id=request.op_id)
     return result
 
 

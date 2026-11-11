@@ -46,6 +46,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphNode
 from meho_backplane.topology.query import _PATH_SQL, find_path
+from tests._time_limits import check_time_limit
 from tests.fixtures.topology_10k_nodes import MeshSpec, seed_mesh_graph
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
 
@@ -114,15 +115,20 @@ _EXPECTED_PRUNED_ROWS = 795
 _EXPECTED_UNPRUNED_ROWS = 1544
 _EXPECTED_WORST_CASE_ROWS = 31_041
 
-# Perf-gate calibration for the worst-case benchmark. Measured healthy
-# hops-32 / hops-8 ratio on :data:`_WORST_MESH` is ~7.7 (row-count
-# driven: 31 041 vs 3 866 walk rows); the 20.0 ceiling sits ~2.6x above
-# healthy while any superlinear regression (broken CYCLE bookkeeping,
-# dropped hop bound) lands orders of magnitude higher. The absolute
-# ceiling is a catastrophic-regression backstop only (~40x the measured
-# ~121 ms median), mirroring the #1434 discipline.
+# Calibration for the worst-case benchmark. The work is counted in walk
+# rows, not time: the healthy hops-32 / hops-8 row ratio on
+# :data:`_WORST_MESH` is ~8 (31 041 vs 3 866 rows). The 20.0 ceiling sits
+# ~2.5x above healthy while any superlinear regression (broken CYCLE
+# bookkeeping, dropped hop bound) lands orders of magnitude higher.
+# Row counts do not depend on runner speed, so this gate cannot fail on
+# a busy runner.
+#
+# The wall-clock check is separate and its limits are wide (healthy is
+# ~7.7 for the ratio and ~121 ms for hops-32), so a busy runner does not
+# fail it: a 1.09 s pause on a shared runner moved the ratio to 22.
+_WORST_ROW_RATIO_CEILING = 20.0
 _PERF_SAMPLES = 5
-_WORST_RATIO_CEILING = 20.0
+_WORST_TIME_RATIO_CEILING = 100.0
 _WORST_ABS_CEILING_MS = 5000.0
 
 
@@ -396,20 +402,16 @@ async def test_worst_case_find_path_envelope_on_dense_mesh(
     operator triggers with a typo'd ``to=`` plus ``max_hops=32`` (the
     API ceiling).
 
-    Three gates, strongest first (same discipline as the depth-16
-    ratio gate, #1434 — load-invariant properties primary, wall-clock
-    backstop secondary):
+    Two gates, both counting work, never time, so a busy runner cannot
+    fail them (the timed backstop is the next test):
 
     1. **Row-count pin** — the materialised walk volume is a
        deterministic function of the mesh, independent of runner speed.
-    2. **Hops-32 / hops-8 wall-clock ratio** — both sides are timed in
-       the same run so host contention divides out. On this 12-node
-       mesh every simple path is shorter than 12 hops, so hops-32 and
-       hops-8 differ only by how much of the combinatorial explosion
-       the bound cuts off; a superlinear regression (e.g. broken CYCLE
-       bookkeeping) blows the ratio while runner noise does not.
-    3. **Absolute ceiling** — generous catastrophic-regression backstop
-       only, not the load-bearing gate.
+    2. **Hops-32 / hops-8 row ratio** — on this 12-node mesh every
+       simple path is shorter than 12 hops, so hops-32 and hops-8 differ
+       only by how much of the combinatorial explosion the bound cuts
+       off; a superlinear regression (e.g. broken CYCLE bookkeeping)
+       blows the ratio.
     """
     op = _operator(TENANT_A_ID)
 
@@ -427,24 +429,47 @@ async def test_worst_case_find_path_envelope_on_dense_mesh(
         f"docs/architecture/topology.md §Performance expectations"
     )
 
+    # Gate 2 — scaling ratio, counted in rows.
+    baseline_rows = await _walk_rows("worst-0-0", "worst-island", max_hops=8, pruned=True)
+    ratio = worst_rows / baseline_rows
+    assert ratio < _WORST_ROW_RATIO_CEILING, (
+        f"worst-case walk hops-32/hops-8 row ratio {ratio:.1f} exceeds "
+        f"{_WORST_ROW_RATIO_CEILING} (hops-8 {baseline_rows} rows, hops-32 "
+        f"{worst_rows} rows) — the walk is scaling worse than the "
+        f"documented envelope; check the CYCLE guard and the hop bound."
+    )
+
+
+@pytest.mark.slow_runner_tolerant
+@_skip_no_docker
+async def test_worst_case_find_path_time_backstop_on_dense_mesh(
+    worst_mesh: dict[str, uuid.UUID],
+) -> None:
+    """Wide wall-clock backstop for the worst case (``max_hops=32``).
+
+    The limits are far above the healthy times, so only an
+    order-of-magnitude slowdown fails them. The precise gates count
+    rows in the test above.
+    """
+    op = _operator(TENANT_A_ID)
+
     # Warm the connection/plan so the timed medians measure steady state.
     await find_path(op, "worst-0-0", "worst-island", max_hops=1)
 
     baseline_ms = await _median_path_ms(op, "worst-0-0", "worst-island", max_hops=8)
     worst_ms = await _median_path_ms(op, "worst-0-0", "worst-island", max_hops=_MAX_HOPS_CEILING)
 
-    # Gate 2 — load-invariant scaling ratio.
     ratio = worst_ms / baseline_ms
-    assert ratio < _WORST_RATIO_CEILING, (
-        f"worst-case find_path hops-32/hops-8 ratio {ratio:.1f} exceeds "
-        f"{_WORST_RATIO_CEILING} (hops-8 {baseline_ms:.1f} ms, hops-32 "
-        f"{worst_ms:.1f} ms) — the walk is scaling worse than the "
-        f"documented envelope; check the CYCLE guard and the hop bound."
+    check_time_limit(
+        ratio,
+        _WORST_TIME_RATIO_CEILING,
+        f"worst-case find_path hops-32/hops-8 time ratio {ratio:.1f} exceeds "
+        f"{_WORST_TIME_RATIO_CEILING} (hops-8 {baseline_ms:.1f} ms, hops-32 "
+        f"{worst_ms:.1f} ms)",
     )
-    # Gate 3 — generous absolute backstop (documented envelope lives in
-    # docs/architecture/topology.md; this only catches an
-    # order-of-magnitude catastrophe that also slowed the baseline).
-    assert worst_ms < _WORST_ABS_CEILING_MS, (
+    check_time_limit(
+        worst_ms,
+        _WORST_ABS_CEILING_MS,
         f"worst-case find_path took {worst_ms:.1f} ms (median), over the "
-        f"{_WORST_ABS_CEILING_MS:.0f} ms catastrophic-regression backstop"
+        f"{_WORST_ABS_CEILING_MS:.0f} ms catastrophic-regression backstop",
     )

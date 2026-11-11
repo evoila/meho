@@ -133,6 +133,7 @@ from meho_backplane.connectors.github.composites.schemas_issues import (
     ISSUE_VIEW_PARAMETER_SCHEMA,
     ISSUE_VIEW_RESPONSE_SCHEMA,
 )
+from meho_backplane.operations.governed_subops import declare_no_governed_subops
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -546,6 +547,21 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         llm_instructions=BRANCH_COMMIT_FILES_LLM_INSTRUCTIONS,
     ),
 )
+
+#: The write composites. Each makes its change in calls on the connector's
+#: own session, with no step that MEHO checks on its own: MEHO checks policy
+#: once, for the whole call. Declared so the CI check of step lists passes.
+_WRITES_WITHOUT_CHECKED_STEPS: tuple[str, ...] = (
+    "gh.composite.repo_create",
+    "gh.composite.branch_commit_files",
+    "gh.composite.issue_create",
+    "gh.composite.issue_comment",
+    "gh.composite.sub_issue_add",
+    "gh.composite.project_item_add",
+    "gh.composite.project_item_set_field",
+)
+
+declare_no_governed_subops(_WRITES_WITHOUT_CHECKED_STEPS)
 
 
 async def register_github_composite_operations(

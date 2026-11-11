@@ -47,8 +47,8 @@ func newRequestListCmd() *cobra.Command {
 			"appliances may see a JSONFlux result handle — page it with\n" +
 			"result_query(handle_id, offset, limit).\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho vcf-fleet request list --target rdc-fleet\n" +
-			"  meho vcf-fleet request list --target rdc-fleet --json | jq '.result.requests[] | select(.outcome==\"running\")'",
+		Example: "  meho vcf-fleet request list --target fleet-lab\n" +
+			"  meho vcf-fleet request list --target fleet-lab --json | jq '.result.requests[] | select(.outcome==\"running\")'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -117,7 +117,7 @@ func newRequestInfoCmd() *cobra.Command {
 			"and, for a failed request, its error causes (the first one is the\n" +
 			"failed step). Requires a request id from `vcf-fleet request list`.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example:       "  meho vcf-fleet request info req-vmid-001 --target rdc-fleet",
+		Example:       "  meho vcf-fleet request info req-vmid-001 --target fleet-lab",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -57,8 +57,8 @@ func newAboutCmd() *cobra.Command {
 			"  - 2   auth_expired (run `meho login`)\n" +
 			"  - 3   unreachable (network / DNS / TLS)\n" +
 			"  - 4   unexpected response shape",
-		Example: "  meho vmware about --target rdc-vcenter\n" +
-			"  meho vmware about --target rdc-vcenter --json | jq .result",
+		Example: "  meho vmware about --target vcenter-lab\n" +
+			"  meho vmware about --target vcenter-lab --json | jq .result",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

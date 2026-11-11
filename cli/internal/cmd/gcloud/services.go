@@ -43,9 +43,9 @@ func newServicesListCmd() *cobra.Command {
 			"By default only ENABLED services are returned; use --all to\n" +
 			"include disabled services as well.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho gcloud services list --target rdc-gcp-dev\n" +
-			"  meho gcloud services list --target rdc-gcp-dev --all\n" +
-			"  meho gcloud services list --target rdc-gcp-dev --json | jq '.result.rows[].name'",
+		Example: "  meho gcloud services list --target gcp-dev-lab\n" +
+			"  meho gcloud services list --target gcp-dev-lab --all\n" +
+			"  meho gcloud services list --target gcp-dev-lab --json | jq '.result.rows[].name'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -255,8 +255,9 @@ meho status
 ### VKS (vSphere Kubernetes Service)
 
 VKS is the Kubernetes that VMware Cloud Foundation (VCF) runs on a
-vSphere Supervisor. MEHO is tested on a VKS cluster with Kubernetes
-v1.35.5 on VCF 9.1. The chart needs no change for VKS. Every command,
+vSphere Supervisor. MEHO is tested on two VKS clusters: Kubernetes
+v1.35.5 on VCF 9.1, and Kubernetes v1.32.10 on vSphere 8.0 Update 3
+(VCF 5.2). The chart needs no change for VKS. Every command,
 step by step, is on [Install MEHO on VKS by hand](form-3-vks.md). The
 steps above stay the same, with these differences:
 
@@ -298,6 +299,11 @@ steps above stay the same, with these differences:
 - **vCenter and NSX.** List their networks in
   `networkPolicy.extraEgress`, as in Step 3. Without it, MEHO cannot
   reach the vCenter it runs on.
+- **vSphere 8.** The install is the same as on VCF 9.1, with the same
+  `values-vks.yaml`. A vSphere 8 Supervisor offers an older Kubernetes:
+  v1.32.10 in our test. MEHO needs 1.28 or newer. In our test the
+  load balancer was the NSX load balancer of the Supervisor and the
+  disks were on NFS storage. Both worked with no extra setting.
 
 !!! warning "No firewall rule between the nodes"
 

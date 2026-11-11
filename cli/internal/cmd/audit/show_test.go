@@ -259,6 +259,51 @@ func TestPrintEntrySummaryShowsActor(t *testing.T) {
 	}
 }
 
+// TestPrintEntrySummaryShowsVia — the summary names the login client
+// and the channel from the payload's "client" block, and shows "-" for
+// a row without one.
+func TestPrintEntrySummaryShowsVia(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]any
+		want    string
+	}{
+		{"no block", map[string]any{}, "via:               -"},
+		{
+			"token",
+			map[string]any{"client": map[string]any{"azp": "meho-cli", "channel": "token"}},
+			"via:               meho-cli (token)",
+		},
+		{
+			"web",
+			map[string]any{"client": map[string]any{"azp": "meho-ui", "channel": "web"}},
+			"via:               meho-ui (web)",
+		},
+		{
+			"no azp",
+			map[string]any{"client": map[string]any{"azp": nil, "channel": "token"}},
+			"via:               unknown client (token)",
+		},
+		{"not an object", map[string]any{"client": "meho-cli"}, "via:               -"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printEntrySummary(&buf, &api.AuditEntry{
+				Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+				Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
+				PrincipalSub: "damir",
+				OpId:         "x.y",
+				ResultStatus: "ok",
+				Payload:      tc.payload,
+			})
+			if !strings.Contains(buf.String(), tc.want+"\n") {
+				t.Errorf("summary missing %q in %s", tc.want, buf.String())
+			}
+		})
+	}
+}
+
 // TestPrintEntrySummaryRendersUUIDsAndOptionals — the populated-
 // field render path. UUIDs come back as canonical
 // lowercase-hyphenated strings; optional strings render verbatim.

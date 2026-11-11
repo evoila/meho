@@ -596,6 +596,41 @@ credential read counts as governed in `has_safety_floor`, so a re-ingest
 never lowers a stricter stored row. Tests:
 `tests/test_credential_read_safety_floor.py`.
 
+The rule lives in one place, `operations/credential_read.py`
+(`raise_for_credential_read`), and holds for every connector kind:
+
+- **Where it runs.** At ingest (`apply_safety_floor`, above). At every
+  lookup: `effective_policy_map` in `op_policy.py` applies it last,
+  after the operator overrides, next to the caller-address floor. So
+  dispatch, the call contract, search, the operation read, the connector
+  review and the console page show the same values, for typed and
+  ingested reads, also when an override turned approval off and also for
+  a row stored before the floor. And for a call with
+  `reveal_secret: true` (below): in the dispatcher and in the preview
+  (`raise_descriptor_for_reveal`), so the preview reports the level and
+  the wait of the real call.
+- **Reads that return no secret value.** A connector marks such a read in
+  code with `declare_no_secret_value` (`op_classes.py`); the mark keeps
+  the read at its own level. A spec import and a tenant override cannot
+  set it. The marked built-in reads: `vault.kv.list` (key names),
+  `vault.kv.compare` and `k8s.secret.compare_to_ref` ("same" or
+  "different"), `bind9.config.show` (the redaction replaces every key
+  secret), and `vault.kv.read` without `reveal_secret` (every value is
+  hidden). The Vault marks sit in `credential_read.py`, because the Vault
+  reads get their class in core code too.
+- **`vault.kv.read` with `reveal_secret: true`.** The answer shows the
+  values, so the dispatcher raises the call to at least `caution` with
+  approval before the policy gate. A person's reveal waits for a second
+  person, the same as a service principal's. Approving runs nothing: the
+  read runs once when the person who asked fetches the value
+  (`POST /api/v1/approvals/{id}/reveal`, `operations/approved_reveal.py`),
+  and MEHO stores the result without the value. The Vault console's
+  secret view sends the flag, so it shows "waiting for approval" with a
+  link to the request and a "Show value" button
+  (`POST /ui/vault/read/reveal`). `meho secret read` prints the request
+  id and the command that gets the value after the approval:
+  `meho secret read --approval <id> --field <name>`.
+
 #### Caller-address floor
 
 The caller-address floor is the fourth and last floor. It covers an

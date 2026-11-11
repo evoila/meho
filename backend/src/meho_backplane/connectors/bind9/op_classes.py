@@ -7,7 +7,11 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 """
 
-from meho_backplane.op_classes import declare_op_classes, declare_root_shell
+from meho_backplane.op_classes import (
+    declare_no_secret_value,
+    declare_op_classes,
+    declare_root_shell,
+)
 
 declare_op_classes(
     # #4617 -- a BIND config file can hold TSIG and rndc key secrets. The
@@ -16,6 +20,11 @@ declare_op_classes(
     # recorder from storing the body.
     credential_read=("bind9.config.show",),
 )
+
+# #5132 -- the redaction replaces every key secret in the config text, so a
+# session can read the file before it changes it without waiting for
+# approval (meho_backplane.operations.credential_read).
+declare_no_secret_value(("bind9.config.show",))
 
 # The record and config writes run their script as root through the sudo
 # helper of the connector. A run approval never covers these: a person

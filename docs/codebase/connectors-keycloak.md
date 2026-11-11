@@ -29,7 +29,9 @@ ends is then audited, and a second person must approve it. #3851 adds
 sessions of one user, so their refresh tokens stop working at once. #3886 adds a
 fourth destructive delete, `realm.delete` (write surface **eighteen**), so a
 short-lived realm (a test run, a demo, a failed set-up) is removed through
-MEHO too, not by a direct API call.
+MEHO too, not by a direct API call. #4940 adds `user.disable` and
+`user.enable` (write surface **twenty**): they turn an account off and on
+without deleting it.
 `user.check_login` tests one login with a password from Vault and answers
 only `accepted`, `refused` or `error`, so an operator can prove a password
 change worked (the new password is accepted, the old one refused) without a
@@ -62,7 +64,7 @@ fresh target with no asserted version still resolves.
   `user_create`/`user_reset_password`, `role_mapping_assign`,
   `group_create`, `group_update_attributes`, `group_member_add`,
   `group_member_remove`, `user_delete`, `group_delete`, `client_delete`,
-  `user_logout`, `realm_delete`, `user_check_login`,
+  `user_logout`, `user_disable`, `user_enable`, `realm_delete`, `user_check_login`,
   `authflow_ensure_approval_flow`, `authflow_ensure_passkey_code_skip`),
   the `_get_admin_json` / `_get_admin_list` GET
   helpers (object vs array responses), and the `_write_admin` mutating
@@ -90,7 +92,9 @@ fresh target with no asserted version still resolves.
 - `WRITE_OPS` (`connectors/keycloak/ops_write_schemas.py`, re-exported by
   `ops_write.py`) + the write handlers (`connectors/keycloak/ops_write.py`) —
   the nine original approval-gated write ops plus `user.logout` (#3851),
-  with `GROUP_WRITE_OPS` and `DELETE_WRITE_OPS` spliced in,
+  with `GROUP_WRITE_OPS`, `DELETE_WRITE_OPS` and `USER_ENABLED_OPS`
+  (`ops_write_user_enabled_schemas.py`; handlers in
+  `ops_write_user_enabled.py`) spliced in,
   reusing the `KeycloakOp` dataclass.
   Every op is `requires_approval=True`; a create treats HTTP 409 as an
   idempotent success; `user.create`/`user.reset_password` source the
@@ -332,6 +336,8 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.group.delete` | destructive | `DELETE .../groups/{group-id}` |
 | `keycloak.client.delete` | destructive | `DELETE .../clients/{client-uuid}` |
 | `keycloak.user.logout` | caution | `POST .../users/{user-id}/logout` |
+| `keycloak.user.disable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: false`) |
+| `keycloak.user.enable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: true`) |
 | `keycloak.realm.delete` | destructive | `DELETE /admin/realms/{realm}` |
 | `keycloak.authflow.ensure_passkey_code_skip` | caution | `POST .../authentication/flows/browser/copy`, then `PUT .../realms/{realm}` |
 | `keycloak.authflow.ensure_approval_flow` | caution | `.../authentication/flows` and the client `PUT` (see "Approval sign-in flow and identity providers") |
@@ -571,6 +577,29 @@ for example at the end of an event or when someone leaves.
   broadcast feed it is a plain `write` (pinned in
   `broadcast/events.py::_WRITE_OPS`, because `.logout` is not a write suffix).
 - CLI: `meho keycloak user logout (--id|--username)`.
+
+### Turn a user off and on (#4940)
+
+`keycloak.user.disable` and `keycloak.user.enable` set `enabled` to false or
+true on one user. The account and its history stay. A disabled person can no
+longer sign in to any app that uses this realm.
+
+- Pass `id` (the user's UUID) or `username` (exact match, looked up with
+  `_find_user_uuid`).
+- The op reads the user, puts `enabled` on top and writes the whole user back
+  (`read_merge_write`), so no other field is reset. It reads the user again
+  and names any field that changed without being asked
+  (`unrequested_changes`, names only).
+- Safe to run twice: setting `enabled` to the value it already has succeeds.
+  A user that does not exist raises `KeycloakUserNotFoundError` and nothing
+  is written.
+- **Disabling does not end sessions that are already open.** To cut access at
+  once, run `keycloak.user.disable`, then `keycloak.user.logout`.
+- Risk level `dangerous`, approval required, group `user_write`. On the
+  broadcast feed both are a plain `write` (declared in `op_classes.py`,
+  because `.disable` and `.enable` are not write suffixes).
+- The result is `{id, username, enabled, unrequested_changes, read_back_checked}`
+  and carries no credential.
 
 ### Login test
 
@@ -907,10 +936,10 @@ Keycloak spec quirk). The lane
 [`backend/tests/test_connectors_keycloak_spec_reconcile.py`](../../backend/tests/test_connectors_keycloak_spec_reconcile.py)
 (the #2980 harness; parse-only, runs in the required unit sweep, uniform
 skip when the shelf is unconfigured) introspects those live constants and
-asserts all 48 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
+asserts all 49 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
 paths at #3280, +4 delete paths at #3944, +1 user logout path at #3851,
 +3 realm-delete paths at #3886, +8 login flow and identity provider
-paths at #5621, +3 passkey step paths) are served by the pinned
+paths at #5621, +3 passkey step paths, +1 user PUT path at #4940) are served by the pinned
 `keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
 Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
 `org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Three dispatched

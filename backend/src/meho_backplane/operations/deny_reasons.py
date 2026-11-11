@@ -11,6 +11,8 @@ text.
 * ``agent_grant_denied`` — an agent's grants (or its safety default)
   refused the call. In a run that a person started, this is the agent's
   own grant, not the person's.
+* ``agent_no_grant`` — an agent has no grant that covers the call, and
+  ``AGENT_GRANT_REQUIRED=on`` says it needs one (#6189).
 * ``role_insufficient`` — the caller's role is below what the operation
   or tool needs.
 * ``read_scope_denied`` — a service login's read scope does not cover the
@@ -30,15 +32,18 @@ from typing import Final
 
 __all__ = [
     "AGENT_GRANT_DENIED",
+    "AGENT_NO_GRANT",
     "AGENT_REVEAL_REFUSED",
     "CONNECTOR_NOT_ALLOWED",
     "POLICY_DENIED",
     "READ_SCOPE_DENIED",
     "ROLE_INSUFFICIENT",
     "deny_reason_code",
+    "is_agent_no_grant",
 ]
 
 AGENT_GRANT_DENIED: Final[str] = "agent_grant_denied"
+AGENT_NO_GRANT: Final[str] = "agent_no_grant"
 ROLE_INSUFFICIENT: Final[str] = "role_insufficient"
 READ_SCOPE_DENIED: Final[str] = "read_scope_denied"
 CONNECTOR_NOT_ALLOWED: Final[str] = "connector_not_allowed"
@@ -52,6 +57,16 @@ _AGENT_VERDICT_MARK: Final[str] = "verdict=deny"
 _ROLE_FLOOR_MARK: Final[str] = " role; your role is "
 
 
+def is_agent_no_grant(reason: str) -> bool:
+    """Say whether *reason* is the "agent has no grant" refusal.
+
+    The resolver starts that text with ``agent_no_grant:``. A direct run
+    puts "agent <name> acting for <sub>: " before it, so the code may
+    follow that prefix.
+    """
+    return reason.startswith(f"{AGENT_NO_GRANT}:") or f": {AGENT_NO_GRANT}:" in reason
+
+
 def deny_reason_code(reason: str) -> str:
     """Return the code for a deny *reason* text of the policy gate.
 
@@ -61,6 +76,8 @@ def deny_reason_code(reason: str) -> str:
     """
     if reason.startswith(f"{READ_SCOPE_DENIED}:"):
         return READ_SCOPE_DENIED
+    if is_agent_no_grant(reason):
+        return AGENT_NO_GRANT
     if _AGENT_VERDICT_MARK in reason:
         return AGENT_GRANT_DENIED
     if _ROLE_FLOOR_MARK in reason:

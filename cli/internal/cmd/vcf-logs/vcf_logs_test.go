@@ -411,7 +411,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := conn.Call(context.Background(), srv.URL, "GET:/api/v2/version", "rdc-vrli", nil)
+	r, err := conn.Call(context.Background(), srv.URL, "GET:/api/v2/version", "vrli-lab", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -484,7 +484,7 @@ func TestQueryDispatchesTypedOpWithSchemaParams(t *testing.T) {
 
 	cmd := newQueryCmd()
 	cmd.SetArgs([]string{"text/CONTAINS+error",
-		"--target", "rdc-vrli",
+		"--target", "vrli-lab",
 		"--limit", "100",
 		"--backplane", srv.URL,
 	})
@@ -515,7 +515,7 @@ func TestQueryEmptyConstraintsAllowed(t *testing.T) {
 
 	cmd := newQueryCmd()
 	cmd.SetArgs([]string{
-		"--target", "rdc-vrli",
+		"--target", "vrli-lab",
 		"--backplane", srv.URL,
 	})
 	if err := cmd.Execute(); err != nil {
@@ -528,7 +528,7 @@ func TestQueryEmptyConstraintsAllowed(t *testing.T) {
 func TestQueryRejectsNegativeLimit(t *testing.T) {
 	cmd := newQueryCmd()
 	cmd.SetArgs([]string{
-		"--target", "rdc-vrli",
+		"--target", "vrli-lab",
 		"--limit", "-1",
 		"--backplane", "https://nowhere.test.invalid",
 	})

@@ -477,6 +477,7 @@ async def test_file_read_unreadable_file_reports_present_without_content() -> No
         "truncated": False,
         "size_bytes": None,
         "exists": True,
+        "zero_length": False,
     }
 
 
@@ -1361,6 +1362,9 @@ _READ_OP_IDS: frozenset[str] = frozenset(
         "linux.dns.lookup",
         "linux.firewall.show",
         "linux.mount.list",
+        "linux.journal.tail",
+        "linux.fs.usage",
+        "linux.dir.list",
     }
 )
 
@@ -1380,7 +1384,7 @@ _EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS
 
 
 def test_linux_ops_count_matches_expected() -> None:
-    # about + seven read verbs + six write verbs = fourteen.
+    # about + ten read verbs + six write verbs = seventeen.
     assert len(LINUX_OPS) == len(_EXPECTED_OP_IDS)
 
 

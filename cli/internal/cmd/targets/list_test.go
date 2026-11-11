@@ -83,13 +83,13 @@ func TestPrintTargetsTableEmpty(t *testing.T) {
 func TestPrintTargetsTableRendersColumns(t *testing.T) {
 	captureOn := true
 	rows := []api.TargetSummary{
-		{Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"), Name: "rdc-vcenter", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example", FlightRecorderCapture: &captureOn},
+		{Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"), Name: "vcenter-lab", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example", FlightRecorderCapture: &captureOn},
 		{Id: mustUUID(t, "22222222-2222-2222-2222-222222222222"), Name: "rke2-meho", Aliases: nil, Product: "k8s", Host: "k.example"},
 	}
 	var buf bytes.Buffer
 	printTargetsTable(&buf, rows)
 	out := buf.String()
-	for _, want := range []string{"NAME", "ALIASES", "PRODUCT", "HOST", "CAPTURE", "rdc-vcenter", "vc-prod", "vcenter", "vc.example", "true", "rke2-meho", "k8s", "inherit"} {
+	for _, want := range []string{"NAME", "ALIASES", "PRODUCT", "HOST", "CAPTURE", "vcenter-lab", "vc-prod", "vcenter", "vc.example", "true", "rke2-meho", "k8s", "inherit"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printTargetsTable missing %q in %q", want, out)
 		}
@@ -137,7 +137,7 @@ func TestRunListHappyPath(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.TargetListResponse{Items: []api.TargetSummary{
-			{Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"), Name: "rdc-vcenter", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example"},
+			{Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"), Name: "vcenter-lab", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example"},
 		}})
 	})
 	srv := httptest.NewServer(mux)
@@ -150,7 +150,7 @@ func TestRunListHappyPath(t *testing.T) {
 		t.Fatalf("runList: %v; stderr=%s", err, stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"NAME", "rdc-vcenter", "vcenter", "vc.example"} {
+	for _, want := range []string{"NAME", "vcenter-lab", "vcenter", "vc.example"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q in %q", want, out)
 		}
@@ -164,7 +164,7 @@ func TestRunListJSONHappyPath(t *testing.T) {
 	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.TargetListResponse{Items: []api.TargetSummary{
-			{Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"), Name: "rdc-vcenter", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example"},
+			{Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"), Name: "vcenter-lab", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example"},
 		}})
 	})
 	srv := httptest.NewServer(mux)
@@ -182,7 +182,7 @@ func TestRunListJSONHappyPath(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
 	}
-	if len(decoded) != 1 || decoded[0].Name != "rdc-vcenter" {
+	if len(decoded) != 1 || decoded[0].Name != "vcenter-lab" {
 		t.Errorf("--json decode produced %+v", decoded)
 	}
 }

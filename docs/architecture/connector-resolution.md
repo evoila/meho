@@ -233,6 +233,14 @@ default `None` (the v0.6-T3 class attribute) matches any target
 version — including targets without a fingerprint at all. This is the
 behaviour a connector with no range gets.
 
+So a class with no range must say why in `version_range_reason` (one plain
+sentence, for example "Entra ID has no product version"). The generated
+connector page shows it in the "Built for" column. The test
+`backend/tests/test_connector_version_ranges.py` fails for a connector class
+with neither. A short list in that test names the classes whose range is
+still to be decided, each with the Task that decides it. The same check is
+in the connector package template (`tests/test_version_range.py`).
+
 ## Error shapes
 
 - `NoMatchingConnector` (subclass of `LookupError`) — zero candidates

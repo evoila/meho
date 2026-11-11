@@ -84,6 +84,7 @@ def window(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], None]:
             ui_session_read_revalidation_seconds=seconds,
             keycloak_audience="meho",
             ui_session_encryption_key="made-up-key",
+            audit_client_identity=False,
         )
         monkeypatch.setattr(revalidation, "get_settings", lambda: settings)
         # The refusal log names the session by its ref, made with this key.

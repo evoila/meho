@@ -21,7 +21,7 @@ import (
 // minted once at construction (mintAdminToken) against the master
 // realm using the password grant against `admin-cli`, matching the
 // pattern the reference shell script at
-// rdc-hetzner-dc/scripts/keycloak-bootstrap-meho-cli.sh uses.
+// the lab's keycloak-bootstrap-meho-cli.sh uses.
 //
 // The client is deliberately stdlib-only — no Keycloak Go SDK in
 // go.mod. The admin verb runs once per bootstrap and the surface area

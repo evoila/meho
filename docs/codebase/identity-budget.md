@@ -301,7 +301,10 @@ pre-check) that produces a `BudgetDecision`:
 - **ALLOW (no change)** — the run proceeds against the requested tier.
 - **ALLOW (downgraded)** — the runtime resolves the cheaper tier
   one rung down `TIER_DOWNGRADE_LADDER`
-  (INVESTIGATE → SUMMARIZE → TRIAGE) before building the model.
+  (INVESTIGATE → SUMMARIZE → TRIAGE) before building the model. In this
+  version every tier uses the same model (the one backend in
+  `AGENT_MODEL_BACKEND`), so the step changes the tier on the run
+  record, but not the model or the cost.
 
 ### Knobs
 

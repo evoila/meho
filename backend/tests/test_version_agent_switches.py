@@ -179,6 +179,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "mail_smtp_port",
         "mail_smtp_starttls",
         "mail_smtp_username",
+        "mcp_client_per_tool_kind",
         "mcp_require_session_id",
         "mcp_resource_uri",
         "mcp_session_start_limit_per_minute",

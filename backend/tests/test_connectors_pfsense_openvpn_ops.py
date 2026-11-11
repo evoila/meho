@@ -8,7 +8,8 @@
   and no server at all gives an empty list.
 * The log parser: event types, the window, the year of a year-less stamp.
 * The handlers: bad input is refused before any SSH call, the common name
-  is quoted, a failed read raises, a missing log file raises, and the
+  is quoted, only lines with the whole name count, a failed read raises
+  (also a grep error behind the pipe), a missing log file raises, and the
   result is cut and flagged at the limit.
 * The registration: both ops are ``safe`` reads in the ``openvpn`` group.
 
@@ -157,6 +158,9 @@ _LOG = [
 ]
 
 
+_GREP_OK = "\n@@GREP 0\n"
+
+
 def test_log_parser_window_filters_and_orders() -> None:
     since = datetime(2026, 11, 10, 9, 30, tzinfo=UTC)  # 10:30 at the firewall
     until = datetime(2026, 11, 10, 10, 45, tzinfo=UTC)
@@ -215,7 +219,7 @@ async def test_clients_handler_no_servers_is_an_empty_list() -> None:
 
 @pytest.mark.asyncio
 async def test_log_handler_happy_path_quotes_name() -> None:
-    connector, run = _connector(_proc(_DATE + "\n" + "\n".join(_LOG[:3]) + "\n"))
+    connector, run = _connector(_proc(_DATE + "\n" + "\n".join(_LOG[:3]) + _GREP_OK))
     with patch.object(PfSenseConnector, "_run_command", run):
         result = await connector.openvpn_log(
             _TARGET, {"common_name": "alice", "since": "2026-11-10T09:30:00Z"}
@@ -223,7 +227,52 @@ async def test_log_handler_happy_path_quotes_name() -> None:
     assert [e["event"] for e in result["events"]] == ["restart", "connect"]
     assert result["event_count"] == 2
     assert result["truncated"] is False
-    assert "grep -F -e alice /var/log/openvpn.log" in run.call_args.args[1]
+    cmd = run.call_args.args[1]
+    assert "grep -E -e '(^|[^A-Za-z0-9._@-])alice($|[^A-Za-z0-9._@-])' /var/log/openvpn.log" in cmd
+    assert 'echo "@@GREP $?"; } | tail -n 5001' in cmd
+
+
+@pytest.mark.asyncio
+async def test_log_handler_keeps_only_lines_with_the_whole_name() -> None:
+    lines = [
+        "Nov 10 09:00:01 fw openvpn[1]: bob/203.0.113.5:4000 SIGTERM[soft,remote-exit] received",
+        "Nov 10 09:00:02 fw openvpn[1]: bobby/203.0.113.6:4000 SIGTERM[soft,remote-exit] received",
+        "Nov 10 09:00:03 fw openvpn[1]: bob.smith/203.0.113.7:4000 [bob.smith] Peer Connection "
+        "Initiated",
+        "Nov 10 09:00:04 fw openvpn[1]: 203.0.113.5:4000 [bob] Peer Connection Initiated",
+    ]
+    connector, run = _connector(_proc(_DATE + "\n" + "\n".join(lines) + _GREP_OK))
+    with patch.object(PfSenseConnector, "_run_command", run):
+        result = await connector.openvpn_log(_TARGET, {"common_name": "bob"})
+    assert [e["line"] for e in result["events"]] == [lines[0], lines[3]]
+    assert result["event_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_log_handler_dot_in_name_is_not_a_wildcard() -> None:
+    connector, run = _connector(_proc(_DATE + "\n" + _GREP_OK))
+    with patch.object(PfSenseConnector, "_run_command", run):
+        await connector.openvpn_log(_TARGET, {"common_name": "j.doe"})
+    assert "])j\\.doe($|[" in run.call_args.args[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stdout", "match"),
+    [
+        (_DATE + "\n" + _LOG[0] + "\n@@GREP 2\n", "grep exit 2"),
+        (_DATE + "\n@@GREP 2\n", "grep exit 2"),
+        (_DATE + "\n" + _LOG[0] + "\n", "did not finish"),
+        (_DATE + "\n", "did not finish"),
+    ],
+)
+async def test_log_handler_grep_failure_behind_the_pipe_raises(stdout: str, match: str) -> None:
+    connector, run = _connector(_proc(stdout, stderr="grep: read error"))
+    with (
+        patch.object(PfSenseConnector, "_run_command", run),
+        pytest.raises(RuntimeError, match=match),
+    ):
+        await connector.openvpn_log(_TARGET, {"common_name": "alice"})
 
 
 @pytest.mark.asyncio
@@ -253,7 +302,7 @@ async def test_log_handler_bad_input_is_refused_before_ssh(params: dict[str, Any
 
 @pytest.mark.asyncio
 async def test_log_handler_no_matching_lines_is_empty_not_error() -> None:
-    connector, run = _connector(_proc(_DATE + "\n"))
+    connector, run = _connector(_proc(_DATE + "\n@@GREP 1\n"))
     with patch.object(PfSenseConnector, "_run_command", run):
         result = await connector.openvpn_log(_TARGET, {"common_name": "nobody"})
     assert result["events"] == []
@@ -272,7 +321,7 @@ async def test_log_handler_missing_log_file_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_log_handler_unreadable_date_raises() -> None:
-    connector, run = _connector(_proc("oops\n" + _LOG[0] + "\n"))
+    connector, run = _connector(_proc("oops\n" + _LOG[0] + _GREP_OK))
     with (
         patch.object(PfSenseConnector, "_run_command", run),
         pytest.raises(RuntimeError, match="date"),
@@ -282,7 +331,7 @@ async def test_log_handler_unreadable_date_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_log_handler_limit_keeps_newest_and_flags_truncated() -> None:
-    connector, run = _connector(_proc(_DATE + "\n" + "\n".join(_LOG[:3]) + "\n"))
+    connector, run = _connector(_proc(_DATE + "\n" + "\n".join(_LOG[:3]) + _GREP_OK))
     with patch.object(PfSenseConnector, "_run_command", run):
         result = await connector.openvpn_log(_TARGET, {"common_name": "alice", "limit": 1})
     assert result["truncated"] is True
@@ -293,7 +342,7 @@ async def test_log_handler_limit_keeps_newest_and_flags_truncated() -> None:
 @pytest.mark.asyncio
 async def test_log_handler_full_tail_flags_truncated() -> None:
     lines = [_LOG[0]] * 5000
-    connector, run = _connector(_proc(_DATE + "\n" + "\n".join(lines) + "\n"))
+    connector, run = _connector(_proc(_DATE + "\n" + "\n".join(lines) + _GREP_OK))
     with patch.object(PfSenseConnector, "_run_command", run):
         result = await connector.openvpn_log(_TARGET, {"common_name": "alice", "limit": 1000})
     assert result["truncated"] is True

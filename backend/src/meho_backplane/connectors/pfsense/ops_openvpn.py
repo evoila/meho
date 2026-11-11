@@ -17,7 +17,8 @@ Two read ops for the first question of a "the VPN is slow" ticket.
 ``pfsense.openvpn.log``
     The OpenVPN log lines of one user (common name) in a time window,
     each with an event type: ``connect``, ``disconnect``, ``restart``,
-    ``error`` or ``other``.
+    ``error`` or ``other``. A line counts only when it holds the whole
+    name: ``bob`` does not match the lines of ``bobby`` or ``bob.smith``.
 
 Bounded on purpose
 ------------------
@@ -28,6 +29,9 @@ Bounded on purpose
 * The log read returns at most ``limit`` events (default 200, at most
   1000) and reads at most the last 5000 matching lines. When lines may be
   missing, the result says ``truncated: true``.
+* A failed log read raises. ``grep`` prints its exit status after its
+  lines, so an error (status 2) is not hidden by the pipe to ``tail``.
+  Status 1 (no line matched) is a normal, empty answer.
 * A server whose socket cannot be read is reported with
   ``readable: false``. It is never shown as a server with no clients.
 
@@ -75,6 +79,10 @@ _MAX_RAW_CHARS = 500
 # first character is a letter or digit so a value can never look like a
 # grep option. A name with other characters is refused, not cleaned.
 _COMMON_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{1,63}")
+# The characters a name can hold. A match must not touch one of them on
+# either side, so it is the whole name and not a part of a longer one.
+_NAME_CHARS = "A-Za-z0-9._@-"
+_GREP_STATUS = "@@GREP "
 
 _CLIENTS_CMD = (
     "for d in /var/etc/openvpn/server*; do "
@@ -145,6 +153,20 @@ def _validate_limit(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_LIMIT:
         raise ValueError(f"limit must be a whole number from 1 to {_MAX_LIMIT}; got {value!r}")
     return value
+
+
+def _name_grep_pattern(common_name: str) -> str:
+    """The ``grep -E`` pattern for the whole name. Only ``.`` is special in it.
+
+    >>> _name_grep_pattern("j.doe")
+    '(^|[^A-Za-z0-9._@-])j\\\\.doe($|[^A-Za-z0-9._@-])'
+    """
+    escaped = common_name.replace(".", "\\.")
+    return f"(^|[^{_NAME_CHARS}]){escaped}($|[^{_NAME_CHARS}])"
+
+
+def _name_line_re(common_name: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<![{_NAME_CHARS}]){re.escape(common_name)}(?![{_NAME_CHARS}])")
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +348,26 @@ def _first_line(text: str) -> str:
     return (text.strip().splitlines() or [""])[0][:200]
 
 
+def _checked_grep_lines(text: str, detail: str) -> list[str]:
+    """Return the log lines, or raise when grep did not finish well.
+
+    Status 0 (lines found) and 1 (no line matched) are good. Any other
+    status, or no status line at all, means the read failed or stopped.
+    """
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    status = (
+        lines.pop()[len(_GREP_STATUS) :] if lines and lines[-1].startswith(_GREP_STATUS) else None
+    )
+    if status not in ("0", "1"):
+        message = (
+            f"openvpn log read failed (grep exit {status})"
+            if status is not None
+            else "openvpn log read failed (the read did not finish)"
+        )
+        raise RuntimeError(f"{message}: {detail}" if detail else message)
+    return lines
+
+
 async def pfsense_openvpn_clients(
     self: PfSenseConnector,
     target: Any,
@@ -369,24 +411,27 @@ async def pfsense_openvpn_log(
         raise ValueError("since must not be later than until")
     limit = _validate_limit(params.get("limit"))
 
+    # grep's status line comes last, so tail keeps it: 5000 lines plus that one.
     cmd = (
         f"date '+%Y-%m-%d %H:%M:%S %z'; "
         f"[ -r {_LOG_FILE} ] || {{ echo '@@NOLOG'; exit 3; }}; "
-        f"grep -F -e {shlex.quote(common_name)} {_LOG_FILE} | tail -n {_MAX_LOG_LINES}"
+        f"{{ grep -E -e {shlex.quote(_name_grep_pattern(common_name))} {_LOG_FILE}; "
+        f'echo "{_GREP_STATUS}$?"; }} | tail -n {_MAX_LOG_LINES + 1}'
     )
     proc = await self._run_command(target, cmd, operator=operator, timeout=30.0)
     stdout = _text(proc, "stdout")
+    detail = _first_line(_text(proc, "stderr"))
     if proc.exit_status != 0:
         reason = "the OpenVPN log file is not readable" if "@@NOLOG" in stdout else "read failed"
-        detail = _first_line(_text(proc, "stderr"))
         message = f"openvpn log read failed ({reason}): exit {proc.exit_status}"
         raise RuntimeError(f"{message}: {detail}" if detail else message)
     first, _, rest = stdout.partition("\n")
     now = _parse_firewall_now(first)
     if now is None:
         raise RuntimeError("openvpn log read failed: the firewall date could not be read")
-    lines = [ln for ln in rest.splitlines() if ln.strip()]
-    events = parse_openvpn_log(lines, now, since, until)
+    lines = _checked_grep_lines(rest, detail)
+    name_re = _name_line_re(common_name)
+    events = parse_openvpn_log([ln for ln in lines if name_re.search(ln)], now, since, until)
     # 5000 lines means the tail cut older lines, so the window may be incomplete.
     truncated = len(lines) >= _MAX_LOG_LINES or len(events) > limit
     return {

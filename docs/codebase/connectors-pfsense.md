@@ -315,7 +315,7 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.user.enable` | same as `pfsense.user.disable`, but clears `disabled` | `users` | `dangerous` |
 | `pfsense.diag.ping` | `ifconfig -a` (the source must be one of these addresses) + `ping -4\|-6 -n -c <1-5> -W 1000 -t <count+2> -S <source> <host>` | `diagnostics` | `caution` |
 | `pfsense.openvpn.clients` | for each `/var/etc/openvpn/server*` with a socket: `grep` of `proto` / `port` in `config.ovpn` + `nc -U` to the management socket (`status 3`) | `openvpn` | `safe` |
-| `pfsense.openvpn.log` | `date` + `grep -F -e <common_name> /var/log/openvpn.log \| tail -n 5000` | `openvpn` | `safe` |
+| `pfsense.openvpn.log` | `date` + `{ grep -E <whole common_name> /var/log/openvpn.log; echo <grep status>; } \| tail -n 5001` | `openvpn` | `safe` |
 
 The 11 read / identity ops plus the `pfsense.mgmt_flow.summary` classifier
 are `safety_level="safe"`. `pfsense.diag.ping` is `safety_level="caution"` /
@@ -902,8 +902,10 @@ dropping" ticket. They change nothing.
 - **`pfsense.openvpn.log`** takes `common_name` (required; 2 to 64 characters of
   letters, digits, `.`, `_`, `@`, `-`), `since` and `until` (ISO 8601 with a
   zone; a time without a zone is refused) and `limit` (1 to 1000, default 200).
-  It greps the log for the name (fixed string, quoted) and keeps the last 5000
-  matching lines. Each line gets an event: `connect`, `disconnect` (with a
+  It greps the log for the whole name (quoted; `bob` does not match `bobby` or
+  `bob.smith`) and keeps the last 5000 matching lines. grep prints its exit
+  status after its lines, so a read error (status 2) raises an error instead
+  of an empty answer. No matching line (status 1) is an empty answer. Each line gets an event: `connect`, `disconnect` (with a
   reason such as `remote-exit` or `inactivity-timeout`), `restart` (reason such
   as `ping-restart`), `error` (TLS and auth errors) or `other`.
 - **Time.** A log stamp has no year and no zone. The op reads the firewall's
@@ -914,8 +916,7 @@ dropping" ticket. They change nothing.
   was full) or more events matched than `limit`. The newest events are kept.
 - **Known limit.** Lines are matched by the common name text. A line from
   before the server knew the user (for example an early TLS error) has no name
-  and is not returned. The match is on text, not on whole names: the name
-  `bob` also returns lines of `bobby`. Check the name inside each line.
+  and is not returned.
 - **Tests.** `backend/tests/test_connectors_pfsense_openvpn_ops.py`.
 
 ## Diagnostics: `pfsense.diag.ping` (#3965)

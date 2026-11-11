@@ -74,7 +74,7 @@ _LOG_PARAMETER_SCHEMA: dict[str, Any] = {
             "maxLength": 64,
             "description": (
                 "The VPN user's common name: letters, digits, '.', '_', '@' or '-'. "
-                "Log lines are matched by this text."
+                "Only log lines with the whole name count."
             ),
         },
         "since": {

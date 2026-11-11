@@ -396,7 +396,7 @@ from meho_backplane.operations._preview import (
     build_proposed_effect,
     describe_preview_provenance,
 )
-from meho_backplane.operations._preview_steps import agent_no_grant_step_reason
+from meho_backplane.operations._preview_steps import agent_step_refusal
 from meho_backplane.operations._request_preview import (
     compute_preview_hash,
     preview_dispatch,
@@ -1125,15 +1125,16 @@ def _agent_acts(operator: Operator) -> bool:
     return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
 
 
-async def _agent_no_grant_step_refusal(
+async def _agent_step_refusal(
     *, operator: Operator, op_id: str, connector_id: str, target: Any
 ) -> str | None:
-    """Refuse a multi-step call up front when a write step has no grant (#6189).
+    """Refuse a multi-step call up front when the agent may not run a write step.
 
+    A write step with no grant (#6189), or with a ``deny`` grant (#6285).
     Only for an agent with ``AGENT_GRANT_REQUIRED`` not ``off`` and only at
     the top level: the steps of the call are checked here, with the same
     list the preview checks, so the call never stops half-way at a step the
-    switch refuses. With ``observe`` the check only writes the
+    agent's grants refuse. With ``observe`` the check only writes the
     ``agent_no_grant_would_deny`` line of each uncovered step and returns
     ``None``, so the verdict stays as it was.
     """
@@ -1143,7 +1144,7 @@ async def _agent_no_grant_step_refusal(
         or composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
     ):
         return None
-    return await agent_no_grant_step_reason(
+    return await agent_step_refusal(
         operator=operator, op_id=op_id, connector_id=connector_id, target=target
     )
 
@@ -3995,7 +3996,7 @@ async def _dispatch_now(
                 _log.info("reveal_secret_waits_for_approval", op_id=op_id)
                 verdict = PermissionVerdict.NEEDS_APPROVAL
             if verdict is not PermissionVerdict.DENY:
-                step_refusal = await _agent_no_grant_step_refusal(
+                step_refusal = await _agent_step_refusal(
                     operator=operator, op_id=op_id, connector_id=connector_id, target=target
                 )
                 if step_refusal is not None:

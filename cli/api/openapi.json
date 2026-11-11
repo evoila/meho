@@ -26900,6 +26900,42 @@
         "title": "ApprovalRevealResult",
         "description": "The run result of an approved reveal, for the person who asked."
       },
+      "ApprovalSignInStatus": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "flow_missing",
+              "flow_differs",
+              "not_bound",
+              "not_checked"
+            ],
+            "title": "State"
+          },
+          "flow": {
+            "type": "string",
+            "title": "Flow",
+            "default": "meho approval sign-in"
+          },
+          "client": {
+            "type": "string",
+            "title": "Client"
+          },
+          "detail": {
+            "type": "string",
+            "nullable": true,
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state",
+          "client"
+        ],
+        "title": "ApprovalSignInStatus",
+        "description": "The state of the approval sign-in flow and its binding (#6280)."
+      },
       "ApprovalsStatus": {
         "properties": {
           "custody": {
@@ -26913,6 +26949,10 @@
           "delegated_decision_posture": {
             "type": "string",
             "title": "Delegated Decision Posture"
+          },
+          "sign_in": {
+            "$ref": "#/components/schemas/ApprovalSignInStatus",
+            "nullable": true
           }
         },
         "type": "object",
@@ -26922,7 +26962,7 @@
           "delegated_decision_posture"
         ],
         "title": "ApprovalsStatus",
-        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value."
+        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`)."
       },
       "ApproveRequestBody": {
         "properties": {

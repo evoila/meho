@@ -30,7 +30,7 @@ the end, then return to the trail.
 | `meho approval sign-in` | Login flow, bound to `meho-cli-approve` | Always asks for the password (and the one-time code, when the person has one) |
 | `meho-mcp` | **Public** client, authorization-code + PKCE | Browser-capable MCP clients (Claude Desktop, MCP Inspector, …) |
 | `meho-web` | Confidential client, authorization-code + PKCE | The MEHO web UI. Redirect URI `https://<host>/ui/auth/callback`. |
-| `meho approval touch` | Login flow, bound to `meho-web`, with two levels | Level 1 is the normal console login. Level 2 (`meho-touch`) asks for a passkey touch every time. See [The passkey touch level](#the-passkey-touch-level). |
+| `meho approval touch` | Login flow, bound to `meho-web`, with two levels | Level 1 is the normal console login. Level 3 (`meho-touch`) asks for a passkey touch every time. See [The passkey touch level](#the-passkey-touch-level). |
 | `meho-admin`, `meho-check-runner` | Confidential service clients | MEHO manages clients and users in the realm (`meho-admin`), and runs scheduled checks (`meho-check-runner`) |
 | 8 protocol mappers | On the login clients (`meho-cli-approve` without `meho-mcp-audience`) | Make issued tokens carry the claims the backplane validates |
 | 4 default client scopes | On the login clients | Including the `basic` scope that carries the mandatory `sub` claim |
@@ -280,8 +280,10 @@ nothing changes for anyone.
 What the realm has:
 
 - **A level for the touch.** The realm maps the name `meho-touch` to
-  level 2 (realm settings, **ACR to LoA Mapping**). The normal login is
-  level 1, and its `acr` stays `1`.
+  level 3 (realm settings, **ACR to LoA Mapping**). The normal login is
+  level 1, and its `acr` stays `1`. Level 2 is kept for the approval
+  sign-in (`meho-approve`). A higher level also counts where a lower
+  one is asked for.
 - **A login flow with two levels**, `meho approval touch`, bound as the
   browser flow of `meho-web` only. The CLI, MCP and approval sign-in
   clients keep their own flows.
@@ -289,8 +291,10 @@ What the realm has:
     cookie, the company login, the password form (which also takes a
     passkey), and the one-time code when the person has one and did not
     use a passkey. So the normal console login looks the same as
-    before.
-  - Level 2 asks for a passkey with user verification (**WebAuthn
+    before. These are the steps of Keycloak's own browser flow, not a
+    copy of your realm's current one. If your own Keycloak uses a
+    changed browser flow, the console login loses those changes.
+  - Level 3 asks for a passkey with user verification (**WebAuthn
     Passwordless Authenticator**). Its condition has **Max Age** 0, so a
     touch counts for one login only. Every request for the touch asks
     for a new touch, also when the person is still signed in.
@@ -325,8 +329,8 @@ The flow, step by step (`meho approval touch`, type **Basic flow**):
 | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Condition - user configured | Required | |
 | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Condition - credential | Required | Credentials `webauthn-passwordless`, Included off |
 | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;OTP Form | Required | |
-| &nbsp;&nbsp;Sub-flow `meho approval touch - level 2` | Conditional | |
-| &nbsp;&nbsp;&nbsp;&nbsp;Condition - Level of Authentication | Required | Level 2, Max Age 0 |
+| &nbsp;&nbsp;Sub-flow `meho approval touch - level 3` | Conditional | |
+| &nbsp;&nbsp;&nbsp;&nbsp;Condition - Level of Authentication | Required | Level 3, Max Age 0 |
 | &nbsp;&nbsp;&nbsp;&nbsp;WebAuthn Passwordless Authenticator | Required | Authentication reference `hwk`, max age 120 |
 
 #### On your own Keycloak
@@ -336,7 +340,7 @@ The flow needs Keycloak 26.4 or newer: older versions have no
 the operation below say so and change nothing.
 
 `meho admin keycloak bootstrap-clients` makes the flow with its
-settings and maps `meho-touch` to level 2. When the realm has the
+settings and maps `meho-touch` to level 3. When the realm has the
 console client (`--web-client-id`, default `meho-web`), it also adds the
 `amr` mapper to it and binds the flow as its browser flow. The helper
 does not make the console client. Without it, the helper says so; bind
@@ -345,7 +349,7 @@ the flow by hand after you make the client.
 By hand, in the Keycloak admin console:
 
 1. **Realm settings → General → ACR to LoA Mapping**: add `meho-touch`
-   with level `2`.
+   with level `3`.
 2. **Authentication → Create flow**: name `meho approval touch`, type
    **Basic flow**. Add the steps and sub-flows of the table above, in
    that order. Set each requirement, and the settings with the gear
@@ -376,7 +380,7 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch 
 ```
 
 - The flow is missing: MEHO makes it with its settings, maps
-  `meho-touch` to level 2, adds the `amr` mapper to `meho-web`, and
+  `meho-touch` to level 3, adds the `amr` mapper to `meho-web`, and
   binds the flow. The binding is the last change.
 - Everything is there: MEHO changes nothing, and every change flag in
   the result is `false`. So the call is safe to run twice.
@@ -385,6 +389,12 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch 
   hand, or delete it and run again.
 - The realm maps `meho-touch` to another level: MEHO stops before it
   binds the flow.
+- The realm's browser flow sends people straight to the company login:
+  MEHO gives the touch flow the same company login default before it
+  binds the flow. So the console still goes straight to the company
+  login.
+- `meho-web` already has another browser flow: MEHO replaces it. The
+  result names the old one in `previous_browser_flow_id`.
 - `meho-web` is missing, or the Keycloak is older than 26.4: MEHO
   stops before it changes anything.
 

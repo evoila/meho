@@ -5,7 +5,7 @@
 
 The chart's realm file has the login flow ``meho approval touch`` and binds
 it to the console client ``meho-web``. Level 1 of the flow is the normal
-login. Level 2 (``acr_values=meho-touch``) asks for a passkey with user
+login. Level 3 (``acr_values=meho-touch``) asks for a passkey with user
 verification, every time (maximum age 0). Keycloak reads that file only
 when the realm does not exist yet, so a realm made earlier has none of it.
 This op adds it with one governed request.
@@ -27,13 +27,18 @@ What the op does, on the target's managed realm:
    * It exists with another shape: stop and name the first difference.
      Nothing is written.
 
-3. Map ``meho-touch`` to level 2 in the realm attribute ``acr.loa.map``,
+3. Map ``meho-touch`` to level 3 in the realm attribute ``acr.loa.map``,
    next to the names the realm maps already. A realm that maps
    ``meho-touch`` to another level stops the op; the flow is then made but
    not bound.
 4. Add the mapper ``amr`` (``oidc-amr-mapper``) to the client, unless it
    has one.
-5. Bind the flow as the client's browser flow, unless it already is.
+5. When the realm's browser flow sends people straight to the company login
+   (a default on its Identity Provider Redirector step), give the redirect
+   step of the touch flow the same default. Without it the console login
+   would stop going straight to the company login.
+6. Bind the flow as the client's browser flow, unless it already is. A
+   different browser flow on the client is replaced; the result names it.
 
 Safe to run twice. Risk level ``caution`` with approval: the op changes how
 people log in to the console. The normal login keeps its steps.
@@ -61,6 +66,8 @@ from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import (
     AMR_MAPPER,
     ENSURE_APPROVAL_TOUCH_OP_ID,
     LOA_MAP_ATTRIBUTE,
+    REDIRECT_CONFIG_ALIAS,
+    REDIRECTOR,
     TOUCH_ACR,
     TOUCH_FLOW_ALIAS,
     TOUCH_FLOW_DESCRIPTION,
@@ -304,7 +311,7 @@ def _loa_map(realm_rep: dict[str, Any]) -> dict[str, Any]:
 async def _ensure_loa_map(
     connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
 ) -> bool:
-    """Map ``meho-touch`` to level 2 in the realm; whether this run changed it."""
+    """Map ``meho-touch`` to level 3 in the realm; whether this run changed it."""
     realm_path = fill_path(_ADMIN_REALM_PATH, {"realm": realm})
     before = await connector._get_admin_json(target, realm_path, operator=operator)
     mapping = _loa_map(before)
@@ -328,7 +335,7 @@ async def _ensure_loa_map(
     after = await connector._get_admin_json(target, realm_path, operator=operator)
     if str(_loa_map(after).get(TOUCH_ACR)) != str(TOUCH_LEVEL):
         raise KeycloakTouchFlowError(
-            "check_failed", f"the realm does not read back with {TOUCH_ACR!r} at level 2"
+            "check_failed", f"the realm does not read back with {TOUCH_ACR!r} at level 3"
         )
     return True
 
@@ -354,6 +361,91 @@ async def _ensure_amr_mapper(
     await connector._write_admin(
         target, "POST", path, operator=operator, json=dict(AMR_MAPPER), idempotent_conflict=False
     )
+    return True
+
+
+async def _redirect_default(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    realm: str,
+    rows: list[dict[str, Any]],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The company login default of the redirect step in *rows*, and that step's settings."""
+    step = next((row for row in rows if row.get("providerId") == REDIRECTOR), None)
+    config_id = step.get("authenticationConfig") if step is not None else None
+    if not isinstance(config_id, str) or not config_id:
+        return None, None
+    path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(config_id)})
+    body = await connector._get_admin_json(target, path, operator=operator)
+    config = body.get("config")
+    default = config.get("defaultProvider") if isinstance(config, dict) else None
+    return (default if isinstance(default, str) and default else None), body
+
+
+async def _ensure_redirect(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    realm: str,
+    rows: list[dict[str, Any]],
+) -> bool:
+    """Copy the company login default of the realm's browser flow onto the touch flow.
+
+    The chart's setup step does the same at each upgrade (core/company_login.py).
+    Whether this run changed it.
+    """
+    realm_rep = await connector._get_admin_json(
+        target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
+    )
+    browser = str(realm_rep.get("browserFlow") or "browser")
+    if browser == TOUCH_FLOW_ALIAS:
+        return False
+    path = fill_path(
+        _AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": quote_segment(browser)}
+    )
+    browser_rows = await get_admin_list_strict(connector, target, path, operator=operator)
+    wanted, _ = await _redirect_default(
+        connector, operator, target, realm, [r for r in browser_rows if isinstance(r, dict)]
+    )
+    if wanted is None:
+        return False
+    have, body = await _redirect_default(connector, operator, target, realm, rows)
+    if have == wanted:
+        return False
+    if body is not None:
+        config = body.get("config")
+        merged = {**(config if isinstance(config, dict) else {}), "defaultProvider": wanted}
+        path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(str(body["id"]))})
+        await connector._write_admin(
+            target,
+            "PUT",
+            path,
+            operator=operator,
+            json={**body, "config": merged},
+            idempotent_conflict=False,
+        )
+    else:
+        step = next(row for row in rows if row.get("providerId") == REDIRECTOR)
+        path = fill_path(
+            _AUTH_EXECUTION_CONFIG_PATH,
+            {"realm": realm, "executionId": quote_segment(str(step["id"]))},
+        )
+        await connector._write_admin(
+            target,
+            "POST",
+            path,
+            operator=operator,
+            json={"alias": REDIRECT_CONFIG_ALIAS, "config": {"defaultProvider": wanted}},
+            idempotent_conflict=False,
+        )
+    rows = await _read_rows(connector, operator, target, realm)
+    if (await _redirect_default(connector, operator, target, realm, rows))[0] != wanted:
+        raise KeycloakTouchFlowError(
+            "check_failed",
+            "the company login default of the touch flow does not read back. "
+            "The flow was not bound.",
+        )
     return True
 
 
@@ -457,6 +549,7 @@ async def keycloak_authflow_ensure_approval_touch(
     flow_id, created, rows = await _ensure_flow(self, operator, target, segment)
     loa_changed = await _ensure_loa_map(self, operator, target, segment)
     mapper_added = await _ensure_amr_mapper(self, operator, target, segment, client_uuid)
+    redirect_copied = await _ensure_redirect(self, operator, target, segment, rows)
     client_path = fill_path(
         _CLIENT_PATH, {"realm": segment, "client-uuid": quote_segment(client_uuid)}
     )
@@ -469,6 +562,7 @@ async def keycloak_authflow_ensure_approval_touch(
         "flow_steps": _listed(rows),
         "loa_map_changed": loa_changed,
         "amr_mapper_added": mapper_added,
+        "redirect_default_copied": redirect_copied,
         "client_id": client_id,
         "client_uuid": client_uuid,
         **binding,

@@ -11,7 +11,7 @@ What is proven:
 
 * the op's flow is the one of the chart's realm file: same steps, same
   requirements, same settings;
-* a realm without the flow gets it, ``meho-touch`` at level 2 next to the
+* a realm without the flow gets it, ``meho-touch`` at level 3 next to the
   realm's other names, the ``amr`` mapper and the binding; a second run
   writes nothing;
 * a flow with another shape or other settings stops the op and nothing is
@@ -45,6 +45,7 @@ from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_authflow_touch import wanted_steps
 from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import (
     AMR_MAPPER,
+    REDIRECT_CONFIG_ALIAS,
     TOUCH_FLOW_ALIAS,
 )
 from meho_backplane.connectors.keycloak.session import (
@@ -52,6 +53,7 @@ from meho_backplane.connectors.keycloak.session import (
     KeycloakClientCredentials,
     KeycloakTargetLike,
 )
+from meho_backplane.core import company_login
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
@@ -308,7 +310,37 @@ class FakeKeycloak:
 
     def _config(self, request: httpx.Request) -> httpx.Response:
         config_id = request.url.raw_path.decode().rsplit("/", 1)[1]
+        if request.method == "PUT":
+            self.configs[config_id] = self._log(request)
+            return httpx.Response(204)
         return httpx.Response(200, json=self.configs[config_id])
+
+    def redirect_to(self, provider: str) -> None:
+        """Give the realm's browser flow a redirect step that goes to *provider*."""
+        self.configs["browser-redirect"] = {
+            "id": "browser-redirect",
+            "alias": "meho-company-login-redirect",
+            "config": {"defaultProvider": provider},
+        }
+        self.flows["browser"]["steps"] = [
+            {"id": "cookie", "provider": "auth-cookie", "requirement": "ALTERNATIVE"},
+            {
+                "id": "redirector",
+                "provider": "identity-provider-redirector",
+                "requirement": "ALTERNATIVE",
+                "config": "browser-redirect",
+            },
+        ]
+
+    def touch_redirect(self) -> dict[str, Any] | None:
+        """The settings of the touch flow's redirect step, or ``None``."""
+        step = next(
+            row
+            for row in self.listed(TOUCH_FLOW_ALIAS)
+            if row.get("providerId") == "identity-provider-redirector"
+        )
+        config_id = step.get("authenticationConfig")
+        return self.configs[config_id] if config_id else None
 
 
 def _client(browser: str | None = None) -> dict[str, Any]:
@@ -365,7 +397,7 @@ def test_op_flow_is_the_flow_of_the_realm_file() -> None:
     web = next(c for c in realm["clients"] if c["clientId"] == "meho-web")
     file_mapper = next(m for m in web["protocolMappers"] if m["name"] == "amr")
     assert file_mapper == AMR_MAPPER
-    assert json.loads(realm["attributes"]["acr.loa.map"]) == {"meho-touch": 2}
+    assert json.loads(realm["attributes"]["acr.loa.map"]) == {"meho-touch": 3}
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +454,7 @@ async def test_op_waits_for_approval_and_the_card_names_client_and_flow(
 async def test_realm_without_the_flow_gets_all_of_it_and_a_second_run_changes_nothing(
     kc: KeycloakConnector,
 ) -> None:
-    fake = FakeKeycloak(client=_client(), loa_map='{"gold":3}')
+    fake = FakeKeycloak(client=_client(), loa_map='{"meho-approve":2}')
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         fake.mount(mock)
         first = await _run({})
@@ -436,6 +468,8 @@ async def test_realm_without_the_flow_gets_all_of_it_and_a_second_run_changes_no
     assert out["loa_map_changed"] is True
     assert out["amr_mapper_added"] is True
     assert out["binding_changed"] is True
+    assert out["redirect_default_copied"] is False
+    assert fake.touch_redirect() is None
     assert out["flow_id"] == flow_id
     assert out["browser_flow_id"] == flow_id
     assert out["previous_browser_flow_id"] is None
@@ -453,7 +487,8 @@ async def test_realm_without_the_flow_gets_all_of_it_and_a_second_run_changes_no
         assert (config["alias"], config["config"]) == node.config
 
     # The realm keeps its other names; the client keeps its other settings.
-    assert json.loads(fake.realm["attributes"]["acr.loa.map"]) == {"gold": 3, "meho-touch": 2}
+    levels = json.loads(fake.realm["attributes"]["acr.loa.map"])
+    assert levels == {"meho-approve": 2, "meho-touch": 3}
     assert fake.realm["attributes"]["frontendUrl"] == ""
     assert any(m["protocolMapper"] == "oidc-amr-mapper" for m in fake.mappers)
     assert fake.client is not None
@@ -464,7 +499,14 @@ async def test_realm_without_the_flow_gets_all_of_it_and_a_second_run_changes_no
     assert fake.client["redirectUris"] == ["https://meho.example.test/ui/auth/callback"]
 
     assert second["status"] == "ok", second
-    for flag in ("flow_created", "loa_map_changed", "amr_mapper_added", "binding_changed"):
+    flags = (
+        "flow_created",
+        "loa_map_changed",
+        "amr_mapper_added",
+        "redirect_default_copied",
+        "binding_changed",
+    )
+    for flag in flags:
         assert second["result"][flag] is False, flag
     assert len(fake.writes) == writes_after_first
 
@@ -478,6 +520,69 @@ async def test_the_bind_is_the_last_write(kc: KeycloakConnector) -> None:
     assert result["status"] == "ok", result
     assert result["result"]["previous_browser_flow_id"] == "old-flow-id"
     assert fake.writes[-1][1] == f"{_ADMIN}/clients/{_CLIENT_UUID}"
+
+
+# ---------------------------------------------------------------------------
+# The company login redirect
+# ---------------------------------------------------------------------------
+
+
+def test_redirect_settings_name_is_the_one_of_the_setup_step() -> None:
+    """The chart's setup step and the op give the touch flow's redirect the same name."""
+    assert f"{company_login.REDIRECT_CONFIG_ALIAS}-touch" == REDIRECT_CONFIG_ALIAS
+
+
+async def test_company_login_redirect_is_copied_before_the_bind(kc: KeycloakConnector) -> None:
+    """With the redirect on, the console still goes straight to the company login."""
+    fake = FakeKeycloak(client=_client())
+    fake.redirect_to("company")
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        first = await _run({})
+        writes_after_first = len(fake.writes)
+        second = await _run({})
+    assert first["status"] == "ok", first
+    assert first["result"]["redirect_default_copied"] is True
+    copied = fake.touch_redirect()
+    assert copied is not None
+    assert (copied["alias"], copied["config"]) == (
+        REDIRECT_CONFIG_ALIAS,
+        {"defaultProvider": "company"},
+    )
+    # The bind stays the last write: the console uses the flow only with its redirect.
+    assert fake.writes[writes_after_first - 1][1] == f"{_ADMIN}/clients/{_CLIENT_UUID}"
+    # The realm's own browser flow is not changed.
+    assert fake.configs["browser-redirect"]["config"] == {"defaultProvider": "company"}
+
+    assert second["status"] == "ok", second
+    assert second["result"]["redirect_default_copied"] is False
+    assert len(fake.writes) == writes_after_first
+
+
+async def test_other_redirect_default_on_the_touch_flow_is_updated(
+    kc: KeycloakConnector,
+) -> None:
+    fake = FakeKeycloak(client=_client())
+    await _made(fake)
+    fake.redirect_to("company")
+    step = next(
+        s
+        for s in fake.flows[f"{TOUCH_FLOW_ALIAS} - sign-in"]["steps"]
+        if s.get("provider") == "identity-provider-redirector"
+    )
+    fake.configs["old"] = {
+        "id": "old",
+        "alias": REDIRECT_CONFIG_ALIAS,
+        "config": {"defaultProvider": "old-company"},
+    }
+    step["config"] = "old"
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run({})
+    assert result["status"] == "ok", result
+    assert result["result"]["redirect_default_copied"] is True
+    assert fake.configs["old"]["config"] == {"defaultProvider": "company"}
+    assert ("PUT", f"{_ADMIN}/authentication/config/old") in [(m, p) for m, p, _ in fake.writes]
 
 
 async def test_missing_client_stops_before_any_write(kc: KeycloakConnector) -> None:
@@ -498,8 +603,8 @@ async def test_missing_client_stops_before_any_write(kc: KeycloakConnector) -> N
 async def test_flow_with_a_step_turned_off_stops_without_a_write(kc: KeycloakConnector) -> None:
     fake = FakeKeycloak(client=_client())
     await _made(fake)
-    level_2 = fake.flows[f"{TOUCH_FLOW_ALIAS} - level 2"]["steps"]
-    level_2[1]["requirement"] = "DISABLED"
+    level_3 = fake.flows[f"{TOUCH_FLOW_ALIAS} - level 3"]["steps"]
+    level_3[1]["requirement"] = "DISABLED"
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         fake.mount(mock)
         result = await _run({})
@@ -514,7 +619,7 @@ async def test_flow_with_other_settings_stops_without_a_write(kc: KeycloakConnec
     """A touch level kept for a while (maximum age not 0) is not this flow."""
     fake = FakeKeycloak(client=_client())
     await _made(fake)
-    condition = fake.flows[f"{TOUCH_FLOW_ALIAS} - level 2"]["steps"][0]
+    condition = fake.flows[f"{TOUCH_FLOW_ALIAS} - level 3"]["steps"][0]
     fake.configs[condition["config"]]["config"]["loa-max-age"] = "300"
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         fake.mount(mock)
@@ -541,13 +646,13 @@ async def test_flow_with_an_extra_step_stops_without_a_write(kc: KeycloakConnect
 
 
 async def test_realm_with_another_touch_level_is_not_bound(kc: KeycloakConnector) -> None:
-    fake = FakeKeycloak(client=_client(), loa_map='{"meho-touch":3}')
+    fake = FakeKeycloak(client=_client(), loa_map='{"meho-touch":2}')
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         fake.mount(mock)
         result = await _run({})
     assert result["status"] != "ok"
     assert "loa_conflict" in json.dumps(result)
-    assert fake.realm["attributes"]["acr.loa.map"] == '{"meho-touch":3}'
+    assert fake.realm["attributes"]["acr.loa.map"] == '{"meho-touch":2}'
     assert fake.client == _client()
 
 

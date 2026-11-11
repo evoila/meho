@@ -196,7 +196,8 @@ def test_human_clients_read_claims_from_groups(realm: dict[str, Any], client_id:
     mappers = {m["name"]: m for m in _client(realm, client_id)["protocolMappers"]}
     # The console also names the sign-in methods in its tokens (#6213).
     if client_id == "meho-web":
-        assert mappers.pop("amr")["protocolMapper"] == "oidc-amr-mapper"
+        amr = mappers.pop("amr")
+        assert amr["protocolMapper"] == "oidc-amr-mapper"
     assert set(mappers) == {
         "audience-meho-backplane",
         "meho-mcp-audience",
@@ -479,16 +480,16 @@ def _configs(realm: dict[str, Any]) -> dict[str, dict[str, str]]:
 
 
 def test_touch_level_is_mapped_in_the_realm(realm: dict[str, Any]) -> None:
-    """#6213: ``acr_values=meho-touch`` asks for level 2. Level 1 keeps its name "1"."""
-    assert json.loads(realm["attributes"]["acr.loa.map"]) == {"meho-touch": 2}
+    """#6213: ``acr_values=meho-touch`` asks for level 3. Level 1 keeps its name "1"."""
+    assert json.loads(realm["attributes"]["acr.loa.map"]) == {"meho-touch": 3}
 
 
 def test_console_login_flow_has_level_1_and_the_touch_level(realm: dict[str, Any]) -> None:
-    """The console's flow: level 1 is today's login, level 2 is a passkey touch.
+    """The console's flow: level 1 is today's login, level 3 is a passkey touch.
 
     Level 1 has the steps of Keycloak's own browser flow: the login cookie,
     the company login, the password form (which also takes a passkey) and
-    the one-time code, which a passkey login skips. Level 2 asks for a passkey
+    the one-time code, which a passkey login skips. Level 3 asks for a passkey
     with user verification, and nothing else.
     """
     flows = {flow["alias"]: flow for flow in realm["authenticationFlows"]}
@@ -508,15 +509,15 @@ def test_console_login_flow_has_level_1_and_the_touch_level(realm: dict[str, Any
         (5, "conditional-user-configured", "REQUIRED", None),
         (5, "conditional-credential", "REQUIRED", f"{_TOUCH} - skip code after passkey"),
         (5, "auth-otp-form", "REQUIRED", None),
-        (1, f"{_TOUCH} - level 2", "CONDITIONAL", None),
-        (2, "conditional-level-of-authentication", "REQUIRED", f"{_TOUCH} - level 2"),
+        (1, f"{_TOUCH} - level 3", "CONDITIONAL", None),
+        (2, "conditional-level-of-authentication", "REQUIRED", f"{_TOUCH} - level 3"),
         (2, "webauthn-authenticator-passwordless", "REQUIRED", f"{_TOUCH} - passkey"),
     ]
     configs = _configs(realm)
     assert configs[f"{_TOUCH} - level 1"] == {"loa-condition-level": "1", "loa-max-age": "36000"}
     # Maximum age 0: the touch counts for this one login only, so every
     # request for the touch level asks for a new passkey signature.
-    assert configs[f"{_TOUCH} - level 2"] == {"loa-condition-level": "2", "loa-max-age": "0"}
+    assert configs[f"{_TOUCH} - level 3"] == {"loa-condition-level": "3", "loa-max-age": "0"}
     assert configs[f"{_TOUCH} - skip code after passkey"] == {
         "credentials": "webauthn-passwordless",
         "included": "false",

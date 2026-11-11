@@ -169,7 +169,7 @@ func TestTouchFlow_IsTheFlowOfTheRealmFile(t *testing.T) {
 		t.Errorf("realm file flow =\n%s\nbootstrap flow =\n%s",
 			strings.Join(got, "\n"), strings.Join(wantTouchFlowLines(), "\n"))
 	}
-	if got := realm.Attributes[loaMapKey]; got != `{"meho-touch":2}` {
+	if got := realm.Attributes[loaMapKey]; got != `{"meho-touch":3}` {
 		t.Errorf("realm file %s = %q", loaMapKey, got)
 	}
 }
@@ -178,7 +178,7 @@ func TestTouchFlow_IsTheFlowOfTheRealmFile(t *testing.T) {
 // binding; a second run changes nothing.
 func TestBootstrap_TouchFlowIsMadeAndBoundToTheConsole(t *testing.T) {
 	fake := newFakeKeycloak()
-	fake.realm["attributes"].(map[string]any)[loaMapKey] = `{"gold":3}`
+	fake.realm["attributes"].(map[string]any)[loaMapKey] = `{"meho-approve":2}`
 	console := seedConsoleClient(fake)
 
 	res, _, err := runBootstrapOnce(t, fake, fullOpts())
@@ -188,8 +188,8 @@ func TestBootstrap_TouchFlowIsMadeAndBoundToTheConsole(t *testing.T) {
 	if got := touchFlowLines(fake); !slices.Equal(got, wantTouchFlowLines()) {
 		t.Errorf("touch flow =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(wantTouchFlowLines(), "\n"))
 	}
-	if got := touchLevels(t, fake); !maps.Equal(got, map[string]any{"gold": 3.0, "meho-touch": 2.0}) {
-		t.Errorf("realm levels = %v, want gold 3 and meho-touch 2", got)
+	if got := touchLevels(t, fake); !maps.Equal(got, map[string]any{"meho-approve": 2.0, "meho-touch": 3.0}) {
+		t.Errorf("realm levels = %v, want meho-approve 2 and meho-touch 3", got)
 	}
 	if fake.realm["attributes"].(map[string]any)["frontendUrl"] != "" {
 		t.Errorf("the realm lost its other attributes: %v", fake.realm["attributes"])
@@ -207,7 +207,7 @@ func TestBootstrap_TouchFlowIsMadeAndBoundToTheConsole(t *testing.T) {
 	}
 	for _, line := range []string{
 		`[created] login flow "meho approval touch" (passkey touch level meho-touch)`,
-		"[updated] realm maps meho-touch to level 2",
+		"[updated] realm maps meho-touch to level 3",
 		`[added] mapper amr on client "meho-web"`,
 		`[updated] client "meho-web" uses login flow "meho approval touch"`,
 	} {
@@ -258,7 +258,7 @@ func TestBootstrap_TouchFlowWithOtherSettingsIsNotBound(t *testing.T) {
 	seedTouchFlow(fake)
 	console := seedConsoleClient(fake)
 	for _, c := range fake.stepConfigs {
-		if c["alias"] == touchFlowAlias+" - level 2" {
+		if c["alias"] == touchFlowAlias+" - level 3" {
 			c["config"].(map[string]any)["loa-max-age"] = "300"
 		}
 	}
@@ -285,7 +285,7 @@ func TestBootstrap_TouchFlowWithOtherSettingsIsNotBound(t *testing.T) {
 // console client is not bound.
 func TestBootstrap_TouchLevelTakenIsNotChanged(t *testing.T) {
 	fake := newFakeKeycloak()
-	fake.realm["attributes"].(map[string]any)[loaMapKey] = `{"meho-touch":3}`
+	fake.realm["attributes"].(map[string]any)[loaMapKey] = `{"meho-touch":2}`
 	console := seedConsoleClient(fake)
 
 	res, _, err := runBootstrapOnce(t, fake, fullOpts())
@@ -298,7 +298,7 @@ func TestBootstrap_TouchLevelTakenIsNotChanged(t *testing.T) {
 	if got := fake.clients[console.ID].AuthenticationFlowBindingOverrides["browser"]; got != "" {
 		t.Errorf("the console is bound to %q, want no browser flow", got)
 	}
-	want := "[skip] realm maps meho-touch to level 3, not 2; the console client is not bound"
+	want := "[skip] realm maps meho-touch to level 2, not 3; the console client is not bound"
 	if !slices.Contains(res.MapperEventsLog, want) {
 		t.Errorf("events miss %q: %v", want, res.MapperEventsLog)
 	}

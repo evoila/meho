@@ -2451,13 +2451,15 @@ default). This section is the Keycloak part. It is inert until MEHO
 asks for the touch level; nothing in the backplane reads it yet.
 
 * **Realm file** (`deploy/charts/meho/charts/keycloak/files/meho-realm.json`):
-  the realm attribute `acr.loa.map` maps `meho-touch` to level 2. The
+  the realm attribute `acr.loa.map` maps `meho-touch` to level 3 (level 2
+  is `meho-approve`, the approval sign-in level of #6281; a higher level
+  also counts where a lower one is asked for). The
   login flow `meho approval touch` is the browser flow of `meho-web`
   only. Its level 1 branch has the steps of Keycloak's own browser
   flow (cookie, company login redirect, password form that also takes
   a passkey, one-time code unless a passkey was used), so the normal
-  console login does not change. Its level 2 branch is
-  `conditional-level-of-authentication` (level 2, maximum age 0) plus
+  console login does not change. Its level 3 branch is
+  `conditional-level-of-authentication` (level 3, maximum age 0) plus
   `webauthn-authenticator-passwordless`. The passkey step's setting has
   `default.reference.value=hwk` and `default.reference.maxAge=120`;
   without the maximum age Keycloak leaves `amr` empty. `meho-web` has
@@ -2480,7 +2482,10 @@ asks for the touch level; nothing in the backplane reads it yet.
 * **Company login:** the realm stage sets the redirect default of the
   company login on the realm's browser flow and on `meho approval
   touch` (`core/company_login.py`), so the console still goes straight
-  to the company login when `autoRedirect` is on.
+  to the company login when `autoRedirect` is on. The operation
+  `keycloak.authflow.ensure_approval_touch` copies that default from the
+  realm's browser flow onto the touch flow before it binds `meho-web`,
+  so a running realm keeps the redirect before the next upgrade too.
 * **Tests:** `tests/test_core_keycloak_realm.py` (the file),
   `tests/test_connectors_keycloak_authflow_touch.py` (the operation),
   `tests/integration/test_core_keycloak_touch_flow.py` (a real

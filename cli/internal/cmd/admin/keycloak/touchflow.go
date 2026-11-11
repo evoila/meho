@@ -18,12 +18,12 @@ import (
 // The console's login flow with the passkey touch level (#6213). It is
 // the same flow as in the chart's realm file
 // (deploy/charts/meho/charts/keycloak/files/meho-realm.json). Level 1
-// is the normal login. Level 2 (acr_values=meho-touch) asks for a
+// is the normal login. Level 3 (acr_values=meho-touch) asks for a
 // passkey with user verification, every time (maximum age 0).
 const (
 	touchFlowAlias = "meho approval touch"
 	touchACR       = "meho-touch"
-	touchLevel     = 2
+	touchLevel     = 3
 	loaMapKey      = "acr.loa.map"
 	amrMapperType  = "oidc-amr-mapper"
 )
@@ -57,7 +57,7 @@ func touchFlowSteps() []touchStep {
 	return []touchStep{
 		{Level: 0, Parent: t, Provider: "auth-cookie", Requirement: "ALTERNATIVE"},
 		{Level: 0, Parent: t, Subflow: t + " - levels", Requirement: "ALTERNATIVE",
-			Description: "Level 1, then level 2 when it is asked for."},
+			Description: "Level 1, then level 3 when it is asked for."},
 		{Level: 1, Parent: t + " - levels", Subflow: t + " - level 1", Requirement: "CONDITIONAL",
 			Description: "The normal login: company login or password, then the one-time code when the person has one."},
 		{Level: 2, Parent: t + " - level 1", Provider: "conditional-level-of-authentication", Requirement: "REQUIRED",
@@ -76,12 +76,12 @@ func touchFlowSteps() []touchStep {
 			ConfigAlias: t + " - skip code after passkey",
 			Config:      map[string]string{"credentials": "webauthn-passwordless", "included": "false"}},
 		{Level: 5, Parent: t + " - one-time code", Provider: "auth-otp-form", Requirement: "REQUIRED"},
-		{Level: 1, Parent: t + " - levels", Subflow: t + " - level 2", Requirement: "CONDITIONAL",
+		{Level: 1, Parent: t + " - levels", Subflow: t + " - level 3", Requirement: "CONDITIONAL",
 			Description: "The passkey touch: a passkey with user verification, every time."},
-		{Level: 2, Parent: t + " - level 2", Provider: "conditional-level-of-authentication", Requirement: "REQUIRED",
-			ConfigAlias: t + " - level 2",
-			Config:      map[string]string{"loa-condition-level": "2", "loa-max-age": "0"}},
-		{Level: 2, Parent: t + " - level 2", Provider: "webauthn-authenticator-passwordless", Requirement: "REQUIRED",
+		{Level: 2, Parent: t + " - level 3", Provider: "conditional-level-of-authentication", Requirement: "REQUIRED",
+			ConfigAlias: t + " - level 3",
+			Config:      map[string]string{"loa-condition-level": "3", "loa-max-age": "0"}},
+		{Level: 2, Parent: t + " - level 3", Provider: "webauthn-authenticator-passwordless", Requirement: "REQUIRED",
 			ConfigAlias: t + " - passkey",
 			Config:      map[string]string{"default.reference.value": "hwk", "default.reference.maxAge": "120"}},
 	}
@@ -100,7 +100,7 @@ func amrMapper() protocolMapperRep {
 }
 
 // reconcileTouch makes the touch flow when the realm lacks it, maps
-// meho-touch to level 2, and binds the flow to the console client with
+// meho-touch to level 3, and binds the flow to the console client with
 // the `amr` mapper. A flow with another shape, or a realm that maps
 // meho-touch to another level, is kept as it is and no client is bound.
 func reconcileTouch(ctx context.Context, c *adminClient, webClientID string) ([]string, error) {
@@ -264,7 +264,7 @@ func makeTouchFlow(ctx context.Context, c *adminClient) (string, []string, error
 	created := []string{fmt.Sprintf("[created] login flow %q (passkey touch level %s)", touchFlowAlias, touchACR)}
 	top := flowRep{
 		Alias:       touchFlowAlias,
-		Description: "Console login of meho-web. Level 1 is the normal login. Level 2 (acr meho-touch) asks for a passkey touch every time. Provisioned by `meho admin keycloak bootstrap-clients`.",
+		Description: "Console login of meho-web. Level 1 is the normal login. Level 3 (acr meho-touch) asks for a passkey touch every time. Provisioned by `meho admin keycloak bootstrap-clients`.",
 		ProviderID:  "basic-flow",
 		TopLevel:    true,
 	}
@@ -333,7 +333,7 @@ func makeTouchFlow(ctx context.Context, c *adminClient) (string, []string, error
 	return id, created, nil
 }
 
-// reconcileTouchLevel maps meho-touch to level 2 in the realm, next to
+// reconcileTouchLevel maps meho-touch to level 3 in the realm, next to
 // the names it maps already. ok is false when the realm maps meho-touch
 // to another level: then nothing is changed and no client is bound.
 func reconcileTouchLevel(ctx context.Context, c *adminClient) ([]string, bool, error) {

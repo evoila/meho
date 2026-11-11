@@ -19,6 +19,8 @@ __all__ = [
     "AMR_MAPPER",
     "ENSURE_APPROVAL_TOUCH_OP_ID",
     "LOA_MAP_ATTRIBUTE",
+    "REDIRECTOR",
+    "REDIRECT_CONFIG_ALIAS",
     "TOUCH_ACR",
     "TOUCH_FLOW_ALIAS",
     "TOUCH_FLOW_STEPS",
@@ -31,11 +33,15 @@ ENSURE_APPROVAL_TOUCH_OP_ID = "keycloak.authflow.ensure_approval_touch"
 TOUCH_FLOW_ALIAS = "meho approval touch"
 #: The name MEHO asks for in ``acr_values``, and its level.
 TOUCH_ACR = "meho-touch"
-TOUCH_LEVEL = 2
+TOUCH_LEVEL = 3
 #: The realm attribute that maps ``acr`` names to levels.
 LOA_MAP_ATTRIBUTE = "acr.loa.map"
+#: The step that sends people straight to the company login, and the name of
+#: its settings on the touch flow (the same name core/company_login.py uses).
+REDIRECTOR = "identity-provider-redirector"
+REDIRECT_CONFIG_ALIAS = "meho-company-login-redirect-touch"
 TOUCH_FLOW_DESCRIPTION = (
-    "Console login of meho-web. Level 1 is the normal login. Level 2 (acr "
+    "Console login of meho-web. Level 1 is the normal login. Level 3 (acr "
     "meho-touch) asks for a passkey touch every time; MEHO asks for it before a "
     "dangerous or destructive approval."
 )
@@ -71,13 +77,13 @@ class FlowNode:
 _T = TOUCH_FLOW_ALIAS
 
 #: The steps of the flow, in order. Level 1 has the steps of Keycloak's own
-#: browser flow; level 2 is the passkey touch.
+#: browser flow; level 3 is the passkey touch.
 TOUCH_FLOW_STEPS: tuple[FlowNode, ...] = (
     FlowNode("auth-cookie", "ALTERNATIVE"),
     FlowNode(
         f"{_T} - levels",
         "ALTERNATIVE",
-        description="Level 1, then level 2 when it is asked for.",
+        description="Level 1, then level 3 when it is asked for.",
         children=(
             FlowNode(
                 f"{_T} - level 1",
@@ -100,7 +106,7 @@ TOUCH_FLOW_STEPS: tuple[FlowNode, ...] = (
                         "REQUIRED",
                         description="Company login, or the password form.",
                         children=(
-                            FlowNode("identity-provider-redirector", "ALTERNATIVE"),
+                            FlowNode(REDIRECTOR, "ALTERNATIVE"),
                             FlowNode(
                                 f"{_T} - password",
                                 "ALTERNATIVE",
@@ -140,7 +146,7 @@ TOUCH_FLOW_STEPS: tuple[FlowNode, ...] = (
                 ),
             ),
             FlowNode(
-                f"{_T} - level 2",
+                f"{_T} - level 3",
                 "CONDITIONAL",
                 description="The passkey touch: a passkey with user verification, every time.",
                 children=(
@@ -148,8 +154,8 @@ TOUCH_FLOW_STEPS: tuple[FlowNode, ...] = (
                         "conditional-level-of-authentication",
                         "REQUIRED",
                         config=(
-                            f"{_T} - level 2",
-                            {"loa-condition-level": "2", "loa-max-age": "0"},
+                            f"{_T} - level 3",
+                            {"loa-condition-level": "3", "loa-max-age": "0"},
                         ),
                     ),
                     FlowNode(
@@ -170,7 +176,7 @@ _WHEN_TO_USE = (
     "Use to give a running realm the console login flow with the passkey "
     "touch level ('meho approval touch'). Keycloak reads the chart's realm "
     "file only when the realm is new. The op makes the flow, maps the acr "
-    "name 'meho-touch' to level 2 in the realm, adds the 'amr' mapper to the "
+    "name 'meho-touch' to level 3 in the realm, adds the 'amr' mapper to the "
     "console client, and binds the flow as the console client's browser flow. "
     "The normal console login stays the same; only a login that asks for "
     "'meho-touch' needs a passkey. Safe to run twice. A flow with that name "
@@ -216,11 +222,18 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "loa_map_changed": {
             "type": "boolean",
-            "description": "true: this run mapped 'meho-touch' to level 2 in the realm.",
+            "description": "true: this run mapped 'meho-touch' to level 3 in the realm.",
         },
         "amr_mapper_added": {
             "type": "boolean",
             "description": "true: this run added the 'amr' mapper to the client.",
+        },
+        "redirect_default_copied": {
+            "type": "boolean",
+            "description": (
+                "true: this run gave the flow the company login default of the "
+                "realm's browser flow, so the console still goes straight to it."
+            ),
         },
         "client_id": {"type": "string", "description": "The client the flow is bound to."},
         "client_uuid": {"type": "string", "description": "Internal id of the client."},
@@ -245,6 +258,7 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "flow_steps",
         "loa_map_changed",
         "amr_mapper_added",
+        "redirect_default_copied",
         "client_id",
         "client_uuid",
         "browser_flow_id",
@@ -260,7 +274,7 @@ TOUCH_OPS: tuple[KeycloakOp, ...] = (
         summary="Give the console client the login flow with the passkey touch level.",
         description=(
             "Makes the login flow 'meho approval touch', maps 'meho-touch' to "
-            "level 2, adds the 'amr' mapper to the console client, and binds the "
+            "level 3, adds the 'amr' mapper to the console client, and binds the "
             "flow as its browser flow. Changes nothing when all is there; stops "
             "when the flow has another shape."
         ),
@@ -287,15 +301,16 @@ TOUCH_OPS: tuple[KeycloakOp, ...] = (
             "output_shape": (
                 "``{realm, flow_alias, flow_id, flow_created, flow_steps: "
                 "[{level, step, requirement}], loa_map_changed, amr_mapper_added, "
-                "client_id, client_uuid, browser_flow_id, previous_browser_flow_id, "
-                "binding_changed}``."
+                "redirect_default_copied, client_id, client_uuid, browser_flow_id, "
+                "previous_browser_flow_id, binding_changed}``."
             ),
             "next_step": (
-                "All four change flags false: the realm already had everything. An "
+                "All five change flags false: the realm already had everything. An "
                 "error with 'other_steps' names the difference; a person fixes the "
                 "flow in the Keycloak admin console, or deletes it and runs again. "
                 "An error with 'loa_conflict' means the realm maps 'meho-touch' to "
-                "another level. The way back: keycloak.client.update with "
+                "another level. A different browser flow on the client is replaced; "
+                "previous_browser_flow_id names it. The way back: keycloak.client.update with "
                 '{"authenticationFlowBindingOverrides": {"browser": ""}}.'
             ),
         },

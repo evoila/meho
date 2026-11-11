@@ -270,7 +270,11 @@ claim for audit parent-linkage (#3446), is never matched against this table).
    `operations/_preview_steps.py`, the same list the preview checks). When
    one step has no grant, the whole call is refused with `agent_no_grant`,
    no approval request is stored, and no step runs. So the call never
-   stops half-way at a step the switch refuses.
+   stops half-way at a step the switch refuses. The preview runs the same
+   check, also when the operation itself would wait for approval, so it
+   says `deny` with the same reason. With `observe` the dispatcher runs
+   the check too: each uncovered write step logs one
+   `agent_no_grant_would_deny` line, and the call runs or waits as before.
 
 4. **Apply safety-level ceiling.** A row's verdict can only tighten to the
    op's ceiling, never loosen beyond it:

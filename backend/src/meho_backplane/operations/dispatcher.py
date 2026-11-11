@@ -1131,13 +1131,15 @@ async def _agent_no_grant_step_refusal(
 ) -> str | None:
     """Refuse a multi-step call up front when a write step has no grant (#6189).
 
-    Only for an agent with ``AGENT_GRANT_REQUIRED=on`` and only at the top
-    level: the steps of the call are checked here, with the same list the
-    preview checks, so the call never stops half-way at a step the switch
-    refuses.
+    Only for an agent with ``AGENT_GRANT_REQUIRED`` not ``off`` and only at
+    the top level: the steps of the call are checked here, with the same
+    list the preview checks, so the call never stops half-way at a step the
+    switch refuses. With ``observe`` the check only writes the
+    ``agent_no_grant_would_deny`` line of each uncovered step and returns
+    ``None``, so the verdict stays as it was.
     """
     if (
-        get_settings().agent_grant_required != "on"
+        get_settings().agent_grant_required == "off"
         or not _agent_acts(operator)
         or composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
     ):

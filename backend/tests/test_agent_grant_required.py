@@ -512,10 +512,9 @@ async def test_multi_step_op_with_an_uncovered_write_step_is_refused_up_front(
         target=_FakeTarget(product="vault"),
         params={},
     )
-    if op_verdict == "auto-execute":
-        # The preview checks the same step list and gives the same answer.
-        assert preview["policy_verdict"] == "deny", preview
-        assert _WRITE_STEP in preview["policy_reason"]
+    # The preview checks the same step list and gives the same answer.
+    assert preview["policy_verdict"] == "deny", preview
+    assert result.error == f"denied: {preview['policy_reason']}"
 
 
 async def test_multi_step_op_runs_when_every_write_step_has_a_grant(
@@ -739,6 +738,25 @@ async def test_observe_preview_with_a_park_check_logs_once(
     assert envelope["policy_verdict"] == "needs-approval", envelope
     _PARK_CHECKS["vault.kv.flagged"].assert_awaited_once()
     assert _would_deny_ops(spy) == ["vault.kv.flagged"]
+
+
+async def test_observe_checks_the_steps_of_a_waiting_call(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    """The op waits as before; its uncovered write step is logged once."""
+    _switch(monkeypatch, "observe")
+    await _register_multi_step_op(stub_embedding_service)
+    await _grant(_MULTI_OP, "needs-approval")
+    target = await _seed_vault_target()
+    spy = _would_deny_spy(monkeypatch)
+
+    parked = await dispatch(
+        operator=_operator(), connector_id="vault-1.x", op_id=_MULTI_OP, target=target, params={}
+    )
+
+    assert parked.status == "awaiting_approval", parked
+    assert _MULTI_RUNS == []
+    assert _would_deny_ops(spy) == [_WRITE_STEP]
 
 
 async def test_observe_destructive_call_logs_once(monkeypatch: pytest.MonkeyPatch) -> None:

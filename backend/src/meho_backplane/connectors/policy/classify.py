@@ -8,7 +8,9 @@ A classification entry gives connectors, operation groups or operations
 category decides who may approve, so every such change is a change of
 rights:
 
-* the operation is ``dangerous`` and always waits for approval;
+* the operation is ``dangerous`` and always waits for approval, and a
+  person approves each call: no standing grant and no run approval
+  covers it (:func:`~meho_backplane.op_classes.declare_per_call_approval`);
 * every request carries the rights-change mark
   (:func:`~meho_backplane.operations.grant_approval.register_rights_change_op`),
   so the person who asked can never approve it, and the approver must be
@@ -22,8 +24,10 @@ category, or two entries of the same level that would give one operation
 different categories, refuse it and nothing is written.
 
 The operation exists only while the ``POLICY_CLASSIFICATION`` switch is
-on: the registrar does nothing when it is off, and the handler refuses a
-call when the switch was turned off after the start.
+on. With the switch off, the registrar deletes the operation and its
+group if an earlier start wrote them, so nobody finds or calls it and no
+request waits for an approval that cannot run. The handler also refuses
+a call when the switch is off.
 """
 
 from __future__ import annotations
@@ -32,7 +36,10 @@ import os
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.operations.typed_register import (
+    register_typed_operation,
+    remove_built_in_connector_rows,
+)
 from meho_backplane.policy.store import (
     ClassificationEdit,
     classification_enabled,
@@ -214,13 +221,16 @@ async def register_policy_classify_operation(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert the ``policy.classify`` typed op; nothing while the switch is off.
+    """Upsert the ``policy.classify`` typed op; delete it while the switch is off.
 
     Reads the switch from the environment, with the same parsing as
     :class:`~meho_backplane.settings.Settings`: a registrar runs also where
     the other settings are not set (registry checks in tests).
     """
     if not parse_bool_env(os.environ.get("POLICY_CLASSIFICATION")):
+        await remove_built_in_connector_rows(
+            product="policy", version="1.x", impl_id="policy-registry"
+        )
         return
     await register_typed_operation(
         product="policy",

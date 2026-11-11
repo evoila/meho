@@ -88,7 +88,22 @@ always waits.
 Dispatch (`lookup_descriptor`, which joins the group key), preview, search,
 the call contract and the console all read `effective_policy_map`, so they
 show the same values. The returned `EffectivePolicy` carries `category`,
-`labels` and `rule_ref`.
+`labels`, `rule_ref` and `always_wait`.
+
+## "Always wait" means a person approves each call
+
+When a classification entry makes an operation always wait, or two entries
+conflict, `EffectivePolicy.always_wait` is `true`. `apply_effective_policy`
+copies it to the looked-up row as `policy_always_wait` (not a column). Then
+`always_wait_grant_reason` in `operations/service_grants.py` refuses:
+
+- a standing grant at call time, also a grant made before the entry;
+- a new standing grant for the operation;
+- a run approval list that names the operation, and a run approval at call
+  time.
+
+So a service login can never run such an operation without a person
+approving that call.
 
 ## Changing a classification is a change of rights
 
@@ -99,6 +114,8 @@ The change is the operation `policy.classify` on the connector
 `policy-registry-1.x` (`connectors/policy/`):
 
 - It is `dangerous` and always waits for approval.
+- A person approves each call (`declare_per_call_approval`): no standing
+  grant and no run approval covers it.
 - Every request carries the rights-change mark
   (`register_rights_change_op`, see [approvals.md](approvals.md)). The
   person who asked can never approve it; another tenant admin must.
@@ -106,9 +123,11 @@ The change is the operation `policy.classify` on the connector
 - It changes one entry of the caller's tenant document: the entry with the
   same `match` is updated, or a new one is added. It refuses an unknown
   category, bad labels and a conflict. Nothing is written then.
-- It exists only while the switch is on. The registrar does nothing when
-  the switch is off, and the handler refuses a call when the switch was
-  turned off after the start.
+- It exists only while the switch is on. With the switch off, the
+  registrar deletes the operation and its group if an earlier start wrote
+  them (`remove_built_in_connector_rows`). So after a restart with the
+  switch off, nobody finds or calls it, and no new request waits for it.
+  The handler also refuses a call when the switch is off.
 
 ## Known limits
 

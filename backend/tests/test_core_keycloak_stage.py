@@ -1076,7 +1076,8 @@ async def test_without_the_right_to_read_login_flows_the_stage_stops(
     assert str(stopped.value) == f"login flow {_APPROVAL_FLOW}: {NO_FLOW_RIGHT}"
     assert "manage-realm" in NO_FLOW_RIGHT
     assert "docs-site/install/upgrades.md" in NO_FLOW_RIGHT
-    assert "not checked" not in capfd.readouterr().out
+    # The stage stops; it never prints a "not checked (no right to read ...)" line and goes on.
+    assert "no right to read" not in capfd.readouterr().out
     assert _APPROVAL_FLOW not in kc.flows
 
     # The fix: give meho-admin the role once and run the upgrade again.

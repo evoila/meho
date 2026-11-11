@@ -374,6 +374,10 @@ A platform admin **may**:
   the tenants of the person's own groups.
 - act there as `tenant_admin`. When the person has a role group in that
   tenant, the role of that group applies instead.
+- approve their own changes in a tenant where they act as `tenant_admin`.
+  They count as an admin there, so they may approve their own changes
+  like members of `MEHO-SA-Operators` and `MEHO-Admins`. This does not
+  cover a change of rights: another admin must approve that.
 - use the cross-tenant options, for example `--tenant` on the commands
   that have it. For a tenant where the person has a role group, MEHO
   answers `403 tenant_select_with_header`: pick that tenant with
@@ -381,8 +385,6 @@ A platform admin **may**:
 
 A platform admin **may not**:
 
-- approve their own changes. Only the `SA-Operators` group of the
-  current tenant allows that.
 - get the `approver` flag from the platform admin group. It comes only
   from an `Approvers` group of the current tenant.
 - pick a tenant that does not exist. MEHO answers

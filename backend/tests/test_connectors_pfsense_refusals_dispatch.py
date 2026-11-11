@@ -24,7 +24,6 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select
 
-import meho_backplane.connectors.pfsense  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.pfsense import PfSenseConnector
 from meho_backplane.connectors.registry import all_connectors_v2, register_connector_v2
@@ -193,9 +192,17 @@ class _RecordingPfSense(PfSenseConnector):
     async def _auth_config(self, target: Any, operator: Any = None) -> dict[str, Any]:
         return {"username": "admin", "client_keys": [], "known_hosts": None}
 
-    async def _run_command(self, target: Any, command: str, operator: Any = None) -> Any:
-        self.commands.append(command)
-        if command == "cat /cf/conf/config.xml":
+    async def _run_command(
+        self,
+        target: Any,
+        cmd: str,
+        *,
+        operator: Any = None,
+        timeout: float = 30.0,
+        stdin: str | None = None,
+    ) -> Any:
+        self.commands.append(cmd)
+        if cmd == "cat /cf/conf/config.xml":
             return _proc(self._config)
         return _proc("", 0)
 

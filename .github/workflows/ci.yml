@@ -1013,15 +1013,28 @@ jobs:
         # after 150 seconds with `timeout`. There are two tries, so a
         # stalled download cannot use up the job's time.
         #
-        # `apt-get update` exits 100 when any one package index fails to
-        # download, even one that php-cli does not need. The runner image
-        # carries the git-core PPA (it installs a newer git from there), and
-        # that mirror answered 503 in a merge-queue run (#4759), which
-        # dropped the pull request from the queue. apt had already retried
-        # the file three times in that run, so more retries alone do not
-        # help. So a failed update is a warning, not the end of the step:
-        # apt keeps the indexes it did download, and the install below
-        # fails on its own when the Ubuntu indexes are missing.
+        # Why it failed in merge-queue runs (#6312): the runner image carries
+        # the git-core PPA, and that mirror sometimes does not answer at
+        # all. apt waits 120 seconds for each try of the file, so one
+        # `apt-get update` ran into the 150 second `timeout`, was killed
+        # before it stored any index (apt stores them at the end), and the
+        # install then said "Unable to locate package php-cli". The second
+        # try did the same. Two tries were never enough, because each try
+        # waited for the same dead mirror.
+        #
+        # The fix: apt gets a 10 second wait and no retry for each file
+        # (`Acquire::*::Timeout`, `Acquire::Retries`). A mirror that does not
+        # answer is skipped after 10 seconds, the update ends on its own and
+        # stores the Ubuntu indexes, and php-cli comes from them. `apt-get
+        # update` still exits 100 for the skipped mirror, so a failed update
+        # is a warning: the install below fails on its own when the Ubuntu
+        # indexes are missing. A runner image that already has php skips all
+        # of this.
+        #
+        # If the install still fails, the step prints "SETUP FAILURE" so a
+        # person and the fleet loop can tell it from a test failure. The
+        # pfSense tests still run with php in every shard (MEHO_REQUIRE_PHP
+        # below makes them fail, not skip, when php is missing).
         shell: bash
         timeout-minutes: 6
         run: |
@@ -1030,15 +1043,16 @@ jobs:
             echo "php ready: $(php --version | head -1)"
             exit 0
           fi
+          apt_opts=(-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=0)
           for attempt in 1 2; do
-            if ! timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y; then
+            if ! timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" update -y; then
               echo "::warning::apt-get update could not refresh every package index (try ${attempt} of 2); installing php-cli from the indexes that did download"
             fi
-            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli; then
+            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" install -y --no-install-recommends php-cli; then
               break
             fi
             if [ "${attempt}" = "2" ]; then
-              echo "::error::php-cli install failed after 2 tries"
+              echo "::error::SETUP FAILURE, not a test failure: php-cli install failed after 2 tries (package mirror problem on the runner)"
               exit 1
             fi
             echo "::warning::php-cli install failed or timed out; trying once more"

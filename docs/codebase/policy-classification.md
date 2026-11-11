@@ -105,6 +105,19 @@ copies it to the looked-up row as `policy_always_wait` (not a column). Then
 So a service login can never run such an operation without a person
 approving that call.
 
+**Steps of a multi-step operation.** A multi-step operation checks each
+write step against a row built in memory from the step's declared risk
+level (`enforce_subop_policy` in `operations/composite.py`), and the
+preview checks the same steps (`operations/_preview_steps.py`). Both call
+`apply_step_classification` in `operations/op_policy.py` first. It
+classifies the step (`classify_step` in `policy/store.py`), raises its
+level and sets `policy_always_wait`. So a marked step waits for a person
+also when a standing grant or a run approval covers it, and also when a
+person approved the whole multi-step operation. Entries by connector and
+by operation always match a step. The step's group key comes from its
+stored row when there is one; a step without a stored row still runs, but
+then entries by group do not match it.
+
 ## Changing a classification is a change of rights
 
 A category decides who may approve. So a change of a category, labels or

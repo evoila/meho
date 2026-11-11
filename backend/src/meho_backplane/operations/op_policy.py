@@ -72,13 +72,14 @@ from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
 from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
 )
 from meho_backplane.policy.classification import Classification
-from meho_backplane.policy.store import classification_enabled, classify_rows
+from meho_backplane.policy.store import classification_enabled, classify_rows, classify_step
 
 __all__ = [
     "SAFETY_RANK",
@@ -89,6 +90,7 @@ __all__ = [
     "PolicyEditResult",
     "apply_effective_policy",
     "apply_policy_edit",
+    "apply_step_classification",
     "effective_policy",
     "effective_policy_map",
     "list_overrides",
@@ -341,6 +343,33 @@ async def apply_effective_policy(
     row.requires_approval = policy.requires_approval
     row.policy_always_wait = policy.always_wait
     return row
+
+
+async def apply_step_classification(
+    *, tenant_id: UUID | None, step: EndpointDescriptor
+) -> EndpointDescriptor:
+    """Apply the classification to *step*, the in-memory row of a composite step.
+
+    A multi-step operation checks each write step against a row built from
+    the step's declared risk level and approval flag. This raises them the
+    same way :func:`_with_classification` does for a stored row, and sets
+    ``step.policy_always_wait``, so no standing grant and no approval of
+    the run clears an "always wait" step. With the
+    ``POLICY_CLASSIFICATION`` switch off, *step* is returned unchanged and
+    no database session is opened.
+    """
+    if not classification_enabled():
+        return step
+    async with get_sessionmaker()() as session:
+        classified = await classify_step(session, tenant_id=tenant_id, step=step)
+    policy = _with_classification(
+        EffectivePolicy(safety_level=step.safety_level, requires_approval=step.requires_approval),
+        classified,
+    )
+    step.safety_level = policy.safety_level
+    step.requires_approval = policy.requires_approval
+    step.policy_always_wait = policy.always_wait
+    return step
 
 
 # ---------------------------------------------------------------------------

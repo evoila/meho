@@ -6,6 +6,8 @@
 * An operation that a classification entry makes always wait (or that two
   entries give a conflict) is never cleared by a standing grant, also one
   made before the entry, and never by a run approval.
+* The same holds for a write step of a multi-step operation, at the step
+  gate and in the step preview, also when the step has no stored row.
 * ``policy.classify`` is approved call by call: no grant covers it.
 * With the ``POLICY_CLASSIFICATION`` switch turned off after a start with
   it on, ``policy.classify`` is no longer found, listed or parked.
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -32,12 +35,20 @@ from meho_backplane.db.models import (
     EndpointDescriptor,
     OperationGroup,
     PermissionVerdict,
+    RunApproval,
     ServicePrincipalGrant,
     TenantPolicy,
 )
 from meho_backplane.op_classes import needs_per_call_approval
+from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._lookup import lookup_descriptor
+from meho_backplane.operations._preview_steps import preview_step_verdict
 from meho_backplane.operations._validate import policy_gate
+from meho_backplane.operations.composite import approved_run_var, enforce_subop_policy
+from meho_backplane.operations.governed_subops import (
+    register_governed_subops,
+    reset_governed_subop_registry,
+)
 from meho_backplane.operations.meta_tools import (
     UnknownConnectorError,
     call_operation,
@@ -63,6 +74,8 @@ _OP = "clsgrant.vm.restart"
 _SERVICE_SUB = "svc:classified"
 
 _ALWAYS_WAIT = {"classifications": [{"match": {"group": "compute"}, "always_wait": True}]}
+#: The same mark by operation id: it matches a step that has no stored row.
+_ALWAYS_WAIT_BY_OP = {"classifications": [{"match": {"op": _OP}, "always_wait": True}]}
 _CONFLICT = {
     "classifications": [
         {"match": {"op": "clsgrant.vm.*"}, "category": "compute"},
@@ -303,3 +316,130 @@ async def test_switch_on_then_off_removes_policy_classify(
     )
     assert call["status"] != "awaiting_approval", call
     assert call["status"] == "error", call
+
+
+# ---------------------------------------------------------------------------
+# A write step of a multi-step operation
+# ---------------------------------------------------------------------------
+
+_COMPOSITE = "clsgrant.vm.rebuild"
+_RUN = "run-6271"
+
+
+@pytest.fixture
+def _no_step_lists() -> Iterator[None]:
+    reset_governed_subop_registry()
+    yield
+    reset_governed_subop_registry()
+
+
+async def _step_status() -> str | None:
+    """Run the step gate for ``_OP`` as a ``caution`` step; ``None`` means it runs."""
+    result = await enforce_subop_policy(
+        operator=_service(),
+        connector_id=_CONNECTOR,
+        op_id=_OP,
+        safety_level="caution",
+        requires_approval=False,
+        target=None,
+        params={"vm": "fixture"},
+    )
+    return None if result is None else result.status
+
+
+async def _seed_run_approval() -> None:
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as session:
+        session.add(
+            RunApproval(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT,
+                principal_sub=_SERVICE_SUB,
+                work_ref=_RUN,
+                entries=[{"connector_id": _CONNECTOR, "op_id": _OP}],
+                reason="fixture: approved before the classification",
+                requested_at=now,
+                expires_at=now + timedelta(hours=1),
+                approved_at=now,
+                approved_by_sub="person-approver",
+            )
+        )
+        await session.commit()
+
+
+async def _setup_step(embedding: AsyncMock, *, stored_row: bool) -> None:
+    """Store the "always wait" mark: by group with a stored row, else by op id."""
+    if stored_row:
+        await _register(embedding)
+    await _store_policy(_ALWAYS_WAIT if stored_row else _ALWAYS_WAIT_BY_OP)
+
+
+_STEP_CASES = pytest.mark.parametrize(
+    ("stored_row", "switch_on"),
+    [(True, False), (True, True), (False, True)],
+    ids=["switch_off", "group_entry", "op_entry_no_stored_row"],
+)
+
+
+@_STEP_CASES
+@pytest.mark.asyncio
+async def test_existing_grant_does_not_clear_an_always_wait_step(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch, stored_row: bool, switch_on: bool
+) -> None:
+    _switch(monkeypatch, switch_on)
+    await _setup_step(embedding, stored_row=stored_row)
+    await _seed_grant()
+    assert await _step_status() == (None if not switch_on else "awaiting_approval")
+
+
+@_STEP_CASES
+@pytest.mark.asyncio
+async def test_run_approval_does_not_clear_an_always_wait_step(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch, stored_row: bool, switch_on: bool
+) -> None:
+    _switch(monkeypatch, switch_on)
+    await _setup_step(embedding, stored_row=stored_row)
+    await _seed_run_approval()
+    token = work_ref_var.set(_RUN)
+    try:
+        status = await _step_status()
+    finally:
+        work_ref_var.reset(token)
+    assert status == (None if not switch_on else "awaiting_approval")
+
+
+@_STEP_CASES
+@pytest.mark.asyncio
+async def test_approval_of_the_run_does_not_clear_an_always_wait_step(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch, stored_row: bool, switch_on: bool
+) -> None:
+    """A person approved the multi-step operation; the marked step still waits."""
+    _switch(monkeypatch, switch_on)
+    await _setup_step(embedding, stored_row=stored_row)
+    token = approved_run_var.set(True)
+    try:
+        status = await _step_status()
+    finally:
+        approved_run_var.reset(token)
+    assert status == (None if not switch_on else "awaiting_approval")
+
+
+@_STEP_CASES
+@pytest.mark.usefixtures("_no_step_lists")
+@pytest.mark.asyncio
+async def test_preview_says_an_always_wait_step_waits_despite_a_grant(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch, stored_row: bool, switch_on: bool
+) -> None:
+    _switch(monkeypatch, switch_on)
+    await _setup_step(embedding, stored_row=stored_row)
+    await _seed_grant()
+    register_governed_subops(composite_op_id=_COMPOSITE, connector_id=_CONNECTOR, sub_op_ids=(_OP,))
+    verdict = await preview_step_verdict(
+        operator=_service(), op_id=_COMPOSITE, connector_id=_CONNECTOR, target=None
+    )
+    if not switch_on:
+        assert verdict is None
+    else:
+        assert verdict is not None
+        assert verdict[0] is PermissionVerdict.NEEDS_APPROVAL
+        assert _OP in verdict[1]

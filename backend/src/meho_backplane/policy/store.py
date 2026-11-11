@@ -56,6 +56,7 @@ __all__ = [
     "ClassificationEdit",
     "classification_enabled",
     "classify_rows",
+    "classify_step",
     "connector_id_of",
     "load_classification",
     "set_classification",
@@ -181,6 +182,49 @@ async def classify_rows(
         all_entries = [*entries, *_override_entries(row_overrides, connector_id)]
         results.append(classify(coords, all_entries, taxonomy))
     return results
+
+
+async def _stored_group_key(
+    session: AsyncSession, tenant_id: UUID | None, step: EndpointDescriptor
+) -> str | None:
+    """The group key of *step*'s stored row, or ``None`` when it has none.
+
+    The tenant's own row comes before a built-in one.
+    """
+    visible: ColumnElement[bool] = EndpointDescriptor.tenant_id.is_(None)
+    if tenant_id is not None:
+        visible = or_(visible, EndpointDescriptor.tenant_id == tenant_id)
+    stmt = (
+        select(OperationGroup.group_key)
+        .join(EndpointDescriptor, EndpointDescriptor.group_id == OperationGroup.id)
+        .where(
+            visible,
+            EndpointDescriptor.product == step.product,
+            EndpointDescriptor.version == step.version,
+            EndpointDescriptor.impl_id == step.impl_id,
+            EndpointDescriptor.op_id == step.op_id,
+        )
+        .order_by(EndpointDescriptor.tenant_id.is_(None))
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def classify_step(
+    session: AsyncSession, *, tenant_id: UUID | None, step: EndpointDescriptor
+) -> Classification:
+    """Return the classified values of one step of a multi-step operation.
+
+    *step* is the in-memory row the step gate builds; it is never stored.
+    Entries for the connector and the operation match it. The group key
+    comes from the step's stored row when one exists, so a group entry
+    matches too; without a stored row the step still runs, and only the
+    group entries do not match.
+    """
+    taxonomy, entries = await load_classification(session, tenant_id)
+    group_key = await _stored_group_key(session, tenant_id, step)
+    coords = OpCoordinates(connector_id_of(step), group_key, step.op_id)
+    return classify(coords, entries, taxonomy)
 
 
 # ---------------------------------------------------------------------------

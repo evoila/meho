@@ -515,15 +515,15 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
   `0131`), not with the params and not in the encrypted payload of a
   credential write, and outside `params_hash`, so the retry check and the
   approve surfaces compare the call without it. `resume_dispatch_after_approval`
-  and the rerun of a failed run read the choice from the row (also after the
-  first run deleted the encrypted payload of a credential write), take a
-  flag sent again with the params off before the hash and preview checks
-  (`_secret_values.split_reveal_secret`), and put the stored choice on the
+  reads the choice from the row, takes a flag sent again with the params
+  off before the hash and preview checks
+  (`_secret_values.split_reveal_secret`), and puts the stored choice on the
   params of the approved run, which answers with the values and stamps the
-  choice on its audit row. For a read, the approve runs nothing: the read
-  runs once, when the person who asked fetches the value, and the stored
-  run result has no value
-  ([approvals.md](approvals.md#an-approved-secret-read-runs-when-the-person-who-asked-fetches-it)).
+  choice on its audit row. For every such request, a read or an operation
+  that creates a credential, the approve runs nothing: the operation runs
+  once, when the person who asked fetches the value, the stored run result
+  has no value, and "run again" refuses it
+  ([approvals.md](approvals.md#an-approved-secret-reveal-runs-when-the-person-who-asked-fetches-it)).
 - **Audit stamp.** `reveal_secret_var` (bound with the same token/finally
   discipline as `policy_decision_var`) lands as `payload['reveal_secret']`
   on the audit row of every secret read (`True` = values asked for,

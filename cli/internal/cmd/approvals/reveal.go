@@ -15,18 +15,19 @@ import (
 // asked for the hidden values of the answer (reveal_secret: true).
 const revealNotice = "Hidden values: the approved run returns the secret values to the requester."
 
-// dispatchWaitingForRequester is the dispatch_status of an approve of a read
-// that shows secret values. Nothing ran: the person who asked gets the value
-// later, once, and only for a short time after the approval.
+// dispatchWaitingForRequester is the dispatch_status of an approve of a
+// request that shows secret values (a read, or an operation that creates a
+// credential). Nothing ran: the person who asked gets the value later, once,
+// and only for a short time after the approval.
 const dispatchWaitingForRequester = "waiting_for_requester"
 
 // waitsForRequester reports whether the /decide answer d says the approved
-// read runs only when the person who asked gets the value.
+// request runs only when the person who asked gets the value.
 func waitsForRequester(d *api.DecideResponseBody) bool {
 	return d != nil && d.DispatchStatus != nil && *d.DispatchStatus == dispatchWaitingForRequester
 }
 
-// viewWaitsForRequester reports whether d is an approved read that shows
+// viewWaitsForRequester reports whether d is an approved request that shows
 // secret values and has not run: it runs only when the person who asked
 // gets the value.
 func viewWaitsForRequester(d *api.ApprovalRequestView) bool {
@@ -35,12 +36,13 @@ func viewWaitsForRequester(d *api.ApprovalRequestView) bool {
 		d.ResultState != nil && *d.ResultState == api.ApprovalResultStateNotStarted
 }
 
-// requesterFetchNote says what happens after the approve of such a read.
+// requesterFetchNote says what happens after the approve of such a request.
 func requesterFetchNote(id string) string {
-	return fmt.Sprintf("Approved. The read did not run. Only the person who asked can get the value, "+
-		"once, within the time limit (15 minutes by default): `meho secret read --approval %s`, or "+
-		"the \"Show value\" button in the console. After the time limit, they must ask again.",
-		output.SafeText(id))
+	safe := output.SafeText(id)
+	return fmt.Sprintf("Approved. The operation did not run. It runs once, when the person who asked "+
+		"gets the value, within the time limit (15 minutes by default): `meho secret read --approval %s`, "+
+		"POST /api/v1/approvals/%s/reveal, or the \"Show value\" button in the console. After the "+
+		"time limit, they must ask again.", safe, safe)
 }
 
 // printRevealNotice writes revealNotice, after indent, when the approved run

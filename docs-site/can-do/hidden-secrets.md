@@ -29,11 +29,14 @@ More rules:
 - A person or a service principal can ask for the real value with
   `reveal_secret: true`. An agent is refused. When the operation reads a
   secret, such as a Vault secret read, the request waits until a second
-  person approves it. Approving does not run the read. The person who
-  asked then gets the value: with "Show value" in the console's Vault
-  view, or with `meho secret read --approval <id> --field <name>`. This
-  works once, and only for 15 minutes after the approval. The person who
-  approved does not see the value, and MEHO does not store it.
+  person approves it. For every request with `reveal_secret` that waits
+  for approval, also one that creates a credential, approving does not
+  run the operation. The person who asked then runs it and gets the
+  value: with `POST /api/v1/approvals/<id>/reveal`, with "Show value" in
+  the console's Vault view, or with
+  `meho secret read --approval <id> --field <name>`. This works once, and
+  only for 15 minutes after the approval. The person who approved does
+  not see the value, and MEHO does not store it.
 - An operation that makes a new credential still gives it to the
   caller once.
 - A connector can mark a field that only looks secret, such as a date

@@ -37,6 +37,7 @@ type groupRow struct {
 	outcome  string // dispatch_execution_outcome the decide route answers
 	decideHT int    // HTTP status the decide route answers (default 200)
 	reveal   bool   // the requester asked for the hidden values (reveal_secret)
+	change   bool   // the request changes something when it runs (reveal_changes_something)
 	// results the detail route answers as result_state after the decide,
 	// one per read; the last one repeats. Plays the waiting requester
 	// whose run ends later (dispatch "already_resumed").
@@ -77,6 +78,10 @@ func groupViews(t *testing.T, rows []groupRow) []api.ApprovalRequestView {
 		if r.reveal {
 			reveal := true
 			v.RevealSecret = &reveal
+		}
+		if r.change {
+			change := true
+			v.RevealChangesSomething = &change
 		}
 		views = append(views, v)
 	}
@@ -358,6 +363,26 @@ func TestInOrderSecretReadWaitingForRequesterGoesOn(t *testing.T) {
 	if !strings.Contains(res.Steps[0].Detail, "meho secret read --approval "+inOrderID(1)) ||
 		strings.Contains(res.Steps[0].Detail, "send it again") {
 		t.Errorf("step 1 must name the fetch command of the person who asked: %q", res.Steps[0].Detail)
+	}
+}
+
+// TestInOrderStopsAtAWaitingRevealThatChangesSomething: an approved request
+// that creates a credential and asked for the value runs only when the
+// person who asked gets it, so the steps after it are not approved.
+func TestInOrderStopsAtAWaitingRevealThatChangesSomething(t *testing.T) {
+	rows := []groupRow{
+		{status: "pending", level: "dangerous", dispatch: dispatchWaitingForRequester, reveal: true, change: true},
+		{status: "pending", level: "caution", dispatch: "ok"},
+	}
+	rec, stdout, _, err := runInOrderWithMock(t, rows, yesAll, false)
+	assertExitCode(t, err, 4)
+	if len(rec.decided) != 1 || rec.decided[0] != inOrderID(1) {
+		t.Fatalf("decided: got %v want only step 1", rec.decided)
+	}
+	for _, want := range []string{"meho secret read --approval " + inOrderID(1), "The steps after it wait"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout)
+		}
 	}
 }
 

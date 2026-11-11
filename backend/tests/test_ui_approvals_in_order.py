@@ -38,6 +38,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.operations.approval_rights import WEB_APPROVAL_HINT
+from meho_backplane.operations.approved_reveal import WAITING_FOR_REQUESTER
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRF_HEADER_NAME
 from meho_backplane.ui.routes.approvals import in_order
 from meho_backplane.ui.routes.approvals.in_order import group_warnings
@@ -68,9 +69,12 @@ def _seed(
     resume_result: dict[str, Any] | None = None,
     principal_sub: str = "agent-7",
     created_at: datetime | None = None,
+    op_id: str | None = None,
+    reveal_secret: bool = False,
 ) -> uuid.UUID:
     """Insert step *step* of change ticket ``_REF`` at risk level *level*."""
     rid = uuid.uuid4()
+    op_id = op_id or f"op.step{step}"
 
     async def _do() -> None:
         async with get_sessionmaker()() as session, session.begin():
@@ -80,12 +84,12 @@ def _seed(
                     tenant_id=_TENANT_A,
                     run_id=None,
                     principal_sub=principal_sub,
-                    op_id=f"op.step{step}",
+                    op_id=op_id,
                     connector_id="linux",
                     target_id=None,
                     params_hash="0" * 64,
                     params={"path": "/etc/example"},
-                    proposed_effect={"op_id": f"op.step{step}", "safety_level": level},
+                    proposed_effect={"op_id": op_id, "safety_level": level},
                     preview_hash="1" * 64 if level == "destructive" else None,
                     status=status_value,
                     work_ref=_REF,
@@ -95,6 +99,7 @@ def _seed(
                     resume_result=resume_result,
                     decided_at=_BASE if status_value != "pending" else None,
                     reviewed_by="op-1" if status_value != "pending" else None,
+                    reveal_secret=reveal_secret,
                 )
             )
 
@@ -644,6 +649,49 @@ def test_rerun_skips_only_steps_that_ran_ok() -> None:
     assert "ran OK before, skipped" in response.text
     assert _request_status(s3) == "pending"
     resume.assert_not_awaited()
+
+
+def _fake_reveal_resume() -> AsyncMock:
+    """Stand in for the approve of a reveal: nothing runs; the requester gets the value later."""
+    plain = _fake_resume(failing_ops=set())
+
+    async def _run(*, operator: Any, request: ApprovalRequest, params: Any) -> SimpleNamespace:
+        if request.reveal_secret:
+            return SimpleNamespace(
+                status=WAITING_FOR_REQUESTER, op_id=request.op_id, result=None, error=None
+            )
+        return await plain(operator=operator, request=request, params=params)
+
+    return AsyncMock(side_effect=_run)
+
+
+def test_a_read_reveal_waiting_for_the_requester_goes_on() -> None:
+    """A read changes nothing, so the steps after it run."""
+    session_id = _session()
+    s1 = _seed(1, "caution", op_id="vault.kv.read", reveal_secret=True)
+    s2 = _seed(2, "caution")
+
+    response = _post(session_id, _fake_reveal_resume())
+
+    assert "data-approval-in-order-done" in response.text
+    assert [_request_status(r) for r in (s1, s2)] == ["approved", "approved"]
+
+
+def test_a_write_reveal_waiting_for_the_requester_stops_the_run() -> None:
+    """A credential write that asked for the values runs only when the person
+    who asked gets them, so the steps after it wait."""
+    session_id = _session()
+    s1 = _seed(1, "caution", op_id="vault.kv.put", reveal_secret=True)
+    s2 = _seed(2, "caution")
+    resume = _fake_reveal_resume()
+
+    response = _post(session_id, resume)
+
+    assert 'data-approval-in-order-stopped="1"' in response.text
+    assert "The steps after it wait until then" in response.text
+    assert _request_status(s1) == "approved"
+    assert _request_status(s2) == "pending"
+    assert resume.await_count == 1
 
 
 def test_rejected_predecessor_stops_the_run() -> None:

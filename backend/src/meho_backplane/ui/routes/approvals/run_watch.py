@@ -50,7 +50,7 @@ from meho_backplane.operations.approval_queue import (
     approval_result_state,
     get_request,
 )
-from meho_backplane.operations.approved_reveal import WAITING_FOR_REQUESTER, is_read_reveal
+from meho_backplane.operations.approved_reveal import WAITING_FOR_REQUESTER, is_secret_reveal
 from meho_backplane.operations.operation_run import TERMINAL_STATUSES
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
@@ -119,7 +119,7 @@ def live_run(row: ApprovalRequest, run: OperationRun | None) -> dict[str, Any] |
     state = approval_result_state(row)
     if state is None:
         return None
-    if state == ApprovalResultState.NOT_STARTED and is_read_reveal(row):
+    if state == ApprovalResultState.NOT_STARTED and is_secret_reveal(row):
         return _state(WAITING_FOR_REQUESTER, None, polling=False)
     if state in _FINAL_ROW_STATES:
         live = _state(state.value, run, polling=False)
@@ -242,7 +242,7 @@ async def start_approved_run(operator: Operator, approval: ApprovalRequest) -> d
     """
     # A secret reveal runs only when the person who asked fetches the value
     # (``approved_reveal``), so the approve starts no run.
-    if is_read_reveal(approval):
+    if is_secret_reveal(approval):
         return _state(WAITING_FOR_REQUESTER, None, polling=False)
     service = get_operation_run_service()
     run_id = await service.submit_approval_resume(operator, approval, params=None)

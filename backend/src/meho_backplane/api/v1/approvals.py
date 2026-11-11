@@ -163,7 +163,7 @@ from meho_backplane.operations.approval_rerun import (
     rerun_failed_request,
 )
 from meho_backplane.operations.approval_rights import ApproveRight, approve_right
-from meho_backplane.operations.approved_reveal import is_read_reveal
+from meho_backplane.operations.approved_reveal import is_secret_reveal, is_write_reveal
 from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
@@ -376,11 +376,17 @@ class ApprovalRequestView(BaseModel):
     #: (``reveal_secret: true``). When ``True``, the approved run returns
     #: the secret values to the requester. Read off the row. Additive.
     reveal_secret: bool = False
-    #: ``True`` for a read that shows secret values (``reveal_secret`` on a
-    #: read). Approving it runs nothing: it runs only when the person who
-    #: asked gets the value. A client that lost the answer to its approve
-    #: reads this instead of waiting for a run. Additive.
+    #: ``True`` for every request with ``reveal_secret``: a read that shows
+    #: secret values, or an operation that creates a credential. Approving it
+    #: runs nothing: it runs only when the person who asked gets the value.
+    #: A client that lost the answer to its approve reads this instead of
+    #: waiting for a run. Additive.
     waits_for_requester: bool = False
+    #: ``True`` when such a request also changes something when it runs
+    #: (for example it creates a token). Until the person who asked gets the
+    #: value, the change has not happened, so an approve in order stops at
+    #: it. Additive.
+    reveal_changes_something: bool = False
     status: ApprovalRequestStatus
     #: Run phase of an approved request (#3486): ``not_started`` /
     #: ``started`` / ``executed`` / ``failed`` / ``uncertain`` (#5025, MEHO
@@ -667,7 +673,8 @@ def _view(
         preview_hash=row.preview_hash,
         proposed_effect=row.proposed_effect,
         reveal_secret=bool(row.reveal_secret),
-        waits_for_requester=is_read_reveal(row),
+        waits_for_requester=is_secret_reveal(row),
+        reveal_changes_something=is_write_reveal(row),
         status=ApprovalRequestStatus(row.status),
         result_state=approval_result_state(row),
         resume_outcome=_resume_outcome_view(row),
@@ -1237,7 +1244,7 @@ async def approve_approval_request(
     # inside the background task.
     # A secret reveal runs nothing on an approve (``approved_reveal``), so it
     # needs no background run.
-    if body.async_ and not is_read_reveal(request):
+    if body.async_ and not is_secret_reveal(request):
         run_id = await get_operation_run_service().submit_approval_resume(
             operator, request, params=body.params
         )
@@ -1781,7 +1788,7 @@ async def decide_approval_request(
     # the claim is free (waiter gone), else it no-ops already_resumed —
     # so the run_id-is-not-None skip guard is gone: it was the source of
     # the silent-non-execution seam when the waiter had died.
-    if decision == "approved" and body.async_ and not is_read_reveal(request):
+    if decision == "approved" and body.async_ and not is_secret_reveal(request):
         return await _decide_in_background(operator, request, body)
     if decision == "approved":
         dispatch_result = await _resume_dispatch_after_approval(

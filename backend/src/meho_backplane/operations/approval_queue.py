@@ -150,7 +150,7 @@ from meho_backplane.operations.approval_resume_checks import (
     target_changed_since_request,
 )
 from meho_backplane.operations.approved_reveal import (
-    is_read_reveal,
+    is_secret_reveal,
     result_waiting_for_requester,
     without_secret_values,
 )
@@ -2422,7 +2422,7 @@ async def resume_dispatch_after_approval(
     # nothing is used up and nothing was sent.
     if is_draining():
         return shutting_down_result(request.op_id)
-    if is_read_reveal(request) and not requester_fetch:
+    if is_secret_reveal(request) and not requester_fetch:
         return result_waiting_for_requester(request)
     # The requester's reveal choice is on the request row, outside the
     # params and the hash (``create_pending_request``). It goes on the

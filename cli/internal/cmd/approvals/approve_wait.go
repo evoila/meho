@@ -34,7 +34,7 @@ const approveWaitHelp = "approve answers at once. MEHO saves the decision " +
 	"has ended. Its result_state field says where the run is: started " +
 	"while it runs, then executed, failed or uncertain. When the answer " +
 	"to the approve is lost on the network, approve reads the request " +
-	"again and prints the state MEHO has. A read that shows secret " +
+	"again and prints the state MEHO has. A request that shows secret " +
 	"values (reveal_secret) does not run on the approve: approve says " +
 	"so and names the command the person who asked uses to get the " +
 	"value, and --wait does not wait for it."

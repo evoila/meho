@@ -26616,6 +26616,11 @@
             "title": "Waits For Requester",
             "default": false
           },
+          "reveal_changes_something": {
+            "type": "boolean",
+            "title": "Reveal Changes Something",
+            "default": false
+          },
           "status": {
             "$ref": "#/components/schemas/ApprovalRequestStatus"
           },

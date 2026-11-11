@@ -120,7 +120,7 @@ def test_read_views_carry_the_reveal_choice() -> None:
     assert _view(plain).model_dump(mode="json")["reveal_secret"] is False
 
 
-def test_rest_view_says_when_the_approved_read_waits_for_the_requester() -> None:
+def test_rest_view_says_when_the_approved_request_waits_for_the_requester() -> None:
     read = _load(_seed(reveal=True))
     plain = _load(_seed(reveal=False))
     write_rid = _seed_request(tenant_id=_TENANT_A, op_id="vault.kv.put")
@@ -128,9 +128,13 @@ def test_rest_view_says_when_the_approved_read_waits_for_the_requester() -> None
     write = _load(write_rid)
 
     assert _view(read).waits_for_requester is True
+    assert _view(read).reveal_changes_something is False
     assert _view(plain).waits_for_requester is False
-    # Approving a write runs it, also when it asked for the values.
-    assert _view(write).waits_for_requester is False
+    assert _view(plain).reveal_changes_something is False
+    # A write that asked for the values also waits for the person who asked,
+    # and the view says it changes something when it runs.
+    assert _view(write).waits_for_requester is True
+    assert _view(write).reveal_changes_something is True
 
 
 def test_mcp_list_and_get_return_the_reveal_choice() -> None:

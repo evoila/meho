@@ -227,7 +227,7 @@ func runDecision(
 		fmt.Fprintln(cmd.OutOrStdout(), lostAnswerNote)
 	}
 	endedWithoutResult := false
-	// An approved secret read runs only when the person who asked gets the
+	// An approved secret reveal runs only when the person who asked gets the
 	// value, so there is no run to wait for. After a lost answer the
 	// request itself says so.
 	recoveredRead := lost && viewWaitsForRequester(detail)

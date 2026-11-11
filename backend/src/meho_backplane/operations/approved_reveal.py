@@ -3,19 +3,22 @@
 
 """The person who asked gets the value of an approved secret reveal.
 
-A call with ``reveal_secret: true`` on a read that shows secret values waits
-for a second person's approval
-(:mod:`meho_backplane.operations.credential_read`). The approval does not run
-the read. It is a one-time permission for the person who asked:
+A request with ``reveal_secret: true`` that waits for a second person's
+approval follows one rule, for a read
+(:mod:`meho_backplane.operations.credential_read`) and for an operation that
+creates a credential (for example a token). The approval does not run the
+operation. It is a one-time permission for the
+person who asked:
 
 * Approving runs nothing. Every approve surface goes through
   :func:`~meho_backplane.operations.approval_queue.resume_dispatch_after_approval`,
   which answers with :func:`result_waiting_for_requester` for such a request.
   So the answer to the approving person holds no secret value.
-* The read runs when the person who asked fetches the value
-  (:func:`fetch_approved_reveal`): the "Show value" button of the Vault
-  console, or ``meho secret read --approval <id>``. The value goes only to
-  that person, in that one answer.
+* The operation runs when the person who asked fetches the value
+  (:func:`fetch_approved_reveal`): ``POST /api/v1/approvals/{id}/reveal``,
+  the "Show value" button of the Vault console, or
+  ``meho secret read --approval <id>``. The value goes only to that person,
+  in that one answer.
 * The fetch works once, and only within
   ``APPROVAL_REVEAL_FETCH_WINDOW_SECONDS`` (15 minutes by default) after the
   approval. The one-resumer claim makes the second fetch fail.
@@ -24,7 +27,7 @@ the read. It is a one-time permission for the person who asked:
   hash.
 * MEHO keeps no value. The run result stored on the request
   (``resume_result``) is the answer without its values
-  (:func:`without_secret_values`). The audit row of the read stores
+  (:func:`without_secret_values`). The audit row of the run stores
   fingerprints only, as for every reveal.
 """
 
@@ -46,7 +49,8 @@ __all__ = [
     "WAITING_FOR_REQUESTER",
     "RevealFetchRefusedError",
     "fetch_approved_reveal",
-    "is_read_reveal",
+    "is_secret_reveal",
+    "is_write_reveal",
     "result_waiting_for_requester",
     "reveal_fetch_window",
     "without_secret_values",
@@ -56,8 +60,8 @@ __all__ = [
 #: who asked can now fetch the value.
 WAITING_FOR_REQUESTER: Final[str] = "waiting_for_requester"
 
-#: The op classes (:func:`~meho_backplane.broadcast.events.classify_op`) of a
-#: write. Approving such a request runs it, also when it asked for a reveal.
+#: The op classes (:func:`~meho_backplane.broadcast.events.classify_op`) of an
+#: operation that changes something.
 _WRITE_CLASSES: Final[frozenset[str]] = frozenset({"write", "credential_write", "credential_mint"})
 
 #: Status code of the ``approval.reveal`` audit row of a refused fetch.
@@ -79,13 +83,23 @@ class RevealFetchRefusedError(Exception):
         super().__init__(f"{code}: {message}")
 
 
-def is_read_reveal(request: ApprovalRequest) -> bool:
-    """True when *request* is a read whose caller wants the hidden values of the answer.
+def is_secret_reveal(request: ApprovalRequest) -> bool:
+    """True when the caller of *request* wants the hidden values of the answer.
 
-    A write that asked for ``reveal_secret`` (for example a credential write)
-    is left out: approving a write runs it, as for every other write.
+    This holds for every request with ``reveal_secret``: a read, and an
+    operation that creates a credential. Approving such a request runs
+    nothing; it runs once, when the person who asked fetches the value.
     """
-    return bool(request.reveal_secret) and classify_op(request.op_id) not in _WRITE_CLASSES
+    return bool(request.reveal_secret)
+
+
+def is_write_reveal(request: ApprovalRequest) -> bool:
+    """True for a secret reveal that changes something (for example it creates a token).
+
+    Such a request has not changed anything after the approve. An approve
+    in order stops at it, so the steps after it do not run before it.
+    """
+    return is_secret_reveal(request) and classify_op(request.op_id) in _WRITE_CLASSES
 
 
 def reveal_fetch_window() -> timedelta:
@@ -105,9 +119,11 @@ def result_waiting_for_requester(request: ApprovalRequest) -> OperationResult:
             "result_status": WAITING_FOR_REQUESTER,
             "approval_request_id": str(request.id),
             "next_step": (
-                f"Approved. The read did not run. The person who asked can now get "
-                f"the value once, within {minutes} minutes: the 'Show value' button "
-                f"in the console, or `meho secret read --approval {request.id}`."
+                f"Approved. The operation did not run. It runs once, when the person "
+                f"who asked gets the value, within {minutes} minutes: "
+                f"`POST /api/v1/approvals/{request.id}/reveal`, "
+                f"`meho secret read --approval {request.id}`, or the 'Show value' "
+                f"button in the console."
             ),
         },
     )
@@ -135,9 +151,9 @@ def _check_fetch(request: ApprovalRequest, *, now: datetime) -> None:
     from meho_backplane.db.models import ApprovalRequestStatus
     from meho_backplane.operations._validate import params_hash_matches
 
-    if not is_read_reveal(request):
+    if not is_secret_reveal(request):
         raise RevealFetchRefusedError(
-            "not_a_reveal", "This request is not a read that asks to show a secret value."
+            "not_a_reveal", "This request does not ask to show a secret value."
         )
     if request.status != ApprovalRequestStatus.APPROVED.value:
         raise RevealFetchRefusedError(
@@ -147,7 +163,7 @@ def _check_fetch(request: ApprovalRequest, *, now: datetime) -> None:
     if request.resumed_at is not None:
         raise RevealFetchRefusedError(
             "already_used",
-            "The value of this request was already fetched. Send a new read to see it again.",
+            "The value of this request was already fetched. Send the request again.",
         )
     decided_at = request.decided_at
     if decided_at is not None and decided_at.tzinfo is None:
@@ -155,7 +171,7 @@ def _check_fetch(request: ApprovalRequest, *, now: datetime) -> None:
     if decided_at is None or now > decided_at + reveal_fetch_window():
         raise RevealFetchRefusedError(
             "window_passed",
-            "The time to fetch the value has passed. Send a new read and ask for approval again.",
+            "The time to fetch the value has passed. Send the request again.",
         )
     stored = request.params
     if request.execution_handle is None and (
@@ -163,7 +179,7 @@ def _check_fetch(request: ApprovalRequest, *, now: datetime) -> None:
     ):
         raise RevealFetchRefusedError(
             "params_changed",
-            "The stored request no longer matches the approved one. Send a new read.",
+            "The stored request no longer matches the approved one. Send the request again.",
         )
 
 
@@ -183,7 +199,7 @@ async def fetch_approved_reveal(
 
     Every attempt by the person who asked writes one ``approval.reveal``
     audit row (class ``approval_decision``: it uses up the approval) with
-    the outcome. The read itself writes its own audit row, with
+    the outcome. The run itself writes its own audit row, with
     fingerprints only.
     """
     from meho_backplane.db.engine import get_sessionmaker
@@ -227,6 +243,6 @@ async def fetch_approved_reveal(
     if result.status == "already_resumed":
         raise RevealFetchRefusedError(
             "already_used",
-            "The value of this request was already fetched. Send a new read to see it again.",
+            "The value of this request was already fetched. Send the request again.",
         )
     return result

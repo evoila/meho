@@ -74,7 +74,7 @@ from meho_backplane.operations.approval_queue import (
     rehydrate_resume_target,
 )
 from meho_backplane.operations.approval_resume_checks import preview_changed_since_request
-from meho_backplane.operations.approved_reveal import is_read_reveal
+from meho_backplane.operations.approved_reveal import is_secret_reveal
 from meho_backplane.operations.grant_approval import grant_changed_since_request
 
 __all__ = [
@@ -336,9 +336,9 @@ async def _check_rerun(
 
     A secret reveal never runs again: its approval works once, for one fetch
     of the person who asked (:mod:`meho_backplane.operations.approved_reveal`).
-    After a failed fetch, that person sends a new read.
+    After a failed fetch, that person sends a new request.
     """
-    state = "secret_reveal" if is_read_reveal(request) else _not_failed_state(request)
+    state = "secret_reveal" if is_secret_reveal(request) else _not_failed_state(request)
     if state is not None:
         raise await _refuse(
             operator,

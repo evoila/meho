@@ -121,7 +121,7 @@ from meho_backplane.operations.approval_rights import (
     approve_right,
     self_approval_confirmation,
 )
-from meho_backplane.operations.approved_reveal import WAITING_FOR_REQUESTER
+from meho_backplane.operations.approved_reveal import WAITING_FOR_REQUESTER, is_write_reveal
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.routes import login_location
@@ -444,6 +444,14 @@ async def _run_step(
     step.row = approved
     if status == "ok":
         step.outcome, step.detail = "approved", "Ran OK."
+    elif status == WAITING_FOR_REQUESTER and is_write_reveal(approved):
+        # The change happens only when the person who asked gets the
+        # value, so the steps after it must not run before it.
+        step.outcome, step.detail = (
+            "stopped",
+            "Approved. It did not run yet: it runs when the person who asked "
+            "gets the value. The steps after it wait until then.",
+        )
     elif status == WAITING_FOR_REQUESTER:
         step.outcome, step.detail = (
             "approved",

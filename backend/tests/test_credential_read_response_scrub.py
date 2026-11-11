@@ -38,9 +38,12 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+import respx
 from fastapi import HTTPException
+from httpx import ASGITransport
 from sqlalchemy import select, update
 
+from meho_backplane.api.v1 import approvals as approvals_api
 from meho_backplane.api.v1.approval_reveal import reveal_approved_request
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import scrub_secret_named_values
@@ -50,6 +53,7 @@ from meho_backplane.connectors.registry import clear_registry, register_connecto
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, AuditLog
+from meho_backplane.main import app
 from meho_backplane.operations import (
     dispatch,
     register_typed_operation,
@@ -72,6 +76,12 @@ from meho_backplane.operations.approved_reveal import (
 )
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
+from tests._oidc_jwt_helpers import (
+    make_rsa_keypair,
+    mint_token,
+    mock_discovery_and_jwks,
+    public_jwks,
+)
 from tests._result_store_helpers import MemoryResultStore
 
 # Assembled from fragments so gitleaks' built-in rules don't false-positive
@@ -213,21 +223,26 @@ async def _ok_rows(op_id: str) -> list[AuditLog]:
 _REVIEWER = _make_operator().model_copy(update={"sub": "reviewer-2467"})
 
 
+async def _parked_reveal(op_id: str = "vault.kv.read", secret: str = _PASSWORD_SECRET) -> UUID:
+    """A person's call of *op_id* with ``reveal_secret`` waits for approval."""
+    parked = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id=op_id,
+        target=None,
+        params={"path": "app/db", "reveal_secret": True},
+    )
+    assert parked.status == "awaiting_approval", parked.error
+    assert secret not in parked.model_dump_json()
+    return UUID(parked.extras["approval_request_id"])
+
+
 async def _approved_reveal() -> UUID:
     """A person's reveal of ``vault.kv.read`` waits; another person approves it.
 
     The approve runs nothing: the approver's answer holds no value.
     """
-    parked = await dispatch(
-        operator=_make_operator(),
-        connector_id="vault-1.x",
-        op_id="vault.kv.read",
-        target=None,
-        params={"path": "app/db", "reveal_secret": True},
-    )
-    assert parked.status == "awaiting_approval", parked.error
-    assert _PASSWORD_SECRET not in parked.model_dump_json()
-    request_id = UUID(parked.extras["approval_request_id"])
+    request_id = await _parked_reveal()
     async with get_sessionmaker()() as session:
         approved = await approve_request(session, request_id, operator=_REVIEWER)
         await session.commit()
@@ -946,3 +961,146 @@ async def test_rest_reveal_route_gives_the_value_once_to_the_person_who_asked(
         await reveal_approved_request(request_id, operator=_make_operator())
     assert again.value.status_code == 409
     assert str(again.value.detail).startswith("reveal_already_used:")
+
+
+# ---------------------------------------------------------------------------
+# The approve answer over HTTP holds no value, on every approve route
+# ---------------------------------------------------------------------------
+
+#: The approve routes and bodies of the person who approves: ``/approve`` and
+#: ``/decide``, each without and with ``async``.
+_APPROVE_CALLS = [
+    pytest.param("approve", {"params": {"path": "app/db"}}, id="approve"),
+    pytest.param("approve", {"params": {"path": "app/db"}, "async": True}, id="approve-async"),
+    pytest.param("decide", {"decision": "approved"}, id="decide"),
+    pytest.param("decide", {"decision": "approved", "async": True}, id="decide-async"),
+]
+
+
+class _NoBackgroundRun:
+    """Stands in for the background run service: an approve of a reveal must not use it."""
+
+    async def submit_approval_resume(self, *_args: Any, **_kwargs: Any) -> UUID:
+        raise AssertionError("an approve of a reveal must start no background run")
+
+
+async def _approve_over_http(request_id: UUID, route: str, body: dict[str, Any]) -> httpx.Response:
+    """The reviewer approves *request_id* through the REST *route*."""
+    key = make_rsa_keypair("kid-reveal-approve")
+    token = mint_token(
+        key,
+        sub=_REVIEWER.sub,
+        name="Reviewer",
+        email=None,
+        tenant_id=str(_REVIEWER.tenant_id),
+        tenant_role=TenantRole.OPERATOR.value,
+        fresh_sign_in=True,
+    )
+    with respx.mock as mocked:
+        mock_discovery_and_jwks(mocked, public_jwks(key))
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app), base_url="https://testserver"
+        ) as client:
+            return await client.post(
+                f"/api/v1/approvals/{request_id}/{route}",
+                json=body,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+
+@pytest.mark.parametrize(("route", "body"), _APPROVE_CALLS)
+async def test_http_approve_of_a_read_reveal_holds_no_value(
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+    body: dict[str, Any],
+) -> None:
+    """``/approve`` and ``/decide``, sync and async: the answer body holds no value."""
+    monkeypatch.setattr(approvals_api, "get_operation_run_service", lambda: _NoBackgroundRun())
+    await _register_vault_read(stub_embedding_service)
+    request_id = await _parked_reveal()
+
+    response = await _approve_over_http(request_id, route, body)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["dispatch_status"] == WAITING_FOR_REQUESTER
+    assert response.json()["dispatch_result"] is None
+    assert _PASSWORD_SECRET not in response.text
+    assert await _ok_rows("vault.kv.read") == []
+    assert _PASSWORD_SECRET not in _whole_row(await _request_row(request_id))
+
+    result = await fetch_approved_reveal(_make_operator(), request_id)
+    assert result.result["data"]["password"] == _PASSWORD_SECRET
+
+
+_MINTED_SECRET_ID = "minted" + "-secret-id-6034"
+_MINT_OP = "vault.auth.approle.generate_secret_id"
+_mint_runs: list[int] = []
+
+
+async def _module_mint_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Stand-in for an operation that creates a credential and returns it."""
+    _mint_runs.append(1)
+    return {"secret_id": _MINTED_SECRET_ID, "secret_id_accessor": "accessor-1"}
+
+
+async def _register_mint(embedding_service: AsyncMock) -> None:
+    _mint_runs.clear()
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=_MINT_OP,
+        handler=_module_mint_handler,
+        summary="Create an AppRole SecretID.",
+        description="Create a SecretID.",
+        parameter_schema={"type": "object", "properties": {"path": {"type": "string"}}},
+        safety_level="caution",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=embedding_service,
+    )
+
+
+@pytest.mark.parametrize(("route", "body"), _APPROVE_CALLS)
+async def test_approving_a_credential_create_with_a_reveal_runs_it_only_for_the_requester(
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+    body: dict[str, Any],
+) -> None:
+    """An operation that creates a credential and asked for ``reveal_secret``.
+
+    The approve runs nothing, and the approver's answer and the request row
+    hold no value. The person who asked runs it once and gets the value; a
+    second fetch is refused.
+    """
+    monkeypatch.setattr(approvals_api, "get_operation_run_service", lambda: _NoBackgroundRun())
+    await _register_mint(stub_embedding_service)
+    request_id = await _parked_reveal(_MINT_OP, _MINTED_SECRET_ID)
+
+    response = await _approve_over_http(request_id, route, body)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["dispatch_status"] == WAITING_FOR_REQUESTER
+    assert _MINTED_SECRET_ID not in response.text
+    assert _mint_runs == []
+    assert _MINTED_SECRET_ID not in _whole_row(await _request_row(request_id))
+
+    with pytest.raises(ResultAccessForbiddenError):
+        await fetch_approved_reveal(_REVIEWER, request_id)
+    result = await fetch_approved_reveal(_make_operator(), request_id)
+    assert result.status == "ok", result.error
+    assert result.result["secret_id"] == _MINTED_SECRET_ID
+    assert _mint_runs == [1]
+
+    with pytest.raises(RevealFetchRefusedError) as refused:
+        await fetch_approved_reveal(_make_operator(), request_id)
+    assert refused.value.code == "already_used"
+    assert _mint_runs == [1]
+    assert _MINTED_SECRET_ID not in _whole_row(await _request_row(request_id))

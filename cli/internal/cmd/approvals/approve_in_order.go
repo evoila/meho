@@ -29,8 +29,11 @@ const inOrderHelp = "With --filter-work-ref REF --in-order, approve takes every 
 	"approval: it runs the operation at once and has its own audit " +
 	"row and its own checks. After each step it reads how the run " +
 	"ended. It goes on only when the run was OK, or when the step is a " +
-	"read that shows secret values: approving such a read runs nothing, " +
-	"and only the person who asked gets the value later. When the waiting " +
+	"read that shows secret values: approving a request that shows secret " +
+	"values runs nothing, and only the person who asked gets the value " +
+	"later. It stops at such a request that changes something (for " +
+	"example it creates a token): that change happens only when the " +
+	"person who asked gets the value. When the waiting " +
 	"requester runs the step instead, it waits for that run's stored " +
 	"result (up to two minutes) and goes on only when it was OK. It " +
 	"stops at the first run that failed or was denied, at a run whose " +
@@ -235,7 +238,7 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 		if item.RevealSecret != nil && *item.RevealSecret &&
 			item.ResultState != nil && *item.ResultState == api.ApprovalResultStateNotStarted {
 			return &stepStop{detail: fmt.Sprintf(
-				"approved earlier and not run yet. If it is a read that shows secret values, it runs "+
+				"approved earlier and not run yet. If it asked to show secret values, it runs "+
 					"only when the person who asked gets the value (meho secret read --approval %s), "+
 					"and this run cannot go past it before that. To go on now, approve the later "+
 					"steps by id", step.ID)}
@@ -268,7 +271,7 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 		return &stepStop{detail: "the approval was refused: " + err.Error(), err: err}
 	}
 	step.SelfApproval = selfApprovalLine(resp.JSON200)
-	stop, claimedElsewhere := checkDispatch(resp, step)
+	stop, claimedElsewhere := checkDispatch(resp, item, step)
 	if claimedElsewhere {
 		return r.waitForStoredResult(ctx, item.Id, step)
 	}
@@ -280,7 +283,7 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 // requester claimed the run, not that it ended; the second return value
 // is then true and the caller waits for the stored result. Any other
 // answer, including an answer that is not a finished 200, stops the run.
-func checkDispatch(resp *api.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse, step *inOrderStep) (*stepStop, bool) {
+func checkDispatch(resp *api.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse, item *api.ApprovalRequestView, step *inOrderStep) (*stepStop, bool) {
 	if resp.StatusCode() != 200 || resp.JSON200 == nil {
 		return &stepStop{detail: fmt.Sprintf(
 			"approved, but MEHO answered HTTP %d without a finished run, so the run cannot tell "+
@@ -298,8 +301,13 @@ func checkDispatch(resp *api.DecideApprovalRequestApiV1ApprovalsRequestIdDecideP
 	case "already_resumed":
 		return nil, true
 	case dispatchWaitingForRequester:
-		// A read that shows secret values: it changes nothing, so the steps
-		// after it may go on.
+		// It runs only when the person who asked gets the value. A step that
+		// changes something (for example it creates a token) has not
+		// changed it yet, so the steps after it must wait.
+		if item != nil && item.RevealChangesSomething != nil && *item.RevealChangesSomething {
+			return &stepStop{detail: requesterFetchNote(step.ID) + " The steps after it wait until it has run"}, false
+		}
+		// A read changes nothing, so the steps after it may go on.
 		step.Outcome = stepApproved
 		step.Detail = requesterFetchNote(step.ID)
 		return nil, false

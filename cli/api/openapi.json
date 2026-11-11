@@ -12491,6 +12491,60 @@
         }
       }
     },
+    "/api/v1/approvals/{request_id}/reveal": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Reveal Approved Request",
+        "description": "Run an approved secret reveal once and return the value to the person who asked.",
+        "operationId": "reveal_approved_request_api_v1_approvals__request_id__reveal_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRevealResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/service-principals/grants": {
       "get": {
         "tags": [
@@ -24983,6 +25037,50 @@
         }
       }
     },
+    "/ui/vault/read/reveal": {
+      "post": {
+        "tags": [
+          "ui-vault"
+        ],
+        "summary": "Vault Read Reveal",
+        "description": "Run the approved read once for the person who asked and render the value.\n\nReveal-gated like ``/ui/vault/read``. Before the approval, the\nwaiting panel comes back.",
+        "operationId": "vault_read_reveal_ui_vault_read_reveal_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/vault/versions": {
       "get": {
         "tags": [
@@ -26521,6 +26619,16 @@
             "title": "Reveal Secret",
             "default": false
           },
+          "waits_for_requester": {
+            "type": "boolean",
+            "title": "Waits For Requester",
+            "default": false
+          },
+          "reveal_changes_something": {
+            "type": "boolean",
+            "title": "Reveal Changes Something",
+            "default": false
+          },
           "status": {
             "$ref": "#/components/schemas/ApprovalRequestStatus"
           },
@@ -26738,6 +26846,59 @@
         ],
         "title": "ApprovalResumeOutcomeView",
         "description": "What happened when an approved request ran (#3543).\n\nA summary read off the stored result envelope. The result body and the\nfree-text error stay on the owner-only ``/result`` read."
+      },
+      "ApprovalRevealResult": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "nullable": true,
+            "title": "Result"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Audit Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "status",
+          "op_id",
+          "result",
+          "error",
+          "audit_id"
+        ],
+        "title": "ApprovalRevealResult",
+        "description": "The run result of an approved reveal, for the person who asked."
       },
       "ApprovalsStatus": {
         "properties": {

@@ -432,3 +432,215 @@ func TestSecretReadNotFoundExitsOne(t *testing.T) {
 		t.Errorf("not_found must not ask for a CLI upgrade; got %q", errBuf.String())
 	}
 }
+
+// ---------- approved reads (--approval) ----------
+
+const approvalStubID = "3f2b9c1e-1111-4000-8000-000000000042"
+
+// exitCodeOf returns the exit code a rendered error carries, or -1.
+func exitCodeOf(err error) int {
+	var coded interface{ ExitCode() int }
+	if errors.As(err, &coded) {
+		return coded.ExitCode()
+	}
+	return -1
+}
+
+// runReadCmd runs `meho secret read` with args and returns stdout,
+// stderr and the error.
+func runReadCmd(t *testing.T, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := newReadCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return out.String(), errBuf.String(), err
+}
+
+// TestSecretReadParkedNamesTheApprovalCommand — a read that waits for
+// approval writes no value and tells the person how to get it later.
+func TestSecretReadParkedNamesTheApprovalCommand(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(t, w, 200, dispatch.CallResult{
+				Status: dispatch.StatusAwaitingApproval, OpID: opKVRead,
+				Extras: json.RawMessage(`{"approval_request_id":"` + approvalStubID + `"}`),
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+	withStdoutTTY(t, false)
+
+	out, errOut, err := runReadCmd(t,
+		"--field", "password", "--backplane", srv.URL, "secret", "app/db")
+	if err == nil {
+		t.Fatalf("a waiting read must exit non-zero")
+	}
+	if out != "" {
+		t.Errorf("stdout must be empty while the read waits; got %q", out)
+	}
+	want := "meho secret read --approval " + approvalStubID + " --field <name>"
+	if !strings.Contains(errOut, want) {
+		t.Errorf("stderr must name %q; got %q", want, errOut)
+	}
+}
+
+// TestSecretReadApprovedWritesTheValue — after the approval, --approval
+// runs the approved read once through the reveal route and writes only
+// the field value. It sends no new read.
+func TestSecretReadApprovedWritesTheValue(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + approvalStubID + "/reveal": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(t, w, 200, map[string]any{
+				"approval_request_id": approvalStubID,
+				"status":              "ok",
+				"op_id":               opKVRead,
+				"error":               nil,
+				"audit_id":            nil,
+				"result": map[string]any{
+					"data":    map[string]any{"password": "s3cr3t-p@ss", "user": "root"},
+					"version": 2,
+				},
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+	withStdoutTTY(t, false)
+
+	out, errOut, err := runReadCmd(t,
+		"--approval", approvalStubID, "--field", "password", "--backplane", srv.URL)
+	if err != nil {
+		t.Fatalf("approved read: %v (stderr %q)", err, errOut)
+	}
+	if out != "s3cr3t-p@ss" {
+		t.Errorf("stdout = %q, want exactly the value", out)
+	}
+}
+
+// TestSecretReadApprovedStillWaiting — not approved yet: the route
+// refuses (409), no value, the reason on stderr, exit 4.
+func TestSecretReadApprovedStillWaiting(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + approvalStubID + "/reveal": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(t, w, 409, map[string]any{
+				"detail": "reveal_not_approved: The request is pending. " +
+					"The value can be fetched only after the approval.",
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+	withStdoutTTY(t, false)
+
+	out, errOut, err := runReadCmd(t,
+		"--approval", approvalStubID, "--field", "password", "--backplane", srv.URL)
+	if exitCodeOf(err) != 4 {
+		t.Fatalf("a request that still waits must exit 4; got %v", err)
+	}
+	if out != "" {
+		t.Errorf("stdout must be empty; got %q", out)
+	}
+	if !strings.Contains(errOut, "no value: reveal_not_approved: The request is pending") {
+		t.Errorf("stderr must say the request still waits; got %q", errOut)
+	}
+}
+
+// TestSecretReadApprovedUsedOnce — the second fetch is refused with a
+// clear reason and no value: the approval works once.
+func TestSecretReadApprovedUsedOnce(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + approvalStubID + "/reveal": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(t, w, 409, map[string]any{
+				"detail": "reveal_already_used: The value of this request was already fetched. " +
+					"Send a new read to see it again.",
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+	withStdoutTTY(t, false)
+
+	out, errOut, err := runReadCmd(t,
+		"--approval", approvalStubID, "--field", "password", "--backplane", srv.URL)
+	if exitCodeOf(err) != 4 {
+		t.Fatalf("a used approval must exit 4; got %v", err)
+	}
+	if out != "" {
+		t.Errorf("stdout must be empty; got %q", out)
+	}
+	if !strings.Contains(errOut, "already fetched") {
+		t.Errorf("stderr must say the value was already fetched; got %q", errOut)
+	}
+}
+
+// TestSecretReadApprovedNotOwner — another person gets exit 5, no value.
+func TestSecretReadApprovedNotOwner(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + approvalStubID + "/reveal": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(t, w, 403, map[string]any{"detail": "not_request_owner"})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+	withStdoutTTY(t, false)
+
+	out, _, err := runReadCmd(t,
+		"--approval", approvalStubID, "--field", "password", "--backplane", srv.URL)
+	if exitCodeOf(err) != 5 {
+		t.Fatalf("not the sender must exit 5; got %v", err)
+	}
+	if out != "" {
+		t.Errorf("stdout must be empty; got %q", out)
+	}
+}
+
+// TestSecretReadApprovedRejectsOtherOps — the result of another
+// operation is not written as a secret value.
+func TestSecretReadApprovedRejectsOtherOps(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + approvalStubID + "/reveal": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(t, w, 200, map[string]any{
+				"approval_request_id": approvalStubID,
+				"status":              "ok",
+				"op_id":               "vault.kv.put",
+				"result":              map[string]any{"data": map[string]any{"password": "x"}},
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+	withStdoutTTY(t, false)
+
+	out, errOut, err := runReadCmd(t,
+		"--approval", approvalStubID, "--field", "password", "--backplane", srv.URL)
+	if err == nil || out != "" {
+		t.Fatalf("another op's result must not be written; out=%q err=%v", out, err)
+	}
+	if !strings.Contains(errOut, "is not a secret read") {
+		t.Errorf("stderr must say why; got %q", errOut)
+	}
+}
+
+// TestSecretReadApprovalTakesNoArgs — with --approval the mount and path
+// come from the request, so extra arguments are refused.
+func TestSecretReadApprovalTakesNoArgs(t *testing.T) {
+	withStdoutTTY(t, false)
+	_, _, err := runReadCmd(t, "--approval", approvalStubID, "--field", "password", "secret", "app/db")
+	if err == nil {
+		t.Fatalf("--approval with mount and path must be refused")
+	}
+}
+
+// TestSecretReadApprovedRefusesTTY — the pipe-only guard holds for an
+// approved read too.
+func TestSecretReadApprovedRefusesTTY(t *testing.T) {
+	withStdoutTTY(t, true)
+	out, _, err := runReadCmd(t, "--approval", approvalStubID, "--field", "password")
+	if err == nil || out != "" {
+		t.Fatalf("a terminal must get a refusal and no value; out=%q err=%v", out, err)
+	}
+}

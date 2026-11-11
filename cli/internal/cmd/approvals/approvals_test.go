@@ -1532,6 +1532,39 @@ func TestApproveAnswersAtOnceAndNamesTheShowCommand(t *testing.T) {
 	}
 }
 
+// TestApproveWaitDoesNotWaitForASecretRead: approving a read that shows
+// secret values runs nothing, so --wait does not wait. The command says who
+// gets the value, and how.
+func TestApproveWaitDoesNotWaitForASecretRead(t *testing.T) {
+	notStarted := viewInState(t, api.ApprovalResultStateNotStarted)
+	reveal := true
+	notStarted.RevealSecret = &reveal
+	get, gets := viewSequence(t, notStarted)
+	status := dispatchWaitingForRequester
+	stdout, stderr, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusOK, api.DecideResponseBody{
+				ApprovalRequestId: mustUUID(t, stubID),
+				Decision:          "approved",
+				DispatchStatus:    &status,
+			})
+		},
+		"GET /api/v1/approvals/" + stubID: get,
+	}, decisionOpts{Wait: true})
+	if err != nil {
+		t.Fatalf("approve --wait: %v", err)
+	}
+	if *gets != 1 {
+		t.Errorf("--wait must not poll a read that waits for the requester; got %d reads", *gets)
+	}
+	if strings.Contains(stderr, "Waiting until it ends") || strings.Contains(stdout, "The operation is running") {
+		t.Errorf("no run to wait for; got stdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, requesterFetchNote(stubID)) {
+		t.Errorf("stdout must say how the person who asked gets the value; got:\n%s", stdout)
+	}
+}
+
 func TestApproveWaitPrintsHowTheRunEnded(t *testing.T) {
 	get, gets := viewSequence(t,
 		viewInState(t, api.ApprovalResultStateStarted),
@@ -1759,6 +1792,35 @@ func TestApproveWithALostAnswerReadsTheRequestAgain(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "→ approved") || strings.Contains(stderr, "unreachable") {
 		t.Errorf("stdout must show the real state, not unreachable; got:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+}
+
+// TestApproveWaitWithALostAnswerDoesNotWaitForASecretRead: the approve of a
+// read that shows secret values was saved, but its answer was lost. The
+// request says the read waits for the person who asked, so --wait does not
+// wait for a run, and the command says how that person gets the value.
+func TestApproveWaitWithALostAnswerDoesNotWaitForASecretRead(t *testing.T) {
+	notStarted := viewInState(t, api.ApprovalResultStateNotStarted)
+	waits := true
+	notStarted.RevealSecret = &waits
+	notStarted.WaitsForRequester = &waits
+	// A second, ended view keeps a wrong wait from running forever.
+	get, gets := viewSequence(t, notStarted, viewInState(t, api.ApprovalResultStateExecuted))
+	stdout, stderr, err := runApprove(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": closeConnection(t),
+		"GET /api/v1/approvals/" + stubID:              get,
+	}, decisionOpts{Wait: true})
+	if err != nil {
+		t.Fatalf("a lost answer on a saved approval is no error: %v (stderr %s)", err, stderr)
+	}
+	if *gets != 1 {
+		t.Errorf("--wait must not poll a read that waits for the requester; got %d reads", *gets)
+	}
+	if strings.Contains(stderr, "Waiting until it ends") || strings.Contains(stdout, "The operation is running") {
+		t.Errorf("no run to wait for; got stdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, lostAnswerNote) || !strings.Contains(stdout, requesterFetchNote(stubID)) {
+		t.Errorf("stdout must say the answer was lost and how the person who asked gets the value; got:\n%s", stdout)
 	}
 }
 

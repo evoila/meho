@@ -1822,10 +1822,11 @@ type ApprovalRequestView struct {
 	//
 	// A summary read off the stored result envelope. The result body and the
 	// free-text error stay on the owner-only ``/result`` read.
-	ResumeOutcome  *ApprovalResumeOutcomeView `json:"resume_outcome,omitempty"`
-	RevealSecret   *bool                      `json:"reveal_secret,omitempty"`
-	ReviewedBy     *string                    `json:"reviewed_by"`
-	ReviewedByName *string                    `json:"reviewed_by_name"`
+	ResumeOutcome          *ApprovalResumeOutcomeView `json:"resume_outcome,omitempty"`
+	RevealChangesSomething *bool                      `json:"reveal_changes_something,omitempty"`
+	RevealSecret           *bool                      `json:"reveal_secret,omitempty"`
+	ReviewedBy             *string                    `json:"reviewed_by"`
+	ReviewedByName         *string                    `json:"reviewed_by_name"`
 
 	// ReviewerContext Redacted, human-legible context for judging a parked request (#3353).
 	//
@@ -1871,12 +1872,13 @@ type ApprovalRequestView struct {
 	// drift guard
 	// :func:`tests.migrations.test_migration_0119_approval_withdrawn.test_status_check_matches_enum`
 	// asserts equality at unit-test time.
-	Status         ApprovalRequestStatus `json:"status"`
-	TargetId       *openapi_types.UUID   `json:"target_id"`
-	TenantId       openapi_types.UUID    `json:"tenant_id"`
-	WithdrawReason *string               `json:"withdraw_reason"`
-	WithdrawnAt    *string               `json:"withdrawn_at"`
-	WorkRef        *string               `json:"work_ref"`
+	Status            ApprovalRequestStatus `json:"status"`
+	TargetId          *openapi_types.UUID   `json:"target_id"`
+	TenantId          openapi_types.UUID    `json:"tenant_id"`
+	WaitsForRequester *bool                 `json:"waits_for_requester,omitempty"`
+	WithdrawReason    *string               `json:"withdraw_reason"`
+	WithdrawnAt       *string               `json:"withdrawn_at"`
+	WorkRef           *string               `json:"work_ref"`
 }
 
 // ApprovalResultState Whether an approved request has run yet (#3486).
@@ -1966,6 +1968,27 @@ type ApprovalResumeOutcomeView struct {
 	Guidance         *string             `json:"guidance"`
 	ResultStatus     *string             `json:"result_status"`
 	ResumedAt        *string             `json:"resumed_at"`
+}
+
+// ApprovalRevealResult The run result of an approved reveal, for the person who asked.
+type ApprovalRevealResult struct {
+	ApprovalRequestId openapi_types.UUID           `json:"approval_request_id"`
+	AuditId           *openapi_types.UUID          `json:"audit_id"`
+	Error             *string                      `json:"error"`
+	OpId              string                       `json:"op_id"`
+	Result            *ApprovalRevealResult_Result `json:"result"`
+	Status            string                       `json:"status"`
+}
+
+// ApprovalRevealResultResult0 defines model for .
+type ApprovalRevealResultResult0 map[string]interface{}
+
+// ApprovalRevealResultResult1 defines model for .
+type ApprovalRevealResultResult1 = []interface{}
+
+// ApprovalRevealResult_Result defines model for ApprovalRevealResult.Result.
+type ApprovalRevealResult_Result struct {
+	union json.RawMessage
 }
 
 // ApprovalsStatus The approval settings in force (#4830).
@@ -12406,6 +12429,11 @@ type GetApprovalResultApiV1ApprovalsRequestIdResultGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams defines parameters for RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost.
+type RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams defines parameters for WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPost.
 type WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -13931,6 +13959,11 @@ type VaultReadUiVaultReadGetParams struct {
 	Path   *string `form:"path,omitempty" json:"path,omitempty"`
 }
 
+// VaultReadRevealUiVaultReadRevealPostParams defines parameters for VaultReadRevealUiVaultReadRevealPost.
+type VaultReadRevealUiVaultReadRevealPostParams struct {
+	RequestId openapi_types.UUID `form:"request_id" json:"request_id"`
+}
+
 // VaultVersionsUiVaultVersionsGetParams defines parameters for VaultVersionsUiVaultVersionsGet.
 type VaultVersionsUiVaultVersionsGetParams struct {
 	Target *string `form:"target,omitempty" json:"target,omitempty"`
@@ -14897,6 +14930,68 @@ func (a PreviewOperationResponse) MarshalJSON() ([]byte, error) {
 		}
 	}
 	return json.Marshal(object)
+}
+
+// AsApprovalRevealResultResult0 returns the union data inside the ApprovalRevealResult_Result as a ApprovalRevealResultResult0
+func (t ApprovalRevealResult_Result) AsApprovalRevealResultResult0() (ApprovalRevealResultResult0, error) {
+	var body ApprovalRevealResultResult0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromApprovalRevealResultResult0 overwrites any union data inside the ApprovalRevealResult_Result as the provided ApprovalRevealResultResult0
+func (t *ApprovalRevealResult_Result) FromApprovalRevealResultResult0(v ApprovalRevealResultResult0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeApprovalRevealResultResult0 performs a merge with any union data inside the ApprovalRevealResult_Result, using the provided ApprovalRevealResultResult0
+func (t *ApprovalRevealResult_Result) MergeApprovalRevealResultResult0(v ApprovalRevealResultResult0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsApprovalRevealResultResult1 returns the union data inside the ApprovalRevealResult_Result as a ApprovalRevealResultResult1
+func (t ApprovalRevealResult_Result) AsApprovalRevealResultResult1() (ApprovalRevealResultResult1, error) {
+	var body ApprovalRevealResultResult1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromApprovalRevealResultResult1 overwrites any union data inside the ApprovalRevealResult_Result as the provided ApprovalRevealResultResult1
+func (t *ApprovalRevealResult_Result) FromApprovalRevealResultResult1(v ApprovalRevealResultResult1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeApprovalRevealResultResult1 performs a merge with any union data inside the ApprovalRevealResult_Result, using the provided ApprovalRevealResultResult1
+func (t *ApprovalRevealResult_Result) MergeApprovalRevealResultResult1(v ApprovalRevealResultResult1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t ApprovalRevealResult_Result) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *ApprovalRevealResult_Result) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
 }
 
 // AsApproveResponseBodyDispatchResult0 returns the union data inside the ApproveResponseBody_DispatchResult as a ApproveResponseBodyDispatchResult0
@@ -16469,6 +16564,9 @@ type ClientInterface interface {
 
 	// GetApprovalResultApiV1ApprovalsRequestIdResultGet request
 	GetApprovalResultApiV1ApprovalsRequestIdResultGet(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalResultApiV1ApprovalsRequestIdResultGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost request
+	RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost(ctx context.Context, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody request with any body
 	WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -18065,6 +18163,9 @@ type ClientInterface interface {
 	// VaultReadUiVaultReadGet request
 	VaultReadUiVaultReadGet(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// VaultReadRevealUiVaultReadRevealPost request
+	VaultReadRevealUiVaultReadRevealPost(ctx context.Context, params *VaultReadRevealUiVaultReadRevealPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// VaultStatusUiVaultStatusGet request
 	VaultStatusUiVaultStatusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -18725,6 +18826,18 @@ func (c *Client) RerunApprovalRequestApiV1ApprovalsRequestIdRerunPost(ctx contex
 
 func (c *Client) GetApprovalResultApiV1ApprovalsRequestIdResultGet(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalResultApiV1ApprovalsRequestIdResultGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetApprovalResultApiV1ApprovalsRequestIdResultGetRequest(c.Server, requestId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost(ctx context.Context, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostRequest(c.Server, requestId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -25887,6 +26000,18 @@ func (c *Client) VaultReadUiVaultReadGet(ctx context.Context, params *VaultReadU
 	return c.Client.Do(req)
 }
 
+func (c *Client) VaultReadRevealUiVaultReadRevealPost(ctx context.Context, params *VaultReadRevealUiVaultReadRevealPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultReadRevealUiVaultReadRevealPostRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) VaultStatusUiVaultStatusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewVaultStatusUiVaultStatusGetRequest(c.Server)
 	if err != nil {
@@ -28388,6 +28513,55 @@ func NewGetApprovalResultApiV1ApprovalsRequestIdResultGetRequest(server string, 
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostRequest generates requests for RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost
+func NewRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostRequest(server string, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/approvals/%s/reveal", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -51641,6 +51815,51 @@ func NewVaultReadUiVaultReadGetRequest(server string, params *VaultReadUiVaultRe
 	return req, nil
 }
 
+// NewVaultReadRevealUiVaultReadRevealPostRequest generates requests for VaultReadRevealUiVaultReadRevealPost
+func NewVaultReadRevealUiVaultReadRevealPostRequest(server string, params *VaultReadRevealUiVaultReadRevealPostParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/read/reveal")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "request_id", runtime.ParamLocationQuery, params.RequestId); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewVaultStatusUiVaultStatusGetRequest generates requests for VaultStatusUiVaultStatusGet
 func NewVaultStatusUiVaultStatusGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -51968,6 +52187,9 @@ type ClientWithResponsesInterface interface {
 
 	// GetApprovalResultApiV1ApprovalsRequestIdResultGetWithResponse request
 	GetApprovalResultApiV1ApprovalsRequestIdResultGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalResultApiV1ApprovalsRequestIdResultGetParams, reqEditors ...RequestEditorFn) (*GetApprovalResultApiV1ApprovalsRequestIdResultGetResponse, error)
+
+	// RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse request
+	RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams, reqEditors ...RequestEditorFn) (*RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse, error)
 
 	// WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse request with any body
 	WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse, error)
@@ -53564,6 +53786,9 @@ type ClientWithResponsesInterface interface {
 	// VaultReadUiVaultReadGetWithResponse request
 	VaultReadUiVaultReadGetWithResponse(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*VaultReadUiVaultReadGetResponse, error)
 
+	// VaultReadRevealUiVaultReadRevealPostWithResponse request
+	VaultReadRevealUiVaultReadRevealPostWithResponse(ctx context.Context, params *VaultReadRevealUiVaultReadRevealPostParams, reqEditors ...RequestEditorFn) (*VaultReadRevealUiVaultReadRevealPostResponse, error)
+
 	// VaultStatusUiVaultStatusGetWithResponse request
 	VaultStatusUiVaultStatusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultStatusUiVaultStatusGetResponse, error)
 
@@ -54484,6 +54709,29 @@ func (r GetApprovalResultApiV1ApprovalsRequestIdResultGetResponse) Status() stri
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetApprovalResultApiV1ApprovalsRequestIdResultGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ApprovalRevealResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -63593,6 +63841,28 @@ func (r VaultReadUiVaultReadGetResponse) StatusCode() int {
 	return 0
 }
 
+type VaultReadRevealUiVaultReadRevealPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultReadRevealUiVaultReadRevealPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultReadRevealUiVaultReadRevealPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type VaultStatusUiVaultStatusGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -64136,6 +64406,15 @@ func (c *ClientWithResponses) GetApprovalResultApiV1ApprovalsRequestIdResultGetW
 		return nil, err
 	}
 	return ParseGetApprovalResultApiV1ApprovalsRequestIdResultGetResponse(rsp)
+}
+
+// RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse request returning *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse
+func (c *ClientWithResponses) RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams, reqEditors ...RequestEditorFn) (*RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse, error) {
+	rsp, err := c.RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost(ctx, requestId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse(rsp)
 }
 
 // WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse request with arbitrary body returning *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse
@@ -69309,6 +69588,15 @@ func (c *ClientWithResponses) VaultReadUiVaultReadGetWithResponse(ctx context.Co
 	return ParseVaultReadUiVaultReadGetResponse(rsp)
 }
 
+// VaultReadRevealUiVaultReadRevealPostWithResponse request returning *VaultReadRevealUiVaultReadRevealPostResponse
+func (c *ClientWithResponses) VaultReadRevealUiVaultReadRevealPostWithResponse(ctx context.Context, params *VaultReadRevealUiVaultReadRevealPostParams, reqEditors ...RequestEditorFn) (*VaultReadRevealUiVaultReadRevealPostResponse, error) {
+	rsp, err := c.VaultReadRevealUiVaultReadRevealPost(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultReadRevealUiVaultReadRevealPostResponse(rsp)
+}
+
 // VaultStatusUiVaultStatusGetWithResponse request returning *VaultStatusUiVaultStatusGetResponse
 func (c *ClientWithResponses) VaultStatusUiVaultStatusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultStatusUiVaultStatusGetResponse, error) {
 	rsp, err := c.VaultStatusUiVaultStatusGet(ctx, reqEditors...)
@@ -70611,6 +70899,39 @@ func ParseGetApprovalResultApiV1ApprovalsRequestIdResultGetResponse(rsp *http.Re
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ApprovalResultView
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse parses an HTTP response from a RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse call
+func ParseRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse(rsp *http.Response) (*RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ApprovalRevealResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -82040,6 +82361,32 @@ func ParseVaultReadUiVaultReadGetResponse(rsp *http.Response) (*VaultReadUiVault
 	}
 
 	response := &VaultReadUiVaultReadGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseVaultReadRevealUiVaultReadRevealPostResponse parses an HTTP response from a VaultReadRevealUiVaultReadRevealPostWithResponse call
+func ParseVaultReadRevealUiVaultReadRevealPostResponse(rsp *http.Response) (*VaultReadRevealUiVaultReadRevealPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultReadRevealUiVaultReadRevealPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

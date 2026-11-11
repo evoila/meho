@@ -96,6 +96,7 @@ from meho_backplane.operations.answer_ready import (
     pick_columns,
     read_more_line,
 )
+from meho_backplane.operations.reducer import SECRET_REVEAL_CONTEXT_KEY
 from meho_backplane.operations.result_document import (
     DOCUMENT_RECORD,
     document_drill_in_rationale,
@@ -549,9 +550,14 @@ class JsonFluxReducer:
         the inline sample still ships, and (#1629) the branch carries a
         machine-readable ``reason`` naming which skip fired so the
         reduced-but-unspilled response is self-explanatory.
+
+        A ``reveal_secret: true`` run (:data:`SECRET_REVEAL_CONTEXT_KEY`)
+        gets ``(payload, None)``: nothing is stored.
         """
         del schema  # schema is inferred from captured rows
 
+        if context and context.get(SECRET_REVEAL_CONTEXT_KEY) is True:
+            return payload, None
         if _always_document(context):
             # The op asked for a stored document whatever the size: no
             # collection detection, no inline pass-through of a small payload.

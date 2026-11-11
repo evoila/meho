@@ -11,6 +11,10 @@ Copyright (c) 2026 evoila Group
 > tier's verdicts persisted back to memory as the policy the cheap
 > tier reads on every firing.
 
+In this version both agents use the same model: every tier goes to the
+one backend set in `AGENT_MODEL_BACKEND`. The tier is stored for later.
+The pattern works, but it does not get cheaper by tier yet.
+
 This guide is **composition only** — it wires existing MEHO
 primitives. No new server-side endpoint is introduced.
 
@@ -27,7 +31,9 @@ primitives. No new server-side endpoint is introduced.
   is read-only across discovery connectors (write ops route through
   the R2 approval gate, [PR #1243](https://github.com/evoila/meho/pull/1243)).
 - Per-identity daily budget caps that **degrade** the deep tier to
-  the fast tier at 80% of the daily cost cap, and **refuse** every
+  the fast tier at 80% of the daily cost cap (in this version both
+  tiers use the same model, so the step changes the tier on the run
+  record, not the model or the cost), and **refuse** every
   run at 100% — both per the [G11.5-T6 #1080](https://github.com/evoila/meho/issues/1080)
   pre-execution gate.
 - A closed-loop policy memory: every deep-tier investigation

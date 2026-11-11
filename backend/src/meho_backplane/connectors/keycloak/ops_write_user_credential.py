@@ -173,15 +173,17 @@ async def keycloak_user_credential_delete(
                 target, "DELETE", path, operator=operator, idempotent_conflict=False
             )
         except httpx.HTTPError as exc:
-            # A 401 goes to the dispatcher unchanged, so it can renew the login.
-            unauthorized = (
-                isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401
-            )
-            if unauthorized or not removed:
+            # Every failure after a delete ran (a 401 too) must name what is already gone.
+            if not removed:
                 raise
+            status = (
+                f" with HTTP {exc.response.status_code}"
+                if isinstance(exc, httpx.HTTPStatusError)
+                else ""
+            )
             raise KeycloakCredentialDeleteError(
                 f"{op_id}: removed {len(removed)} of {len(matches)} credentials, then a "
-                f"delete failed ({type(exc).__name__}). Already removed ids: "
+                f"delete failed ({type(exc).__name__}{status}). Already removed ids: "
                 f"{[item['id'] for item in removed]}"
             ) from exc
         removed.append(entry)

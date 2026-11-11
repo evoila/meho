@@ -774,14 +774,16 @@ async def test_delete_for_a_missing_user_is_not_found(kc: KeycloakConnector) -> 
     assert "KeycloakUserNotFoundError" in str(result)
 
 
+@pytest.mark.parametrize("status_code", [500, 401])
 async def test_a_failed_second_delete_names_the_credential_already_removed(
-    kc: KeycloakConnector,
+    kc: KeycloakConnector, status_code: int
 ) -> None:
+    """A 401 is no exception: the connector has no login retry, so the ids must show."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         mock.get(_CREDENTIALS_PATH).respond(200, json=_CREDENTIALS)
         mock.delete(f"{_CREDENTIALS_PATH}/cred-otp-1").respond(204)
-        mock.delete(f"{_CREDENTIALS_PATH}/cred-otp-2").respond(500, json={"error": "boom"})
+        mock.delete(f"{_CREDENTIALS_PATH}/cred-otp-2").respond(status_code, json={"error": "boom"})
         result = await _run(
             "keycloak.user.credential.delete", {"id": _USER_UUID, "credential_type": "otp"}
         )
@@ -789,6 +791,7 @@ async def test_a_failed_second_delete_names_the_credential_already_removed(
     text = str(result)
     assert "KeycloakCredentialDeleteError" in text
     assert "cred-otp-1" in text
+    assert f"HTTP {status_code}" in text
 
 
 async def test_a_failed_read_back_after_the_deletes_is_unknown_not_empty(

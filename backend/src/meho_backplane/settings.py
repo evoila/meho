@@ -727,7 +727,9 @@ class Settings(BaseModel):
         Write a ``client`` block into every audit row: the login client
         (``azp``), the channel (``web`` or ``token``), the principal kind
         and a short hash of the sign-in session. An approval request and an
-        approval decision also name the client of the person. Default
+        approval decision also name the client of the person, and a new
+        MCP session writes one ``mcp.session_open`` row with the client
+        name and version the tool sent about itself. Default
         ``False``: the rows stay as before. See
         :mod:`meho_backplane.auth.client_identity`. Env var
         ``AUDIT_CLIENT_IDENTITY``.

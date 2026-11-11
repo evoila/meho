@@ -609,16 +609,135 @@ async def test_replace_custom_login_binds_over_the_client_flow(kc: KeycloakConne
     assert fake.writes[-1][1] == f"{_ADMIN}/clients/{_CLIENT_UUID}"
 
 
+def _login_steps(fake: FakeKeycloak, alias: str, prefix: str = "") -> None:
+    """Give *fake* the built-in login as flow *alias*; a copy's sub-flows carry *prefix*."""
+    forms, code = f"{prefix}forms", f"{prefix}Browser - Conditional OTP"
+    fake.flows[alias] = {
+        "id": f"{alias}-id",
+        "top": True,
+        "steps": [
+            {"id": f"{alias}-cookie", "provider": "auth-cookie", "requirement": "ALTERNATIVE"},
+            {"id": f"{alias}-forms", "sub": forms, "requirement": "ALTERNATIVE"},
+        ],
+    }
+    fake.flows[forms] = {
+        "id": f"{forms}-id",
+        "top": False,
+        "steps": [
+            {
+                "id": f"{alias}-pw",
+                "provider": "auth-username-password-form",
+                "requirement": "REQUIRED",
+            },
+            {"id": f"{alias}-code", "sub": code, "requirement": "CONDITIONAL"},
+        ],
+    }
+    fake.flows[code] = {
+        "id": f"{code}-id",
+        "top": False,
+        "steps": [
+            {
+                "id": f"{alias}-user",
+                "provider": "conditional-user-configured",
+                "requirement": "REQUIRED",
+            },
+            {"id": f"{alias}-otp", "provider": "auth-otp-form", "requirement": "REQUIRED"},
+        ],
+    }
+
+
+def _passkey_copy(fake: FakeKeycloak) -> None:
+    """Give *fake* the built-in login and the copy the passkey op makes, and bind the copy."""
+    _login_steps(fake, "browser")
+    prefix = "browser with passkeys "
+    _login_steps(fake, "browser with passkeys", prefix)
+    fake.configs["skip-code"] = {
+        "id": "skip-code",
+        "alias": "browser with passkeys - skip code after passkey",
+        "config": {"credentials": "webauthn-passwordless", "included": "false"},
+    }
+    fake.flows[f"{prefix}Browser - Conditional OTP"]["steps"].insert(
+        1,
+        {
+            "id": "condition",
+            "provider": "conditional-credential",
+            "requirement": "REQUIRED",
+            "config": "skip-code",
+        },
+    )
+    fake.realm["browserFlow"] = "browser with passkeys"
+
+
 async def test_realm_with_the_passkey_copy_of_the_login_is_bound(kc: KeycloakConnector) -> None:
     """MEHO's own 'browser with passkeys' copy keeps the built-in steps."""
     fake = FakeKeycloak(client=_client())
-    fake.flows["browser with passkeys"] = {"id": "passkeys-id", "top": True, "steps": []}
-    fake.realm["browserFlow"] = "browser with passkeys"
+    _passkey_copy(fake)
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         fake.mount(mock)
         result = await _run({})
     assert result["status"] == "ok", result
     assert result["result"]["bound"] is True
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "extra_required_step",
+        "code_step_turned_off",
+        "condition_settings",
+        "no_condition",
+    ],
+)
+async def test_edited_passkey_copy_of_the_login_is_not_bound(
+    kc: KeycloakConnector, change: str
+) -> None:
+    """The flow can be edited: an added or changed step there keeps the console unbound."""
+    fake = FakeKeycloak(client=_client())
+    _passkey_copy(fake)
+    forms = fake.flows["browser with passkeys forms"]["steps"]
+    code = fake.flows["browser with passkeys Browser - Conditional OTP"]["steps"]
+    if change == "extra_required_step":
+        forms.append({"id": "extra", "provider": "auth-otp-form", "requirement": "REQUIRED"})
+    elif change == "code_step_turned_off":
+        code[-1]["requirement"] = "DISABLED"
+    elif change == "condition_settings":
+        fake.configs["skip-code"]["config"]["included"] = "true"
+    else:
+        del code[1]
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run({})
+    assert result["status"] == "ok", result
+    out = result["result"]
+    assert out["bound"] is False
+    assert "browser with passkeys" in out["not_bound_reason"]
+    assert fake.client is not None
+    assert "browser" not in fake.client["authenticationFlowBindingOverrides"]
+    assert ("PUT", f"{_ADMIN}/clients/{_CLIENT_UUID}") not in [(m, p) for m, p, _ in fake.writes]
+
+
+async def test_bound_client_stays_bound_on_a_run_without_replace_custom_login(
+    kc: KeycloakConnector,
+) -> None:
+    """A run without the option reports the binding a run with it made."""
+    fake = FakeKeycloak(client=_client())
+    fake.flows["browser with extra checks"] = {"id": "custom-id", "top": True, "steps": []}
+    fake.realm["browserFlow"] = "browser with extra checks"
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        first = await _run({"replace_custom_login": True})
+        fake.writes.clear()
+        second = await _run({})
+    assert first["result"]["bound"] is True
+    assert second["status"] == "ok", second
+    out = second["result"]
+    flow_id = fake.flows[TOUCH_FLOW_ALIAS]["id"]
+    assert out["bound"] is True
+    assert out["not_bound_reason"] is None
+    assert out["binding_changed"] is False
+    assert out["browser_flow_id"] == flow_id
+    assert out["previous_browser_flow_id"] == flow_id
+    assert fake.writes == []
 
 
 # ---------------------------------------------------------------------------

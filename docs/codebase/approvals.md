@@ -2554,9 +2554,12 @@ asks for the touch level; nothing in the backplane reads it yet.
   fingerprint. They also turn on the token settings of an `amr` mapper
   that leaves the claim out of the ID token. They do not bind it when
   the realm's browser flow is not `browser` or `browser with passkeys`,
-  or when `meho-web` has a browser flow of its own: level 1 is a copy
-  of the built-in login, so binding would drop that login's steps. The
-  operation binds it anyway with `replace_custom_login: true`.
+  when `browser with passkeys` has other steps or settings than
+  `browser` plus the passkey step, or when `meho-web` has a browser flow
+  of its own: level 1 is a copy of the built-in login, so binding would
+  drop that login's steps. The operation binds it anyway with
+  `replace_custom_login: true`. A client bound to the touch flow
+  already stays bound on later runs.
 * **Company login:** the realm stage sets the redirect default of the
   company login on the realm's browser flow and on `meho approval
   touch` (`core/company_login.py`), so the console still goes straight

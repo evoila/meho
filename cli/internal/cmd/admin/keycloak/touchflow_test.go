@@ -567,11 +567,44 @@ func TestBootstrap_TouchFlowNotBoundOverTheClientsOwnLogin(t *testing.T) {
 	}
 }
 
+// seedLoginSteps gives the fake the built-in login as flow alias; the
+// sub-flows of a copy carry prefix in front of their names.
+func seedLoginSteps(fake *fakeKeycloak, alias, prefix string) {
+	forms, code := prefix+"forms", prefix+"Browser - Conditional OTP"
+	fake.flows[alias] = &fakeFlow{ID: alias + "-flow", TopLevel: true, Steps: []*fakeFlowStep{
+		{ID: alias + "-cookie", Provider: "auth-cookie", Requirement: "ALTERNATIVE"},
+		{ID: alias + "-forms", Subflow: forms, Requirement: "ALTERNATIVE"},
+	}}
+	fake.flows[forms] = &fakeFlow{ID: forms + "-flow", Steps: []*fakeFlowStep{
+		{ID: alias + "-pw", Provider: "auth-username-password-form", Requirement: "REQUIRED"},
+		{ID: alias + "-code", Subflow: code, Requirement: "CONDITIONAL"},
+	}}
+	fake.flows[code] = &fakeFlow{ID: code + "-flow", Steps: []*fakeFlowStep{
+		{ID: alias + "-user", Provider: "conditional-user-configured", Requirement: "REQUIRED"},
+		{ID: alias + "-otp", Provider: "auth-otp-form", Requirement: "REQUIRED"},
+	}}
+}
+
+// seedPasskeyCopy gives the fake the built-in login and the copy that
+// keycloak.authflow.ensure_passkey_code_skip makes, and binds the copy.
+func seedPasskeyCopy(fake *fakeKeycloak) {
+	seedLoginSteps(fake, "browser", "")
+	seedLoginSteps(fake, passkeyFlowAlias, passkeyFlowAlias+" ")
+	fake.stepConfigs["skip-code"] = map[string]any{
+		"id": "skip-code", "alias": "browser with passkeys - skip code after passkey",
+		"config": map[string]any{"credentials": "webauthn-passwordless", "included": "false"},
+	}
+	code := fake.flows[passkeyFlowAlias+" Browser - Conditional OTP"]
+	code.Steps = slices.Insert(code.Steps, 1, &fakeFlowStep{
+		ID: "condition", Provider: passkeyConditionType, Requirement: "REQUIRED", Config: "skip-code",
+	})
+	fake.realm["browserFlow"] = passkeyFlowAlias
+}
+
 // The passkey copy of the built-in login is not a login of its own.
 func TestBootstrap_TouchFlowBoundOverThePasskeyCopy(t *testing.T) {
 	fake := newFakeKeycloak()
-	fake.flows["browser with passkeys"] = &fakeFlow{ID: "passkeys-flow", TopLevel: true}
-	fake.realm["browserFlow"] = "browser with passkeys"
+	seedPasskeyCopy(fake)
 	console := seedConsoleClient(fake)
 
 	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
@@ -579,6 +612,75 @@ func TestBootstrap_TouchFlowBoundOverThePasskeyCopy(t *testing.T) {
 	}
 	if fake.clients[console.ID].AuthenticationFlowBindingOverrides["browser"] != fake.flows[touchFlowAlias].ID {
 		t.Error("the console client is not bound to the touch flow")
+	}
+}
+
+// "browser with passkeys" can be edited: a copy with an added or changed
+// step keeps the console login it has.
+func TestBootstrap_TouchFlowNotBoundOverAnEditedPasskeyCopy(t *testing.T) {
+	forms := passkeyFlowAlias + " forms"
+	code := passkeyFlowAlias + " Browser - Conditional OTP"
+	cases := map[string]func(fake *fakeKeycloak){
+		"extra required step": func(fake *fakeKeycloak) {
+			fake.flows[forms].Steps = append(fake.flows[forms].Steps,
+				&fakeFlowStep{ID: "extra", Provider: "auth-otp-form", Requirement: "REQUIRED"})
+		},
+		"code step turned off": func(fake *fakeKeycloak) {
+			fake.flows[code].Steps[2].Requirement = "DISABLED"
+		},
+		"condition settings": func(fake *fakeKeycloak) {
+			fake.stepConfigs["skip-code"]["config"].(map[string]any)["included"] = "true"
+		},
+		"no condition": func(fake *fakeKeycloak) {
+			fake.flows[code].Steps = slices.Delete(fake.flows[code].Steps, 1, 2)
+		},
+	}
+	for name, edit := range cases {
+		t.Run(name, func(t *testing.T) {
+			fake := newFakeKeycloak()
+			seedPasskeyCopy(fake)
+			edit(fake)
+			console := seedConsoleClient(fake)
+
+			res, _, err := runBootstrapOnce(t, fake, fullOpts())
+			if err != nil {
+				t.Fatalf("Bootstrap: %v", err)
+			}
+			if got := fake.clients[console.ID].AuthenticationFlowBindingOverrides["browser"]; got != "" {
+				t.Errorf("console bound to %q over an edited passkey copy", got)
+			}
+			if !slices.ContainsFunc(res.MapperEventsLog, func(e string) bool {
+				return strings.HasPrefix(e, `[skip] client "meho-web" not bound`) &&
+					strings.Contains(e, `"browser with passkeys"`)
+			}) {
+				t.Errorf("events miss the not-bound line: %v", res.MapperEventsLog)
+			}
+		})
+	}
+}
+
+// A console client bound to the touch flow stays bound, also when the
+// realm has its own login flow (the op bound it with replace_custom_login).
+func TestBootstrap_TouchFlowBindingIsKeptOverTheRealmsOwnLogin(t *testing.T) {
+	fake := newFakeKeycloak()
+	fake.flows["browser with extra checks"] = &fakeFlow{ID: "custom-flow", TopLevel: true}
+	fake.realm["browserFlow"] = "browser with extra checks"
+	flow := seedTouchFlow(fake)
+	console := seedConsoleClient(fake)
+	console.AuthenticationFlowBindingOverrides["browser"] = flow.ID
+
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if got := fake.clients[console.ID].AuthenticationFlowBindingOverrides["browser"]; got != flow.ID {
+		t.Errorf("console browser flow = %q, want the touch flow", got)
+	}
+	if !slices.Contains(res.MapperEventsLog, `[skip] client "meho-web" uses login flow "meho approval touch"`) {
+		t.Errorf("events miss the bound line: %v", res.MapperEventsLog)
+	}
+	if slices.ContainsFunc(res.MapperEventsLog, func(e string) bool { return strings.Contains(e, "not bound") }) {
+		t.Errorf("events say not bound: %v", res.MapperEventsLog)
 	}
 }
 

@@ -952,11 +952,14 @@ time; level 2 is kept for the approval sign-in, `meho-approve`). On the target's
 6. Bind the flow as the client's browser flow (full client `PUT`, read
    back). This is the last write. Level 1 is a copy of Keycloak's
    built-in login, so the op binds only when the realm's browser flow is
-   `browser` or `browser with passkeys` and the client has no browser
-   flow of its own. Otherwise it makes the flow, does not bind it, and
-   returns `bound: false` with `not_bound_reason`. With
-   `replace_custom_login: true` it binds anyway;
-   `previous_browser_flow_id` names the flow it replaced.
+   `browser`, or `browser with passkeys` with the steps and settings of
+   `browser` plus the passkey step (that flow can be edited, so the op
+   reads it), and the client has no browser flow of its own. Otherwise it
+   makes the flow, does not bind it, and returns `bound: false` with
+   `not_bound_reason`. With `replace_custom_login: true` it binds anyway;
+   `previous_browser_flow_id` names the flow it replaced. A client bound
+   to the touch flow already stays bound and returns `bound: true`, also
+   on a later run without `replace_custom_login`.
 
 The result is `{realm, flow_alias, flow_id, flow_created, flow_steps,
 loa_map_changed, amr_mapper_added, amr_mapper_fixed, redirect_default_copied, client_id, client_uuid,

@@ -350,8 +350,9 @@ TOUCH_OPS: tuple[KeycloakOp, ...] = (
                 "another level. An error with 'verification_not_required' means the "
                 "realm's passkey policy does not ask for a PIN or fingerprint; a person "
                 "sets it to 'required' and runs again. bound false: the realm or the client "
-                "has its own login flow; not_bound_reason says which. The flow is made "
-                "but not used; a person decides, and runs again with "
+                "has its own login flow, or 'browser with passkeys' has other steps than "
+                "the built-in login with the passkey step; not_bound_reason says which. "
+                "The flow is made but not used; a person decides, and runs again with "
                 "replace_custom_login true to bind it anyway. The way back: "
                 "keycloak.client.update with "
                 '{"authenticationFlowBindingOverrides": {"browser": ""}}.'

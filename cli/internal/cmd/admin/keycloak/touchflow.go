@@ -32,6 +32,10 @@ const (
 	redirectorType  = "identity-provider-redirector"
 	// The name core/company_login.py gives the touch flow's redirect settings.
 	touchRedirectAlias = "meho-company-login-redirect-touch"
+	// The copy of the built-in login that keycloak.authflow.ensure_passkey_code_skip
+	// makes, and the step it adds to skip the one-time code after a passkey.
+	passkeyFlowAlias     = "browser with passkeys"
+	passkeyConditionType = "conditional-credential"
 )
 
 // touchStep is one step of the touch flow, in the order Keycloak lists
@@ -150,13 +154,18 @@ func findFlowID(ctx context.Context, c *adminClient, alias string) (string, erro
 }
 
 func readTouchSteps(ctx context.Context, c *adminClient) ([]map[string]any, error) {
-	body, err := c.flowCall(ctx, http.MethodGet, flowExecutionsPath(touchFlowAlias), nil, http.StatusOK)
+	return readFlowSteps(ctx, c, touchFlowAlias)
+}
+
+// readFlowSteps lists the steps of the login flow alias.
+func readFlowSteps(ctx context.Context, c *adminClient, alias string) ([]map[string]any, error) {
+	body, err := c.flowCall(ctx, http.MethodGet, flowExecutionsPath(alias), nil, http.StatusOK)
 	if err != nil {
 		return nil, err
 	}
 	var steps []map[string]any
 	if err := json.Unmarshal(body, &steps); err != nil {
-		return nil, fmt.Errorf("decode the steps of login flow %q: %w", touchFlowAlias, err)
+		return nil, fmt.Errorf("decode the steps of login flow %q: %w", alias, err)
 	}
 	return steps, nil
 }
@@ -399,24 +408,121 @@ func reconcileTouchLevel(ctx context.Context, c *adminClient) ([]string, bool, e
 // customLogin says why binding the touch flow would change the normal
 // login, or returns "". Level 1 of the flow is a copy of Keycloak's
 // built-in login; a realm or a client with its own login flow may ask
-// for more checks, and binding would drop them.
-func customLogin(realmBrowser, clientBrowser, flowID string) string {
+// for more checks, and binding would drop them. "browser with passkeys"
+// can be edited, so its steps and settings are checked, not only its
+// name.
+func customLogin(ctx context.Context, c *adminClient, realmBrowser, clientBrowser string) (string, error) {
 	if realmBrowser == "" {
 		realmBrowser = "browser"
 	}
-	if realmBrowser != "browser" && realmBrowser != "browser with passkeys" {
-		return fmt.Sprintf("the realm's login flow is %q, not the built-in one", realmBrowser)
+	switch realmBrowser {
+	case "browser":
+	case passkeyFlowAlias:
+		diff, err := passkeyCopyDifference(ctx, c)
+		if err != nil {
+			return "", err
+		}
+		if diff != "" {
+			return fmt.Sprintf("the realm's login flow %q is not the built-in login with the passkey step (%s)",
+				realmBrowser, diff), nil
+		}
+	default:
+		return fmt.Sprintf("the realm's login flow is %q, not the built-in one", realmBrowser), nil
 	}
-	if clientBrowser != "" && clientBrowser != flowID {
-		return fmt.Sprintf("the client has its own login flow %q", clientBrowser)
+	if clientBrowser != "" {
+		return fmt.Sprintf("the client has its own login flow %q", clientBrowser), nil
 	}
-	return ""
+	return "", nil
+}
+
+// passkeyCopyDifference says how the realm's "browser with passkeys" flow
+// differs from what keycloak.authflow.ensure_passkey_code_skip makes, or
+// returns "". That flow is the built-in "browser" flow, step for step and
+// setting for setting, plus one conditional-credential step: required,
+// with the passkey settings, right after conditional-user-configured.
+func passkeyCopyDifference(ctx context.Context, c *adminClient) (string, error) {
+	source, err := readFlowSteps(ctx, c, "browser")
+	if err != nil {
+		return "", err
+	}
+	steps, err := readFlowSteps(ctx, c, passkeyFlowAlias)
+	if err != nil {
+		return "", err
+	}
+	var rest []map[string]any
+	condition := -1
+	for i, s := range steps {
+		if stepName(s) != passkeyConditionType {
+			rest = append(rest, s)
+			continue
+		}
+		if condition >= 0 {
+			return "it has more than one " + passkeyConditionType + " step", nil
+		}
+		condition = i
+	}
+	if condition < 1 || stepName(steps[condition-1]) != "conditional-user-configured" ||
+		steps[condition-1]["level"] != steps[condition]["level"] {
+		return "it has no " + passkeyConditionType + " step right after conditional-user-configured", nil
+	}
+	config, err := stepSettings(ctx, c, steps[condition])
+	if err != nil {
+		return "", err
+	}
+	included, _ := config["included"].(string)
+	credentials, _ := config["credentials"].(string)
+	if steps[condition]["requirement"] != "REQUIRED" || strings.EqualFold(strings.TrimSpace(included), "true") ||
+		slices.ContainsFunc(strings.Split(credentials, "##"), func(s string) bool { return s != "webauthn-passwordless" }) {
+		return "its " + passkeyConditionType + " step is not required with the passkey settings", nil
+	}
+	if len(rest) != len(source) {
+		return fmt.Sprintf("it has %d steps besides the condition; wanted %d", len(rest), len(source)), nil
+	}
+	for i, want := range source {
+		have := rest[i]
+		name := stepName(want)
+		if isFlow, _ := want["authenticationFlow"].(bool); isFlow {
+			name = passkeyFlowAlias + " " + name
+		}
+		if have["level"] != want["level"] || stepName(have) != name || have["requirement"] != want["requirement"] {
+			return fmt.Sprintf("step %d is %q (%v); wanted %q (%v)",
+				i+1, stepName(have), have["requirement"], name, want["requirement"]), nil
+		}
+		haveConfig, err := stepSettings(ctx, c, have)
+		if err != nil {
+			return "", err
+		}
+		wantConfig, err := stepSettings(ctx, c, want)
+		if err != nil {
+			return "", err
+		}
+		if !maps.Equal(haveConfig, wantConfig) {
+			return fmt.Sprintf("step %d (%q) has other settings than in \"browser\"", i+1, stepName(have)), nil
+		}
+	}
+	return "", nil
+}
+
+// stepSettings reads the settings (the config map) of a flow step, or
+// returns nil for a step without any.
+func stepSettings(ctx context.Context, c *adminClient, step map[string]any) (map[string]any, error) {
+	configID, _ := step["authenticationConfig"].(string)
+	if configID == "" {
+		return nil, nil
+	}
+	rep, err := readAuthConfig(ctx, c, configID)
+	if err != nil {
+		return nil, err
+	}
+	config, _ := rep["config"].(map[string]any)
+	return config, nil
 }
 
 // bindTouchFlow gives the console client the `amr` mapper and binds the
 // flow as its browser flow. A realm without the client is skipped: the
-// bootstrap does not make the console client. A realm or a client with
-// its own login flow is not bound (customLogin).
+// bootstrap does not make the console client. A client bound to the flow
+// stays bound. A realm or a client with its own login flow is not bound
+// (customLogin).
 func bindTouchFlow(ctx context.Context, c *adminClient, clientID, flowID, realmBrowser string) ([]string, error) {
 	client, err := c.findClient(ctx, clientID)
 	if err != nil {
@@ -435,14 +541,19 @@ func bindTouchFlow(ctx context.Context, c *adminClient, clientID, flowID, realmB
 	if err != nil {
 		return events, err
 	}
-	if reason := customLogin(realmBrowser, client.AuthenticationFlowBindingOverrides["browser"], flowID); reason != "" {
+	current := client.AuthenticationFlowBindingOverrides["browser"]
+	if current == flowID {
+		return append(events, fmt.Sprintf("[skip] client %q uses login flow %q", clientID, touchFlowAlias)), nil
+	}
+	reason, err := customLogin(ctx, c, realmBrowser, current)
+	if err != nil {
+		return events, err
+	}
+	if reason != "" {
 		return append(events, fmt.Sprintf(
 			"[skip] client %q not bound to login flow %q: %s, and binding would drop its steps "+
 				"from the console login; to bind it anyway, run keycloak.authflow.ensure_approval_touch "+
 				"with replace_custom_login", clientID, touchFlowAlias, reason)), nil
-	}
-	if client.AuthenticationFlowBindingOverrides["browser"] == flowID {
-		return append(events, fmt.Sprintf("[skip] client %q uses login flow %q", clientID, touchFlowAlias)), nil
 	}
 	overrides := maps.Clone(client.AuthenticationFlowBindingOverrides)
 	if overrides == nil {

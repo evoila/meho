@@ -44,10 +44,11 @@ What the op does, on the target's managed realm:
    has no default, a default on the touch flow is removed.
 6. Bind the flow as the client's browser flow, unless it already is. Level
    1 is a copy of Keycloak's built-in login, so the op binds only when the
-   realm's browser flow is ``browser`` or ``browser with passkeys`` and the
+   realm's browser flow is ``browser``, or ``browser with passkeys`` with
+   the steps and settings of ``browser`` plus the passkey step, and the
    client has no browser flow of its own. Otherwise the flow is made but
    not bound, and ``not_bound_reason`` says why. ``replace_custom_login``
-   binds it anyway.
+   binds it anyway. A client bound to the flow already stays bound.
 
 Safe to run twice. Risk level ``caution`` with approval: the op changes how
 people log in to the console.
@@ -74,6 +75,7 @@ from meho_backplane.connectors.keycloak.ops_authflow import get_admin_list_stric
 from meho_backplane.connectors.keycloak.ops_authflow_passkey import (
     BUILT_IN_BROWSER_FLOW,
     PASSKEY_FLOW_ALIAS,
+    passkey_copy_difference,
 )
 from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import (
     AMR_MAPPER,
@@ -533,19 +535,35 @@ async def _ensure_redirect(
     return True
 
 
-def _custom_login(browser: str, previous: Any, flow_id: str) -> str | None:
+async def _custom_login(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    realm: str,
+    browser: str,
+    previous: str | None,
+) -> str | None:
     """Why binding would change the normal login, or ``None`` when it would not.
 
     Level 1 of the touch flow is a copy of Keycloak's built-in login. A realm
     or a client with its own login flow may ask for more checks; binding
-    would drop them.
+    would drop them. ``browser with passkeys`` can be edited, so its steps
+    and settings are checked, not only its name.
     """
     if browser not in (BUILT_IN_BROWSER_FLOW, PASSKEY_FLOW_ALIAS):
         return (
             f"the realm's login flow is {browser!r}, not the built-in one; binding "
             "would drop its steps from the console login"
         )
-    if previous and previous != flow_id:
+    if browser == PASSKEY_FLOW_ALIAS:
+        difference = await passkey_copy_difference(connector, operator, target, realm)
+        if difference is not None:
+            return (
+                f"the realm's login flow {browser!r} is not the built-in login with the "
+                f"passkey step: {difference}; binding would drop its other steps from the "
+                "console login"
+            )
+    if previous:
         return (
             f"the client has its own login flow {previous!r}; binding would drop its "
             "steps from the console login"
@@ -565,7 +583,8 @@ async def _bind(
 ) -> dict[str, Any]:
     """Make *flow_id* the client's browser flow, then read the client again.
 
-    A realm or a client with its own login flow is not bound, unless
+    A client bound to the flow already stays bound. Otherwise a realm or a
+    client with its own login flow is not bound, unless
     *replace_custom_login* is set; ``not_bound_reason`` then says why.
     """
     realm_rep = await connector._get_admin_json(
@@ -576,8 +595,10 @@ async def _bind(
     overrides = client.get("authenticationFlowBindingOverrides")
     previous = overrides.get("browser") if isinstance(overrides, dict) else None
     previous = previous or None
-    reason = _custom_login(browser, previous, flow_id)
-    if reason is not None and not replace_custom_login:
+    reason = None
+    if previous != flow_id and not replace_custom_login:
+        reason = await _custom_login(connector, operator, target, realm, browser, previous)
+    if reason is not None:
         return {
             "bound": False,
             "not_bound_reason": reason,

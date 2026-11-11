@@ -1912,6 +1912,34 @@
   
   
     <li class="md-nav__item">
+      <a href="codex/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Codex
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="mcp-remote-shim/" class="md-nav__link">
         
   
@@ -3108,7 +3136,7 @@ fallback, and the path for every other client. Whichever you pick, an
 agent session lists a small, tiered set of meta-tools — see
 <a href="mcp-surface-and-scopes/">MCP surface and scopes</a>.</p>
 <h2 id="the-mcp-client-matrix">The MCP client matrix<a class="headerlink" href="#the-mcp-client-matrix" title="Permanent link">&para;</a></h2>
-<p>All three MCP paths are <strong>internal-only</strong> — the client, or the local
+<p>All of these MCP paths are <strong>internal-only</strong> — the client, or the local
 shim it spawns, runs on a VPN-connected machine and speaks Streamable
 HTTP to the backplane's <code>/mcp</code> route directly. Pick the row that
 matches your client:</p>
@@ -3132,6 +3160,11 @@ matches your client:</p>
 <td><a href="claude-code/">Claude Code</a></td>
 </tr>
 <tr>
+<td><strong>Codex</strong></td>
+<td>Native HTTP in <code>~/.codex/config.toml</code>, with a loopback login pinned to the pre-registered <code>meho-mcp</code> public client. No shim needed.</td>
+<td><a href="codex/">Codex</a></td>
+</tr>
+<tr>
 <td><strong>Cursor and other clients that can't carry a <code>client_id</code></strong></td>
 <td>A generic <code>mcp-remote</code> stdio shim carrying a CLI-minted bearer token.</td>
 <td><a href="mcp-remote-shim/">Other MCP clients</a></td>
@@ -3141,7 +3174,7 @@ matches your client:</p>
 <p>Running Claude for a whole company? The Claude admin should read
 <a href="organisation-setup/">Organisation setup for the Claude admin</a>: the
 settings that keep MEHO the only path to your systems.</p>
-<p>All three assume the realm already has the public <code>meho-mcp</code> OAuth
+<p>All of them assume the realm already has the public <code>meho-mcp</code> OAuth
 client and the operator's workstation trusts the deployment's CA. The
 one-time realm work is in
 <a href="../install/keycloak-realm/">Keycloak realm setup</a>; the CA-trust step

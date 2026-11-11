@@ -24,14 +24,16 @@ The check then goes into that list too, at every level.
 
 Each step is checked with the same :func:`policy_gate` the step gate runs,
 with the same declared facts (``dangerous``, no ``requires_approval``,
-the level every shipped write step uses), and with ``decide_only=True``,
-so nothing is written and no grant is used.
+the level every shipped write step uses), raised by the classification
+like at the step gate, and with ``decide_only=True``, so nothing is
+written and no grant is used.
 
 With ``AGENT_GRANT_REQUIRED=on`` (#6189) the dispatcher checks the same
 list for an agent call before anything runs
-(:func:`agent_no_grant_step_reason`): a write step that no grant covers
-refuses the whole call with ``agent_no_grant``, so it never stops
-half-way.
+(:func:`agent_step_refusal`): a write step that no grant covers
+refuses the whole call with ``agent_no_grant``, and a write step that a
+``deny`` grant meets refuses it with ``agent_grant_denied`` (#6285). So
+the call never stops half-way.
 """
 
 from __future__ import annotations
@@ -42,10 +44,17 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._lookup import parse_connector_id
 from meho_backplane.operations._validate import policy_gate
-from meho_backplane.operations.deny_reasons import AGENT_NO_GRANT, is_agent_no_grant
+from meho_backplane.operations.deny_reasons import (
+    AGENT_GRANT_DENIED,
+    AGENT_NO_GRANT,
+    deny_reason_code,
+    is_agent_no_grant,
+)
 from meho_backplane.operations.governed_subops import governed_subops_for
+from meho_backplane.operations.op_policy import apply_step_classification
+from meho_backplane.settings import get_settings
 
-__all__ = ["agent_no_grant_step_reason", "preview_step_verdict"]
+__all__ = ["agent_step_refusal", "preview_step_verdict"]
 
 _READ_PREFIXES: Final[tuple[str, ...]] = ("GET:", "HEAD:")
 _STEP_SAFETY_LEVEL: Final = "dangerous"
@@ -93,6 +102,7 @@ async def _step_verdict(
         requires_approval=False,
         parameter_schema={},
     )
+    await apply_step_classification(tenant_id=operator.tenant_id, step=step)
     return await policy_gate(
         operator=operator,
         descriptor=step,
@@ -132,29 +142,44 @@ async def preview_step_verdict(
     )
 
 
-async def agent_no_grant_step_reason(
+async def agent_step_refusal(
     *,
     operator: Operator,
     op_id: str,
     connector_id: str,
     target: Any,
 ) -> str | None:
-    """The refusal for a write step that no grant of the agent covers, or ``None``.
+    """The refusal for a write step the agent's grants refuse, or ``None``.
 
-    With ``AGENT_GRANT_REQUIRED=on`` such a step is refused when the call
-    reaches it, so the multi-step operation would stop half-way. The
+    With ``AGENT_GRANT_REQUIRED=on`` a write step is refused when the call
+    reaches it if no grant covers it, or if a ``deny`` grant meets it
+    (#6285). The multi-step operation would then stop half-way. The
     dispatcher calls this before it stores an approval request or runs a
     step, with the same step list the preview checks, and refuses the
-    whole call instead. The reason starts with ``agent_no_grant:``.
+    whole call instead. A step with no grant gives a reason that starts
+    with ``agent_no_grant:``. A step with a ``deny`` grant gives a reason
+    with the grant's own text, so its code is ``agent_grant_denied``.
+
+    With ``observe`` only the ``agent_no_grant_would_deny`` lines are
+    written and this returns ``None``: a ``deny`` grant on a step is left
+    to the step gate, as before.
     """
+    refuse_denied_steps = get_settings().agent_grant_required == "on"
     for step_op_id in _write_steps(op_id):
         verdict, reason = await _step_verdict(
             operator=operator, step_op_id=step_op_id, connector_id=connector_id, target=target
         )
-        if verdict is PermissionVerdict.DENY and reason and is_agent_no_grant(reason):
+        if verdict is not PermissionVerdict.DENY or not reason:
+            continue
+        if is_agent_no_grant(reason):
             return (
                 f"{AGENT_NO_GRANT}: the operation {op_id!r} has a write step "
                 f"{step_op_id} that no grant covers, so MEHO refuses the call "
                 f"before any step runs ({reason})"
+            )
+        if refuse_denied_steps and deny_reason_code(reason) == AGENT_GRANT_DENIED:
+            return (
+                f"the operation {op_id!r} has a write step {step_op_id} that a "
+                f"grant denies, so MEHO refuses the call before any step runs ({reason})"
             )
     return None

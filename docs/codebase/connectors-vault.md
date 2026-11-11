@@ -342,6 +342,56 @@ target registration) is documented in
   `VaultAuthBackendNotMountedError` are reused from `ops_auth.py` so a
   404 from an unmounted backend surfaces the same error class as the
   read ops.
+- **userpass password sources and the on/off switch**
+  (`userpass_password.py`, `ops_userpass_write_schemas.py`,
+  `ops_userpass_lifecycle.py`, `ops_userpass_lifecycle_schemas.py`) —
+  `vault.auth.userpass.write` takes the password from exactly one of:
+  - `password` (in the request, as before);
+  - `password_secret_ref` (a KV-v2 path in the same Vault, with
+    `password_secret_mount`, default `secret`, and `password_secret_key`,
+    default `password`). MEHO reads the password and sets it. An onboarding
+    never passes a password through an agent or a chat;
+  - `generate_password` (`{path, mount?, field?, length?}`, length 16 to
+    128, default 32). MEHO makes a random password, writes it to the KV
+    path first (with `cas`, so a second writer is not overwritten), and then
+    sets it on the login. A password already in KV is used for a new login.
+    It is safe to run twice: when the login exists and the path holds a
+    password, nothing changes (`written: false`), except a changed
+    `token_policies`. `rotate: true` makes a new password. If a run stops
+    after the KV write, run it again with `rotate: true`.
+
+  The result never holds the password. It says `credential_source`
+  (`request`, `kv_path` or `generated`), `credential_generated` and
+  `stored_mount`, `stored_path` and `stored_field`. These key names avoid the words
+  `password`, `secret` and `token` on purpose: the result redaction hides
+  values under such keys. The approval preview shows the same location, not
+  the value.
+
+  | op_id | what it does | safety_level |
+  |---|---|---|
+  | `vault.auth.userpass.disable` | sets `disabled` on the login's identity entity; `revoke_tokens: true` also revokes the user's tokens | dangerous, approval |
+  | `vault.auth.userpass.enable` | sets `disabled` back to false | dangerous, approval |
+
+  Vault has no switch on the userpass login itself, so both ops use the
+  identity entity behind the login's alias (alias name is the lower case
+  username, on the mount accessor from `sys/auth`). `disable` creates a new
+  entity and the alias when they are missing. It sends no entity name, so
+  Vault picks a unique one: an entity found by name may belong to another
+  login, so it is never reused. `enable` does nothing for a
+  login without an entity (Vault makes an enabled one at the first login).
+  A login that does not exist raises `VaultUserpassUserNotFoundError`; no
+  entity is made for it. A disabled entity makes the login fail with
+  permission denied and makes its tokens unusable, but does not revoke them
+  (Vault docs). `revoke_tokens` calls `sys/leases/revoke-prefix` with
+  `auth/<mount>/login/<username>/`: Vault stores a login token under the path
+  of its login request, and revoke-prefix revokes tokens by that path (read
+  in the Vault source: `vault/request_handling.go`, `vault/expiration.go`;
+  the endpoint needs `sudo`). Vault revokes in the background, so the result
+  says `revoke_requested`. A login typed as `ALICE` has its own path, so the
+  op lists `sys/leases/lookup/auth/<mount>/login/` (also `sudo`) and revokes
+  every spelling of the username found there, plus the given and the lower
+  case spelling. Both ops refuse a `username` with `/` and a
+  `mount` with `..`.
 - **`auth` group, JWT/OIDC login roles** (`ops_auth_jwt.py` /
   `ops_auth_jwt_schemas.py`, #3694). The JWT/OIDC login method is how
   people and services log in to Vault with a token from an identity

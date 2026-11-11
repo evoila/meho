@@ -140,7 +140,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -179,6 +179,7 @@ __all__ = [
     "register_composite_operation",
     "register_typed_op_registrar",
     "register_typed_operation",
+    "remove_built_in_connector_rows",
     "run_typed_op_registrars",
     "validate_composite_handler_signature",
 ]
@@ -584,6 +585,30 @@ async def _bind_catalog_session(session: AsyncSession) -> AsyncIterator[None]:
         yield
     finally:
         _CATALOG_SESSION.reset(token)
+
+
+async def remove_built_in_connector_rows(*, product: str, version: str, impl_id: str) -> None:
+    """Delete the built-in operation and group rows of one typed connector.
+
+    For a registrar whose operations exist only while a switch is on: with
+    the switch off it calls this, so rows from a start with the switch on
+    are not found, listed or called. Writes only through the start-up
+    registration transaction (:func:`operation_catalog_write`); outside it
+    (a registry check that runs a registrar with no database) it does
+    nothing.
+    """
+    session = _CATALOG_SESSION.get()
+    if session is None:
+        return
+    for model in (EndpointDescriptor, OperationGroup):
+        await session.execute(
+            delete(model).where(
+                model.tenant_id.is_(None),
+                model.product == product,
+                model.version == version,
+                model.impl_id == impl_id,
+            )
+        )
 
 
 async def _run_typed_op_registrars(

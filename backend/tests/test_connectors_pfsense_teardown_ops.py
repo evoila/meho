@@ -52,6 +52,7 @@ from meho_backplane.connectors.pfsense.ops_delete import (
     _match_static_routes_canonical,
     find_gateway_references,
 )
+from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 from meho_backplane.connectors.registry import all_connectors_v2, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
@@ -59,6 +60,8 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations.approval_queue import (
+    ApprovalResultState,
+    approval_result_state,
     approve_request,
     resume_dispatch_after_approval,
 )
@@ -458,13 +461,21 @@ async def test_route_delete_not_found_stages_nothing() -> None:
     assert mock_cmd.await_count == 1
 
 
+def _assert_refused(exc_info: Any, code: str) -> None:
+    """The refusal names its code, keeps the guidance, and says nothing changed."""
+    exc = exc_info.value
+    assert exc.code == code
+    assert f"refused ({code})" in str(exc)
+    assert exc.guidance and exc.guidance in str(exc)
+
+
 async def test_route_delete_ambiguous_refuses_fail_closed() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_CONFIG_DUP_ROUTE)]
-        result = await connector.route_static_delete(None, {"network": "10.10.0.0/24"})
-    assert result["status"] == "ambiguous"
-    assert result["matched"] == 2
+        with pytest.raises(PfSenseRefusedError) as exc_info:
+            await connector.route_static_delete(None, {"network": "10.10.0.0/24"})
+    _assert_refused(exc_info, "ambiguous")
     assert mock_cmd.await_count == 1
 
 
@@ -510,12 +521,13 @@ async def test_gateway_delete_referenced_refuses_and_names_referrers() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_CONFIG_ROUTING)]
-        result = await connector.gateway_delete(None, {"name": "LAB_GW"})
-    assert result["status"] == "referenced"
-    assert result["reference_count"] == 3  # 2 routes + 1 gateway group
-    kinds = sorted(r["kind"] for r in result["references"])
-    assert kinds == ["gateway_group", "static_route", "static_route"]
-    assert "still referenced" in result["guidance"]
+        with pytest.raises(PfSenseRefusedError) as exc_info:
+            await connector.gateway_delete(None, {"name": "LAB_GW"})
+    _assert_refused(exc_info, "referenced")
+    guidance = exc_info.value.guidance
+    assert "still referenced by 3 object(s)" in guidance  # 2 routes + 1 gateway group
+    assert guidance.count("static_route(") == 2
+    assert guidance.count("gateway_group(") == 1
     # Fail-closed: refuses after a single guard read, stages nothing.
     assert mock_cmd.await_count == 1
 
@@ -533,10 +545,10 @@ async def test_gateway_delete_refuses_filter_rule_and_interface_referrers(
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(config)]
-        result = await connector.gateway_delete(None, {"name": name})
-    assert result["status"] == "referenced"
-    assert (kind, ref_id) in {(r["kind"], r["id"]) for r in result["references"]}
-    assert f"{kind}({ref_id}" in result["guidance"]
+        with pytest.raises(PfSenseRefusedError) as exc_info:
+            await connector.gateway_delete(None, {"name": name})
+    _assert_refused(exc_info, "referenced")
+    assert f"{kind}({ref_id}" in exc_info.value.guidance
     # Fail-closed: refuses after a single guard read, stages nothing.
     assert mock_cmd.await_count == 1
 
@@ -555,9 +567,9 @@ async def test_gateway_delete_ambiguous_refuses_fail_closed() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_CONFIG_DUP_GW)]
-        result = await connector.gateway_delete(None, {"name": "DUP_GW"})
-    assert result["status"] == "ambiguous"
-    assert result["matched"] == 2
+        with pytest.raises(PfSenseRefusedError) as exc_info:
+            await connector.gateway_delete(None, {"name": "DUP_GW"})
+    _assert_refused(exc_info, "ambiguous")
     assert mock_cmd.await_count == 1
 
 
@@ -676,11 +688,10 @@ async def test_member_remove_last_member_refuses_fail_closed() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_CONFIG_SHARED_ALIAS)]
-        result = await connector.alias_member_remove(None, {"name": "SOLO", "value": "203.0.113.9"})
-    assert result["status"] == "last_member"
-    assert result["member_matched"] == 1
-    assert result["members_before"] == 1
-    assert "alias.delete" in result["guidance"]
+        with pytest.raises(PfSenseRefusedError) as exc_info:
+            await connector.alias_member_remove(None, {"name": "SOLO", "value": "203.0.113.9"})
+    _assert_refused(exc_info, "last_member")
+    assert "alias.delete" in exc_info.value.guidance
     # Fail-closed: refuses after a single guard read, stages nothing.
     assert mock_cmd.await_count == 1
 
@@ -689,11 +700,11 @@ async def test_member_remove_ambiguous_duplicate_alias_name() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_CONFIG_DUP_ALIAS)]
-        result = await connector.alias_member_remove(
-            None, {"name": "SHARED_HOSTS", "value": "192.0.2.10"}
-        )
-    assert result["status"] == "ambiguous"
-    assert result["matched"] == 2
+        with pytest.raises(PfSenseRefusedError) as exc_info:
+            await connector.alias_member_remove(
+                None, {"name": "SHARED_HOSTS", "value": "192.0.2.10"}
+            )
+    _assert_refused(exc_info, "ambiguous")
     assert mock_cmd.await_count == 1
 
 
@@ -701,11 +712,11 @@ async def test_member_remove_ambiguous_duplicate_member_value() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [_proc(_CONFIG_DUP_MEMBER)]
-        result = await connector.alias_member_remove(
-            None, {"name": "SHARED_HOSTS", "value": "198.51.100.5"}
-        )
-    assert result["status"] == "ambiguous"
-    assert result["member_matched"] == 2
+        with pytest.raises(PfSenseRefusedError) as exc_info:
+            await connector.alias_member_remove(
+                None, {"name": "SHARED_HOSTS", "value": "198.51.100.5"}
+            )
+    _assert_refused(exc_info, "ambiguous")
     assert mock_cmd.await_count == 1
 
 
@@ -774,7 +785,7 @@ def test_route_delete_response_schema_accepts_outcomes() -> None:
     )
 
 
-def test_gateway_delete_response_schema_accepts_referenced() -> None:
+def test_gateway_delete_response_schema_lists_only_results() -> None:
     op = next(o for o in PFSENSE_OPS if o.op_id == _GATEWAY_OP)
     assert op.response_schema is not None
     validator = Draft202012Validator(op.response_schema)
@@ -782,16 +793,27 @@ def test_gateway_delete_response_schema_accepts_referenced() -> None:
         {
             "op_class": "delete",
             "resource": "gateway",
-            "status": "referenced",
+            "status": "not_found",
             "name": "LAB_GW",
-            "matched": 1,
+            "matched": 0,
             "removed": None,
-            "references": [{"kind": "static_route", "id": "10.10.0.0/24", "descr": "lab net"}],
-            "reference_count": 3,
+            "references": [],
+            "reference_count": 0,
             "gateways_before": 2,
             "gateways_after": None,
             "verified": False,
-            "guidance": "referenced",
+            "guidance": "no gateway",
+        }
+    )
+    # A refusal is an error, not a result: the schema does not list it.
+    assert not validator.is_valid(
+        {
+            "op_class": "delete",
+            "resource": "gateway",
+            "status": "referenced",
+            "name": "LAB_GW",
+            "matched": 1,
+            "verified": False,
         }
     )
 
@@ -822,18 +844,30 @@ def test_member_remove_response_schema_accepts_outcomes() -> None:
         {
             "op_class": "update",
             "resource": "alias_member",
-            "status": "last_member",
+            "status": "member_not_found",
             "alias": "SOLO",
             "value": "203.0.113.9",
             "matched": 1,
-            "member_matched": 1,
+            "member_matched": 0,
             "removed": False,
             "members_before": 1,
             "members_after": None,
             "residual_members": None,
             "alias_retained": None,
             "verified": False,
-            "guidance": "last member",
+            "guidance": "no such member",
+        }
+    )
+    # A refusal is an error, not a result: the schema does not list it.
+    assert not validator.is_valid(
+        {
+            "op_class": "update",
+            "resource": "alias_member",
+            "status": "last_member",
+            "alias": "SOLO",
+            "value": "203.0.113.9",
+            "matched": 1,
+            "verified": False,
         }
     )
 
@@ -1088,10 +1122,14 @@ async def test_referenced_gateway_refused_post_approval_fail_closed() -> None:
         row = await s.get(ApprovalRequest, request_id)
         assert row is not None
         resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
-    assert resume.status == "ok", resume.error
-    assert resume.result["status"] == "referenced"
-    assert resume.result["reference_count"] == 3
+    assert resume.status == "error", resume
+    assert resume.extras["exception_class"] == "PfSenseRefusedError"
+    assert "refused (referenced)" in resume.extras["exception_message"]
     assert not recorder.playback_ran
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        assert approval_result_state(row) == ApprovalResultState.FAILED
 
 
 @pytest.mark.asyncio

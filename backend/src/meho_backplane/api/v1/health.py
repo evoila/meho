@@ -86,6 +86,10 @@ import structlog
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.auth.approval_sign_in_flow import (
+    ApprovalSignInStatus,
+    read_approval_sign_in,
+)
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.jwt import verify_jwt_allow_unchosen
 from meho_backplane.auth.operator import Operator, TenantMembership, TenantRole, group_grant
@@ -337,7 +341,9 @@ class ApprovalsStatus(BaseModel):
     ``delegated_decision_posture`` says whether a decision made on
     someone else's instruction is allowed. The three values come from
     :func:`meho_backplane.features.build_features_block`; they are state
-    words only, never a key value.
+    words only, never a key value. ``sign_in`` is the state of the
+    approval client's own login flow in Keycloak (#6280,
+    :mod:`meho_backplane.auth.approval_sign_in_flow`).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -345,6 +351,7 @@ class ApprovalsStatus(BaseModel):
     custody: str
     effective_posture: str
     delegated_decision_posture: str
+    sign_in: ApprovalSignInStatus | None = None
 
 
 class FeatureStatus(BaseModel):
@@ -987,6 +994,7 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     vault_status = await _probe_federation(operator, log)
     db_state = await db_migration_status()
     approvals, features = _approvals_and_features()
+    approvals = approvals.model_copy(update={"sign_in": await read_approval_sign_in()})
     return HealthResponse(
         operator=_operator_identity(operator),
         vault=vault_status,

@@ -150,11 +150,15 @@ for example "claude-code 2.1", next to the person.
   `path = /mcp/initialize`, `payload.op_id = mcp.session_open`. The
   payload also holds `client_name` and `client_version` (from
   `clientInfo`), `user_agent` (the HTTP header) and
-  `"self_declared": true`.
+  `"self_declared": true`. Like every audit row with the switch on, it
+  also holds the `client` block: the login client (`azp`), the channel
+  and a short hash of the sign-in session.
 - **Link.** The row's `agent_session_id` is the new session id. Every
   later row of the same session has the same `agent_session_id`.
-- **Clean text.** Control and format characters are removed, and each
-  text is cut to 200 characters. A value that is not a string is stored
+- **Clean text.** Control and format characters, line and paragraph
+  separators (U+2028, U+2029) and lone surrogates are removed, and each
+  text is cut to 200 characters. A client that sends such a character
+  still gets its session. A value that is not a string is stored
   as `null`.
 - **Fail closed.** The row commits before the response goes back. If
   the write fails, the client gets a JSON-RPC internal error (`-32603`)

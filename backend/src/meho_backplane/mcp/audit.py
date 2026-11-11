@@ -333,16 +333,26 @@ async def write_mcp_audit_row(
     return audit_id
 
 
-def _clean_client_text(value: object) -> str | None:
-    """Return *value* without control or format characters, cut to 200 characters.
+#: Unicode groups removed from client texts: control (``Cc``), format
+#: (``Cf``), line and paragraph separators (``Zl`` U+2028, ``Zp`` U+2029),
+#: and lone surrogates (``Cs``).
+_DROPPED_CHAR_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
 
-    The client sends these texts about itself, so they are not trusted:
-    a control character could break a log line or a terminal. A value
-    that is not a string, or is empty after cleaning, gives ``None``.
+
+def _clean_client_text(value: object) -> str | None:
+    """Return *value* without unsafe characters, cut to 200 characters.
+
+    The client sends these texts about itself, so they are not trusted.
+    A control character or a line separator could break a log line or a
+    terminal. A lone surrogate cannot be stored as UTF-8, so the row
+    write, and with it the ``initialize``, would fail. A value that is
+    not a string, or is empty after cleaning, gives ``None``.
     """
     if not isinstance(value, str):
         return None
-    cleaned = "".join(ch for ch in value if unicodedata.category(ch) not in ("Cc", "Cf"))
+    cleaned = "".join(
+        ch for ch in value if unicodedata.category(ch) not in _DROPPED_CHAR_CATEGORIES
+    )
     return cleaned[:_CLIENT_TEXT_MAX_CHARS] or None
 
 

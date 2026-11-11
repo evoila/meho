@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from meho_backplane.audit_query import AuditQueryFilters, query_audit
+from meho_backplane.auth.client_identity import sid_hash
 from meho_backplane.auth.operator import Operator, RoleGroup, TenantMembership, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
@@ -138,6 +139,45 @@ async def test_audit_query_finds_the_row_by_op_id(
     assert [r.op_id for r in result.rows] == [SESSION_OPEN_OP_ID]
 
 
+def _client_for(operator: Operator) -> Iterator[TestClient]:
+    """Yield a ``TestClient`` whose MCP login check returns *operator*."""
+
+    async def _fake_verify() -> Operator:
+        return operator
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
+    try:
+        with TestClient(app) as client:
+            yield client
+    finally:
+        app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+
+
+@pytest.fixture
+def cli_client() -> Iterator[TestClient]:
+    """A token login from the command line client, with a sign-in session."""
+    operator = build_operator(TenantRole.READ_ONLY).model_copy(
+        update={"azp": "meho-cli", "sid": "sign-in-session-1"},
+    )
+    yield from _client_for(operator)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_row_holds_the_client_block(cli_client: TestClient) -> None:
+    """The session row also names the login client, like every audit row."""
+    post_mcp(cli_client, _initialize({"name": "claude-code", "version": "2.1.0"}))
+
+    rows = await _session_open_rows()
+    assert len(rows) == 1
+    block = rows[0].payload["client"]
+    assert block["azp"] == "meho-cli"
+    assert block["channel"] == "token"
+    assert block["sid_hash"] == sid_hash("sign-in-session-1")
+    assert block["sid_hash"] is not None
+    assert "sign-in-session-1" not in str(rows[0].payload)
+
+
 @pytest.fixture
 def unchosen_client() -> Iterator[TestClient]:
     """A login with several tenants that sent no ``Meho-Tenant`` header (#5239).
@@ -159,16 +199,7 @@ def unchosen_client() -> Iterator[TestClient]:
             "tenant_chosen": False,
         },
     )
-
-    async def _fake_verify() -> Operator:
-        return operator
-
-    app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
-    try:
-        with TestClient(app) as client:
-            yield client
-    finally:
-        app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+    yield from _client_for(operator)
 
 
 @pytest.mark.asyncio
@@ -223,6 +254,35 @@ async def test_long_and_control_character_texts_are_cleaned(
     # A version that is not a string is not stored.
     assert payload["client_version"] is None
     assert payload["user_agent"] == "agentUA"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_separators_and_lone_surrogates_still_open_the_session(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """U+2028, U+2029 and a lone surrogate are removed; the session still opens.
+
+    The body is written by hand: a JSON encoder cannot write a lone
+    surrogate as UTF-8, but the escape ``\\ud800`` is valid JSON text.
+    """
+    client, _op = client_with_operator
+    body = (
+        '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": '
+        '{"protocolVersion": "' + PROTOCOL_VERSION + '", "capabilities": {}, '
+        '"clientInfo": {"name": "line\\u2028para\\u2029name", "version": "1.\\udfff0\\ud800"}}}'
+    )
+    response = client.post("/mcp", content=body, headers={"Content-Type": "application/json"})
+
+    assert response.status_code == 200
+    assert "result" in response.json()
+    assert response.headers.get("mcp-session-id")
+    rows = await _session_open_rows()
+    assert len(rows) == 1
+    assert rows[0].payload["client_name"] == "lineparaname"
+    # A low surrogate first and a high surrogate last are both alone
+    # (no pair), so both are removed.
+    assert rows[0].payload["client_version"] == "1.0"
 
 
 @pytest.mark.asyncio
@@ -309,3 +369,8 @@ def test_clean_client_text_edge_inputs() -> None:
     assert _clean_client_text("\x00\x07") is None
     assert _clean_client_text("ok-name 1.0") == "ok-name 1.0"
     assert _clean_client_text("é" * 300) == "é" * 200
+    assert _clean_client_text("a\u2028b\u2029c") == "abc"
+    assert _clean_client_text("a\ud800b\udfffc") == "abc"
+    assert _clean_client_text("\u2028\ud800") is None
+    # A real character outside the basic plane is kept.
+    assert _clean_client_text("tool \U0001f680") == "tool \U0001f680"

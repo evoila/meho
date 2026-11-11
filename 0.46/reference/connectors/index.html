@@ -3422,7 +3422,7 @@
 <tr>
 <td>VMware vCenter and vSphere</td>
 <td><code>vmware-rest-9.0</code>, <code>vmware-rest-8.0</code></td>
-<td>8.0, 9.x</td>
+<td>8.0 Update 1 or newer, 9.x</td>
 <td><code>vmware-rest-9.0</code>: not yet recorded. <code>vmware-rest-8.0</code>: not yet recorded.</td>
 <td>Reads and manages virtual machines, hosts, clusters, storage and networks.</td>
 </tr>
@@ -3577,7 +3577,7 @@
 </table>
 <h2 id="versions-and-how-a-connector-is-chosen">Versions and how a connector is chosen<a class="headerlink" href="#versions-and-how-a-connector-is-chosen" title="Permanent link">&para;</a></h2>
 <p><strong>Built for</strong> is the range the code declares and CI tests. <strong>Tested live on</strong> lists the versions where a person ran MEHO against a real system. Reads means read operations ran; changes means change operations ran too, with approval. A version that is not listed there was not tested live. A test that is much older than the newest MEHO release shows the release it was tested with.</p>
-<p>Where a product has more than one implementation — a modern and a legacy one, say — both are registered and MEHO resolves the right one per target from the target's fingerprint, so one estate spanning old and new versions just works. A connector can also state the target versions its operations work on. MEHO checks this range each time an operation runs (at dispatch time), also when the call names the connector itself. Outside the range, MEHO refuses the call with <code>unqualified_target_version</code>, and a Sensor on that connector can read <code>unknown</code>. So pick the connector whose version matches the target, for example <code>vmware-rest-8.0</code> for vCenter 8.0.x and <code>vmware-rest-9.0</code> for vCenter 9.0.x.</p>
+<p>Where a product has more than one implementation — a modern and a legacy one, say — both are registered and MEHO resolves the right one per target from the target's fingerprint, so one estate spanning old and new versions just works. A connector can also state the target versions its operations work on. MEHO checks this range each time an operation runs (at dispatch time), also when the call names the connector itself. Outside the range, MEHO refuses the call with <code>unqualified_target_version</code>, and a Sensor on that connector can read <code>unknown</code>. So pick the connector whose version matches the target, for example <code>vmware-rest-8.0</code> for vCenter 8.0 Update 1 to Update 3 and <code>vmware-rest-9.0</code> for vCenter 9.0.x.</p>
 <h2 id="maturity-and-readiness">Maturity and readiness<a class="headerlink" href="#maturity-and-readiness" title="Permanent link">&para;</a></h2>
 <p>This inventory lists what is <em>registered</em>; it does not restate a ship-state. Feature-level maturity — GA, beta, or experimental — is published in the <a href="../maturity/">feature maturity index</a>. Per-release, per-connector ship-state (dispatch + catalog, loader-wired, or production-ready) is stated in the <a href="https://github.com/evoila/meho/blob/main/CHANGELOG.md">changelog</a> under the connector release-notes convention. The two-connector model is described in the <a href="../../architecture/">architecture overview</a>.</p>
 

@@ -3526,6 +3526,10 @@ from start to end, with commands you can copy.</p>
   (<a href="../targets-and-secrets/">Register targets and secrets</a>). It helps
   to have run one operation by hand first
   (<a href="../first-operations/">Run your first operations</a>).</li>
+<li><strong>A model and its key.</strong> MEHO runs the model calls itself, so the
+  install must name a model backend and give its key. Without them,
+  every run fails at the start. See
+  <a href="../../install/form-3-your-kubernetes/#give-hosted-agents-a-model-optional">Give hosted agents a model</a>.</li>
 <li><strong>Setup needs the <code>tenant_admin</code> role.</strong> This covers the identity,
   the definition, and the grants.</li>
 <li><strong>Running an agent needs the <code>operator</code> role</strong> (or <code>tenant_admin</code>).

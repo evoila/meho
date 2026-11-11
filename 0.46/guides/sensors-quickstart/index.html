@@ -3470,8 +3470,10 @@ connectors. For an operation from an API file, MEHO first looks for the
 same operation on the connector version that matches the target, and
 runs it there when it exists and is turned on.</p>
 <p>So pin the connector whose version matches the target. To see the
-target's version, run <code>meho targets describe &lt;name&gt;</code>. A sensor cannot
-be changed: delete it and create it again with the right connector.</p>
+target's version, run <code>meho targets describe &lt;name&gt;</code>. To move a sensor
+to the right connector, change it with
+<code>meho sensor edit &lt;sensor_id&gt; --connector-id &lt;id&gt;</code> (see
+<a href="#change-a-sensor-or-a-dashboard">Change a sensor or a dashboard</a>).</p>
 <h2 id="step-2-create-the-sensor">Step 2 — create the sensor<a class="headerlink" href="#step-2-create-the-sensor" title="Permanent link">&para;</a></h2>
 <p>The <strong>assertion</strong> is a bounded two-part spec: one <code>select</code> (a path
 into the operation's result) feeding one typed comparator —
@@ -3873,10 +3875,10 @@ attempts parks in the approval queue like everyone else's.</p>
   offending rows — the specific objects or series that broke the check —
   so a notification or an investigation names <em>what</em> breached, not just
   <em>that</em> something did. A healthy tick's evidence is unchanged.</li>
-<li><strong>A broadcast feed.</strong> Every dashboard rollup transition is also
-  published to the tenant broadcast feed, so operators and agents can
-  watch check-state changes the way they watch every other action
-  (<code>meho_broadcast_recent</code>, <code>meho_broadcast_watch</code>, <code>GET /api/v1/feed</code>).</li>
+<li><strong>Where a change shows.</strong> A dashboard change is shown in the console
+  and the checks API, and it can send a mail (see notifications above).
+  It is not posted to the activity feed. The feed carries notes that
+  agents and people post.</li>
 <li><strong>The investigator.</strong> The diagnose-only agent above turns a red
   dashboard into a structured, retrievable finding — read-only by
   design.</li>

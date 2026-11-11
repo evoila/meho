@@ -2189,6 +2189,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#network-ports-and-account-rights-the-vmware-family" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Network ports and account rights: the VMware family
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#what-can-go-wrong-here" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3261,6 +3272,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#network-ports-and-account-rights-the-vmware-family" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Network ports and account rights: the VMware family
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#what-can-go-wrong-here" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3600,6 +3622,69 @@ implementation version at dispatch time.</p>
 meho<span class="w"> </span>targets<span class="w"> </span>discover<span class="w"> </span>k8s<span class="w">           </span><span class="c1"># candidate systems a connector can see</span>
 <span class="w">                                    </span><span class="c1"># from an already-registered seed target</span>
 </code></pre></div>
+<h2 id="network-ports-and-account-rights-the-vmware-family">Network ports and account rights: the VMware family<a class="headerlink" href="#network-ports-and-account-rights-the-vmware-family" title="Permanent link">&para;</a></h2>
+<p>Open these ports from MEHO to the target, and give the target login at
+least these rights. These are the vendor's own role names and standard
+ports.</p>
+<table>
+<thead>
+<tr>
+<th>Target system</th>
+<th>Port MEHO opens</th>
+<th>Rights for reads</th>
+<th>Extra rights for changes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>vCenter</td>
+<td>HTTPS 443</td>
+<td>The built-in <code>Read-only</code> role, set on the top of the inventory with "propagate to children".</td>
+<td>A role that holds the rights of each change, for example power operations or snapshots on virtual machines. Set it only on the folders or clusters MEHO may change.</td>
+</tr>
+<tr>
+<td>ESXi host</td>
+<td>HTTPS 443</td>
+<td>The built-in <code>Read-only</code> role on the host.</td>
+<td>A role with the rights of each change.</td>
+</tr>
+<tr>
+<td>NSX</td>
+<td>HTTPS 443 to NSX Manager</td>
+<td>The built-in <code>Auditor</code> role.</td>
+<td><code>Network Admin</code>, or <code>Enterprise Admin</code> for the whole estate.</td>
+</tr>
+<tr>
+<td>SDDC Manager</td>
+<td>HTTPS 443</td>
+<td>The <code>VIEWER</code> role.</td>
+<td><code>OPERATOR</code>, or <code>ADMIN</code> for lifecycle tasks.</td>
+</tr>
+<tr>
+<td>VCF Operations</td>
+<td>HTTPS 443</td>
+<td>The <code>ReadOnly</code> role.</td>
+<td>A role that may edit the object a change touches.</td>
+</tr>
+<tr>
+<td>VCF Automation</td>
+<td>HTTPS 443</td>
+<td>See the vendor guide of your version.</td>
+<td>See the vendor guide of your version.</td>
+</tr>
+<tr>
+<td>Operations for logs</td>
+<td>HTTPS 443</td>
+<td>See the vendor guide of your version.</td>
+<td>See the vendor guide of your version.</td>
+</tr>
+</tbody>
+</table>
+<p>Use a separate login for reads and for changes where you can. MEHO also
+asks a person to approve a risky change before it runs
+(<a href="../approvals-and-break-glass/">Approvals and break-glass</a>).</p>
+<p>When a right is missing, the call fails with the vendor's own error.
+MEHO passes that error on and changes nothing.</p>
 <h2 id="what-can-go-wrong-here">What can go wrong here<a class="headerlink" href="#what-can-go-wrong-here" title="Permanent link">&para;</a></h2>
 <p>Real failure modes, with the errors they actually produce:</p>
 <table>

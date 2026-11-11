@@ -1005,6 +1005,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#give-hosted-agents-a-model-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Give hosted agents a model (optional)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#let-meho-reach-the-systems-it-manages" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3162,6 +3173,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#give-hosted-agents-a-model-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Give hosted agents a model (optional)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#let-meho-reach-the-systems-it-manages" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3307,6 +3329,14 @@ This chapter does not need it.</p>
 <td><strong>A DNS name</strong></td>
 <td>A hostname for MEHO, for example <code>meho.example.com</code>, that points to your ingress controller.</td>
 </tr>
+<tr>
+<td><strong>Cluster capacity</strong></td>
+<td>With the default values, all parts together (MEHO, PostgreSQL, Keycloak, OpenBao and Valkey) ask for 0.77 CPU and 2.2 GiB of memory (requests). They may use up to 4.2 CPU and 5.1 GiB of memory (limits). They need 20 GiB of disk: 10 GiB for PostgreSQL and 10 GiB for OpenBao. Short setup jobs and the migration step run at install and upgrade. Each asks for 0.05 CPU and 256 MiB, so leave a little room. Bigger estates need more. See <code>values.yaml</code> to change each part.</td>
+</tr>
+<tr>
+<td><strong>A browser</strong></td>
+<td>The web console is built with Tailwind CSS 4, which is made for Chrome 111, Safari 16.4 and Firefox 128 or newer. Use a browser at least that new.</td>
+</tr>
 </tbody>
 </table>
 <p>Everything else ships inside the Helm release: the activity-feed store
@@ -3348,6 +3378,21 @@ uses an internal certificate authority, read
 <code>config.vaultAddr</code>, <code>config.keycloakIssuerUrl</code> and <code>keycloak.issuer</code>
 empty. The chart sets them, and Helm stops with an error that names the
 key if you set one. You never type a database password.</p>
+<h3 id="give-hosted-agents-a-model-optional">Give hosted agents a model (optional)<a class="headerlink" href="#give-hosted-agents-a-model-optional" title="Permanent link">&para;</a></h3>
+<p>Hosted agents and the sensor investigator need a model and its key. Set
+<code>agent.modelBackend</code>: <code>anthropic</code> (the default), <code>openai</code> for an
+OpenAI-compatible server such as vLLM, <code>bedrock</code>, or <code>vcf-paif</code>. Then
+give the key:</p>
+<ul>
+<li><strong>Anthropic:</strong> set <code>agent.enabled: true</code> and <code>agent.secretName</code> to a
+  Secret that holds the key (under <code>api_key</code>, or the name in
+  <code>agent.secretKey</code>).</li>
+<li><strong>OpenAI-compatible server:</strong> set <code>agent.openai.enabled: true</code>,
+  <code>agent.openai.baseUrl</code>, <code>agent.openai.defaultModel</code> and
+  <code>agent.openai.secretName</code>.</li>
+</ul>
+<p>Without a model and key, every agent run fails at the start. Every tier
+of every agent uses the one backend you set here.</p>
 <h3 id="let-meho-reach-the-systems-it-manages">Let MEHO reach the systems it manages<a class="headerlink" href="#let-meho-reach-the-systems-it-manages" title="Permanent link">&para;</a></h3>
 <p>The network rules of the chart are on by default. They let MEHO reach
 its own parts and DNS, and nothing else. vCenter, NSX, ESXi, SSH hosts,

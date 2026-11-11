@@ -14,20 +14,29 @@ These tests check:
 * two sessions at the same time each see their own texts;
 * ``tools/call`` checks the call against the texts the session listed;
 * the ``tools/call`` audit row names the choice;
+* the request usage event names the choice, also when
+  ``AUDIT_WRAPPER_ROWS_RETIRED`` leaves out the audit row;
 * a profile and the short texts work together, also over HTTP.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import structlog
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
+from meho_backplane.main import app as production_app
 from meho_backplane.mcp import registry as mcp_registry
+from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.handlers import handle_tools_call, handle_tools_list
 from meho_backplane.mcp.profiles import OPERATE_TOOLS
 from meho_backplane.mcp.registry import MCP_ADMIN_SCOPE, ToolDefinition, get_tool
@@ -41,11 +50,14 @@ from meho_backplane.mcp.tools._short_tool_texts import CALL_OPERATION_SHORT
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
+    build_operator,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
 from tests.test_mcp_short_tool_texts import SHORT_TEXTS, _without_descriptions
+
+from ._request_usage_helpers import read_usage_events
 
 
 def _set_switch(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
@@ -250,3 +262,53 @@ def test_http_unknown_texts_is_a_bad_request(
     error = response.json()["error"]
     assert error["code"] == INVALID_REQUEST
     assert "unknown tool texts" in error["message"]
+
+
+# ---------------------------------------------------------------------------
+# The usage event names the choice (also with the wrapper audit rows retired)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def retired_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """The app with usage events on and the wrapper audit rows retired."""
+    monkeypatch.setenv("REQUEST_USAGE_RETENTION_DAYS", "30")
+    monkeypatch.setenv("AUDIT_WRAPPER_ROWS_RETIRED", "true")
+    _set_switch(monkeypatch, on=False)
+    op = build_operator(TenantRole.OPERATOR)
+
+    async def _fake_verify() -> Operator:
+        # The usage event names the caller from these context values.
+        structlog.contextvars.bind_contextvars(operator_sub=op.sub, tenant_id=str(op.tenant_id))
+        return op
+
+    production_app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
+    try:
+        with TestClient(production_app) as client:
+            yield client
+    finally:
+        production_app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(("url", "expected"), [("/mcp?texts=short", "short"), ("/mcp", None)])
+async def test_usage_event_names_the_choice_when_no_audit_row_is_written(
+    retired_client: TestClient, url: str, expected: str | None
+) -> None:
+    call = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "meho_status", "arguments": {}},
+    }
+    response = retired_client.post(url, json=call)
+    assert response.status_code == 200
+    assert "error" not in response.json()
+
+    [event] = [e for e in await read_usage_events() if e.transport == "mcp"]
+    assert event.route == "tool:meho_status"
+    assert event.tool_texts == expected
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(select(AuditLog).where(AuditLog.method == "MCP"))).all()
+    # A read writes no wrapper audit row, so the usage event is the only record.
+    assert rows == []

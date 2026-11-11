@@ -1730,6 +1730,11 @@ them for everyone.
 - The `tools/call` audit row of such a session has
   `"tool_texts": "short"` in its payload, so a measurement can tell these
   sessions apart. Other rows do not have the key.
+- The request usage event of every request of such a session has
+  `tool_texts = short` (column added by migration `0158`). With
+  `AUDIT_WRAPPER_ROWS_RETIRED=true`, a read or `call_operation` writes no
+  audit row, so this event is then the record of the choice. See
+  [request-usage.md](request-usage.md).
 - Like the profile, the parameter is read on each request. A client
   sends the same URL with every request, so the whole session sees the
   same texts.
@@ -1797,7 +1802,8 @@ Tests:
 - `tests/test_mcp_short_tool_texts_session.py`: `?texts=short` gives one
   session the short texts while the switch is off; two sessions at the
   same time each see their own texts; `tools/call` uses the same texts
-  and its audit row names the choice; an unknown value is refused.
+  and its audit row names the choice; the usage event names the choice
+  also when no audit row is written; an unknown value is refused.
 - `/ready` shows the switch as `features.mcp.short_tool_texts`.
 
 How to measure it: run the same benchmark task set twice against one

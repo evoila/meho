@@ -116,12 +116,17 @@ from meho_backplane.mcp.session_limit import (
     check_mcp_session_cap,
     resolve_mcp_session_cap,
 )
-from meho_backplane.mcp.short_texts import UnknownToolTextsError, parse_tool_texts
+from meho_backplane.mcp.short_texts import (
+    SHORT_TEXTS_VALUE,
+    UnknownToolTextsError,
+    parse_tool_texts,
+)
 from meho_backplane.mcp.tenant_gate import allowed_without_tenant
 from meho_backplane.operations.caller_gone import watch_caller
 from meho_backplane.request_usage.collector import (
     note_request_fallback_status,
     note_request_route,
+    note_request_tool_texts,
 )
 from meho_backplane.settings import Settings, get_settings
 from meho_backplane.untrusted_text import VENDOR_TEXT_BAND
@@ -1373,6 +1378,8 @@ def _apply_url_options(request: Request, operator: Operator) -> Operator | JSONR
     Tool profile (#4172): ``?profile=<name>``. Short tool texts for this
     session only (#6293): ``?texts=short``. An unknown value is a bad URL,
     refused before the body is read, so a typo is never quietly ignored.
+    The usage event of the request names the short texts choice, so it is
+    on record also when no audit row is written.
     """
     try:
         profile = parse_tool_profile(request.query_params.getlist("profile"))
@@ -1384,6 +1391,7 @@ def _apply_url_options(request: Request, operator: Operator) -> Operator | JSONR
         update["mcp_tool_profile"] = profile
     if short_texts:
         update["mcp_short_tool_texts"] = True
+        note_request_tool_texts(SHORT_TEXTS_VALUE)
     return operator.model_copy(update=update) if update else operator
 
 

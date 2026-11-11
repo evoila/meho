@@ -9830,6 +9830,9 @@ class RequestUsageEvent(Base):
       ``context_selected``.
     * ``correlation_id`` -- opaque id that links a ``context_selected``
       event to later evaluation data; ``NULL`` on ``request_finished``.
+    * ``tool_texts`` -- ``short`` when the MCP session asked for the short
+      tool texts with ``?texts=short``; ``NULL`` otherwise (migration
+      ``0158``).
 
     Indexes are declared in migrations ``0107`` and ``0113``:
     ``(tenant_id, occurred_at)`` for tenant-scoped window reads,
@@ -9856,6 +9859,7 @@ class RequestUsageEvent(Base):
     route: Mapped[str] = mapped_column(Text, nullable=False)
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    tool_texts: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class OperationSearchRecord(Base):

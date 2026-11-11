@@ -55,7 +55,7 @@ __all__ = [
 ForSettings = Callable[[ToolDefinition], ToolDefinition]
 
 #: The one value of the ``texts`` URL parameter.
-SHORT_TEXTS_VALUE: Final[str] = "short"
+SHORT_TEXTS_VALUE: Final = "short"
 
 #: An error text repeats at most three values from the URL, each cut to
 #: this many characters.

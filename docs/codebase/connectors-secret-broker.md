@@ -409,18 +409,24 @@ What MEHO does on the host:
   `/run`, `/opt`, `/srv`, `/usr/local`), or inside the home directory of
   `<owner>`.
 - Before it opens any SSH connection, MEHO refuses a relative path, `..`, a
-  control character, and every path that is not under a write root or under
-  `/home/<owner>` (`/root` for the owner `root`). A home directory in another
-  place works only when it is under a write root.
-- On the host, the script reads the owner's real home (`getent passwd`),
-  resolves symbolic links and refuses a path that ends up outside a write root
-  or that home.
+  control character, and a system folder that can never hold a home directory
+  (`/proc`, `/sys`, `/dev`, `/boot`, `/bin`, `/sbin`, `/lib*`, `/tmp`, and
+  `/usr` and `/var` outside the write roots).
+- For a path outside the write roots, MEHO first asks the host for the
+  owner's home (`getent passwd`). This short script carries no secret. When
+  the path is not inside that home, MEHO stops before it sends the secret. So
+  a home in any place works, for example `/srv/app` or `/data/app`.
+- The script that writes the file checks again: it resolves symbolic links and
+  refuses a path that ends up outside a write root or the owner's home.
 - Root never writes in a folder that another user can change:
   - Inside the owner's home, the folders, the temp file and the rename are
     all done as the owner (`runuser -u <owner>`), not as root.
   - Under a write root, root writes only when every folder from the write
     root down belongs to root and is not writable by group or others.
   - When the parent folder belongs to the owner, the write runs as the owner.
+    This also holds for several folders of the owner in a row (for example
+    the two folders that an earlier run made), when the folder above them
+    belongs to root.
     Missing folders are made by root (each one while its parent still belongs
     to root), handed to the owner, and then the write runs as the owner.
   - Any other folder (one that group or others can write, or a root folder

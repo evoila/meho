@@ -40,6 +40,7 @@ from meho_backplane.connectors.linux.secret_endpoint import (
     LinuxSecretRefError,
     LinuxSecretSinkEndpoint,
     LinuxSecretSinkError,
+    build_home_lookup_script,
     build_linux_secret_endpoint,
     build_secret_sink_script,
     parse_linux_secret_ref,
@@ -126,6 +127,8 @@ def test_ref_in_the_owner_home_passes_the_lexical_check() -> None:
         "agent",
     )
     assert parse_linux_secret_ref("seat-host/root/.config/key#root")[1] == "/root/.config/key"
+    # A home in another place passes too; the host then says where the home is.
+    assert parse_linux_secret_ref("seat-host/data/app/key#app")[1] == "/data/app/key"
 
 
 @pytest.mark.parametrize(
@@ -147,11 +150,8 @@ def test_ref_in_the_owner_home_passes_the_lexical_check() -> None:
         "seat-host/var/log/x#app",
         "seat-host/tmp/x#app",
         "seat-host/etc/a\\nb#app",  # backslash
-        "seat-host/root/key#app",  # the home of another user
-        "seat-host/home/other/key#app",
-        "seat-host/home/app#app",  # the home itself is not a file in it
-        "seat-host/home/apple/key#app",  # only a name that starts like the owner
-        "seat-host/data/app/key#app",  # neither a write root nor /home/<owner>
+        "seat-host/var/www/x#app",  # /var outside the write roots
+        "seat-host/dev/x#app",
     ],
 )
 def test_bad_refs_are_refused_before_any_ssh(ref: str) -> None:
@@ -167,7 +167,9 @@ def test_write_roots_inside_never_roots_stay_allowed(ref: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ref", ["seat-host/etc/../root/key#app", "seat-host/root/key#app"])
+@pytest.mark.parametrize(
+    "ref", ["seat-host/etc/../root/key#app", "seat-host/tmp/key#app", "seat-host/proc/x#app"]
+)
 async def test_a_refused_path_opens_no_ssh_connection(ref: str) -> None:
     connect = AsyncMock()
     with (
@@ -459,6 +461,32 @@ def test_write_root_refuses_a_folder_that_others_can_write(tmp_path: Path) -> No
     assert _runuser_log(home) == []
 
 
+@_NEEDS_LINUX
+def test_write_root_second_write_through_two_folders_of_the_owner(tmp_path: Path) -> None:
+    root, home = _write_root(tmp_path)
+    target = root / "app" / "sub" / "key"
+    owner = getpass.getuser()
+    first = build_secret_sink_script(str(target), owner, b"one", roots=(str(root),))
+    assert _run_script(first, home=home).returncode == 0
+    # The first run gave both new folders to the owner. The next run must
+    # still work, and write as the owner.
+    owner_dirs = (root / "app", root / "app" / "sub")
+    second = build_secret_sink_script(str(target), owner, b"two", roots=(str(root),))
+    proc = _run_script(second, home=home, owner_dirs=owner_dirs)
+    assert proc.returncode == 0, proc.stderr
+    assert target.read_bytes() == b"two"
+    assert _runuser_log(home) == [owner, owner]
+
+
+@_NEEDS_LINUX
+def test_home_lookup_prints_the_home_from_the_host(tmp_path: Path) -> None:
+    home = tmp_path / "data" / "seat"
+    home.mkdir(parents=True)
+    proc = _run_script(build_home_lookup_script("seat"), home=home)
+    assert proc.returncode == 0, proc.stderr
+    assert f"===MEHO_SINK_HOME:{home}===" in proc.stdout.splitlines()
+
+
 def test_script_carries_the_value_as_base64_only() -> None:
     script = build_secret_sink_script("/etc/app/key", "app", _SENTINEL.encode())
     assert _SENTINEL not in script
@@ -473,14 +501,23 @@ def test_script_carries_the_value_as_base64_only() -> None:
 class _Wire:
     """What the fake SSH channel saw."""
 
-    def __init__(self, stdout: str, stderr: str = "", exit_status: int = 0) -> None:
+    def __init__(
+        self, stdout: str, stderr: str = "", exit_status: int = 0, home: str = "/home/seat"
+    ) -> None:
         self.commands: list[str] = []
         self.stdin: list[str | None] = []
         self._proc = MagicMock(stdout=stdout, stderr=stderr, exit_status=exit_status)
+        self._home = MagicMock(
+            stdout=f"===MEHO_SINK_HOME:{home}===\n===MEHO_SINK_HOME:{home}===\n",
+            stderr="",
+            exit_status=0,
+        )
 
     async def run_capped(self, conn: Any, cmd: str, **kwargs: Any) -> Any:
         self.commands.append(cmd)
         self.stdin.append(kwargs.get("stdin"))
+        if "MEHO_SINK_HOME" in (kwargs.get("stdin") or ""):
+            return self._home
         return self._proc
 
 
@@ -514,11 +551,14 @@ async def test_write_secret_sends_the_value_only_on_stdin(caplog: pytest.LogCapt
         with p1, p2, p3, p4:
             await endpoint.write_secret(_OPERATOR, SecretMaterial(_SENTINEL))
 
-    assert len(wire.commands) == 1
-    assert _SENTINEL not in wire.commands[0]
-    assert base64.b64encode(_SENTINEL.encode()).decode() not in wire.commands[0]
-    assert _SUDO_CANARY not in wire.commands[0]
-    stdin = wire.stdin[0]
+    # First the home lookup (no secret), then the write.
+    assert len(wire.commands) == 2
+    assert base64.b64encode(_SENTINEL.encode()).decode() not in (wire.stdin[0] or "")
+    for cmd in wire.commands:
+        assert _SENTINEL not in cmd
+        assert base64.b64encode(_SENTINEL.encode()).decode() not in cmd
+        assert _SUDO_CANARY not in cmd
+    stdin = wire.stdin[1]
     assert stdin is not None
     assert base64.b64encode(_SENTINEL.encode()).decode() in stdin
     assert "/home/seat/.config/key" in stdin
@@ -553,6 +593,53 @@ async def test_a_missing_ok_marker_is_a_failure_even_with_exit_zero() -> None:
     p1, p2, p3, p4 = _patch_wire(wire)
     with p1, p2, p3, p4, pytest.raises(LinuxSecretSinkError):
         await endpoint.write_secret(_OPERATOR, SecretMaterial(_SENTINEL))
+
+
+@pytest.mark.asyncio
+async def test_a_path_outside_the_real_home_is_refused_before_the_secret_is_sent() -> None:
+    # The host says the home of "app" is /srv/app, so /home/app is not its home.
+    wire = _Wire(stdout="===MEHO_SINK_OK===\n", home="/srv/app")
+    endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}/home/app/key#app")
+    p1, p2, p3, p4 = _patch_wire(wire)
+    with p1, p2, p3, p4, pytest.raises(LinuxSecretRefError) as excinfo:
+        await endpoint.write_secret(_OPERATOR, SecretMaterial(_SENTINEL))
+    assert len(wire.commands) == 1  # only the lookup ran
+    encoded = base64.b64encode(_SENTINEL.encode()).decode()
+    assert all(encoded not in (stdin or "") for stdin in wire.stdin)
+    assert _SENTINEL not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_a_home_outside_slash_home_is_allowed() -> None:
+    wire = _Wire(stdout="===MEHO_SINK_OK===\n", home="/data/app")
+    endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}/data/app/.config/key#app")
+    p1, p2, p3, p4 = _patch_wire(wire)
+    with p1, p2, p3, p4:
+        await endpoint.write_secret(_OPERATOR, SecretMaterial(_SENTINEL))
+    assert len(wire.commands) == 2
+    assert base64.b64encode(_SENTINEL.encode()).decode() in (wire.stdin[1] or "")
+
+
+@pytest.mark.asyncio
+async def test_an_owner_without_a_home_stops_before_the_secret_is_sent() -> None:
+    wire = _Wire(stdout="===MEHO_SINK_OK===\n")
+    wire._home = MagicMock(stdout="", stderr="===MEHO_SINK_ERR:owner===\n", exit_status=5)
+    endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}/home/app/key#app")
+    p1, p2, p3, p4 = _patch_wire(wire)
+    with p1, p2, p3, p4, pytest.raises(LinuxSecretSinkError) as excinfo:
+        await endpoint.write_secret(_OPERATOR, SecretMaterial(_SENTINEL))
+    assert "reason: owner" in str(excinfo.value)
+    assert len(wire.commands) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_write_root_path_needs_no_home_lookup() -> None:
+    wire = _Wire(stdout="===MEHO_SINK_OK===\n")
+    endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}/etc/app/key#app")
+    p1, p2, p3, p4 = _patch_wire(wire)
+    with p1, p2, p3, p4:
+        await endpoint.write_secret(_OPERATOR, SecretMaterial(_SENTINEL))
+    assert len(wire.commands) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -609,7 +696,7 @@ async def test_vault_to_linux_move_keeps_the_value_out_of_every_output(
     assert result.status == "ok", result.error
     assert set(result.result) == {"status", "value_fingerprint", "length"}
     assert result.result["length"] == len(_SENTINEL)
-    stdin = wire.stdin[0]
+    stdin = wire.stdin[-1]
     assert stdin is not None and base64.b64encode(_SENTINEL.encode()).decode() in stdin
 
     assert _SENTINEL not in result.model_dump_json()

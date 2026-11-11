@@ -24,12 +24,14 @@ Allowed paths: the write roots of ``linux.file.write``
 place inside the home directory of ``<owner>``.
 
 Before MEHO opens any SSH connection, it checks that the path is absolute,
-has no ``..`` and no control character, and is under a write root or under
-``/home/<owner>`` (``/root`` for the owner ``root``). A home directory in
-another place can be used only when it is under a write root. The root script
-then reads the owner's real home from the host (``getent passwd``), resolves
-the real path (symbolic links included) and refuses it unless it is still under
-a write root or that home.
+has no ``..`` and no control character, and is not in a system folder that can
+never hold a home directory (``/proc``, ``/sys``, ``/dev``, ``/boot``, ``/bin``,
+``/sbin``, ``/lib*``, ``/tmp``, and ``/usr`` and ``/var`` outside the write
+roots). For a path outside the write roots, MEHO then reads the owner's home
+from the host (``getent passwd``) with a short script that carries no secret,
+and refuses a path outside that home before the secret is sent. The root script
+that writes the file checks again: it resolves the real path (symbolic links
+included) and refuses it unless it is still under a write root or that home.
 
 Root never writes in a folder that another user can change. For a path inside
 the owner's home, the folders, the temp file and the rename are all made **as
@@ -84,6 +86,7 @@ __all__ = [
     "LinuxSecretRefError",
     "LinuxSecretSinkEndpoint",
     "LinuxSecretSinkError",
+    "build_home_lookup_script",
     "build_linux_secret_endpoint",
     "build_secret_sink_script",
     "confine_secret_sink_path",
@@ -123,6 +126,43 @@ _FOLDER_CHECKS = (
 _SINK_OK = "===MEHO_SINK_OK==="
 _SINK_ERR_PREFIX = "===MEHO_SINK_ERR:"
 _ERR_MARKER = re.compile(r"===MEHO_SINK_ERR:([a-z-]+)===")
+_HOME_MARKER = re.compile(r"^===MEHO_SINK_HOME:(.*)===$", re.MULTILINE)
+
+#: Write-root branch: pick who writes. Sets ``as_owner=1`` when the write must
+#: run as the owner, and refuses (``place``) a folder that is neither root-only
+#: nor a folder of the owner inside root-only folders.
+_CHOOSE_WRITER = "\n".join(
+    (
+        'base="$dir"; missing=()',
+        'while [ ! -e "$base" ] && [ ! -L "$base" ]; do',
+        '  missing=("$base" ${missing[@]+"${missing[@]}"}); base="$(dirname -- "$base")"',
+        "done",
+        "as_owner=0",
+        'if safe "$base"; then',
+        # New folders are made by root inside root-only folders. Then they go
+        # to the owner from the deepest one up, so each one changes hands while
+        # its parent still belongs to root.
+        '  for m in ${missing[@]+"${missing[@]}"}; do',
+        '    mkdir -m 0700 -- "$m" || { echo "===MEHO_SINK_ERR:mkdir===" >&2; exit 4; }',
+        "  done",
+        "  for (( i=${#missing[@]}-1; i>=0; i-- )); do",
+        '    chown -h "$owner:$grp" -- "${missing[$i]}" '
+        '|| { echo "===MEHO_SINK_ERR:mkdir===" >&2; exit 4; }',
+        "  done",
+        '  [ "${#missing[@]}" -gt 0 ] && as_owner=1',
+        "else",
+        # Go up through the folders of the owner (an earlier run may have
+        # made several). The first folder above them must be root-only.
+        '  top="$base"',
+        '  while [ "$top" != "$root" ] && ownedby "$top" "$ouid"; do',
+        '    top="$(dirname -- "$top")"',
+        "  done",
+        '  [ "$top" != "$base" ] && safe "$top" '
+        '|| { echo "===MEHO_SINK_ERR:place===" >&2; exit 6; }',
+        "  as_owner=1",
+        "fi",
+    )
+)
 
 
 class LinuxSecretRefError(ValueError):
@@ -144,18 +184,37 @@ def _is_under(path: str, root: str) -> bool:
     return path == root or path.startswith(root + "/")
 
 
-def _home_roots(owner: str) -> tuple[str, ...]:
-    """The home directories MEHO accepts for *owner* before it connects."""
-    return ("/root",) if owner == "root" else (f"/home/{owner}",)
+#: System folders that can never hold a home directory. A path here is refused
+#: before any SSH connection, unless a write root (``/usr/local``, ``/var/lib``)
+#: covers it first.
+_NEVER_ROOTS: tuple[str, ...] = (
+    "/proc",
+    "/sys",
+    "/dev",
+    "/boot",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/usr",
+    "/var",
+    "/tmp",
+)
 
 
-def confine_secret_sink_path(requested: str, owner: str) -> str:
+def _under_write_root(path: str) -> bool:
+    return any(_is_under(path, root) for root in LINUX_WRITE_ROOTS)
+
+
+def confine_secret_sink_path(requested: str) -> str:
     """Return the normalised *requested* path, or raise :class:`LinuxSecretRefError`.
 
-    Pure check, no SSH. Refuses a relative path, ``..`` and a control
-    character. The path must be under a write root, or inside the usual home
-    directory of *owner* (``/home/<owner>``, or ``/root`` for ``root``). The
-    root script then checks the real path against the home the host reports.
+    Pure check, no SSH. Refuses a relative path, ``..``, a control character
+    and a system folder that can never hold a home directory. A path under a
+    write root passes. Any other path passes only this check: before the secret
+    is sent, :meth:`LinuxSecretSinkEndpoint.write_secret` reads the owner's home
+    from the host and refuses a path outside it.
     """
     if not isinstance(requested, str) or not requested.startswith("/"):
         raise LinuxSecretRefError(f"linux secret path {requested!r} must be absolute")
@@ -170,14 +229,42 @@ def confine_secret_sink_path(requested: str, owner: str) -> str:
         path = "/" + path.lstrip("/")
     if path == "/":
         raise LinuxSecretRefError(f"linux secret path {requested!r} must name a file")
-    if any(_is_under(path, root) for root in LINUX_WRITE_ROOTS):
+    if _under_write_root(path):
         return path
-    homes = _home_roots(owner)
-    if any(path.startswith(home + "/") for home in homes):
-        return path
-    raise LinuxSecretRefError(
-        f"linux secret path {path!r} is outside the allowed places: "
-        f"{[*LINUX_WRITE_ROOTS, *homes]!r}"
+    if any(_is_under(path, root) for root in _NEVER_ROOTS):
+        raise LinuxSecretRefError(
+            f"linux secret path {path!r} is outside the allowed places: "
+            f"the write roots {list(LINUX_WRITE_ROOTS)!r} or the owner's home"
+        )
+    return path
+
+
+def build_home_lookup_script(owner: str) -> str:
+    """Render the script that prints the home of *owner*. It carries no secret.
+
+    It prints the home as ``getent passwd`` gives it and with links resolved,
+    each on a :data:`_HOME_MARKER` line, or stops with the ``owner`` marker.
+    """
+    err = _SINK_ERR_PREFIX
+    return (
+        f"set -u\nowner={shlex.quote(owner)}\n"
+        'home="$(getent passwd "$owner" | cut -d: -f6)"\n'
+        f'[ -n "$home" ] || {{ echo "{err}owner===" >&2; exit 5; }}\n'
+        'printf \'===MEHO_SINK_HOME:%s===\\n\' "$home" "$(realpath -m -- "$home")"\n'
+    )
+
+
+def _homes_from(proc: Any, target_name: str) -> tuple[str, ...]:
+    """The owner's home folders from the lookup's output, or raise."""
+    stdout = proc.stdout if isinstance(getattr(proc, "stdout", None), str) else ""
+    homes = tuple(h for h in _HOME_MARKER.findall(stdout) if h.startswith("/") and h != "/")
+    if homes and getattr(proc, "exit_status", None) in (0, None):
+        return homes
+    stderr = proc.stderr if isinstance(getattr(proc, "stderr", None), str) else ""
+    match = _ERR_MARKER.search(stderr)
+    raise LinuxSecretSinkError(
+        f"linux secret sink: the home lookup on target {target_name!r} did not finish "
+        f"(reason: {match.group(1) if match else 'home'})"
     )
 
 
@@ -206,7 +293,7 @@ def parse_linux_secret_ref(ref: str) -> tuple[str, str, str]:
             f"malformed linux secret ref {ref!r}: expected a '<target>/<absolute path>' "
             "address before '#<owner>'"
         )
-    path = confine_secret_sink_path("/" + rest.lstrip("/"), owner)
+    path = confine_secret_sink_path("/" + rest.lstrip("/"))
     return target_name, path, owner
 
 
@@ -271,29 +358,7 @@ def build_secret_sink_script(
         '  case "$real" in "$r"/*) root=$r;; esac',
         "done",
         f'[ -d "$root" ] || {{ echo "{err}mkdir===" >&2; exit 4; }}',
-        'base="$dir"; missing=()',
-        'while [ ! -e "$base" ] && [ ! -L "$base" ]; do',
-        '  missing=("$base" ${missing[@]+"${missing[@]}"}); base="$(dirname -- "$base")"',
-        "done",
-        "as_owner=0",
-        'if safe "$base"; then',
-        # New folders are made by root inside root-only folders. Then they go
-        # to the owner from the deepest one up, so each one changes hands while
-        # its parent still belongs to root.
-        '  for m in ${missing[@]+"${missing[@]}"}; do',
-        f'    mkdir -m 0700 -- "$m" || {{ echo "{err}mkdir===" >&2; exit 4; }}',
-        "  done",
-        "  for (( i=${#missing[@]}-1; i>=0; i-- )); do",
-        '    chown -h "$owner:$grp" -- "${missing[$i]}" '
-        f'|| {{ echo "{err}mkdir===" >&2; exit 4; }}',
-        "  done",
-        '  [ "${#missing[@]}" -gt 0 ] && as_owner=1',
-        'elif [ "$base" != "$root" ] && ownedby "$base" "$ouid" '
-        '&& safe "$(dirname -- "$base")"; then',
-        "  as_owner=1",
-        "else",
-        f'  echo "{err}place===" >&2; exit 6',
-        "fi",
+        _CHOOSE_WRITER,
         'if [ "$as_owner" = 1 ]; then',
         f'  printf %s {q_b64} | runuser -u "$owner" -- bash -c {q_inner} meho-sink "$real" '
         f'|| {{ echo "{err}write===" >&2; exit 4; }}',
@@ -342,6 +407,8 @@ class LinuxSecretSinkEndpoint:
         target = cast("Target", row)
 
         sudo_password = await _resolve_sudo_password(connector, target, operator)
+        if not _under_write_root(self._path):
+            await self._check_home(connector, target, operator, sudo_password)
         script = build_secret_sink_script(self._path, self._owner, material.value)
         _log.debug(
             "secret_broker.linux.write",
@@ -353,6 +420,29 @@ class LinuxSecretSinkEndpoint:
             connector, target, script, operator=operator, sudo_password=sudo_password
         )
         _check_result(proc, self._target_name, self._path)
+
+    async def _check_home(
+        self, connector: LinuxSshConnector, target: Target, operator: Operator, sudo_password: str
+    ) -> None:
+        """Refuse a path outside the owner's home before the secret is sent.
+
+        The home comes from the host (``getent passwd``). The lookup script
+        carries no secret.
+        """
+        proc = await run_remote_bash_with_sudo(
+            connector,
+            target,
+            build_home_lookup_script(self._owner),
+            operator=operator,
+            sudo_password=sudo_password,
+        )
+        homes = _homes_from(proc, self._target_name)
+        if not any(self._path.startswith(h.rstrip("/") + "/") for h in homes):
+            raise LinuxSecretRefError(
+                f"linux secret path {self._path!r} is outside the allowed places: "
+                f"the write roots {list(LINUX_WRITE_ROOTS)!r} or the home of "
+                f"{self._owner!r} on target {self._target_name!r}"
+            )
 
 
 def _check_result(proc: Any, target_name: str, path: str) -> None:

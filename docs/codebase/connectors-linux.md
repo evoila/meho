@@ -493,8 +493,8 @@ know it. It is the wrong tool for a secret. The secret broker has a `linux`
 store for this (write side only): `secret.move --to
 'linux:<target>/<absolute path>#<owner>'`. The file gets mode 0600 and the
 owner you name, and a missing parent directory gets mode 0700 and the same
-owner. It may also write inside the home directory of `<owner>`
-(`/home/<owner>`), which `linux.file.write` cannot. The value goes over the SSH channel's standard
+owner. It may also write inside the home directory of `<owner>` (MEHO
+reads it from the host), which `linux.file.write` cannot. The value goes over the SSH channel's standard
 input through the same sudo helper as `file.write`, and never appears in a
 result, an audit row, a preview, a log line or an error. The ref grammar and
 the rules for allowed paths are in

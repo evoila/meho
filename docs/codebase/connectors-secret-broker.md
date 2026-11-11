@@ -411,7 +411,8 @@ What MEHO does on the host:
 - Before it opens any SSH connection, MEHO refuses a relative path, `..`, a
   control character, and a system folder that can never hold a home directory
   (`/proc`, `/sys`, `/dev`, `/boot`, `/bin`, `/sbin`, `/lib*`, `/tmp`, and
-  `/usr` and `/var` outside the write roots).
+  `/usr` outside the write roots). A path under `/var` is not refused here:
+  a home can be there, for example `/var/www` or `/var/home/<owner>`.
 - For a path outside the write roots, MEHO first asks the host for the
   owner's home (`getent passwd`). This short script carries no secret. When
   the path is not inside that home, MEHO stops before it sends the secret. So

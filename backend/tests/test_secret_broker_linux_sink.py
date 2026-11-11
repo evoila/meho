@@ -147,10 +147,8 @@ def test_ref_in_the_owner_home_passes_the_lexical_check() -> None:
         "seat-host/proc/sys/x#app",  # outside every allowed place
         "seat-host/boot/x#app",
         "seat-host/usr/bin/x#app",
-        "seat-host/var/log/x#app",
         "seat-host/tmp/x#app",
         "seat-host/etc/a\\nb#app",  # backslash
-        "seat-host/var/www/x#app",  # /var outside the write roots
         "seat-host/dev/x#app",
     ],
 )
@@ -618,6 +616,33 @@ async def test_a_home_outside_slash_home_is_allowed() -> None:
         await endpoint.write_secret(_OPERATOR, SecretMaterial(_SENTINEL))
     assert len(wire.commands) == 2
     assert base64.b64encode(_SENTINEL.encode()).decode() in (wire.stdin[1] or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("home", ["/var/www", "/var/home/app"])
+async def test_a_home_under_var_is_allowed(home: str) -> None:
+    wire = _Wire(stdout="===MEHO_SINK_OK===\n", home=home)
+    endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}{home}/.config/key#app")
+    p1, p2, p3, p4 = _patch_wire(wire)
+    with p1, p2, p3, p4:
+        await endpoint.write_secret(_OPERATOR, SecretMaterial(_SENTINEL))
+    assert len(wire.commands) == 2
+    assert base64.b64encode(_SENTINEL.encode()).decode() in (wire.stdin[1] or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/var/log/key", "/var/www2/key", "/var/key"])
+async def test_a_var_path_outside_the_home_is_refused_before_the_secret_is_sent(
+    path: str,
+) -> None:
+    wire = _Wire(stdout="===MEHO_SINK_OK===\n", home="/var/www")
+    endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}{path}#app")
+    p1, p2, p3, p4 = _patch_wire(wire)
+    with p1, p2, p3, p4, pytest.raises(LinuxSecretRefError):
+        await endpoint.write_secret(_OPERATOR, SecretMaterial(_SENTINEL))
+    assert len(wire.commands) == 1  # only the lookup ran
+    encoded = base64.b64encode(_SENTINEL.encode()).decode()
+    assert all(encoded not in (stdin or "") for stdin in wire.stdin)
 
 
 @pytest.mark.asyncio

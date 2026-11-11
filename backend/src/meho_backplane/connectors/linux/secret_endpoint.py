@@ -26,12 +26,13 @@ place inside the home directory of ``<owner>``.
 Before MEHO opens any SSH connection, it checks that the path is absolute,
 has no ``..`` and no control character, and is not in a system folder that can
 never hold a home directory (``/proc``, ``/sys``, ``/dev``, ``/boot``, ``/bin``,
-``/sbin``, ``/lib*``, ``/tmp``, and ``/usr`` and ``/var`` outside the write
-roots). For a path outside the write roots, MEHO then reads the owner's home
-from the host (``getent passwd``) with a short script that carries no secret,
-and refuses a path outside that home before the secret is sent. The root script
-that writes the file checks again: it resolves the real path (symbolic links
-included) and refuses it unless it is still under a write root or that home.
+``/sbin``, ``/lib*``, ``/tmp``, and ``/usr`` outside the write roots). A home
+under ``/var`` (for example ``/var/www``) is allowed. For a path outside the
+write roots, MEHO then reads the owner's home from the host (``getent passwd``)
+with a short script that carries no secret, and refuses a path outside that
+home before the secret is sent. The root script that writes the file checks
+again: it resolves the real path (symbolic links included) and refuses it
+unless it is still under a write root or that home.
 
 Root never writes in a folder that another user can change. For a path inside
 the owner's home, the folders, the temp file and the rename are all made **as
@@ -185,7 +186,7 @@ def _is_under(path: str, root: str) -> bool:
 
 
 #: System folders that can never hold a home directory. A path here is refused
-#: before any SSH connection, unless a write root (``/usr/local``, ``/var/lib``)
+#: before any SSH connection, unless a write root (``/usr/local``)
 #: covers it first.
 _NEVER_ROOTS: tuple[str, ...] = (
     "/proc",
@@ -198,7 +199,6 @@ _NEVER_ROOTS: tuple[str, ...] = (
     "/lib32",
     "/lib64",
     "/usr",
-    "/var",
     "/tmp",
 )
 

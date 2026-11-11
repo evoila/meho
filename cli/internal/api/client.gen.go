@@ -2287,7 +2287,8 @@ type AuditEntry struct {
 //     rejected, or let an approval request expire, or its sender withdrew
 //     it (#5717). The operation did not run on any of these rows.
 //   - :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
-//     refresh-token replay or a broken satellite effect chain.
+//     refresh-token replay or a broken satellite effect chain. The
+//     “mcp.session_open“ row of a new MCP session has this class too.
 //   - :attr:`CONFIG_CHANGE` -- an operator changed the settings of
 //     operations, and none of them ran. Two writers: an edit of one
 //     operation with “meho_connector_edit_op“ (turned it on or off, or
@@ -2332,7 +2333,8 @@ type AuditQueryRequest struct {
 	//   rejected, or let an approval request expire, or its sender withdrew
 	//   it (#5717). The operation did not run on any of these rows.
 	// * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
-	//   refresh-token replay or a broken satellite effect chain.
+	//   refresh-token replay or a broken satellite effect chain. The
+	//   ``mcp.session_open`` row of a new MCP session has this class too.
 	// * :attr:`CONFIG_CHANGE` -- an operator changed the settings of
 	//   operations, and none of them ran. Two writers: an edit of one
 	//   operation with ``meho_connector_edit_op`` (turned it on or off, or

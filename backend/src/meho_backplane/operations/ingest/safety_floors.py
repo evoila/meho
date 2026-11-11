@@ -8,8 +8,8 @@ Four sources raise the parsed safety of an ingested operation:
 * a connector-owned floor, registered in code by the connector module;
 * the per-spec ``safety_overlay`` declared on the catalog row; and
 * the op class of the operation: a read whose answer holds credentials
-  (``credential_read``, see :mod:`meho_backplane.op_classes`) is at least
-  ``caution`` and waits for a person's approval; and
+  (``credential_read``, see :mod:`meho_backplane.operations.credential_read`)
+  is at least ``caution`` and waits for a person's approval; and
 * the caller-address marker: an operation with a parameter that holds an
   address MEHO connects to (``x-meho-caller-address: true``, see
   :mod:`meho_backplane.operations.caller_address`) is at least ``caution``
@@ -26,10 +26,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from meho_backplane.broadcast.events import classify_op
 from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
+)
+from meho_backplane.operations.credential_read import (
+    has_credential_read_floor,
+    raise_for_credential_read,
 )
 from meho_backplane.operations.ingest.catalog import safety_overlay_for
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto, SafetyLevel
@@ -80,12 +83,16 @@ def _apply_credential_read_floor(proto: EndpointDescriptorProto) -> EndpointDesc
     otherwise, so :func:`has_safety_floor` sees every credential read as
     governed.
     """
-    if classify_op(proto.op_id) != "credential_read":
+    if not has_credential_read_floor(proto.op_id):
         return proto
-    safety_level = proto.safety_level
-    if _SAFETY_RANK[safety_level] < _SAFETY_RANK["caution"]:
-        safety_level = "caution"
-    return proto.model_copy(update={"safety_level": safety_level, "requires_approval": True})
+    safety_level, requires_approval = raise_for_credential_read(
+        proto.op_id,
+        safety_level=proto.safety_level,
+        requires_approval=proto.requires_approval,
+    )
+    return proto.model_copy(
+        update={"safety_level": safety_level, "requires_approval": requires_approval}
+    )
 
 
 def _apply_caller_address_floor(proto: EndpointDescriptorProto) -> EndpointDescriptorProto:

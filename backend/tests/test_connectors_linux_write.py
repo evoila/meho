@@ -705,10 +705,39 @@ async def linux_write_registered() -> AsyncIterator[None]:
         ("linux.script.run", {"script": _SCRIPT_CANARY, "arguments": _ARG_CANARY}),
     ],
 )
-async def test_preview_credential_class_writes_show_own_plan_no_secret(
+async def test_preview_credential_class_writes_are_unavailable_no_secret(
     linux_write_registered: None, op_id: str, params: dict[str, Any]
 ) -> None:
-    """The credential writes preview from their own builder, with no params copy (#5074)."""
+    """AC: preview_operation returns preview_unavailable for the credential writes."""
+    envelope = await preview_operation(
+        _OPERATOR,
+        {"connector_id": _CONNECTOR_ID, "op_id": op_id, "target": _TARGET_NAME, "params": params},
+    )
+    assert envelope["status"] == "unavailable"
+    assert envelope["extras"]["reason"] == "not_ingested"
+    assert "redacted_body" not in envelope
+    # No secret rides in the envelope.
+    for leaked in (_CONTENT_CANARY, _SCRIPT_CANARY, _ARG_CANARY):
+        assert leaked not in str(envelope)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "op_id,params",
+    [
+        ("linux.file.write", {"path": "/etc/app/conf.yaml", "content": _CONTENT_CANARY}),
+        ("linux.script.run", {"script": _SCRIPT_CANARY, "arguments": _ARG_CANARY}),
+    ],
+)
+async def test_preview_credential_class_writes_show_own_plan_with_switch_on(
+    linux_write_registered: None,
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    params: dict[str, Any],
+) -> None:
+    """With ``PREVIEW_TYPED_WRITES`` on, they preview from their own builder (#5074)."""
+    monkeypatch.setenv("PREVIEW_TYPED_WRITES", "true")
+    get_settings.cache_clear()
     envelope = await preview_operation(
         _OPERATOR,
         {"connector_id": _CONNECTOR_ID, "op_id": op_id, "target": _TARGET_NAME, "params": params},

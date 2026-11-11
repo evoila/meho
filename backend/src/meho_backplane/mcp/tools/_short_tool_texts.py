@@ -192,10 +192,9 @@ PREVIEW_OPERATION_SHORT: Final = ShortText(
         "sent or written.\n"
         "Use it to see why a write failed, and to get the `preview_hash` a "
         "destructive call needs. A typed operation gives "
-        '`status="unavailable"`, except a write: '
+        '`status="unavailable"`, except a destructive or approval-gated one: '
         '`method="COMPOSITE"` with the redacted params and a `preview_hash`. A '
-        "credential write shows its plan only, never the params, and only when "
-        "it has its own safe preview."
+        "credential write cannot be previewed."
     ),
     inputs={
         "op_id": "Operation id from `search_operations`.",

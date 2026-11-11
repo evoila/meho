@@ -44,6 +44,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "mcp_short_tool_texts",
         "mcp_topology_off_default_list",
         "operation_contract_guidance",
+        "preview_typed_writes",
         "search_clear_lead",
         "search_plain_sentences",
         "team_knowledge_recall",

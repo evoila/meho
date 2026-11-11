@@ -211,12 +211,13 @@ target 5.1 explicitly — the cmdlet surface is stable across Windows Server
 !!! note "How preview behaves for these operations"
 
     `preview_operation` returns the literal request a spec-ingested
-    operation would send. These connectors are typed, so a read has no
-    single such request, and preview answers `status: "unavailable"` —
-    the expected result, not a failure.
+    operation would send. These connectors are typed, so an operation
+    that runs without approval has no single such request, and preview
+    answers `status: "unavailable"` — the expected result, not a failure.
 
-    A write *is* previewable. Every write (also a `caution` one such as
-    `winsrv.time.set`) and every `destructive` operation returns a synthetic preview carrying the same
+    The governed tiers *are* previewable. Every operation that waits for
+    approval (also a `caution` one such as `winsrv.time.set`) and every
+    `destructive` operation returns a synthetic preview carrying the same
     redacted proposed-effect the approval park shows the approver —
     resolved with nothing sent, no park, and no audit row — so you can
     read the would-be effect of, say, `msad.user.delete` or
@@ -224,12 +225,18 @@ target 5.1 explicitly — the cmdlet surface is stable across Windows Server
     `windns.record.remove` is previewable too; the exact record set it
     would remove is enumerated when it parks for approval.
 
-    A credential operation previews only when it has its own safe
-    preview, and then it shows only that plan, never the params.
-    `guest.program.run` has none of its own. Because its `arguments` and
-    `env` can carry a secret, it stays `unavailable` — the approver sees
-    its redacted summary (program path, argument size, env-var names) at
-    approval time instead.
+    A credential operation such as `msad.user.set-password` stays
+    `unavailable`. So does `guest.program.run`.
+    Because its `arguments` and `env` can carry a secret, it is treated as
+    a credential-class write and does not synthesize a preview — the
+    approver sees its redacted summary (program path, argument size,
+    env-var names) at approval time instead.
+
+    With the backplane switch `PREVIEW_TYPED_WRITES` on (off by default),
+    every write previews, also one that runs without approval. A
+    credential operation then previews only when it has its own safe
+    preview, and it shows only that plan, never the params.
+    `guest.program.run` has none of its own, so it stays `unavailable`.
 
 ## Safety tiers of the write operations
 

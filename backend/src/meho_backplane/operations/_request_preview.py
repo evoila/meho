@@ -241,10 +241,13 @@ def is_credential_builder_op(descriptor: EndpointDescriptor) -> bool:
     """True for a credential-class op that has its own preview builder (#5074).
 
     Such an op previews from its builder only. The params are never copied
-    into the preview, because a secret can ride in them.
+    into the preview, because a secret can ride in them. Only while the
+    ``PREVIEW_TYPED_WRITES`` switch is on; off, nothing changes.
     """
-    return classify_op(descriptor.op_id) in _SENSITIVE_CLASSES and has_preview_builder(
-        descriptor.op_id
+    return (
+        get_settings().preview_typed_writes
+        and classify_op(descriptor.op_id) in _SENSITIVE_CLASSES
+        and has_preview_builder(descriptor.op_id)
     )
 
 
@@ -270,11 +273,20 @@ def _is_previewable(descriptor: EndpointDescriptor) -> bool:
     A credential-class op with no builder of its own stays ``unavailable``:
     its secret rides in the params, and the generic safe view cannot be
     trusted to hide a connector-specific secret shape.
+
+    The last two rules hold only while the ``PREVIEW_TYPED_WRITES`` switch
+    is on. Off (the default), a typed op previews as before: when it is
+    destructive, or when it carries ``requires_approval`` and is not a
+    credential-class op.
     """
     if descriptor.source_kind == "ingested":
         return True
     if descriptor.safety_level == "destructive":
         return True
+    if not get_settings().preview_typed_writes:
+        return (
+            descriptor.requires_approval and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
+        )
     if classify_op(descriptor.op_id) in _SENSITIVE_CLASSES:
         return has_preview_builder(descriptor.op_id)
     return descriptor.requires_approval or _is_mutating(descriptor)

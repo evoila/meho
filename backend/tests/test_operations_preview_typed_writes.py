@@ -3,11 +3,16 @@
 
 """A preview of a typed write shows what it will change (#5074).
 
-Before this change a typed write that did not carry ``requires_approval``
-(``targets.register``) and a credential write with its own safe preview
-(``keycloak.user.reset_password``) both answered ``status="unavailable"``.
-Now both preview. A credential write shows only its own plan: the params
-are never copied, and a secret value never shows.
+With the ``PREVIEW_TYPED_WRITES`` switch off (the default), a typed write
+that does not carry ``requires_approval`` (``targets.register``) and a
+credential write with its own safe preview (``keycloak.user.reset_password``)
+both answer ``status="unavailable"``, as before. With the switch on, both
+preview. A credential write shows only its own plan: the params are never
+copied, and a secret value never shows.
+
+Most tests here run with the switch on. The tests named ``*_switch_off_*``
+prove that with it off the answers, the hashes and the tool texts stay as
+they were.
 """
 
 from __future__ import annotations
@@ -20,6 +25,14 @@ import pytest
 
 import meho_backplane.connectors.keycloak.ops_write_preview as keycloak_preview
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.mcp import registry as mcp_registry
+from meho_backplane.mcp.registry import tool_for_settings
+from meho_backplane.mcp.tools import operations as _operation_tools  # noqa: F401 — registers the tool
+from meho_backplane.mcp.tools._preview_typed_writes_text import (
+    PREVIEW_OPERATION_TYPED_WRITES_SHORT,
+    TYPED_WRITE_TEXT_SWAPS,
+)
+from meho_backplane.mcp.tools._short_tool_texts import PREVIEW_OPERATION_SHORT
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._preview import (
     _PREVIEW_BUILDERS,
@@ -43,6 +56,7 @@ def _env_and_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("PREVIEW_TYPED_WRITES", "true")
     get_settings.cache_clear()
     reset_dispatcher_caches()
     clear_registry()
@@ -213,3 +227,127 @@ async def test_credential_write_without_builder_stays_unavailable(
     assert envelope["status"] == "unavailable"
     assert "redacted_body" not in envelope
     assert _SECRET not in str(envelope)
+
+
+def _switch(monkeypatch: pytest.MonkeyPatch, name: str, on: bool) -> None:
+    monkeypatch.setenv(name, "true" if on else "false")
+    get_settings.cache_clear()
+
+
+def test_switch_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PREVIEW_TYPED_WRITES", raising=False)
+    get_settings.cache_clear()
+    assert get_settings().preview_typed_writes is False
+
+
+@pytest.mark.asyncio
+async def test_switch_off_caution_write_without_requires_approval_stays_unavailable(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _switch(monkeypatch, "PREVIEW_TYPED_WRITES", False)
+    await _register(stub_embedding_service, "targets.register", safety_level="caution")
+
+    envelope = await _preview("targets.register", {"name": "lab-a"})
+
+    assert envelope["status"] == "unavailable"
+    assert envelope["extras"]["reason"] == "not_ingested"
+    assert "redacted_body" not in envelope
+    assert "preview_hash" not in envelope
+
+
+@pytest.mark.asyncio
+async def test_switch_off_credential_write_with_builder_stays_unavailable(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _switch(monkeypatch, "PREVIEW_TYPED_WRITES", False)
+    await _register(
+        stub_embedding_service,
+        "keycloak.user.reset_password",
+        safety_level="dangerous",
+        requires_approval=True,
+    )
+    params = {"username": "alice", "realm": "lab", "password_secret_ref": "secret/a"}
+
+    envelope = await _preview("keycloak.user.reset_password", {**params, "password": _SECRET})
+
+    assert envelope["status"] == "unavailable"
+    assert "redacted_body" not in envelope
+    assert "proposed_effect" not in envelope
+    assert _SECRET not in str(envelope)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "safety_level", "requires_approval"),
+    [
+        ("demo.typed.gated", "caution", True),
+        ("demo.typed.delete", "destructive", True),
+    ],
+)
+async def test_switch_does_not_change_gated_or_destructive_previews(
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    safety_level: str,
+    requires_approval: bool,
+) -> None:
+    """An op that previewed before gives the same answer and hash in both states."""
+    await _register(
+        stub_embedding_service,
+        op_id,
+        safety_level=safety_level,
+        requires_approval=requires_approval,
+    )
+    params = {"name": "lab-a", "size": 3}
+
+    _switch(monkeypatch, "PREVIEW_TYPED_WRITES", False)
+    off = await _preview(op_id, params)
+    _switch(monkeypatch, "PREVIEW_TYPED_WRITES", True)
+    on = await _preview(op_id, params)
+
+    assert off["status"] == "ok"
+    assert off == on
+
+
+def _shown_preview_tool() -> dict[str, Any]:
+    definition = mcp_registry._TOOLS["preview_operation"][0]
+    return tool_for_settings(definition).to_wire()
+
+
+@pytest.mark.parametrize("short", [False, True], ids=["full-text", "short-text"])
+def test_switch_off_tool_text_is_unchanged(monkeypatch: pytest.MonkeyPatch, short: bool) -> None:
+    _switch(monkeypatch, "MCP_SHORT_TOOL_TEXTS", short)
+    _switch(monkeypatch, "PREVIEW_TYPED_WRITES", False)
+    registered = mcp_registry._TOOLS["preview_operation"][0]
+
+    description = _shown_preview_tool()["description"]
+
+    if short:
+        assert description.endswith(PREVIEW_OPERATION_SHORT.description)
+    else:
+        assert description == registered.description
+    assert "except a write" not in description
+    assert "keycloak.user.reset_password" not in description
+
+
+@pytest.mark.parametrize("short", [False, True], ids=["full-text", "short-text"])
+def test_switch_on_tool_text_says_the_new_rule(
+    monkeypatch: pytest.MonkeyPatch, short: bool
+) -> None:
+    _switch(monkeypatch, "MCP_SHORT_TOOL_TEXTS", short)
+    _switch(monkeypatch, "PREVIEW_TYPED_WRITES", True)
+    registered = mcp_registry._TOOLS["preview_operation"][0]
+
+    shown = _shown_preview_tool()
+
+    if short:
+        assert shown["description"].endswith(PREVIEW_OPERATION_TYPED_WRITES_SHORT.description)
+        assert "except a write" in shown["description"]
+    else:
+        for old, new in TYPED_WRITE_TEXT_SWAPS:
+            assert old in registered.description
+            assert old not in shown["description"]
+            assert new in shown["description"]
+    # Only the text changes: the input schema is the same in both states.
+    _switch(monkeypatch, "PREVIEW_TYPED_WRITES", False)
+    assert shown["inputSchema"] == _shown_preview_tool()["inputSchema"]

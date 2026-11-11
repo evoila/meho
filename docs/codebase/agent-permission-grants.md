@@ -189,6 +189,13 @@ the admin MCP tools `meho_agent_principals_register` and
 `meho_agents_create`. The CLI flags and the console pick come later
 (#6192).
 
+The two MCP tools show the `starting_grants` input and the sentence about
+it only while `AGENT_GRANT_REQUIRED` is `observe` or `on`
+(`mcp/tools/_starting_grants.py`, through the tool's `for_settings`). With
+the switch `off` (the default), an AI client sees both tools exactly as
+before, and a call that sends `starting_grants` is refused by the input
+check. REST takes the field in every state.
+
 ## Elevation sweeper (`agents/grant_expiry.py`)
 
 Background `asyncio.Task` registered in `main.py` lifespan, gated on `GRANT_EXPIRY_ENABLED` (default: true). Cadence: `GRANT_EXPIRY_TICK_INTERVAL_SECONDS` (default: 300 s).

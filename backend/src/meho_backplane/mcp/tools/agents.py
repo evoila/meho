@@ -57,7 +57,6 @@ from pydantic import ValidationError
 
 from meho_backplane.agents.grant_sets import (
     PERSON_ONLY_REMEDIATION,
-    STARTING_GRANTS_JSON_SCHEMA,
     StartingGrantsError,
     audit_fields,
     writes_rows,
@@ -76,6 +75,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.human_only import ensure_human_mcp_caller
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.tools._starting_grants import with_starting_grants
 
 _log = structlog.get_logger(__name__)
 
@@ -257,9 +257,6 @@ register_mcp_tool(
             "duplicate name returns an error with detail "
             "'agent_already_exists'; an unknown / cross-tenant / revoked "
             "identity_ref returns 'identity_ref_unknown'. "
-            "starting_grants picks the first grants of that agent; it is "
-            "required while AGENT_GRANT_REQUIRED is not 'off' and the agent "
-            "has no grant yet. "
             "Response: {name, agent: {...}}."
         ),
         inputSchema={
@@ -306,7 +303,6 @@ register_mcp_tool(
                     "type": "boolean",
                     "description": "Soft on/off switch (default true).",
                 },
-                "starting_grants": STARTING_GRANTS_JSON_SCHEMA,
             },
             "required": [
                 "name",
@@ -319,6 +315,10 @@ register_mcp_tool(
         },
         required_role=TenantRole.TENANT_ADMIN,
         op_class="write",
+        for_settings=with_starting_grants(
+            "starting_grants picks the first grants of that agent; it is "
+            "required while the agent has no grant yet."
+        ),
     ),
     handler=_create_handler,
 )

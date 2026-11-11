@@ -828,31 +828,6 @@
             "maxLength": 256,
             "minLength": 1,
             "type": "string"
-          },
-          "starting_grants": {
-            "additionalProperties": false,
-            "properties": {
-              "set": {
-                "enum": [
-                  "none",
-                  "read-everything",
-                  "read-targets"
-                ],
-                "type": "string"
-              },
-              "targets": {
-                "items": {
-                  "minLength": 1,
-                  "type": "string"
-                },
-                "maxItems": 100,
-                "type": "array"
-              }
-            },
-            "required": [
-              "set"
-            ],
-            "type": "object"
           }
         },
         "required": [
@@ -912,31 +887,6 @@
               "object",
               "null"
             ]
-          },
-          "starting_grants": {
-            "additionalProperties": false,
-            "properties": {
-              "set": {
-                "enum": [
-                  "none",
-                  "read-everything",
-                  "read-targets"
-                ],
-                "type": "string"
-              },
-              "targets": {
-                "items": {
-                  "minLength": 1,
-                  "type": "string"
-                },
-                "maxItems": 100,
-                "type": "array"
-              }
-            },
-            "required": [
-              "set"
-            ],
-            "type": "object"
           },
           "system_prompt": {
             "minLength": 1,

@@ -54,11 +54,7 @@ from typing import Any, Final
 import structlog
 from pydantic import ValidationError
 
-from meho_backplane.agents.grant_sets import (
-    STARTING_GRANTS_JSON_SCHEMA,
-    StartingGrants,
-    audit_fields,
-)
+from meho_backplane.agents.grant_sets import StartingGrants, audit_fields
 from meho_backplane.auth.agent_principals import (
     AgentPrincipalCreate,
     AgentPrincipalExistsError,
@@ -74,6 +70,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.human_only import ensure_human_mcp_caller
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpExecutionFailedError, McpInvalidParamsError
+from meho_backplane.mcp.tools._starting_grants import with_starting_grants
 from meho_backplane.scheduler.vault_credentials import (
     SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
     SCHEDULER_VAULT_WRITE_DENIED_DETAIL,
@@ -230,8 +227,6 @@ register_mcp_tool(
             "and inserts a DB row. "
             "Returns the created principal record. "
             "409 when a principal with the same name already exists. "
-            "starting_grants picks the agent's first grants; it is required "
-            "while AGENT_GRANT_REQUIRED is not 'off'. "
             "Requires tenant_admin."
         ),
         inputSchema={
@@ -263,13 +258,15 @@ register_mcp_tool(
                         "(kill-switch owner). Defaults to the caller's sub."
                     ),
                 },
-                "starting_grants": STARTING_GRANTS_JSON_SCHEMA,
             },
             "required": ["name"],
             "additionalProperties": False,
         },
         required_role=TenantRole.TENANT_ADMIN,
         op_class="write",
+        for_settings=with_starting_grants(
+            "starting_grants picks the agent's first grants; it is required."
+        ),
     ),
     handler=_register_handler,
 )

@@ -28,7 +28,11 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from meho_backplane.agents.grant_sets import StartingGrants, StartingGrantsError
+from meho_backplane.agents.grant_sets import (
+    STARTING_GRANTS_JSON_SCHEMA,
+    StartingGrants,
+    StartingGrantsError,
+)
 from meho_backplane.agents.grants import AgentGrantService
 from meho_backplane.agents.schemas import AgentDefinitionCreate
 from meho_backplane.agents.service import AgentDefinitionService
@@ -46,7 +50,12 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.main import app
 from meho_backplane.mcp.handlers import handle_tools_call
-from meho_backplane.mcp.registry import MCP_ADMIN_SCOPE, get_tool
+from meho_backplane.mcp.registry import (
+    MCP_ADMIN_SCOPE,
+    ToolDefinition,
+    get_tool,
+    tool_for_settings,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.mcp.tools import agent_principals as mcp_agent_principals
 from meho_backplane.mcp.tools import agents as mcp_agents
@@ -605,6 +614,66 @@ async def test_mcp_definition_create_needs_the_pick(monkeypatch: pytest.MonkeyPa
     result = await _create_handler(_operator(), _definition(sub, {"set": "none"}))
     assert result["name"] == "triage"
     assert await _grants(sub) == []
+
+
+_PICK_TOOLS = [
+    ("meho_agent_principals_register", mcp_agent_principals),
+    ("meho_agents_create", mcp_agents),
+]
+
+
+def _registered(tool: str, module: Any) -> ToolDefinition:
+    # Another test file may have emptied the tool registry.
+    if get_tool(tool) is None:
+        importlib.reload(module)
+    entry = get_tool(tool)
+    assert entry is not None
+    return entry[0]
+
+
+@pytest.mark.parametrize(("tool", "module"), _PICK_TOOLS)
+def test_mcp_tools_are_unchanged_while_the_switch_is_off(tool: str, module: Any) -> None:
+    defn = _registered(tool, module)
+    assert "starting_grants" not in defn.inputSchema["properties"]
+    assert "starting_grants" not in defn.description
+    assert "AGENT_GRANT_REQUIRED" not in defn.description
+    assert tool_for_settings(defn) is defn
+
+
+@pytest.mark.parametrize("mode", ["observe", "on"])
+@pytest.mark.parametrize(("tool", "module"), _PICK_TOOLS)
+def test_mcp_tools_show_the_pick_while_the_switch_is_not_off(
+    monkeypatch: pytest.MonkeyPatch, tool: str, module: Any, mode: str
+) -> None:
+    defn = _registered(tool, module)
+    _switch(monkeypatch, mode)
+    shown = tool_for_settings(defn)
+    assert shown.inputSchema["properties"]["starting_grants"] == STARTING_GRANTS_JSON_SCHEMA
+    assert shown.inputSchema["required"] == defn.inputSchema["required"]
+    assert shown.description.startswith(defn.description)
+    assert "starting_grants" in shown.description
+    assert "starting_grants" not in defn.inputSchema["properties"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_call_with_a_pick_is_refused_while_the_switch_is_off() -> None:
+    _registered("meho_agent_principals_register", mcp_agent_principals)
+    await _seed_tenants()
+    factory, kc = _mock_kc()
+    with (
+        patch(_KC_PATH, factory),
+        patch("meho_backplane.mcp.handlers.write_mcp_audit_row", new=AsyncMock()),
+        pytest.raises(McpInvalidParamsError, match="starting_grants"),
+    ):
+        await handle_tools_call(
+            _operator(),
+            {
+                "name": "meho_agent_principals_register",
+                "arguments": {"name": "bot", "starting_grants": {"set": "read-everything"}},
+            },
+        )
+    kc.create_client.assert_not_awaited()
+    assert await _grants("agent:bot") == []
 
 
 # ---------------------------------------------------------------------------

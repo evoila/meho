@@ -22,12 +22,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from meho_backplane.audit_query import AuditQueryFilters, query_audit
-from meho_backplane.auth.client_identity import sid_hash
+from meho_backplane.auth.client_identity import clean_client_text, sid_hash
 from meho_backplane.auth.operator import Operator, RoleGroup, TenantMembership, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.main import app
-from meho_backplane.mcp.audit import SESSION_OPEN_OP_ID, _clean_client_text
+from meho_backplane.mcp.audit import SESSION_OPEN_OP_ID
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, PROTOCOL_VERSION
 from meho_backplane.settings import get_settings
@@ -363,14 +363,14 @@ async def test_audit_write_failure_fails_initialize(
 
 
 def test_clean_client_text_edge_inputs() -> None:
-    assert _clean_client_text(None) is None
-    assert _clean_client_text(42) is None
-    assert _clean_client_text("") is None
-    assert _clean_client_text("\x00\x07") is None
-    assert _clean_client_text("ok-name 1.0") == "ok-name 1.0"
-    assert _clean_client_text("é" * 300) == "é" * 200
-    assert _clean_client_text("a\u2028b\u2029c") == "abc"
-    assert _clean_client_text("a\ud800b\udfffc") == "abc"
-    assert _clean_client_text("\u2028\ud800") is None
+    assert clean_client_text(None) is None
+    assert clean_client_text(42) is None
+    assert clean_client_text("") is None
+    assert clean_client_text("\x00\x07") is None
+    assert clean_client_text("ok-name 1.0") == "ok-name 1.0"
+    assert clean_client_text("é" * 300) == "é" * 200
+    assert clean_client_text("a\u2028b\u2029c") == "abc"
+    assert clean_client_text("a\ud800b\udfffc") == "abc"
+    assert clean_client_text("\u2028\ud800") is None
     # A real character outside the basic plane is kept.
-    assert _clean_client_text("tool \U0001f680") == "tool \U0001f680"
+    assert clean_client_text("tool \U0001f680") == "tool \U0001f680"

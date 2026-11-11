@@ -1468,6 +1468,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#the-mcp-clients-of-the-ai-tools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The MCP clients of the AI tools
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#how-long-each-login-lasts" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3500,6 +3511,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#the-mcp-clients-of-the-ai-tools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The MCP clients of the AI tools
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#how-long-each-login-lasts" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3719,6 +3741,11 @@ the end, then return to the trail.</p>
 <td><code>meho-mcp</code></td>
 <td><strong>Public</strong> client, authorization-code + PKCE</td>
 <td>Browser-capable MCP clients (Claude Desktop, MCP Inspector, …)</td>
+</tr>
+<tr>
+<td><code>meho-mcp-code</code>, <code>meho-mcp-desktop</code></td>
+<td><strong>Public</strong> clients, copies of <code>meho-mcp</code></td>
+<td>The Claude Code plugin and the Claude Desktop extension, each with a login of its own, when <code>MCP_CLIENT_PER_TOOL_KIND</code> is on. See <a href="#the-mcp-clients-of-the-ai-tools">The MCP clients of the AI tools</a>.</td>
 </tr>
 <tr>
 <td><code>meho-web</code></td>
@@ -4587,6 +4614,54 @@ differences:</p>
 <p>The eight mappers and four default scopes apply identically. Which MCP
 client uses which flow — and everything else client-side — is the
 <a href="../../clients/">Connect clients</a> section's territory.</p>
+<h2 id="the-mcp-clients-of-the-ai-tools">The MCP clients of the AI tools<a class="headerlink" href="#the-mcp-clients-of-the-ai-tools" title="Permanent link">&para;</a></h2>
+<p>MEHO can give Claude Code and Claude Desktop a login client each. Then
+the audit log tells the two tools apart, and each tool keeps a saved
+login of its own.</p>
+<table>
+<thead>
+<tr>
+<th>Client</th>
+<th>Used by</th>
+<th>Header the tool sends</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meho-mcp-code</code></td>
+<td>The Claude Code plugin</td>
+<td><code>Meho-Tool: claude-code</code></td>
+</tr>
+<tr>
+<td><code>meho-mcp-desktop</code></td>
+<td>The Claude Desktop extension</td>
+<td><code>Meho-Tool: claude-desktop</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Built-in login setup and <code>bootstrap-clients</code>.</strong> Both make the two
+clients for you, with the same settings as <code>meho-mcp</code>. The built-in setup
+adds them to a running realm at the next upgrade.</p>
+<p><strong>Your own Keycloak.</strong> Add the two clients by hand:</p>
+<ol>
+<li>Make each client exactly like <code>meho-mcp</code> (the table above): public,
+   standard flow with PKCE <code>S256</code>, the same loopback redirect URIs, the
+   eight mappers, the four default scopes, <code>offline_access</code> and the three
+   <code>mcp:*</code> scopes as optional scopes, and the 48-hour offline idle limit.
+   Only the client ID and the name differ.</li>
+<li>Give neither client a fixed tenant or role. A person gets their tenant
+   and role from their group, as with <code>meho-mcp</code>.</li>
+</ol>
+<p><strong>Then turn the switch on.</strong> Set <code>MCP_CLIENT_PER_TOOL_KIND=true</code> on the
+backplane. <code>GET /api/v1/auth-config</code> then lists
+<code>"mcp_clients": {"claude-code": "meho-mcp-code", "claude-desktop": "meho-mcp-desktop"}</code>.
+The plugin and the extension read it at start. Each person signs in
+once more in each tool. Turn the switch on only after the realm has both
+clients: a tool that signs in with a missing client gets a Keycloak error.</p>
+<p>With the switch off (the default), both tools keep <code>meho-mcp</code>, as before.
+Older plugins and other MCP clients keep <code>meho-mcp</code> in any case. MEHO
+accepts tokens of all three clients on <code>/mcp</code>. None of them can approve
+a request: an approval needs <code>meho-cli-approve</code> or the web console.</p>
 <h2 id="how-long-each-login-lasts">How long each login lasts<a class="headerlink" href="#how-long-each-login-lasts" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -4615,6 +4690,12 @@ client uses which flow — and everything else client-side — is the
 <td>The Claude Code plugin, the Claude Desktop bundle, a plain HTTP entry in Claude Code's <code>.mcp.json</code></td>
 <td>Long login (<code>offline_access</code>). It renews itself.</td>
 <td>After 48 hours without use, or after 7 days at most.</td>
+</tr>
+<tr>
+<td><code>meho-mcp-code</code>, <code>meho-mcp-desktop</code></td>
+<td>The Claude Code plugin and the Claude Desktop extension, when <code>MCP_CLIENT_PER_TOOL_KIND</code> is on</td>
+<td>Same as <code>meho-mcp</code></td>
+<td>Same as <code>meho-mcp</code></td>
 </tr>
 <tr>
 <td><code>meho-web</code></td>

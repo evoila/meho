@@ -1848,6 +1848,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#a-login-of-its-own-for-claude-desktop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A login of its own for Claude Desktop
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#when-the-login-expires-or-is-not-finished" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3212,6 +3223,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#a-login-of-its-own-for-claude-desktop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A login of its own for Claude Desktop
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#when-the-login-expires-or-is-not-finished" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3494,9 +3516,9 @@ that differ per deployment —</p>
   CA in your OS trust store instead — see
   <a href="#trusting-an-internal-ca">Trusting an internal CA</a>.</li>
 </ul>
-<p>Two advanced fields default to the working setup and rarely need
-changing: the OAuth <strong>client id</strong> (default <code>meho-mcp</code>) and the OAuth
-<strong>scopes</strong> (default <code>mcp:read mcp:execute offline_access</code>). To opt the
+<p>Two advanced fields rarely need changing: the OAuth <strong>client id</strong> (leave
+it empty; see <a href="#a-login-of-its-own-for-claude-desktop">A login of its own for Claude Desktop</a>)
+and the OAuth <strong>scopes</strong> (default <code>mcp:read mcp:execute offline_access</code>). To opt the
 session into the operator planes, add <code>mcp:admin</code> to the scopes field — see
 <a href="../mcp-surface-and-scopes/#how-a-client-requests-elevation">MCP surface and scopes</a>.</p>
 <p>The optional <strong>Tenant</strong> field names the MEHO tenant the extension works
@@ -3511,6 +3533,26 @@ hours with the
 <a href="../../install/keycloak-realm/#how-long-an-mcp-login-lasts">recommended realm setting</a>.
 Without it, the login ends at the realm's SSO idle limit (30 minutes by
 default). If you change the scopes field, keep <code>offline_access</code> in it.</p>
+<h3 id="a-login-of-its-own-for-claude-desktop">A login of its own for Claude Desktop<a class="headerlink" href="#a-login-of-its-own-for-claude-desktop" title="Permanent link">&para;</a></h3>
+<p>When your MEHO admin turns on <code>MCP_CLIENT_PER_TOOL_KIND</code>, Claude Desktop
+and Claude Code no longer share one login:</p>
+<ul>
+<li>At start, the extension asks MEHO which login client Claude Desktop uses
+  (<code>GET /api/v1/auth-config</code>). MEHO names <code>meho-mcp-desktop</code>.</li>
+<li>The extension signs in with <code>meho-mcp-desktop</code> and sends the header
+  <code>Meho-Tool: claude-desktop</code>. The header gives Claude Desktop a saved
+  login of its own, apart from Claude Code.</li>
+<li>The audit log names the client (<code>meho-mcp-desktop</code>), so it tells Claude
+  Desktop from Claude Code.</li>
+<li>The first use after the change asks for one browser login.</li>
+</ul>
+<p>With the switch off, with an older MEHO, or when MEHO does not answer
+within 5 seconds, the extension keeps <code>meho-mcp</code> and sends no header, as
+before. A value in the <strong>client id</strong> field wins; then the extension does
+not ask MEHO and sends no header. The value <code>meho-mcp</code> counts as empty:
+older versions of the extension filled it in by default. The realm needs
+the <code>meho-mcp-desktop</code> client: see
+<a href="../../install/keycloak-realm/#the-mcp-clients-of-the-ai-tools">the MCP clients of the AI tools</a>.</p>
 <h3 id="when-the-login-expires-or-is-not-finished">When the login expires or is not finished<a class="headerlink" href="#when-the-login-expires-or-is-not-finished" title="Permanent link">&para;</a></h3>
 <p>The bundle makes sure a MEHO call never hangs because of a login:</p>
 <ul>
@@ -3526,8 +3568,9 @@ default). If you change the scopes field, keep <code>offline_access</code> in it
 <p>After you update to a bundle with this fix, the first use opens <strong>one new
 browser login</strong>. The bundle's newer <code>mcp-remote</code> keeps saved logins in a
 new folder, <code>~/.mcp-auth/mcp-remote-0.1.38/</code>.</p>
-<p>The bundle still expects the realm's public <code>meho-mcp</code> client with the
-shim's loopback redirect URIs registered (below), and — on an
+<p>The bundle still expects the realm's public <code>meho-mcp</code> client (and
+<code>meho-mcp-desktop</code> when the switch above is on) with the shim's loopback
+redirect URIs registered (below), and — on an
 internal-CA deploy — one of the two CA trust routes below. If you cannot
 install the bundle, wire the shim by hand with the rest of this page.</p>
 <h2 id="trusting-an-internal-ca">Trusting an internal CA<a class="headerlink" href="#trusting-an-internal-ca" title="Permanent link">&para;</a></h2>

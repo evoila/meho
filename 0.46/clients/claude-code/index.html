@@ -1914,6 +1914,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#a-login-of-its-own-for-claude-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A login of its own for Claude Code
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3183,6 +3194,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#a-login-of-its-own-for-claude-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A login of its own for Claude Code
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3404,6 +3426,27 @@ plugin keeps that login when one renewal fails:</p>
 <li>Only one browser login runs at a time on the computer. Another session
   that starts meanwhile waits and then uses the new login.</li>
 </ul>
+<h3 id="a-login-of-its-own-for-claude-code">A login of its own for Claude Code<a class="headerlink" href="#a-login-of-its-own-for-claude-code" title="Permanent link">&para;</a></h3>
+<p>When your MEHO admin turns on <code>MCP_CLIENT_PER_TOOL_KIND</code>, Claude Code and
+Claude Desktop no longer share one login:</p>
+<ul>
+<li>At start, the plugin asks MEHO which login client Claude Code uses
+  (<code>GET /api/v1/auth-config</code>). MEHO names <code>meho-mcp-code</code>.</li>
+<li>The plugin signs in with <code>meho-mcp-code</code> and sends the header
+  <code>Meho-Tool: claude-code</code>. The header gives Claude Code a saved login of
+  its own, apart from Claude Desktop.</li>
+<li>The audit log names the client (<code>meho-mcp-code</code>), so it tells Claude
+  Code from Claude Desktop.</li>
+<li>The first session after the change asks for one browser login.</li>
+</ul>
+<p>With the switch off, with an older MEHO, or when MEHO does not answer
+within 5 seconds, the plugin keeps <code>meho-mcp</code> and sends no header, as
+before. <code>MEHO_MCP_CLIENT_ID</code> always wins when you set it; then the plugin
+does not ask MEHO and sends no header. The realm needs the
+<code>meho-mcp-code</code> client: see
+<a href="../../install/keycloak-realm/#the-mcp-clients-of-the-ai-tools">the MCP clients of the AI tools</a>.</p>
+<p>All sessions of one tool kind on one computer still share one saved
+login.</p>
 <p>When the login has really ended (not used for the idle limit, or ended by
 an admin in Keycloak), the next MEHO call fails at once with "Your MEHO
 login has expired. Run /mcp, pick meho, and reconnect to log in again." A

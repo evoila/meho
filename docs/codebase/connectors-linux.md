@@ -155,6 +155,7 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 | `linux.journal.tail` | `log` | `unit?`, `since?`, `until?`, `priority?`, `lines?` | `{rows, total, truncated}` (+ `warning?`); row = `{ts, unit, priority, message, message_truncated}` |
 | `linux.fs.usage` | `storage` | `path` | `{path, filesystem, fstype, size_bytes, used_bytes, avail_bytes, inodes_total, inodes_used}` |
 | `linux.dir.list` | `file` | `path`, `depth?`, `include_hidden?` | `{rows, total, path, exists, truncated, incomplete}`; row = `{name, type, size_bytes, mtime, mode, owner}` |
+| `linux.user.password_status` | `system` | `user` | `{user, last_change, expires, inactive, account_expires, min_days, max_days, warn_days, must_change, days_until_expiry, expired}` |
 
 `linux.about` is the identity canary (its handler wraps `fingerprint`).
 `linux.firewall.show` reads the rules as root. When the login is not root,
@@ -222,6 +223,34 @@ allow-list**: `LINUX_READ_ROOTS` plus `/srv`, `/mnt`, `/media`, `/data`,
 `:`; `/` is refused and a wrong entry raises an error). The key and
 password deny list of `file.read` applies too. Overlap with the host
 readiness reads: `linux.fs.usage` is the one `df` read.
+
+### Password expiry of a local user (`linux.user.password_status`)
+
+`linux.user.password_status` answers: how many days are left until a local
+user's password expires? It runs `LC_ALL=C chage -l -- <user>`. `chage -l`
+prints dates and day counts only, never the hash. The op never reads
+`/etc/shadow`; the `shadow*` read deny list stays.
+
+- **Input.** `user` is checked against `^[A-Za-z_][A-Za-z0-9_-]{0,31}$`
+  before any command is built. A space, `;`, `$(`, a quote or a leading `-`
+  is refused with a `ValueError` and never reaches the host.
+- **Who runs it.** When the login of the target is root or the same user,
+  `chage` runs directly, so a host without sudo still answers. Any other login reads through sudo, the same way as
+  `linux.firewall.show` (an empty sudo password when the secret holds none).
+- **Output.** `last_change`, `expires`, `inactive`, `account_expires` are ISO
+  dates, `never`, or (`last_change`, `expires`) `password must be changed`.
+  `min_days`, `max_days`, `warn_days` are numbers. `days_until_expiry` is the
+  number of days from today (UTC) to `expires`: `null` for `never`, `0` when
+  the password must be changed now. `expired` is true when the date has
+  passed (a negative number) or the password must be changed. `must_change`
+  says which of the two.
+- **Errors.** An unknown user (`unknown_user`), a refused sudo
+  (`permission_denied`) and any other failed read (`read_failed`) raise an
+  error. Partial or odd `chage` output also raises. The error text names the
+  user and the kind only, never host output.
+- **Sensor.** Use `$.days_until_expiry` with a `threshold` compare, `lt`,
+  `degraded: 14`, `critical: 3`. A `never` password gives `null`, which the
+  sensor reads as unknown.
 
 ### DNS lookup on the host (`linux.dns.lookup`)
 
@@ -683,6 +712,7 @@ it in its own body, where the approver reads it.
   confinement primitives.
 - Per-domain op modules: `ops_file.py` (file.read / log.tail),
   `ops_host.py` (service.status / sysctl.read / dns.lookup),
+  `ops_user.py` (user.password_status),
   `ops_firewall.py` (firewall.show), `ops_storage.py` (mount.list) — each
   ships its handler, command builder, output parser, and `LinuxOp` rows.
 - `ops_firewall_rollback.py` — the timed load of `firewall.load` and the

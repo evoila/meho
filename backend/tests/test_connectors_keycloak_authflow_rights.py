@@ -3,8 +3,9 @@
 
 """The login flow ops check the rights of the target's account before they wait.
 
-``keycloak.authflow.ensure_approval_flow`` and
-``keycloak.authflow.ensure_passkey_code_skip`` run through the real dispatch
+``keycloak.authflow.ensure_approval_flow``,
+``keycloak.authflow.ensure_passkey_code_skip`` and
+``keycloak.authflow.ensure_approval_touch`` run through the real dispatch
 stack against a fake Keycloak (respx). No running Keycloak and no Vault.
 
 What is proven, for each op:
@@ -21,7 +22,9 @@ What is proven, for each op:
 * the admin token never reaches the card or the result;
 * the card and the check of one request share one read of the roles;
 * after a refusal, MEHO drops the admin token it keeps;
-* a preview that does not talk to Keycloak says the check runs at the call.
+* a preview that does not talk to Keycloak says the check runs at the call;
+* a 403 at the client lookup names the roles that let an account find a client;
+* after a refusal, the role is given and the next call waits for approval.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import func, select
@@ -66,8 +70,15 @@ from meho_backplane.targets.resolver import resolve_target
 
 _FLOW_OP = "keycloak.authflow.ensure_approval_flow"
 _PASSKEY_OP = "keycloak.authflow.ensure_passkey_code_skip"
-_ROLES = {_FLOW_OP: ["manage-realm", "manage-clients"], _PASSKEY_OP: ["manage-realm"]}
-_OPS = [_FLOW_OP, _PASSKEY_OP]
+_TOUCH_OP = "keycloak.authflow.ensure_approval_touch"
+_ROLES = {
+    _FLOW_OP: ["manage-realm", "manage-clients"],
+    _PASSKEY_OP: ["manage-realm"],
+    _TOUCH_OP: ["manage-realm", "manage-clients"],
+}
+_OPS = [_FLOW_OP, _PASSKEY_OP, _TOUCH_OP]
+#: The ops that find a client first and bind a flow to it.
+_CLIENT_OPS = [_FLOW_OP, _TOUCH_OP]
 _CONNECTOR_ID = "keycloak-admin-26.x"
 _TARGET_NAME = "kc-rights-test"
 _KC_HOST = "keycloak-rights.test.invalid"
@@ -239,12 +250,15 @@ async def test_account_without_manage_realm_is_refused_before_any_approval_reque
     assert kc._admin_tokens == {}
 
 
-async def test_flow_op_without_manage_clients_still_waits(kc: KeycloakConnector) -> None:
+@pytest.mark.parametrize("op_id", _CLIENT_OPS)
+async def test_client_op_without_manage_clients_still_waits(
+    kc: KeycloakConnector, op_id: str
+) -> None:
     # A Keycloak permission to manage only the one client can replace
     # manage-clients, and the token does not show it. So no refusal.
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         admin = _mount(mock, _token_with(["manage-realm", "view-clients"]))
-        result = await _dispatch(_FLOW_OP)
+        result = await _dispatch(op_id)
 
     assert result["status"] == "awaiting_approval", result
     assert admin.call_count == 0
@@ -369,6 +383,20 @@ async def test_account_with_the_roles_waits_for_approval(kc: KeycloakConnector, 
     assert token not in json.dumps(effect)
 
 
+async def test_touch_op_card_names_the_client(kc: KeycloakConnector) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount(mock, _token_with(["manage-realm", "manage-clients"]))
+        result = await _dispatch(_TOUCH_OP)
+    card = (await _effect(result))["preview"]
+    assert card["client_id"] == "meho-web"
+    assert card["new_flow"] == "meho approval touch"
+    assert card["client_lookup_needs_one_of"] == [
+        "query-clients",
+        "view-clients",
+        "manage-clients",
+    ]
+
+
 async def test_flow_op_card_names_the_client(kc: KeycloakConnector) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount(mock, _token_with(["manage-realm", "manage-clients"]))
@@ -415,6 +443,60 @@ async def test_preview_says_the_check_runs_at_the_call(kc: KeycloakConnector, op
     assert card["rights_check"] == RIGHTS_CHECKED_AT_CALL
     assert card["roles_needed"] == _ROLES[op_id]
     assert sign_in.call_count == 0
+
+
+@pytest.mark.parametrize("op_id", _CLIENT_OPS)
+async def test_403_at_the_client_lookup_names_the_lookup_roles(
+    kc: KeycloakConnector, op_id: str
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        admin = _mount(mock, _token_with(["manage-realm", "manage-clients"]))
+        result = await _dispatch(op_id, approved=True)
+
+    assert admin.call_count == 1
+    assert admin.calls.last.request.url.path == f"/admin/realms/{_REALM}/clients"
+    extras = result["extras"]
+    assert extras["exception_class"] == "KeycloakMissingRightsError"
+    assert "to find the client" in extras["exception_message"]
+    assert "Nothing was changed." in extras["exception_message"]
+    remediation = extras["remediation"]
+    assert remediation.startswith("Keycloak refused (HTTP 403) to find the client")
+    assert "one of the roles query-clients, view-clients, manage-clients" in remediation
+    assert "Nothing was changed." in remediation
+    assert "try again after that" in remediation
+    assert kc._admin_tokens == {}
+
+
+@pytest.mark.parametrize("op_id", _OPS)
+async def test_refused_then_role_given_then_the_call_waits(
+    kc: KeycloakConnector, op_id: str
+) -> None:
+    tokens = iter(
+        [
+            _token_with(["view-realm", "manage-clients"]),
+            _token_with(["view-realm", "manage-realm", "manage-clients"]),
+        ]
+    )
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        sign_in = mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").mock(
+            side_effect=lambda _: httpx.Response(
+                200, json={"access_token": next(tokens), "expires_in": 300}
+            )
+        )
+        admin = mock.route(path__startswith="/admin/").respond(403)
+        refused = await _dispatch(op_id)
+        # A person gives the account manage-realm in Keycloak; MEHO signs in again.
+        waits = await _dispatch(op_id)
+
+    assert refused["status"] == "denied", refused
+    assert "manage-realm" in refused["extras"]["reason"]
+    assert waits["status"] == "awaiting_approval", waits
+    assert sign_in.call_count == 2
+    assert admin.call_count == 0
+    assert await _approval_count() == 1
+    preflight = (await _effect(waits))["permission_preflight"]
+    assert preflight["will_be_denied"] is False
+    assert preflight["granted"] == sorted(_ROLES[op_id])
 
 
 async def test_read_account_rights_never_raises(

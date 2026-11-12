@@ -3,11 +3,10 @@
 
 """The login flow ops check the rights of the target's account before they wait.
 
-The ``keycloak.authflow.ensure_*`` ops change login flows. Keycloak lets an
-account do that only with the realm-management role ``manage-realm``. An
-account without it passes the preview, a person approves, and the run fails
-with HTTP 403 at its first write. So each of these ops registers, with
-:func:`register_rights_check`:
+The ``keycloak.authflow.ensure_*`` ops change login flows. A change of a
+login flow needs the realm-management role ``manage-realm``. MEHO checks
+the roles of the target's account before the call waits for approval. Each
+of these ops registers, with :func:`register_rights_check`:
 
 * a check before the wait (``register_permission_preflight``). It reads the
   roles of the target's account. When a role the run needs is missing, it
@@ -75,10 +74,12 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
 
 __all__ = [
+    "CLIENT_LOOKUP_ROLES",
     "NO_RIGHTS_CHECK",
     "RIGHTS_CHECKED_AT_CALL",
     "AccountRights",
     "KeycloakMissingRightsError",
+    "find_client_uuid",
     "missing_rights_error",
     "names_missing_rights",
     "read_account_rights",
@@ -97,6 +98,9 @@ _TOKEN_DELAY: Final[str] = (
     "Keycloak can keep the old roles in MEHO's sign-in token for a few minutes; "
     "try again after that."
 )
+
+#: An op that finds a client first: Keycloak lets any one of these roles do that.
+CLIENT_LOOKUP_ROLES: Final[tuple[str, ...]] = ("query-clients", "view-clients", "manage-clients")
 
 _MASTER_REALM: Final[str] = "master"
 _REALM_MANAGEMENT: Final[str] = "realm-management"
@@ -412,3 +416,43 @@ def names_missing_rights(op_id: str, roles: tuple[str, ...]) -> Callable[[Handle
         return run
 
     return wrap
+
+
+async def find_client_uuid(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    realm_segment: str,
+    client_id: str,
+    *,
+    op_id: str,
+    roles: tuple[str, ...],
+) -> str | None:
+    """Find the client of a login flow op; a 403 names the roles of the lookup.
+
+    The lookup is the op's first request, so nothing was changed yet.
+    """
+    try:
+        return await connector._find_client_uuid(
+            target, realm_segment, client_id, operator=operator
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            raise
+        lookup = ", ".join(CLIENT_LOOKUP_ROLES)
+        raise await missing_rights_error(
+            connector,
+            operator,
+            target,
+            exc,
+            op_id=op_id,
+            roles=roles,
+            message=(
+                f"{op_id} stopped: Keycloak refused (HTTP 403) to find the client "
+                f"{client_id!r}. Nothing was changed. See extras.remediation."
+            ),
+            done=(
+                f"Keycloak refused (HTTP 403) to find the client {client_id!r}; that needs "
+                f"one of the roles {lookup}. Nothing was changed."
+            ),
+        ) from exc

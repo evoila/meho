@@ -895,20 +895,22 @@ like an empty list.
 
 ### Rights of the login flow ops
 
-Keycloak lets an account change login flows only with the role
-`manage-realm` of the realm's admin client. Without the right role, a run
-fails with HTTP 403 at its first write, after a person approved it. So each
-`keycloak.authflow.ensure_*` op checks the account first
+A change of a login flow needs the role `manage-realm` of the realm's
+admin client. Each `keycloak.authflow.ensure_*` op checks the roles of the
+target's account before the call waits for approval
 (`ops_authflow_rights.py`):
 
 | op_id | roles the run needs |
 |---|---|
 | `keycloak.authflow.ensure_approval_flow` | `manage-realm` (the flow), `manage-clients` (the client binding) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `manage-realm` (the flow copy and the realm's browser flow) |
+| `keycloak.authflow.ensure_approval_touch` | `manage-realm` (the flow and the realm's level map), `manage-clients` (the client's `amr` mapper and the client binding) |
 
-`ensure_approval_flow` also finds the client first. Keycloak lets any one
-of `query-clients`, `view-clients` or `manage-clients` do that. The card
-lists them as `client_lookup_needs_one_of`.
+`ensure_approval_flow` and `ensure_approval_touch` also find the client
+first. Keycloak lets any one of `query-clients`, `view-clients` or
+`manage-clients` do that. The card lists them as
+`client_lookup_needs_one_of`. A 403 at this lookup names these roles in
+`extras.remediation` and says that nothing was changed.
 
 The admin client is `realm-management` when the account signs in to the
 managed realm, and `<realm>-realm` when it signs in to `master`. The admin
@@ -935,22 +937,29 @@ request share one read, so a wrong password makes one failed sign-in.
   lightweight access token, or the account signs in to a third realm): the
   call still waits for approval. The card says "MEHO could not check the
   rights of the target's account".
-- **A 403 at the run:** the op stops with `KeycloakMissingRightsError`
-  (`http_status` 403). `extras.remediation` names the roles the op needs,
-  the admin client and the account, and the missing roles when they could
-  be read.
+- **A 403 at the run:** the op stops with `KeycloakMissingRightsError`.
+  The result has `error_code` `connector_error` (not `connector_http_403`),
+  `http_status` 403 and `exception_class` `KeycloakMissingRightsError`.
+  `extras.remediation` names the roles the op needs, the admin client and
+  the account, and the missing roles when they could be read.
 - **A 403 when `ensure_approval_flow` binds the client** (the account has
   `manage-realm` but may not change the client): the run stops half-way.
   The error says what the run changed: the flow alias, its id and
   `flow_created`. The flow stays in the realm; a second run after the fix
   finds it and only binds it.
+- **A 403 at a step of `ensure_approval_touch`** after the flow exists (the
+  realm's level map, the client's `amr` mapper, the company login default,
+  the client binding): the run stops half-way. The error names the refused
+  step. `extras.remediation` also says what the run changed before: the
+  flow (alias, id, `flow_created`), the level map and the mapper. These
+  changes stay; a second run after the fix keeps them.
 
 After a refusal (before the wait, or a 403 at the run), MEHO drops the
 admin token it keeps, so the next call signs in again. The next step also
 says that Keycloak can keep the old roles in MEHO's sign-in token for a few
 minutes.
 
-The approval card of both ops lists the roles (`roles_needed`) and the
+The approval card of the three ops lists the roles (`roles_needed`) and the
 result of the check (`rights_check`). A preview (`preview_operation`) does
 not talk to Keycloak; its card says "MEHO checks the rights of the target's
 account when the call is made."
@@ -1138,7 +1147,7 @@ use:
 | `keycloak.user.check_login` | `{resource, username, realm, client_id, password_source, password_secret_ref[, password_secret_mount, password_secret_key]}` (registered in `ops_login_check.py`) |
 | `keycloak.authflow.ensure_approval_flow` | `{resource, realm, flow, client_id, client_lookup_needs_one_of, roles_needed, rights_check}` (registered in `ops_authflow.py`) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back, roles_needed, rights_check}` (registered in `ops_authflow_passkey.py`) |
-| `keycloak.authflow.ensure_approval_touch` | `{resource, realm, client_id, new_flow, affects, way_back}` (registered in `ops_authflow_touch.py`) |
+| `keycloak.authflow.ensure_approval_touch` | `{resource, realm, client_id, new_flow, affects, way_back, client_lookup_needs_one_of, roles_needed, rights_check}` (registered in `ops_authflow_touch.py`) |
 | `keycloak.realm.update` | `{resource, realm, representation[, smtp_password_source, smtp_password_secret_ref]}` (registered in `ops_write_realm_smtp.py`) |
 
 The group builders surface `attribute_keys` (which attributes change,

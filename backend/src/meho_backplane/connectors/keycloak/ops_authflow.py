@@ -31,6 +31,9 @@ What the op does, on the target's managed realm:
    When Keycloak refuses this with HTTP 403, the error says what the run
    changed before: the flow alias, its id and ``flow_created``.
 
+A 403 at the client lookup names the roles that let an account find a
+client (``query-clients``, ``view-clients`` or ``manage-clients``).
+
 Safe to run twice: a second run finds the flow and the binding and writes
 nothing. Risk level ``caution`` with approval: the op changes how people sign
 in to approve.
@@ -52,6 +55,8 @@ from meho_backplane.connectors.keycloak._paths import (
     fill_path,
 )
 from meho_backplane.connectors.keycloak.ops_authflow_rights import (
+    CLIENT_LOOKUP_ROLES,
+    find_client_uuid,
     missing_rights_error,
     names_missing_rights,
     register_rights_check,
@@ -93,8 +98,6 @@ _CODE_FLOW_DESCRIPTION = "Asks for the one-time code when the person has set one
 _ROLES = ("manage-realm", "manage-clients")
 #: A Keycloak permission on the one client can replace ``manage-clients``.
 _PER_CLIENT = ("manage-clients",)
-#: The run finds the client first; Keycloak lets any one of these roles do that.
-_CLIENT_LOOKUP_ROLES = ("query-clients", "view-clients", "manage-clients")
 
 
 @dataclass(frozen=True)
@@ -357,7 +360,15 @@ async def keycloak_authflow_ensure_approval_flow(
     realm = resolve_realm_config(target).managed_realm
     realm_segment = quote_segment(realm)
     client_id = str(params.get("client_id") or _DEFAULT_CLIENT_ID).strip()
-    client_uuid = await self._find_client_uuid(target, realm_segment, client_id, operator=operator)
+    client_uuid = await find_client_uuid(
+        self,
+        operator,
+        target,
+        realm_segment,
+        client_id,
+        op_id=ENSURE_APPROVAL_FLOW_OP_ID,
+        roles=_ROLES,
+    )
     if client_uuid is None:
         raise KeycloakApprovalFlowError(
             "client_not_found", f"no client {client_id!r} in realm {realm!r}; nothing was changed"
@@ -570,7 +581,7 @@ async def _approval_flow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "realm": realm,
         "flow": APPROVAL_FLOW_ALIAS,
         "client_id": str(ctx.params.get("client_id") or _DEFAULT_CLIENT_ID).strip(),
-        "client_lookup_needs_one_of": list(_CLIENT_LOOKUP_ROLES),
+        "client_lookup_needs_one_of": list(CLIENT_LOOKUP_ROLES),
     }
 
 

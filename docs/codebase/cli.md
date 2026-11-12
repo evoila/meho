@@ -1116,6 +1116,9 @@ that header from one place, so every verb gets it without its own flag.
   CLI trims it, so a trailing line break is refused too. A bad value
   stops the command before any request leaves the CLI. A good value
   goes on the command context (`api.WithWorkRef`).
+- `meho operation call` has its own `--work-ref` flag, which goes into
+  the request body. It is checked and trimmed the same way, so
+  `--work-ref " CHG1 "` stores `CHG1`, like the global flag.
 - The header carries the text as UTF-8. The backplane reads it as UTF-8
   (`decode_work_ref_header` in `operations/_audit.py`), so a non-ASCII
   ticket id such as `Änderung-7` lands on the audit row unchanged.

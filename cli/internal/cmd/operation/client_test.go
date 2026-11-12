@@ -799,6 +799,29 @@ func TestRunCallForwardsNonGitHubWorkRef(t *testing.T) {
 	}
 }
 
+// TestRunCallTrimsWorkRef checks that --work-ref " CHG1 " is sent as
+// "CHG1", the same id the global flag and MEHO_WORK_REF send.
+func TestRunCallTrimsWorkRef(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{Status: "ok", OpID: "vault.kv.read", DurationMs: 1})
+	f := &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	}
+	withFakeClient(t, f)
+
+	cmd := newCallCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--work-ref", " CHG1 ", "--backplane", "https://x"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if f.lastCallBody == nil || f.lastCallBody.WorkRef == nil || *f.lastCallBody.WorkRef != "CHG1" {
+		t.Fatalf("work_ref not trimmed; got %+v", f.lastCallBody)
+	}
+}
+
 // TestRunCallRejectsMalformedWorkRefBeforeRequest checks that an empty
 // or blank value, or a value with a line break, fails locally before
 // any request. An explicit `--work-ref ""` is refused, not taken as

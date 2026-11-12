@@ -1165,39 +1165,36 @@ def test_bound_work_ref_binds_text_as_it_is(ticket: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ticket", ["Zadanie-Łódź", "Задача-12"])
-async def test_console_run_binds_ticket_id_unchanged(
-    monkeypatch: pytest.MonkeyPatch, ticket: str
-) -> None:
-    """The console run passes its form value as text; the run sees it unchanged.
+@pytest.mark.parametrize("ticket", ["Zadanie-Łódź", "Задача-12", "変更-7"])
+async def test_console_run_stores_ticket_id_unchanged(client: TestClient, ticket: str) -> None:
+    """A console run with a ticket id outside latin-1 runs and stores that id.
 
-    The console stream goes ``_bridge_generator`` -> ``_events_generator``
-    -> ``_bound_work_ref``. A ticket id with letters outside latin-1 must
-    not fail there.
+    The console takes the id from a form field as normal text. Its stream
+    goes ``_bridge_generator`` -> ``_events_generator`` ->
+    ``_bound_work_ref``. The run must start, and its row must carry
+    exactly the typed text.
     """
-    from meho_backplane.agent.run import AgentRunEvent, AgentRunEventKind
-    from meho_backplane.api.v1 import agent_runs
+    from meho_backplane.auth.operator import Operator
     from meho_backplane.operations._audit import work_ref_var
     from meho_backplane.ui.routes.agents.run import _bridge_generator
 
-    seen: list[str | None] = []
-    run_id = UUID(int=7)
-
-    class _FakeInvoker:
-        async def stream_events(self, operator: Any, name: str, inputs: str) -> Any:
-            seen.append(work_ref_var.get())
-            yield run_id, AgentRunEvent(kind=AgentRunEventKind.FINAL, data={"text": "ok"})
-
-    monkeypatch.setattr(agent_runs, "get_agent_invoker", lambda: _FakeInvoker())
+    await _seed_definition()
+    _install_invoker("console answer")
+    operator = Operator(
+        sub="op-user",
+        name="Console Operator",
+        email=None,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.OPERATOR,
+    )
     frames = [
         frame
-        async for frame in _bridge_generator(
-            object(),  # type: ignore[arg-type]
-            name="triage",
-            input_="go",
-            work_ref=ticket,
-        )
+        async for frame in _bridge_generator(operator, name="triage", input_="go", work_ref=ticket)
     ]
-    assert seen == [ticket]
-    assert len(frames) == 1
+    assert any(frame.startswith("event: final") for frame in frames), frames
     assert work_ref_var.get() is None
+
+    async with get_sessionmaker()() as session:
+        stored = (await session.execute(select(AgentRun.work_ref))).scalars().all()
+    assert stored == [ticket]

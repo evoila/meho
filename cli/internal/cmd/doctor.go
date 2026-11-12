@@ -153,7 +153,8 @@ func newDoctorCmd() *cobra.Command {
 //
 // The doctor always checks the default profile, also under --profile
 // or MEHO_PROFILE: its offline credential check reads the default
-// slot, so the online checks must use the same login.
+// slot, so the online checks must use the same login. Its login hints
+// say --profile default when MEHO_PROFILE names another profile.
 func runDoctor(cmd *cobra.Command, opts doctorOptions, deps doctorDeps) *doctorReport {
 	ctx := auth.WithProfile(cmd.Context(), auth.DefaultProfile)
 	report := &doctorReport{}
@@ -169,6 +170,7 @@ func runDoctor(cmd *cobra.Command, opts doctorOptions, deps doctorDeps) *doctorR
 		runAuthenticatedChecks(ctx, report, backplaneURL, deps)
 	}
 	runServerChecks(ctx, report, opts, deps)
+	defaultLoginHints(report)
 	return report
 }
 

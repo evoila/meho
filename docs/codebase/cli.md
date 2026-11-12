@@ -724,8 +724,11 @@ implementations. `NewTokenStore` picks the backend at runtime:
   `applyProfile` also calls `output.SetLoginProfile`, and
   `RenderError` turns each `meho login` in an error hint into
   `meho --profile <name> login`, so following the hint fills the right
-  profile. `meho doctor` always checks the default profile, in both
-  its offline and its online layer.
+  profile. For the default profile the hint stays `meho login`, except
+  when `MEHO_PROFILE` names another profile: then a plain `meho login`
+  would fill that one, so the hint says `meho --profile default login`.
+  `meho doctor` always checks the default profile, in both its offline
+  and its online layer, and its hints follow the same rule.
 
 The escape hatch (`MEHO_KEYRING_DISABLE=1`) is documented for
 shared dev hosts where the local keyring belongs to a different

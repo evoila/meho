@@ -245,6 +245,102 @@ func TestLoginHintForTheDefaultProfileIsUnchanged(t *testing.T) {
 	}
 }
 
+// --profile default under MEHO_PROFILE=approver: a plain `meho login`
+// would fill the approver login, so the hint must name the default
+// profile.
+func TestLoginHintNamesTheDefaultProfileOverEnv(t *testing.T) {
+	cases := []struct {
+		name    string
+		expired bool
+		json    bool
+	}{
+		{"missing default login", false, false},
+		{"expired default login", true, false},
+		{"expired default login, json", true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := setupProfiles(t)
+			store, err := auth.NewFileStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			svc, user := auth.KeyForProfile(srv.URL, auth.DefaultProfile)
+			if tc.expired {
+				err = store.Save(svc, user, auth.StoredToken{BackplaneURL: srv.URL, AccessToken: "tok-stale", TokenType: "Bearer", Expiry: time.Now().Add(-time.Hour)})
+			} else {
+				err = store.Delete(svc, user)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(auth.ProfileEnv, "approver")
+			args := []string{"--profile", "default", "status"}
+			if tc.json {
+				args = append(args, "--json")
+			}
+			_, stderr, err := runRootOut(t, args...)
+			if err == nil {
+				t.Fatal("want an auth error")
+			}
+			if !strings.Contains(stderr, "meho --profile default login") {
+				t.Errorf("stderr = %q; want a hint with --profile default", stderr)
+			}
+			if strings.Contains(stderr, "`meho login") {
+				t.Errorf("the hint must not be a plain login (MEHO_PROFILE would pick approver); stderr = %q", stderr)
+			}
+		})
+	}
+}
+
+// With MEHO_PROFILE=default a plain `meho login` already fills the
+// default login, so the hint stays as it was.
+func TestLoginHintUnchangedWhenEnvNamesTheDefault(t *testing.T) {
+	withTempXDG(t)
+	t.Setenv(auth.ProfileEnv, "default")
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	_, stderr, err := runRootOut(t, "--profile", "default", "status", "--backplane", srv.URL)
+	if err == nil {
+		t.Fatal("want an auth error")
+	}
+	if !strings.Contains(stderr, "run `meho login "+srv.URL+"`") {
+		t.Errorf("stderr = %q; want the plain login hint", stderr)
+	}
+}
+
+// The doctor checks the default login; under MEHO_PROFILE=approver its
+// hint names the default profile.
+func TestDoctorLoginHintNamesTheDefaultProfileUnderMEHOPROFILE(t *testing.T) {
+	withTempXDG(t)
+	t.Setenv(auth.ProfileEnv, "approver")
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	deps := offlineDeps(t, t.TempDir())
+	deps.stat = func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist }
+	r := runDoctor(cmd, doctorOptions{noNetwork: true}, deps)
+	found := false
+	for _, c := range r.Checks {
+		if strings.Contains(c.Hint, "`meho login") || strings.Contains(c.Detail, "`meho login") {
+			t.Errorf("a doctor hint is a plain login: %+v", c)
+		}
+		if strings.Contains(c.Hint, "meho --profile default login") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want a hint with --profile default; checks: %+v", r.Checks)
+	}
+
+	t.Setenv(auth.ProfileEnv, "")
+	r = runDoctor(cmd, doctorOptions{noNetwork: true}, deps)
+	for _, c := range r.Checks {
+		if strings.Contains(c.Hint, "--profile") {
+			t.Errorf("without MEHO_PROFILE the hint must stay plain: %+v", c)
+		}
+	}
+}
+
 // The doctor checks the default profile in both layers, also when
 // MEHO_PROFILE names a profile with no login.
 func TestDoctorChecksTheDefaultProfileUnderMEHOPROFILE(t *testing.T) {

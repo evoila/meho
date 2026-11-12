@@ -4972,7 +4972,7 @@ meho service-principals read-scope show <principal-sub> [flags]
 
 ## `meho sessions`
 
-List, show and delete stored agent sessions
+Upload, list, show and delete stored agent sessions
 
 ```
 meho sessions
@@ -5004,6 +5004,19 @@ meho sessions list [flags]
 - `--limit` — sessions per page (1 to 200)
 - `--project` — only sessions of this project
 - `--state` — only sessions in this state: open, ended or unfinished
+
+### `meho sessions push`
+
+Upload the agent sessions in your local outbox (POST /api/v1/sessions)
+
+```
+meho sessions push [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by `meho login`)
+- `--dry-run` — show what would be sent, and send nothing
+- `--json` — print the result as JSON
+- `--outbox` — outbox folder (defaults to the setting, then <meho config folder>/session-outbox)
 
 ### `meho sessions show`
 

@@ -24,8 +24,11 @@ What is true with this feature:
 S3-compatible object storage is a file store with the Amazon S3 interface,
 for example MinIO. The customer brings its own.
 
-Not in this part: the laptop uploader (`meho sessions push`), hosted agent
-runs, the link from audit rows to a session, and a review page.
+- A person uploads the sessions of a laptop with `meho sessions push`
+  See "Laptop uploader" below.
+
+Not in this part: hosted agent runs, the link from audit rows to a
+session, and a review page.
 
 The code is in `backend/src/meho_backplane/session_store/` and
 `backend/src/meho_backplane/api/v1/sessions.py`. The CLI is in
@@ -237,6 +240,47 @@ When the store fails, the rows stay and the next run tries again. One run
 removes at most 500 sessions. The job does nothing while the store is not
 configured.
 
+## Laptop uploader (`meho sessions push`)
+
+The code is in `cli/internal/cmd/sessions/push.go`, `outbox.go` and
+`secretcheck.go`. The operator guide `docs-site/guides/agent-sessions.md`
+shows the settings, the outbox layout and a Claude Code hook that fills
+the outbox.
+
+1. **Read the outbox.** One folder per session:
+   `<session-id>/<session-id>.jsonl` and the folder `<session-id>/`.
+   The empty file `meho-ended` says the session ended; without it, the
+   state is `open`. The empty file `meho-send` is a mark by hand.
+2. **Allowlist.** The project folder is the first `cwd` in the
+   transcript. A session is sent only when that folder is in `projects`
+   of `sessions.json` (exact match, no sub-folders), or when it has the
+   hand mark. The project name sent to MEHO is the folder's last part.
+3. **Whole lines.** While a session is open, each file is cut after its
+   last newline, like the server does.
+4. **Receipt.** `meho-receipt.json` in the session folder holds, per
+   file, the bytes sent (`offset`) and their SHA-256 hash, the state and
+   MEHO's answer. The same files and state as the receipt: nothing is
+   sent. A failed upload writes no receipt, so the next run tries again.
+   The receipt is written to a temporary file and renamed.
+5. **Secret check** (`secretcheck.go`). It follows the server's check:
+   known secrets are replaced, JSON lines are parsed and each string is
+   checked, and a private key over many lines becomes one marker. When
+   the check is not sure (not UTF-8, a secret-like name with a value, a
+   private key with no `END` line), the session is held back and `push`
+   names the file and the reason, never the value. Go's `regexp` has no
+   look-around, so a leading character is matched and kept instead. It
+   also finds GitHub tokens and AWS access keys.
+6. **Upload.** All checked files go in one gzip tar archive to `POST
+   /api/v1/sessions`, with the person's `meho login` token (refreshed on
+   a `401`).
+
+The laptop always sends the whole (checked) files, not only the new
+tail. The server compares them with what it stored and keeps only the
+new tail. This works because the check works line by line: a line's
+result never depends on a later line, so the checked file of a growing
+session grows only at the end
+(`TestCheckGrowsOnlyAtTheEnd` in `secretcheck_test.go`).
+
 ## Dependencies
 
 - `boto3` / `botocore` for the object storage. Path-style addressing and
@@ -260,7 +304,9 @@ configured.
 - Code: `backend/src/meho_backplane/session_store/`,
   `backend/src/meho_backplane/api/v1/sessions.py`,
   `cli/internal/cmd/sessions/`.
-- Tests: `backend/tests/test_session_store_api.py`,
+- Tests: `cli/internal/cmd/sessions/push_test.go`,
+  `cli/internal/cmd/sessions/secretcheck_test.go`,
+  `backend/tests/test_session_store_api.py`,
   `backend/tests/test_session_store_units.py`,
   `backend/tests/test_session_store_worker.py`,
   `backend/tests/migrations/test_migration_0152_create_agent_session_store.py`.

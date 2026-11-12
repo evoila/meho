@@ -4,8 +4,8 @@
 """Pause a Sensor whose target keeps refusing the login.
 
 When the credential of a target is no longer valid, every evaluation starts
-a new login that fails. So the runner counts the evaluations in a row that ended with a refused login
-(``connector_auth_failed``). At the limit
+a new login that fails. So the runner counts the evaluations in a row that
+ended with a refused login (``connector_auth_failed``). At the limit
 (``SENSOR_AUTH_FAILURE_PARK_THRESHOLD``, default 3) it pauses the Sensor
 with ``status_reason='auth_failed:ConnectorAuthError'`` and stops calling the
 target.

@@ -1170,13 +1170,13 @@ async def test_console_run_stores_ticket_id_unchanged(client: TestClient, ticket
     """A console run with a ticket id outside latin-1 runs and stores that id.
 
     The console takes the id from a form field as normal text. Its stream
-    goes ``_bridge_generator`` -> ``_events_generator`` ->
-    ``_bound_work_ref``. The run must start, and its row must carry
+    starts the run with ``_start_run``, which binds the id with
+    ``_bound_work_ref``. The run must finish, and its row must carry
     exactly the typed text.
     """
     from meho_backplane.auth.operator import Operator
     from meho_backplane.operations._audit import work_ref_var
-    from meho_backplane.ui.routes.agents.run import _bridge_generator
+    from meho_backplane.ui.routes.agents.run import _start_run
 
     await _seed_definition()
     _install_invoker("console answer")
@@ -1188,13 +1188,17 @@ async def test_console_run_stores_ticket_id_unchanged(client: TestClient, ticket
         tenant_id=_TENANT_A,
         tenant_role=TenantRole.OPERATOR,
     )
-    frames = [
-        frame
-        async for frame in _bridge_generator(operator, name="triage", input_="go", work_ref=ticket)
-    ]
-    assert any(frame.startswith("event: final") for frame in frames), frames
+    run_id = await _start_run(operator, name="triage", input_="go", work_ref=ticket)
     assert work_ref_var.get() is None
 
-    async with get_sessionmaker()() as session:
-        stored = (await session.execute(select(AgentRun.work_ref))).scalars().all()
-    assert stored == [ticket]
+    # Wait for the background run to end, so no task is left running.
+    row: AgentRun | None = None
+    for _ in range(100):
+        async with get_sessionmaker()() as session:
+            row = await session.get(AgentRun, run_id)
+        if row is not None and row.status == "succeeded":
+            break
+        await asyncio.sleep(0.02)
+    assert row is not None
+    assert row.status == "succeeded"
+    assert row.work_ref == ticket

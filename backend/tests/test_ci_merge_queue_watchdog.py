@@ -298,3 +298,8 @@ def test_fan_in_waiting_on_needs_is_seen_on_the_second_poll(tmp_path: Path) -> N
     assert not outcome.cancelled, outcome.output
     assert "one more poll" in outcome.output
     assert "1 required job(s) still queued or running" in outcome.output
+
+
+def test_install_step_prints_a_warning_when_the_install_fails() -> None:
+    (step,) = [s for s in _watchdog_steps() if s.get("name") == _INSTALL_STEP]
+    assert "::warning::" in step["run"]

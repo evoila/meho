@@ -2810,7 +2810,11 @@ A job must not fail because a download failed once. The rules:
   warm-up) with the same three tries.
 - `.github/actions/setup-kind` installs kind this way and starts the
   cluster. It replaces `helm/kind-action`, which downloaded kind on every
-  run.
+  run. It also installs kubectl (`azure/setup-kubectl`), yq (pinned in
+  `tool-versions.env`), and jq and openssl when they are missing. The kind
+  jobs need them, and the image of our own runner pools does not have
+  them, so the merge-queue runs on `meho-runners-ci-heavy-queue` would
+  fail without them.
 - Release-time workflows that cannot rely on the script (they check out a
   tag) use `curl --retry 3 --retry-all-errors`.
 - `scripts/tests/test_ci_tool_scripts.py` tests these scripts with fake

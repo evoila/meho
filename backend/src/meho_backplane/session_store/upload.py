@@ -41,6 +41,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.session_store.audit import add_audit_row, write_audit_row
 from meho_backplane.session_store.config import SessionStoreConfig
+from meho_backplane.session_store.hosted_runs import HOSTED_RUN_APP
 from meho_backplane.session_store.models import AgentSessionRecord, AgentSessionUpload
 from meho_backplane.session_store.object_store import ObjectStore
 from meho_backplane.session_store.prepare import CheckedArchive, PreparedUpload, prepare_upload
@@ -213,6 +214,8 @@ async def _prepare_or_refuse(
     config: SessionStoreConfig,
 ) -> PreparedUpload:
     try:
+        if record is not None and record.app == HOSTED_RUN_APP:
+            raise SessionConflictError("session_is_a_hosted_run")
         if record is not None and record.uploaded_by_sub != call.operator.sub:
             raise SessionConflictError("session_owned_by_another_person")
         prepared = await run_in_worker(

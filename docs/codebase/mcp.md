@@ -1310,8 +1310,8 @@ session (on top of the Role + Extra-gate columns).
 | `meho_broadcast_overrides_set` | tenant_admin | — | Create a broadcast-detail override rule. |
 | `meho_connector_delete` | tenant_admin | — | Delete a connector's ingested rows / auto-registered shim. |
 | `meho_connector_disable` | tenant_admin | — | Disable every group of a connector (regression roll-back). |
-| `meho_connector_edit_group` | tenant_admin | — | Edit an operation group's `when_to_use` prose or name. |
-| `meho_connector_edit_op` | tenant_admin | — | Edit one operation's per-op overrides. |
+| `meho_connector_edit_group` | tenant_admin | — | Edit an operation group's `when_to_use` prose or name; with `POLICY_CLASSIFICATION` on, ask for its category or labels. |
+| `meho_connector_edit_op` | tenant_admin | — | Edit one operation's per-op overrides; with `POLICY_CLASSIFICATION` on, ask for its category or labels. |
 | `meho_connector_enable` | tenant_admin | — | Enable every group of a connector. |
 | `meho_connector_enable_reads` | tenant_admin | — | Bulk-enable a connector's read-class operations. |
 | `meho_connector_ingest` | tenant_admin | — | Ingest one or more OpenAPI specs into a connector. |

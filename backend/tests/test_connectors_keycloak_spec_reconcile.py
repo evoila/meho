@@ -111,7 +111,6 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_USER_LOGOUT_PATH": ("POST",),
     "_USER_SESSIONS_PATH": ("GET",),
     "_USER_CREDENTIALS_PATH": ("GET",),
-    "_USER_BRUTE_FORCE_PATH": ("GET",),
     "_ROLES_PATH": ("GET",),
     "_ROLE_PATH": ("GET",),
     "_ROLE_USERS_PATH": ("GET",),
@@ -151,6 +150,10 @@ _EXCLUDED_METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_TOKEN_PATH": ("POST",),
     "_LOGOUT_PATH": ("POST",),
     "_SERVERINFO_PATH": ("GET",),
+    # The lock status read. Keycloak serves it (AttackDetectionResource,
+    # ``GET brute-force/users/{userId}``, and the admin console uses it),
+    # but the pinned 26.3 spec lists only the DELETE methods on this path.
+    "_USER_BRUTE_FORCE_PATH": ("GET",),
 }
 
 
@@ -203,7 +206,6 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "DELETE:/admin/realms/{realm}/users/{user-id}",
         "DELETE:/admin/realms/{realm}/users/{user-id}/groups/{groupId}",
         "GET:/admin/realms/{realm}",
-        "GET:/admin/realms/{realm}/attack-detection/brute-force/users/{user-id}",
         "GET:/admin/realms/{realm}/authentication/config/{id}",
         "GET:/admin/realms/{realm}/authentication/flows",
         "GET:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions",
@@ -253,6 +255,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "PUT:/admin/realms/{realm}/users/{user-id}/reset-password",
     ]
     assert sorted(_op_ids(_EXCLUDED_METHODS_BY_CONSTANT)) == [
+        "GET:/admin/realms/{realm}/attack-detection/brute-force/users/{user-id}",
         "GET:/admin/serverinfo",
         "POST:/realms/{realm}/protocol/openid-connect/logout",
         "POST:/realms/{realm}/protocol/openid-connect/token",

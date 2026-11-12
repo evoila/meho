@@ -2548,6 +2548,89 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#start-an-agent-when-a-sensor-or-dashboard-changes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Start an agent when a Sensor or Dashboard changes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Start an agent when a Sensor or Dashboard changes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#step-0-turn-on-the-switch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 0: turn on the switch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-four-choices" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The four choices
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-the-event-says" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the event says
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#one-run-per-cause-budgets-and-the-kill-switch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One run per cause, budgets and the kill switch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#worked-example-a-sensor-starts-my-agent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked example: a Sensor starts my agent
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#run-the-checks-investigator-from-a-trigger" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run the checks investigator from a trigger
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#scheduler-and-the-checks-runner" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3094,6 +3177,89 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#start-an-agent-when-a-sensor-or-dashboard-changes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Start an agent when a Sensor or Dashboard changes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Start an agent when a Sensor or Dashboard changes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#step-0-turn-on-the-switch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 0: turn on the switch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-four-choices" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The four choices
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-the-event-says" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the event says
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#one-run-per-cause-budgets-and-the-kill-switch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One run per cause, budgets and the kill switch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#worked-example-a-sensor-starts-my-agent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked example: a Sensor starts my agent
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#run-the-checks-investigator-from-a-trigger" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run the checks investigator from a trigger
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#scheduler-and-the-checks-runner" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3286,6 +3452,230 @@ deploy-side. The recipe lives in
 the dedicated <code>VAULT_CHECK_RUNNER_ROLE</code> lets you bound exactly what
 that background identity can read.</p>
 </div>
+<h2 id="start-an-agent-when-a-sensor-or-dashboard-changes">Start an agent when a Sensor or Dashboard changes<a class="headerlink" href="#start-an-agent-when-a-sensor-or-dashboard-changes" title="Permanent link">&para;</a></h2>
+<p>A trigger can start an agent when a <a href="../sensors-quickstart/">Sensor</a> or a
+Dashboard changes state. So the simple model is: an agent, plus a trigger.
+The trigger is a schedule, a webhook, or a Sensor or Dashboard change.</p>
+<h3 id="step-0-turn-on-the-switch">Step 0: turn on the switch<a class="headerlink" href="#step-0-turn-on-the-switch" title="Permanent link">&para;</a></h3>
+<p>MEHO publishes these events only when <code>CHECKS_AGENT_EVENTS</code> is <code>true</code>. It is
+off by default. While it is off, a trigger that waits for a Sensor or a
+Dashboard never starts.</p>
+<p>The Helm chart has no value of its own for it. Set it with <code>extraEnv</code> in your
+values file, then upgrade the release:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">extraEnv</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">CHECKS_AGENT_EVENTS</span>
+<span class="w">    </span><span class="nt">value</span><span class="p">:</span><span class="w"> </span><span class="s">"true"</span>
+</code></pre></div>
+<h3 id="the-four-choices">The four choices<a class="headerlink" href="#the-four-choices" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Start when</th>
+<th>CLI flag</th>
+<th>Console ("Start on")</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>One Sensor changes</td>
+<td><code>--on-sensor &lt;name or id&gt;</code></td>
+<td>Start on Sensor, then pick the Sensor</td>
+</tr>
+<tr>
+<td>One Dashboard changes</td>
+<td><code>--on-dashboard &lt;name or id&gt;</code></td>
+<td>Start on Dashboard, then pick the Dashboard</td>
+</tr>
+<tr>
+<td>Any Sensor changes</td>
+<td><code>--on-any-sensor</code></td>
+<td>Start on Sensor, then "Any sensor"</td>
+</tr>
+<tr>
+<td>Any Dashboard changes</td>
+<td><code>--on-any-dashboard</code></td>
+<td>Start on Dashboard, then "Any dashboard"</td>
+</tr>
+</tbody>
+</table>
+<p>Add <code>--only-worse</code> (console: "Only when it gets worse") to start only when the
+state gets worse (for example from green to degraded). Without it, a recovery starts the agent too.</p>
+<p>Use one of these flags with <code>--kind event</code>. Do not use them together with
+<code>--event-filter</code>. <code>meho_scheduler_create</code> (the admin MCP tool) takes the same
+choices. The console form also has a "Custom filter" choice, for people who
+write the filter themselves.</p>
+<p>MEHO stores the Sensor or Dashboard by its id, so a rename does not break the
+trigger. A name that does not exist in your tenant is refused with 422.</p>
+<h3 id="what-the-event-says">What the event says<a class="headerlink" href="#what-the-event-says" title="Permanent link">&para;</a></h3>
+<p>If you write your own <code>--event-filter</code>, these are the fields you can match.
+A Sensor event is <code>check.sensor.changed</code>. A Dashboard event is
+<code>check.dashboard.changed</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>event</code></td>
+<td>The event name, as above.</td>
+</tr>
+<tr>
+<td><code>source</code></td>
+<td><code>{kind, id, name}</code>: whether it is a <code>sensor</code> or a <code>dashboard</code>, and which one.</td>
+</tr>
+<tr>
+<td><code>previous_state</code>, <code>state</code></td>
+<td>The state before and after the change.</td>
+</tr>
+<tr>
+<td><code>worsening</code></td>
+<td><code>true</code> when the state got worse.</td>
+</tr>
+<tr>
+<td><code>severity</code></td>
+<td>Sensor events only: the Sensor's severity.</td>
+</tr>
+<tr>
+<td><code>target</code>, <code>connector_id</code>, <code>op_id</code></td>
+<td>Sensor events only: the target name and the operation the Sensor runs.</td>
+</tr>
+<tr>
+<td><code>cause_group</code></td>
+<td>Dashboard events only: <code>{key, members}</code>, the failing Sensors that share one cause. It is <code>null</code> for a recovery.</td>
+</tr>
+<tr>
+<td><code>known_noise</code></td>
+<td>Dashboard events only: <code>true</code> when an earlier finding said this cause is known noise.</td>
+</tr>
+<tr>
+<td><code>coalesce_key</code></td>
+<td>Names the cause. It is the key for "one run per cause", below.</td>
+</tr>
+</tbody>
+</table>
+<p>An event has no raw results from the Sensor. The agent reads those itself,
+with its own grants.</p>
+<p>An example filter that starts only on a worse Dashboard change that is not
+known noise:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"event"</span><span class="p">:</span><span class="w"> </span><span class="s2">"check.dashboard.changed"</span><span class="p">,</span><span class="w"> </span><span class="nt">"worsening"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">"known_noise"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">}</span>
+</code></pre></div>
+<div class="admonition warning">
+<p class="admonition-title">An empty filter matches every event</p>
+<p>An event trigger with the filter <code>{}</code> matches every event. Once the switch
+is on, it also starts on every Sensor and Dashboard change. Never leave
+the filter empty. Pick one of the <code>--on-*</code> flags, or write a filter with
+at least an <code>event</code> field.</p>
+</div>
+<h3 id="one-run-per-cause-budgets-and-the-kill-switch">One run per cause, budgets and the kill switch<a class="headerlink" href="#one-run-per-cause-budgets-and-the-kill-switch" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>One run per cause.</strong> Each event carries a <code>coalesce_key</code> that names its
+  cause. While a run for that cause is still working (<code>pending</code>, <code>running</code> or
+  <code>awaiting_approval</code>), a new event for the same cause is skipped. When the
+  run is done, the next event starts a new run. So a Sensor that flaps does
+  not start ten agents.</li>
+<li><strong>Budgets.</strong> A run takes the agent's own login. A spend cap on that login
+  (<code>meho agent budget set agent:&lt;name&gt; ...</code>, see
+  <a href="../hosted-agents/">Hosted agents</a>) stops a new run with <code>budget_exceeded</code>
+  when the cap is reached. The agent's <code>--turn-budget</code> limits each run.</li>
+<li>
+<p><strong>Kill switch.</strong> To stop new runs of one agent, run
+  <code>meho agent edit &lt;name&gt; --disabled</code>. To stop only one trigger, cancel it
+  with <code>meho scheduler cancel &lt;trigger_id&gt;</code>. Neither stops a run that has
+  already started. Find those runs and stop each one:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>run-list<span class="w"> </span>--agent-name<span class="w"> </span>&lt;name&gt;<span class="w"> </span>--status<span class="w"> </span>pending
+meho<span class="w"> </span>agent<span class="w"> </span>run-list<span class="w"> </span>--agent-name<span class="w"> </span>&lt;name&gt;<span class="w"> </span>--status<span class="w"> </span>running
+meho<span class="w"> </span>agent<span class="w"> </span>run-list<span class="w"> </span>--agent-name<span class="w"> </span>&lt;name&gt;<span class="w"> </span>--status<span class="w"> </span>awaiting_approval
+meho<span class="w"> </span>agent<span class="w"> </span>run-cancel<span class="w"> </span>&lt;run-id&gt;
+</code></pre></div>
+</li>
+</ul>
+<h3 id="worked-example-a-sensor-starts-my-agent">Worked example: a Sensor starts my agent<a class="headerlink" href="#worked-example-a-sensor-starts-my-agent" title="Permanent link">&para;</a></h3>
+<p>You need the <code>tenant_admin</code> role. The example uses a test system, so you can
+make a Sensor fail on purpose. Names such as <code>lab-rke2</code> and <code>k8s-1.x</code> are only
+examples: use your own target and connector.</p>
+<p><strong>1. Make a Sensor.</strong> It turns non-green when a pod is not running. The full
+explanation is in the <a href="../sensors-quickstart/">Sensors quickstart</a>.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>sensor<span class="w"> </span>create<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>pods-not-running<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--connector-id<span class="w"> </span>k8s-1.x<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--op-id<span class="w"> </span>k8s.pod.list<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--target<span class="w"> </span><span class="s1">'{"name": "lab-rke2"}'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--params<span class="w"> </span><span class="s1">'{"all_namespaces": true, "field_selector": "status.phase!=Running"}'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--assertion<span class="w"> </span><span class="s1">'{"select": {"path": "$.total"},</span>
+<span class="s1">                "compare": {"type": "threshold", "op": "gt", "degraded": 0, "critical": 2}}'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cadence-kind<span class="w"> </span>interval<span class="w"> </span>--interval-seconds<span class="w"> </span><span class="m">60</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--severity<span class="w"> </span>critical
+</code></pre></div>
+<p><strong>2. Make a small agent that can only read.</strong> First give it a login. Then
+create it, and give it two grants: deny everything, then allow the pod list.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>pod-reader
+
+cat<span class="w"> </span>&gt;<span class="w"> </span>pod-reader-toolset.json<span class="w"> </span><span class="s">&lt;&lt;'JSON'</span>
+<span class="s">{</span>
+<span class="s">  "meta_tools": ["list_operation_groups", "search_operations", "call_operation", "result_query"],</span>
+<span class="s">  "connectors": ["k8s-1.x"]</span>
+<span class="s">}</span>
+<span class="s">JSON</span>
+
+meho<span class="w"> </span>agent<span class="w"> </span>create<span class="w"> </span>pod-reader<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--identity-ref<span class="w"> </span>agent:pod-reader<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model-tier<span class="w"> </span>standard<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--turn-budget<span class="w"> </span><span class="m">20</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--system-prompt<span class="w"> </span><span class="s2">"You are pod-reader. You only read. You never change anything. A Sensor started you. Use the connector k8s-1.x. Find the operation with search_operations, then run it with call_operation. If the answer is a link to a stored result, read all rows with result_query. Say in short plain sentences which pods are not running."</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--toolset<span class="w"> </span>@pod-reader-toolset.json
+
+meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:pod-reader<span class="w"> </span>--op<span class="w"> </span><span class="s1">'*'</span><span class="w"> </span>--verdict<span class="w"> </span>deny
+meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:pod-reader<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--op<span class="w"> </span>k8s.pod.list<span class="w"> </span>--target<span class="w"> </span><span class="s1">'*'</span><span class="w"> </span>--verdict<span class="w"> </span>auto-execute
+</code></pre></div>
+<p>Hosted agents are described in <a href="../hosted-agents/">Hosted agents</a>. You do not
+need that page for this example.</p>
+<p><strong>3. Make the trigger.</strong> <code>--agent-definition</code> takes the id of the agent. Read
+it from the <code>id:</code> line of <code>meho agent show pod-reader</code>.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>show<span class="w"> </span>pod-reader<span class="w">        </span><span class="c1"># copy the id: line</span>
+
+meho<span class="w"> </span>scheduler<span class="w"> </span>create<span class="w"> </span>--kind<span class="w"> </span>event<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--agent-definition<span class="w"> </span>&lt;agent-id&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--on-sensor<span class="w"> </span>pods-not-running<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--only-worse
+</code></pre></div>
+<p>If <code>CHECKS_AGENT_EVENTS</code> is still off, the answer carries a notice that the
+trigger will not start until you turn the switch on.</p>
+<p><strong>4. Make the Sensor fail.</strong> Point one deployment at an image that does not
+exist, so a pod gets stuck. Wait for the next Sensor check. The state changes
+from <code>ok</code> to <code>degraded</code>, and MEHO starts the agent.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>sensor<span class="w"> </span>list<span class="w">     </span><span class="c1"># LAST_STATE is now degraded</span>
+</code></pre></div>
+<p><strong>5. Find the run and read its answer.</strong></p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>run-list<span class="w"> </span>--agent-name<span class="w"> </span>pod-reader
+meho<span class="w"> </span>agent<span class="w"> </span>run-status<span class="w"> </span>&lt;run-id&gt;
+</code></pre></div>
+<p><code>run-status</code> shows the <code>status</code>. When the run has <code>succeeded</code>, it shows the
+<code>output</code>: the agent's answer. If the status stays <code>running</code>, the agent may be
+waiting for a person to approve a step: check <code>meho approvals list</code>.</p>
+<p><strong>6. Clean up.</strong> Cancel the trigger with <code>meho scheduler cancel &lt;trigger_id&gt;</code>
+(<code>meho scheduler list</code> shows the id), and fix the pod.</p>
+<h3 id="run-the-checks-investigator-from-a-trigger">Run the checks investigator from a trigger<a class="headerlink" href="#run-the-checks-investigator-from-a-trigger" title="Permanent link">&para;</a></h3>
+<p>The checks investigator is an agent that finds the cause of a worse Dashboard
+and answers with a short finding. MEHO stores the finding and mails it to the
+Dashboard's mail address. You can run it from a normal event trigger.</p>
+<p>The folder
+<a href="https://github.com/evoila/meho/tree/main/examples/checks-investigator"><code>examples/checks-investigator/</code></a>
+has everything: the agent (<code>agent.json</code>), its grants (<code>permissions.json</code>) and
+the trigger (<code>trigger.json</code>). Its README lists the commands. In short:</p>
+<ol>
+<li>Turn on <code>CHECKS_AGENT_EVENTS</code>.</li>
+<li>Register the login <code>agent:checks-investigator</code>, then create the agent and
+   its grants from the files.</li>
+<li>Create the trigger with the filter from <code>trigger.json</code>. It matches
+   <code>check.dashboard.changed</code> events that are worse and are not known noise.</li>
+</ol>
+<p>While an active event trigger for the investigator agent exists, the older
+built-in investigator path steps aside. So one Dashboard change never starts
+the agent twice. To go back to the old path, pause or cancel the trigger.</p>
 <h2 id="scheduler-and-the-checks-runner">Scheduler and the checks runner<a class="headerlink" href="#scheduler-and-the-checks-runner" title="Permanent link">&para;</a></h2>
 <p>The scheduler fires <strong>agent runs</strong>. It is not the same background worker
 as the <strong>checks/sensors runner</strong>, which evaluates deterministic
@@ -3324,6 +3714,11 @@ this page is its agent-run twin.</p>
 <td><code>scheduler create</code> answers 422</td>
 <td>MEHO checks the trigger when you create it: a cron expression that does not parse, an unknown <code>--timezone</code>, or missing <code>--inputs</code> on a <code>cron</code> / <code>one_off</code> trigger. No trigger is made.</td>
 <td>Fix the 5-field expression, the IANA timezone or the inputs, and create it again.</td>
+</tr>
+<tr>
+<td>A Sensor trigger never starts the agent</td>
+<td><code>CHECKS_AGENT_EVENTS</code> is off, or the trigger's filter does not match.</td>
+<td>Turn the switch on (see <a href="#start-an-agent-when-a-sensor-or-dashboard-changes">Start an agent when a Sensor or Dashboard changes</a>). Check the filter with <code>meho scheduler list --json</code>.</td>
 </tr>
 <tr>
 <td>A scheduled write is stuck <code>awaiting_approval</code></td>

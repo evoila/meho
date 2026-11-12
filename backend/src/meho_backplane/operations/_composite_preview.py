@@ -62,6 +62,7 @@ from meho_backplane.operations._preview import (
 from meho_backplane.operations._request_preview import (
     PARAMS_DIGEST_KEY,
     compute_preview_hash,
+    is_credential_builder_op,
 )
 from meho_backplane.operations._validate import compute_params_hash
 
@@ -215,12 +216,19 @@ async def build_composite_preview(
     every other typed/composite op keeps the ``"unavailable"`` contract. No
     handler runs and nothing is sent.
     """
-    redacted_body = safe_params_view(
-        params,
-        parameter_schema=descriptor.parameter_schema,
-        connector_id=connector_id,
-        operator=operator,
-        op_id=op_id,
+    # A credential write never has its params copied (#5074): the plan comes
+    # from its own builder, and the digest below keeps the hash bound to
+    # every value.
+    redacted_body = (
+        None
+        if is_credential_builder_op(descriptor)
+        else safe_params_view(
+            params,
+            parameter_schema=descriptor.parameter_schema,
+            connector_id=connector_id,
+            operator=operator,
+            op_id=op_id,
+        )
     )
     _log.info(
         "preview_dispatch_composite",

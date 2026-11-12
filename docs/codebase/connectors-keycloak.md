@@ -66,7 +66,8 @@ fresh target with no asserted version still resolves.
   `user_create`/`user_reset_password`, `role_mapping_assign`,
   `group_create`, `group_update_attributes`, `group_member_add`,
   `group_member_remove`, `user_delete`, `group_delete`, `client_delete`,
-  `user_logout`, `user_disable`, `user_enable`, `realm_delete`, `user_check_login`,
+  `user_logout`, `user_disable`, `user_enable`,
+  `client_scope_protocol_mapper_update`, `realm_delete`, `user_check_login`,
   `authflow_ensure_approval_flow`, `authflow_ensure_passkey_code_skip`),
   the `_get_admin_json` / `_get_admin_list` GET
   helpers (object vs array responses), and the `_write_admin` mutating
@@ -96,7 +97,9 @@ fresh target with no asserted version still resolves.
   the nine original approval-gated write ops plus `user.logout` (#3851),
   with `GROUP_WRITE_OPS`, `DELETE_WRITE_OPS` and `USER_ENABLED_OPS`
   (`ops_write_user_enabled_schemas.py`; handlers in
-  `ops_write_user_enabled.py`) spliced in,
+  `ops_write_user_enabled.py`) and `SCOPE_MAPPER_OPS`
+  (`ops_write_scope_mapper_schemas.py`; handler in
+  `ops_write_scope_mapper.py`) spliced in,
   reusing the `KeycloakOp` dataclass.
   Every op is `requires_approval=True`; a create treats HTTP 409 as an
   idempotent success; `user.create`/`user.reset_password` source the
@@ -369,6 +372,7 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.user.logout` | caution | `POST .../users/{user-id}/logout` |
 | `keycloak.user.disable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: false`) |
 | `keycloak.user.enable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: true`) |
+| `keycloak.client_scope.protocol_mapper.update` | caution | `GET` then `PUT .../client-scopes/{client-scope-id}/protocol-mappers/models/{id}` |
 | `keycloak.realm.delete` | destructive | `DELETE /admin/realms/{realm}` |
 | `keycloak.authflow.ensure_passkey_code_skip` | caution | `POST .../authentication/flows/browser/copy`, then `PUT .../realms/{realm}` |
 | `keycloak.authflow.ensure_approval_flow` | caution | `.../authentication/flows` and the client `PUT` (see "Approval sign-in flow and identity providers") |
@@ -631,6 +635,35 @@ longer sign in to any app that uses this realm.
   because `.disable` and `.enable` are not write suffixes).
 - The result is `{id, username, enabled, unrequested_changes, read_back_checked}`
   and carries no credential.
+
+### Change a protocol mapper of a client scope (#5930)
+
+`keycloak.client_scope.protocol_mapper.update` changes one protocol mapper
+that already exists on a client scope. Example: add one value to a
+hardcoded-claim mapper, such as the `capabilities` claim that lists which
+document collections a person may open. A second hardcoded-claim mapper with
+the same claim name would not add values, it would overwrite the first, so
+the existing mapper is changed.
+
+- Pass the scope as `scope_id` (UUID) or `scope_name` (exact name), and the
+  mapper as `mapper_id` (UUID) or `mapper_name` (exact name on that scope).
+  Pass only the fields to change in `representation`.
+- The op reads the mapper, puts `representation` on top and writes the whole
+  mapper back (`read_merge_write`). Fields not sent stay. `config` merges key
+  by key, so `{"config": {"claim.value": "..."}}` changes only that key. The
+  mapper `id` cannot be changed.
+- A name that matches nothing raises `KeycloakUserNotFoundError` (the shared
+  "not found" error) and nothing is written. A name that matches more than
+  one object raises `ValueError`. A scope list that cannot be read is an
+  error, never "not found".
+- Safe to run twice. The result names the scope and the mapper and lists the
+  changed field names (`changed_fields`, `unrequested_changes`), never values.
+  Check the new value with `keycloak.client_scope.list`.
+- Risk level `caution`, approval required, group `protocol_mapper_write`.
+  The approval card shows the generic params echo, which names the scope and
+  the mapper. The audit row holds the same params.
+- Not offered: adding a mapper to a client scope, and changing or deleting a
+  mapper on a client.
 
 ### Login test
 

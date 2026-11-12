@@ -46,6 +46,7 @@ from meho_backplane.connectors.keycloak.ops_write_groups_schemas import (
     WHEN_TO_USE_GROUP_WRITE,
 )
 from meho_backplane.connectors.keycloak.ops_write_realm_smtp import SMTP_PASSWORD_SECRET_PROPS
+from meho_backplane.connectors.keycloak.ops_write_scope_mapper_schemas import SCOPE_MAPPER_OPS
 from meho_backplane.connectors.keycloak.ops_write_user_enabled_schemas import USER_ENABLED_OPS
 
 __all__ = ["WHEN_TO_USE_WRITE_BY_GROUP", "WRITE_OPS"]
@@ -614,6 +615,9 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
     # Turn a user off and on (``user.disable`` / ``user.enable``) -- rows in
     # ``ops_write_user_enabled_schemas``, handlers in ``ops_write_user_enabled``.
     *USER_ENABLED_OPS,
+    # Change one protocol mapper of a client scope -- row in
+    # ``ops_write_scope_mapper_schemas``, handler in ``ops_write_scope_mapper``.
+    *SCOPE_MAPPER_OPS,
     # Per-user session logout (#3851).
     KeycloakOp(
         op_id="keycloak.user.logout",

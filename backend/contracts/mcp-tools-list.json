@@ -2891,6 +2891,24 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "sensor_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sensor_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_sensor_pause",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
           "cursor": {
             "type": "string"
           },
@@ -2929,6 +2947,24 @@
         "type": "object"
       },
       "name": "meho_sensor_results",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "sensor_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sensor_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_sensor_resume",
       "outputSchema": null,
       "surface": "operator"
     },

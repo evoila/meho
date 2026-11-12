@@ -343,6 +343,10 @@ async def edit_sensor(
     runner checks it on its next tick. The audit row of the request carries
     ``before`` and ``after`` with the changed fields (secret-named values
     hidden).
+
+    ``status`` (``paused`` or ``active``), sent alone, pauses or resumes the
+    sensor. A paused sensor is not run and keeps its id, history and
+    dashboards. Pause and resume are safe to send twice.
     """
     target_tenant = authorize_tenant_scope(operator, tenant_filter)
     structlog.contextvars.bind_contextvars(

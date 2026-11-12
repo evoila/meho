@@ -734,6 +734,12 @@ const (
 	SensorStatusPaused SensorStatus = "paused"
 )
 
+// Defines values for SensorUpdateStatus.
+const (
+	SensorUpdateStatusActive SensorUpdateStatus = "active"
+	SensorUpdateStatusPaused SensorUpdateStatus = "paused"
+)
+
 // Defines values for SessionDetailState.
 const (
 	SessionDetailStateEnded      SessionDetailState = "ended"
@@ -10462,6 +10468,9 @@ type SensorStatus string
 // field: “interval_seconds“ for “interval“, “cron_expr“ (and
 // optionally “timezone“) for “cron“. The field of the old kind is
 // cleared.
+//
+// “status“ (“paused“ or “active“) pauses or resumes the Sensor. It is
+// sent alone, without other fields.
 type SensorUpdate struct {
 	// Assertion A full assertion: one select stage feeding one typed comparator.
 	//
@@ -10503,9 +10512,13 @@ type SensorUpdate struct {
 	// ``critical`` one contributes ``critical``. The five-state vocabulary
 	// itself is declared once in #2504's :data:`CheckState`; this is only
 	// the two operator-selectable severities.
-	Severity *SensorSeverity `json:"severity,omitempty"`
-	Timezone *string         `json:"timezone"`
+	Severity *SensorSeverity     `json:"severity,omitempty"`
+	Status   *SensorUpdateStatus `json:"status"`
+	Timezone *string             `json:"timezone"`
 }
+
+// SensorUpdateStatus defines model for SensorUpdate.Status.
+type SensorUpdateStatus string
 
 // ServiceGrantCreate Body for creating a standing scoped auto-approval grant.
 //

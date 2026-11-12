@@ -360,10 +360,43 @@ Each surface carries the four verbs — `list` / `create` / `delete` plus the
 `results` trend query (#2756): `GET /api/v1/sensors/{id}/results`, the
 `meho_sensor_results` MCP tool, and `meho sensor results <id>`. REST and
 the CLI also carry **edit** (`PATCH /api/v1/sensors/{id}`,
-`meho sensor edit <id>`; see **Edit** below). There is **no** pause /
-resume path — `status` is server-initialized to `active` at create
-(clients cannot supply it; a body carrying `status` is a 422) and
-transitions to `paused` only via #2505's runner parking.
+`meho sensor edit <id>`; see **Edit** below). **Pause and resume** are on
+all three surfaces (see **Pause and resume** below). A client cannot supply
+`status` at create (a body carrying it is a 422).
+
+**Pause and resume** (`PATCH /api/v1/sensors/{id}` with `{"status":
+"paused"}` or `{"status": "active"}`, `meho sensor pause <id>` /
+`meho sensor resume <id>`, MCP `meho_sensor_pause` / `meho_sensor_resume`,
+all `tenant_admin`; code in `checks/sensor_pause.py`). A paused Sensor is
+not claimed by the runner, so it makes no call to its target. The row, its
+`sensor_results` history and its Dashboard memberships stay.
+
+- `status` is sent alone. Mixed with other fields, it is a 422.
+- Pause sets `status_reason='paused_by_operator'`. Resume sets
+  `status='active'`, clears the reason, sets `auth_failure_count` to 0 and
+  makes the Sensor due at once.
+- Both are safe to send twice: a Sensor already in the asked status is not
+  written again.
+- The audit row (`op_id=sensor.edit` for REST, `sensor.pause` /
+  `sensor.resume` for MCP) carries the status before and after.
+- An edit that does not name `status` keeps a paused Sensor paused. Only a
+  Sensor the runner parked for a broken cadence (`invalid_cadence:*`)
+  becomes `active` again.
+
+**Pause after refused logins** (`checks/auth_park.py`). When the credential
+of a target is no longer valid, every run starts a new login that fails.
+So the runner counts
+the runs in a row where the dispatcher answered `connector_auth_failed`
+(the run's evidence then carries `error_code`). The count is the column
+`sensor.auth_failure_count` (migration `0161`). It reaches
+`SENSOR_AUTH_FAILURE_PARK_THRESHOLD` (default 3): the runner sets
+`status='paused'` with `status_reason='auth_failed:ConnectorAuthError'` and
+stops calling the target. Any other result sets the count to 0. The count,
+the pause and the result commit in one transaction. With
+`CHECKS_AGENT_EVENTS` on, the pause also writes a `check.sensor.parked`
+event (reason `target_credential_stale`, `checks/events.py`) that an event
+trigger can match. A resume re-arms the Sensor: if the credential is still
+stale, it is paused again after the same number of refused logins.
 
 **Edit** (`PATCH /api/v1/sensors/{id}` → `checks/sensor_edit.edit_sensor`)
 changes a Sensor in place, so its id, its `sensor_results` history and its

@@ -137,6 +137,7 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.runner_identity import (
@@ -144,8 +145,13 @@ from meho_backplane.auth.runner_identity import (
     reset_check_runner_token_cache,
 )
 from meho_backplane.checks.assertions import AssertionOutcome, AssertionSpec
+from meho_backplane.checks.auth_park import (
+    AUTH_FAILED_ERROR_CODE,
+    AUTH_PARK_REASON,
+    count_auth_outcome,
+)
 from meho_backplane.checks.evaluate import evaluate_assertion
-from meho_backplane.checks.events import publish_sensor_changed
+from meho_backplane.checks.events import publish_sensor_changed, publish_sensor_parked
 from meho_backplane.checks.investigate import investigate_on_transition, is_worsening
 from meho_backplane.checks.repository import (
     accelerate_sensor_next_fire,
@@ -489,10 +495,14 @@ async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
         return _unknown_outcome("dispatch_error", error=str(exc))
 
     if result.status != "ok":
+        extra: dict[str, object] = {}
+        if (result.extras or {}).get("error_code") == AUTH_FAILED_ERROR_CODE:
+            extra["error_code"] = AUTH_FAILED_ERROR_CODE
         return _unknown_outcome(
             "dispatch_not_ok",
             dispatch_status=result.status,
             dispatch_error=result.error,
+            **extra,
         )
 
     try:
@@ -545,6 +555,41 @@ def _evaluate_result(
         return outcome
     evidence = {**summary_outcome.evidence, "checked": "summary"}
     return summary_outcome.model_copy(update={"evidence": evidence})
+
+
+async def _count_auth_outcome(
+    session: AsyncSession,
+    snap: _SensorSnapshot,
+    row: Sensor | None,
+    outcome: AssertionOutcome,
+    evaluated_at: datetime,
+) -> None:
+    """Count a refused login. Pause the Sensor at the limit.
+
+    Runs in the open transaction of :func:`_persist_outcome`, so the count,
+    the pause and the event commit together with the result.
+    """
+    settings = get_settings()
+    parked = await count_auth_outcome(
+        session,
+        snap.id,
+        auth_failed=outcome.evidence.get("error_code") == AUTH_FAILED_ERROR_CODE,
+        threshold=settings.sensor_auth_failure_park_threshold,
+    )
+    if not parked or row is None:
+        return
+    _log().warning("sensor_paused", sensor_id=str(snap.id), reason=AUTH_PARK_REASON)
+    if settings.checks_agent_events:
+        await publish_sensor_parked(
+            session,
+            tenant_id=snap.tenant_id,
+            sensor_id=row.id,
+            sensor_name=row.name,
+            target=row.target,
+            connector_id=row.connector_id,
+            op_id=row.op_id,
+            parked_at=evaluated_at,
+        )
 
 
 async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> None:
@@ -603,6 +648,7 @@ async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> 
         # a missing row means it was deleted mid-evaluation -- nothing to
         # accelerate).
         row = await session.get(Sensor, snap.id)
+        await _count_auth_outcome(session, snap, row, outcome, evaluated_at)
         if row is not None and row.pending_state is not None:
             await accelerate_sensor_next_fire(
                 session,

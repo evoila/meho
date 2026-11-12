@@ -173,24 +173,34 @@ def _cut_value(value: Any, *, max_chars: int) -> Any:
 def _shrink_row(row: dict[str, Any], *, byte_budget: int) -> dict[str, Any]:
     """Cut a row that alone is over the byte budget down to fit it.
 
-    Large attribute values (a vendor response or request body) are replaced
-    with a short preview and a marker. The stored row is not touched. If cutting
-    values is not enough, the attributes are dropped and only the marker stays.
+    Large values are replaced with a short preview and a marker: the attribute
+    values and the top-level text fields (name, status, span_kind). The stored
+    row is not touched. If cutting values is not enough, the final fallback
+    keeps only the attribute key names and a short name, so the budget holds.
     """
     attributes = row.get("attributes") or {}
-    max_chars = max(16, byte_budget // (4 * max(1, len(attributes))))
+    max_chars = max(16, byte_budget // (4 * max(1, len(attributes) + 3)))
     while max_chars >= 16:
         shrunk = {
-            **row,
-            "attributes": {k: _cut_value(v, max_chars=max_chars) for k, v in attributes.items()},
+            k: _cut_value(v, max_chars=max_chars) if isinstance(v, str) else v
+            for k, v in row.items()
+        }
+        shrunk["attributes"] = {
+            k: _cut_value(v, max_chars=max_chars) for k, v in attributes.items()
         }
         if len(msgspec.json.encode(shrunk)) <= byte_budget:
             return shrunk
         max_chars //= 2
-    return {
-        **row,
-        "attributes": {_CUT_MARKER_KEY: _CUT_MARKER_NOTE, "keys": sorted(attributes)[:20]},
-    }
+    keys = [str(k)[:32] for k in sorted(attributes)]
+    while True:
+        fallback = {
+            "seq": row.get("seq"),
+            "name": _cut_value(str(row.get("name", "")), max_chars=16),
+            "attributes": {_CUT_MARKER_KEY: _CUT_MARKER_NOTE, "keys": keys},
+        }
+        if len(msgspec.json.encode(fallback)) <= byte_budget or not keys:
+            return fallback
+        keys = keys[: len(keys) // 2]
 
 
 def _bounded_sample(rows: list[dict[str, Any]], *, byte_budget: int) -> list[dict[str, Any]]:

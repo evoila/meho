@@ -294,6 +294,20 @@ def test_bounded_sample_handles_a_row_without_attributes() -> None:
     row = {"seq": 0, "name": "n" * 10_000, "attributes": {}}
     sample = agent_read_mod._bounded_sample([row], byte_budget=512)
     assert len(sample) == 1
+    assert len(msgspec.json.encode(sample[0])) <= 512
+
+
+def test_bounded_sample_cuts_long_top_level_text_fields() -> None:
+    row = {
+        "seq": 0,
+        "span_kind": "k" * 5000,
+        "name": "n" * 5000,
+        "status": "s" * 5000,
+        "attributes": {"a": "v" * 5000},
+    }
+    sample = agent_read_mod._bounded_sample([row], byte_budget=1024)
+    assert len(msgspec.json.encode(sample[0])) <= 1024
+    assert sample[0]["name"]["cut"]
 
 
 async def test_first_span_with_a_60kb_body_gets_a_small_preview_and_full_read(

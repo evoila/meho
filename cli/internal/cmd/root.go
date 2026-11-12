@@ -678,13 +678,16 @@ func applyWorkRef(cmd *cobra.Command, _ []string) error {
 	if sendsNoBackplaneRequest(cmd) {
 		return nil
 	}
+	// A given --work-ref is checked, also an empty one. An empty
+	// MEHO_WORK_REF means "not set". The variable is checked before it
+	// is trimmed, so a trailing line break is refused too.
 	ref, source := "", ""
 	if f := cmd.Root().PersistentFlags().Lookup("work-ref"); f != nil && f.Changed {
 		ref, source = f.Value.String(), "--work-ref"
-	} else if v, ok := os.LookupEnv(api.WorkRefEnv); ok {
-		ref, source = strings.TrimSpace(v), api.WorkRefEnv
+	} else if v := os.Getenv(api.WorkRefEnv); v != "" {
+		ref, source = v, api.WorkRefEnv
 	}
-	if ref == "" {
+	if source == "" {
 		return nil
 	}
 	if !api.ValidWorkRef(ref) {
@@ -704,7 +707,7 @@ func applyWorkRef(cmd *cobra.Command, _ []string) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(source+" "+api.WorkRefRule), jsonOut)
 	}
-	cmd.SetContext(api.WithWorkRef(cmd.Context(), ref))
+	cmd.SetContext(api.WithWorkRef(cmd.Context(), strings.TrimSpace(ref)))
 	return nil
 }
 

@@ -155,7 +155,9 @@ type callOptions struct {
 }
 
 func runCall(cmd *cobra.Command, opts callOptions) error {
-	if opts.WorkRef != "" && !api.ValidWorkRef(opts.WorkRef) {
+	// Check a given --work-ref, also an empty one: `--work-ref ""` is
+	// refused, not taken as "no reference".
+	if cmd.Flags().Changed("work-ref") && !api.ValidWorkRef(opts.WorkRef) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected("--work-ref "+api.WorkRefRule), opts.JSONOut)
 	}

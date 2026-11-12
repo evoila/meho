@@ -1110,9 +1110,15 @@ that header from one place, so every verb gets it without its own flag.
   value once with `api.ValidWorkRef`. The check is no stricter than the
   backplane, which takes any non-empty text. It refuses only a blank
   value and a value with a control character such as a line break,
-  because the `Meho-Work-Ref` header cannot carry one. A bad value
+  because the `Meho-Work-Ref` header cannot carry one. A given flag is
+  always checked, so `--work-ref ""` is refused. An empty
+  `MEHO_WORK_REF` means "not set". The variable is checked before the
+  CLI trims it, so a trailing line break is refused too. A bad value
   stops the command before any request leaves the CLI. A good value
   goes on the command context (`api.WithWorkRef`).
+- The header carries the text as UTF-8. The backplane reads it as UTF-8
+  (`decode_work_ref_header` in `operations/_audit.py`), so a non-ASCII
+  ticket id such as `Änderung-7` lands on the audit row unchanged.
 - Commands that send no backplane request skip the check:
   `help`, `completion` and its children, `__complete` /
   `__completeNoDesc` (shell completion), `version` and
@@ -1783,7 +1789,7 @@ narrow-waist contract.
   distinct from any `flight_recorder_trace_handle` in `extras`.
 - `--work-ref <ticket>` (call only) — an external change-ticket reference for
   this dispatch, for example `gh:evoila/meho#13` or `CHG0012345`. The CLI
-  refuses a blank value or one with a line break before it sends the request,
+  refuses an empty or blank value, or one with a line break, before it sends the request,
   with the same check as the global flag. It puts a good value into
   `CallOperationBody.WorkRef`, so the dispatch's approval and audit rows keep
   their change-ticket link.

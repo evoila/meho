@@ -161,6 +161,9 @@ func TestWorkRefAcceptsAnyTicketID(t *testing.T) {
 		{"flag, GitHub issue", "gh:evoila/meho#13", "", "gh:evoila/meho#13"},
 		{"env, Jira key", "", "OPS-123", "OPS-123"},
 		{"env, ServiceNow change", "", "CHG0012345", "CHG0012345"},
+		{"flag, non-ASCII", "Änderung-7", "", "Änderung-7"},
+		{"env, non-ASCII", "", "Änderung-7", "Änderung-7"},
+		{"env with spaces around it", "", "  OPS-123 ", "OPS-123"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -182,21 +185,29 @@ func TestWorkRefAcceptsAnyTicketID(t *testing.T) {
 
 func TestWorkRefMalformedRejectedBeforeAnyRequest(t *testing.T) {
 	addArgs := []string{"targets", "add", "vault-a", "--product", "vault", "--host", "vault.example.test"}
+	flagErr := "--work-ref " + api.WorkRefRule
+	envErr := api.WorkRefEnv + " " + api.WorkRefRule
 	cases := []struct {
-		name, flag, env, wantInErr string
+		name      string
+		flag      []string
+		env       string
+		wantInErr string
 	}{
-		{"blank flag", "   ", "", "--work-ref " + api.WorkRefRule},
-		{"flag with a line break", "OPS-123\nX-Other: 1", "", "--work-ref " + api.WorkRefRule},
-		{"env with a line break", "", "OPS-123\nX-Other: 1", api.WorkRefEnv + " " + api.WorkRefRule},
+		{"empty flag", []string{"--work-ref", ""}, "", flagErr},
+		{"empty flag with =", []string{"--work-ref="}, "", flagErr},
+		{"empty flag over a good env", []string{"--work-ref", ""}, "OPS-123", flagErr},
+		{"blank flag", []string{"--work-ref", "   "}, "", flagErr},
+		{"flag with a line break", []string{"--work-ref", "OPS-123\nX-Other: 1"}, "", flagErr},
+		{"env with a line break", nil, "OPS-123\nX-Other: 1", envErr},
+		{"env with a trailing line break", nil, "OPS-123\n", envErr},
+		{"env with a trailing carriage return", nil, "OPS-123\r\n", envErr},
+		{"blank env", nil, "   ", envErr},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, rec := newWorkRefBackplane(t)
 			t.Setenv(api.WorkRefEnv, tc.env)
-			args := addArgs
-			if tc.flag != "" {
-				args = append([]string{"--work-ref", tc.flag}, addArgs...)
-			}
+			args := append(append([]string{}, tc.flag...), addArgs...)
 			stderr, err := runRoot(t, args...)
 			if err == nil {
 				t.Fatal("want an error for a malformed work-ref")

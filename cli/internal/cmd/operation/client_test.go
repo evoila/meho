@@ -775,7 +775,7 @@ func TestRunCallForwardsValidWorkRef(t *testing.T) {
 // another system (a ServiceNow change, a Jira key) goes into the body
 // unchanged, like the backplane accepts it.
 func TestRunCallForwardsNonGitHubWorkRef(t *testing.T) {
-	for _, ref := range []string{"CHG0012345", "OPS-123"} {
+	for _, ref := range []string{"CHG0012345", "OPS-123", "Änderung-7"} {
 		t.Run(ref, func(t *testing.T) {
 			cr, _ := json.Marshal(CallResult{Status: "ok", OpID: "vault.kv.read", DurationMs: 1})
 			f := &fakeOperationsClient{
@@ -799,10 +799,13 @@ func TestRunCallForwardsNonGitHubWorkRef(t *testing.T) {
 	}
 }
 
-// TestRunCallRejectsMalformedWorkRefBeforeRequest checks that a blank
-// value or a value with a line break fails locally, before any request.
+// TestRunCallRejectsMalformedWorkRefBeforeRequest checks that an empty
+// or blank value, or a value with a line break, fails locally before
+// any request. An explicit `--work-ref ""` is refused, not taken as
+// "no reference".
 func TestRunCallRejectsMalformedWorkRefBeforeRequest(t *testing.T) {
 	for name, ref := range map[string]string{
+		"empty":        "",
 		"blank":        "   ",
 		"line break":   "OPS-123\nX-Other: 1",
 		"carriage ret": "OPS-123\r",

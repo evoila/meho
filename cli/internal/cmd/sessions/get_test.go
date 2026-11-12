@@ -221,6 +221,7 @@ func TestGetStopsOnAnUnsafeArchiveBeforeAnyFileIsWritten(t *testing.T) {
 		"dot-dot":       {name: "abc/../../evil.jsonl", body: "x\n"},
 		"leading slash": {name: "/tmp/evil.jsonl", body: "x\n"},
 		"link":          {name: "evil.jsonl", typeflag: tar.TypeSymlink},
+		"too long":      {name: strings.Repeat("a/", 256) + "b", body: "x\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			uploads := threeUploads(t, false)
@@ -239,6 +240,27 @@ func TestGetStopsOnAnUnsafeArchiveBeforeAnyFileIsWritten(t *testing.T) {
 				t.Fatalf("files were written: %v", entries)
 			}
 		})
+	}
+}
+
+// The server limits a path to 512 characters, not bytes, so a nested path
+// with many two-byte characters is still a path the download accepts.
+func TestGetWritesALongUnicodePathTheServerAccepts(t *testing.T) {
+	long := "abc/" + strings.Repeat(strings.Repeat("é", 54)+"/", 5) + "a.jsonl"
+	if chars := len([]rune(long)); chars > 512 || len(long) <= 512 {
+		t.Fatalf("path has %d characters and %d bytes", chars, len(long))
+	}
+	uploads := threeUploads(t, false)
+	uploads[2] = fakeUpload{archive: gzipTar(t, tarEntry{name: long, body: "x\n"}), rows: map[string][2]int{long: {0, 2}}}
+	srv, _ := fakeSessionServer(t, uploads, false)
+	folder := t.TempDir()
+
+	cmd, _, stderr := newCmd(t, "")
+	if err := runGet(cmd, "abc", folder, false, srv.URL); err != nil {
+		t.Fatalf("runGet: %v; stderr=%s", err, stderr.String())
+	}
+	if got := readOut(t, filepath.Join(folder, "abc", filepath.FromSlash(long))); got != "x\n" {
+		t.Fatalf("long path file = %q", got)
 	}
 }
 

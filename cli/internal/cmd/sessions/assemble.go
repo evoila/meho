@@ -12,6 +12,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/evoila/meho/cli/internal/api"
 )
@@ -33,10 +34,11 @@ type wholeFile struct {
 
 // cleanArchivePath applies the path rules of the server
 // (session_store/archive.py): no leading "/", no "." or ".." part, no
-// empty part, no backslash and no control character.
+// empty part, no backslash and no control character. Like the server,
+// the length limit counts characters, not bytes.
 func cleanArchivePath(name string) (string, error) {
 	path := strings.TrimPrefix(name, "./")
-	bad := path == "" || len(path) > 512 || strings.HasPrefix(path, "/") || strings.Contains(path, "\\")
+	bad := path == "" || utf8.RuneCountInString(path) > 512 || strings.HasPrefix(path, "/") || strings.Contains(path, "\\")
 	for _, part := range strings.Split(path, "/") {
 		if part == "" || part == "." || part == ".." {
 			bad = true

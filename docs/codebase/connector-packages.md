@@ -128,7 +128,8 @@ and runs the overlay wheel checks on its wheel. It runs on every pull
 request that is not docs-only, so a kit change that breaks the sample fails
 in the same pull request.
 
-The folder's `__init__.py` does three things when MEHO imports it:
+The folder's `__init__.py` can do five things when MEHO imports it. The
+first two are always needed:
 
 1. **Register the connector class** with `register_connector_v2` from the
    connector kit (`meho_connector_kit`). The class is a subclass of the
@@ -226,6 +227,17 @@ Rules the code checks at start:
 - Keep every handler inside the package's own folder. MEHO records the
   package of an operation from the place of its handler (see "When a
   package is removed").
+- Mark every input that holds an address MEHO connects to (a URL, a host
+  name, a host and port) with the kit's `CALLER_ADDRESS_MARKER`
+  (`x-meho-caller-address: true`) in its parameter schema. MEHO then runs
+  the operation at `caution` or higher, and it waits for a person's
+  approval. The operation contract check fails when an input looks like
+  an address and has no marker.
+- Call the kit's `declare_root_shell(op_ids)` at import for every
+  operation that changes a host by running a command or script as root
+  (for example over SSH with `sudo`). A run approval never covers such
+  an operation: a person approves each call (see
+  [run-approvals.md](run-approvals.md)).
 
 MEHO does the rest for every operation: policy, approvals, audit, removal
 of secrets from results, and a result handle (a link to the stored result)
@@ -282,6 +294,16 @@ says which package brought it (`ConnectorSpecEntry.source_package`);
 the right place for either kind of row. When the package is removed,
 its rows are gone at the next start. The stored operations keep the
 risk level of their last ingest, as always.
+
+Ingested operations run on a hand-written class only when the class
+allows it. Set `accepts_ingested_operations = True` on each connector
+class that serves the operations ingested from its catalog. Without it,
+MEHO refuses the ingest of the API file under the class's name, and
+refuses each ingested operation whose target resolves to the class
+([spec-ingestion.md](spec-ingestion.md), "Which connector class ingested
+operations run on"). Set it only on a class whose login and checks fit
+any operation of the API file: an ingested operation runs none of the
+checks of the class's hand-written operations.
 
 A test for a package checks that the rows are there, for example that
 `safety_overlay_for(product, version)` is not empty after the folder is
@@ -603,6 +625,18 @@ allowlist file only once, at start. `installed_connector_packages()` in
 Each entry has the name, version, wheel digest and folders, as in the
 allowlist file. For the plain public image the list is empty, and the CLI
 and the console say "none".
+
+The package list also counts in two other places:
+
+- **Approvals.** A waiting approval stores the running release, and that
+  release includes a short digest of the installed connector packages. A
+  new, updated or removed package ends waiting requests with reason
+  `release_changed`. See [approvals.md](approvals.md).
+- **Satellite runners.** A runner sends the digest of its own package set.
+  MEHO gives a runner only the work items of a package it has with the same
+  digest, and the runner refuses an item whose package set differs. See
+  [satellite-runner.md](satellite-runner.md), "Connector package set
+  check".
 ## When a package is removed
 
 Each operation row records the package that wrote it, in the column
@@ -694,6 +728,39 @@ call. The usual check reads one row: a handler that imports ends it.
 Limit: an op of a package whose handler lives outside the package's own
 folders (for example in a built-in shared module) is recorded as built
 in.
+
+### When a package version removes an op
+
+The rows above stay when the whole package is gone. When a new version of
+a package drops one op, its row from the older version stays too: no
+registrar writes it again, and its handler does not import. A package
+cannot add to the core's `RETIRED_OPS` list
+(`operations/dead_handler_sweep.py`). So it lists such ops itself, from
+the `__init__` of its connector folder:
+
+```python
+import meho_connector_kit as kit
+
+kit.register_retired_operations(
+    __name__,
+    [kit.RetiredOp("example", "1.x", "example-widget", "example.widget.old_report")],
+)
+```
+
+- At start, after every registrar ran, the sweep deletes each listed
+  built-in (`tenant_id IS NULL`) typed or composite row whose
+  `owner_package` is the listing package. It logs `dead_handler_op_retired`
+  once per row, with `owner_package`.
+- A listed entry that names a row of the core (`owner_package` `NULL`) or
+  of another package deletes nothing. A listing from a folder that is not
+  part of an installed package deletes nothing and logs
+  `package_retired_ops_ignored`.
+- A row that no list names is kept, as for the core
+  (`dead_handler_op_kept`).
+- The same promise as for `RETIRED_OPS`: a listed `op_id` is never used
+  again, and an entry stays in later versions of the package.
+
+`backend/tests/test_package_retired_ops.py` covers these cases.
 
 ## The connector kit
 
@@ -826,6 +893,33 @@ not declared stays hidden, so a forgotten declaration never shows a secret.
 Details: `docs/codebase/redaction.md`, "Secret-named fields in every
 answer".
 
+## Record a live test
+
+`docs/compatibility/live-tests.yaml` says which connector versions were
+tested on a real system. It is one small file for every connector family.
+
+- **Levels.** `read`: a read operation ran through MEHO against a real
+  system of that version. `change`: a change operation ran, with approval.
+  A `change` test also counts as a `read` test, so the file keeps only the
+  highest level for each product version.
+- **What a row means.** A connector id with tests was tested live. A
+  connector id with `tests: []` is built (code and CI tests only), not yet
+  tested live. A connector id that is not in the file is not yet recorded.
+- **Who adds a row.** The person who ran the live test opens a pull request
+  that adds one entry (product version, level, date, MEHO release). The pull
+  request says where the evidence is kept.
+- **No lab names or host names.** No IP address, no host name and no URL
+  anywhere in the file.
+- **The checks.** `backend/scripts/validate_live_tests.py` checks the file
+  (level, date, MEHO release in `CHANGELOG.md`, one entry for each
+  connector id and product version, no lab details). A product version is
+  digits and dots, with an optional suffix like `2.7.2-RELEASE`. A connector
+  id listed twice is refused, also when YAML would keep only the last one.
+  `backend/tests/test_live_tests_record.py` checks that every connector id
+  exists in the registry or in the enterprise pack list. The VCF manifest
+  (`vcf-api-contract-manifest.yaml`) accepts a `live-verified` row only when
+  this file has a test for that component at that version.
+
 ## Known limits
 
 - Code that Python runs before MEHO starts, for example from a `.pth` file
@@ -834,9 +928,10 @@ answer".
 - Plain modules (single `.py` files) directly in `connectors/` are not
   imported by the walk, so the check does not look at them.
 - The check does not stop public code from importing a connector folder
-  that will leave this repository in a package. A separate test does:
-  `backend/tests/test_split_ready_imports.py` reads every public module
-  and fails when one imports such a folder.
+  that left this repository in a package. A separate test does:
+  `backend/tests/test_split_ready_imports.py` reads every public module.
+  It fails when a module imports one of those folders, or when such a
+  folder comes back.
 - MEHO must be installed, as a wheel or as an editable install of the same
   checkout. A bare source tree on `PYTHONPATH` that borrows another
   checkout's install has no file list and is outside that checkout, so

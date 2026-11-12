@@ -5,7 +5,8 @@
 #
 # Locked artefact contract (Goal #11 — CLI release-distribution principle):
 #   On every `v*` tag push, build four single-static tarballs
-#   (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64), produce a
+#   (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64) and two zip
+#   archives (windows/amd64, windows/arm64), produce a
 #   combined SHA256SUMS file, and publish them as assets on a new
 #   GitHub Release (auto-published, `draft: false` since #1127) at
 #   https://github.com/evoila/meho/releases.
@@ -35,11 +36,27 @@
 # so it works on the self-hosted runner image, which ships without `gh`
 # (#3171).
 #
+# After the `release` job, the `windows-check` job downloads each Windows
+# zip from the Release on a GitHub-hosted Windows runner, checks its hash
+# against SHA256SUMS and runs `meho.exe version`. Set the repository
+# variable MEHO_WINDOWS_ARM_CHECK to `skip` when the `windows-11-arm`
+# runner is not available: then only amd64 is checked, and the
+# `windows-arm-skipped` job asks for a check of arm64 by hand.
+#
 # After the `release` job, the `linux-download` job calls
 # linux-download.yml (#4734). It builds the download of install form 2,
 # meho-linux-<version>-amd64.tar, from the `release` job's Linux CLI and
 # the tag's chart and image. It attaches the tar, SHA256SUMS-linux and
 # SHA256SUMS-linux.cosign.bundle to the same Release.
+#
+# The `operation-catalog` job calls operation-catalog.yml. It attaches
+# operation-catalog.json and operation-catalog-changes.json, each with its
+# .cosign.bundle, to the same Release.
+#
+# After `linux-download`, the `security-sheet` job calls
+# security-sheet.yml (#4639). It checks every signature of the release,
+# writes the security sheet and attaches it, the SBOM of the image and the
+# full scan report to the same Release.
 #
 # Permissions design follows the same per-job least-privilege posture
 # as chart.yml + image.yml:
@@ -51,6 +68,7 @@
 #     in this Task's scope.
 #   * `linux-download` grants the same two to the called workflow, where
 #     only its `publish` job (sign + attach) uses them.
+#   * `security-sheet` grants only `contents: write` (attach the files).
 
 name: cli-release
 
@@ -93,7 +111,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       # `contents: write` is required for GoReleaser to create the
-      # GitHub Release and upload the four tarballs + SHA256SUMS as
+      # GitHub Release and upload the archives + SHA256SUMS as
       # release assets. Scoped to this job only.
       contents: write
       # `id-token: write` mints a GitHub Actions OIDC token. Cosign
@@ -118,17 +136,15 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          # Matches `cli/go.mod`'s `go 1.26.10` directive. GoReleaser
+          # Matches the `go` directive in `cli/go.mod`. GoReleaser
           # builds with this toolchain; bumping requires an aligned
           # `cli/go.mod` edit so we hardcode the version explicitly
           # rather than reading it from go.mod via `go-version-file:`
           # (which would silently follow a future bump without a CI
           # rebuild signal).
           # Bumped from 1.25 → 1.26 because Go 1.25 gets no more
-          # security fixes: nine standard-library CVEs (net/http,
-          # crypto/tls, net/textproto) need go1.26.9 or newer, and
-          # GO-2026-6809 (crypto/x509) needs go1.26.10 or newer.
-          go-version: '1.26'
+          # security fixes. Read the current version from `cli/go.mod`.
+          go-version: '1.26.11'
           # Same reason as ci.yml's go-lint-test lane: do not use an
           # older 1.26.x that the runner image has cached.
           check-latest: true
@@ -182,9 +198,18 @@ jobs:
         # at the next `## ` heading or end-of-file. A missing section
         # falls back to the `[Unreleased]` block — useful for
         # pre-release tags like `v0.1.0-rc.1` that the CHANGELOG may
-        # not have a dedicated section for yet. If both are absent,
-        # the file is left empty and GoReleaser falls back to its
-        # built-in `changelog:` git-log generation.
+        # not have a dedicated section for yet. If both are absent on
+        # a final tag, the file is left empty and GoReleaser falls back
+        # to its built-in `changelog:` git-log generation.
+        #
+        # A pre-release tag (it has a `-`, like `v1.0.0-rc.1`) gets two
+        # more rules (#3860):
+        #   * the notes start with a short header that says this is a
+        #     release candidate and which final release the notes
+        #     count from (the last tag that is not an rc);
+        #   * when both sections are empty the step fails. An rc whose
+        #     Release body is a raw git log is a wrong release; cut the
+        #     next rc after the CHANGELOG is fixed.
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -216,13 +241,37 @@ jobs:
             ' CHANGELOG.md
           }
 
+          # A section with only blank lines counts as empty.
+          has_text() { grep -q '[^[:space:]]' "$1"; }
+
           # Try the exact version first, then [Unreleased].
           extract_section "${VERSION}" > "${NOTES_FILE}"
-          if [[ ! -s "${NOTES_FILE}" ]]; then
+          if ! has_text "${NOTES_FILE}"; then
             extract_section "Unreleased" > "${NOTES_FILE}"
           fi
 
-          if [[ -s "${NOTES_FILE}" ]]; then
+          case "${TAG}" in
+            *-*)
+              if ! has_text "${NOTES_FILE}"; then
+                echo "::error::No CHANGELOG section for ${VERSION} and [Unreleased] is empty. A release candidate needs notes: fill [Unreleased], then cut the next rc."
+                exit 1
+              fi
+              # The last final tag: skip rc tags, as docs/RELEASING.md
+              # (rc series, R1) does for PREV.
+              PREV="$(git describe --tags --abbrev=0 --exclude='v*-rc.*' HEAD 2>/dev/null || true)"
+              {
+                printf '> **Release candidate.** %s is a test version before %s.' "\`${TAG}\`" "\`v${VERSION%%-*}\`"
+                if [[ -n "${PREV}" ]]; then
+                  printf ' The notes below list all changes since %s.' "\`${PREV}\`"
+                fi
+                printf '\n\n'
+                cat "${NOTES_FILE}"
+              } > "${NOTES_FILE}.rc"
+              mv "${NOTES_FILE}.rc" "${NOTES_FILE}"
+              ;;
+          esac
+
+          if has_text "${NOTES_FILE}"; then
             echo "Release notes extracted (${VERSION} or Unreleased):"
             echo "--- BEGIN ---"
             cat "${NOTES_FILE}"
@@ -385,10 +434,10 @@ jobs:
             echo "### Artefacts"
             echo ""
             echo '```'
-            ls -1 cli/dist/*.tar.gz cli/dist/SHA256SUMS cli/dist/*.cosign.bundle "${RUNNER_TEMP}"/mcpb/*.mcpb "${RUNNER_TEMP}"/mcpb/SHA256SUMS-mcpb* 2>/dev/null || true
+            ls -1 cli/dist/*.tar.gz cli/dist/*.zip cli/dist/SHA256SUMS cli/dist/*.cosign.bundle "${RUNNER_TEMP}"/mcpb/*.mcpb "${RUNNER_TEMP}"/mcpb/SHA256SUMS-mcpb* 2>/dev/null || true
             echo '```'
             echo ""
-            echo "Each \`.tar.gz\` and the \`SHA256SUMS\` file has a matching"
+            echo "Each \`.tar.gz\`, each Windows \`.zip\` and the \`SHA256SUMS\` file has a matching"
             echo "\`.cosign.bundle\` (sigstore bundle: signature + Fulcio cert +"
             echo "Rekor proof, single JSON file)."
             echo ""
@@ -431,13 +480,87 @@ jobs:
             echo "actually downloaded (two-step trust chain)."
             echo ""
             echo "The release is **live** the moment this workflow ends"
-            echo "(auto-published, #1127) — verify the four tarballs +"
+            echo "(auto-published, #1127) — verify the four tarballs, the two Windows zips +"
             echo "bundles, the .mcpb asset and SHA256SUMS-mcpb are present and that"
             echo "\`meho version\` reports the expected tag."
             echo ""
             echo "The form-2 download \`meho-linux-${TAG#v}-amd64.tar\`, with"
             echo "\`SHA256SUMS-linux\` and its \`.cosign.bundle\`, is attached later"
             echo "by the \`linux-download\` job (see docs/RELEASING.md)."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  windows-check:
+    name: Windows check (meho.exe ${{ matrix.arch }})
+    # Downloads the Windows zip of this tag from the release that the
+    # `release` job created, checks its hash against SHA256SUMS, unzips it
+    # and runs `meho.exe version`. It fails unless the output names the
+    # release tag. GitHub-hosted runners: the repo is public, so they are
+    # free. Read-only: it needs no write permission.
+    needs: release
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    # amd64 always runs. arm64 needs the `windows-11-arm` runner. If the
+    # organisation does not allow that runner, the job would wait in the
+    # queue and never start. Then set the repository variable
+    # MEHO_WINDOWS_ARM_CHECK to `skip`: the matrix leaves arm64 out, and
+    # the `windows-arm-skipped` job says so in the summary.
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(vars.MEHO_WINDOWS_ARM_CHECK == 'skip' && '[{"arch":"amd64","runner":"windows-latest"}]' || '[{"arch":"amd64","runner":"windows-latest"},{"arch":"arm64","runner":"windows-11-arm"}]') }}
+    steps:
+      - name: Download, check the hash, unzip, run meho.exe version
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+          ARCH: ${{ matrix.arch }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:TAG.TrimStart('v')
+          $zip = "meho_${version}_windows_$($env:ARCH).zip"
+          gh release download $env:TAG --pattern $zip --pattern SHA256SUMS
+          if ($LASTEXITCODE -ne 0) { throw "download failed" }
+          $line = Get-Content SHA256SUMS | Where-Object { $_ -match "\s$([regex]::Escape($zip))$" }
+          if (-not $line) { throw "$zip is not listed in SHA256SUMS" }
+          $expected = ($line -split '\s+')[0].ToLower()
+          $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($expected -ne $actual) { throw "hash mismatch for ${zip}: expected $expected, got $actual" }
+          Expand-Archive -Path $zip -DestinationPath meho-win
+          $out = (& .\meho-win\meho.exe version) | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "meho.exe version failed" }
+          if (-not $out.Contains($env:TAG)) { throw "meho.exe version does not name the tag $($env:TAG)" }
+          "Windows $($env:ARCH): hash matches, ``meho.exe version`` names $($env:TAG)." | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+  windows-arm-skipped:
+    name: Windows check (meho.exe arm64) skipped
+    # Runs only when the repository variable MEHO_WINDOWS_ARM_CHECK is
+    # `skip` (see `windows-check`). It writes why the arm64 check did not
+    # run, and that a person must check the arm64 zip by hand.
+    needs: release
+    if: vars.MEHO_WINDOWS_ARM_CHECK == 'skip'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Write why the arm64 check did not run
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          {
+            echo "### Windows arm64 check did not run"
+            echo ""
+            echo "The repository variable \`MEHO_WINDOWS_ARM_CHECK\` is \`skip\`,"
+            echo "because the \`windows-11-arm\` runner is not available."
+            echo ""
+            echo "Check \`meho_${TAG#v}_windows_arm64.zip\` by hand on an ARM"
+            echo "Windows machine: check its hash against \`SHA256SUMS\`, unzip it"
+            echo "and run \`meho.exe version\`. The output must name \`${TAG}\`."
+            echo "The steps are in docs-site/clients/cli.md, section Windows."
           } >> "${GITHUB_STEP_SUMMARY}"
 
   linux-download:
@@ -458,3 +581,33 @@ jobs:
     permissions:
       contents: write
       id-token: write
+
+  operation-catalog:
+    name: Operation catalog (operation-catalog.json)
+    # Writes the signed list of every built-in operation and the list of its
+    # changes since the previous release, and attaches both with their
+    # signature bundles to the release that the `release` job created. See
+    # .github/workflows/operation-catalog.yml.
+    needs: release
+    uses: ./.github/workflows/operation-catalog.yml
+    with:
+      tag: ${{ github.ref_name }}
+    # Same as `linux-download`: only the called `publish` job uses these.
+    permissions:
+      contents: write
+      id-token: write
+
+  security-sheet:
+    name: Security sheet (meho-security-sheet-<tag>.md)
+    # Makes the security sheet of this tag and attaches it, the SBOM and the
+    # full scan report to the release (#4639). It runs after
+    # `linux-download`, because it checks the signature of every checksum
+    # file of the release, SHA256SUMS-linux too. See
+    # .github/workflows/security-sheet.yml.
+    needs: linux-download
+    uses: ./.github/workflows/security-sheet.yml
+    with:
+      tag: ${{ github.ref_name }}
+    # Only to attach the three files to the release.
+    permissions:
+      contents: write

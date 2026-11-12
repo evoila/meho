@@ -36,14 +36,15 @@ Enforcement is **service-principal-only**. The branch structure:
 
 | Principal | `requires_approval` | mutating `caution` / `dangerous` | safe / read |
 |---|---|---|---|
-| `USER` (human, interactive) | park (queue) | **auto-execute** (unchanged) | auto-execute |
+| `USER` (person) | park (queue) | park; a `caution` op runs at once in the web interface (#3980) | `safe` runs at once; a token call parks a `caution` read (#3980) |
 | `SERVICE` (client-credentials) | park unless granted | **park unless granted** (#3152) | auto-execute |
 | `AGENT` | `resolve_verdict` (agent-permission model) — untouched | | |
 
-A human `USER` operator keeps the v0.2 default-allow contract (they are
-their own approver via the approval queue); `safety_level` is consulted
-**only** for a `SERVICE` principal. That is how "operator-interactive"
-is distinguished from "service principal": the `principal_kind` claim
+A person follows the web-interface and token rule of
+`_person_park_reason` (#3980; see
+[agent-permission-model.md](agent-permission-model.md#safety-levels-at-a-glance)).
+Standing grants apply **only** to a `SERVICE` principal. The
+`principal_kind` claim tells a person from a service principal
 (`user` vs `service`, `auth/jwt.py::_extract_principal_kind`). Agents are
 unaffected — they keep the `AgentPermission` verdict model.
 
@@ -71,14 +72,14 @@ the **absent-claim** case on either of two positive markers:
 
 Fail-closed for the policy path: only a positive marker *upgrades*; any
 unrecognised shape stays `user`, and an interactive human token (which
-always carries a session claim) is never upgraded, so the `user`
-default-allow is preserved. As a residual-drift signal, `_non_agent_verdict`
+always carries a session claim) is never upgraded, so a person keeps
+the person rule. As a residual-drift signal, `_non_agent_verdict`
 emits a WARN (`policy_gate_grant_holder_classified_non_service`) whenever a
 **parking** non-service principal still holds ≥1 live grant.
 
 **"Mutating" is grounded in existing descriptor fields** (no new column,
 `_is_mutating`): an ingested op is read-class iff its HTTP `method` ∈
-`{GET, HEAD}` (the `READ_HTTP_METHODS` set); a typed / composite op
+`{GET, HEAD}` (the `_READ_METHODS` set in `_validate.py`); a typed / composite op
 carries no `method`, so its curated `safety_level` stands in (`safe` =
 read, `caution` / `dangerous` / `destructive` = write). `destructive`
 parks always **and is never grant-satisfiable** (#3183); `dangerous`
@@ -89,9 +90,18 @@ When a `SERVICE` op would park, the gate consults a live standing grant
 matched — the dispatcher and the composite sub-op gate both pass it; the
 gateway path is safe-only and never needs it). A match auto-approves the
 op and records the use; absent a match, the op parks for a human decision.
-The one exception is the `destructive` tier: `consult_and_record_grant`
-refuses it **before** any grant lookup, so even a stale grant row cannot
-auto-approve a destructive op — the tier always parks for a human.
+Four kinds of op are refused **before** any grant lookup, so even a stale grant
+row cannot auto-approve them: the `destructive` tier (the tier always
+parks for a human), an op that reads a credential (`classify_op` says
+`credential_read`; grant create refuses it with "A standing grant cannot
+cover OP: it shows a secret, so a person always approves it", and a wider
+grant never clears its wait; `credential_read_grant_reason`), an op with a parameter marked
+`x-meho-caller-address: true` (it connects to an address the caller
+gives; a grant never covers the address, so a person approves each call,
+and grant create refuses such a grant — `caller_address_grant_reason`), and an
+op a connector marks with `declare_per_call_approval` (`op_classes.py`; today
+`msad.group.add-member` and `msad.group.remove-member`): a person approves each
+call, and grant create refuses such a grant — `per_call_approval_grant_reason`.
 Parking is not refusal: a service principal can still propose a
 destructive op and read its result after a human approves. The steps are in
 [`approvals.md`](approvals.md#an-add-on-proposes-a-governed-destroy-3478).
@@ -135,6 +145,20 @@ explicit — no wildcards** on `principal_sub`, `op_id`, or `connector_id`
 (contrast `AgentPermission`, whose `op_pattern` is a glob for the *agent*
 model). Creating the grant IS the operator's upfront review, deny-by-default
 absent a match.
+
+**Role floor.** Some ops need a role from the person who runs them
+(`operations/role_floors.py`): `targets.register` and the `topology.*`
+writes need `tenant_admin`. A grant lets the service principal run the op
+with no approval, so the person who makes the grant needs the same role,
+like the person who approves a parked call. `_review` checks
+`role_floor_denial(op_id, creator_role)` and raises `GrantRoleFloorError`
+(a `GrantValidationError`) below the floor. Every path that makes a grant
+passes `_review`: `create` and the renewal of delete grants. Both take
+`creator_role`, the role of the person. Its default is `operator`, the
+lowest role that makes grants, so a caller that does not pass it is held to
+the floor. REST answers 403 `role_floor_required: <op> needs the
+tenant_admin role; your role is operator`. The console passes the
+session's role; its grant writes need `tenant_admin` anyway.
 
 The **target scope** is one of three shapes:
 
@@ -365,6 +389,14 @@ session; NULL for a plain REST call) and `parent_audit_id` (the multi-step
 parent's audit id when a child step was cleared). Details:
 [`approvals.md`](approvals.md#service-principal-standing-grants--safety_level-gate-3151--3152).
 
+## Run approvals (#4126)
+
+A standing grant covers one operation for good. A **run approval** covers
+the operation list of one automation run: the add-on asks, a person
+approves the list once, and it ends with the run. The gate checks it after
+the standing grants, with the same delete rule. See
+[run-approvals.md](run-approvals.md).
+
 ## Read scope: limit a service principal's reads to named targets (#4992)
 
 A standing grant can only let a service principal do more. The read scope
@@ -397,6 +429,12 @@ scope. The dispatcher writes one `denied` audit row, as for every deny. A
 call without a target is refused unless the scope has the "no target"
 entry. The check reads one row and writes nothing, so `preview_operation`
 reports the same verdict (`policy_verdict=deny`).
+
+**A topology refresh** follows the scope too. `POST /api/v1/topology/refresh/{target_name}`
+and the console refresh read the target through its connector without the
+policy gate, so the refresh service checks the scope itself
+(`topology/refresh_read_scope.py`). A target outside the scope gets 403
+`read_scope_denied`, and MEHO does not call the connector.
 
 What the scope does not change:
 
@@ -460,7 +498,7 @@ What the code does:
   on (a `Settings` field, read at boot only, default `false`; chart value
   `sandboxMode.deleteGrantsFromApi`), REST and the CLI may create a delete
   grant too: `POST /api/v1/service-principals/grants` passes
-  `by_tenant_admin`, and an `operator` without `tenant_admin` gets
+  the caller's role as `creator_role`, and an `operator` without `tenant_admin` gets
   `DeleteGrantNeedsTenantAdminError`, HTTP 403
   `grants_require_tenant_admin`. A machine token still gets 403 before the
   route runs. The checks are the console's (`_review`). The mode check
@@ -526,7 +564,7 @@ What the code does:
   render fails when the host is not `ingress.host`; the notes warn.
 
 Tests: `test_sandbox_mode_boot.py`, `test_sandbox_mode_grants.py`,
-`test_sandbox_mode_calls.py`, `test_sandbox_mode_verdict_table.py` (with
+`test_sandbox_mode_verdict_table.py` (with
 the checked-in mode-off table `tests/data/sandbox_mode_verdict_table_off.json`),
 `test_sandbox_mode_audit_mark.py`, `test_sandbox_mode_display.py`,
 `test_chart_sandbox_mode.py`, `migrations/test_migration_0115_add_sandbox_mode.py`.
@@ -553,7 +591,8 @@ supported alternative:
 `connector_id` the answer carries. A vCenter write step is checked under the
 connector the target resolves to (#4991): ask with `vmware-rest-8.0` for a
 vCenter 8.0.x target and with `vmware-rest-9.0` for a 9.x target. Without
-`connector_id` the route answers for `vmware-rest-9.0`.
+`connector_id` the route answers for the connector the composite is
+registered against.
 
 Each entry carries the child `op_id`, a best-effort `safety_level`
 (descriptor-resolved; `null` for a code-shipped vim sub-op with no
@@ -584,7 +623,9 @@ Create and revoke need a person. A token of an agent, a service principal
 or a runner gets 403 `human_principal_required` (the same check
 `require_human_principal` in `auth/rbac.py` that the approval decision
 routes and the agent-grant create / elevate routes use, #4616). List and
-show keep the role check alone.
+show keep the role check alone. Create also checks the op's role floor
+(see "Role floor" above): an `operator` gets 403 `role_floor_required` for
+`targets.register` and the `topology.*` writes.
 
 | Verb | Path | Purpose |
 |---|---|---|
@@ -643,7 +684,6 @@ on one of these routers has no matching CLI verb in that reference.
   stored display-name field, so their JWT `sub` is deliberately shown as the
   fail-open identity; concrete target UUIDs resolve to a tenant-local target
   name when available, while selector and targetless grants remain explicit.
-  / `path=approval.decision`.
 - **No agent-path change** — `resolve_verdict` and the `AgentPermission`
   model are untouched; agents keep their own grant model.
 

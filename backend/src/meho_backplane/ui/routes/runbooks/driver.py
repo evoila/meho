@@ -10,9 +10,9 @@ lifecycle (T1 #1884 ships the list + start modal; each row links here).
 
 This is a pure UI/BFF build over the in-process
 :class:`~meho_backplane.runbooks.run_service.RunbookRunService` -- the
-``require_ui_session`` floor for the read page, the ``require_ui_operator``
-role floor for next / abort (or the ``require_ui_admin`` hard gate, for
-reassign) + a direct service call, never the Bearer ``/api/v1`` surface.
+``require_ui_operator`` role floor for the read page and for next / abort
+(or the ``require_ui_admin`` hard gate, for reassign) + a direct service
+call, never the Bearer ``/api/v1`` surface.
 The closest write-surface precedent is
 :mod:`meho_backplane.ui.routes.runbooks.lifecycle` (HTMX fragment swap +
 typed-error -> inline alert + CSRF re-mint).
@@ -144,7 +144,6 @@ from meho_backplane.ui.auth.middleware import (
     UISessionContext,
     require_ui_admin,
     require_ui_operator,
-    require_ui_session,
 )
 from meho_backplane.ui.routes.connectors.operator import resolve_role_probe
 from meho_backplane.ui.routes.runbooks.driver_render import (
@@ -160,13 +159,12 @@ __all__ = ["register_driver_routes"]
 log = structlog.get_logger(__name__)
 
 #: Module-level ``Depends`` closures (B008 idiom -- no call in a default
-#: arg). ``_require_session`` is the session floor the read page sits on;
-#: ``_require_operator`` is the ``operator`` role floor the next / abort
-#: POSTs sit on (``read_only`` gets 403 at the dependency, like on REST);
+#: arg). ``_require_operator`` is the ``operator`` role floor the read page
+#: and the next / abort POSTs sit on (``read_only`` gets 403 at the
+#: dependency, like on REST);
 #: ``_require_admin`` is the hard ``tenant_admin`` gate the reassign POST
 #: sits on (an operator gets 403 at the dependency, before the handler
 #: body runs).
-_require_session = Depends(require_ui_session)
 _require_operator = Depends(require_ui_operator)
 _require_admin = Depends(require_ui_admin)
 
@@ -201,7 +199,7 @@ _VERIFY_VALUE_ERRORS: Final[tuple[type[ValueError], ...]] = (
 )
 
 
-def _build_next_request(verify_type: str, answer: str) -> NextStepRequest:
+def _build_next_request(verify_type: str, answer: str, *, retry: bool = False) -> NextStepRequest:
     """Shape the :class:`NextStepRequest` from the form's verify echo.
 
     The page renders the current step's ``verify.type`` into the Advance
@@ -227,8 +225,9 @@ def _build_next_request(verify_type: str, answer: str) -> NextStepRequest:
         return NextStepRequest(
             last_verified=True,
             verify_response=ConfirmVerifyResponse(type="confirm", answer=normalized),
+            retry=retry,
         )
-    return NextStepRequest(last_verified=True, verify_response=None)
+    return NextStepRequest(last_verified=True, verify_response=None, retry=retry)
 
 
 async def _advance(
@@ -237,8 +236,11 @@ async def _advance(
     run_id: uuid.UUID,
     verify_type: str,
     answer: str,
+    retry: bool = False,
 ) -> HTMLResponse:
     """Advance the run one step and re-render the step fragment.
+
+    ``retry`` runs the check of a failed step again ("Try this step again").
 
     Maps the service / engine outcomes to operator-facing fragments:
 
@@ -248,14 +250,14 @@ async def _advance(
       alert (HTTP 200, never a 500) -- a non-assignee (including a tampered
       POST by a TENANT_ADMIN) cannot advance; the documented path is a
       reassign.
-    * :class:`PreviousStepFailedError` -> the dead-end banner: the step
+    * :class:`PreviousStepFailedError` -> the failed-step banner: the step
       failed (the operator answered ``no`` / ``escalate``, or an
       operation_call verify did not match), so Advance is hidden and the
-      only forward move is Abort.
+      forward moves are "Try this step again" or Abort.
     * terminal / verify ``ValueError``s -> an inline alert.
     """
     service = RunbookRunService()
-    request_model = _build_next_request(verify_type, answer)
+    request_model = _build_next_request(verify_type, answer, retry=retry)
 
     structlog.contextvars.bind_contextvars(
         operator_sub=session.operator_sub,
@@ -559,7 +561,7 @@ def register_driver_routes(router: APIRouter) -> None:
     async def runbooks_run_driver(
         run_id: uuid.UUID,
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_operator,
     ) -> HTMLResponse:
         return await render_driver_page(request, session, run_id)
 
@@ -570,8 +572,16 @@ def register_driver_routes(router: APIRouter) -> None:
         session: UISessionContext = _require_operator,
         verify_type: str = Form(default="", max_length=_MAX_VERIFY_TYPE_LENGTH),
         answer: str = Form(default="", max_length=_MAX_ANSWER_LENGTH),
+        retry: str = Form(default="", max_length=_MAX_ANSWER_LENGTH),
     ) -> HTMLResponse:
-        return await _advance(request, session, run_id, verify_type.strip(), answer.strip())
+        return await _advance(
+            request,
+            session,
+            run_id,
+            verify_type.strip(),
+            answer.strip(),
+            retry=retry.strip() == "1",
+        )
 
     @router.post("/ui/runbooks/runs/{run_id}/abort", response_class=HTMLResponse)
     async def runbooks_run_abort(

@@ -405,6 +405,38 @@ def test_every_smaller_answer_fits_the_ceiling_it_was_cut_for(
         assert answer["delivered_bytes"] == whole_size
 
 
+def test_delivery_cap_drops_the_table_before_the_handle(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    store: MemoryResultStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the answer-ready switch on, the table goes first and the rows stay readable."""
+    client, _op = client_with_operator
+    monkeypatch.setattr(answer_module, "_REDUCER", JsonFluxReducer(store=store, answer_ready=True))
+    _ceiling(monkeypatch, 1 << 20)
+    whole = _dependents(client, _closure(60))
+    assert "items" in whole and "counts" in whole
+    whole_size = measure_delivered_wire_bytes(whole)
+
+    _ceiling(monkeypatch, whole_size - 1)
+    partial = _dependents(client, _closure(60))
+
+    assert partial["delivery"] == "partial"
+    assert "items" not in partial and "counts" not in partial
+    assert partial["completeness"]["retained"] == 60
+    assert measure_delivered_wire_bytes(partial) <= whole_size - 1
+    rationale = partial["handle"]["fetch_more"]["drill_in"]["rationale"]
+    assert "in items" not in rationale
+    assert "counts cover" not in rationale
+    assert f"handle_id={partial['handle']['handle_id']}" in rationale
+
+    _ceiling(monkeypatch, measure_delivered_wire_bytes(partial) - 16)
+    unavailable = _dependents(client, _closure(60))
+    assert unavailable["delivery"] == "unavailable"
+    assert "handle" not in unavailable
+    assert "items" not in unavailable and "counts" not in unavailable
+
+
 def _history(count: int, snapshot_bytes: int) -> TopologyHistoryResult:
     snapshot = {"before": None, "after": {"pad": "x" * snapshot_bytes}}
     rows = tuple(

@@ -51,6 +51,11 @@ from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.approval_outcome import resume_outcome
+from meho_backplane.operations.approval_outcome_check import (
+    list_outcome_unknown,
+    outcome_check,
+    outcome_unknown,
+)
 from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
     ApprovalNotFoundError,
@@ -126,10 +131,15 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
     ``result_state`` and ``resume_outcome`` (#3486, #3543) match the REST
     view: whether an approved request ran, and a short summary of how the
     run ended. The result body stays on the owner-only REST ``/result``.
+    ``reveal_secret`` matches the REST view too: ``True`` when the requester
+    asked for the hidden values of the answer. The run happens when the
+    requester gets the values.
     """
     result_state = approval_result_state(row)
     outcome = resume_outcome(row)
     expired_reason = approval_expired_reason(row)
+    unknown = outcome_unknown(row)
+    check = outcome_check(row)
     return {
         "id": str(row.id),
         "tenant_id": str(row.tenant_id),
@@ -140,6 +150,10 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
         "connector_id": row.connector_id,
         "target_id": str(row.target_id) if row.target_id else None,
         "proposed_effect": row.proposed_effect,
+        # True when the requester asked for the hidden values of the answer
+        # (``reveal_secret: true``). The operation runs when the requester
+        # gets the values, not on approve.
+        "reveal_secret": bool(row.reveal_secret),
         "status": row.status,
         "result_state": result_state.value if result_state is not None else None,
         "resume_outcome": (
@@ -149,8 +163,31 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
                 "error_code": outcome.error_code,
                 "audit_id": str(outcome.audit_id) if outcome.audit_id else None,
                 "guidance": outcome.guidance,
+                "execution_outcome": outcome.execution_outcome,
             }
             if outcome is not None
+            else None
+        ),
+        # #5026: why the outcome is unknown and what to check, and what a
+        # person recorded after they checked the target.
+        "outcome_unknown": (
+            {
+                "reason": unknown.reason.value,
+                "advice": unknown.advice,
+                "run_started_at": unknown.run_started_at,
+            }
+            if unknown is not None
+            else None
+        ),
+        "outcome_check": (
+            {
+                "verdict": check.verdict.value,
+                "note": check.note,
+                "checked_by": check.checked_by,
+                "checked_by_name": check.checked_by_name,
+                "checked_at": check.checked_at,
+            }
+            if check is not None
             else None
         ),
         # #5030: why an expired request expired, and the advice to ask again.
@@ -225,16 +262,29 @@ async def _list_handler(
             raise McpInvalidParamsError("work_ref must be a non-empty string when supplied")
         work_ref_filter = work_ref_raw
 
+    outcome_unknown_only = arguments.get("outcome_unknown", False)
+    if not isinstance(outcome_unknown_only, bool):
+        raise McpInvalidParamsError("outcome_unknown must be true or false")
+
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        rows = await list_pending(
-            session,
-            tenant_id=operator.tenant_id,
-            status=status_filter,
-            work_ref=work_ref_filter,
-            limit=limit,
-            offset=offset,
-        )
+        if outcome_unknown_only:
+            rows = await list_outcome_unknown(
+                session,
+                tenant_id=operator.tenant_id,
+                work_ref=work_ref_filter,
+                limit=limit,
+                offset=offset,
+            )
+        else:
+            rows = await list_pending(
+                session,
+                tenant_id=operator.tenant_id,
+                status=status_filter,
+                work_ref=work_ref_filter,
+                limit=limit,
+                offset=offset,
+            )
     return {
         "items": [_row_to_dict(r) for r in rows],
         "limit": limit,
@@ -251,7 +301,9 @@ register_mcp_tool(
             "List approval requests for your tenant. "
             "Operator-level. Use status='pending' (default) for the "
             "common case — requests awaiting a decision. Pass status='all' "
-            "for every state. Pagination via limit / offset."
+            "for every state. Pass outcome_unknown=true for approved "
+            "changes whose outcome MEHO does not know, for a person to "
+            "check. Pagination via limit / offset."
         ),
         inputSchema={
             "type": "object",
@@ -287,6 +339,19 @@ register_mcp_tool(
                         "match), e.g. 'gh:evoila/meho#1' — the requests "
                         "authorised by change ticket X. Omit for no "
                         "work_ref filter."
+                    ),
+                },
+                "outcome_unknown": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "List only approved requests whose outcome MEHO does "
+                        "not know and that nobody marked as checked: the "
+                        "result says 'uncertain', or the latest run started more "
+                        "than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES (default "
+                        "15) ago and stored no result. Do not run these "
+                        "again; a person checks the target. When true, "
+                        "`status` is ignored."
                     ),
                 },
             },
@@ -336,6 +401,9 @@ register_mcp_tool(
             "Operator-level. Returns the full detail including "
             "proposed_effect (human-readable description of what the op "
             "would do) so an operator can decide before approving. "
+            "`reveal_secret: true` means the requester asked for the "
+            "hidden values of the answer. Approving runs nothing: the "
+            "operation runs once, when the requester gets the values. "
             "Cross-tenant / absent ids return approval_request_not_found. "
             "Pass either `approval_request_id` (canonical name) "
             "or the deprecated `id` alias."

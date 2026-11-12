@@ -29,8 +29,9 @@ row unless the call already wrote its own record:
   its own scope, so a child run's row never counts as the record of the
   parent's ``invoke_agent`` call.
 * The payload stores the tool name, a hash of the arguments, the op class,
-  and for a failure the error type. It never stores the arguments or the
-  error text. The hash is the keyed audit hash the MCP rows use, with
+  and for a failure the error type. A refused call also stores the
+  refusal's reason code and a short text under ``error`` (#5773). It never
+  stores the arguments or the error text. The hash is the keyed audit hash the MCP rows use, with
   secret-named values left out.
 * A call to a tool name the run cannot use never reaches a tool hook:
   Pydantic AI rejects the name first and asks the model to retry. The
@@ -82,6 +83,7 @@ from meho_backplane.audit_cutover import (
 )
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.engine import get_sessionmaker
@@ -116,8 +118,15 @@ class ToolRefusedRetry(ModelRetry):
     """A :class:`ModelRetry` that refuses a tool call (role or connector gate).
 
     It reaches the model like any retry. The audit row records it as a
-    refusal (403), not as bad input.
+    refusal (403), not as bad input, with *reason_code* (a code of
+    :mod:`~meho_backplane.operations.deny_reasons`) and *reason*: a short
+    text that names the rule, never the call's arguments.
     """
+
+    def __init__(self, message: str, *, reason_code: str, reason: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.reason = reason
 
 
 class UnknownToolError(LookupError):
@@ -198,12 +207,20 @@ async def write_agent_tool_row(
     }
     if error is not None:
         payload["error_type"] = type(error).__name__
-    if operator.name:
-        payload["principal_name"] = operator.name
+    if isinstance(error, ToolRefusedRetry):
+        # The same shape as the dispatcher's refusal row (#5773).
+        payload["error"] = {
+            "error_code": "denied",
+            "reason_code": error.reason_code,
+            "reason": error.reason,
+        }
     payload.update(tenant_role_source_payload(operator))
     _apply_contextvar_lineage_mirrors(payload)
     audit_id = uuid.uuid4()
     async with get_sessionmaker()() as session:
+        principal_name = await principal_display_name(session, operator)
+        if principal_name:
+            payload["principal_name"] = principal_name
         session.add(
             AuditLog(
                 id=audit_id,

@@ -48,6 +48,7 @@ Run from ``backend/``::
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 from meho_backplane.connectors.registry import (
@@ -59,9 +60,20 @@ from meho_backplane.mcp.human_only import HUMAN_ONLY_MCP_TOOLS
 from meho_backplane.mcp.registry import ToolSurface, eager_import_mcp_modules
 from meho_backplane.operations.ingest.catalog import load_catalog
 
+if __package__ in (None, ""):
+    # Run as a file (``python scripts/...py``): make ``scripts`` importable.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.live_test_cells import LiveTestRecord
+
 #: Where the rendered pages land, relative to the repo root.
 CONNECTORS_RELPATH = "docs-site/reference/connectors.md"
 MCP_TOOLS_RELPATH = "docs-site/reference/mcp-tools.md"
+OVERVIEW_RELPATH = "docs-site/can-do/connectors-overview.md"
+
+#: The generated block in the overview page sits between these two lines.
+OVERVIEW_START = "<!-- live-tests:start -->"
+OVERVIEW_END = "<!-- live-tests:end -->"
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -140,13 +152,10 @@ def _catalog_kind_by_triple() -> dict[tuple[str, str, str], str]:
     statement of a connector's ingest kind: a row that names an
     ``upstream`` spec URL or ships a bundled ``spec_resource`` is a
     generic (spec-ingested) connector; a row with neither is a typed
-    (hand-coded) one. The mechanism-fixture row (``product="_fixture"``)
-    is not a shippable connector and is skipped.
+    (hand-coded) one.
     """
     kinds: dict[tuple[str, str, str], str] = {}
     for entry in load_catalog().entries:
-        if entry.product == "_fixture":
-            continue
         generic = bool(getattr(entry, "upstream", None)) or bool(
             getattr(entry, "spec_resource", None)
         )
@@ -154,21 +163,221 @@ def _catalog_kind_by_triple() -> dict[tuple[str, str, str], str]:
     return kinds
 
 
+#: Where a connector's contributor docs page lives on GitHub. The docs site
+#: does not build ``docs/codebase/``, so the table uses the full GitHub address.
+_DOCS_PAGE_URL = "https://github.com/evoila/meho/blob/main/docs/codebase/{name}"
+
+#: Products whose docs page name differs from ``connectors-<product>.md``.
+_DOCS_PAGE_BY_PRODUCT = {
+    "gh": "connectors-github.md",
+    "hetzner": "connectors-hetzner-robot.md",
+    "k8s": "connectors-kubernetes.md",
+    "windns": "connectors-windows-dns.md",
+}
+
+#: The connectors of evoila's enterprise pack, a commercial add-on image on
+#: top of the public one. They are not in this repository's registry, so the
+#: page lists them from this fixed list: product, connector ids, the product
+#: versions they cover, and what they do. Names and one-liners only.
+_ENTERPRISE_PACK: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "VMware vCenter and vSphere",
+        "vmware-rest-9.0, vmware-rest-8.0",
+        "8.0 Update 1 or newer, 9.x",
+        "Reads and manages virtual machines, hosts, clusters, storage and networks.",
+    ),
+    (
+        "VMware NSX",
+        "nsx-rest-9.0, nsx-rest-4.2",
+        "4.x, 9.x",
+        "Reads and changes segments, gateways, firewall rules, load balancers and VPNs.",
+    ),
+    (
+        "VCF SDDC Manager",
+        "sddc-rest-9.0, sddc-vcf5-5.0",
+        "5.x, 9.x",
+        "Reads workload domains, clusters and hosts, and runs VCF lifecycle tasks.",
+    ),
+    (
+        "VCF Installer and Cloud Builder",
+        "installer-rest-9.1, installer-cb-5.0",
+        "5.x, 9.x",
+        "Checks a deployment plan and deploys a new VCF instance.",
+    ),
+    (
+        "VCF fleet management and Aria Suite Lifecycle",
+        "fleet-lcm-9.0, fleet-rest-9.0",
+        "8.x, 9.x",
+        "Installs, updates and scales the VCF management components.",
+    ),
+    (
+        "VCF Automation and Aria Automation",
+        "vcfa-rest-9.0, vcfa-vra8-8.0",
+        "8.x, 9.x",
+        "Reads and manages projects, catalog items, templates and deployments.",
+    ),
+    (
+        "VCF Operations and Aria Operations",
+        "vrops-rest-9.0, vrops-vrops8-8.0",
+        "8.x, 9.x",
+        "Reads resources, alerts, metrics and health.",
+    ),
+    (
+        "VCF Operations for logs and Aria Operations for Logs",
+        "vrli-rest-9.0, vrli-vrli8-8.0",
+        "8.x, 9.x",
+        "Searches logs and reads log alerts.",
+    ),
+    (
+        "VCF Operations orchestrator",
+        "vro-rest-9.0",
+        "8.x, 9.x",
+        "Reads workflows and their runs, and starts or cancels a workflow run.",
+    ),
+    (
+        "VCF Identity Broker and Workspace ONE Access",
+        "idb-rest-9.0, idb-wsa-3.3",
+        "3.3, 9.x",
+        "Reads users, groups and identity settings.",
+    ),
+    (
+        "VMware Cloud Director",
+        "vcd-rest-10.6",
+        "10.x",
+        "Reads and manages tenants, vApps, virtual machines, networks and edge gateways.",
+    ),
+    (
+        "VMware HCX",
+        "hcx-rest-9.0",
+        "4.7 to 9.x",
+        "Reads site pairings, service meshes and migrations, and changes service meshes.",
+    ),
+    (
+        "VMware Site Recovery Manager",
+        "srm-rest-9.1",
+        "8.8 to 9.x",
+        "Reads protection groups and recovery plans, and runs recovery tasks.",
+    ),
+    (
+        "VMware vSphere Replication",
+        "vr-rest-9.1",
+        "8.8 to 9.x",
+        "Reads and manages the replication of virtual machines.",
+    ),
+    (
+        "VMware Aria Automation Config (Salt)",
+        "salt-raas-8.18",
+        "8.x, 9.x",
+        "Reads minions and jobs, accepts minion keys and starts jobs.",
+    ),
+    (
+        "VMware Holodeck",
+        "holodeck-ssh-9.0",
+        "9.0",
+        "Builds and manages nested VCF lab environments.",
+    ),
+    (
+        "Fortinet FortiGate",
+        "fortigate-rest-7.x",
+        "7.2 to 7.x",
+        "Reads firewalls and changes interfaces, routes, addresses, policies and IPsec VPNs.",
+    ),
+    (
+        "Fortinet FortiManager",
+        "fortimanager-jsonrpc-7.x",
+        "7.2 to 7.x",
+        "Changes addresses, groups and policies, then installs the policy package to devices.",
+    ),
+    (
+        "Fortinet FortiAnalyzer",
+        "fortianalyzer-jsonrpc-7.x",
+        "7.2 to 7.x",
+        "Searches the logs and events that FortiAnalyzer keeps for many devices.",
+    ),
+    (
+        "Fortinet FortiMail",
+        "fortimail-rest-7.x",
+        "7.2 to 7.x",
+        "Reads status, quarantine and mail queues, and changes block lists, safe lists "
+        "and policies.",
+    ),
+    (
+        "Fortinet FortiSIEM",
+        "fortisiem-rest-7.5, fortisiem-rest-7.4",
+        "7.4 to 7.x",
+        "Reads the health of the FortiSIEM nodes and the organizations.",
+    ),
+    (
+        "CrowdStrike Falcon",
+        "falcon-rest-2026.11",
+        "cloud service",
+        "Reads hosts and detections, and cuts a host off the network or gives it back.",
+    ),
+)
+
+
+_VERSIONS_PARAGRAPH = (
+    "**Built for** is the range the code declares and CI tests. "
+    "**Tested live on** lists the versions where a person ran MEHO "
+    "against a real system. Reads means read operations ran; changes "
+    "means change operations ran too, with approval. A version that is "
+    "not listed there was not tested live. A test that is much older "
+    "than the newest MEHO release shows the release it was tested with.\n\n"
+    "Where a product has more than one "
+    "implementation — a modern and a legacy one, say — both are "
+    "registered and MEHO resolves the right one per target from the "
+    "target's fingerprint, so one estate spanning old and new versions "
+    "just works. A connector can also state the target versions its "
+    "operations work on. MEHO checks this range each time an operation "
+    "runs (at dispatch time), also when the call names the connector "
+    "itself. Outside the range, MEHO refuses the call with "
+    "`unqualified_target_version`, and a Sensor on that connector can "
+    "read `unknown`. So pick the connector whose version matches the "
+    "target, for example `vmware-rest-8.0` for vCenter 8.0 Update 1 to Update 3 and "
+    "`vmware-rest-9.0` for vCenter 9.0.x."
+)
+
+
+def _docs_link(product: str) -> str:
+    """Return a Markdown link to *product*'s docs page, or "" when it has none."""
+    name = _DOCS_PAGE_BY_PRODUCT.get(product, f"connectors-{product}.md")
+    if not (_REPO_ROOT / "docs" / "codebase" / name).is_file():
+        return ""
+    return f"[docs]({_DOCS_PAGE_URL.format(name=name)})"
+
+
+def _enterprise_pack_rows(record: LiveTestRecord) -> list[str]:
+    """Return the rows of the enterprise pack table of the inventory page."""
+    rows: list[str] = []
+    for product, connectors, versions, summary in _ENTERPRISE_PACK:
+        id_list = [c.strip() for c in connectors.split(",")]
+        ids = ", ".join(f"`{_md_escape(c)}`" for c in id_list)
+        tested = _md_escape(record.tested_live_cell(id_list))
+        rows.append(
+            f"| {_md_escape(product)} | {ids} | {_md_escape(versions)} | {tested} "
+            f"| {_md_escape(summary)} |"
+        )
+    return rows
+
+
 def render_connector_index() -> str:
     """Render the connector-inventory page from the v2 registry + catalog."""
     _eager_import_connectors()
     kinds = _catalog_kind_by_triple()
+    record = LiveTestRecord.from_repo(_REPO_ROOT)
 
-    rows: list[tuple[str, str, str, str]] = []
+    rows: list[tuple[str, str, str, str, str, str]] = []
     for (product, version, impl_id), cls in all_connectors_v2().items():
         # Skip the wildcard / v1-compat padding rows (empty version /
         # impl_id): they are resolver-internal, never operator-addressable.
         if not version or not impl_id:
             continue
         connector_id = f"{impl_id}-{version}"
-        supported = cls.supported_version_range or "—"
+        supported = cls.supported_version_range or cls.version_range_reason or "no range stated"
         kind = kinds.get((product, version, impl_id), "—")
-        rows.append((product, connector_id, supported, kind))
+        summary = cls.summary or "—"
+        tested = record.tested_live_cell([connector_id])
+        rows.append((product, connector_id, summary, supported, tested, kind))
     rows.sort(key=lambda row: (row[0], row[1]))
 
     lines = _generated_header(
@@ -179,40 +388,62 @@ def render_connector_index() -> str:
     lines += [
         "# Connector inventory",
         "",
-        "Every connector MEHO can resolve a target to, generated from the "
+        "This page lists every MEHO connector in two tables. The first table "
+        "lists the open source connectors of the public image. The second "
+        "table lists the connectors of evoila's enterprise pack, a commercial "
+        "add-on with the VMware and VCF connectors. Agents and "
+        "operators drive all of them through the same governed surface — "
+        "pick a connector, list its operation groups, search operations, "
+        "then call — so no tool name carries a vendor name.",
+        "",
+        "You can add your own connectors the same way as the enterprise "
+        "pack: see [Write a connector package](../extend/connector-kit.md).",
+        "",
+        "## Open source connectors (public image)",
+        "",
+        "These connectors are in the public image, generated from the "
         "in-process connector registry. Each row is one registered "
-        "implementation: agents and operators drive them all through the "
-        "same governed surface — pick a connector, list its operation "
-        "groups, search operations, then call — so the vendor never leaks "
-        "into the tool names.",
+        "implementation. The **Docs** column links to the connector's page "
+        "in the source repository.",
         "",
         "MEHO has two kinds of connector, both first-class and "
         "indistinguishable to an agent. **Generic** connectors are built by "
-        "ingesting a vendor's protocol spec (OpenAPI, GraphQL, WSDL, proto); "
+        "ingesting a vendor's OpenAPI file (version 3.0 or 3.1; the command line "
+        "converts a Swagger 2.0 file first); "
         "**typed** connectors are hand-coded against a vendor SDK or "
         "transport where no usable spec exists. The **Kind** column is "
         "populated only where MEHO's published connector-spec catalog states "
         "it, and is blank otherwise — it is a property of how a connector's "
         "operations are sourced, not something this table infers.",
         "",
-        "| Connector | Product | Supported versions | Kind |",
-        "| --- | --- | --- | --- |",
+        "| Connector | Product | What it does | Built for | Tested live on | Kind | Docs |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for product, connector_id, supported, kind in rows:
+    for product, connector_id, summary, supported, tested, kind in rows:
         lines.append(
             f"| `{_md_escape(connector_id)}` | `{_md_escape(product)}` "
-            f"| {_md_escape(supported)} | {kind} |"
+            f"| {_md_escape(summary)} | {_md_escape(supported)} | {_md_escape(tested)} "
+            f"| {kind} | {_docs_link(product)} |"
         )
+    lines += [
+        "",
+        "## evoila's enterprise pack",
+        "",
+        "evoila's enterprise pack is a commercial add-on. It adds the VMware "
+        "and VCF connectors, and connectors for Fortinet and CrowdStrike "
+        "products, as a signed package on top of the public image. "
+        "Their setup guides and operation lists come with the pack. To get "
+        "the pack, contact evoila.",
+        "",
+        "| Product | Connectors | Built for | Tested live on | What it does |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    lines += _enterprise_pack_rows(record)
     lines += [
         "",
         "## Versions and how a connector is chosen",
         "",
-        "**Supported versions** is the product-version range an "
-        "implementation advertises. Where a product has more than one "
-        "implementation — a modern and a legacy one, say — both are "
-        "registered and MEHO resolves the right one per target from the "
-        "target's fingerprint, so one estate spanning old and new versions "
-        "just works.",
+        _VERSIONS_PARAGRAPH,
         "",
         "## Maturity and readiness",
         "",
@@ -228,6 +459,34 @@ def render_connector_index() -> str:
         "",
     ]
     return "\n".join(lines).rstrip() + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Overview page block
+# ---------------------------------------------------------------------------
+
+
+def render_overview_block() -> str:
+    """Render the enterprise-pack table of the overview page, markers included."""
+    record = LiveTestRecord.from_repo(_REPO_ROOT)
+    lines = [
+        OVERVIEW_START,
+        "| Product | Built for | Tested live on |",
+        "| --- | --- | --- |",
+    ]
+    for product, connectors, versions, _summary in _ENTERPRISE_PACK:
+        id_list = [c.strip() for c in connectors.split(",")]
+        tested = _md_escape(record.tested_live_cell(id_list))
+        lines.append(f"| {_md_escape(product)} | {_md_escape(versions)} | {tested} |")
+    lines.append(OVERVIEW_END)
+    return "\n".join(lines)
+
+
+def splice_overview_block(page: str, block: str) -> str:
+    """Return *page* with the text between the two markers replaced by *block*."""
+    start = page.index(OVERVIEW_START)
+    end = page.index(OVERVIEW_END) + len(OVERVIEW_END)
+    return page[:start] + block + page[end:]
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +530,25 @@ def _tool_table(rows: list[tuple[str, str, str, str]]) -> list[str]:
     for name, maturity, gating, summary in rows:
         lines.append(f"| `{name}` | {maturity} | {gating} | {_md_escape(summary)} |")
     return lines
+
+
+#: Reads "<place>, or the CLI: `<command> <args>`" out of a human-only
+#: remediation text, so the page names the same place and CLI verb as the
+#: answer an agent gets.
+_HUMAN_ONLY_WHERE = re.compile(r"via the (?P<place>[^,]+), or the CLI: `(?P<cli>[^`]+)`")
+
+
+def _human_only_where(name: str) -> str:
+    """Name where a person makes a human-only decision: console place and CLI verb."""
+    match = _HUMAN_ONLY_WHERE.search(HUMAN_ONLY_MCP_TOOLS[name])
+    if match is None:
+        raise ValueError(f"human-only remediation of {name!r} names no console place and CLI verb")
+    verb = []
+    for word in match["cli"].split():
+        if word.startswith(("<", "-")):
+            break
+        verb.append(word)
+    return f"{match['place']}, or `{' '.join(verb)}`"
 
 
 def render_mcp_tool_index() -> str:
@@ -359,7 +637,7 @@ def render_mcp_tool_index() -> str:
         "| --- | --- |",
     ]
     for name in sorted(HUMAN_ONLY_MCP_TOOLS):
-        lines.append(f"| `{name}` | operator console approvals queue, or the `meho` CLI |")
+        lines.append(f"| `{name}` | {_human_only_where(name)} |")
     lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -373,6 +651,12 @@ def main() -> None:
         target = _REPO_ROOT / relpath
         target.write_text(render(), encoding="utf-8")
         print(f"wrote {target}")
+    overview = _REPO_ROOT / OVERVIEW_RELPATH
+    overview.write_text(
+        splice_overview_block(overview.read_text(encoding="utf-8"), render_overview_block()),
+        encoding="utf-8",
+    )
+    print(f"wrote {overview}")
 
 
 if __name__ == "__main__":

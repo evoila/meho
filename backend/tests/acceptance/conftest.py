@@ -169,6 +169,8 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # ``kb_revision.entry_id`` references ``documents(id)`` (migration
     # ``0110``, #3753), so it must be truncated in the same statement.
     "kb_revision",
+    # ``memory_revision`` (migration ``0141``) has the same two FKs.
+    "memory_revision",
     "endpoint_descriptor",
     # ``operation_policy_override`` (migration ``0120``, #4711) holds the
     # operator's stricter risk levels; reset it with the descriptors.
@@ -273,6 +275,10 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # table is in the same statement, exactly as ``check_dashboard_sensors``
     # (also a sensor-FK, no tenant_id) is listed below.
     "sensor_results",
+    # ``sensor_acknowledgements`` FKs ``sensor`` with ``ondelete=CASCADE``
+    # (migration ``0144``, #4128). No ``tenant_id`` FK; listed for the same
+    # reason as ``sensor_results`` above.
+    "sensor_acknowledgements",
     # ``check_dashboards.tenant_id`` is a real ``REFERENCES tenant(id)`` FK
     # from migration ``0065`` (Initiative #2416 T2506); and
     # ``check_dashboard_sensors`` FKs both ``check_dashboards`` and ``sensor``
@@ -297,6 +303,9 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # tenant(id)`` FK from migration ``0117`` (#4992 read scope), the same
     # shape as ``service_principal_grant`` above.
     "service_principal_read_scope",
+    # ``run_approval.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
+    # migration ``0143`` (#4126 run approvals), the same shape as above.
+    "run_approval",
     # ``addon_pairing.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
     # migration ``0079`` (#3025 add-on pairing handshake). PG rejects
     # truncating ``tenant`` unless every referencing table is listed in the

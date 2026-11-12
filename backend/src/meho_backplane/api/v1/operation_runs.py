@@ -166,7 +166,7 @@ async def list_operation_runs(
         default=None,
         description=(
             "Filter by lifecycle status (pending / running / succeeded / "
-            "failed / cancelled). Omit for every state."
+            "failed / cancelled / uncertain). Omit for every state."
         ),
     ),
     limit: int = Query(default=100, ge=1, le=500, description="Max runs per page (1..500)."),

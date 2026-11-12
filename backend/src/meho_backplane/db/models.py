@@ -439,7 +439,16 @@ class AuditEventClass(StrEnum):
       rejected, or let an approval request expire, or its sender withdrew
       it (#5717). The operation did not run on any of these rows.
     * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
-      refresh-token replay or a broken satellite effect chain.
+      refresh-token replay or a broken satellite effect chain. The
+      ``mcp.session_open`` row of a new MCP session has this class too.
+    * :attr:`CONFIG_CHANGE` -- an operator changed the settings of
+      operations, and none of them ran. Two writers: an edit of one
+      operation with ``meho_connector_edit_op`` (turned it on or off, or
+      changed its risk level, approval rule, description or guidance,
+      #5791), and a tenant's own on or off switch with
+      ``meho_connector_tenant_setting``, for one operation or a whole
+      group (#5864). The row's ``payload["op_id"]`` names the edited
+      operation; a group switch names ``payload["group_key"]`` instead.
     * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
       row written before migration ``0106`` reads as this class; it is never
       guessed from ``method`` / ``path``. The REST and MCP request wrapper
@@ -452,10 +461,11 @@ class AuditEventClass(StrEnum):
     POLICY_DECISION = "policy_decision"
     APPROVAL_DECISION = "approval_decision"
     SECURITY_EVENT = "security_event"
+    CONFIG_CHANGE = "config_change"
     LEGACY_REQUEST = "legacy_request"
 
 
-#: Closed tuple mirrored in migration ``0106``'s CHECK constraint.
+#: Closed tuple mirrored in the CHECK constraint of migrations ``0106`` and ``0137``.
 AUDIT_EVENT_CLASSES: tuple[str, ...] = tuple(c.value for c in AuditEventClass)
 
 
@@ -899,6 +909,43 @@ class Tenant(Base):
         nullable=True,
         default=None,
     )
+    # Per-tenant prices for agent models that MEHO's own price table
+    # (``MODEL_PRICING``) does not know, for example an open model on a
+    # model server the tenant runs itself (#5853). A map from model id to
+    # ``{"input": "<USD>", "output": "<USD>"}`` per million tokens; the
+    # prices are decimal strings, so no float rounding gets in. ``NULL``
+    # means no prices. Read and written through
+    # :mod:`meho_backplane.operations.tenant_model_prices`. A model in
+    # ``MODEL_PRICING`` always keeps that price. Nullable, so migration
+    # ``0138`` needs no backfill.
+    agent_model_prices: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    # Tenant setting of the run approval (#4126). ``True`` lets a run
+    # approval list a target kind (a product, for example ``vcenter``) in
+    # place of one target, so targets the run registers itself are covered.
+    # ``False`` (default): every entry names one target or no target.
+    # ``server_default=false`` in migration ``0143`` backfills existing rows.
+    run_approval_target_kinds_enabled: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=False,
+        server_default=sa.false(),
+    )
+    # Where the tenant keeps its lessons (#5976): the key of one docs
+    # collection, the team wiki loaded into a knowledge index.
+    # ``search_knowledge`` and ``meho kb search`` also search it, and
+    # ``add_to_knowledge`` says the lesson goes there as a candidate page
+    # (:mod:`meho_backplane.kb.wiki_search`). ``NULL`` (default): lessons
+    # live in MEHO only, as before. Nullable, so migration ``0150`` needs
+    # no backfill.
+    knowledge_wiki_collection: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -1119,6 +1166,10 @@ class KbRevision(Base):
     * ``embedding_model`` / ``chunker_version`` -- which embedding
       model and chunking rule indexed this body. ``None`` on backfill
       rows, because the migration cannot know them.
+    * ``entry_metadata`` -- the entry's metadata (the header) as of this
+      revision. A change to the body or to the metadata adds a
+      revision, so one revision id names one exact state of the entry.
+      ``None`` on rows stored before this column existed.
     * ``created_at`` -- when the revision was stored.
     """
 
@@ -1146,6 +1197,10 @@ class KbRevision(Base):
     origin: Mapped[str] = mapped_column(Text, nullable=False)
     embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
     chunker_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    entry_metadata: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1163,6 +1218,103 @@ class KbRevision(Base):
             "origin IN ('write', 'backfill-current')",
             name="ck_kb_revision_origin",
         ),
+    )
+
+
+class MemoryRevision(Base):
+    """One retained version of a memory entry (body and metadata).
+
+    The :class:`Document` row with ``source="memory"`` stays the latest
+    head. Each time a memory write changes the body or the metadata, the
+    service adds one row here. A row is never updated. Rows go with the
+    entry: ``ON DELETE CASCADE``, and the memory delete paths remove them
+    explicitly (SQLite does not enforce the foreign key).
+
+    ``revision_number`` counts 1, 2, 3, ... per entry and is unique per
+    entry. ``written_by_sub`` is the OIDC ``sub`` of the writer, or
+    ``None`` when the write had no principal.
+    """
+
+    __tablename__ = "memory_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    entry_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    doc_metadata: Mapped[dict[str, object]] = mapped_column(
+        "metadata",
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+    )
+    written_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "memory_revision_entry_number_idx",
+            "entry_id",
+            "revision_number",
+            unique=True,
+        ),
+    )
+
+
+class LessonRetrieval(Base):
+    """One knowledge or memory entry that a search or recall gave to an agent session.
+
+    The weekly knowledge upkeep (:mod:`meho_backplane.lessons.upkeep`) and
+    the learning numbers of ``meho audit reflex``
+    (:mod:`meho_backplane.lessons.metrics`) read these rows. A row is
+    written only for a call that has a session id, because only a session
+    can later show that the entry was used.
+
+    * ``tenant_id`` -- the tenant of the session that searched.
+    * ``store`` -- ``"kb"`` or ``"memory"``.
+    * ``entry_id`` -- the ``documents.id`` of the entry. No foreign key:
+      the row stays when the entry is deleted, so the numbers of the past
+      do not change.
+    * ``entry_tenant_id`` -- the tenant that owns the entry (another
+      tenant for a shared knowledge entry).
+    * ``status`` -- the header ``status`` of the entry at that moment, or
+      ``None``.
+    * ``expired`` -- whether the entry's ``expires_at`` had passed at that
+      moment.
+    * ``channel`` -- how the entry reached the session: ``"search"`` (a
+      search tool returned it) or ``"recall"`` (MEHO showed it before an
+      operation).
+    """
+
+    __tablename__ = "lesson_retrieval"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    store: Mapped[str] = mapped_column(Text, nullable=False)
+    entry_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    entry_tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    agent_session_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    channel: Mapped[str] = mapped_column(
+        Text, nullable=False, default="search", server_default=sa.text("'search'")
+    )
+
+    __table_args__ = (
+        Index("lesson_retrieval_tenant_time_idx", "tenant_id", "retrieved_at"),
+        Index("lesson_retrieval_entry_idx", "entry_id"),
     )
 
 
@@ -1778,7 +1930,11 @@ class EndpointDescriptor(Base):
     * ``endpoint_descriptor_bm25_idx`` (PG only) — GIN over
       ``to_tsvector('english', coalesce(summary, '') || ' ' ||
       coalesce(description, ''))``. Powers the BM25 half of
-      ``search_operations``'s hybrid retrieval. Declared in
+      ``search_operations``'s hybrid retrieval. Its twin
+      ``endpoint_descriptor_bm25_custom_idx`` (migration ``0148``) is
+      GIN over the same text with ``nullif(custom_description, '')``
+      in place of ``description``; the keyword query uses it while the
+      ``AGENT_READS_CUSTOM_DESCRIPTION`` switch is on. Declared in
       migration ``0005`` via raw SQL because Alembic has no clean
       API for expression-based GIN; intentionally **not** in
       :attr:`__table_args__` because declaring it would force
@@ -1855,6 +2011,12 @@ class EndpointDescriptor(Base):
         nullable=False,
         default=False,
     )
+    #: Not a column. ``True`` on a row that
+    #: :func:`~meho_backplane.operations.op_policy.apply_effective_policy`
+    #: returned when a classification entry makes the operation always
+    #: wait (or two entries conflict). Then no standing grant and no run
+    #: approval clears a call: a person approves each one.
+    policy_always_wait = False
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,
@@ -1970,7 +2132,14 @@ class OperationPolicyOverride(Base):
     ``requires_approval`` ``True`` means "require approval", ``False``
     means "a platform admin turned approval off" (only allowed with a
     ``reason``, never for a destructive operation), ``NULL`` means "no
-    change". A row with both fields ``NULL`` is deleted.
+    change". A row with both fields ``NULL`` and no category or labels is
+    deleted.
+
+    ``category`` and ``labels`` classify this one operation (the most
+    specific classification level). They are read only when the
+    ``POLICY_CLASSIFICATION`` switch is on; see
+    :mod:`meho_backplane.policy.classification`. ``labels`` is a map of
+    free ``key=value`` text, kept apart from the code's ``tags``.
     """
 
     __tablename__ = "operation_policy_override"
@@ -1986,6 +2155,10 @@ class OperationPolicyOverride(Base):
         sa.Boolean(), nullable=True, default=None
     )
     reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    labels: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON, nullable=True, default=None
+    )
     set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     set_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -2019,6 +2192,53 @@ class OperationPolicyOverride(Base):
             "safety_level IS NULL OR safety_level IN "
             "('safe', 'caution', 'dangerous', 'destructive')",
             name="ck_operation_policy_override_safety_level",
+        ),
+    )
+
+
+class TenantPolicy(Base):
+    """The stored classification policy of one tenant, or of the whole install.
+
+    One row per scope: ``tenant_id`` is a tenant UUID for a tenant's
+    policy and ``NULL`` for the install's. ``document`` holds the
+    ``taxonomy`` (the categories and the default category) and the
+    ``classifications`` (category, labels, risk level and "always wait"
+    for connectors, operation groups and operations, matched by pattern).
+    The install's taxonomy is the one category list; a tenant's taxonomy
+    only adds categories for that tenant.
+
+    Read only when the ``POLICY_CLASSIFICATION`` switch is on; see
+    :mod:`meho_backplane.policy.classification`. The policy file import
+    writes whole documents here; a single classification edit changes one
+    entry.
+    """
+
+    __tablename__ = "tenant_policy"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    document: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "tenant_policy_install_idx",
+            sa.text("(tenant_id IS NULL)"),
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NULL"),
+            sqlite_where=sa.text("tenant_id IS NULL"),
+        ),
+        Index(
+            "tenant_policy_tenant_idx",
+            "tenant_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NOT NULL"),
+            sqlite_where=sa.text("tenant_id IS NOT NULL"),
         ),
     )
 
@@ -4325,6 +4545,15 @@ class AgentRun(Base):
         nullable=True,
         default=None,
     )
+    # Token counts of a succeeded run (#5853), summed over its model
+    # requests. ``input_tokens`` is the uncached input only; the cached
+    # input is in the two cache columns (``0`` when the provider does not
+    # report a prompt cache). ``NULL`` on a run that did not succeed and
+    # on rows written before migration ``0138``.
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    cache_read_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    cache_write_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
     output: Mapped[dict[str, object] | None] = mapped_column(
         _PORTABLE_JSON,
         nullable=True,
@@ -4478,6 +4707,9 @@ class OperationRunStatus(StrEnum):
       from a persisted error envelope on a ``succeeded`` run.
     * :attr:`CANCELLED` -- an authorized operator cancelled a non-terminal
       run (terminal).
+    * :attr:`UNCERTAIN` -- the worker of a run that changes something died
+      mid-flight (reaped), so MEHO does not know if the change happened
+      (terminal, #5025). A dead run of a read operation is ``failed``.
 
     There is deliberately no ``awaiting_approval`` state (unlike
     :class:`AgentRunStatus`): a governed dispatch runs to a terminal
@@ -4491,6 +4723,7 @@ class OperationRunStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    UNCERTAIN = "uncertain"
 
 
 class OperationRunOrigin(StrEnum):
@@ -6094,6 +6327,75 @@ class ServicePrincipalReadScope(Base):
     )
 
 
+class RunApproval(Base):
+    """A person's approval of the operation list of one automation run (#4126).
+
+    A service principal (the automation add-on) asks for it with its run
+    reference (``work_ref``) and the list of operations the run may use.
+    Each entry is a ``connector_id``, an ``op_id`` and one target, a target
+    kind (``target_product``, only when the tenant setting
+    :attr:`Tenant.run_approval_target_kinds_enabled` is on), or no target.
+    A person approves the whole list once. Then a call of that principal
+    with that ``Meho-Work-Ref`` that matches an entry runs without a new
+    approval; the policy gate writes one ``approval.decision`` audit row
+    that names this row
+    (:func:`meho_backplane.operations.run_approvals.consult_and_record_run_approval`).
+
+    The approval is keyed on the token subject (``principal_sub``), never
+    on a client name. A row is live while it is approved, not revoked, not
+    ended and before ``expires_at``. Rows are never deleted, so the history
+    stays visible. Destructive operations are never covered.
+
+    ``expired_at`` is written by the next request of the same run, when the
+    row is past ``expires_at``. Until then the dead row still holds the
+    run's slot in ``run_approval_open_run_idx``, the partial unique index
+    that lets one run hold at most one open row (not revoked, not ended,
+    not recorded as expired). Two requests for the same run that arrive at
+    the same time both pass the check in the service; the index lets only
+    one of them insert
+    (:meth:`meho_backplane.operations.run_approvals.RunApprovalService.request`).
+    """
+
+    __tablename__ = "run_approval"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), ForeignKey("tenant.id"), nullable=False)
+    # JWT ``sub`` of the service principal that asked. Soft reference, no FK
+    # -- same discipline as ServicePrincipalGrant.principal_sub.
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    work_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    entries: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revoked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("run_approval_lookup_idx", "tenant_id", "principal_sub", "work_ref"),
+        # Matches migration 0143: at most one open row per (tenant, token
+        # subject, run reference).
+        Index(
+            "run_approval_open_run_idx",
+            "tenant_id",
+            "principal_sub",
+            "work_ref",
+            unique=True,
+            postgresql_where=sa.text(
+                "revoked_at IS NULL AND ended_at IS NULL AND expired_at IS NULL"
+            ),
+            sqlite_where=sa.text("revoked_at IS NULL AND ended_at IS NULL AND expired_at IS NULL"),
+        ),
+    )
+
+
 class SandboxModeState(Base):
     """The stored sandbox mode: exactly one row, fixed for the database (#4622).
 
@@ -6652,6 +6954,15 @@ class ApprovalRequestStatus(StrEnum):
 #: literal. The drift guard asserts equality so the two never diverge.
 _APPROVAL_REQUEST_STATUSES: tuple[str, ...] = tuple(s.value for s in ApprovalRequestStatus)
 
+#: What an operator found when they checked the target of an approved run
+#: whose outcome MEHO does not know (#5026). Kept equal to
+#: ``OutcomeCheckVerdict`` in ``operations/approval_outcome_check.py``.
+_APPROVAL_OUTCOME_CHECK_VERDICTS: tuple[str, ...] = ("happened", "did_not_happen")
+
+#: Why a checked request was on the "outcome unknown" list (#5026). Kept
+#: equal to ``OutcomeUnknownReason`` in ``operations/approval_outcome_check.py``.
+_APPROVAL_OUTCOME_CHECK_REASONS: tuple[str, ...] = ("uncertain", "started_no_result")
+
 
 class ApprovalRequest(Base):
     """One pending (or decided) approval request for a ``requires_approval`` op.
@@ -6699,7 +7010,14 @@ class ApprovalRequest(Base):
       hoist-at-write pattern as ``audit_log.principal_name`` (#1212); NULL
       when the token carried no name (fail-open) and on pre-0097 rows.
       Display name only -- never email or other profile fields. Added by
-      migration ``0097``.
+      migration ``0097``. For a machine token without a ``name`` claim
+      it is the registered agent name or the client id (#3885).
+
+    * ``principal_kind`` -- Text nullable. The requester's
+      ``principal_kind`` (``user`` / ``agent`` / ``service`` / ``runner``),
+      saved at park time so the console and the CLI can mark a machine
+      requester as not a person (#3885). NULL on rows parked before
+      migration ``0149``.
 
     * ``op_id`` / ``connector_id`` -- the operation + connector the
       dispatcher was asked to call. Stored verbatim for resume.
@@ -6873,6 +7191,13 @@ class ApprovalRequest(Base):
       refuses to run when it differs. NULL for a request with no target
       and on rows saved before this column. Added by migration ``0130``.
 
+    * ``rights_change`` -- Boolean nullable. The rights-change mark: ``True``
+      when the request changes who has rights (groups, roles, categories,
+      labels, the policy file). Then the requester can never approve it,
+      whatever their group, and another admin must
+      (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
+      NULL on every other request. Added by migration ``0153``.
+
     * ``reveal_secret`` -- Boolean NOT NULL DEFAULT ``false``. The requester
       asked for the hidden values of the answer (``reveal_secret: true``;
       an agent is refused before the call waits). It is not a parameter of
@@ -6924,6 +7249,9 @@ class ApprovalRequest(Base):
     # Display name only -- no email / groups / other profile fields. Added
     # by migration ``0097``.
     principal_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The requester's principal kind (#3885), so the approval surfaces can
+    # mark an agent requester as not a person. NULL before migration 0149.
+    principal_kind: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Dispatch coordinates for resume.
     op_id: Mapped[str] = mapped_column(Text, nullable=False)
     connector_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -7094,6 +7422,15 @@ class ApprovalRequest(Base):
     rerun_count: Mapped[int] = mapped_column(
         sa.Integer(), nullable=False, default=0, server_default=sa.text("0")
     )
+    # When the latest re-run started (#5026). NULL until the first re-run.
+    # Until then, the latest run is the first run, which started at
+    # ``resumed_at``. The re-run claim sets it
+    # in the same UPDATE that adds one to ``rerun_count``. The "outcome
+    # unknown" list counts its minutes from the start of the latest run.
+    # Added by migration ``0142``.
+    rerun_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
     # The target's connection settings when the request was made. See the
     # class docstring. Added by migration ``0130``.
     target_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
@@ -7102,6 +7439,26 @@ class ApprovalRequest(Base):
     reveal_secret: Mapped[bool] = mapped_column(
         sa.Boolean(), nullable=False, default=False, server_default=sa.false()
     )
+    # The request changes who has rights: only another admin approves it.
+    # See the class docstring. Added by migration ``0153``.
+    rights_change: Mapped[bool | None] = mapped_column(sa.Boolean(), nullable=True, default=None)
+    # An operator checked the target of an approved run whose outcome MEHO
+    # does not know, and wrote down what they found (#5026): the verdict
+    # (``happened`` / ``did_not_happen``), a note, who and when. NULL until
+    # someone marks the request as checked. ``outcome_check_reason`` is why
+    # the request was on the list at that time (``uncertain`` /
+    # ``started_no_result``). A check covers only that reason and the run that
+    # was the latest at that time, so a later re-run or a later ``uncertain``
+    # result puts the request back on the list. The stored result is never
+    # changed, and nothing runs. Added by migration ``0142``.
+    outcome_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    outcome_checked_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    outcome_checked_by_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    outcome_check_verdict: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    outcome_check_note: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    outcome_check_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     __table_args__ = (
         Index(
@@ -7144,6 +7501,85 @@ class ApprovalRequest(Base):
         sa.CheckConstraint(
             _ck_in("status", _APPROVAL_REQUEST_STATUSES),
             name="ck_approval_request_status",
+        ),
+        sa.CheckConstraint(
+            _ck_in("outcome_check_verdict", _APPROVAL_OUTCOME_CHECK_VERDICTS),
+            name="ck_approval_request_outcome_check_verdict",
+        ),
+        sa.CheckConstraint(
+            _ck_in("outcome_check_reason", _APPROVAL_OUTCOME_CHECK_REASONS),
+            name="ck_approval_request_outcome_check_reason",
+        ),
+    )
+
+
+#: Where a passkey touch for an approval was started (#6214): the web
+#: console, a link the command line prints, or a link a REST answer carries.
+APPROVAL_PRESENCE_CHANNELS: tuple[str, ...] = ("web", "cli_link", "rest_link")
+
+
+class ApprovalPresenceChallenge(Base):
+    """One started passkey touch for an approval (#6214).
+
+    When a person clicks Approve on a request that needs a passkey touch,
+    MEHO makes this row. It names exactly what the approval will run, and
+    it can be used once, until ``expires_at``. Made and checked by
+    :mod:`meho_backplane.operations.approval_presence`. Nothing writes it
+    while the ``APPROVAL_PRESENCE_TOUCH`` switch is off.
+
+    Columns
+    -------
+
+    * ``tenant_id`` -- the tenant of the requests (no foreign key).
+    * ``approver_sub`` -- the person who started the touch. Only they can
+      use the row.
+    * ``request_ids`` -- the ids of the approval requests the touch
+      approves, in the order the person saw them (a JSON list of strings).
+    * ``binding_hash`` -- SHA-256 over the tenant, each request's stored
+      hashes and release, the ``card_hash`` and ``server_random``. MEHO
+      sends it to Keycloak as the ``nonce``.
+    * ``server_random`` -- 32 random bytes (hex) that MEHO made for this
+      row. Part of the binding hash, so the hash cannot be guessed and can
+      be built again to see if a request changed.
+    * ``card_hash`` -- SHA-256 over the approval card text the person saw.
+    * ``match_code`` -- 6 characters from the binding hash. The person sees
+      the same code in MEHO and next to the touch.
+    * ``created_at`` / ``expires_at`` -- when the row was made, and when it
+      ends (``created_at`` + ``APPROVAL_PRESENCE_TOUCH_VALID_SECONDS``).
+    * ``used_at`` -- when an approval used the row. NULL until then. Set
+      once.
+    * ``channel`` -- ``web``, ``cli_link`` or ``rest_link``.
+    * ``session_kind`` -- what kind of session started the touch.
+
+    A daily clean-up deletes rows that were never used and are older than
+    14 days. Added by migration ``0157``.
+    """
+
+    __tablename__ = "approval_presence_challenge"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    approver_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    request_ids: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False
+    )
+    binding_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    server_random: Mapped[str] = mapped_column(Text, nullable=False)
+    card_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    match_code: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    session_kind: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        Index("approval_presence_challenge_created_at_idx", "created_at"),
+        sa.CheckConstraint(
+            _ck_in("channel", APPROVAL_PRESENCE_CHANNELS),
+            name="ck_approval_presence_challenge_channel",
         ),
     )
 
@@ -8437,6 +8873,14 @@ class RunbookRunStepState(Base):
         nullable=True,
         default=None,
     )
+    # Every check attempt of the step, oldest first: ``{"at", "passed",
+    # "verify_response"}``. ``verify_response`` above holds the latest one.
+    # A retry of a failed step adds an entry; no entry is ever replaced.
+    attempts: Mapped[object] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         sa.CheckConstraint(
@@ -9062,6 +9506,14 @@ class CheckDashboard(Base):
     # and a boundary rejection names the field and its limit where a CHECK
     # violation would surface as an opaque 500.
     investigator_prompt: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Result of the last alert mail attempt, written by ``checks.mail_result``.
+    # All three are NULL until the first attempt. ``last_mail_reason`` is the
+    # failure reason code and stays NULL when the mail was sent.
+    last_mail_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    last_mail_sent: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
+    last_mail_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -9156,6 +9608,77 @@ class CheckDashboardSensor(Base):
         sa.CheckConstraint(
             _ck_in("last_member_state", _CHECK_DASHBOARD_ROLLUP_STATES),
             name="ck_check_dashboard_sensors_last_member_state",
+        ),
+    )
+
+
+#: Why a person acknowledged a Sensor finding (#4128). A closed set, so a
+#: report can count the reasons; the short text says the rest.
+SENSOR_ACK_REASONS: tuple[str, ...] = ("accepted_risk", "fix_planned", "false_alarm")
+
+#: The Sensor states a person can acknowledge: every state that is not green.
+#: ``skip`` is never a Sensor's own state (only a rollup derivation).
+SENSOR_ACK_STATES: tuple[str, ...] = ("unknown", "degraded", "critical")
+
+#: Why an acknowledgement ended before or at its end time.
+SENSOR_ACK_END_REASONS: tuple[str, ...] = ("expired", "state_worse")
+
+
+class SensorAcknowledgement(Base):
+    """A person's acknowledgement of one Sensor finding, for a set time (#4128).
+
+    While it is active (``ended_at IS NULL`` and ``expires_at`` is in the
+    future), the in-band advisory says "acknowledged" and the warning mails
+    for this Sensor are not sent again. The Sensor keeps running and its
+    real state stays visible.
+
+    It ends at ``expires_at`` (``end_reason='expired'``), or early when the
+    Sensor's state gets worse than ``acked_state``
+    (``end_reason='state_worse'``). ``checks.acknowledgement`` writes the
+    end and its audit row in the same transaction as the Sensor result that
+    caused it. A partial unique index allows one open row per Sensor.
+    """
+
+    __tablename__ = "sensor_acknowledgements"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    sensor_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("sensor.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # The Sensor's state when the person acknowledged it. A later state
+    # worse than this one ends the acknowledgement early.
+    acked_state: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    end_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
+    __table_args__ = (
+        Index(
+            "sensor_acknowledgements_open_idx",
+            "sensor_id",
+            unique=True,
+            postgresql_where=sa.text("ended_at IS NULL"),
+            sqlite_where=sa.text("ended_at IS NULL"),
+        ),
+        sa.CheckConstraint(
+            _ck_in("acked_state", SENSOR_ACK_STATES),
+            name="ck_sensor_acknowledgements_acked_state",
+        ),
+        sa.CheckConstraint(
+            _ck_in("reason", SENSOR_ACK_REASONS),
+            name="ck_sensor_acknowledgements_reason",
+        ),
+        sa.CheckConstraint(
+            _ck_in("end_reason", SENSOR_ACK_END_REASONS),
+            name="ck_sensor_acknowledgements_end_reason",
         ),
     )
 
@@ -9380,6 +9903,9 @@ class RequestUsageEvent(Base):
       ``context_selected``.
     * ``correlation_id`` -- opaque id that links a ``context_selected``
       event to later evaluation data; ``NULL`` on ``request_finished``.
+    * ``tool_texts`` -- ``short`` when the MCP session asked for the short
+      tool texts with ``?texts=short``; ``NULL`` otherwise (migration
+      ``0158``).
 
     Indexes are declared in migrations ``0107`` and ``0113``:
     ``(tenant_id, occurred_at)`` for tenant-scoped window reads,
@@ -9406,3 +9932,102 @@ class RequestUsageEvent(Base):
     route: Mapped[str] = mapped_column(Text, nullable=False)
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    tool_texts: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class OperationSearchRecord(Base):
+    """One ``search_operations`` call: what it was asked and what it returned.
+
+    Written by :mod:`meho_backplane.operation_picks.recorder`, only when
+    ``REQUEST_USAGE_RETENTION_DAYS`` is set. The request usage retention job
+    deletes rows older than that window. Migration ``0147`` makes the table.
+
+    * ``transport`` -- ``mcp``, ``rest`` or ``agent`` (a hosted agent run).
+    * ``mode`` -- ``ranked`` (a query) or ``exact`` (one ``op_id``).
+    * ``op_ids`` -- the returned operation ids, in rank order.
+    * ``query_hash`` -- SHA-256 of the query text; ``NULL`` in exact mode.
+    * ``query_text`` -- the query itself, only when
+      ``OPERATION_SEARCH_STORE_QUERY_TEXT`` is on. Otherwise ``NULL``.
+    """
+
+    __tablename__ = "operation_search_record"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    transport: Mapped[str] = mapped_column(Text, nullable=False)
+    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    group_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    search_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    hit_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    op_ids: Mapped[list[str]] = mapped_column(JSON().with_variant(JSONB(), "postgresql"))
+    query_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    query_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class OperationCallRecord(Base):
+    """One ``call_operation`` call, linked to the search it followed.
+
+    Written next to :class:`OperationSearchRecord`, under the same switch
+    and retention. ``search_id`` is the newest search of the same caller,
+    session and connector within five minutes, or ``NULL`` when there was
+    none. ``rank`` is the 1-based place of ``op_id`` in that search's
+    results, or ``NULL`` when it was not there. ``outcome`` is the call's
+    status (``ok``, ``error``, ``denied``, ...) or ``unknown_op``.
+    """
+
+    __tablename__ = "operation_call_record"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    transport: Mapped[str] = mapped_column(Text, nullable=False)
+    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    search_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class InstanceSettingsRevision(Base):
+    """One applied settings-file import (``POST /api/v1/settings/import``).
+
+    Append-only: the service only INSERTs, and on PostgreSQL migration
+    ``0136`` installs a ``BEFORE UPDATE OR DELETE`` trigger that refuses any
+    mutation (a copy of the ``audit_log`` trigger from ``0100``). An import
+    that changes nothing writes no row.
+
+    ``spec_before`` / ``spec_after`` hold the ``spec`` of the tenants the
+    import touched, in the export's shape; the diff is worked out on read
+    (see :mod:`meho_backplane.instance_settings.diff`). ``audit_id`` is the
+    import request's ``audit_log`` id; the ``tenant_convention_history``
+    rows the import wrote link to it by ``request_id``. ``actor_sub`` is
+    always the human operator (machine principals cannot import).
+    """
+
+    __tablename__ = "instance_settings_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    actor_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    audit_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    api_version: Mapped[str] = mapped_column(Text, nullable=False)
+    exported_from: Mapped[dict[str, object] | None] = mapped_column(_PORTABLE_JSON, nullable=True)
+    spec_before: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    spec_after: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    summary: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+
+    __table_args__ = (Index("instance_settings_revision_ts_idx", "ts"),)

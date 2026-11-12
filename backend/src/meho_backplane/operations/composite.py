@@ -103,6 +103,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.operations.governed_subops import governed_subops_for
 from meho_backplane.settings import get_settings
 
 _log = structlog.get_logger(__name__)
@@ -115,6 +116,7 @@ __all__ = [
     "CompositeRecursionLimitExceeded",
     "CompositeResumeState",
     "DispatchChild",
+    "approved_run_var",
     "composite_depth_var",
     "composite_dispatch_var",
     "composite_resume_scope_var",
@@ -225,15 +227,13 @@ composite_dispatch_var: ContextVar[tuple[str, dict[str, Any]] | None] = ContextV
 #: later identical sub-op in the same composite does not clear a second time.
 #: ``None`` for every ordinary dispatch.
 #:
-#: Correctness contract (#3351 review B1): the resume re-enters the parent
-#: composite under the **approving reviewer's** identity, and every governed
-#: sub-op shipped today is ``dangerous`` + ``requires_approval=False`` — a
-#: verdict a USER auto-executes (``policy_gate`` default-allow). So the reviewer
-#: runs the approved sub-op **and** every remaining governed sub-op in a single
-#: pass; the composite completes in one resume. This var clears exactly one
-#: sub-op; the correctness of the rest relies on that auto-execute invariant.
-#: A multi-gate re-park — a later governed sub-op that a USER would *not*
-#: auto-execute (``destructive`` or ``requires_approval=True``) — is **not
+#: Correctness contract (#3351 review B1, #3980): this var clears exactly one
+#: sub-op. Every other governed sub-op that is not ``destructive`` and not
+#: marked ``requires_approval`` goes ahead because a person approved the run
+#: (:func:`_covered_by_approved_run`), whoever runs the resume and however
+#: the approval was given (web click or command line). So the composite
+#: completes in one resume. A multi-gate re-park — a later governed sub-op
+#: that is ``destructive`` or ``requires_approval=True`` — is **not
 #: supported** by this re-entry mechanism (there is no completed-leg guard, so
 #: a second park + second resume would re-run earlier legs). It is detected via
 #: :data:`composite_resume_scope_var` and fails closed in
@@ -263,6 +263,17 @@ composite_resume_scope_var: ContextVar[tuple[str, str] | None] = ContextVar(
     "composite_resume_scope",
     default=None,
 )
+
+
+#: ContextVar set to ``True`` while the dispatcher runs an approved call
+#: (``dispatch(..., _approved=True)``) (#3980). A person approved this run,
+#: so :func:`enforce_subop_policy` lets its internal steps go ahead without a
+#: second approval, unless a step is ``destructive`` or marked
+#: ``requires_approval`` (:func:`_covered_by_approved_run`). One approval
+#: still completes one run, now that a call made with a token (and a
+#: ``dangerous`` step in the web interface) waits for approval. ``False`` for
+#: every ordinary dispatch.
+approved_run_var: ContextVar[bool] = ContextVar("approved_run", default=False)
 
 
 class CompositeResumeState(NamedTuple):
@@ -514,10 +525,10 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
     direct seam — and the var is consumed (set to ``None``) so the same
     sub-op cannot clear twice in one re-entry. Matching on
     the params-hash (not op_id alone) pins the clear to the exact entity
-    approved. This clears **exactly one** sub-op: the resume then relies on the
-    reviewer auto-executing every other governed sub-op in the same pass (all
-    ``dangerous`` + ``requires_approval=False``). If any other governed sub-op
-    would instead need its own approval, the fail-closed multi-gate guard in
+    approved. This clears **exactly one** sub-op. Every other governed sub-op
+    that is not ``destructive`` and not ``requires_approval`` goes ahead under
+    the approval of the run (:func:`_covered_by_approved_run`, #3980). If any
+    other governed sub-op would instead need its own approval, the fail-closed multi-gate guard in
     :func:`enforce_subop_policy` (keyed off the unconsumed
     :data:`composite_resume_scope_var`) aborts the resume rather than re-park it
     (#3351 review B1) — it does **not** re-park the rest. The exception is a
@@ -532,6 +543,24 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
         _log.info("composite_subop_resume_cleared", op_id=op_id)
         return True
     return False
+
+
+def _covered_by_approved_run(
+    *, safety_level: str, requires_approval: bool, always_wait: bool = False
+) -> bool:
+    """True when a person's approval of this run covers this waiting step (#3980).
+
+    The run is approved when the dispatcher runs it with ``_approved=True``
+    (:data:`approved_run_var`) or when it is the re-entry of an approved step
+    (:data:`composite_resume_scope_var`). Such an approval covers every other
+    internal step, except a ``destructive`` step, a step marked
+    ``requires_approval`` and a step a classification entry makes always
+    wait: those keep their own approval, or end with
+    ``composite_resume_multi_gate_unsupported`` during a resume.
+    """
+    if safety_level == "destructive" or requires_approval or always_wait:
+        return False
+    return approved_run_var.get() or composite_resume_scope_var.get() is not None
 
 
 def _resume_parent_for_current_composite(
@@ -571,6 +600,28 @@ def _resume_parent_for_current_composite(
 # (#3351) and the #294 proposed_effect stamping + destructive-tier refusal,
 # alongside the earlier `connector_id=connector_id` grant pass-through, and
 # the #4217 resume-state checks.
+def _warn_if_step_not_declared(step_op_id: str) -> None:
+    """Log one warning when a composite checks a step its list does not have (#6298).
+
+    The up-front step check of an agent call reads that list
+    (:mod:`~meho_backplane.operations.governed_subops`), so a step that is
+    not on it is not checked before the call starts. The step gate below
+    still checks it; this only makes the gap visible.
+    """
+    composite_ctx = composite_dispatch_var.get()
+    if composite_ctx is None:
+        return
+    composite_op_id = composite_ctx[0]
+    surface = governed_subops_for(composite_op_id)
+    if surface is not None and step_op_id in surface.sub_op_ids:
+        return
+    _log.warning(
+        "composite_step_not_declared",
+        composite_op_id=composite_op_id,
+        step_op_id=step_op_id,
+    )
+
+
 async def enforce_subop_policy(
     *,
     operator: Operator,
@@ -664,6 +715,7 @@ async def enforce_subop_policy(
         result_denied,
     )
     from meho_backplane.operations._lookup import parse_connector_id
+    from meho_backplane.operations._park_check import park_check_refusal
     from meho_backplane.operations._validate import (
         compute_audit_params_hash,
         compute_params_hash,
@@ -680,8 +732,10 @@ async def enforce_subop_policy(
         _destructive_binding_refusal,
         _preflight_denied_refusal,
     )
+    from meho_backplane.operations.op_policy import apply_step_classification
 
     started = time.monotonic()
+    _warn_if_step_not_declared(op_id)
     product, version, impl_id = parse_connector_id(connector_id)
     # The hash this step's audit rows carry (secret-named values left out).
     # A parked step stores the full approval hash instead (below).
@@ -740,6 +794,10 @@ async def enforce_subop_policy(
         requires_approval=requires_approval,
         parameter_schema={},
     )
+    # A classification entry can raise the step's level or make it always
+    # wait, the same as for a called operation. Only the step's group key is
+    # read from a stored row; the step runs without one.
+    await apply_step_classification(tenant_id=operator.tenant_id, step=descriptor)
 
     # #4622: the step's params reach the gate so a delete grant (sandbox
     # mode) can store the step's proposed effect on its grant-use row. No
@@ -752,6 +810,15 @@ async def enforce_subop_policy(
         params=params,
     )
     if verdict is PermissionVerdict.AUTO_EXECUTE:
+        return None
+    # #3980: a person approved this run, so a step that would only wait goes
+    # ahead. A ``deny`` stays a deny.
+    if verdict is PermissionVerdict.NEEDS_APPROVAL and _covered_by_approved_run(
+        safety_level=descriptor.safety_level,
+        requires_approval=descriptor.requires_approval,
+        always_wait=descriptor.policy_always_wait,
+    ):
+        _log.info("composite_subop_covered_by_approved_run", op_id=op_id)
         return None
 
     # #4646: the rows this gate writes read the verdict off
@@ -771,9 +838,9 @@ async def enforce_subop_policy(
             # would create a second approval whose own resume re-enters the composite
             # from the top and re-runs every earlier governed leg (this mechanism
             # clears one sub-op and has no completed-leg guard), double-executing
-            # writes. No shipped composite reaches here — every governed sub-op is
-            # ``dangerous`` + ``requires_approval=False``, which the USER reviewer
-            # auto-executes in the single resume pass. Refuse instead of parking.
+            # writes. Only a ``destructive`` or ``requires_approval`` step reaches
+            # here: every other step went ahead above under the approval of the
+            # run (#3980). Refuse instead of parking.
             #
             # #4217 relaxes this guard for an ``after_main_effect`` step: it saved
             # the state its resume continues from (checked above), so its own
@@ -793,6 +860,30 @@ async def enforce_subop_policy(
                     composite_op_id=composite_op_id,
                     approved_op_id=approved_op_id,
                     blocked_op_id=op_id,
+                    duration_ms=duration_ms,
+                )
+
+            # The step's own check before the wait for approval, the same as
+            # at the dispatcher: a param that must not be stored (a secret
+            # given as a plain value) refuses the step before any approval
+            # row exists. Audited on the step's path like the refusals below.
+            refusal = await park_check_refusal(
+                op_id=op_id,
+                connector_id=connector_id,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                params=params,
+                duration_ms=duration_ms,
+            )
+            if refusal is not None:
+                return await _audit_denied_and_return(
+                    refusal,
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
                     duration_ms=duration_ms,
                 )
 

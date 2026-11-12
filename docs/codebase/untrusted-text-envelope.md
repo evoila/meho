@@ -1,8 +1,7 @@
 # Untrusted-text envelope (stored prompt-injection guard)
 
-Security hardening from the coordinated-disclosure backlog
-(evoila-bosnia/meho-internal#154, Goal #87 / Initiative #101; extended to
-the federated docs corpus by #304, Initiative #262): every LLM-facing
+A guard on stored text (extended to the federated docs corpus by #304,
+Initiative #262): every LLM-facing
 surface that re-serves **agent-authored stored text** — or **federated,
 externally-controlled corpus text** — wraps it in a positional
 guard/delimiter envelope so a reading agent attributes it to its untrusted
@@ -16,7 +15,7 @@ re-serves it verbatim to other agents:
 | Stored text | Write path | LLM-facing read path (wrapped) |
 |---|---|---|
 | Broadcast announcement `activity` / `scope` / `target` | `meho_broadcast_announce` → `publish_agent_announcement` | `meho_broadcast_recent`, `meho_broadcast_watch`, `meho://tenant/{tenant_id}/feed` |
-| Broadcast operation event `payload.params` (every string inside the request parameters) and `work_ref` | any audited operation call (`call_operation`, `add_to_memory`, ...) | the same three broadcast surfaces (each string leaf wrapped, shape kept) |
+| Broadcast operation event `payload.params` (every string inside the request parameters) and `work_ref` | no writer today: Broadcast carries agent announcements only | the wrap in `dump_event_wire` stays as a guard for this event type (each string leaf wrapped, shape kept) |
 | The Claude Code plugin's session-start digest (recent audit rows, memory notes, knowledge entries) | `meho audit recent`, `meho list`, `meho kb list` | `clients/claude-code-plugin/bin/session-start.sh` prints the whole digest inside one envelope |
 | kb entry `body` | `add_to_knowledge`, kb file walker, UI editor | `meho://kb/{slug}`, `meho://kb/id/{entry}/revision/{revision}`, `search_knowledge` hits (snippet, each passage `text`, each `locator.heading_path` title) |
 | memory entry `body` | `add_to_memory`, `POST /api/v1/memory` | `meho://memory/id/{document_uuid}`, `meho://memory/{scope}/{slug}`, and each `search_memory` hit `snippet` (#3751) |
@@ -141,7 +140,7 @@ Each tool's `outputSchema` lists the field. Wherever an answer is measured
 against a wire ceiling, the notice is part of the measured answer, so the
 delivered answer never exceeds the ceiling by the notice's size. The
 `VENDOR_TEXT_RULE` band
-and the per-operation contract guidance (next section) stay as they
+and the per-operation contract guidance (above) stay as they
 were; the notice is the per-answer reminder of the same rule.
 
 ## One delimiter pair per envelope (load-bearing)
@@ -169,18 +168,17 @@ The plugin hook (`session-start.sh`) applies the same rewrite with
 * Entries stored **before** the guard existed get wrapped too; a
   write-time wrap would leave the historical backlog un-guarded until
   it ages out.
-* Stored rows stay clean prose: non-LLM sinks (frontend HTML, Slack
-  mirror — escaped/plain-text separately) don't inherit envelope
+* Stored rows stay clean prose: non-LLM sinks (frontend HTML, escaped
+  separately) don't inherit envelope
   noise, and the envelope text can evolve without a data migration.
 * Filtering (`event_matches`, e.g. `target` equality) runs on the
   parsed model *before* the dump, so wrapping never affects matching.
 
 ## Surfaces deliberately not wrapped
 
-* The UI broadcast history pane consumes
-  `list_recent_events_fail_soft` but drops announcement-kind events
-  before rendering (`_is_audit_event`) and HTML-escapes everything —
-  HTML injection is a different sink with its own defence.
+* The UI broadcast pane and its stream (`/ui/broadcast/stream`) show
+  announcements from the archive without the wrap. The browser escapes
+  every field (`x-text`), and the text is never given to a model.
 * The SSE feed (`GET /api/v1/feed`) streams to the frontend, same
   reasoning.
 * The REST memory search route, which feeds the CLI table, serves the

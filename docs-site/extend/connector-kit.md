@@ -66,7 +66,7 @@ Your package imports MEHO only through one module:
 import meho_connector_kit as kit
 ```
 
-The kit version this page describes: **1.1**.
+The kit version this page describes: **1.3**.
 
 The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
@@ -78,6 +78,9 @@ part that starts with an underscore is private by its name too.
 | Register | `register_typed_op_registrar` | Queue the function that registers your operations when MEHO starts. |
 | Register | `register_typed_operation` | Register one operation: the shape of its inputs and its answer, its risk level, whether it waits for approval, and its texts for agents. |
 | Register | `register_connector_catalog` | Bring the catalog rows of your package: for a product and version, the vendor API file MEHO can load, the ingest profile, and the safety overlay for the operations made from that file. |
+| Register | `register_retired_operations` | List the operations a later version of your package removed, so MEHO deletes their stored rows at start. |
+| Register | `RetiredOp` | One entry of that list: product, version, implementation id and operation id. |
+| Register | `CALLER_ADDRESS_MARKER` | The schema keyword `x-meho-caller-address`. Put `CALLER_ADDRESS_MARKER: True` on each input that holds an address MEHO connects to. See "An input that holds an address" below. |
 | Register | `EmbeddingService` | The type of the `embedding_service` value that MEHO hands to your registering function. Pass it on unchanged. |
 | Connector | `Connector` | The base class of every connector. |
 | Connector | `HttpConnector` | The base class for an HTTP API. It brings MEHO's checks for TLS (secure, encrypted connections), addresses, redirects and answer size. |
@@ -104,6 +107,7 @@ part that starts with an underscore is private by its name too.
 | Approvals | `register_preview_builder` | Register a preview for one operation. |
 | Approvals | `PermissionPreflight` | The type of a check that runs while a change waits: may the caller make it? |
 | Approvals | `register_permission_preflight` | Register such a check for one operation. |
+| Approvals | `declare_root_shell` | Mark the operations that change a host by running a command or script as root, for example over SSH with `sudo`. A run approval of an automation run never covers them: a person approves each call. |
 | Audit | `compute_audit_digest_hash` | A hash made with a secret key of MEHO, for a value that lands in an audit or approval row. |
 
 Inside three classes, the kit also promises some parts:
@@ -134,6 +138,12 @@ operations you register, not `execute`.
 - **Errors.** Raise `kit.ConnectorUpstreamError` when the vendor answers
   with an error, and `kit.ConnectorAuthError` when it refuses the
   credential. A failed read must never look like an empty answer.
+- **Version range.** Set `supported_version_range` (for example
+  `">=1.0,<2.0"`) to the product versions the connector is built for. When no
+  range applies, for example for a cloud API with no product version, leave
+  it out and set `version_range_reason` to one plain sentence. The template
+  has a test, `tests/test_version_range.py`, that fails when a connector has
+  neither.
 - **Caches.** Key a cache you keep across calls, for example a login
   token, with `kit.target_cache_key(target)`.
 
@@ -170,10 +180,51 @@ The inputs of `register_typed_operation`:
   `when_to_use` and `llm_instructions`. An agent picks your operation
   from these texts, so write them with care.
 - `embedding_service`: pass on the value MEHO hands to your function.
+- **Tags:** add the tag `no-trace-body` to an operation whose request
+  body must not be kept in the trace (for example an operation that runs
+  code with given inputs). It changes nothing else: not the risk level,
+  not the approval, and not the error text of the vendor.
+
+**An input that holds an address.** Some operations connect to an
+address the caller gives: a URL, a host name, or a host and port. The
+connection can come from MEHO, or from the target for MEHO (for example a
+ping that a firewall sends). Mark each such input in `parameter_schema`
+with `kit.CALLER_ADDRESS_MARKER: True`, also when it sits inside a nested
+object or a list:
+
+```python
+"properties": {
+    "url": {"type": "string", kit.CALLER_ADDRESS_MARKER: True, "description": "..."},
+}
+```
+
+MEHO then runs the operation at risk level `caution` or higher, and it
+waits until a person approves each call. This holds whatever
+`safety_level` you set, and an operator override cannot turn the approval
+off. Set `safety_level="caution"` (or higher) and `requires_approval=True`
+yourself too, so your code says what MEHO does. Do not mark an input
+that only stores or names an address and never connects to it, for
+example a host name written into an inventory record. MEHO's sensors run
+only `safe` operations, so a sensor cannot use a marked operation.
 
 **A preview for a change.** Register a preview with
 `kit.register_preview_builder`. It shows the person who approves what the
 change will do. Every `destructive` operation needs one.
+
+**A multi-step operation.** The kit has no names for multi-step
+operations yet. A package that registers one with MEHO's own modules must
+declare the steps of each multi-step operation that changes something:
+call `register_governed_subops` with every step the operation may run,
+or `declare_no_governed_subops` when it makes its change without a step
+that MEHO checks on its own (both in
+`meho_backplane.operations.governed_subops`). MEHO checks an agent's
+grants for each listed step before the call starts. When an operation
+declares neither, MEHO refuses an agent's call of it with
+`agent_steps_not_declared` once `AGENT_GRANT_REQUIRED` is `on`. Check
+this in your package's own CI: after your operations are registered,
+`composites_without_declared_steps(op_ids)` from the same module must
+return an empty list for the ids of your multi-step operations that
+change something.
 
 What MEHO does for you, so you do not:
 
@@ -197,6 +248,26 @@ and call `kit.register_connector_catalog(__name__)` from the folder's
 own. A row for a product and version that MEHO already has stops the
 start. The details are in
 [connector-packages.md, "Bring catalog rows"](https://github.com/evoila/meho/blob/main/docs/codebase/connector-packages.md#bring-catalog-rows).
+
+**Remove an operation.** When a new version of your package drops an
+operation, MEHO still has its stored row from the older version. Agents
+would still find it, and every call would fail. So list it in the
+folder's `__init__.py`:
+
+```python
+kit.register_retired_operations(
+    __name__,
+    [kit.RetiredOp("example", "1.x", "example-widget", "example.widget.old_report")],
+)
+```
+
+At start, MEHO deletes each listed row that your package wrote, and logs
+`dead_handler_op_retired` once for each row it deletes. It never deletes a row of MEHO itself or
+of another package. Keep each entry in later versions, because an
+install can skip a version. Never use a listed operation id again. A row
+whose code is gone and that no list names stays, and MEHO logs
+`dead_handler_op_kept` for it: during an upgrade, an older MEHO server
+can share the database with a newer one.
 
 ## 6. Say which MEHO releases fit
 
@@ -226,7 +297,7 @@ wheels without any package index, against the kit of the base image, so a
 package that does not fit the kit cannot be installed.
 
 The kit is never published on a public package index. It ships only with
-MEHO's own image and release files.
+MEHO's own image and its source code.
 
 ## 7. Test
 

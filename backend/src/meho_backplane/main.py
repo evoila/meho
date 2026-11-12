@@ -65,12 +65,14 @@ from meho_backplane.agents import (
 from meho_backplane.api.openapi_maturity import inject_maturity_extensions
 from meho_backplane.api.v1.addon_capability import router as api_v1_addon_capability_router
 from meho_backplane.api.v1.addon_pairing import router as api_v1_addon_pairing_router
+from meho_backplane.api.v1.agent_budgets import router as api_v1_agent_budgets_router
 from meho_backplane.api.v1.agent_grants import router as api_v1_agent_grants_router
 from meho_backplane.api.v1.agent_principals import (
     router as api_v1_agent_principals_router,
 )
 from meho_backplane.api.v1.agent_runs import router as api_v1_agent_runs_router
 from meho_backplane.api.v1.agents import router as api_v1_agents_router
+from meho_backplane.api.v1.approval_reveal import router as api_v1_approval_reveal_router
 from meho_backplane.api.v1.approvals import router as api_v1_approvals_router
 from meho_backplane.api.v1.ask_docs import router as api_v1_ask_docs_router
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
@@ -83,6 +85,9 @@ from meho_backplane.api.v1.broadcast_overrides import (
     router as api_v1_broadcast_overrides_router,
 )
 from meho_backplane.api.v1.checks import router as api_v1_checks_router
+from meho_backplane.api.v1.checks_dashboard_files import (
+    router as api_v1_checks_dashboard_files_router,
+)
 from meho_backplane.api.v1.checks_dashboards import (
     router as api_v1_checks_dashboards_router,
 )
@@ -102,6 +107,7 @@ from meho_backplane.api.v1.events_ingest import router as api_v1_events_ingest_r
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.gateway import router as api_v1_gateway_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
+from meho_backplane.api.v1.instance_settings import router as api_v1_instance_settings_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
 from meho_backplane.api.v1.memory import router as api_v1_memory_router
 from meho_backplane.api.v1.operation_overrides import (
@@ -111,9 +117,11 @@ from meho_backplane.api.v1.operation_runs import router as api_v1_operation_runs
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
 from meho_backplane.api.v1.read_docs import router as api_v1_read_docs_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
-from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
-from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_retire_router
+from meho_backplane.api.v1.retrieve_operation_picks import (
+    router as api_v1_retrieve_operation_picks_router,
+)
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
+from meho_backplane.api.v1.run_approvals import router as api_v1_run_approvals_router
 from meho_backplane.api.v1.runbook_runs import router as api_v1_runbook_runs_router
 from meho_backplane.api.v1.runbook_templates import router as api_v1_runbook_templates_router
 from meho_backplane.api.v1.runner_principals import (
@@ -121,10 +129,16 @@ from meho_backplane.api.v1.runner_principals import (
 )
 from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_router
+from meho_backplane.api.v1.sensor_acknowledgements import (
+    router as api_v1_sensor_acknowledgements_router,
+)
 from meho_backplane.api.v1.sensors import router as api_v1_sensors_router
 from meho_backplane.api.v1.service_grants import router as api_v1_service_grants_router
 from meho_backplane.api.v1.service_read_scopes import (
     router as api_v1_service_read_scopes_router,
+)
+from meho_backplane.api.v1.sessions import (
+    router as api_v1_sessions_router,
 )
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.tenants import router as api_v1_tenants_router
@@ -162,6 +176,7 @@ from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.docs_search.readiness_probe import docs_backends_readiness_probe
 from meho_backplane.events import start_event_drain, stop_event_drain
+from meho_backplane.first_start import router as first_start_router
 from meho_backplane.flight_recorder.reaper import (
     start_flight_recorder_reaper,
     stop_flight_recorder_reaper,
@@ -176,6 +191,7 @@ from meho_backplane.gateway.unreported_mint import (
 )
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
+from meho_backplane.lessons.upkeep import start_knowledge_upkeep, stop_knowledge_upkeep
 from meho_backplane.logging import configure_logging
 from meho_backplane.mcp import eager_import_mcp_modules
 from meho_backplane.mcp import router as mcp_router
@@ -188,11 +204,17 @@ from meho_backplane.metrics import VAULT_TENANT_SCOPE_ENFORCED, render_metrics
 from meho_backplane.metrics_access import verify_metrics_access
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import operation_catalog_write, set_default_reducer
+from meho_backplane.operations._validate import warn_if_params_hash_key_missing
 from meho_backplane.operations.approval_expiry import (
     expire_approvals_from_older_release,
     start_approval_expiry_sweeper,
     stop_approval_expiry_sweeper,
 )
+from meho_backplane.operations.approval_presence import (
+    start_presence_challenge_cleanup,
+    stop_presence_challenge_cleanup,
+)
+from meho_backplane.operations.approval_restart_recovery import recover_interrupted_approvals
 from meho_backplane.operations.ingest import (
     build_anthropic_ingest_llm_client,
     load_catalog,
@@ -210,6 +232,15 @@ from meho_backplane.operations.result_read_admission import (
     configure_result_read_admission,
     shutdown_result_read_admission,
 )
+from meho_backplane.operations.shutdown_drain import (
+    begin_drain,
+    drain_deadline,
+    install_stop_signal_hook,
+    record_unfinished_operations,
+    reset_drain_state,
+    wait_for_running_operations,
+)
+from meho_backplane.operations.unpriced_model import warn_if_model_unpriced
 from meho_backplane.request_body_limit import RequestBodyLimitMiddleware
 from meho_backplane.request_usage.retention import (
     start_request_usage_retention_sweeper,
@@ -218,6 +249,11 @@ from meho_backplane.request_usage.retention import (
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.sandbox_mode import assert_sandbox_mode_consistent
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
+from meho_backplane.session_store.config import load_config as load_session_store_config
+from meho_backplane.session_store.retention import (
+    start_session_store_cleanup,
+    stop_session_store_cleanup,
+)
 from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.topology import (
     start_topology_history_retention_sweeper,
@@ -364,6 +400,19 @@ async def _expire_approvals_from_older_release() -> None:
         await expire_approvals_from_older_release()
     except Exception:
         structlog.get_logger().exception("approval_release_expiry_failed")
+
+
+async def _recover_interrupted_approvals() -> None:
+    """Mark approved runs that a restart cut short as uncertain (#5025).
+
+    Fail-open: a failure here is logged and the start goes on. Nothing is
+    run again either way, so the only cost of a miss is a request that stays
+    ``started`` until the next start.
+    """
+    try:
+        await recover_interrupted_approvals()
+    except Exception:
+        structlog.get_logger().exception("approval_restart_recovery_failed")
 
 
 async def _run_lifespan_shutdown() -> None:
@@ -514,6 +563,13 @@ async def _run_lifespan_startup() -> None:
     # (#1673).
     _assert_mcp_resource_uri_configured()
     _advise_vault_tenant_scope_unenforced()
+    # #5771: a default model with no price row costs 0, so the spend
+    # limits would not count it. Warn, but start.
+    warn_if_model_unpriced(get_settings().agent_default_model)
+    # Without PARAMS_HASH_KEY the first-start destination check does not
+    # run, and the params hashes use a key made from DATABASE_URL. Warn,
+    # but start.
+    warn_if_params_hash_key_missing(get_settings().params_hash_key)
     # G10.0-T5 (#866) — ensure ``ui/static/dist/`` exists so the
     # StaticFiles mount does not crash on a fresh clone where
     # ``tailwindcss --watch`` has not yet materialised the compiled
@@ -527,6 +583,9 @@ async def _run_lifespan_startup() -> None:
     # #5030: an approval covers one exact release. End every waiting
     # approval made under another release before MEHO serves a request.
     await _expire_approvals_from_older_release()
+    # #5025: an approved run that a restart cut short has no result. MEHO
+    # does not know if the change happened, so mark it uncertain.
+    await _recover_interrupted_approvals()
     # The typed-op registration (G0.6-T-Refactor-Vault #390) does not run
     # here. The lifespan runs it after this function, around the start of
     # the background loops, so the operation rows commit only when the
@@ -546,13 +605,16 @@ class _BackgroundTasks:
 
     topology_scheduler: asyncio.Task[None]
     memory_expiry: asyncio.Task[None] | None
+    knowledge_upkeep: asyncio.Task[None] | None
     topology_history: asyncio.Task[None] | None
     announcement_retention: asyncio.Task[None] | None
     evidence_retention: asyncio.Task[None] | None
     request_usage_retention: asyncio.Task[None] | None
+    session_store_cleanup: asyncio.Task[None] | None
     audit_raw_payload_retention: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
     approval_expiry: asyncio.Task[None] | None
+    approval_presence_cleanup: asyncio.Task[None]
     scheduler: asyncio.Task[None] | None
     sensor_runner: asyncio.Task[None] | None
     sensor_watchdog: asyncio.Task[None] | None
@@ -602,6 +664,11 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
     memory_expiry: asyncio.Task[None] | None = None
     if settings.memory_expiry_enabled:
         memory_expiry = start(start_memory_expiry_sweeper)
+    # Weekly knowledge upkeep and report (lessons/upkeep.py); gated on
+    # KNOWLEDGE_UPKEEP_ENABLED.
+    knowledge_upkeep: asyncio.Task[None] | None = None
+    if settings.knowledge_upkeep_enabled:
+        knowledge_upkeep = start(start_knowledge_upkeep)
     # G9.3-T6 #858 — gated on TOPOLOGY_HISTORY_PRUNE_ENABLED.
     # ``RETENTION_DAYS=0`` keeps the loop running but every tick is a
     # no-op (heartbeat-only); ``PRUNE_ENABLED=false`` skips starting
@@ -627,6 +694,12 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
     request_usage_retention: asyncio.Task[None] | None = None
     if settings.request_usage_retention_days is not None:
         request_usage_retention = start(start_request_usage_retention_sweeper)
+    # #4901 -- agent session store cleanup. Gated on
+    # SESSION_STORE_CLEANUP_ENABLED; a run does nothing while the store is
+    # not configured.
+    session_store_cleanup: asyncio.Task[None] | None = None
+    if load_session_store_config().cleanup_enabled:
+        session_store_cleanup = start(start_session_store_cleanup)
     # Security review S19 #307 — audit_log.raw_payload age-off. Gated on
     # RAW_PAYLOAD_PRUNE_ENABLED so operators with an external age-off can skip
     # the loop. ``RETENTION_DAYS=0`` keeps the loop running as a no-op
@@ -647,6 +720,9 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
     approval_expiry: asyncio.Task[None] | None = None
     if settings.approval_expiry_enabled:
         approval_expiry = start(start_approval_expiry_sweeper)
+    # #6214 -- always on: once a day, delete passkey touch challenges that
+    # were never used and are older than 14 days.
+    approval_presence_cleanup = start(start_presence_challenge_cleanup)
     # G11.3-T2 #823 — cron + one-off agent-trigger scheduler. Gated on
     # SCHEDULER_ENABLED so operators using an external orchestrator
     # (or running the test path without a scheduler) can opt out.
@@ -716,13 +792,16 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
+        knowledge_upkeep=knowledge_upkeep,
         topology_history=topology_history,
         announcement_retention=announcement_retention,
         evidence_retention=evidence_retention,
         request_usage_retention=request_usage_retention,
+        session_store_cleanup=session_store_cleanup,
         audit_raw_payload_retention=audit_raw_payload_retention,
         grant_expiry=grant_expiry,
         approval_expiry=approval_expiry,
+        approval_presence_cleanup=approval_presence_cleanup,
         scheduler=scheduler,
         sensor_runner=sensor_runner,
         sensor_watchdog=sensor_watchdog,
@@ -779,12 +858,15 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_sensor_runner(tasks.sensor_runner)
     if tasks.scheduler is not None:
         await stop_scheduler(tasks.scheduler)
+    await stop_presence_challenge_cleanup(tasks.approval_presence_cleanup)
     if tasks.approval_expiry is not None:
         await stop_approval_expiry_sweeper(tasks.approval_expiry)
     if tasks.grant_expiry is not None:
         await stop_grant_expiry_sweeper(tasks.grant_expiry)
     if tasks.audit_raw_payload_retention is not None:
         await stop_audit_raw_payload_reaper(tasks.audit_raw_payload_retention)
+    if tasks.session_store_cleanup is not None:
+        await stop_session_store_cleanup(tasks.session_store_cleanup)
     if tasks.request_usage_retention is not None:
         await stop_request_usage_retention_sweeper(tasks.request_usage_retention)
     if tasks.evidence_retention is not None:
@@ -793,10 +875,27 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_announcement_retention_sweeper(tasks.announcement_retention)
     if tasks.topology_history is not None:
         await stop_topology_history_retention_sweeper(tasks.topology_history)
+    if tasks.knowledge_upkeep is not None:
+        await stop_knowledge_upkeep(tasks.knowledge_upkeep)
     if tasks.memory_expiry is not None:
         await stop_memory_expiry_sweeper(tasks.memory_expiry)
     await stop_topology_refresh_scheduler(tasks.topology_scheduler)
     await _run_lifespan_shutdown()
+
+
+async def _drain_running_operations() -> None:
+    """Let running operations finish before the background loops stop (#5024).
+
+    uvicorn has already waited for the open HTTP requests. This waits for
+    the operations that run in the background (async runs, sensor checks)
+    until ``SHUTDOWN_DRAIN_SECONDS`` after the stop signal, then records
+    every operation that did not finish. See
+    :mod:`meho_backplane.operations.shutdown_drain`.
+    """
+    begin_drain()
+    deadline = drain_deadline(get_settings().shutdown_drain_seconds)
+    still_running = await wait_for_running_operations(deadline)
+    await record_unfinished_operations(still_running)
 
 
 @asynccontextmanager
@@ -828,6 +927,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     refactor when adding a fourth background loop.
     """
     await _run_lifespan_startup()
+    reset_drain_state()
+    undo_stop_hook = install_stop_signal_hook()
     tasks: _BackgroundTasks | None = None
     try:
         async with operation_catalog_write():
@@ -835,7 +936,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         if tasks is not None:
+            await _drain_running_operations()
             await _stop_background_tasks(tasks)
+        undo_stop_hook()
+        reset_drain_state()
 
 
 def api_docs_enabled() -> bool:
@@ -964,6 +1068,7 @@ app.add_middleware(RequestBodyLimitMiddleware)
 app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
 
 app.include_router(health_router)
+app.include_router(first_start_router)
 app.include_router(version_router)
 app.include_router(api_v1_auth_config_router)
 app.include_router(api_v1_health_router)
@@ -982,27 +1087,9 @@ app.include_router(api_v1_retrieve_router)
 # `audit_query` class via the `audit_op_id` / `audit_op_class`
 # contextvar overrides honoured by the chassis broadcast publisher.
 app.include_router(api_v1_retrieve_usage_router)
-# G4.3-T2 (#441) -- corpus-driven retrieval-quality eval at
-# `POST /api/v1/retrieve/eval`. Operator role minimum; tenant-scoped
-# to the operator's JWT claim. Broadcast publishes under the canonical
-# op_id `meho.retrieval.eval` + aggregate-only `audit_query` class
-# via the same `audit_op_id` / `audit_op_class` contextvar overrides
-# T5's retrieve_usage adopted -- the eval queries themselves can be
-# operator-sensitive so the broadcast event ships in aggregate-only
-# mode.
-app.include_router(api_v1_retrieve_eval_router)
-# G4.3-T6 (#445) -- retire-decision checklist verb at
-# `POST /api/v1/retrieve/retire-checklist`. Combines T2 eval results +
-# T5 usage telemetry + a CLI-supplied open-blocker count into the
-# five-criterion per-surface green/yellow/red checklist Goal #215
-# decision #2 locked. Operator role minimum; tenant_admin gates the
-# cross-tenant `tenant_filter` field. Broadcast publishes under the
-# canonical op_id `meho.retrieval.retire_checklist` + aggregate-only
-# `audit_query` class via the same `audit_op_id` / `audit_op_class`
-# contextvar overrides T2 + T5 adopted -- surface filters + blocker
-# counts can leak retire-decision intent so the broadcast event ships
-# in aggregate-only mode.
-app.include_router(api_v1_retrieve_retire_router)
+# #4750 -- per connector and day: did the agent call an operation the
+# search returned, and did it run? `GET /api/v1/retrieve/operation-picks`.
+app.include_router(api_v1_retrieve_operation_picks_router)
 # G4.5-T3 (#1521) — federated vendor-document retrieval at
 # `POST /api/v1/search_docs` (the `meho-docs` add-on, Initiative #1518).
 # Operator role minimum; tenant-scoped via the forwarded operator JWT.
@@ -1048,6 +1135,11 @@ app.include_router(api_v1_targets_router)
 # capture policy (PATCH /api/v1/tenants/flight-recorder-policy;
 # tenant-scoped, tenant_admin). Operator-plane REST + CLI only; no MCP tool.
 app.include_router(api_v1_tenants_router)
+# Settings file (core.md §5): GET /api/v1/settings/export, POST
+# /api/v1/settings/import (?preview=true), GET /api/v1/settings/history.
+# tenant_admin (own tenant) or platform_admin (several tenants); human-only
+# import. Operator-plane REST + CLI only; no MCP tool.
+app.include_router(api_v1_instance_settings_router)
 # T3 (#2880) -- event_source registry admin surface at
 # /api/v1/event-sources*. Tenant-scoped CRUD (operator reads,
 # tenant_admin writes) the inbound webhook ingest (#2881) resolves a
@@ -1216,6 +1308,7 @@ app.include_router(api_v1_broadcast_overrides_router)
 # ``show_agent`` because the grants router only matches paths under
 # its own ``/api/v1/agents/grants`` prefix.
 app.include_router(api_v1_agent_grants_router)
+app.include_router(api_v1_agent_budgets_router)
 # G11.1-T4 (#811) -- agent invocation surface. POST /agents/{name}/run
 # (sync block-and-return, or async handle on the timeout / async flag),
 # GET /agents/runs (list the tenant's runs, --work-ref filter; work_ref
@@ -1252,6 +1345,10 @@ app.include_router(api_v1_agent_principals_router)
 # the JWT; cross-tenant probes return 404. The minted runner token is caged
 # to the gateway path prefixes (see middleware.RUNNER_ALLOWED_PATH_PREFIXES).
 app.include_router(api_v1_runner_principals_router)
+# #4901 -- the agent session store: upload, list, show, download, delete and
+# the tenant's retention period. Person-only; rights per route in
+# session_store/rights.py; every call writes its own audit row.
+app.include_router(api_v1_sessions_router)
 # Initiative #2415 (#2498) -- outbound long-poll command plane (runner-facing).
 # GET /gateway/{runner}/next (blocking long-poll: 200 with a claimed command
 # envelope or 204 on timeout) + POST /gateway/{runner}/result (200 / 404 / 409).
@@ -1282,6 +1379,9 @@ app.include_router(api_v1_scheduler_router)
 # JWT; platform_admin may pass tenant_filter / a body tenant_id to act
 # cross-tenant. Every mutation writes an audit row under op_class=write.
 app.include_router(api_v1_sensors_router)
+# #4128 -- POST /sensors/{id}/acknowledgement: a person acknowledges a
+# Sensor finding until an end time, with a reason. Operator role, people only.
+app.include_router(api_v1_sensor_acknowledgements_router)
 # I2416-T2506 -- Dashboard admin surface (five-state worst-of rollup). POST
 # /checks/dashboards (create, tenant_admin; 422 sensor_not_found on a foreign
 # member id), GET /checks/dashboards (list, operator-level; each row carries
@@ -1291,6 +1391,8 @@ app.include_router(api_v1_sensors_router)
 # cross-tenant. Distinct module from api_v1_checks_router (the #2415 gateway
 # assignment/result surface) -- the ``dashboards`` sub-path does not collide.
 app.include_router(api_v1_checks_dashboards_router)
+# Export a Dashboard and its Sensors to a file, and import it at another site.
+app.include_router(api_v1_checks_dashboard_files_router)
 # G11.2-T4/T5 (#817/#818) -- approval queue + surfacing channel.
 # GET /approvals (list pending), GET /approvals/{id} (inspect — T5 #818),
 # POST /approvals/{id}/approve (approve + re-dispatch via the ``_approved``
@@ -1301,11 +1403,15 @@ app.include_router(api_v1_checks_dashboards_router)
 # (T5) so a ``broadcast_watch`` operator session learns of pending
 # requests without polling. Operator-level; tenant-scoped via the JWT.
 app.include_router(api_v1_approvals_router)
+# The person who asked fetches the value of an approved secret reveal once.
+app.include_router(api_v1_approval_reveal_router)
 # #3151 -- operator-managed standing scoped auto-approval grants for
 # service principals (the persistent form of an approve decision).
 app.include_router(api_v1_service_grants_router)
 # #4992 -- the targets a service principal may read (set by a person).
 app.include_router(api_v1_service_read_scopes_router)
+# #4126 -- a person approves the operation list of one automation run once.
+app.include_router(api_v1_run_approvals_router)
 # #3025 -- add-on pairing handshake (pair / unpair / list / heartbeat): a
 # sibling add-on product paired as a scoped Keycloak service principal over a
 # versioned integration contract (Initiative #2900 foundation).

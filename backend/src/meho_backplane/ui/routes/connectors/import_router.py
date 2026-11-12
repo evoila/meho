@@ -12,8 +12,8 @@ parse / classify logic so neither module exceeds the chassis ~600-line
 cap and the mapping helpers stay unit-testable without a FastAPI
 :class:`Request` fixture.
 
-Route inventory (all tenant_admin-gated server-side via
-:func:`~meho_backplane.ui.routes.connectors.operator.resolve_operator_or_403`):
+Route inventory (all gated server-side to a tenant admin who is a person, via
+:func:`~meho_backplane.ui.routes.connectors.operator.resolve_human_admin_or_403`):
 
 * ``GET  /ui/connectors/import``         -- the full import page.
 * ``POST /ui/connectors/import``         -- parse + render the preview.
@@ -42,14 +42,14 @@ from meho_backplane.ui.routes.connectors.import_view import (
     render_preview,
     submit_confirm,
 )
-from meho_backplane.ui.routes.connectors.operator import resolve_operator_or_403
+from meho_backplane.ui.routes.connectors.operator import resolve_human_admin_or_403
 
 __all__ = ["build_import_router"]
 
 #: Module-level :class:`Depends` closures -- ruff B008 idiom matching
 #: the chassis list / detail / forms routers.
 _require_session_dep = Depends(require_ui_session)
-_require_admin_dep = Depends(resolve_operator_or_403)
+_require_admin_dep = Depends(resolve_human_admin_or_403)
 _get_session_dep = Depends(get_session)
 
 #: Upper bound on the YAML payload the parse path accepts. The CSRF

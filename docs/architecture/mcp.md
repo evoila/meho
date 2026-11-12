@@ -4,9 +4,9 @@
 >
 > The content below was written under the **v0.2 transitional shape** (every G3-G9 verb gets a parallel MCP tool). That model was wrong against [CLAUDE.md](../../CLAUDE.md) postulate 5. The corrected shape:
 >
-> - **The agent surface is ~17 meta-tools** registered by G0.5 (#226 updated): `search_connectors`, `list_connectors`, `list_operation_groups`, `search_operations`, `call_operation`, `search_knowledge`, `add_to_knowledge`, `search_memory`, `add_to_memory`, `broadcast_recent`, `broadcast_announce`, `broadcast_watch`, `list_targets`, `query_topology`, `query_audit`, `result_query`, `result_aggregate`, `result_export`, `result_describe`.
+> - **The default agent surface is 26 meta-tools** (22 without the docs add-on), the "working surface": `meho_status`, `meho_connector_list`, `list_operation_groups`, `search_operations`, `call_operation`, `preview_operation`, `result_query`, `search_knowledge`, `add_to_knowledge`, the four docs tools (`ask_docs`, `search_docs`, `read_docs`, `list_doc_collections`), `search_memory`, `add_to_memory`, `meho_broadcast_recent`, `meho_broadcast_announce`, `meho_broadcast_watch`, `list_targets`, `query_topology`, and the six `meho_runbook_*` run tools. The per-tool inventory is [`docs/codebase/mcp.md`](../codebase/mcp.md), pinned in CI by `backend/tests/test_mcp_surface_conformance.py`.
 > - **No per-vendor MCP tools.** Vendor operations (e.g. vCenter's 3,000+ paths, K8s's 13 typed ops) reach the agent through `call_operation(connector_id, op_id, target?, params)`, backed by the G0.6 dispatcher — see [operations-substrate.md](operations-substrate.md) for the canonical reference (tables, registry v2, dispatcher pipeline, composite recursion, JSONFlux reducer, meta-tools).
-> - **Admin operations** (override management, replay, annotation) use the `meho.*` admin namespace (`meho_broadcast_overrides_set`, `meho_audit_replay`, `meho_topology_annotate`, `meho_memory_promote`), tenant_admin role required, visible in `tools/list` only with admin scope.
+> - **Admin operations** (override management, replay, annotation) are operator-plane tools such as `meho_broadcast_overrides_set`, `meho_audit_replay`, `meho_topology_annotate` and `meho_memory_promote` (`tenant_admin` role). They are listed in `tools/list` only for a session that asked for the optional `mcp:admin` scope. `query_audit` is an operator-plane tool too.
 > - **The `_op_map` pattern** described later in this doc is v0.2 transitional. Operations live in G0.6's `endpoint_descriptor` table; typed connectors register via `register_typed_operation()` (driven by `register_typed_op_registrar()` + the lifespan-run registrar list).
 >
 > Read [CLAUDE.md](../../CLAUDE.md) for the canonical surface contract and [operations-substrate.md](operations-substrate.md) for the dispatcher + registry + tables. Treat the body content below as the historical baseline that G0.5 amendment + G0.6 + G0.7 evolved from.
@@ -20,7 +20,7 @@ How MEHO speaks the Model Context Protocol alongside its HTTP API. The substrate
 The locked decision (#7 in [locked-decisions.md](../decisions/locked-decisions.md)) was to ship MCP alongside the CLI in v0.2 rather than defer to v0.2.next. Two consequences:
 
 - Operators + agents get a unified working surface; the CLI + MCP dispatch through the same backplane path.
-- External pilots (the first being a customer beyond `rdc-internal`) get day-1 agent-native access via Claude Desktop, Cline, Continue, or any MCP-spec-conformant client.
+- External pilots get day-1 agent-native access via Claude Desktop, Cline, Continue, or any MCP-spec-conformant client.
 
 ## Spec target
 
@@ -42,7 +42,7 @@ Per the spec's *Session Management* section, a server MAY assign a session id at
 - The dispatched response is HTTP 2xx **and** the JSON-RPC envelope has no `error` member — a failed initialize must not seed a session id.
 - The client did not already send an `Mcp-Session-Id` header inbound (a resume / replay attempt where the client carries an id is accepted lenient; MEHO does not overwrite the client's correlation key).
 
-Before G0.15-T4 #1213, MEHO captured the header end of the chain but never issued one. The visible symptom (`claude-rdc-hetzner-dc#753` finding 2) was every Claude Code MCP audit row landing with `agent_session_id: null` despite [`meho_status`](../../backend/src/meho_backplane/api/v1/health.py) / [`/ready.features.audit_replay.capture_mode`](../../backend/src/meho_backplane/api/v1/health.py) advertising `"when_negotiated"` — both surfaces correctly reported the **capture** config; nothing populated the column because no client had a server-assigned session id to send back.
+Before G0.15-T4 #1213, MEHO captured the header end of the chain but never issued one. The visible symptom was every Claude Code MCP audit row landing with `agent_session_id: null` despite [`meho_status`](../../backend/src/meho_backplane/api/v1/health.py) / [`/ready.features.audit_replay.capture_mode`](../../backend/src/meho_backplane/api/v1/health.py) advertising `"when_negotiated"` — both surfaces correctly reported the **capture** config; nothing populated the column because no client had a server-assigned session id to send back.
 
 **Capture side.** On every `POST /mcp`, [`_bind_mcp_session_id`](../../backend/src/meho_backplane/mcp/server.py) binds an `mcp_session_id` structlog contextvar (G8.2-T2 #1010):
 
@@ -56,7 +56,7 @@ Before G0.15-T4 #1213, MEHO captured the header end of the chain but never issue
 
 ### `initialize.instructions` — session preamble
 
-The spec-optional [`instructions`](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle) field on `InitializeResult` is MEHO's surface for the agent-facing session preamble. Two banded text sections stack into the field, in this order: **tenant conventions** (tenant-wide), then **runbook priming** (operator-personal, per-session). The assembler is [`assemble_preamble(tenant_id, operator_sub)`](../../backend/src/meho_backplane/conventions/preamble.py) at [`backend/src/meho_backplane/mcp/server.py:327`](../../backend/src/meho_backplane/mcp/server.py); the empty-string result is collapsed to `None` so a spec-conforming client sees the field omitted rather than emitted as a literal empty string.
+The spec-optional [`instructions`](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle) field on `InitializeResult` is MEHO's surface for the agent-facing session preamble. Two banded text sections stack into the field, in this order: **tenant conventions** (tenant-wide), then **runbook priming** (operator-personal, per-session). The assembler is [`assemble_preamble_detailed(tenant_id, operator_sub)`](../../backend/src/meho_backplane/conventions/preamble.py), called by `_session_instructions` in [`backend/src/meho_backplane/mcp/server.py`](../../backend/src/meho_backplane/mcp/server.py); the empty-string result is collapsed to `None` so a spec-conforming client sees the field omitted rather than emitted as a literal empty string.
 
 Order rationale: tenant conventions are background context that frames every dispatch in this tenant; runbook priming is a per-session imperative the agent must consult before its next move. Conventions go first because they set the operating environment; priming goes second because it's the higher-precedence "what to do right now" layer. Two newlines separate the bands so they render as distinct paragraphs in the agent's context (see [`_combine_bands`](../../backend/src/meho_backplane/conventions/preamble.py)). The two bands have independent token budgets: a tenant with many conventions does not shrink the priming surface, and an operator with many in-progress runs does not shrink the conventions surface.
 
@@ -113,8 +113,8 @@ MEHO acts as an **OAuth 2.1 resource server** per [RFC 9728 (Protected Resource 
 
 ```json
 {
-  "resource": "https://meho.evba.lab/mcp",
-  "authorization_servers": ["https://keycloak.evba.lab/realms/evba"],
+  "resource": "https://meho.example.com/mcp",
+  "authorization_servers": ["https://keycloak.example.com/realms/meho"],
   "scopes_supported": ["mcp:read", "mcp:execute", "offline_access"],
   "bearer_methods_supported": ["header"]
 }
@@ -130,15 +130,23 @@ Two parallel registries in [`mcp/registry.py`](../../backend/src/meho_backplane/
 
 ```python
 class ToolDefinition(BaseModel):
-    name: str                # dotted: "meho_status", "vault.kv.read"
+    name: str                # "meho_status", "call_operation" — never a vendor op id
     description: str         # agent-facing — LOAD-BEARING for UX
     inputSchema: dict        # JSON Schema 2020-12
+    feature: str | None
+    surface: ToolSurface       # working surface, or operator plane (needs mcp:admin)
+    title: str | None
     outputSchema: dict | None
-    required_role: TenantRole  # MEHO-internal; dropped from wire shape
-    op_class: str              # "read" | "write" | "credential_read" | "audit_query"
+    required_role: TenantRole  # server-side only; dropped from wire shape
+    op_class: str              # "read" | "write" | "credential_read" | "audit_query" | ...
+    required_capability: str | None    # e.g. the docs add-on capability
+    required_addon_family: str | None  # e.g. a paired automation add-on
+    broadcast_omit_args: frozenset[str]
+    annotations: ToolAnnotations | None  # e.g. readOnlyHint
+    meta: dict | None
 ```
 
-Wire shape (returned via `tools/list`) drops `required_role` and `op_class` — clients shouldn't see server-side policy. It also strips any top-level `oneOf` / `allOf` / `anyOf` from `inputSchema`: the Anthropic Messages API rejects a top-level JSON-Schema combinator in a tool's `input_schema` and 400s the whole `tools` array (so one offender breaks every call in the session), hence the published copy must be combinator-free. The full schema — combinators retained — stays on `inputSchema` for server-side `jsonschema` validation, so the `-32602` rejections for bad argument shapes are unaffected. See `_wire_safe_input_schema` in [`mcp/registry.py`](../../backend/src/meho_backplane/mcp/registry.py). (#905)
+Wire shape (returned via `tools/list`) drops `required_role`, `op_class` and the other server-side fields — clients shouldn't see server-side policy. It also strips any top-level `oneOf` / `allOf` / `anyOf` from `inputSchema`: the Anthropic Messages API rejects a top-level JSON-Schema combinator in a tool's `input_schema` and 400s the whole `tools` array (so one offender breaks every call in the session), hence the published copy must be combinator-free. The full schema — combinators retained — stays on `inputSchema` for server-side `jsonschema` validation, so the `-32602` rejections for bad argument shapes are unaffected. See `_wire_safe_input_schema` in [`mcp/registry.py`](../../backend/src/meho_backplane/mcp/registry.py). (#905)
 
 ### `ResourceTemplateDefinition` + handler
 
@@ -165,7 +173,7 @@ Surface failures at boot, never at request time.
 
 ## RBAC filtering
 
-Every registered tool/resource carries a `required_role` (one of `read_only` / `operator` / `tenant_admin`). The list methods filter the registry against the calling operator's `tenant_role`; tools/resources above the operator's role rank don't appear in the response. Role rank declared as a pinned tuple in [`mcp/registry.py`](../../backend/src/meho_backplane/mcp/registry.py) — `read_only < operator < tenant_admin`.
+Every registered tool/resource carries a `required_role` (one of `read_only` / `operator` / `tenant_admin`). The list methods filter the registry against the calling operator's `tenant_role`; tools/resources above the operator's role rank don't appear in the response. A tool is also hidden when the session lacks its surface (operator-plane tools need the `mcp:admin` scope), the tenant lacks its `required_capability`, or no paired add-on offers its `required_addon_family`. The same checks run again at call time ([`docs/codebase/mcp.md`](../codebase/mcp.md)). Role rank declared as a pinned tuple in [`mcp/registry.py`](../../backend/src/meho_backplane/mcp/registry.py) — `read_only < operator < tenant_admin`.
 
 Helper `role_at_least(actual, required)` is the single source for the role ordering, used by both list-time filtering and call-time re-checks.
 
@@ -237,7 +245,9 @@ A future breaking unification (a shared `TargetRef` / `TargetSelector` model tha
 
 ## Adding an MCP tool
 
-For a new vendor connector op:
+> This section is the v0.2 plan and is kept as history. MEHO does not add an MCP tool per vendor operation: a new connector operation is a row in `endpoint_descriptor`, and the agent reaches it through `search_operations` and `call_operation` ([operations-substrate.md](operations-substrate.md)). A new meta-tool changes the pinned inventory in [`docs/codebase/mcp.md`](../codebase/mcp.md) and its CI test.
+
+For a new vendor connector op (v0.2 plan):
 
 1. **Implement the op** in your connector's `_op_map` (per [`connectors.md`](connectors.md)).
 2. **Pick the target-reference shape** per the "Target-reference shape convention" section above — bare-string `target` for read tools (and as the preferred forward shape for write/dispatch tools too; the dict shape stays accepted on `call_operation` for forward-compat selector room), `from_name`/`to_name` pair for edge tools. The example below is a single-target read.
@@ -280,7 +290,7 @@ register_mcp_resource(
 )
 ```
 
-Handler receives `(operator, bound_params)` where `bound_params = {"slug": "..."}`. Must validate `operator.tenant_id` matches whatever tenant scope the resource is supposed to honor — cross-tenant reads return 403.
+Handler receives `(operator, bound_params)` where `bound_params = {"slug": "..."}`. Must validate `operator.tenant_id` matches whatever tenant scope the resource is supposed to honor. A cross-tenant read answers "not found" (`-32602`), the same as a missing row, so it never shows that the other tenant's data exists (see `meho://kb/{slug}` in [kb.md](kb.md)).
 
 ## Manual runbook (pre-release verification)
 
@@ -323,9 +333,9 @@ Note that the local-`claude_desktop_config.json` shape documented in the Claude 
 
 Verification checklist after the connector is wired:
 
-- The connector card shows MEHO's tools (`meho_status` at minimum in v0.2; product tools as G3-G9 land).
+- The connector card shows MEHO's working-surface tools (`meho_status`, `call_operation`, `search_operations`, ...).
 - A chat that prompts "check that MEHO is reachable" should result in Claude calling `meho_status` and surfacing the bundle.
-- The audit_log table on the backplane should grow by one row per `tools/call` and `resources/read` — verify with a quick `SELECT method, path, operator_sub, status_code FROM audit_log ORDER BY occurred_at DESC LIMIT 10`.
+- The audit_log table on the backplane should grow by one row per `tools/call` and `resources/read` (with `AUDIT_WRAPPER_ROWS_RETIRED=true`, routine reads leave a request usage event instead; see [audit.md](audit.md#audit-row-channel-convention-http--mcp--agent--internal)) — verify with a quick `SELECT method, path, operator_sub, status_code FROM audit_log ORDER BY occurred_at DESC LIMIT 10`.
 
 If Claude renders a connector error rather than the tools, the OAuth handshake failed — the most common cause is the realm's MCP client missing the `resource_metadata` parameter; the second is `BACKPLANE_URL` resolving to a host the Custom Connector backend can't reach (firewall / private DNS). See [`docs/cross-repo/mcp-client-setup.md`](../cross-repo/mcp-client-setup.md) for the Keycloak-side wiring.
 

@@ -6,7 +6,8 @@
 The rules are in ``docs/decisions/approval-groups-and-self-approval.md``.
 These tests check the code against them on the service layer and over REST:
 
-* a MEHO-SA-Operator may approve their own change, at every risk level;
+* a MEHO-SA-Operator or a MEHO-Admin may approve their own change, at every
+  risk level (#5969 added the admins);
 * another person's ``dangerous`` or ``destructive`` change may be approved
   only by the groups the decision record names; everyone else gets 403;
 * a lower-risk change keeps the reviewer rule (#3243);
@@ -137,10 +138,17 @@ def _break_glass_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("level", [*_LOW_RISK, *_HIGH_RISK])
-async def test_an_sa_operator_approves_their_own_change_at_every_level(level: str) -> None:
+@pytest.mark.parametrize(
+    "approver",
+    [_person(_REQUESTER, sa_operator=True), _person(_REQUESTER, role=TenantRole.TENANT_ADMIN)],
+    ids=["sa-operator", "admin"],
+)
+async def test_a_self_approval_group_approves_their_own_change_at_every_level(
+    level: str, approver: Operator
+) -> None:
     request_id = await _park(level)
 
-    await _approve(request_id, _person(_REQUESTER, sa_operator=True))
+    await _approve(request_id, approver)
 
     assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
     payload = await _decision_payload(request_id)
@@ -169,21 +177,25 @@ async def test_the_step_event_of_a_self_approval_carries_the_same_fields() -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("level", _HIGH_RISK)
-@pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.TENANT_ADMIN])
+@pytest.mark.parametrize(
+    "approver",
+    [_person(_REQUESTER), _person(_REQUESTER, role=TenantRole.READ_ONLY, approver=True)],
+    ids=["operator", "approver"],
+)
 async def test_others_cannot_approve_their_own_high_risk_change(
-    level: str, role: TenantRole, monkeypatch: pytest.MonkeyPatch
+    level: str, approver: Operator, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Also an admin, and also with the emergency switch on."""
+    """Also with the emergency switch on."""
     _break_glass_on(monkeypatch)
     request_id = await _park(level)
 
     with pytest.raises(SelfApprovalForbiddenError) as exc:
-        await _approve(request_id, _person(_REQUESTER, role=role))
+        await _approve(request_id, approver)
 
     assert exc.value.high_risk is True
     message = str(exc.value)
     assert "you cannot approve your own change" in message.lower()
-    assert "MEHO-SA-Operators" in message
+    assert "MEHO-SA-Operators and MEHO-Admins groups" in message
     assert "APPROVAL_ALLOW_SELF_APPROVAL" not in message
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
 
@@ -339,7 +351,9 @@ async def test_a_machine_with_the_sa_operators_flag_is_refused(
 # ---------------------------------------------------------------------------
 
 
-def _rest_token(key: Any, sub: str, *, groups: list[str] | None = None) -> str:
+def _rest_token(
+    key: Any, sub: str, *, groups: list[str] | None = None, role: TenantRole = TenantRole.OPERATOR
+) -> str:
     """A person's fresh approval sign-in; *groups* is the ``groups`` claim."""
     claims: dict[str, Any] = {
         "azp": APPROVAL_CLIENT_ID,
@@ -352,7 +366,7 @@ def _rest_token(key: Any, sub: str, *, groups: list[str] | None = None) -> str:
     return mint_token(
         key,
         sub=sub,
-        tenant_role=TenantRole.OPERATOR.value,
+        tenant_role=role.value,
         tenant_id=str(_TENANT_A),
         extra_claims=claims,
     )
@@ -405,7 +419,7 @@ async def test_rest_an_operator_cannot_approve_their_own_dangerous_change(
     assert response.status_code == 403, response.text
     detail = response.json()["detail"]
     assert detail.startswith("self_approval_forbidden:")
-    assert "Only members of the MEHO-SA-Operators group" in detail
+    assert "Only members of the MEHO-SA-Operators and MEHO-Admins groups" in detail
     assert "MEHO-SA-Operator or a MEHO-Admin" in detail
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
     assert _fake_resume == []
@@ -428,5 +442,52 @@ async def test_rest_an_operator_cannot_approve_another_persons_destructive_chang
     assert detail.startswith("approval_group_required:")
     assert "destructive change" in detail
     assert "MEHO-SA-Operator or a MEHO-Admin" in detail
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+    assert _fake_resume == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["approve", "decide"])
+async def test_rest_an_admin_approves_their_own_destructive_change_after_a_fresh_sign_in(
+    route: str,
+    _client: tuple[httpx.AsyncClient, Any],  # noqa: F811
+    _fake_resume: list[uuid.UUID],  # noqa: F811
+) -> None:
+    """An admin may approve their own change, like a MEHO-SA-Operator (#5969)."""
+    ac, key = _client
+    request_id = await _park("destructive", requester="op-admin")
+    token = _rest_token(key, "op-admin", role=TenantRole.TENANT_ADMIN)
+
+    response = await _post(ac, route, request_id, token)
+
+    assert response.status_code == 200, response.text
+    assert _fake_resume == [request_id]
+    payload = await _decision_payload(request_id)
+    assert payload["self_approved"] is True
+    assert payload["approval_rule"] == "sa_operator_self_approval"
+    assert payload["approval_auth"]["method"] == "fresh_sign_in"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["approve", "decide"])
+async def test_rest_an_admin_with_a_plain_token_cannot_approve_their_own_change(
+    route: str,
+    _client: tuple[httpx.AsyncClient, Any],  # noqa: F811
+    _fake_resume: list[uuid.UUID],  # noqa: F811
+) -> None:
+    """A plain API token never approves, also for an admin (the fresh sign-in rules)."""
+    ac, key = _client
+    request_id = await _park("destructive", requester="op-admin")
+    plain = mint_token(
+        key,
+        sub="op-admin",
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(_TENANT_A),
+    )
+
+    response = await _post(ac, route, request_id, plain)
+
+    assert response.status_code == 401, response.text
+    assert response.json()["detail"].startswith("fresh_sign_in_required:")
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
     assert _fake_resume == []

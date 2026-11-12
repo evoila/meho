@@ -19,6 +19,10 @@ When you finish, you will have:
       ([Register targets and secrets](targets-and-secrets.md)). It helps
       to have run one operation by hand first
       ([Run your first operations](first-operations.md)).
+    - **A model and its key.** MEHO runs the model calls itself, so the
+      install must name a model backend and give its key. Without them,
+      every run fails at the start. See
+      [Give hosted agents a model](../install/form-3-your-kubernetes.md#give-hosted-agents-a-model-optional).
     - **Setup needs the `tenant_admin` role.** This covers the identity,
       the definition, and the grants.
     - **Running an agent needs the `operator` role** (or `tenant_admin`).
@@ -132,7 +136,7 @@ gets, and which connectors it may use. You pass it with `--toolset`.
 
 | Field | Type | If you leave it out | If it is an empty list `[]` |
 |---|---|---|---|
-| `meta_tools` | list of tool names | The agent gets every tool marked "yes" in the "In the default set" column below. | The agent gets **no** tools from the table below. It still gets `invoke_agent` (see the note under the table). |
+| `meta_tools` | list of tool names | The agent gets every tool marked "yes" in the "In the default set" column below. | The agent gets **no** tools. |
 | `connectors` | list of connector ids, for example `k8s-1.x` | No connector limit. The agent may use any connector in your tenant. Grants and approvals still apply. | The agent may use **no** connector. Every `call_operation` is refused. |
 
 More rules:
@@ -145,7 +149,8 @@ More rules:
 - `meta_tools` and `connectors` must be lists of strings. Anything else
   (for example a single string) makes the run fail.
 - The `connectors` list limits `call_operation` and
-  `preview_operation`. When the agent asks for a connector that is not in
+  `preview_operation`, and `meho_connector_list` shows only the
+  connectors in the list. When the agent asks for a connector that is not in
   the list, MEHO refuses the call and tells the agent which connectors it
   may use.
 
@@ -158,6 +163,7 @@ These are the names you can put in `meta_tools`:
 | `list_operation_groups` | List the operation groups of one connector. | yes |
 | `search_operations` | Search a connector's operations by meaning and by words. | yes |
 | `call_operation` | Run one operation. This is the only tool that changes or reads your systems. | yes |
+| `meho_status` | Check whether MEHO itself is healthy. | yes |
 | `meho_connector_list` | List the connectors your tenant can use. | yes |
 | `list_targets` | List the targets in your tenant. | yes |
 | `preview_operation` | Show the request `call_operation` would send, without sending it. | yes |
@@ -169,26 +175,50 @@ These are the names you can put in `meta_tools`:
 | `search_memory` | Search the tenant's Memory store. | no — you must name it |
 | `search_knowledge` | Search the tenant's knowledge base. | no — you must name it |
 | `read_context_resource` | Read one Memory, knowledge base, or convention entry that a search returned. | no — you must name it |
+| `add_to_memory` | Save a note to the Memory store. | no — you must name it |
+| `add_to_knowledge` | Add or update an entry in the knowledge base. | no — you must name it |
+| `list_doc_collections` | List the vendor document collections the agent may search. Needs the docs add-on. | no — you must name it |
+| `search_docs` | Search vendor documents. Needs the docs add-on. | no — you must name it |
+| `read_docs` | Read more around a vendor document hit. Needs the docs add-on. | no — you must name it |
 
-The last four return text that people in your tenant stored. That is
-why the agent only gets them when you name them.
+The search and read tools return text that people in your tenant stored,
+or text from vendor documents. The two `add_to_` tools write to your
+tenant. That is why the agent only gets these tools when you name them.
+
+The two `add_to_` tools write with the agent's limits, not yours. The
+agent may change only its own knowledge base entries. It cannot save a
+Memory note for the whole team, even when a tenant admin starts the run.
 
 !!! note "One more tool: `invoke_agent`"
 
-    Every hosted run also gets the `invoke_agent` tool. With it, the
-    agent can start another agent definition in your tenant. The
-    toolset does not turn this tool on or off, so it is not in the table
-    above. Putting `invoke_agent` in `meta_tools` does nothing.
+    With the `invoke_agent` tool, an agent can start another agent
+    definition in your tenant as a child run. The agent gets this tool
+    only when its `meta_tools` list names `invoke_agent`. Leaving out
+    `meta_tools` does not add it.
+
+    A child run gets at most what both definitions allow:
+
+    - Tools: only the tools on both `meta_tools` lists. A child with no
+      `meta_tools` list gets the default tools that the parent's list names.
+    - Connectors: only the connectors on both `connectors` lists. A
+      missing list means no limit, so the other list counts.
+
+    So a parent that should hand work to a wider agent must itself name
+    the tools and connectors that the child needs. When an agent login
+    starts the run, the child must be a definition that login owns, the
+    same rule as for a direct run.
 
 ### Tools a hosted agent does not have
 
 Some tools exist for MCP clients but not for hosted agents. Putting
 these names in `meta_tools` does nothing:
 
-- no health or status tool (`meho_status`);
-- no runbook tools (`meho_runbook_*`);
+- no runbook tools (`meho_runbook_*`). A person must confirm each
+  runbook step;
+- no `ask_docs`. It calls a model of its own, outside the run's model
+  setting. The agent uses `search_docs` and `read_docs` and writes the
+  answer itself;
 - no approval tools. An agent can never approve anything;
-- no tools that write to Memory or the knowledge base;
 - no admin tools.
 
 ### A read-only toolset
@@ -265,8 +295,8 @@ no grant matches.
 |---|---|
 | `safe` (reads) | Runs without approval. |
 | `caution` | Waits until a second person approves. |
-| `dangerous` | Denied. |
-| `destructive` | Denied. |
+| `dangerous` | Waits until a person approves. |
+| `destructive` | Waits until a person approves. The agent must preview the operation first. |
 
 So a new agent can already run **every `safe` operation** on every
 connector and target, with no grant at all. To make it truly read-only
@@ -287,8 +317,8 @@ to every run of the agent:
   sub.
 
 The safety-level table above applies to both kinds of run. With no
-grant, a `caution` operation waits until a second person approves, and
-a `dangerous` operation is denied, even when you may run it yourself.
+grant, a `caution`, `dangerous` or `destructive` operation waits until a
+person approves, even when you may run it yourself.
 See [Approvals and break-glass](approvals-and-break-glass.md) for which
 calls wait for a second person.
 
@@ -325,11 +355,11 @@ When MEHO checks a call, it follows these rules:
 | `safe` | `auto-execute` (no limit) |
 | `caution` | `needs-approval` |
 | `dangerous` | `needs-approval` |
-| `destructive` | `deny`. No grant can open it for an agent. |
+| `destructive` | `needs-approval`. No grant lets it run without a person. |
 
-So a grant can always make an operation **stricter**. It can make a
-`dangerous` operation possible, but only with a second person's
-approval. A `caution` or `dangerous` operation never runs on its own.
+So a grant can always make an operation **stricter**. It can never
+let a `caution`, `dangerous` or `destructive` operation run on its own:
+these always wait for a person's approval. An agent never approves.
 
 Grants only check operations that run through `call_operation`. The
 discovery tools (`meho_connector_list`, `list_operation_groups`,
@@ -507,15 +537,14 @@ For a run that repeats, use `--kind cron` with `--cron-expr` and
 
 ## Step 7 — Check what the agent did
 
-Each operation the agent runs through `call_operation` writes an audit
-row. The row carries the run id in the `agent_session_id` field. So the
-run id is all you need to find the operations of one run.
+Every tool call of a hosted run writes one audit row. The row carries
+the run id in the `agent_session_id` field. So the run id is all you
+need to find what one run did.
 
-Not every tool call writes a row. In a hosted run, the discovery tools
-(`meho_connector_list`, `list_operation_groups`, `search_operations`,
-`list_targets`), `preview_operation`, and `result_query` do not write
-audit rows. So the audit shows **which operations the agent ran**, not
-every tool it touched. The run itself, with its status, its turns, and
+That includes the discovery tools, `preview_operation`, `result_query`,
+the broadcast tools, `invoke_agent`, refused calls, and calls to a tool
+name the run does not have. A `call_operation` dispatch writes its own
+row and gets no second one. The run itself, with its status, its turns, and
 its output, is in `meho agent run-status <run-id>`.
 
 List every row of the run:
@@ -536,13 +565,68 @@ In each row, check:
 - `op_id` — which operation the agent ran;
 - `target_name` — on which target;
 - `policy_decision` — `auto-execute`, `needs-approval`, or `deny`;
-- `result_status` — `ok`, `error`, or `denied`;
+- `result_status` — `ok`, `pending` (the call waited for approval),
+  `error`, `denied`, or `withdrawn`;
 - `principal_sub` — who acted: the agent's sub for a scheduled run, your
   sub for a run you started by hand.
 
 `meho audit query` needs the `operator` role. `meho audit replay` needs
 `tenant_admin`. The
 [audit forensics guide](audit-forensics.md) explains all filters.
+
+## Step 8 — Set a spend cap
+
+MEHO checks a spend cap before every run. You can cap three things for
+one window (a day, a week, or a month):
+
+- the tokens the agent uses;
+- the cost in US dollars;
+- the number of runs.
+
+A cap belongs to a login. A scheduled run, and a run as the agent, use
+the agent's login (`agent:<name>`). A run you start by hand uses your
+own login, so your own cap applies to it.
+
+Set a cap with `meho agent budget set`. You need the `tenant_admin`
+role, and you must be a person. An agent cannot change its own cap.
+
+```bash
+meho agent budget set agent:pod-reader --window daily \
+  --cost-limit 5 --request-limit 200
+```
+
+A limit you leave out stays as it was. A limit of `0` stops the agent
+from running at all. A cap stays in force in every later window until
+you change or remove it.
+
+Show the caps and what the agent has used so far in the current day,
+week, and month:
+
+```bash
+meho agent budget show agent:pod-reader
+```
+
+Remove all limits of one window (what the agent has used is kept):
+
+```bash
+meho agent budget clear agent:pod-reader --window daily
+```
+
+When a run would start and a cap is already reached, MEHO refuses the
+run with `budget_exceeded`. The error says which window and which limit
+was reached. No run is created. The agent can run again when the next
+window starts, or when you raise or clear the cap.
+
+Two details:
+
+- A run in progress counts as one request. So runs that start at the
+  same time cannot all pass a request cap.
+- MEHO counts the tokens and the cost of a run after it ends. A run can
+  go over a token or cost cap while it runs. The next run is then
+  refused.
+
+Every change of a cap writes an audit row (`agent.budget.set` and
+`agent.budget.clear`).
 
 ## What can go wrong here
 
@@ -556,6 +640,7 @@ In each row, check:
 | A call is `denied` | A grant or the safety level denies it. | Check `meho agent grant list --principal agent:<name>` and the operation's `safety_level`. |
 | A run you started by hand is denied an operation that you may run | The agent's grants deny it. In a run by hand, the stricter answer wins. | Add a grant with `meho agent grant create --principal agent:<name>`, or run the operation yourself. |
 | The run fails with `turn budget exhausted` | The agent used all its turns. | Raise `--turn-budget` with `meho agent edit`, or make the task smaller. |
+| A run is refused with `budget_exceeded` | The agent's login has reached a spend cap. | Run `meho agent budget show agent:<name>`, then raise the cap with `meho agent budget set` or remove it with `meho agent budget clear`. |
 | The run fails right away and the error names a runbook | The prompt or input tells the agent to run a runbook. Hosted agents cannot run runbooks. | Remove that instruction. |
 | `agent run` gives back a run id but no output | The run took longer than the wait limit, so it went on in the background. | Run `meho agent run-status <run-id>`. |
 | `409` on `agent run` | The definition is switched off. | Run `meho agent edit <name> --enabled`. |

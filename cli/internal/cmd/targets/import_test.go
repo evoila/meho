@@ -26,7 +26,7 @@ func TestParseTargetsYAMLHappyPath(t *testing.T) {
 	t.Parallel()
 	in := []byte(`
 targets:
-  - name: rdc-vcenter
+  - name: vcenter-lab
     product: vcenter
     host: vc-dc.evba.lab
     sso_realm: evba.lab
@@ -38,8 +38,8 @@ targets:
 	if len(entries) != 1 {
 		t.Fatalf("entries: got %d; want 1", len(entries))
 	}
-	if entries[0]["name"] != "rdc-vcenter" {
-		t.Errorf("name: got %v; want rdc-vcenter", entries[0]["name"])
+	if entries[0]["name"] != "vcenter-lab" {
+		t.Errorf("name: got %v; want vcenter-lab", entries[0]["name"])
 	}
 }
 
@@ -98,7 +98,7 @@ targets:
 func TestMapEntryKnownTopLevelPassthrough(t *testing.T) {
 	t.Parallel()
 	body, warnings := mapEntry(map[string]any{
-		"name":         "rdc-vault",
+		"name":         "vault-lab",
 		"product":      "vault",
 		"host":         "vault.evba.lab",
 		"port":         8200,
@@ -180,6 +180,29 @@ func TestMapEntryVersionIsTopLevel(t *testing.T) {
 	}
 }
 
+func TestParseTargetsYAMLNullVersionIsAccepted(t *testing.T) {
+	t.Parallel()
+	in := []byte(`
+targets:
+  - name: addon
+    product: demo-product
+    host: addon.example.test
+    version: null
+`)
+	entries, err := parseTargetsYAML(in)
+	if err != nil {
+		t.Fatalf("parseTargetsYAML: a null version must parse, got %v", err)
+	}
+	body, warnings := entryToCreateBody(entries[0])
+	v, present := body["version"]
+	if !present || v != nil {
+		t.Errorf("version: got %v (present=%v); want null at the top level", v, present)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings: got %v; want none", warnings)
+	}
+}
+
 func TestParseTargetsYAMLNonStringVersionFails(t *testing.T) {
 	t.Parallel()
 	in := []byte(`
@@ -201,7 +224,7 @@ targets:
 func TestMapEntrySkipsFingerprintWithWarning(t *testing.T) {
 	t.Parallel()
 	body, warnings := mapEntry(map[string]any{
-		"name":        "rdc-vault",
+		"name":        "vault-lab",
 		"product":     "vault",
 		"host":        "vault.evba.lab",
 		"fingerprint": map[string]any{"vendor": "hashicorp"},
@@ -220,7 +243,7 @@ func TestMapEntryPreferredImplIDIsTopLevel(t *testing.T) {
 	// top-level column. It must land in the body root, NOT in
 	// extras.
 	body, _ := mapEntry(map[string]any{
-		"name":              "rdc-vcenter",
+		"name":              "vcenter-lab",
 		"product":           "vcenter",
 		"host":              "vc-dc.evba.lab",
 		"preferred_impl_id": "vsphere-8.x",
@@ -419,7 +442,7 @@ func TestMapEntryTLSServerNameStillSpillsUnknown(t *testing.T) {
 func TestMapEntryExplicitExtrasMergesWithSpilled(t *testing.T) {
 	t.Parallel()
 	body, _ := mapEntry(map[string]any{
-		"name":       "rdc-vault",
+		"name":       "vault-lab",
 		"product":    "vault",
 		"host":       "vault.evba.lab",
 		"extras":     map[string]any{"namespace": "rdc"},
@@ -448,7 +471,7 @@ func TestEntryToUpdateBodyStripsImmutables(t *testing.T) {
 	// Stripping at the client side surfaces a meaningful error
 	// (a PATCH that does nothing) rather than a 422.
 	body, _ := entryToUpdateBody(map[string]any{
-		"name":    "rdc-vault",
+		"name":    "vault-lab",
 		"product": "vault",
 		"host":    "vault.evba.lab",
 		"notes":   "patched",
@@ -476,7 +499,7 @@ func TestEntryToUpdateBodySparseShape(t *testing.T) {
 	// `setattr` loop wipe other columns on every --update run
 	// (the bug PR #362's review on #257 surfaced).
 	body, _ := entryToUpdateBody(map[string]any{
-		"name":  "rdc-vault",
+		"name":  "vault-lab",
 		"notes": "patched",
 	})
 	if len(body) != 1 {
@@ -500,21 +523,21 @@ func TestEntryToUpdateBodySparseShape(t *testing.T) {
 // against the same fakeDoer the apply path uses.)
 func TestDryRunPlanExistingRendersUpdateNewRendersCreate(t *testing.T) {
 	t.Parallel()
-	f := &fakeDoer{existing: []string{"rdc-vault"}}
+	f := &fakeDoer{existing: []string{"vault-lab"}}
 	entries := []map[string]any{
 		// Existing target → UPDATE. Carries only `notes` (name/product
 		// stripped on the PATCH path) so the body is a 1-key sparse
 		// shape, matching what apply would PATCH.
-		{"name": "rdc-vault", "product": "vault", "host": "v1", "notes": "patched"},
+		{"name": "vault-lab", "product": "vault", "host": "v1", "notes": "patched"},
 		// Brand-new target → CREATE.
-		{"name": "rdc-vcenter", "product": "vcenter", "host": "vc1"},
+		{"name": "vcenter-lab", "product": "vcenter", "host": "vc1"},
 	}
 	p, err := buildLivePlan(context.Background(), f.do, entries, true)
 	if err != nil {
 		t.Fatalf("buildLivePlan (dry-run): %v", err)
 	}
-	if len(p.Update) != 1 || p.Update[0].Name != "rdc-vault" {
-		t.Errorf("update: %v; want one UPDATE entry for rdc-vault", p.Update)
+	if len(p.Update) != 1 || p.Update[0].Name != "vault-lab" {
+		t.Errorf("update: %v; want one UPDATE entry for vault-lab", p.Update)
 	}
 	if p.Update[0].Action != actionUpdate {
 		t.Errorf("existing-target action: got %q; want UPDATE", p.Update[0].Action)
@@ -522,8 +545,8 @@ func TestDryRunPlanExistingRendersUpdateNewRendersCreate(t *testing.T) {
 	if _, ok := p.Update[0].Body["name"]; ok {
 		t.Errorf("dry-run UPDATE body should use the sparse PATCH shape (no `name`): %v", p.Update[0].Body)
 	}
-	if len(p.Create) != 1 || p.Create[0].Name != "rdc-vcenter" {
-		t.Errorf("create: %v; want one CREATE entry for rdc-vcenter", p.Create)
+	if len(p.Create) != 1 || p.Create[0].Name != "vcenter-lab" {
+		t.Errorf("create: %v; want one CREATE entry for vcenter-lab", p.Create)
 	}
 	if p.Create[0].Action != actionCreate {
 		t.Errorf("new-target action: got %q; want CREATE", p.Create[0].Action)
@@ -552,15 +575,15 @@ func TestListExistingNamesReadsTheListEnvelope(t *testing.T) {
 
 	t.Run("envelope body yields the names", func(t *testing.T) {
 		t.Parallel()
-		f := &fakeDoer{existing: []string{"rdc-vault", "rdc-vcenter"}}
+		f := &fakeDoer{existing: []string{"vault-lab", "vcenter-lab"}}
 		got, err := listExistingNames(context.Background(), f.do)
 		if err != nil {
 			t.Fatalf("listExistingNames: %v", err)
 		}
 		if len(got) != 2 {
-			t.Fatalf("names: %v; want rdc-vault + rdc-vcenter", got)
+			t.Fatalf("names: %v; want vault-lab + vcenter-lab", got)
 		}
-		for _, want := range []string{"rdc-vault", "rdc-vcenter"} {
+		for _, want := range []string{"vault-lab", "vcenter-lab"} {
 			if _, ok := got[want]; !ok {
 				t.Errorf("missing %q from %v", want, got)
 			}
@@ -570,7 +593,7 @@ func TestListExistingNamesReadsTheListEnvelope(t *testing.T) {
 	t.Run("bare-array body is a decode error", func(t *testing.T) {
 		t.Parallel()
 		bareArray := func(_ context.Context, _, _ string, _ []byte) ([]byte, error) {
-			return []byte(`[{"name": "rdc-vault"}]`), nil
+			return []byte(`[{"name": "vault-lab"}]`), nil
 		}
 		got, err := listExistingNames(context.Background(), bareArray)
 		if err == nil {
@@ -591,7 +614,7 @@ func TestListExistingNamesReadsTheListEnvelope(t *testing.T) {
 func TestListExistingNamesPaginatesOnNextCursor(t *testing.T) {
 	t.Parallel()
 	f := &fakeDoer{
-		existing: []string{"rdc-vault", "rdc-vcenter", "rdc-argocd"},
+		existing: []string{"vault-lab", "vcenter-lab", "argocd-lab"},
 		pageSize: 1,
 	}
 	got, err := listExistingNames(context.Background(), f.do)
@@ -601,7 +624,7 @@ func TestListExistingNamesPaginatesOnNextCursor(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("names: %v; want all three across pages", got)
 	}
-	for _, want := range []string{"rdc-vault", "rdc-vcenter", "rdc-argocd"} {
+	for _, want := range []string{"vault-lab", "vcenter-lab", "argocd-lab"} {
 		if _, ok := got[want]; !ok {
 			t.Errorf("missing %q from %v", want, got)
 		}
@@ -695,23 +718,23 @@ func (f *fakeDoer) listPage(rawPath string) ([]byte, error) {
 
 func TestBuildLivePlanPartitionsCreateAndUpdate(t *testing.T) {
 	t.Parallel()
-	f := &fakeDoer{existing: []string{"rdc-vault"}}
-	// rdc-vault carries ONLY `notes` (plus the immutable name/product
+	f := &fakeDoer{existing: []string{"vault-lab"}}
+	// vault-lab carries ONLY `notes` (plus the immutable name/product
 	// stripped on the PATCH path) so the assertion can pin a 1-key
 	// sparse body.
 	entries := []map[string]any{
-		{"name": "rdc-vault", "product": "vault", "host": "v1", "notes": "patched"},
-		{"name": "rdc-vcenter", "product": "vcenter", "host": "vc1"},
+		{"name": "vault-lab", "product": "vault", "host": "v1", "notes": "patched"},
+		{"name": "vcenter-lab", "product": "vcenter", "host": "vc1"},
 	}
 	p, err := buildLivePlan(context.Background(), f.do, entries, true)
 	if err != nil {
 		t.Fatalf("buildLivePlan: %v", err)
 	}
-	if len(p.Create) != 1 || p.Create[0].Name != "rdc-vcenter" {
-		t.Errorf("create: %v; want one entry for rdc-vcenter", p.Create)
+	if len(p.Create) != 1 || p.Create[0].Name != "vcenter-lab" {
+		t.Errorf("create: %v; want one entry for vcenter-lab", p.Create)
 	}
-	if len(p.Update) != 1 || p.Update[0].Name != "rdc-vault" {
-		t.Errorf("update: %v; want one entry for rdc-vault", p.Update)
+	if len(p.Update) != 1 || p.Update[0].Name != "vault-lab" {
+		t.Errorf("update: %v; want one entry for vault-lab", p.Update)
 	}
 	// Sparse-PATCH contract: update body carries ONLY the YAML keys
 	// that map to top-level columns and aren't immutable. `name` /
@@ -770,7 +793,7 @@ func TestRunImportDryRunPrintsPlan(t *testing.T) {
 	path := filepath.Join(dir, "targets.yaml")
 	yaml := []byte(`
 targets:
-  - name: rdc-vault
+  - name: vault-lab
     product: vault
     host: vault.evba.lab
     sso_realm: evba.lab
@@ -779,7 +802,7 @@ targets:
 		t.Fatalf("write yaml: %v", err)
 	}
 
-	// Tenant has no targets → rdc-vault is new → CREATE. The listing
+	// Tenant has no targets → vault-lab is new → CREATE. The listing
 	// GET is the only call dry-run may make.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, r *http.Request) {
@@ -799,7 +822,7 @@ targets:
 		t.Fatalf("runImport: %v\nstderr=%s", err, stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"CREATE", "rdc-vault", "Plan:"} {
+	for _, want := range []string{"CREATE", "vault-lab", "Plan:"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("dry-run output missing %q:\n%s", want, out)
 		}
@@ -816,7 +839,7 @@ func TestRunImportDryRunExistingTargetRendersUpdate(t *testing.T) {
 	path := filepath.Join(dir, "targets.yaml")
 	yaml := []byte(`
 targets:
-  - name: rdc-vault
+  - name: vault-lab
     product: vault
     host: vault.evba.lab
     notes: patched
@@ -832,7 +855,7 @@ targets:
 		}
 		w.Header().Set("Content-Type", "application/json")
 		// Existing tenant target with the same name → must plan UPDATE.
-		_, _ = w.Write([]byte(`{"items":[{"name":"rdc-vault"}],"next_cursor":null}`))
+		_, _ = w.Write([]byte(`{"items":[{"name":"vault-lab"}],"next_cursor":null}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -844,8 +867,8 @@ targets:
 		t.Fatalf("runImport --update --dry-run: %v\nstderr=%s", err, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "UPDATE") || !strings.Contains(out, "rdc-vault") {
-		t.Errorf("dry-run for existing target should preview UPDATE rdc-vault:\n%s", out)
+	if !strings.Contains(out, "UPDATE") || !strings.Contains(out, "vault-lab") {
+		t.Errorf("dry-run for existing target should preview UPDATE vault-lab:\n%s", out)
 	}
 	if strings.Contains(out, "CREATE") {
 		t.Errorf("dry-run for existing target must not show CREATE:\n%s", out)

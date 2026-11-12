@@ -15,7 +15,10 @@ type: application
 # appVersion is the *application* version — overridden by the same workflow
 # to the git sha being deployed. Both values are placeholders here; the
 # publish workflow rewrites them at OCI push time.
-version: 0.1.0
+# 0.2.0 is the first version with the built-in core on by default: one
+# install brings PostgreSQL, Keycloak and OpenBao and wires MEHO to them
+# (#4047). Bring-your-own installs set the three `core*.enabled: false`.
+version: 0.2.0
 appVersion: "0.1.0"
 
 # Tightest Kubernetes API version range that exercises all manifests:

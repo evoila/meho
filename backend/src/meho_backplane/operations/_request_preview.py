@@ -28,6 +28,9 @@ Scope (honouring #1683's out-of-scope dispositions):
 
 * **No dispatch.** The connector's HTTP transport is never called; no
   network egress, no audit row, no broadcast event, no policy-gate park.
+  The one exception is an op's opt-in check before the wait for approval
+  (:mod:`._park_check`): it runs here when the call would wait, and it may
+  make the same vendor read it makes on the call.
 * **No replay.** Inspecting a *would-be* request only; re-dispatching a
   past audited request is a separate governance concern (Goal #1651).
 * **Ingested ops, plus a synthetic preview for the approval tiers.** A
@@ -68,6 +71,7 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import resolve_connector_or_label
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
@@ -82,21 +86,34 @@ from meho_backplane.operations._errors import (
     result_unqualified_target_version,
 )
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._ingested_owner import (
+    INGESTED_OPS_NOT_ACCEPTED,
+    accepts_ingested_operations,
+    ingested_ops_refusal_message,
+)
 from meho_backplane.operations._lookup import (
     lookup_descriptor,
     parse_connector_id,
 )
 from meho_backplane.operations._op_miss import op_miss_result
+from meho_backplane.operations._park_check import park_check_refusal, park_check_registered
 from meho_backplane.operations._preview import _SENSITIVE_CLASSES
-from meho_backplane.operations._preview_steps import preview_step_verdict
+from meho_backplane.operations._preview_steps import (
+    agent_step_refusal,
+    preview_step_verdict,
+)
+from meho_backplane.operations._secret_values import split_reveal_secret
+from meho_backplane.operations._target_connector_match import mismatch_preview_envelope
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     params_check_errors,
     policy_gate,
     validate_params,
 )
+from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.redaction import apply_connector_boundary_redaction
+from meho_backplane.settings import get_settings
 
 __all__ = ["PARAMS_DIGEST_KEY", "compute_preview_hash", "preview_dispatch"]
 
@@ -287,7 +304,11 @@ async def _resolve_descriptor(
     picks the code and names other connectors that have the op (#4031).
     Returns the ``target_required`` envelope when the op needs a target
     and got none (#4139); like ``dispatch``, this comes before the
-    catalog choice.
+    catalog choice. Returns the ``target_connector_mismatch`` envelope
+    when the target's connector cannot run the op (#5948); like
+    ``dispatch``, this comes right after the target check, so it is never
+    hidden by the catalog choice or by the op's check before the wait for
+    approval.
     """
     product, version, impl_id = parse_connector_id(connector_id)
 
@@ -336,7 +357,34 @@ async def _resolve_descriptor(
             missing, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
         )
 
-    # --- Catalog choice (mirrors dispatch Step 3, no audit row) ------------
+    # #5948: same answer and same order as ``dispatch`` -- right after the
+    # target check, before the catalog choice (and so before the version
+    # check of a composite) and before the check before the wait for
+    # approval. No audit row.
+    mismatch = mismatch_preview_envelope(
+        descriptor=descriptor, connector_id=connector_id, target=target
+    )
+    if mismatch is not None:
+        return mismatch
+
+    return await _catalog_choice(
+        operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
+    )
+
+
+async def _catalog_choice(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    connector_id: str,
+    target: Any,
+) -> tuple[EndpointDescriptor, str] | dict[str, Any]:
+    """The catalog choice of dispatch Step 3, with no audit row.
+
+    Returns the descriptor and connector id that would run (the sibling's
+    when a sibling catalog serves the target, #3600), or the
+    ``unqualified_target_version`` envelope when no catalog does (#4984).
+    """
     choice = await choose_catalog_for_target(
         operator=operator,
         descriptor=descriptor,
@@ -345,14 +393,17 @@ async def _resolve_descriptor(
     )
     if isinstance(choice, CatalogRefusal):
         refused = result_unqualified_target_version(
-            op_id,
+            descriptor.op_id,
             reason=choice.reason,
             target_product=choice.target_product,
             target_version=choice.target_version,
             duration_ms=0.0,
         )
         return _refused_envelope(
-            refused, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
+            refused,
+            op_id=descriptor.op_id,
+            connector_id=connector_id,
+            source_kind=descriptor.source_kind,
         )
     return choice.descriptor, choice.connector_id
 
@@ -387,6 +438,19 @@ def _gate_and_validate(
             op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
         )
 
+    return _validate_params_envelope(
+        descriptor=descriptor, connector_id=connector_id, op_id=op_id, params=params
+    )
+
+
+def _validate_params_envelope(
+    *,
+    descriptor: EndpointDescriptor,
+    connector_id: str,
+    op_id: str,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Dispatch Step 3: the ``invalid_params`` / ``invalid_op_schema`` envelope, or ``None``."""
     # --- Step 3: parameter_schema validation (mirrors dispatch) -----------
     try:
         validation_errors = validate_params(descriptor.parameter_schema, params)
@@ -408,6 +472,60 @@ def _gate_and_validate(
     return None
 
 
+async def _park_check_envelope(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    connector_id: str,
+    op_id: str,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """The ``refused_before_approval`` envelope when the call would be refused.
+
+    The preview gives the same answer the call gives: when the op has a
+    check before the wait for approval
+    (:mod:`~meho_backplane.operations._park_check`), its params pass the
+    schema, and the policy gate says the call would wait for approval, the
+    check runs here. A refusal returns the same ``error`` and ``extras``
+    the call returns. Writes nothing, like every preview. The check is
+    the op's own code: it may read the vendor (for example the form that
+    says which fields are secret), the same read the call makes.
+    """
+    if not park_check_registered(descriptor.op_id):
+        return None
+    if (
+        _validate_params_envelope(
+            descriptor=descriptor, connector_id=connector_id, op_id=op_id, params=params
+        )
+        is not None
+    ):
+        return None  # the call fails the params check first; the preview says so below
+    verdict, _reason = await policy_gate(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        decide_only=True,
+    )
+    if verdict is not PermissionVerdict.NEEDS_APPROVAL:
+        return None
+    refusal = await park_check_refusal(
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+        duration_ms=0.0,
+    )
+    if refusal is None:
+        return None
+    return _refused_envelope(
+        refusal, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
+    )
+
+
 async def _governance_fields(
     *,
     operator: Operator,
@@ -427,7 +545,12 @@ async def _governance_fields(
     person's call that runs at once). A call that would run at once is
     also checked step by step (:func:`preview_step_verdict`, #5492): a
     multi-step operation reads as covered only when its write steps are
-    too. All four are advisory: none is in :data:`_PREVIEW_HASH_KEYS`, so
+    too. With ``AGENT_GRANT_REQUIRED=on`` a call that would run or wait
+    reads as ``deny`` when a write step has no grant or a ``deny`` grant,
+    or when an agent calls a multi-step operation that changes something
+    and declares no steps (:func:`agent_step_refusal`), as the dispatcher
+    refuses it.
+    All four are advisory: none is in :data:`_PREVIEW_HASH_KEYS`, so
     the hash does not change.
     """
     verdict, reason = await policy_gate(
@@ -437,7 +560,15 @@ async def _governance_fields(
         connector_id=connector_id,
         decide_only=True,
     )
-    if verdict is PermissionVerdict.AUTO_EXECUTE:
+    step_refusal = None
+    if verdict is not PermissionVerdict.DENY and get_settings().agent_grant_required == "on":
+        # The same up-front check the dispatcher runs (#6189).
+        step_refusal = await agent_step_refusal(
+            operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
+        )
+    if step_refusal is not None:
+        verdict, reason = PermissionVerdict.DENY, step_refusal
+    elif verdict is PermissionVerdict.AUTO_EXECUTE:
         steps = await preview_step_verdict(
             operator=operator, op_id=descriptor.op_id, connector_id=connector_id, target=target
         )
@@ -521,9 +652,11 @@ async def _build_ingested_preview(
     resolve (shared with :func:`dispatch_ingested`) and body redaction.
     Returns the ``status="ok"`` envelope, a structured ``no_connector`` /
     ``ambiguous_connector`` error envelope when the target resolves no
-    connector, or a ``dispatch_error`` envelope when the request can't be
-    resolved (an unsubstituted path var or a descriptor missing its
-    method/path -- the two faults :func:`resolve_ingested_request` raises).
+    connector, an ``ingested_ops_not_accepted`` error envelope when the
+    target's class does not accept ingested operations, or a
+    ``dispatch_error`` envelope when the request can't be resolved (an
+    unsubstituted path var or a descriptor missing its method/path -- the
+    two faults :func:`resolve_ingested_request` raises).
     Never sends the request; never raises for those faults.
     """
     cls, label, exc_message = resolve_connector_or_label(target)
@@ -538,6 +671,15 @@ async def _build_ingested_preview(
         }
     # ``label is None`` ⇔ ``cls`` is set (resolver contract).
     assert cls is not None
+    if not accepts_ingested_operations(cls):
+        return {
+            "status": "error",
+            "op_id": op_id,
+            "connector_id": connector_id,
+            "source_kind": descriptor.source_kind,
+            "error": f"{INGESTED_OPS_NOT_ACCEPTED}: {ingested_ops_refusal_message(cls)}",
+            "extras": {"error_code": INGESTED_OPS_NOT_ACCEPTED},
+        }
     connector_instance = get_or_create_connector_instance(cls)
 
     # The literal request, resolved through the SAME code path
@@ -659,13 +801,17 @@ async def preview_dispatch(
 
     Returns a JSON-shaped envelope: ``status`` ``"ok"`` (request/synthetic
     preview resolved), ``"error"`` (structured ``unknown_op`` /
-    ``target_required`` / ``unqualified_target_version`` / ``invalid_params`` /
-    ``no_connector`` / ``ambiguous_connector`` / ``dispatch_error``), or
+    ``target_required`` / ``target_connector_mismatch`` /
+    ``unqualified_target_version`` / ``invalid_params`` /
+    ``no_connector`` / ``ambiguous_connector`` / ``dispatch_error`` /
+    ``refused_before_approval`` -- the op's check before the wait for
+    approval refused the call, see :func:`_park_check_envelope`), or
     ``"unavailable"`` (a non-governed typed/composite op). ``op_id`` /
     ``connector_id`` / ``source_kind`` echo for correlation. Every envelope
     whose op resolved (every status except ``unknown_op`` /
     ``unknown_connector`` / ``target_required`` /
-    ``unqualified_target_version``) carries ``safety_level``,
+    ``target_connector_mismatch`` / ``unqualified_target_version``) carries
+    ``safety_level``,
     ``requires_approval``, ``policy_verdict`` and ``policy_reason`` (#4923).
     On ``ok``: ``method``, ``resolved_path``, ``query``, ``redacted_body``,
     ``preview_hash`` (#3197 — the binding a caller presents on the governed
@@ -683,20 +829,34 @@ async def preview_dispatch(
     if isinstance(resolved, dict):
         return resolved  # the op or the target did not resolve (see _resolve_descriptor)
     descriptor, connector_id = resolved
-    envelope = await _preview_resolved_op(
-        operator=operator,
-        connector_id=connector_id,
-        op_id=op_id,
-        descriptor=descriptor,
-        target=target,
-        params=params,
-    )
-    governance = await _governance_fields(
-        operator=operator,
-        descriptor=descriptor,
-        target=target,
-        connector_id=connector_id,
-    )
+    # ``reveal_secret`` is a dispatch control, not an op param: the
+    # dispatcher strips it before the schema check and the hash, and a call
+    # that asks for the hidden values of a secret read gets the floor.
+    params, reveal_secret = split_reveal_secret(params)
+    raise_descriptor_for_reveal(descriptor, reveal_secret=reveal_secret)
+    # The park check and the governance fields each run the policy gate.
+    with agent_no_grant_log_scope():
+        envelope = await _park_check_envelope(
+            operator=operator,
+            descriptor=descriptor,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=target,
+            params=params,
+        ) or await _preview_resolved_op(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+        )
+        governance = await _governance_fields(
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            connector_id=connector_id,
+        )
     return {**envelope, **governance}
 
 

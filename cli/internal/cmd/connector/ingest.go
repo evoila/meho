@@ -487,7 +487,7 @@ func postIngest(ctx context.Context, authed *api.AuthedClient, body api.IngestRe
 //     capped error message as unexpected_response (exit 4), the
 //     same family the sync path's pipeline failures land in. A
 //     degraded job (the pipeline ran but persisted nothing
-//     dispatchable — claude-rdc-hetzner-dc#1136) renders the same
+//     dispatchable — the lab repo) renders the same
 //     way so a non-dispatchable ingest is never mistaken for success.
 //
 // The progress notice goes to stderr in both output modes: stdout
@@ -514,7 +514,7 @@ func runIngestAsync(
 	fmt.Fprintf(cmd.ErrOrStderr(),
 		"ingest accepted (HTTP 202) — job_id=%s; polling %s every %s until the job completes\n",
 		handle.JobId, handle.PollUrl, interval)
-	st, err := pollIngestJob(cmd.Context(), authed, handle.JobId, interval)
+	st, err := pollIngestJob(cmd.Context(), authed, handle.JobId, interval, cmd.ErrOrStderr())
 	if err != nil {
 		return renderIngestWaitError(cmd, backplaneURL, handle, err, opts.JSONOut)
 	}
@@ -581,7 +581,7 @@ func renderIngestTerminal(
 		)
 	case api.IngestJobStatusResponseStatusDegraded:
 		// The pipeline ran to completion but left the connector
-		// non-dispatchable (claude-rdc-hetzner-dc#1136): a bare
+		// non-dispatchable (the lab repo): a bare
 		// "succeeded" here was the false-success the server now refuses
 		// to report. Surface it as an error (non-zero exit) carrying the
 		// structured error_class + detail so the operator knows the
@@ -638,12 +638,18 @@ func renderIngestTerminal(
 // classification, because every poll-phase failure message must
 // carry the "job keeps running server-side, don't re-run ingest"
 // guidance.
+//
+// Each time the running job moves to a new phase, one line goes to
+// progress (stderr), so a long wait shows which step runs and since
+// when.
 func pollIngestJob(
 	ctx context.Context,
 	authed *api.AuthedClient,
 	jobID uuid.UUID,
 	interval time.Duration,
+	progress io.Writer,
 ) (*api.IngestJobStatusResponse, error) {
+	var lastPhase api.IngestJobStatusResponsePhase
 	for {
 		resp, err := retryOn401(ctx, authed,
 			func(ctx context.Context) (*api.GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse, error) {
@@ -666,6 +672,10 @@ func pollIngestJob(
 		}
 		if resp.JSON200.Status != api.IngestJobStatusResponseStatusRunning {
 			return resp.JSON200, nil
+		}
+		if resp.JSON200.Phase != "" && resp.JSON200.Phase != lastPhase {
+			lastPhase = resp.JSON200.Phase
+			fmt.Fprintf(progress, "ingest job phase: %s\n", ingestJobPhase(resp.JSON200))
 		}
 		if serr := sleepCtx(ctx, interval); serr != nil {
 			return nil, serr
@@ -833,6 +843,25 @@ func printUnassignedOps(w io.Writer, connectorID string, g *api.GroupingResultMo
 // the resolved triple via `connector_id`. Deriving from the response
 // keeps the heading correct in both modes and matches the pre-#1150
 // operator-visible output.
+// loginSetupNote explains a login_setup outcome in a few words. A
+// tenant's login setup applies only to that tenant's calls.
+func loginSetupNote(outcome api.IngestionResultModelLoginSetup) string {
+	switch outcome {
+	case api.IngestionResultModelLoginSetupRegistered:
+		return " (calls in this scope use this login type)"
+	case api.IngestionResultModelLoginSetupReplaced:
+		return " (replaced the earlier login type of this scope; see the audit log)"
+	case api.IngestionResultModelLoginSetupUnchanged:
+		return " (this login type was already in place)"
+	case api.IngestionResultModelLoginSetupServedByConnectorCode:
+		return " (hand-written connector code serves this connector; login type saved, not used)"
+	case api.IngestionResultModelLoginSetupServedByBuiltinLoginSetup:
+		return " (a built-in login type serves this connector; login type saved, not used)"
+	default:
+		return ""
+	}
+}
+
 func printIngestSummary(w io.Writer, opts ingestOptions, r *api.IngestResponse) {
 	totalOps := r.Ingestion.InsertedCount + r.Ingestion.UpdatedCount + r.Ingestion.SkippedCount
 	heading := ingestSummaryHeading(r.Ingestion.ConnectorId)
@@ -854,6 +883,10 @@ func printIngestSummary(w io.Writer, opts ingestOptions, r *api.IngestResponse) 
 			r.Ingestion.ConnectorRegistered,
 		)
 		fmt.Fprintf(w, "  operations_grouped: %t\n", r.Ingestion.OperationsGrouped)
+		if r.Ingestion.LoginSetup != nil {
+			fmt.Fprintf(w, "  login_setup: %s%s\n", *r.Ingestion.LoginSetup,
+				loginSetupNote(*r.Ingestion.LoginSetup))
+		}
 	}
 	if r.Grouping != nil {
 		fmt.Fprintf(w, "  grouping: %d groups, %d ops assigned, %d unassigned",

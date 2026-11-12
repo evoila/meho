@@ -72,6 +72,7 @@ from meho_backplane.ui.auth import flow as oauth_flow
 from meho_backplane.ui.auth.flow import clear_discovery_cache
 from meho_backplane.ui.auth.middleware import require_ui_session
 from meho_backplane.ui.auth.refresh import refresh_session_tokens
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import (
     create_session,
     load_session,
@@ -347,7 +348,7 @@ def test_refresh_success_event_fields_and_no_token_leakage() -> None:
     succeeded = [e for e in captured if e["event"] == "ui_auth_token_refresh_succeeded"]
     assert len(succeeded) == 1
     event = succeeded[0]
-    assert event["session_id"] == str(session_id)
+    assert event["session_ref"] == session_ref(session_id)
     assert isinstance(event["old_expires_at"], str)
     assert isinstance(event["new_expires_at"], str)
     assert isinstance(event["time_cost_ms"], float)
@@ -356,6 +357,8 @@ def test_refresh_success_event_fields_and_no_token_leakage() -> None:
     serialised = repr(captured)
     for secret in (stale, fresh, "rt-secret-old", "refresh-token-2", "test-client-secret"):
         assert secret not in serialised
+    # No session id (the cookie value) in any captured event either.
+    assert str(session_id) not in serialised
 
 
 # ---------------------------------------------------------------------------
@@ -850,3 +853,39 @@ def test_agents_lift_refresh_unavailable_keeps_json_shape() -> None:
 
     assert response.status_code == 401
     assert response.json() == {"detail": "session_expired"}
+
+
+# ---------------------------------------------------------------------------
+# #3980 -- only the web interface session counts as a person
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("expired", [False, True], ids=["valid-token", "after-refresh"])
+def test_session_operator_is_marked_as_a_web_session(expired: bool) -> None:
+    """The Operator built from the web session has ``web_session=True`` (#3980).
+
+    Both legs count: the stored token verifies as is, or it is refreshed
+    once first. The token's own claims cannot set the field; only this
+    function does.
+    """
+    from meho_backplane.ui.auth.refresh import verify_access_token_with_refresh
+
+    key = make_rsa_keypair("kid-web-session")
+    stored = _admin_jwt(key, expires_in=-120) if expired else _admin_jwt(key)
+    session_id = _seed_session(access_token=stored)
+
+    decrypted = _load_row(session_id)
+
+    async def _verify() -> Any:
+        _refreshed, operator = await verify_access_token_with_refresh(
+            decrypted, expected_audience=get_settings().keycloak_audience
+        )
+        return operator
+
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc(mock_router, public_jwks(key))
+        _mock_token_endpoint(_refresh_response(_admin_jwt(key)))
+        operator = asyncio.run(_verify())
+
+    assert operator.sub == "op-77"
+    assert operator.web_session is True

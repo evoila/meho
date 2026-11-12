@@ -48,6 +48,13 @@ _REGISTRY = "registry.example.com"
 _DIGEST = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set-string",
@@ -88,6 +95,8 @@ _ALL_ON = [
     "--set",
     "corePostgres.enabled=true",
     "--set",
+    "postgres.credentialsSecret=",
+    "--set",
     "coreKeycloak.enabled=true",
     "--set",
     "coreKeycloak.hostname=meho.test",
@@ -96,25 +105,27 @@ _ALL_ON = [
     "--set",
     "coreVault.enabled=true",
     "--set",
+    "vault.address=",
+    "--set",
+    "config.vaultAddr=",
+    "--set",
     "resultCache.enabled=true",
     "--set",
     "agent.enabled=true",
     "--set",
     "agent.secretName=agent",
     "--set",
+    "agent.openai.enabled=true",
+    "--set",
+    "agent.openai.secretName=agent-openai",
+    "--set",
     "keycloakAdmin.enabled=true",
-    "--set",
-    "keycloakAdmin.url=https://keycloak.test",
-    "--set",
-    "keycloakAdmin.clientId=admin",
     "--set",
     "keycloakAdmin.clientSecret.secretName=test-core-keycloak-admin",
     "--set",
     "uiConsole.enabled=true",
     "--set",
     "uiConsole.secretName=test-core-ui-auth",
-    "--set",
-    "config.uiKeycloakClientId=ui",
 ]
 
 # The pods that render with `_ALL_ON`, so a part that silently stops
@@ -133,6 +144,7 @@ _EXPECTED_PODS = {
     "Deployment/test-result-cache",
     "Pod/test-meho-test-pgvector",
     "Pod/test-meho-test-agent-runtime-config",
+    "Pod/test-meho-test-agent-openai-config",
     "Pod/test-meho-test-ui-console-config",
 }
 
@@ -228,6 +240,8 @@ def test_registry_rewrite_rule(registry: str, repository: str, expected: str) ->
     pods = _pods(
         "--set",
         "corePostgres.enabled=true",
+        "--set",
+        "postgres.credentialsSecret=",
         "--set",
         f"corePostgres.image.repository={repository}",
         "--set",

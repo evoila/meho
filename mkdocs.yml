@@ -52,10 +52,30 @@ nav:
       - index.md
       - Reference architecture: architecture.md
       - Deployment shapes: deployment-shapes.md
+  - What MEHO can do:
+      - can-do/index.md
+      - Ways to install MEHO: can-do/installation-options.md
+      - Connectors overview: can-do/connectors-overview.md
+      - Approvals: can-do/approvals.md
+      - Secret values stay hidden: can-do/hidden-secrets.md
   - Install & operate:
-      - The install trail: install/index.md
+      - Which install form is right for you?: install/which-form.md
+      - "Form 1: VMware appliance": install/form-1-vmware-appliance.md
+      - "Form 2: Linux server": install/form-2-linux-server.md
+      - "Form 3: Your Kubernetes": install/form-3-your-kubernetes.md
+      - Install MEHO on VKS by hand: install/form-3-vks.md
+      - The setup page and the settings file: install/setup-page.md
+      - The first-start checks: install/first-start-checks.md
+      - Your first day: install/first-day.md
+      - Set up login: install/login-setup.md
+      - Tools for your laptop: install/laptop-tools.md
+      - Back up, restore and update: install/backup-restore-update.md
+      - Common problems: install/common-problems.md
+      - Ways to install MEHO: install/ways-to-install.md
+      - "The install trail: full detail and your own parts": install/index.md
       - Credential backends: install/credential-backends.md
       - Keycloak realm setup: install/keycloak-realm.md
+      - "Keycloak break-glass: get admin access back": install/keycloak-break-glass.md
       - Company login with authentik: install/company-login-authentik.md
       - "OpenBao unseal key: who keeps what": install/openbao-unseal-key.md
       - Company login:
@@ -66,13 +86,14 @@ nav:
           - Your own Keycloak: install/login/customer-keycloak.md
       - TLS and ingress: install/tls-ingress.md
       - Upgrades: install/upgrades.md
-      - Local kind quickstart: install/kind-quickstart.md
   - Connect clients:
       - clients/index.md
       - MCP surface and scopes: clients/mcp-surface-and-scopes.md
       - The meho CLI: clients/cli.md
       - Claude Desktop: clients/claude-desktop.md
+      - Organisation setup for the Claude admin: clients/organisation-setup.md
       - Claude Code: clients/claude-code.md
+      - Codex: clients/codex.md
       - Other MCP clients (mcp-remote shim): clients/mcp-remote-shim.md
       - Troubleshooting auth walls: clients/troubleshooting.md
   - Do real work:
@@ -85,8 +106,11 @@ nav:
       - One person in several tenants: guides/several-tenants.md
       - Topology: guides/topology.md
       - Broadcast: guides/broadcast.md
+      - MEHO on your phone and laptop: guides/phone-and-laptop.md
       - Memory and knowledge: guides/memory-and-knowledge.md
+      - Agent sessions: guides/agent-sessions.md
       - Audit forensics: guides/audit-forensics.md
+      - The settings file: guides/settings-file.md
       - Flight recorder: guides/flight-recorder.md
       - Runbooks: guides/runbooks.md
       - Hosted agents: guides/hosted-agents.md

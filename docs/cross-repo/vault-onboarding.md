@@ -12,14 +12,22 @@ Copyright (c) 2026 evoila Group
 > [`backend/src/meho_backplane/connectors/vault/`](../../backend/src/meho_backplane/connectors/vault/);
 > the engineering-facing companion is
 > [`docs/codebase/connectors-vault.md`](../codebase/connectors-vault.md).
-> This doc is the cookbook every RDC operator reads when retiring the
-> bash wrappers in favour of `meho vault …`.
+> This doc is the cookbook for an operator who retires the bash
+> wrappers in favour of `meho vault …`.
 
 This is **not** [`vault-provisioning.md`](./vault-provisioning.md).
 That page is the federation-chain setup (JWT auth method, `meho-mcp`
 role, policy, KV mount, federation-proof fixture) the backplane needs
 to reach Vault at all. This page assumes that chain is already green
 and is about the **operator op surface** layered on top of it.
+
+**Built-in OpenBao or your own Vault.** The connector talks to the one
+Vault the backplane uses (`VAULT_ADDR`). With the built-in OpenBao
+(`coreVault.enabled: true`, the chart default since 0.45.0) that is the
+built-in OpenBao, and its setup Job has already made the chain green.
+The ops and verbs on this page are the same for both. With the built-in
+OpenBao, each tenant reads and writes only its own secrets, under
+`secret/tenants/<tenant id>/`.
 
 ## What this surface is
 
@@ -31,13 +39,24 @@ the connector id `vault-1.x`.
 
 The v0.2 op surface (Initiative
 [#366](https://github.com/evoila/meho/issues/366)) is the working set
-the consumer's wrappers exercise daily:
+the consumer's wrappers exercise daily. The CLI verbs on this page cover
+these ops:
 
 | Group | Ops | Class |
 | --- | --- | --- |
 | `kv` | `vault.kv.read`, `vault.kv.list`, `vault.kv.put`, `vault.kv.versions`, `vault.kv.delete` | reads + 2 writes |
 | `sys` | `vault.sys.health`, `vault.sys.seal_status`, `vault.sys.mounts.list`, `vault.sys.auth.list` | read-only diagnostics |
 | `auth` | `vault.auth.userpass.list`, `vault.auth.userpass.read`, `vault.auth.approle.list`, `vault.auth.approle.read` | read-only identity browse |
+
+The connector has more ops today, with no own CLI verb. Run them with
+`meho operation call vault-1.x <op_id>` or through the agent meta-tools.
+Among them: `vault.kv.patch`, `vault.kv.compare`,
+`vault.kv.metadata.delete` and `vault.kv.folder.delete` (`kv`); policy,
+auth-method and mount ops (`sys`); userpass, AppRole and JWT login role
+writes (`auth`); and the `token` and `identity` groups. The full list is
+in [`docs/codebase/connectors-vault.md`](../codebase/connectors-vault.md);
+the Vault rights each op needs are in
+[`connector-vault-policy.md`](./connector-vault-policy.md) §6.
 
 Every op dispatches through the same `POST /api/v1/operations/call`
 route the agent surface uses — auth, policy, audit, broadcast, and
@@ -49,7 +68,7 @@ a separate data path and is **not** mirrored on the MCP surface
 ## Prerequisites
 
 - **A registered Vault target.** The CLI verbs take `--target <slug>`
-  (e.g. `--target rdc-vault`); the slug resolves server-side to a row
+  (e.g. `--target my-vault`); the slug resolves server-side to a row
   in the `targets` table. The target carries `product="vault"`,
   `host`, `secret_ref` (nullable), and `auth_model`.
 - **`auth_model = shared_service_account`** — the DB-column default and
@@ -61,7 +80,7 @@ a separate data path and is **not** mirrored on the MCP surface
   `operator` role minimum (same gate as every dispatch verb);
   `read_only` callers get HTTP 403 on the write ops.
 - **The federation chain is green.** `meho vault sys health
-  --target rdc-vault` is the fastest end-to-end smoke; if it fails,
+  --target my-vault` is the fastest end-to-end smoke; if it fails,
   fix the chain via [`vault-provisioning.md`](./vault-provisioning.md)
   before reading further here.
 
@@ -95,9 +114,14 @@ Initiative framing:
   responsibility collapses into `meho login` against Keycloak: the
   per-request Vault token is minted and revoked by the federation
   chain, never written to disk, never the operator's to rotate.
-- Per-operator userpass impersonation and approle secret-id generation
-  (the write-side identity surfaces) are explicitly **future**
-  (v0.2.next) — not shipped here.
+- The write-side identity ops (userpass and AppRole writes, AppRole
+  secret-id generation) exist as approval-gated ops with no CLI verb (see
+  the op list above).
+- A vault target may name its own Vault login role in its `extras`
+  (`vault_role`, optional `vault_mount`). Then the ops on that target log
+  in under that role instead of `meho-mcp`. Only a platform admin may set
+  these two keys. See [`vault-provisioning.md`](./vault-provisioning.md)
+  §8.
 
 If a future target ever needs the long-lived-token shape, that is the
 `per_user` / `impersonation` `auth_model` and a separate Initiative;
@@ -121,41 +145,42 @@ KV-v2 `data/` vs `metadata/` split internally (the bash wrappers
 hand-built `/v1/<mount>/data/<rest>`; you no longer do that).
 
 ```console
-$ meho vault kv read    --target rdc-vault secret meho/test/federation
-$ meho vault kv read    --target rdc-vault secret app/db --json | jq .result.data
-$ meho vault kv list    --target rdc-vault secret meho
-$ meho vault kv versions --target rdc-vault secret app/db
-$ meho vault kv put     --target rdc-vault secret app/db --data '{"password":"s3cr3t"}'
-$ meho vault kv put     --target rdc-vault secret app/db --data @secret.json --cas 3
-$ meho vault kv delete  --target rdc-vault secret app/db --versions 3,4,5
+$ meho vault kv read    --target my-vault secret meho/test/federation
+$ meho vault kv read    --target my-vault secret app/db --json | jq .result.data
+$ meho vault kv list    --target my-vault secret meho
+$ meho vault kv versions --target my-vault secret app/db
+$ meho vault kv put     --target my-vault secret app/db --data '{"password":"s3cr3t"}'
+$ meho vault kv put     --target my-vault secret app/db --data @secret.json --cas 3
+$ meho vault kv delete  --target my-vault secret app/db --versions 3,4,5
 ```
 
 | Verb | op_id | Notes |
 | --- | --- | --- |
 | `kv read <mount> <path>` | `vault.kv.read` | Latest version. Result: `{data: {...}, version: <int>}`. `safety_level=safe`, classified `credential_read`. |
 | `kv list <mount> <path>` | `vault.kv.list` | Child key names only (never values). Set-shaped — see the JSONFlux section. `credential_read`. |
-| `kv put <mount> <path> --data <json> [--cas N]` | `vault.kv.put` | New version (wholesale replace, no merge). `--data` is inline JSON or `@<file>`. `--cas 0` asserts must-not-exist; `--cas N` asserts current version `== N`. `safety_level=caution`, `op_class=write`. |
+| `kv put <mount> <path> --data <json> [--cas N]` | `vault.kv.put` | New version (wholesale replace, no merge). `--data` is inline JSON or `@<file>`. `--cas 0` asserts must-not-exist; `--cas N` asserts current version `== N`. `safety_level=caution`, classified `credential_write`. |
 | `kv versions <mount> <path>` | `vault.kv.versions` | Version metadata (created/deleted/destroyed timestamps). Read-only metadata browse — **not** `credential_read` (no secret values). |
 | `kv delete <mount> <path> --versions <N,M>` | `vault.kv.delete` | Soft-delete (reversible — Vault retains the data). `--versions` is a comma-separated int list. `safety_level=dangerous`, `op_class=write`. |
 
 `--cas` distinguishes "explicitly `--cas 0`" (a real must-not-exist
 assertion) from "flag absent" — pass `--cas 0` only when you mean it.
 
-`requires_approval` is registered `false` for `kv.put` / `kv.delete`
-in v0.2 (the shipped G0.6 substrate has no per-path approval
-predicate). `safety_level` (`caution` / `dangerous`) is the
-load-bearing signal the future G7/G10 production-path approval gate
-keys on.
+`kv.put` and `kv.delete` are registered `requires_approval=true`: the
+first call returns `status=awaiting_approval`, and the write runs after a
+second person approves it. Before the call waits, MEHO checks that the
+Vault login can write the path, and refuses the call with
+`write_capability_denied` when it cannot
+([`connector-vault-policy.md`](./connector-vault-policy.md) §6.2).
 
 ### System diagnostics — `meho vault sys …`
 
 No args, no params, all read-only:
 
 ```console
-$ meho vault sys health      --target rdc-vault
-$ meho vault sys seal-status --target rdc-vault
-$ meho vault sys mounts-list --target rdc-vault
-$ meho vault sys auth-list   --target rdc-vault
+$ meho vault sys health      --target my-vault
+$ meho vault sys seal-status --target my-vault
+$ meho vault sys mounts-list --target my-vault
+$ meho vault sys auth-list   --target my-vault
 ```
 
 | Verb | op_id | Result |
@@ -175,10 +200,10 @@ Note the verb spellings hyphenate (`seal-status`, `mounts-list`,
 Read-only. The `read` verbs take a single positional identifier:
 
 ```console
-$ meho vault auth userpass-list                  --target rdc-vault
-$ meho vault auth userpass-read --target rdc-vault svc-deploy
-$ meho vault auth approle-list                   --target rdc-vault
-$ meho vault auth approle-read  --target rdc-vault ci-runner
+$ meho vault auth userpass-list                  --target my-vault
+$ meho vault auth userpass-read --target my-vault svc-deploy
+$ meho vault auth approle-list                   --target my-vault
+$ meho vault auth approle-read  --target my-vault ci-runner
 ```
 
 | Verb | op_id | Result |
@@ -188,9 +213,9 @@ $ meho vault auth approle-read  --target rdc-vault ci-runner
 | `auth approle-list` | `vault.auth.approle.list` | AppRole role-name roster. |
 | `auth approle-read <role>` | `vault.auth.approle.read` | One role's policies + token/secret-id TTLs. |
 
-AppRole **secret-id generation** is deliberately out of scope for v0.2
-(high-risk write with policy implications; deferred to v0.2.next behind
-a policy gate). These four verbs are read-only.
+These four verbs are read-only. AppRole **secret-id generation**
+(`vault.auth.approle.generate_secret_id`) is an approval-gated op with
+no CLI verb.
 
 ## The agent meta-tool path
 
@@ -199,19 +224,19 @@ ergonomics. Per [CLAUDE.md](../../CLAUDE.md) postulate 5, an agent
 reaches every Vault op through the narrow-waist meta-tools:
 
 ```text
-search_connectors(query="vault secrets")        → finds vault-1.x
-list_operation_groups(connector_id="vault-1.x") → kv / sys / auth
+meho_connector_list()                           → finds vault-1.x
+list_operation_groups(connector_id="vault-1.x") → kv / sys / auth / token / identity
 search_operations(connector_id="vault-1.x", query="read a secret", group="kv")
 call_operation(connector_id="vault-1.x",
-               operation_id="vault.kv.read",
-               target={"name": "rdc-vault"},
+               op_id="vault.kv.read",
+               target="my-vault",
                params={"mount": "secret", "path": "app/db"})
 ```
 
 The agent's flow is always: pick connector → list operation groups →
 search operations (optionally scoped to a group) → `call_operation`.
 The CLI verb table above and the `call_operation` params are
-1:1 — `meho vault kv read --target rdc-vault secret app/db` and the
+1:1 — `meho vault kv read --target my-vault secret app/db` and the
 `call_operation` call above dispatch the identical route, audit row,
 and broadcast event. Each op's `llm_instructions` payload (registered
 at `register_typed_operation()` time) is what `search_operations`
@@ -245,16 +270,16 @@ connector's set-shaped op; small lists land inline as before.
 
 ## The `credential_read` PII guarantee
 
-`vault.kv.read` and `vault.kv.list` are the canonical
+`vault.kv.read`, `vault.kv.list` and `vault.kv.compare` are the
 `credential_read` ops (locked [decision
 #3](../decisions/locked-decisions.md)). The broadcast publisher's
 sensitivity classifier maps them via an explicit allowlist —
-`{vault.kv.read, vault.kv.list}` in
+`{vault.kv.read, vault.kv.list, vault.kv.compare}` in
 [`backend/src/meho_backplane/broadcast/events.py`](../../backend/src/meho_backplane/broadcast/events.py)
 — **not** by `vault.kv.` prefix (a future `vault.kv.stats` that reads
 no secret content must not over-match).
 
-For those two ops the broadcast event payload is **aggregate-only**:
+For those ops the broadcast event payload is **aggregate-only**:
 
 ```json
 {"op_class": "credential_read", "result_status": "ok"}
@@ -274,7 +299,7 @@ exactly what the live feed shows:
 | `vault.kv.read` | `credential_read` (aggregate-only) | Reads secret values. |
 | `vault.kv.list` | `credential_read` (aggregate-only) | Key names leak structure. |
 | `vault.kv.versions` | `read` (full detail) | Metadata only, no secret values. |
-| `vault.kv.put` | `write` (full detail) | `.put` write suffix — full params, including the written secret, are NOT aggregate-only. Operators must treat `kv.put` params as sensitive on the feed. |
+| `vault.kv.put` / `vault.kv.patch` | `credential_write` (aggregate-only) | The written secret is in the params, so the feed shows only that a credential was written. |
 | `vault.kv.delete` | `write` (full detail) | `.delete` write suffix. |
 | `vault.sys.health` / `vault.sys.seal_status` | `read` (full detail) | Cluster-state diagnostics, no secret content. |
 | `vault.auth.*.list` / `.read` | `read` (full detail) | Identity config, no secret values. |
@@ -285,12 +310,9 @@ surface) by anyone with the appropriate role on the tenant —
 audit log. Per-tenant opt-in to flip `credential_read` to full-detail
 is a future G6.3-class follow-up; v0.2 ships the conservative default.
 
-> **`kv.put` caveat.** `vault.kv.put` broadcasts at `op_class=write`
-> with **full params** — the written secret body is visible on the
-> per-tenant feed and in the audit row. This is intentional (writes
-> are full-detail per decision #3) but means a `kv.put` is not
-> credential-redacted the way a `kv.read` is. Treat `meho vault kv put`
-> as a feed-visible operation.
+> **`kv.put` on the feed.** `vault.kv.put` and `vault.kv.patch` are
+> pinned `credential_write`, so their broadcast is aggregate-only: no
+> mount, no path, no written value.
 
 ## Migrating off the bash wrappers
 
@@ -304,31 +326,29 @@ hand; the `meho vault` verbs take `<mount> <path>` and use the
 
 | Wrapper invocation | `meho vault …` replacement | Notes |
 | --- | --- | --- |
-| `source _secret-read.sh; secret_read secret/rdc-hetzner-dc/<area>/<item> <field>` | `meho vault kv read --target rdc-vault secret rdc-hetzner-dc/<area>/<item> --json \| jq -r '.result.data.<field>'` | Wrapper echoes one field; `kv read` returns the whole `data` dict — pick the field with `jq`. Drop the `secret/` mount prefix into the positional `<mount>` arg. |
-| `vault.sh --target rdc-vault GET /v1/sys/health` | `meho vault sys health --target rdc-vault` | |
-| `vault.sh --target rdc-vault --probe` | `meho vault sys seal-status --target rdc-vault` (+ `sys health`) | The wrapper's `--probe` combined unauthenticated `/sys/health` + `/sys/seal-status`; `seal-status` carries the richer detail (threshold, shares, seal type). |
-| `vault.sh --target rdc-vault GET /v1/sys/mounts` | `meho vault sys mounts-list --target rdc-vault` | |
-| `vault.sh --target rdc-vault GET /v1/sys/auth` | `meho vault sys auth-list --target rdc-vault` | |
-| `vault.sh --target rdc-vault GET /v1/auth/userpass/users` | `meho vault auth userpass-list --target rdc-vault` | |
-| `vault.sh --target rdc-vault GET /v1/auth/userpass/users/<u>` | `meho vault auth userpass-read --target rdc-vault <u>` | |
-| `vault.sh --target rdc-vault GET /v1/auth/approle/role` | `meho vault auth approle-list --target rdc-vault` | |
-| `vault.sh --target rdc-vault GET /v1/auth/approle/role/<r>` | `meho vault auth approle-read --target rdc-vault <r>` | |
-| `vault.sh --target rdc-vault GET /v1/<mount>/metadata/<path>?list=true` | `meho vault kv list --target rdc-vault <mount> <path>` | |
-| `vault.sh --target rdc-vault PUT /v1/<mount>/data/<path> -d '{"data":{…}}'` | `meho vault kv put --target rdc-vault <mount> <path> --data '{…}'` | `kv put` takes the secret body directly — no `{"data": …}` envelope; the connector wraps it. |
-| `vault.sh --target rdc-vault GET /v1/<mount>/metadata/<path>` | `meho vault kv versions --target rdc-vault <mount> <path>` | Version metadata browse. |
-| `vault.sh --target rdc-vault DELETE /v1/<mount>/data/<path>` (latest) | `meho vault kv delete --target rdc-vault <mount> <path> --versions <N>` | The wrapper's bare DELETE soft-deleted the latest version; the op is explicit about which versions — read `kv versions` first to pick `<N>`. |
+| `source _secret-read.sh; secret_read secret/<area>/<item> <field>` | `meho vault kv read --target my-vault secret <area>/<item> --json \| jq -r '.result.data.<field>'` | Wrapper echoes one field; `kv read` returns the whole `data` dict — pick the field with `jq`. Drop the `secret/` mount prefix into the positional `<mount>` arg. |
+| `vault.sh --target my-vault GET /v1/sys/health` | `meho vault sys health --target my-vault` | |
+| `vault.sh --target my-vault --probe` | `meho vault sys seal-status --target my-vault` (+ `sys health`) | The wrapper's `--probe` combined unauthenticated `/sys/health` + `/sys/seal-status`; `seal-status` carries the richer detail (threshold, shares, seal type). |
+| `vault.sh --target my-vault GET /v1/sys/mounts` | `meho vault sys mounts-list --target my-vault` | |
+| `vault.sh --target my-vault GET /v1/sys/auth` | `meho vault sys auth-list --target my-vault` | |
+| `vault.sh --target my-vault GET /v1/auth/userpass/users` | `meho vault auth userpass-list --target my-vault` | |
+| `vault.sh --target my-vault GET /v1/auth/userpass/users/<u>` | `meho vault auth userpass-read --target my-vault <u>` | |
+| `vault.sh --target my-vault GET /v1/auth/approle/role` | `meho vault auth approle-list --target my-vault` | |
+| `vault.sh --target my-vault GET /v1/auth/approle/role/<r>` | `meho vault auth approle-read --target my-vault <r>` | |
+| `vault.sh --target my-vault GET /v1/<mount>/metadata/<path>?list=true` | `meho vault kv list --target my-vault <mount> <path>` | |
+| `vault.sh --target my-vault PUT /v1/<mount>/data/<path> -d '{"data":{…}}'` | `meho vault kv put --target my-vault <mount> <path> --data '{…}'` | `kv put` takes the secret body directly — no `{"data": …}` envelope; the connector wraps it. |
+| `vault.sh --target my-vault GET /v1/<mount>/metadata/<path>` | `meho vault kv versions --target my-vault <mount> <path>` | Version metadata browse. |
+| `vault.sh --target my-vault DELETE /v1/<mount>/data/<path>` (latest) | `meho vault kv delete --target my-vault <mount> <path> --versions <N>` | The wrapper's bare DELETE soft-deleted the latest version; the op is explicit about which versions — read `kv versions` first to pick `<N>`. |
 
-What the wrappers did that `meho vault` deliberately does **not** do
-(out of scope for v0.2 — keep the wrapper for these until a future
-Initiative lands them):
+What the wrappers did that the `meho vault` verbs do **not** do:
 
 - `vault.sh POST /v1/auth/userpass/users/<u>` and other identity
-  **writes** — v0.2 auth surface is read-only.
-- AppRole **secret-id generation** — deferred to v0.2.next behind a
-  policy gate.
-- Secret-engine writes beyond KV-v2 (database, PKI, transit), token /
-  lease / policy management, cubbyhole, response-wrapping, KV-v1 —
-  all explicitly out of scope.
+  **writes**, AppRole **secret-id generation**, token and policy
+  management — these have no `meho vault` verb. Use the approval-gated
+  ops (`vault.auth.userpass.write`, `vault.auth.approle.generate_secret_id`,
+  `vault.token.*`, `vault.sys.policy.*`) through `meho operation call`.
+- Secret-engine writes beyond KV-v2 (database, PKI, transit), lease
+  management, cubbyhole, response-wrapping, KV-v1 — out of scope.
 - The wrappers' `--host <fqdn>` registry-less mode — `meho vault`
   always resolves a registered `--target`.
 

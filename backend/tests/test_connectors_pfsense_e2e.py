@@ -321,7 +321,14 @@ _DANGEROUS_OP_IDS: frozenset[str] = frozenset({"pfsense.filter.rule.add"})
 #: the read surface, but it takes real params (``sanctioned_src`` /
 #: ``mgmt_nets`` are required), so it is held separate from the empty-params
 #: dispatch/audit sweep (covered by ``test_connectors_pfsense_ops.py``).
-_PARAM_READ_OP_IDS: frozenset[str] = frozenset({"pfsense.mgmt_flow.summary", "pfsense.diag.ping"})
+_PARAM_READ_OP_IDS: frozenset[str] = frozenset(
+    {
+        "pfsense.mgmt_flow.summary",
+        "pfsense.diag.ping",
+        "pfsense.openvpn.clients",
+        "pfsense.openvpn.log",
+    }
+)
 
 # The governed user writes (#3937): ``dangerous`` + requires_approval.
 _USER_WRITE_OP_IDS: frozenset[str] = frozenset({"pfsense.user.disable", "pfsense.user.enable"})
@@ -448,7 +455,7 @@ def test_pfsense_ops_registration_count() -> None:
         | _USER_WRITE_OP_IDS
     ) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(PFSENSE_OPS) == 24, f"Expected 24 ops, got {len(PFSENSE_OPS)}"
+    assert len(PFSENSE_OPS) == 26, f"Expected 26 ops, got {len(PFSENSE_OPS)}"
 
 
 def test_pfsense_ops_safety_levels_and_approval() -> None:
@@ -467,6 +474,10 @@ def test_pfsense_ops_safety_levels_and_approval() -> None:
         if op.op_id in _USER_WRITE_OP_IDS:
             assert op.safety_level == "dangerous", f"{op.op_id} should be dangerous"
             assert op.requires_approval, f"{op.op_id} user write must require approval"
+            continue
+        if op.op_id == "pfsense.diag.ping":
+            # The ping goes to an address the caller gives.
+            assert (op.safety_level, op.requires_approval) == ("caution", True)
             continue
         expected = "caution" if op.op_id in _WRITE_OP_IDS else "safe"
         assert op.safety_level == expected, f"{op.op_id} should be safety_level={expected!r}"

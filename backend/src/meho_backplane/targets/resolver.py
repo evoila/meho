@@ -230,6 +230,8 @@ async def resolve_target_by_id(
     session: AsyncSession,
     tenant_id: UUID,
     target_id: UUID,
+    *,
+    for_update: bool = False,
 ) -> TargetORM | None:
     """Load a live :class:`TargetORM` row by id, tenant-scoped.
 
@@ -252,12 +254,19 @@ async def resolve_target_by_id(
     Returns ``None`` when no live row matches the id in *tenant_id* (the
     caller decides how to surface the miss); cross-tenant ids are
     invisible by the WHERE clause.
+
+    ``for_update=True`` locks the row until the transaction ends
+    (``SELECT ... FOR UPDATE``), so a delete in another transaction waits
+    for the caller's change. A delete that commits first makes the
+    lookup return ``None``.
     """
     stmt = select(TargetORM).where(
         TargetORM.id == target_id,
         TargetORM.tenant_id == tenant_id,
         TargetORM.deleted_at.is_(None),
     )
+    if for_update:
+        stmt = stmt.with_for_update()
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
 

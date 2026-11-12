@@ -1,6 +1,7 @@
 # The connector kit for connector authors: one module, one version, one check (decision)
 
 **Status:** Agreed on 2026-11-01 by the program owner.
+**Shipped:** kit 1.0 in 0.42.0. Later releases added names (kit 1.1 and 1.2); see the CHANGELOG.
 **Date:** 2026-11-01
 **Issue:** [#5278](https://github.com/evoila/meho/issues/5278) — the connector kit as a documented package for connector authors
 **Initiative:** [#5060](https://github.com/evoila/meho/issues/5060) — a connector built in another repository runs like a built-in one

@@ -102,7 +102,7 @@ How they behave:
   role name contains `_withcond_`, which hides a condition), MEHO refuses
   too. If the member is not there, nothing is sent
   (`removed: false`). If someone changed the policy in between, Google
-  answers `409`; MEHO raises `GcloudPolicyChangedError` (a
+  answers `409` (MEHO treats `412` the same way); MEHO raises `GcloudPolicyChangedError` (a
   `ConnectorUpstreamError`), changes nothing and does **not** retry.
 - **Strict values.** `pool_id`, `service_account_email`, `role` and `member`
   must fully match a pattern (in the parameter schema and again in the
@@ -131,7 +131,7 @@ answers, no Google project needed).
 ## Setting up keyless access: create ops
 
 Four more ops make the objects an outside workload needs for keyless Google
-access, so a person no longer makes them by hand. Example: a pod in a
+access, so a person does not have to make them by hand. Example: a pod in a
 private Kubernetes cluster needs to read a Google resource. Google cannot
 reach the cluster's token issuer, so the provider carries the cluster's
 public keys, uploaded at creation.
@@ -199,11 +199,12 @@ Tests: `backend/tests/test_connectors_gcloud_workload_identity_write.py`.
 
 ### JSONFlux handle note
 
-`gcloud.compute.instances.list` returns a `rows`+`total` envelope
-compatible with the future JSONFlux reducer. In v0.2 the `PassThroughReducer`
-never populates `OperationResult.handle` — the full row list is inlined.
-The reducer (a separate Initiative) will spill large lists to MinIO/S3
-and return a `ResultHandle` without any connector-side changes.
+`gcloud.compute.instances.list` returns a `rows`+`total` envelope. The
+backplane runs the `JsonFluxReducer` (set in `main.py` with
+`set_default_reducer(JsonFluxReducer())`). A list over the limits (50 rows
+or 4,096 bytes) is stored and the call returns a result handle; the agent
+reads the rows with `result_query`. The connector needs no code for this.
+See `jsonflux.md` and `result-spill.md`.
 
 ## Key types
 
@@ -264,6 +265,9 @@ and return a `ResultHandle` without any connector-side changes.
    `connectors/<product>/` subpackage in name-sorted order.
 2. Importing `meho_backplane.connectors.gcloud` triggers the module-level
    `register_connector_v2(product="gcloud", version="1.0", impl_id="gcloud-rest", cls=GcloudConnector)` call.
+   A second call registers the same class with `version=""` and
+   `impl_id=""`: a target with no version yet still finds this connector.
+   The versioned entry wins when both match.
 3. The registry's v2 table resolves `("gcloud", "1.0", "gcloud-rest")` to
    `GcloudConnector`. The G0.7 auto-shim's idempotency check no-ops on
    subsequent ingests against the same triple.
@@ -273,9 +277,7 @@ and return a `ResultHandle` without any connector-side changes.
 The single token-acquisition chokepoint is `_ensure_token(target, operator)`.
 Every operation (`_get_json_abs` / `_post_json_abs`), `fingerprint()`,
 `probe()`, and `auth_headers()` flow through it — so the SA-JSON-key refusal
-gate lives there, not only in `auth_headers()` (#985). Previously the gate
-was invoked only from `auth_headers()`, which no live path calls, so the
-control never fired for real usage.
+gate lives there, not only in `auth_headers()`.
 
 1. **auth_model gate** — `auth_headers()` checks `target.auth_model` is
    `IMPERSONATION` or `None`. Any other value → `NotImplementedError`.
@@ -323,7 +325,9 @@ GCP REST APIs return HTTP 401 when a bearer token has expired.
 ### fingerprint()
 
 `GET https://cloudresourcemanager.googleapis.com/v1/projects/<gcp_project>`
-via `_get_json_abs` (with a synthesised system operator for the gate).
+via `_get_json_abs`. `fingerprint()` takes an optional `operator`: when the
+caller passes one, the gate's Vault read runs as that operator; otherwise
+it uses a synthesised system operator.
 Returns:
 - `vendor="google"`, `product="gcp-project"`, `version=None`.
 - `extras["project_number"]`, `extras["lifecycle_state"]`,
@@ -339,7 +343,7 @@ Verifies:
 - ADC source credentials are present and valid.
 - Impersonation chain succeeds (Token Creator role granted).
 - Cloud Resource Manager API reachable.
-- Response `projectId` matches `target.gcp_project`.
+- Response `projectId` matches `gcp_project(target)`.
 
 Returns `ok=True` on success, `ok=False + reason` on failure (an SA-JSON-key
 refusal surfaces as `ok=False`).
@@ -376,10 +380,10 @@ is required and threaded to `_ensure_token` for the SA-JSON-key gate.
 
 ## CLI verbs (G3.7-T6 #851)
 
-The eight G3.7-T5 ops are reachable via `meho gcloud …` (the ninth,
-`gcloud.iam.service_account_keys.list`, is dispatchable via
-`call_operation` but has no CLI verb yet). Source:
-`cli/internal/cmd/gcloud/`.
+The eight G3.7-T5 ops are reachable via `meho gcloud …`. The other ten ops
+(`gcloud.iam.service_account_keys.list` and the nine workload identity and
+service-account policy ops) have no `meho gcloud` verb; run them with
+`call_operation`. Source: `cli/internal/cmd/gcloud/`.
 
 | File | Commands |
 |---|---|
@@ -399,7 +403,7 @@ to a single zone/region.
 ## E2E tests (G3.7-T6 #851)
 
 `backend/tests/test_connectors_gcloud_e2e.py` — httpx_mock (respx) unit-
-level E2E tests covering all 9 ops. A `_StubTarget` dataclass satisfies
+level E2E tests covering the 9 read ops in `ops.py`. A `_StubTarget` dataclass satisfies
 `GcloudTargetLike`; `google.auth` calls are patched so no live GCP
 credentials are needed.
 
@@ -407,22 +411,21 @@ Key tests:
 
 | Test | What it verifies |
 |---|---|
-| `test_gcloud_e2e_about_dispatches_crm_get` | `gcloud.about` calls CRM v1 project GET |
+| `test_gcloud_e2e_about_returns_identity_fields` | `gcloud.about` returns project ID, number, lifecycle state and organization |
 | `test_gcloud_e2e_project_describe_returns_full_resource` | Full CRM v1 dict returned |
-| `test_gcloud_e2e_services_list_follows_pagination` | `nextPageToken` loop |
-| `test_gcloud_e2e_services_list_enabled_only_flag` | `enabled_only=false` param |
-| `test_gcloud_e2e_iam_service_accounts_list` | SA inventory with pagination |
+| `test_gcloud_e2e_services_list_returns_enabled_services` | Enabled services as `rows`+`total` |
+| `test_gcloud_e2e_iam_service_accounts_list_returns_sa_rows` | SA inventory rows |
 | `test_gcloud_e2e_compute_instances_list_jsonflux_envelope` | `rows`+`total` envelope shape |
 | `test_gcloud_e2e_instances_list_zone_filter_uses_per_zone_api` | `--zone` sends per-zone URL |
 | `test_gcloud_e2e_instances_list_empty_project_returns_empty_envelope` | Empty aggregated list → `{rows:[], total:0}` |
-| `test_gcloud_e2e_compute_networks_list` | VPC network inventory |
-| `test_gcloud_e2e_compute_subnetworks_list_region_filter` | `--region` sends per-region URL |
-| `test_gcloud_e2e_iam_policy_read` | IAM policy bindings |
+| `test_gcloud_e2e_compute_networks_list_returns_network_rows` | VPC network inventory |
+| `test_gcloud_e2e_compute_subnetworks_list_returns_subnet_rows` | Subnet rows from the aggregated list |
+| `test_gcloud_e2e_iam_policy_read_returns_bindings` | IAM policy bindings |
 | `test_gcloud_e2e_iam_service_account_keys_list_returns_key_rows` | Per-SA key rows: `key_type` (USER_MANAGED/SYSTEM_MANAGED) + expiry, no key material |
 | `test_gcloud_e2e_iam_service_account_keys_list_requires_email` | Missing/blank `service_account_email` raises before any HTTP call |
 | `test_gcloud_e2e_iam_service_account_keys_list_forwards_key_types_filter` | `key_types` → repeated `keyTypes[]` query filter |
 | `test_gcloud_e2e_audit_params_hash_field_present_in_all_ops` | All 9 handlers return non-None results |
-| `test_gcloud_e2e_all_ops_have_op_id_registered` | All 9 op IDs registered, handler methods exist |
+| `test_gcloud_e2e_all_ops_have_op_id_registered` | All 18 op IDs in `GCLOUD_OPS`, handler methods exist |
 | `test_gcloud_live_integration_about` _(gated)_ | Live GCP probe; skips unless `CI_GCLOUD_CREDENTIALS_PRESENT=1` |
 | `test_gcloud_live_integration_all_9_ops_return_ok_status` _(gated)_ | Live 9-ops sweep |
 
@@ -439,9 +442,10 @@ against a live project.
 
 ## Known issues
 
-- `fingerprint()` and `probe()` run the SA-JSON-key gate under a synthesised
-  system operator (empty `raw_jwt`), because their ABC signatures carry no
-  operator. A target without a `secret_ref` (the normal shape: all auth is
+- `probe()` runs the SA-JSON-key gate under a synthesised system operator
+  (empty `raw_jwt`), because its ABC signature carries no operator.
+  `fingerprint()` does the same when the caller passes no `operator`.
+  A target without a `secret_ref` (the normal shape: all auth is
   ADC + impersonation) is not affected, because the loader reads nothing.
   A target with a `secret_ref` fails closed on that Vault read — the
   intended boundary for system-initiated credential reads — so its probe
@@ -452,9 +456,6 @@ against a live project.
   executor. The executor is the event loop's default (unbounded); a
   bounded executor is a future follow-up if token fetch latency becomes
   a concern.
-- `gcloud.compute.instances.list` inlines all instance rows in v0.2
-  (no handle spill). The JSONFlux reducer Initiative will add threshold-
-  based spill without connector changes.
 
 ## References
 

@@ -44,8 +44,8 @@ func newAboutCmd() *cobra.Command {
 			"the right token based on the op_id's path family. --json\n" +
 			"emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vcf-automation about --plane provider --target rdc-vcfa\n" +
-			"  meho vcf-automation about --plane tenant --target rdc-vcfa --json",
+		Example: "  meho vcf-automation about --plane provider --target vcfa-lab\n" +
+			"  meho vcf-automation about --plane tenant --target vcfa-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -26,16 +26,25 @@
 //     `--notify-min-state` picks the floor an edge must reach.
 //     `--investigator-prompt` adds operator context to the diagnose-only
 //     investigator's briefing (#2721).
+//   - `meho dashboard edit <dashboard_id> [--add-sensor <id> ...]
+//     [--remove-sensor <id> ...] [--name <n>] [--notify-email <a> |
+//     --notify-off] [--notify-min-state <s>]` — change a dashboard in place
+//     via PATCH /api/v1/checks/dashboards/{id}; the id stays.
+//     Role: tenant_admin.
 //   - `meho dashboard delete <dashboard_id> [--tenant <id>] [--json]` —
 //     DELETE /api/v1/checks/dashboards/{id}. Role: tenant_admin.
+//   - `meho dashboard export <name> [--output <file>]` — write the dashboard
+//     and its sensors as one file (GET /api/v1/checks/dashboard-files/export).
+//     Role: operator.
+//   - `meho dashboard import <file> --map-target <placeholder>=<target> ...
+//     [--dry-run] [--force]` — create or update them from a file
+//     (POST /api/v1/checks/dashboard-files/import). Role: tenant_admin.
 //
 // Every verb drives the generated `api.ClientWithResponses` surface
 // directly (the G0.12-T13 typed-client discipline): consumer-side struct
 // drift can't recur because we consume `api.DashboardRead`,
 // `api.DashboardListResponse`, `api.DashboardDetail`, and
-// `api.DashboardCreate` directly. There is no update/edit verb by design —
-// no PATCH route exists ("edit" is delete + recreate, the
-// trigger-immutability posture).
+// `api.DashboardCreate` and `api.DashboardUpdate` directly.
 package dashboard
 
 import (
@@ -60,15 +69,15 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dashboard",
-		Short: "Manage deterministic-check dashboards (list / show / create / delete)",
+		Short: "Manage deterministic-check dashboards (list / show / create / edit / delete / export / import)",
 		Long: "Manage tenant-scoped dashboards wired by the deterministic " +
 			"check layer (Initiative #2416). A dashboard composes registered " +
 			"Sensors into a single rolled-up \"is everything OK?\" answer: the " +
 			"worst-of the five-state member vocabulary (ok/degraded/critical/" +
-			"skip/unknown), evaluated on read. Membership is set at create " +
-			"only — there is no edit verb; \"edit\" is delete + recreate " +
-			"(the trigger-immutability posture). Read verbs (list / show) are " +
-			"operator-level; write verbs (create / delete) require " +
+			"skip/unknown), evaluated on read. `edit` adds or removes " +
+			"members and changes the name and mail settings in place; the " +
+			"id stays. Read verbs (list / show) are " +
+			"operator-level; write verbs (create / edit / delete) require " +
 			"tenant_admin. Tenant scoping is enforced server-side via the " +
 			"JWT; platform_admin callers may use --tenant to act on another " +
 			"tenant's dashboards.",
@@ -77,7 +86,10 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newShowCmd())
 	cmd.AddCommand(newCreateCmd())
+	cmd.AddCommand(newEditCmd())
 	cmd.AddCommand(newDeleteCmd())
+	cmd.AddCommand(newExportCmd())
+	cmd.AddCommand(newImportCmd())
 	return cmd
 }
 
@@ -402,6 +414,18 @@ func printDashboardSummary(w io.Writer, d *api.DashboardDetail) {
 	// whitespace-only prompt as unset and renders no operator section.
 	if prompt := derefString(d.InvestigatorPrompt); strings.TrimSpace(prompt) != "" {
 		fmt.Fprintf(w, "%-18s\n%s\n", "investigator_prompt:", indentBlock(prompt))
+	}
+	// Last alert mail result. Absent until the first attempt. A failure
+	// prints its reason so a blocked mail port shows here, not only in logs.
+	if d.LastMailAt != nil {
+		result := "sent"
+		if d.LastMailSent != nil && !*d.LastMailSent {
+			result = "not sent"
+			if reason := derefString(d.LastMailReason); reason != "" {
+				result += " (" + sanitizeCell(reason) + ")"
+			}
+		}
+		fmt.Fprintf(w, "%-18s %s, %s\n", "last_mail:", formatTime(d.LastMailAt), result)
 	}
 	fmt.Fprintf(w, "%-18s %d\n", "member_count:", d.MemberCount)
 	fmt.Fprintf(w, "%-18s %s\n", "created_by:", d.CreatedBySub)

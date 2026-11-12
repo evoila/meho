@@ -7,10 +7,12 @@ Initiative #806 (G11.5 Portability + cost), Task #1079. The module is the
 behaviour pair of the :class:`~meho_backplane.db.models.IdentityBudget`
 ORM row added by migration ``0031``:
 
-* **Per-op cost source.** :func:`compute_cost` turns a finished agent
-  run's :class:`pydantic_ai.usage.RunUsage` plus a resolved model id
-  into a :class:`~decimal.Decimal` USD cost using a pinned per-model
-  pricing table.
+* **Per-op cost source.** :func:`compute_cost` turns the token usage of
+  one model request plus a resolved model id into a
+  :class:`~decimal.Decimal` USD cost using a pinned per-model pricing
+  table. :func:`compute_run_cost` adds up the requests of one run, so a
+  model whose price depends on the length of each request's prompt
+  (Haiku 5.5) is charged the right rate per request.
 * **Per-principal budget bucketing.** :func:`apply_consumption` upserts
   one :class:`IdentityBudget` row per active window-kind (daily /
   weekly / monthly) for the principal and increments the consumption
@@ -55,6 +57,7 @@ without spinning up the DB.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -68,7 +71,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.db.models import BudgetWindowKind, IdentityBudget
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type-checking
-    from pydantic_ai.usage import RunUsage
+    from pydantic_ai.usage import RequestUsage, RunUsage, UsageBase
 
 __all__ = [
     "MODEL_PRICING",
@@ -76,7 +79,9 @@ __all__ = [
     "PerMillionPricing",
     "TokenUsage",
     "apply_consumption",
+    "clear_limits",
     "compute_cost",
+    "compute_run_cost",
     "get_remaining",
     "set_limits",
     "window_start_for",
@@ -98,19 +103,37 @@ class PerMillionPricing:
 
     Decimal-typed -- pricing arithmetic must not introduce float
     rounding error when summed across the rate-times-tokens products.
+
+    Some models charge more for one request whose prompt is long.
+    ``long_prompt`` holds the rates for such a request, and
+    ``long_prompt_over`` the prompt length (in tokens) above which they
+    apply. Both are ``None`` for a model with one price.
     """
 
     input: Decimal
     output: Decimal
     cache_read: Decimal = Decimal(0)
     cache_write: Decimal = Decimal(0)
+    long_prompt_over: int | None = None
+    long_prompt: PerMillionPricing | None = None
+
+    def for_request(self, usage: TokenUsage) -> PerMillionPricing:
+        """Return the rates that apply to one request with *usage*."""
+        if (
+            self.long_prompt is not None
+            and self.long_prompt_over is not None
+            and usage.prompt_tokens > self.long_prompt_over
+        ):
+            return self.long_prompt
+        return self
 
 
-#: Per-model published pricing as of 2026-05-27 (Anthropic).
+#: Per-model published pricing (Anthropic; 5.5 rows as of 2026-11-05).
+#: ``cache_write`` is the 5-minute cache write price.
 #:
 #: The keys are the resolved provider-prefixed model ids the runtime
 #: emits via :attr:`AgentRunAuditMeta.model` (e.g. the
-#: ``anthropic:claude-sonnet-4-6`` shape ``settings.agent_default_model``
+#: ``anthropic:claude-sonnet-5-5`` shape ``settings.agent_default_model``
 #: defaults to). The runtime calls
 #: :func:`compute_cost` with the *resolved* id, not the operator-
 #: facing logical tier, so this map keys directly on what the
@@ -120,8 +143,36 @@ class PerMillionPricing:
 #: =0 / :attr:`output` =0, i.e. cost reported as 0 (a *known-unknown*
 #: rather than an error). The runtime logs a single ``warning`` on the
 #: first lookup miss per process so an operator notices the gap
-#: without breaking the run.
+#: without breaking the run (``unpriced_model`` also warns at start).
 MODEL_PRICING: Final[dict[str, PerMillionPricing]] = {
+    # Anthropic Claude 5.5 family, the current models.
+    "anthropic:claude-opus-5-5": PerMillionPricing(
+        input=Decimal("4.00"),
+        output=Decimal("20.00"),
+        cache_read=Decimal("0.20"),
+        cache_write=Decimal("5.00"),
+    ),
+    "anthropic:claude-sonnet-5-5": PerMillionPricing(
+        input=Decimal("2.00"),
+        output=Decimal("10.00"),
+        cache_read=Decimal("0.10"),
+        cache_write=Decimal("2.50"),
+    ),
+    # Haiku 5.5 has two prices: one for a request whose prompt is up to
+    # 100,000 tokens, and a higher one for a longer prompt.
+    "anthropic:claude-haiku-5-5": PerMillionPricing(
+        input=Decimal("0.10"),
+        output=Decimal("0.50"),
+        cache_read=Decimal("0.01"),
+        cache_write=Decimal("0.125"),
+        long_prompt_over=100_000,
+        long_prompt=PerMillionPricing(
+            input=Decimal("0.50"),
+            output=Decimal("2.50"),
+            cache_read=Decimal("0.05"),
+            cache_write=Decimal("0.625"),
+        ),
+    ),
     # Anthropic Claude Sonnet 4.x family.
     "anthropic:claude-sonnet-4-6": PerMillionPricing(
         input=Decimal("3.00"),
@@ -168,13 +219,21 @@ _ALL_WINDOW_KINDS: Final[tuple[BudgetWindowKind, ...]] = (
 
 @dataclass(frozen=True, slots=True)
 class TokenUsage:
-    """The four token-stream totals one finished run produced.
+    """The four token-stream totals of one model request, or of one run.
 
-    Lifted from :class:`pydantic_ai.usage.RunUsage` at the runtime
+    Lifted from :class:`pydantic_ai.usage.RequestUsage` (one request) or
+    :class:`pydantic_ai.usage.RunUsage` (a whole run) at the runtime
     boundary so the consumption service does not import the framework
     type. ``cache_read_tokens`` and ``cache_write_tokens`` are the
     Anthropic prompt-cache shapes; providers that do not separate
     them simply pass ``0``.
+
+    The four streams do not overlap. ``input_tokens`` holds only the
+    uncached input tokens, which the provider charges at the input
+    rate. The framework's ``input_tokens`` is different: it is the whole
+    prompt, cached tokens included (pydantic_ai 2.x). The ``from_*``
+    constructors take the cached streams out of it, so a cached token
+    is counted once, at its cache rate.
     """
 
     input_tokens: int
@@ -191,12 +250,38 @@ class TokenUsage:
         cost. Audio token streams (which the framework also tracks)
         are out of scope for the text-only agent runtime in v1.
         """
+        return cls._from_framework_usage(usage)
+
+    @classmethod
+    def from_request_usage(cls, usage: RequestUsage) -> TokenUsage:
+        """Build a :class:`TokenUsage` from one request's ``RequestUsage``."""
+        return cls._from_framework_usage(usage)
+
+    @classmethod
+    def _from_framework_usage(cls, usage: UsageBase) -> TokenUsage:
+        """Split the framework's inclusive input total into the uncached part.
+
+        The framework counts the cached streams inside ``input_tokens``.
+        A usage that does not follow that convention (a hand-made test
+        value with more cached than input tokens) cannot go below zero
+        uncached tokens.
+        """
+        cached = usage.cache_read_tokens + usage.cache_write_tokens
         return cls(
-            input_tokens=usage.input_tokens,
+            input_tokens=max(usage.input_tokens - cached, 0),
             output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens,
             cache_write_tokens=usage.cache_write_tokens,
         )
+
+    @property
+    def prompt_tokens(self) -> int:
+        """The length of the request's prompt: every input stream, cached or not.
+
+        This is the number a provider compares with its long-prompt
+        threshold (:attr:`PerMillionPricing.long_prompt_over`).
+        """
+        return self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
 
     @property
     def total_tokens(self) -> int:
@@ -294,8 +379,21 @@ def _window_end_for(kind: BudgetWindowKind, start: datetime) -> datetime:
 _PRICING_MISS_LOGGED: set[str] = set()
 
 
-def compute_cost(usage: TokenUsage, model_id: str | None) -> Decimal:
-    """Convert a run's :class:`TokenUsage` into a USD cost.
+def compute_cost(
+    usage: TokenUsage,
+    model_id: str | None,
+    *,
+    fallback: PerMillionPricing | None = None,
+) -> Decimal:
+    """Convert one model request's :class:`TokenUsage` into a USD cost.
+
+    The rate is picked per request: a model with a long-prompt price
+    (:attr:`PerMillionPricing.long_prompt`) charges it when this
+    request's :attr:`TokenUsage.prompt_tokens` is over the threshold.
+    So pass one request's usage, not a run's total: a run of several
+    short requests must not be charged the long-prompt rate because
+    its prompts add up to more than the threshold. For a whole run use
+    :func:`compute_run_cost`.
 
     Looks *model_id* up in :data:`MODEL_PRICING`; on miss the function
     returns ``Decimal(0)`` (cost reported as 0) and emits a single
@@ -306,21 +404,27 @@ def compute_cost(usage: TokenUsage, model_id: str | None) -> Decimal:
     G11.5-C4.
 
     Args:
-        usage: Token totals lifted from the run's ``RunUsage``.
+        usage: Token totals of one request.
         model_id: The resolved provider-prefixed id the runtime
             stamped on the agent run row's ``model`` column. ``None``
             falls through to the unknown-model path.
+        fallback: The price to use when *model_id* is not in
+            :data:`MODEL_PRICING`: the tenant's own price for the model
+            (:mod:`meho_backplane.operations.tenant_model_prices`, #5853).
+            A model in :data:`MODEL_PRICING` always keeps that price.
 
     Returns:
-        The total USD cost as a :class:`~decimal.Decimal`,
+        The USD cost as a :class:`~decimal.Decimal`,
         quantized to six fractional places by the caller's
         ``Numeric(14, 6)`` storage; arithmetic precision is
         preserved here.
     """
-    if model_id is None:
-        return Decimal(0)
-    pricing = MODEL_PRICING.get(model_id)
-    if pricing is None:
+    model_pricing = MODEL_PRICING.get(model_id) if model_id is not None else None
+    if model_pricing is None:
+        model_pricing = fallback
+    if model_pricing is None:
+        if model_id is None:
+            return Decimal(0)
         if model_id not in _PRICING_MISS_LOGGED:
             _PRICING_MISS_LOGGED.add(model_id)
             _log.warning(
@@ -329,12 +433,61 @@ def compute_cost(usage: TokenUsage, model_id: str | None) -> Decimal:
                 reason="no entry in MODEL_PRICING; cost recorded as 0",
             )
         return Decimal(0)
+    pricing = model_pricing.for_request(usage)
     return (
         pricing.input * Decimal(usage.input_tokens)
         + pricing.output * Decimal(usage.output_tokens)
         + pricing.cache_read * Decimal(usage.cache_read_tokens)
         + pricing.cache_write * Decimal(usage.cache_write_tokens)
     ) / _PER_MILLION
+
+
+def compute_run_cost(
+    requests: Iterable[TokenUsage],
+    model_id: str | None,
+    *,
+    fallback: PerMillionPricing | None = None,
+) -> Decimal:
+    """Add up the cost of a run's model requests, each at its own rate.
+
+    Args:
+        requests: The token usage of each model request of the run, in
+            any order.
+        model_id: As for :func:`compute_cost`.
+        fallback: As for :func:`compute_cost`.
+
+    Returns:
+        The sum of :func:`compute_cost` over *requests*; ``Decimal(0)``
+        for a run without requests.
+    """
+    return sum((compute_cost(usage, model_id, fallback=fallback) for usage in requests), Decimal(0))
+
+
+async def _latest_prior_bucket(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    principal_sub: str,
+    window_kind: BudgetWindowKind,
+    window_start: datetime,
+) -> IdentityBudget | None:
+    """Return the newest bucket of the same kind that starts before *window_start*.
+
+    A cap is set once and holds for every later window. Each window has
+    its own row, so a new row copies the limits of the row before it.
+    """
+    stmt = (
+        select(IdentityBudget)
+        .where(
+            IdentityBudget.tenant_id == tenant_id,
+            IdentityBudget.principal_sub == principal_sub,
+            IdentityBudget.window_kind == window_kind.value,
+            IdentityBudget.window_start < window_start,
+        )
+        .order_by(IdentityBudget.window_start.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def _get_or_create_bucket(
@@ -354,11 +507,11 @@ async def _get_or_create_bucket(
     the caller's retry path (the runtime catches and re-issues this
     helper) lands on the now-existing row.
 
-    The bucket is created with zero consumption + NULL limits. A
-    seeding helper (:func:`set_limits`) is the only path that
-    populates ``token_limit`` / ``cost_limit`` / ``request_limit``
-    — limits are an out-of-band operator decision, not a runtime
-    side effect.
+    The bucket is created with zero consumption. Its limits are the
+    limits of the bucket before it (the cap carries over to the next
+    window), or ``NULL`` when there is none. :func:`set_limits` and
+    :func:`clear_limits` are the only paths that change a limit —
+    limits are an operator decision, not a runtime side effect.
     """
     window_start = window_start_for(window_kind, now)
     window_end = _window_end_for(window_kind, window_start)
@@ -371,12 +524,22 @@ async def _get_or_create_bucket(
     row = (await session.execute(stmt)).scalar_one_or_none()
     if row is not None:
         return row
+    prior = await _latest_prior_bucket(
+        session,
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        window_kind=window_kind,
+        window_start=window_start,
+    )
     row = IdentityBudget(
         tenant_id=tenant_id,
         principal_sub=principal_sub,
         window_kind=window_kind.value,
         window_start=window_start,
         window_end=window_end,
+        token_limit=prior.token_limit if prior is not None else None,
+        cost_limit=prior.cost_limit if prior is not None else None,
+        request_limit=prior.request_limit if prior is not None else None,
     )
     session.add(row)
     await session.flush()
@@ -500,6 +663,47 @@ async def set_limits(
     return bucket
 
 
+async def clear_limits(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    principal_sub: str,
+    window_kind: BudgetWindowKind,
+    when: datetime | None = None,
+) -> IdentityBudget:
+    """Remove all three limits of a (principal, window_kind) bucket.
+
+    The cap is gone for this window and for every later window, because
+    a new bucket copies the limits of the one before it. Consumption is
+    kept. Creates the current bucket if it does not exist, so the
+    removal also wins over a cap set in an earlier window.
+
+    Args:
+        session: Open :class:`AsyncSession`; flushed, not committed.
+        tenant_id: The tenant the bucket belongs to.
+        principal_sub: The principal sub the bucket is for.
+        window_kind: The window-kind to clear.
+        when: Override the bucket-resolution clock.
+
+    Returns:
+        The mutated, flushed bucket row.
+    """
+    now = when if when is not None else datetime.now(UTC)
+    bucket = await _get_or_create_bucket(
+        session,
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        window_kind=window_kind,
+        now=now,
+    )
+    bucket.token_limit = None
+    bucket.cost_limit = None
+    bucket.request_limit = None
+    bucket.updated_at = now
+    await session.flush()
+    return bucket
+
+
 async def get_remaining(
     session: AsyncSession,
     *,
@@ -510,8 +714,8 @@ async def get_remaining(
 ) -> BudgetReading:
     """Return the limits / consumption / remaining-headroom view for one bucket.
 
-    Returns a synthetic empty :class:`BudgetReading` (zero
-    consumption, no limits) when no row exists for the
+    Returns a synthetic :class:`BudgetReading` (zero consumption, the
+    limits of the window before it) when no row exists for the
     (principal, window_kind, period) — *"no budget configured"* is a
     distinct read from *"budget configured but unspent"*, but both
     are honest answers and the enforcement gate (C3-b) is the only
@@ -539,21 +743,32 @@ async def get_remaining(
     )
     row = (await session.execute(stmt)).scalar_one_or_none()
     if row is None:
+        # No run yet in this window: the cap of the window before it still holds.
+        prior = await _latest_prior_bucket(
+            session,
+            tenant_id=tenant_id,
+            principal_sub=principal_sub,
+            window_kind=window_kind,
+            window_start=window_start,
+        )
+        token_limit = prior.token_limit if prior is not None else None
+        cost_limit = prior.cost_limit if prior is not None else None
+        request_limit = prior.request_limit if prior is not None else None
         return BudgetReading(
             tenant_id=tenant_id,
             principal_sub=principal_sub,
             window_kind=window_kind,
             window_start=window_start,
             window_end=window_end,
-            token_limit=None,
+            token_limit=token_limit,
             tokens_consumed=Decimal(0),
-            tokens_remaining=None,
-            cost_limit=None,
+            tokens_remaining=token_limit,
+            cost_limit=cost_limit,
             cost_consumed=Decimal(0),
-            cost_remaining=None,
-            request_limit=None,
+            cost_remaining=cost_limit,
+            request_limit=request_limit,
             requests_consumed=0,
-            requests_remaining=None,
+            requests_remaining=request_limit,
         )
     tokens_remaining: Decimal | None = (
         row.token_limit - row.tokens_consumed if row.token_limit is not None else None

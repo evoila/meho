@@ -78,6 +78,7 @@ from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
     ProbeResult,
+    TopologyHints,
 )
 
 __all__ = ["PfSenseConnector"]
@@ -272,6 +273,14 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "sent, received and loss. Use it after a route or gateway change to "
         "prove that the path works. It is a ``safe`` read: no approval, no "
         "change on the firewall."
+    ),
+    "openvpn": (
+        "Use for OpenVPN sessions on the firewall. ``pfsense.openvpn.clients`` "
+        "lists the clients that are connected now, per server, with addresses, "
+        "traffic and connect time. ``pfsense.openvpn.log`` reads the OpenVPN log "
+        "for one user in a time window and names each event (connect, "
+        "disconnect, restart, error). Both are ``safe`` reads that change "
+        "nothing. Start with the client list, then read the log for the user."
     ),
     "users": (
         "Use for pfSense local-user questions: which local users exist, "
@@ -731,6 +740,74 @@ class PfSenseConnector(SshConnector):
 
         return await _pfsense_dhcp_leases(self, target, params, operator)
 
+    async def discover_topology(
+        self,
+        target: Target,
+        *,
+        operator: Operator | None = None,
+    ) -> TopologyHints:
+        """Return the firewall's subnets and active DHCP leases for the map (#4131).
+
+        Runs the commands of ``pfsense.interface.list`` and
+        ``pfsense.dhcp.leases``, parses them with the same parsers, and
+        builds the map entries with
+        :func:`~meho_backplane.connectors.pfsense._topology.build_topology_hints`.
+        A command that exits with any status other than 0 raises
+        :class:`~meho_backplane.connectors.pfsense._topology.PfSenseTopologyReadError`,
+        also when it printed some output, so the refresh changes nothing
+        instead of removing the entries a partial list leaves out.
+        One exception: when the lease read fails because the lease file
+        surely does not exist (the DHCP server is off, or the firewall uses
+        the Kea DHCP server), there are no leases, and the subnets still go
+        on the map.
+
+        ``operator`` is keyword-only: the refresh service passes it when the
+        method accepts it (the same seam the Kubernetes connector uses). It
+        reaches the SSH login, which reads the target's key under the
+        operator's identity.
+        """
+        from meho_backplane.connectors.pfsense._topology import (
+            INTERFACE_COMMAND,
+            INTERFACE_SOURCE,
+            LEASE_COMMAND,
+            LEASE_FILE_MISSING_CHECK,
+            LEASE_SOURCE,
+            build_topology_hints,
+            output_or_raise,
+        )
+        from meho_backplane.connectors.pfsense.ops_read import (
+            parse_dhcp_leases,
+            parse_ifconfig,
+        )
+
+        name = str(getattr(target, "name", target))
+        ifconfig = await self._run_command(target, INTERFACE_COMMAND, operator=operator)
+        interfaces = parse_ifconfig(
+            output_or_raise(INTERFACE_SOURCE, name, INTERFACE_COMMAND, ifconfig)
+        )
+        lease_file = await self._run_command(target, LEASE_COMMAND, operator=operator)
+        leases: list[dict[str, Any]]
+        if lease_file.exit_status != 0 and await self._lease_file_missing(
+            target, LEASE_FILE_MISSING_CHECK, operator
+        ):
+            leases = []
+        else:
+            leases = parse_dhcp_leases(
+                output_or_raise(LEASE_SOURCE, name, LEASE_COMMAND, lease_file)
+            )
+        return build_topology_hints(name, interfaces, leases)
+
+    async def _lease_file_missing(
+        self, target: Target, check: str, operator: Operator | None
+    ) -> bool:
+        """Return ``True`` only when *check* exits 0: the lease file surely does not exist.
+
+        Any other answer (no access, an unknown error) means we do not know,
+        so the caller treats the read as failed.
+        """
+        proc = await self._run_command(target, check, operator=operator)
+        return proc.exit_status == 0
+
     async def user_list(
         self,
         target: Target,
@@ -819,6 +896,40 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_diag_ping(self, target, params, operator)
+
+    async def openvpn_clients(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Handler shim for ``pfsense.openvpn.clients``.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_openvpn.pfsense_openvpn_clients`.
+        """
+        from meho_backplane.connectors.pfsense.ops_openvpn import (
+            pfsense_openvpn_clients as _pfsense_openvpn_clients,
+        )
+
+        return await _pfsense_openvpn_clients(self, target, params, operator)
+
+    async def openvpn_log(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Handler shim for ``pfsense.openvpn.log``.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_openvpn.pfsense_openvpn_log`.
+        """
+        from meho_backplane.connectors.pfsense.ops_openvpn import (
+            pfsense_openvpn_log as _pfsense_openvpn_log,
+        )
+
+        return await _pfsense_openvpn_log(self, target, params, operator)
 
     async def mgmt_flow_summary(
         self,

@@ -94,10 +94,10 @@ func newSetCmd() *cobra.Command {
 		Long: "set PATCHes /api/v1/tenants/flight-recorder-policy for the operator's own " +
 			"tenant. tenant_admin only — operator / read_only land as 403 insufficient_role.\n\n" +
 			"Only the flags you pass are sent; an omitted field is left unchanged. " +
-			"--enabled flips the per-tenant capture default (F1). --agent-readable is " +
-			"tri-state (F5): true / false force the agent-read override, inherit clears it " +
+			"--enabled flips the per-tenant capture default. --agent-readable is " +
+			"tri-state: true / false force the agent-read override, inherit clears it " +
 			"back to following the capture default. --retention-days sets the per-tenant " +
-			"trace window (F4, 1..365 days); --clear-retention resets it to the global " +
+			"trace window (1..365 days); --clear-retention resets it to the global " +
 			"default. Pass at least one field flag.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
@@ -110,11 +110,11 @@ func newSetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&opts.enabled, "enabled", false,
-		"per-tenant capture default (F1); send true or false")
+		"per-tenant capture default; send true or false")
 	cmd.Flags().StringVar(&opts.agentReadable, "agent-readable", "",
-		"agent-read override (F5): true | false | inherit (inherit clears to the capture default)")
+		"agent-read override: true | false | inherit (inherit clears to the capture default)")
 	cmd.Flags().IntVar(&opts.retentionDays, "retention-days", 0,
-		"per-tenant trace retention window in days (F4; 1..365)")
+		"per-tenant trace retention window in days (1..365)")
 	cmd.Flags().BoolVar(&opts.clearRetention, "clear-retention", false,
 		"clear the retention override back to the global default")
 	cmd.Flags().BoolVar(&opts.jsonOut, "json", false,

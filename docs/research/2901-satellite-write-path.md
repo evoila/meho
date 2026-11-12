@@ -12,7 +12,7 @@ weakening the push-only/poll boundary ([#2877](https://github.com/evoila/meho/is
 or the defence-in-depth safe-only walls the read path relies on?**
 
 The write path is the reachability prerequisite of the management-plane-lockdown
-Goal (evoila-bosnia/meho-internal#234): its enforcement stages cannot deny
+Goal (an internal planning item): its enforcement stages cannot deny
 operator-direct reach anywhere the central instance does not dial directly until
 governed remote mutations exist. This design also composes with
 [#3183](https://github.com/evoila/meho/issues/3183) (delete-shaped operations
@@ -239,7 +239,7 @@ execution point" and a satellite is the *second kind* of execution point
 resolved per-environment; a per-customer full backplane duplicates the entire
 control plane (Postgres, policy, approvals, audit, Keycloak) per customer and
 contradicts "no hand-managed satellite inventory at fleet scale." The
-management-plane-lockdown Goal (evoila-bosnia/meho-internal#234) names the
+management-plane-lockdown Goal names the
 satellite write path — not a per-customer install — as its keystone.
 Install-per-customer remains the *fallback* only if a given customer's risk
 posture judges the composed control set below insufficient; it is not the

@@ -88,19 +88,21 @@ rollup (no LLM), and the *deep tier* is the scheduled agent run.
    `topology.query.find_dependencies` returns the forward closure. Members
    whose closures intersect are unioned into one cause group. The group key is
    the deepest shared closure node (maximal minimum depth, ties broken by
-   `(kind, name)`), slugified — the deterministic key that is both the
+   `(kind, name)`), slugified, plus a short hash of the node's kind and
+   name — the deterministic key that is both the
    `work_ref` group segment and the memory-slug suffix. A member whose anchor
    is unresolvable — no `name` in the target dict, or an untracked / ambiguous
    node (`NodeNotFoundError` / `AmbiguousNodeError`, the expected state for
    every non-k8s target today, since only the Kubernetes connector overrides
-   `discover_topology`) — forms a singleton keyed on its own Sensor slug. So
+   `discover_topology`) — forms a singleton keyed on its own Sensor slug
+   plus the first 8 hex characters of the Sensor id. So
    correlation degrades gracefully to per-Sensor investigations when topology
    has no data.
 3. **Suppression** (`_is_suppressed`). Read the `checks-noise-<group-key>`
    tenant memory entry; suppress iff its metadata `re_escalate` is falsey. A
    missing entry (novel red) or `re_escalate=true` (still actionable) does not
    suppress. Decided on metadata only — no LLM call to decide.
-4. **In-flight dedupe** (`_has_in_flight_run`). A non-terminal `agent_run`
+4. **In-flight dedupe** (`has_in_flight_run` in `agent/in_flight.py`, shared with the event matcher). A non-terminal `agent_run`
    with the same `(tenant_id, work_ref)` suppresses a duplicate fire (rides
    `agent_run_tenant_work_ref_idx`).
 5. **Invoke** (`_fire_investigation`). Resolve `(client_id, secret)` from the
@@ -141,7 +143,7 @@ clearly delimited section **between the transition snapshot and the
 ## Correlated sensors                           <- server-built: name / state / op
 ## Observed sensor evidence (target-returned)
 <<UNTRUSTED_AGENT_TEXT
-…last_value / evidence / offender sample…       <- target-returned, untrusted (S14)
+…last_value / evidence / offender sample…       <- target-returned, untrusted
 END_UNTRUSTED_AGENT_TEXT>>
 ## Operator instructions for this dashboard
 <<<OPERATOR-PROMPT
@@ -172,7 +174,7 @@ The threat model is *careless*, not adversarial: the column is writable only
 by a `tenant_admin` through the create path, which is why a fixed fence is
 sufficient and a per-briefing nonce is not warranted.
 
-## Target-returned sensor evidence (S14, #302)
+## Target-returned sensor evidence
 
 Each correlated Sensor's `last_value`, `last_evidence` and offender `sample`
 rows are **target-returned**, not operator-authored: the assertion evaluator
@@ -200,6 +202,81 @@ the model must still trust the facts it needs to diagnose and the schema it
 must answer in. Containment beyond the fence is unchanged: the investigator
 has no mail tool and any change op it attempts parks for operator approval and
 is never executed.
+
+## Changes as events (#6180)
+
+With `CHECKS_AGENT_EVENTS` on, a Dashboard change also becomes an event that
+event triggers can match. `_investigate_group` publishes one
+`check.dashboard.changed` event per cause group right after the known-noise
+check (the event is sent also when the group is known noise). Every other
+claimed edge publishes one event in `_process_transition`. The investigator
+call itself is unchanged. Payloads: `docs/codebase/events.md`, "Check events".
+
+## Two paths: the old path and the event trigger (#6183)
+
+With `CHECKS_AGENT_EVENTS` on, the investigator can run on one of two paths.
+With the switch off, only the old path exists and nothing below applies.
+
+**The old path** is the code in this module. `_investigate_group` finds the
+agent by the name in `CHECKS_INVESTIGATOR_AGENT`, starts it, waits for the
+answer and then stores and mails the finding.
+
+**The trigger path** uses no special code. A person makes an ordinary event
+trigger (kind `event`) for any agent, with a filter on the
+`check.dashboard.changed` event. See `examples/checks-investigator/` for the
+agent, its grants and the trigger. The event drain starts the agent. The agent
+needs no memory or mail rights, because MEHO stores and mails the finding:
+
+- `events/drain.py` `_dispatch_event`: after the triggers fire, when the event
+  is `agent_run.completed`, the drain calls
+  `checks/findings.py` `record_finding_for_event`.
+- That function acts only for a run that a Dashboard event trigger really
+  started. It reads the stored run, not the event payload, and checks:
+  - the run **succeeded**, is in the tenant, and a trigger started it. A direct
+    run, or a run that another agent started, never counts, even with the
+    same run key;
+  - the run key `event:<trigger id>:c:<key>` names an event trigger of the same
+    tenant and agent, and no cron or one-off trigger of the tenant carries that
+    run key;
+  - a `check.dashboard.changed` event with a cause group gives exactly this run
+    key for that trigger (made the way the event matcher makes it) and passes
+    the trigger's filter. The Dashboard and the group key come from this event.
+    So a long key that the run key holds only as a hash still works. The
+    step searches only the tenant's Dashboard events with the run key's
+    coalesce key (for a hashed key: every event with a key over 200
+    characters), so other events never hide the cause.
+
+  The Dashboard must be in the run's tenant. The run's answer is parsed with
+  `parse_finding`. Any other answer shape writes nothing.
+- A finding is written to the memory entry `checks-noise-<group key>` (the same
+  entry the old path writes) and mailed to the Dashboard's `notify_email`.
+- The drain marks the `agent_run.completed` event processed only after this
+  step, so a restart can deliver it again. The memory entry keeps the run id.
+  When it holds the finding of this run, or of a run that ended at the same
+  time or later, the step stores and mails nothing. So a second delivery never
+  sends a second mail and never replaces a newer finding.
+- It never raises into the drain loop.
+
+**No double runs.** When an *active* `kind=event` trigger exists in the tenant
+for the agent named in `CHECKS_INVESTIGATOR_AGENT`, `_investigate_group` skips
+its own start and logs `checks_investigation_skipped_trigger_owns`. The event
+is still published, and the trigger path does the work. A trigger for another
+agent does not stop the old path.
+
+**Known noise** works on both paths. The finding step writes the same memory
+entry, so the next event for that group has `known_noise: true`. The example
+trigger filters on `known_noise: false`, so it does not start.
+
+**Move from the old path to the trigger:**
+
+1. Create the agent, its grants and the trigger from `examples/checks-investigator/`.
+   Use the agent name from `CHECKS_INVESTIGATOR_AGENT`, or set the setting to
+   your agent name.
+2. From then on the old path steps aside. To go back, pause or cancel the
+   trigger.
+
+The code for the finding (`ChecksFinding`, `parse_finding`, `persist_finding`,
+`finding_notice`) is in `checks/findings.py`, so both paths use one copy.
 
 ## Agent-name convention (opt-in per tenant)
 
@@ -296,7 +373,7 @@ principal, so no execution path inherits the role.
   transition is claimed under a transaction-scoped per-`(tenant, dashboard)`
   advisory lock, and the memo transition is an atomic compare-and-swap whose
   `rowcount` is the claim token, so exactly one caller fires even across
-  replicas (#2575). The in-flight `work_ref` dedupe (`_has_in_flight_run`) and
+  replicas (#2575). The in-flight `work_ref` dedupe (`has_in_flight_run` (`agent/in_flight.py`, shared with the event matcher)) and
   the noise-suppression memory layer remain as the cross-edge / cross-tick
   backstops. The residual timing gap is intrinsic to the persist-hook seam: a
   member that has not yet committed when the winning claim reads the membership
@@ -313,8 +390,9 @@ principal, so no execution path inherits the role.
     gate + kill switch (inside `run_scheduled`) before firing its agent run. That
     gate reads **already-recorded** consumption
     (`operations/budget_enforcement.py`): tokens/cost are charged against
-    committed state *after* a run finishes, and a reservation ("reserve this
-    run's cost before it starts") is explicitly deferred there. Awaiting each
+    committed state *after* a run finishes. Only the request count is reserved
+    (a run in progress counts as one request); the cost of a run is not
+    reserved before it starts. Awaiting each
     group to completion is what makes the cap correct — group *N*+1's gate
     observes group *N*'s spend already recorded. Fanning the groups out under a
     concurrency cap would open a check-then-fire race where several groups read
@@ -334,7 +412,7 @@ principal, so no execution path inherits the role.
     latency is an operational problem, the correct fix is **not** a naive
     concurrency cap but an **atomic budget reserve/decrement** seam so a group
     reserves budget before firing (replica-safe if the budget is shared across
-    processes) — i.e. the reservation protocol `budget_enforcement.py` defers.
+    processes) — i.e. a reservation of the cost as well as the request count.
     That is a separate, larger change; until it exists, serial-to-completion is
     the only fan-out shape that keeps the cap honest.
 - **Trigger seam.** The runner-persist hook is the v1 seam because the
@@ -355,9 +433,8 @@ principal, so no execution path inherits the role.
   for LLM Applications, LLM01 Prompt Injection —
   <https://genai.owasp.org/llmrisk/llm01-prompt-injection/> ("separate and
   clearly denote untrusted content to limit its influence on user prompts").
-- Target-returned sensor evidence fence: Task #302 (security review S14, parent
-  Initiative #262). Reuses the `wrap_untrusted_text` envelope
-  (`untrusted-text-envelope.md`, Task #154) the event-matcher path already
+- Target-returned sensor evidence fence: reuses the `wrap_untrusted_text`
+  envelope (`untrusted-text-envelope.md`) the event-matcher path already
   applies to inbound event bodies.
 - Mould: `examples/r1-tiered-triage/workflow.py` (harness-persists rationale,
   briefing builder, render/persist shape), `agent.deep-tier-investigator.json`

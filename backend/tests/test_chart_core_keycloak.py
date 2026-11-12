@@ -3,8 +3,10 @@
 
 """Chart-render checks for the built-in Keycloak subchart (#4040).
 
-Off by default: the chart then renders no Keycloak object at all, so a
-bring-your-own install renders what it rendered before. With
+On by default since #4047. These tests start from bring-your-own values
+(every built-in part off) and turn on what they test. Off, the chart renders
+no Keycloak object at all, so a bring-your-own install renders what it
+rendered before. With
 ``coreKeycloak.enabled=true`` the subchart renders a one-replica StatefulSet
 on the official image (pinned by digest), the realm ConfigMap and a Service,
 and the backplane's Ingress gains ``/auth/realms/meho`` and
@@ -33,6 +35,13 @@ _REALM_FILE = _CHART_DIR / "charts" / "keycloak" / "files" / "meho-realm.json"
 _TENANT = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
 
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",
@@ -69,6 +78,8 @@ _ON = [
     "coreKeycloak.enabled=true",
     "--set",
     "corePostgres.enabled=true",
+    "--set",
+    "postgres.credentialsSecret=",
     "--set",
     "coreKeycloak.hostname=meho.test",
     "--set",
@@ -121,14 +132,9 @@ def _env(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {e["name"]: e for e in container["env"]}
 
 
-def test_off_by_default_renders_nothing() -> None:
+def test_off_renders_nothing() -> None:
     docs = _render()
     assert not [d for d in docs if _is_keycloak(d)]
-    # Saying "off" out loud renders the same objects as leaving it out.
-    explicit = _render("--set", "coreKeycloak.enabled=false")
-    assert [(d["kind"], d["metadata"]["name"]) for d in explicit] == [
-        (d["kind"], d["metadata"]["name"]) for d in docs
-    ]
 
 
 def test_on_renders_statefulset_service_and_realm() -> None:
@@ -377,8 +383,6 @@ def test_long_release_name_keeps_statefulset_and_ingress_in_step() -> None:
 @pytest.mark.parametrize(
     ("extra", "messages"),
     [
-        # Helm 3 and Helm 4 word a failed if/then rule differently.
-        (["--set", "corePostgres.enabled=false"], ('Must validate "then"', "'allOf' failed")),
         (["--set", "coreKeycloak.hostname=other.test"], ("must equal ingress.host",)),
         (["--set", "coreKeycloak.hostname="], ("coreKeycloak.hostname is empty",)),
         (["--set", "coreKeycloak.firstTenantId="], ("coreKeycloak.firstTenantId is empty",)),
@@ -397,7 +401,6 @@ def test_long_release_name_keeps_statefulset_and_ingress_in_step() -> None:
         ),
     ],
     ids=[
-        "needs-postgres",
         "host-mismatch",
         "no-hostname",
         "no-tenant-id",
@@ -558,6 +561,79 @@ def test_secret_names_keycloak_reads_must_be_the_core_ones(key: str, core_kind: 
     assert _run(*_ON, "--set", f"{key}=test-core-{core_kind}").returncode == 0
 
 
+# --- One switch each for the console, check runner and admin (#4766) -------
+
+
+def test_console_turns_on_with_one_switch() -> None:
+    data, env, _ = _backplane(*_ON, "--set", "uiConsole.enabled=true")
+    assert data["UI_KEYCLOAK_CLIENT_ID"] == "meho-web"
+    for name, key in (
+        ("UI_KEYCLOAK_CLIENT_SECRET", "client_secret"),
+        ("UI_SESSION_ENCRYPTION_KEY", "session_encryption_key"),
+    ):
+        assert env[name]["valueFrom"]["secretKeyRef"] == {"name": "test-core-ui-auth", "key": key}
+
+
+def test_check_runner_turns_on_with_one_switch() -> None:
+    _, env, _ = _backplane(*_ON, "--set", "checkRunner.enabled=true")
+    assert env["CHECK_RUNNER_CLIENT_ID"]["value"] == "meho-check-runner"
+    assert env["CHECK_RUNNER_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"] == {
+        "name": "test-core-check-runner",
+        "key": "client_secret",
+    }
+
+
+def test_admin_needs_no_url_or_client_id_with_the_built_in_keycloak() -> None:
+    _, env, _ = _backplane(*_ON, "--set", "keycloakAdmin.enabled=true")
+    assert env["KEYCLOAK_ADMIN_URL"]["value"] == "http://test-keycloak:8080/auth/admin/realms/meho"
+    assert env["KEYCLOAK_ADMIN_CLIENT_ID"]["value"] == "meho-admin"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("config.uiKeycloakClientId", "meho-web"),
+        ("checkRunner.clientId", "meho-check-runner"),
+        ("keycloakAdmin.url", "http://test-keycloak:8080/auth/admin/realms/meho"),
+        ("keycloakAdmin.clientId", "meho-admin"),
+    ],
+)
+def test_other_client_values_must_be_the_chart_ones(key: str, value: str) -> None:
+    other = "https://other.test/admin" if key == "keycloakAdmin.url" else "other"
+    result = _run(*_ON, "--set", f"{key}={other}")
+    assert result.returncode != 0
+    assert f'{key} must be empty or "{value}" while coreKeycloak.enabled is on' in result.stderr
+    assert _run(*_ON, "--set", f"{key}={value}").returncode == 0
+
+
+def test_console_check_runner_and_admin_values_stay_required_for_bring_your_own() -> None:
+    cases = (
+        ("uiConsole.enabled", ["uiConsole.secretName", "config.uiKeycloakClientId"]),
+        ("checkRunner.enabled", ["checkRunner.clientId", "checkRunner.clientSecret.secretName"]),
+        ("keycloakAdmin.enabled", ["keycloakAdmin.url", "keycloakAdmin.clientId"]),
+    )
+    full = {
+        "uiConsole.secretName": "ui",
+        "config.uiKeycloakClientId": "web",
+        "checkRunner.clientId": "runner",
+        "checkRunner.clientSecret.secretName": "runner-secret",
+        "keycloakAdmin.url": "https://keycloak.test/admin/realms/meho",
+        "keycloakAdmin.clientId": "admin",
+        "keycloakAdmin.clientSecret.secretName": "admin-secret",
+    }
+    for switch, needed in cases:
+        given = [a for k, v in full.items() for a in ("--set", f"{k}={v}")]
+        assert _run("--set", f"{switch}=true", *given).returncode == 0, switch
+        for key in needed:
+            blank = [a for k, v in full.items() for a in ("--set", f"{k}={'' if k == key else v}")]
+            assert _run("--set", f"{switch}=true", *blank).returncode != 0, key
+
+
+def test_agent_runtime_helm_test_runs_with_the_built_in_keycloak() -> None:
+    docs = _render(*_ON, "--set", "agent.enabled=true", "--set", "agent.secretName=agent-key")
+    assert any(d["metadata"]["name"].endswith("-test-agent-runtime-config") for d in docs)
+
+
 @pytest.mark.parametrize("key", ["config.keycloakIssuerUrl", "keycloak.issuer"])
 def test_hand_set_issuer_fails_with_the_built_in_keycloak(key: str) -> None:
     result = _run(*_ON, "--set", f"{key}=https://keycloak.test/realms/meho")
@@ -595,16 +671,22 @@ _COMPANY_ON = [
 ]
 
 
-def test_the_job_account_gets_two_more_roles_only_with_the_company_login() -> None:
+def test_the_job_account_gets_one_more_role_only_with_the_company_login() -> None:
     realm = json.loads(_REALM_FILE.read_text())
     (account,) = realm["users"]
     assert account["serviceAccountClientId"] == "meho-admin"
-    assert account["clientRoles"]["realm-management"] == ["manage-clients", "manage-users"]
+    # manage-realm is always there: the Job keeps the login flows up to date.
+    assert account["clientRoles"]["realm-management"] == [
+        "manage-clients",
+        "manage-realm",
+        "manage-users",
+    ]
 
     rendered = json.loads(_keycloak_docs(*_COMPANY_ON)["ConfigMap"]["data"]["meho-realm.json"])
 
-    account["clientRoles"]["realm-management"] += list(ROLES)
+    account["clientRoles"]["realm-management"].append("manage-identity-providers")
     assert rendered == realm
+    assert set(ROLES) <= set(account["clientRoles"]["realm-management"])
     assert "${MEHO_REALM_TENANT_ID}" in json.dumps(rendered)
 
 
@@ -649,3 +731,72 @@ def test_no_truststore_without_a_ca_bundle_or_with_the_login_off(extra: list[str
     (container,) = pod["containers"]
     assert "KC_TRUSTSTORE_PATHS" not in _env(container)
     assert [v["name"] for v in pod["volumes"]] == ["realm"]
+
+
+_TRUSTED_CA = [
+    "--set",
+    "coreKeycloak.trustedCaBundle.configMapName=directory-ca",
+    "--set",
+    "coreKeycloak.trustedCaBundle.key=root.pem",
+]
+
+
+def test_trusted_ca_bundle_works_without_the_company_login() -> None:
+    pod = _pod(_keycloak_docs(*_TRUSTED_CA))
+    (container,) = pod["containers"]
+    assert _env(container)["KC_TRUSTSTORE_PATHS"]["value"] == (
+        "/opt/keycloak/conf/trusted-ca/root.pem"
+    )
+    mount = next(m for m in container["volumeMounts"] if m["name"] == "trusted-ca")
+    assert mount == {
+        "name": "trusted-ca",
+        "mountPath": "/opt/keycloak/conf/trusted-ca",
+        "readOnly": True,
+    }
+    volume = next(v for v in pod["volumes"] if v["name"] == "trusted-ca")
+    assert volume["configMap"] == {
+        "name": "directory-ca",
+        "items": [{"key": "root.pem", "path": "root.pem"}],
+    }
+    assert [v["name"] for v in pod["volumes"]] == ["realm", "trusted-ca"]
+
+
+def test_trusted_ca_bundle_and_company_login_ca_are_both_trusted() -> None:
+    pod = _pod(
+        _keycloak_docs(
+            *_COMPANY_ON,
+            "--set",
+            "coreKeycloak.companyLogin.caBundle.configMapName=company-ca",
+            *_TRUSTED_CA,
+        )
+    )
+    (container,) = pod["containers"]
+    assert _env(container)["KC_TRUSTSTORE_PATHS"]["value"] == (
+        "/opt/keycloak/conf/company-login-ca/ca.crt,/opt/keycloak/conf/trusted-ca/root.pem"
+    )
+    assert [v["name"] for v in pod["volumes"]] == ["realm", "company-login-ca", "trusted-ca"]
+    mounts = [m["mountPath"] for m in container["volumeMounts"]]
+    assert "/opt/keycloak/conf/company-login-ca" in mounts
+    assert "/opt/keycloak/conf/trusted-ca" in mounts
+
+
+def test_trusted_ca_bundle_with_the_company_login_on_but_no_company_ca() -> None:
+    pod = _pod(_keycloak_docs(*_COMPANY_ON, *_TRUSTED_CA))
+    (container,) = pod["containers"]
+    assert _env(container)["KC_TRUSTSTORE_PATHS"]["value"] == (
+        "/opt/keycloak/conf/trusted-ca/root.pem"
+    )
+    assert [v["name"] for v in pod["volumes"]] == ["realm", "trusted-ca"]
+
+
+def test_trusted_ca_bundle_with_an_empty_name_is_off() -> None:
+    pod = _pod(_keycloak_docs("--set", "coreKeycloak.trustedCaBundle.key=root.pem"))
+    (container,) = pod["containers"]
+    assert "KC_TRUSTSTORE_PATHS" not in _env(container)
+    assert [v["name"] for v in pod["volumes"]] == ["realm"]
+
+
+def test_trusted_ca_bundle_rejects_an_unknown_key() -> None:
+    result = _run("--set", "coreKeycloak.trustedCaBundle.name=directory-ca")
+    assert result.returncode != 0
+    assert "trustedCaBundle" in result.stderr

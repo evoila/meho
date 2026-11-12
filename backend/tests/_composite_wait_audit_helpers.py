@@ -10,8 +10,9 @@ composite handlers live here because the dispatcher imports them by their
 module path (``handler_ref``); closures are rejected.
 
 Every governed step is ``safe`` + ``requires_approval``, so a person and an
-agent both wait for approval on it. The one denied step is ``dangerous``
-without a grant, which the policy check refuses for an agent.
+agent both wait for approval on it. The one denied step is ``dangerous``;
+the policy check refuses it for an agent with a ``deny`` row
+(:func:`deny_step_for`).
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
+from meho_backplane.db.models import AgentPermission, ApprovalRequest, AuditLog, EndpointDescriptor
 from meho_backplane.operations import DispatchChild, dispatch, register_typed_operation
 from meho_backplane.operations.approval_queue import approve_request
 from meho_backplane.operations.composite import composite_resume_state, enforce_subop_policy
@@ -50,6 +51,9 @@ WAIT_OP_ID = "vault.composite.step_waits"
 DENY_OP_ID = "vault.composite.step_denied"
 PREFLIGHT_OP_ID = "vault.composite.step_refused_before_wait"
 TWO_WAIT_OP_ID = "vault.composite.two_waits"
+TWO_DANGEROUS_OP_ID = "vault.composite.two_dangerous_steps"
+DANGEROUS_CHILD_OP_ID = "vault.kv.destroy_versions"
+DANGEROUS_CHILD_COMPOSITE_OP_ID = "vault.composite.dangerous_child"
 STEP_A = "POST:/vcenter/vm"
 STEP_B = "POST:/vcenter/vm/{vm}/hardware/cdrom"
 STEP_DENIED = "DELETE:/vcenter/vm/{vm}"
@@ -190,6 +194,69 @@ async def two_waits_composite(
     return {"done": True}
 
 
+#: The steps :func:`two_dangerous_steps_composite` ran, in order (#3980).
+executed_steps: list[str] = []
+
+
+async def two_dangerous_steps_composite(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> Any:
+    """Two ``dangerous`` steps, neither marked ``requires_approval`` (#3980).
+
+    Each step records itself in :data:`executed_steps` after its gate lets it
+    go ahead, so a test can check that one approval runs each step once.
+    """
+    for step in (STEP_A, STEP_B):
+        gated = await enforce_subop_policy(
+            operator=operator,
+            connector_id=STEP_CONNECTOR_ID,
+            op_id=step,
+            safety_level="dangerous",
+            requires_approval=False,
+            target=target,
+            params={"name": "vm-1"},
+        )
+        if gated is not None:
+            return gated
+        executed_steps.append(step)
+    return {"done": True}
+
+
+async def dangerous_child_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Typed ``dangerous`` child step; records itself in :data:`executed_steps` (#3980)."""
+    executed_steps.append(DANGEROUS_CHILD_OP_ID)
+    return {"done": True}
+
+
+async def dangerous_child_composite(
+    operator: Operator, target: Any, params: dict[str, Any], dispatch_child: DispatchChild
+) -> Any:
+    """One ``dangerous`` child operation run through ``dispatch_child`` (#3980)."""
+    result = await dispatch_child(
+        connector_id=CONNECTOR_ID, op_id=DANGEROUS_CHILD_OP_ID, params={"path": "/a"}
+    )
+    if result.status != "ok":
+        return result
+    return {"done": True}
+
+
+async def register_dangerous_child(embedding: Any) -> None:
+    """Register the typed ``dangerous`` child step of :func:`dangerous_child_composite`."""
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=DANGEROUS_CHILD_OP_ID,
+        handler=dangerous_child_handler,
+        summary="Destroy versions.",
+        description="Destroy versions.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        safety_level="dangerous",
+        embedding_service=embedding,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -212,7 +279,9 @@ async def register_child(embedding: Any) -> None:
     )
 
 
-async def register_composite(session: AsyncSession, op_id: str, handler_name: str) -> None:
+async def register_composite(
+    session: AsyncSession, op_id: str, handler_name: str, *, safety_level: str = "safe"
+) -> None:
     """Insert one ``source_kind='composite'`` descriptor pointing at a handler here."""
     session.add(
         EndpointDescriptor(
@@ -232,7 +301,7 @@ async def register_composite(session: AsyncSession, op_id: str, handler_name: st
             parameter_schema={"type": "object"},
             response_schema=None,
             llm_instructions=None,
-            safety_level="safe",
+            safety_level=safety_level,
             requires_approval=False,
             is_enabled=True,
             embedding=EMBEDDING,
@@ -248,6 +317,21 @@ async def register_composite(session: AsyncSession, op_id: str, handler_name: st
 # ---------------------------------------------------------------------------
 # Running and reading back
 # ---------------------------------------------------------------------------
+
+
+async def deny_step_for(who: Operator) -> None:
+    """Give *who* a ``deny`` row for the denied step (an agent's request would wait, #3980)."""
+    async with get_sessionmaker()() as s:
+        s.add(
+            AgentPermission(
+                tenant_id=who.tenant_id,
+                principal_sub=who.sub,
+                op_pattern=STEP_DENIED,
+                verdict="deny",
+                created_by_sub="admin",
+            )
+        )
+        await s.commit()
 
 
 async def run(op_id: str, who: Operator | None = None) -> OperationResult:

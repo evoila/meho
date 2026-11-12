@@ -19,9 +19,8 @@ that setting is off. Operator workflow:
   ``tenant_admin``-only cross-tenant view. ``operator`` role with a
   non-null ``tenant_filter`` returns 403.
 
-The route is the API surface backing ``meho retrieval usage``; the
-retire-checklist verb (T6, #445) consumes the same endpoint with
-``--json`` to ingest the structured shape.
+The route is the API surface backing ``meho retrieval usage`` and the
+console Usage tab.
 
 Audit + broadcast contract
 --------------------------

@@ -124,8 +124,8 @@ func newOperationCallCmd() *cobra.Command {
 			"\"nsx-rest-4.2\" pre-baked. Use when an op doesn't have a\n" +
 			"dedicated alias yet.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho nsx operation call GET:/api/v1/node --target rdc-nsx\n" +
-			"  meho nsx operation call GET:/policy/api/v1/infra/tier-0s --target rdc-nsx --json",
+		Example: "  meho nsx operation call GET:/api/v1/node --target nsx-lab\n" +
+			"  meho nsx operation call GET:/policy/api/v1/infra/tier-0s --target nsx-lab --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

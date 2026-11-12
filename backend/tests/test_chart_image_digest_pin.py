@@ -56,6 +56,13 @@ _VALID_DIGEST = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b
 # `image.tag` is always set (schema-required) so the digest tests also
 # prove the digest *wins* over a present tag.
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",

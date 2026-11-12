@@ -103,7 +103,9 @@ class CompanyKeycloak(FakeKeycloak):
         return next(u for u in self.users.values() if u["id"] == user_id)
 
     async def call(self, method: str, path: str, *, json: Any = None, params: Any = None) -> Reply:
-        if self.forbidden and self._company_path(path):
+        # The realm stage stops on login flows without manage-realm (#6280), so
+        # only the identity provider calls answer 403 here.
+        if self.forbidden and "/identity-provider/" in path:
             self.calls.append((method, path))
             return Reply(403, {"error": "HTTP 403 Forbidden"})
         if self.times_out is not None and self.times_out(method, path):
@@ -254,7 +256,14 @@ async def test_off_by_default_touches_nothing_of_the_company_login() -> None:
     # The realm stage lists the login flows and reads the steps of the
     # realm file's own flows.
     own = f"{_BASE}/authentication/flows/{quote('meho approval sign-in', safe='')}/executions"
-    calls = [path for _, path in kc.calls if path not in (f"{_BASE}/authentication/flows", own)]
+    # The recovery-code stage also reads the "Configure OTP" action and the
+    # steps of the browser flow. These do not belong to the company login.
+    recovery = (
+        f"{_BASE}/authentication/required-actions/CONFIGURE_TOTP",
+        f"{_BASE}/authentication/flows/browser/executions",
+    )
+    allowed = (f"{_BASE}/authentication/flows", own, *recovery)
+    calls = [path for _, path in kc.calls if path not in allowed]
     assert not any(kc._company_path(path) for path in calls)
     assert CompanyLoginPlan().enabled is False
 

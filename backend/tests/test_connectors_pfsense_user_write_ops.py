@@ -67,6 +67,7 @@ from meho_backplane.connectors.pfsense.ops_write import (
     pfsense_gateway_add,
     serialized_config_write,
 )
+from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 from meho_backplane.connectors.registry import all_connectors_v2, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
@@ -503,10 +504,12 @@ async def test_refusals_change_nothing(config: str, name: str, status: str, op: 
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.return_value = _proc(config)
-        result = await getattr(connector, op)(None, {"name": name})
-    assert result["status"] == status
-    assert result["applied"] is False
-    assert result["guidance"]
+        with pytest.raises(PfSenseRefusedError) as exc_info:
+            await getattr(connector, op)(None, {"name": name})
+    exc = exc_info.value
+    assert exc.code == status
+    assert f"refused ({status})" in str(exc)
+    assert exc.guidance
     assert not _played(mock_cmd)
 
 
@@ -568,8 +571,9 @@ async def test_results_never_carry_secret_fields() -> None:
         ]
         results.append(await connector.user_disable(None, {"name": "vpn.guest-1"}))
         results.append(await connector.user_disable(None, {"name": "vpn.guest-1"}))
-        results.append(await connector.user_enable(None, {"name": "admin"}))
-    text = json.dumps(results)
+        with pytest.raises(PfSenseRefusedError) as exc_info:
+            await connector.user_enable(None, {"name": "admin"})
+    text = json.dumps(results) + str(exc_info.value)
     for secret in (_SECRET_HASH, _SECRET_KEY, _SECRET_PSK, "bcrypt", "authorizedkeys", "ipsecpsk"):
         assert secret not in text
 
@@ -737,10 +741,12 @@ async def test_response_schema_accepts_every_outcome() -> None:
         outcomes = [
             await connector.user_disable(None, {"name": "vpn.guest-1"}),
             await connector.user_disable(None, {"name": "vpn.guest-1"}),
-            await connector.user_disable(None, {"name": "nobody"}),
         ]
     for outcome in outcomes:
         validator.validate(outcome)
+    assert [o["status"] for o in outcomes] == ["disabled", "nothing_to_do"]
+    # A refusal is an error, not a result: the schema does not list it.
+    assert not validator.is_valid({**outcomes[0], "status": "not_found"})
 
 
 # ===========================================================================
@@ -915,7 +921,8 @@ async def test_preview_names_the_refusal_for_the_admin_account() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_principal_without_grant_is_denied() -> None:
+async def test_agent_principal_without_grant_waits_for_a_person() -> None:
+    """An agent's request waits for a person's approval (#3980); it does not run."""
     recorder = _RecordingPfSense(config_before=_CONFIG_VPN_ON)
     await _bootstrap(recorder)
     await _seed_target()
@@ -929,6 +936,6 @@ async def test_agent_principal_without_grant_is_denied() -> None:
             "params": {"name": "vpn.guest-1"},
         },
     )
-    assert call["status"] == "denied", call
+    assert call["status"] == "awaiting_approval", call
     assert not recorder.playback_ran
-    assert await _pending_count() == 0
+    assert await _pending_count() == 1

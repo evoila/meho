@@ -21,13 +21,29 @@ The Azure connector has typed (hand-written) operations only. There is
 nothing to ingest and nothing to review: the operations are stored when
 MEHO starts.
 
+The connector has 71 operations in 12 groups. These three in the group
+`account` are the ones to try first:
+
 | Group | Operation | What it does |
 | --- | --- | --- |
 | `account` | `azure.about` | Reads the subscription, its tenant and cloud, and the login MEHO uses |
 | `account` | `azure.location.list` | Lists the Azure regions of the subscription (a link to the stored result) |
 | `account` | `azure.operation.status` | Reads the state of a long-running Azure operation once |
 
-All three are reads (`safe`). They need no approval.
+The other groups are `inventory`, `compute`, `network`, `storage`, `aks`,
+`arc`, `automation`, `avs`, `cost`, `migrate` and `security`. To see their
+operations, run `meho operation groups azure-arm-2026.10` and
+`meho operation search azure-arm-2026.10 "<what you need>"`. The engineering
+page lists every operation.
+
+69 operations are reads (`safe`) and need no approval. Two operations
+change something in Azure. They are `caution`, and each one waits until a
+second person approves it:
+
+| Operation | What it does |
+| --- | --- |
+| `azure.tag.update` | Changes the tags of one resource |
+| `azure.patching.assessment.start` | Checks one Azure VM or Arc machine for missing updates now (it installs nothing) |
 
 One target is one subscription. For two subscriptions, make two targets.
 They may share one login.
@@ -63,14 +79,17 @@ same display name. Pick a name that is not used yet.
 
 ## Step 2: give the login its roles
 
-| What MEHO reads | Role | Scope |
+| What MEHO does | Role | Scope |
 | --- | --- | --- |
-| `azure.about`, `azure.location.list`, `azure.operation.status` | `Reader` | the subscription |
+| most reads, also `azure.about`, `azure.location.list`, `azure.operation.status` | `Reader` | the subscription |
+| cost reads (`azure.cost.query`, `azure.cost.forecast`, `azure.cost.budget.list`) | `Reader` or `Cost Management Reader`; the billing account must also let the subscription see costs (the error names the setting) | the subscription |
+| blob list and file read (`azure.storage.blob.list`, `azure.storage.blob.read`) | `Storage Blob Data Reader` (`Reader` alone gives no access to files) | the storage account or the container |
+| `azure.tag.update` (only if you use it) | a role that may write tags, for example `Tag Contributor` | the resources to tag |
+| `azure.patching.assessment.start` (only if you use it) | a role that may check a machine for updates, for example `Virtual Machine Contributor` for a VM | the machines |
 
-The command in step 1 already gives `Reader` on the subscription. Later
-Azure reads may need more read-only roles (for example for costs or for
-Microsoft Defender). Their pages name the role when they ship. Never give
-the login `Contributor` or `Owner` for reads.
+The command in step 1 already gives `Reader` on the subscription. Never
+give the login `Contributor` or `Owner` for reads. The engineering page
+names the role of each operation family.
 
 ## Step 3: put the secret in Vault
 
@@ -130,6 +149,16 @@ meho targets probe example-subscription --json
 The probe reads the subscription. A good answer has `reachable: true`,
 vendor `microsoft`, product `azure`, and the subscription ID, tenant ID,
 cloud and state in `extras`.
+
+One login often sees several subscriptions. To make a target for each of
+them, list the ones that have no target yet. The command uses the login of
+an existing target:
+
+```bash
+meho targets discover azure --seed-target example-subscription --import-yaml > subscriptions.yaml
+# check the file, then:
+meho targets import subscriptions.yaml
+```
 
 ## Step 5: check it end to end
 

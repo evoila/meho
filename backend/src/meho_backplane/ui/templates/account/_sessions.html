@@ -9,10 +9,11 @@
   swap this whole block (``hx-swap="outerHTML"``) with the freshly-queried
   list.
 
-  The per-row revoke posts to one fixed URL and sends the session id in
-  the form body (``hx-vals``), so the id never appears in a URL: the
-  ingress access log and the audit row's path see the same path for
-  every row.
+  The page never holds a session id (the session id is the session
+  cookie value). Each row is named by its session ref, a short HMAC of
+  the id. The per-row revoke posts to one fixed URL and sends the ref in
+  the form body (``hx-vals``). The list shows the person's sessions in
+  every tenant, each with its tenant.
 
   Each row carries a confirm ``<dialog>`` (DaisyUI modal). The current
   device's row ("This device" badge) gets an explicit self-logout warning
@@ -58,12 +59,12 @@
   {%- endif -%}
 {%- endmacro -%}
 
-<div id="account-sessions" class="space-y-2" data-current-session="{{ current_session_id }}">
+<div id="account-sessions" class="space-y-2">
   {% if sessions %}
     {% for s in sessions %}
       <div
         class="flex flex-wrap items-center justify-between gap-3 rounded-box border border-base-300 px-3 py-2.5"
-        data-session-row="{{ s.id }}"
+        data-session-row="{{ s.ref }}"
       >
         <div class="min-w-0 space-y-0.5">
           <div class="flex items-center gap-2">
@@ -75,6 +76,9 @@
               last active
               <span title="{{ s.last_seen_at.isoformat() }}">{{ relative_time(s.last_seen_at) }}</span>
             </span>
+          </div>
+          <div class="text-xs opacity-70" data-field="session-tenant">
+            tenant {{ s.tenant_label }}
           </div>
           <div class="text-xs opacity-55">
             created
@@ -88,8 +92,8 @@
             type="button"
             class="btn btn-xs {% if s.is_current %}btn-warning{% else %}btn-ghost text-error{% endif %}"
             data-action="open-revoke"
-            aria-label="Revoke session {{ s.id }}{% if s.is_current %} (this device){% endif %}"
-            onclick="document.getElementById('account-revoke-modal-{{ s.id }}').showModal()"
+            aria-label="Revoke session {{ s.ref }}{% if s.is_current %} (this device){% endif %}"
+            onclick="document.getElementById('account-revoke-modal-{{ s.ref }}').showModal()"
           >
             {{ icon("ban", class="size-3.5") }}
             <span>Revoke</span>
@@ -98,7 +102,7 @@
 
         {# Per-row confirm modal. The current device's body carries the
            explicit self-logout warning. #}
-        <dialog id="account-revoke-modal-{{ s.id }}" class="modal">
+        <dialog id="account-revoke-modal-{{ s.ref }}" class="modal">
           <div class="modal-box">
             <h3 class="text-lg font-semibold">Revoke this session?</h3>
             {% if s.is_current %}
@@ -121,10 +125,10 @@
                 class="btn btn-sm btn-error"
                 data-action="confirm-revoke"
                 hx-post="/ui/account/sessions/revoke"
-                hx-vals='{"session_id": "{{ s.id }}"}'
+                hx-vals='{"session_ref": "{{ s.ref }}"}'
                 hx-target="#account-sessions"
                 hx-swap="outerHTML"
-                onclick="document.getElementById('account-revoke-modal-{{ s.id }}').close()"
+                onclick="document.getElementById('account-revoke-modal-{{ s.ref }}').close()"
               >
                 Revoke
               </button>

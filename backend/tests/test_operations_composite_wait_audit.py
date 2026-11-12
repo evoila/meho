@@ -212,7 +212,9 @@ async def test_step_denied_by_policy_leaves_a_step_row_and_an_operation_row(
     await h.register_child(stub_embedding_service)
     await h.register_composite(session, h.DENY_OP_ID, "step_denied_composite")
 
-    result = await h.run(h.DENY_OP_ID, h.operator(principal_kind=PrincipalKind.AGENT))
+    agent = h.operator(principal_kind=PrincipalKind.AGENT)
+    await h.deny_step_for(agent)
+    result = await h.run(h.DENY_OP_ID, agent)
 
     assert result.status == "denied", result.error
     runs = await h.rows(h.DENY_OP_ID)

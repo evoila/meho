@@ -122,12 +122,31 @@ func printRunStatus(w io.Writer, s *api.AgentRunStatusResponse) {
 	if s.Model != nil {
 		fmt.Fprintf(w, "%-16s %s\n", "model:", *s.Model)
 	}
+	printRunTokens(w, s)
 	if s.Error != nil && *s.Error != "" {
 		fmt.Fprintf(w, "%-16s %s\n", "error:", *s.Error)
 	}
 	if s.Output != nil {
 		if encoded, err := json.Marshal(*s.Output); err == nil {
 			fmt.Fprintf(w, "%-16s %s\n", "output:", string(encoded))
+		}
+	}
+}
+
+// printRunTokens renders a finished run's token counts. A run that has not
+// succeeded has none, so the lines are left out.
+func printRunTokens(w io.Writer, s *api.AgentRunStatusResponse) {
+	for _, field := range []struct {
+		label string
+		value *int
+	}{
+		{"input_tokens:", s.InputTokens},
+		{"output_tokens:", s.OutputTokens},
+		{"cache_read:", s.CacheReadTokens},
+		{"cache_write:", s.CacheWriteTokens},
+	} {
+		if field.value != nil {
+			fmt.Fprintf(w, "%-16s %d\n", field.label, *field.value)
 		}
 	}
 }

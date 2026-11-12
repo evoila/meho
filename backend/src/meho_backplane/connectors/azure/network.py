@@ -347,9 +347,7 @@ OPS: tuple[AzureTypedOp, ...] = (
         "Read-only.",
         NO_PARAMS,
         EXPRESS_ROUTE_LIST_RESPONSE,
-        # "keys-withheld": Azure's answer holds the circuit's keys, so the trace of
-        # this call keeps no body (the flight recorder's secret-tag rule).
-        ("expressroute", "circuit", "keys-withheld"),
+        ("expressroute", "circuit"),
         _EXPRESS_ROUTE_LIST,
     ),
     _op(

@@ -8,8 +8,8 @@ step 2, with the two files of `lib/` it sources in
 `/usr/local/lib/meho-host/`, and every later run installs the version of
 its download. The
 customer never needs kubectl: that is ADR 0007 decision 2 (the support rule)
-and the form-2 design, section 5, the `meho-host` table (meho-internal
-`docs/design/2026-10-10-install-forms/form-2-linux-server.md`).
+and the form-2 design, section 5, the `meho-host` table (the internal
+form-2 design note).
 
 This version has eight commands:
 
@@ -804,8 +804,8 @@ packages later.
   (#3960) are not part of them.
 - **The certificate line checks the Secret, not the connection.** It does
   not connect to port 443, so it does not prove that Traefik serves this
-  Secret. The first-start list (#4042) fetches the certificate through the
-  console address.
+  Secret. The first-start list (#4042, not built yet) is planned to fetch
+  the certificate through the console address.
 
 - **The Traefik pods are found by name.** The bundle takes the `kube-system`
   pods whose name starts with `rke2-traefik-`, which is how RKE2's
@@ -880,11 +880,10 @@ packages later.
   https://www.freedesktop.org/software/systemd/man/latest/systemd.time.html
 - The kubelet's eviction thresholds:
   https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/
-- ADR 0007 decision 2 (the support rule), meho-internal
-  `docs/decisions/0007-kubernetes-inside-and-ha-path.md`.
+- ADR 0007 decision 2 (the support rule), an internal decision record.
 - ADR 0009 (closed by default; "Work": how the customer sets the admin
-  network after the install), meho-internal
-  `docs/decisions/0009-closed-by-default.md`; the form-2 design, section 5
+  network after the install), an internal decision record; the form-2
+  design, section 5
   (`admin-network`, `uninstall`) and section 11 (SSH and the admin network).
 - The MEHO firewall file and its unit: `docs/codebase/linux-server-install.md`, "The host firewall"
   (#4635), `lib/firewall.sh`.

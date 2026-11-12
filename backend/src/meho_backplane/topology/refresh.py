@@ -84,6 +84,7 @@ from meho_backplane.topology.history import (
     record_node_change,
 )
 from meho_backplane.topology.identity_mode import read_identity_mode, scope_for_discovered_node
+from meho_backplane.topology.refresh_read_scope import ensure_refresh_in_read_scope
 
 __all__ = ["RefreshResult", "refresh_target_topology"]
 
@@ -1100,6 +1101,22 @@ async def _apply_reconcile(
             now=now,
             audit_id=audit_id,
         )
+        # Imported here: refresh_links reuses this module's edge writers.
+        from meho_backplane.topology.refresh_links import reconcile_links
+
+        link_counts = await reconcile_links(
+            session,
+            tenant_id=tenant_id,
+            discovered_by=discovered_by,
+            links=hints.links,
+            live_node_key_to_id=live_key_to_id,
+            all_node_key_to_id=all_key_to_id,
+            now=now,
+            audit_id=audit_id,
+        )
+        added_edges += link_counts[0]
+        updated_edges += link_counts[1]
+        removed_edges += link_counts[2]
         result = RefreshResult(
             target_id=target_id,
             added_nodes=added_nodes,
@@ -1232,7 +1249,13 @@ async def refresh_target_topology(
         result additionally carries ``no_populator_for_product`` +
         ``populated_products`` so the all-zero counts are readable as a
         coverage gap rather than a clean no-op (#2093).
+
+    Raises:
+        RefreshReadScopeDeniedError: *operator* is a service login and
+            *target* is outside its read scope. MEHO checks this first,
+            so the connector is not called.
     """
+    await ensure_refresh_in_read_scope(operator, target)
     started = time.perf_counter()
     target_id: uuid.UUID = target.id
     discovered_by = getattr(target, "product", "unknown")

@@ -50,7 +50,7 @@ cluster.vip is not used yet, and first start refuses the two join fields.
       </Property>
       <Property ovf:key="admin.password" ovf:type="string" ovf:password="true" ovf:qualifiers="MinLen(14)" ovf:userConfigurable="true">
         <Label>Appliance admin password</Label>
-        <Description>The password of the Linux account admin, for the VM console and sudo. At least 14 characters. You must change it at the first login.</Description>
+        <Description>The password of the Linux account admin, for the VM console and sudo. It needs at least 14 characters, with an uppercase letter, a lowercase letter, a digit and another character such as # or !; no character more than 3 times in a row; no run of more than 3 characters such as abcd or 4321; not the user name admin anywhere in it, in any letter case or reversed; and no dictionary word or simple pattern. You must change it at the first login, to a new one that follows the same rules and differs from it in at least 2 characters.</Description>
       </Property>
       <Property ovf:key="admin.ssh_key" ovf:type="string" ovf:userConfigurable="true">
         <Label>Admin SSH public key</Label>

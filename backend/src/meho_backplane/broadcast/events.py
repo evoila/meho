@@ -987,7 +987,8 @@ _SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
 #: positional rules above don't (``api_key``, ``private_key``,
 #: ``secret_id`` -- the Vault AppRole SecretID is secret material
 #: even though ``secret`` is non-final there; ``license_key`` -- a
-#: product licence is a credential a vendor file may show in clear;
+#: product licence is a credential a vendor file may show in clear, and
+#: ``licenseKeys`` is a list of them (the vSphere licence source);
 #: ``product_key`` -- the Windows product key of a vSphere guest
 #: customization spec, the same kind of value).
 _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
@@ -998,6 +999,8 @@ _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("encryption", "key"),
         ("license", "key"),
         ("licence", "key"),
+        ("license", "keys"),
+        ("licence", "keys"),
         ("product", "key"),
         ("secret", "id"),
         ("secret", "value"),
@@ -1011,12 +1014,16 @@ _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
 #: pre-shared key of a VPN connection, the secret half of an access key
 #: pair. Followed by more tokens the pair is a reference, not the
 #: secret: the Kubernetes ``secret_key_ref`` names a Secret and a key in
-#: it, and must stay a plain field.
+#: it, and must stay a plain field. ``connection_string`` is a database or
+#: service URL with its password in it (Azure's ``primaryConnectionString``);
+#: ``connection_string_ref`` only names one.
 _SECRET_NAME_FINAL_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
     {
         ("secret", "key"),
         ("shared", "key"),
         ("preshared", "key"),
+        ("connection", "string"),
+        ("connection", "strings"),
     }
 )
 

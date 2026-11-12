@@ -5,13 +5,11 @@
 MEHO's published documentation site — <https://evoila.github.io/meho/>
 — is built with MkDocs Material from sources under `docs-site/` and
 versioned with [mike](https://github.com/jimporter/mike) on the
-`gh-pages` branch, which GitHub Pages serves. The scaffold landed with
-task #2670 (initiative #2663). The *Start here* and *Install &
-operate* sections carry real content (#2671: landing page,
-`architecture.md`, and the `install/` trail pages); #2672 (connect
-clients) and #2673 (do-real-work guides) migrate the remaining
-sections. The generated reference section lands with the #2662
-contract snapshots.
+`gh-pages` branch, which GitHub Pages serves. The top-level sections of
+the `nav` in `mkdocs.yml` are *Start here*, *Install & operate*,
+*Connect clients*, *Do real work*, *Extend MEHO*, *Reference* and
+*Project*. *Reference* holds the generated pages under
+`docs-site/reference/`.
 
 The site is the *operator/adopter-facing* documentation. The `docs/`
 tree (this directory's parent) remains the contributor-facing material
@@ -26,6 +24,9 @@ force nav curation of files that were never written for outsiders.
 | `mkdocs.yml` | repo root | Site config: Material theme (light/dark toggle), strict mode, nav skeleton, mike version provider |
 | `docs-site/` | repo root | Page sources; one directory per top-level nav section, `index.md` each |
 | `.github/workflows/docs-site.yml` | workflows | PR check (`mkdocs build --strict`) + tag-push deploy (mike → gh-pages) |
+| `scripts/ci/docs_deploy.sh` | scripts/ci | The deploy step: which version a tag publishes under, and whether it moves `latest` |
+| `scripts/ci/docs_republish.sh` | scripts/ci | The republish step: publishes main again under the newest final release's version and moves `latest` |
+| `scripts/ci/docs_pages.sh` | scripts/ci | Shared by both scripts: fetches `gh-pages` and tries again when a push is refused |
 | `backend/pyproject.toml` `[dependency-groups].docs` | backend | Locked toolchain pins (mkdocs-material, mike) riding `uv.lock` + Dependabot |
 | `gh-pages` branch | remote only | mike-managed publish target; never edited by hand |
 
@@ -41,24 +42,37 @@ One docs version **per minor**, with a `latest` alias:
   the newest docs.
 - Material's version selector is enabled via `extra.version.provider:
   mike` in `mkdocs.yml`; it reads mike's `versions.json` on gh-pages.
-- Pre-release tags (`v1.0.0-rc.1`) deploy under their minor (`1.0`) —
-  the rc docs are that minor's docs in progress.
+- A pre-release tag (it has a `-`, like `v1.0.0-rc.1`) runs only
+  `mike deploy --push <version>`: no `latest` alias and no
+  `set-default`. So `latest` and the site root stay on the last final
+  release.
+  - While its minor has no final tag, the rc deploys under the minor
+    (`1.0`): the rc docs are that minor's docs in progress.
+  - Once the minor has a final tag (`v1.0.1-rc.1` after `v1.0.0`), the
+    rc deploys under its own name (`1.0.1-rc.1`). `latest` is a symlink
+    to the `1.0` folder, so writing the rc into `1.0` would show rc
+    pages to every reader of `latest`. The script finds final tags with
+    `git ls-remote --tags origin`.
+- `scripts/ci/docs_deploy.sh` holds these rules.
+  `backend/tests/test_ci_docs_deploy.py` runs it with the real mike
+  against a local `origin` and checks the pages behind `latest`.
 
 ## Control flow (deploy)
 
 1. `v*` tag push triggers the `deploy` job (`docs-site.yml`).
-2. Job fetches `gh-pages` if it exists (mike commits onto the local
-   ref), configures the `github-actions[bot]` committer identity, and
+2. Job configures the `github-actions[bot]` committer identity and
    installs the locked toolchain via `uv sync --locked --only-group
    docs` in `backend/`.
-3. `mike deploy` builds the site (strict — `strict: true` in
-   `mkdocs.yml` applies to mike's internal build too) and pushes the
-   version + alias to `gh-pages`.
+3. `scripts/ci/docs_deploy.sh` fetches `gh-pages` if it exists (mike
+   commits onto the local branch). `mike deploy` builds the site
+   (strict — `strict: true` in `mkdocs.yml` applies to mike's internal
+   build too) and commits the version + alias. A plain `git push` sends
+   it to `gh-pages`.
 4. GitHub Pages serves the branch. A job-level concurrency group
    (`docs-site-gh-pages`, no cancel) serialises publishes so two tags
    can't race the branch update.
 5. A final **reachability gate** polls the freshly-published
-   `https://evoila.github.io/meho/<MAJOR.MINOR>/` (the version path
+   `https://evoila.github.io/meho/<version>/` (the version path
    this run wrote, passed from the deploy step via a `version` output —
    *not* the site root, whose redirect to `latest` would return 200 and
    mask a failed version publish) until it returns HTTP 200, up to a
@@ -69,7 +83,44 @@ One docs version **per minor**, with a `latest` alias:
    — into a red run.
 
 PRs touching the site (or the toolchain lock) get a `mkdocs build
---strict` check instead; nothing deploys from PRs or main pushes.
+--strict` check instead; nothing deploys from PRs.
+
+## Control flow (republish from main)
+
+A docs fix is on the public site the same week, with no hand step.
+
+1. A push to `main` that changes `docs-site/**` or `mkdocs.yml` runs the
+   same `deploy` job (a manual run of the workflow on `main` does too).
+2. The deploy step runs `scripts/ci/docs_republish.sh`. It finds the
+   newest final tag (`vMAJOR.MINOR.PATCH`, no `-`) with `git ls-remote`
+   and takes its `MAJOR.MINOR` as the version.
+3. `mike deploy --update-aliases <version> latest` builds main and
+   commits it onto the local `gh-pages` branch. `latest` points at that
+   version, so it shows the docs of the newest release, built from main.
+   When main is on a minor that has no final release yet, its docs still
+   go out under the newest final release's version.
+4. Guards before the plain `git push` (they run again after a retry):
+   - no push when the pages are the same as on the remote branch (the
+     build time line does not count), so no empty commit;
+   - no push when a file outside the republished version folder would
+     be deleted (other versions, `versions.json`, the site root). Inside
+     that folder the pages follow main: a page that main moved or
+     removed goes away there, and the script lists it;
+   - both file counts are printed.
+5. The reachability gate runs as for a tag. It is skipped when nothing
+   was pushed.
+
+A tag deploy keeps the `docs-site-gh-pages`
+concurrency group and is never cancelled. The main republish has its own
+group (`docs-site-gh-pages-main`), because GitHub keeps only one waiting
+run per group and a later main run would replace a waiting tag deploy.
+The two can overlap. So when a push is refused because `gh-pages` moved,
+both scripts fetch it again, build again and push again
+(`scripts/ci/docs_pages.sh`). Before each try they read the tags again:
+the republish takes the newest final release again (a release tagged
+during the run gets `latest`), and a release candidate checks again
+whether its minor has a final tag. The republish also checks its guards
+again. Each script tries at most 3 times, then fails with a message.
 
 ## Local development
 
@@ -128,7 +179,7 @@ a site that returns 404 (#2741).
 ## References
 
 - Initiative #2663 (information architecture), goal #2661.
-- `docs/RELEASING.md` — the docs site is the fourth tag-published
-  artefact.
+- `docs/RELEASING.md` — the docs site is one of the artefacts a `v*`
+  tag publishes.
 - mkdocs-material versioning guide:
   <https://squidfunk.github.io/mkdocs-material/setup/setting-up-versioning/>

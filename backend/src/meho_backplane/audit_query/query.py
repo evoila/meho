@@ -485,8 +485,21 @@ def _build_audit_entry(
         policy_decision=row.policy_decision,
         event_class=row.event_class,
         sandbox_mode=row.sandbox_mode,
+        actor_sub=row.actor_sub,
+        actor_name=_actor_name(row.actor_sub),
         broadcast_event_id=None,
     )
+
+
+#: An agent's login id is ``agent:<name>`` (``auth/agent_principals.py``).
+_AGENT_ACTOR_PREFIX = "agent:"
+
+
+def _actor_name(actor_sub: str | None) -> str | None:
+    """The agent's name from *actor_sub* (``agent:<name>``), else ``None``."""
+    if actor_sub is None or not actor_sub.startswith(_AGENT_ACTOR_PREFIX):
+        return None
+    return actor_sub.removeprefix(_AGENT_ACTOR_PREFIX) or None
 
 
 def _derive_result_status(row: AuditLog) -> str:

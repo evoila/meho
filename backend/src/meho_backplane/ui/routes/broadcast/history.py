@@ -54,7 +54,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.broadcast.archive_reader import latest_announcements
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.routes.broadcast.feed import (
     IN_DOM_ROW_CAP,
     OP_CLASS_BADGE_CLASSES,
@@ -158,7 +158,9 @@ async def _fetch_history(
 
 
 #: Module-level :class:`fastapi.Depends` closure -- ruff B008 guard.
-_require_ui_session_dep = Depends(require_ui_session)
+#: The ``operator`` floor of the REST broadcast and feed reads: a ``read_only``
+#: session gets ``403 operator_required`` before the handler runs.
+_require_ui_operator_dep = Depends(require_ui_operator)
 
 
 def build_history_router() -> APIRouter:
@@ -181,7 +183,7 @@ def build_history_router() -> APIRouter:
                 "'agent_announcement'. Absent/blank renders both kinds."
             ),
         ),
-        session_ctx: UISessionContext = _require_ui_session_dep,
+        session_ctx: UISessionContext = _require_ui_operator_dep,
     ) -> HTMLResponse:
         """``GET /ui/broadcast/history[?kind=]`` -- the Last-24h replay fragment.
 

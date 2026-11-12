@@ -26,6 +26,9 @@
 //     Prompts for confirmation on stdin unless --confirm is set;
 //     idempotent (delete-already-missing returns 204 from the
 //     backend).
+//   - `meho kb export <directory> [--dry-run] [--json]` — writes the
+//     confirmed, generic entries as Markdown pages into a local folder
+//     via POST /api/v1/kb/export (#5730). Role: operator.
 //
 // Each verb wraps one backplane route and renders the response
 // either as a human-readable form (text table, Markdown body,
@@ -75,9 +78,9 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "kb",
-		Short: "Operate the MEHO knowledge base (ingest / search / list / show / add / delete)",
+		Short: "Operate the MEHO knowledge base (ingest / search / list / show / add / delete / export)",
 		Long: "Operate the tenant-scoped knowledge base wired by G4.1. " +
-			"Ingest, search, list, show, add, and delete kb entries. " +
+			"Ingest, search, list, show, add, delete, and export kb entries. " +
 			"Write verbs (ingest / add / delete) require tenant_admin; " +
 			"read verbs are operator-level. Tenant scoping is enforced " +
 			"server-side via the JWT — no surface accepts a tenant id.",
@@ -89,6 +92,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newShowCmd())
 	cmd.AddCommand(newAddCmd())
 	cmd.AddCommand(newDeleteCmd())
+	cmd.AddCommand(newExportCmd())
 	return cmd
 }
 
@@ -258,6 +262,8 @@ func renderRequestError(
 //   - 422 → unexpected wrapping the FastAPI validation envelope
 //     (invalid slug, missing required body field, both-or-neither
 //     directory/tarball_url).
+//   - 409 → unexpected with the current revision and what changed
+//     (`meho kb add` without the revision it read).
 //   - 501 → unexpected with the backend's detail (tarball_url ingest
 //     unsupported in v0.2).
 //   - Other non-2xx → unexpected with the raw body.
@@ -310,6 +316,19 @@ func renderHTTPStatus(
 		// backend emits the FastAPI validation envelope.
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("invalid request: %s", bodyStr)),
+			jsonOut,
+		)
+	case http.StatusConflict:
+		// 409 stale_revision from `meho kb add`: the entry changed
+		// after the revision the writer read, or the slug exists and no
+		// revision was named. The answer holds the current revision
+		// and what changed.
+		if text, ok := describeStale(body); ok {
+			return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(text), jsonOut)
+		}
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
+				backplaneURL, statusCode, bodyStr)),
 			jsonOut,
 		)
 	case http.StatusNotImplemented:

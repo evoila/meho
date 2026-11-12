@@ -13,7 +13,8 @@ console, where before the only way to do this from MEHO was the
 
 ## Overview
 
-Reads are `require_ui_session`-gated only (GET reads need no CSRF); every
+Reads need the `operator` role (`require_ui_operator`; GET reads need no
+CSRF). A `read_only` session gets `403 operator_required`. Every
 write is CSRF-gated by the `ui/csrf.py` double-submit middleware AND
 hard-gated to `tenant_admin`:
 
@@ -23,9 +24,9 @@ hard-gated to `tenant_admin`:
 | `GET /ui/keycloak/clients/{client_uuid}` | operator | Client-detail fragment (HTMX-swapped into a drawer container), keyed on the client's **internal UUID**. |
 | `GET /ui/keycloak/users` | operator | Full-page user list (`keycloak.user.list`, `safe`) + optional `?username=` filter. Write affordances soft-hidden from non-admins. |
 | `GET /ui/keycloak/users/create` | tenant_admin | Create-user confirm modal (CSRF token minted + cookie re-set). |
-| `POST /ui/keycloak/users/create` | tenant_admin | Dispatch `keycloak.user.create` (`caution`, requires approval). |
+| `POST /ui/keycloak/users/create` | tenant_admin | Dispatch `keycloak.user.create` (`dangerous`, requires approval). |
 | `GET /ui/keycloak/users/{user_uuid}/reset-password` | tenant_admin | Reset-password confirm modal. |
-| `POST /ui/keycloak/users/{user_uuid}/reset-password` | tenant_admin | Dispatch `keycloak.user.reset_password` (`caution`, requires approval). |
+| `POST /ui/keycloak/users/{user_uuid}/reset-password` | tenant_admin | Dispatch `keycloak.user.reset_password` (`dangerous`, requires approval). |
 | `GET /ui/keycloak/users/{user_uuid}/roles/assign` | tenant_admin | Role-assign confirm modal (a **privilege grant**; reads current roles via `keycloak.role_mapping.get`). |
 | `POST /ui/keycloak/users/{user_uuid}/roles/assign` | tenant_admin | Dispatch `keycloak.role_mapping.assign` (`dangerous`, requires approval). |
 
@@ -109,10 +110,11 @@ a raw-blob render here.
 
 ## RBAC: reads operator-tier, writes tenant_admin
 
-Reads are gated only by `require_ui_session`; the underlying
-`POST /api/v1/operations/call` floor is `TenantRole.OPERATOR`, so a plain
+Reads are gated by `require_ui_operator`, the console twin of the
+`POST /api/v1/operations/call` floor (`TenantRole.OPERATOR`). A plain
 operator can read every browse surface (realm/client/scope list and the
-user list). The user-list page threads an `is_tenant_admin` flag (via the
+user list). A `read_only` session gets `403 operator_required` before any
+dispatch. The user-list page threads an `is_tenant_admin` flag (via the
 soft-failing `resolve_role_probe`) so the create / reset / assign buttons
 are **soft-hidden** from a plain operator — but a non-admin render must
 still succeed.
@@ -123,8 +125,8 @@ keycloak-local mirror of `connectors/operator.py::resolve_operator_or_403`
 with a keycloak-appropriate 403 `detail`), so a forged POST from a plain
 operator gets a hard `403` and never dispatches. The dispatch floor itself
 is operator-tier; this BFF-layer `tenant_admin` gate is layered on top for
-blast radius (create/reset are caution writes, role-assign is a privilege
-grant), the same pattern existing UI write routes use.
+blast radius (create, reset and role-assign are all `dangerous` writes),
+the same pattern existing UI write routes use.
 
 ## Authoring writes (T3, #1961)
 
@@ -140,12 +142,14 @@ stays small. `build_keycloak_router` includes the write router, so the whole
 | `GET/POST /ui/keycloak/client-scopes/create` | `keycloak.client_scope.create` |
 | `GET/POST /ui/keycloak/clients/{client_uuid}/protocol-mappers/create` | `keycloak.protocol_mapper.create` |
 
-Both ops register `safety_level="caution"` / `requires_approval=True`
-(`connectors/keycloak/ops_write.py`). The protocol-mapper op is the one that
-wires the `tenant_id` / `tenant_role` claims the backplane row-scopes on.
+Both ops register `requires_approval=True`
+(`connectors/keycloak/ops_write_schemas.py`). The client-scope op is
+`caution`. The protocol-mapper op is `dangerous`: it wires the `tenant_id` /
+`tenant_role` claims the backplane row-scopes on, so a MEHO-SA-Operator or a
+tenant admin must approve it.
 
 Each write is reached only from an explicit, unmissable confirm modal (the
-`GET` render) that names the caution safety level and the requires-approval
+`GET` render) that names the op's safety level and the requires-approval
 handoff before the operator can `POST`. The flow mirrors the merged
 `/ui/operations` Run modal exactly:
 
@@ -257,7 +261,8 @@ login quick. How to set the two values on a running realm:
   `user.list`, `role_mapping.get`).
 - `connectors/keycloak/ops_write.py` — the write ops (`user.create`,
   `user.reset_password`, `role_mapping.assign`, `client_scope.create`,
-  `protocol_mapper.create`), all `requires_approval=True`.
+  `protocol_mapper.create`), all `requires_approval=True`. Their
+  registration rows are in `connectors/keycloak/ops_write_schemas.py`.
 - `ui/csrf.py` (`mint_csrf_token`) + `ui/routes/approvals/render.py`
   (`set_csrf_cookie`) — the double-submit token minted on each write modal.
 - `ui/routes/connectors/operator.py::resolve_role_probe` — the soft-failing
@@ -278,9 +283,10 @@ login quick. How to set the two values on a running realm:
   client relation view is read-only assembly over T1's reads.
 - Single managed realm per target (the connector resolves the realm from
   the target's `managed_realm`); no realm selector.
-- The role-assign picker collects free-text realm role names rather than a
-  catalog dropdown (the realm role catalog op is not in this task's verb
-  set); current realm roles are shown for context via `role_mapping.get`.
+- The role-assign picker collects free-text realm role names, not a
+  dropdown. The connector has `keycloak.role.list`, but the console does
+  not call it. Current realm roles are shown for context via
+  `role_mapping.get`.
 - `routes.py` exceeds the 600-line code-quality file-size budget (warning,
   pre-existing from the T1 scaffold); the route handlers are FastAPI Form
   closures whose param lists trip PLR0913. Both are recorded as warnings,

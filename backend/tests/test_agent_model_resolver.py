@@ -300,7 +300,7 @@ def test_anthropic_builder_strips_provider_prefix(
     """The G11.5 Anthropic builder strips the spec-form provider prefix.
 
     With the shipped default ``agent_default_model`` spec form
-    (``anthropic:claude-sonnet-4-6``), the resolved AnthropicModel must
+    (``anthropic:claude-sonnet-5-5``), the resolved AnthropicModel must
     carry the bare id — the ``anthropic:`` prefix would otherwise 404 at
     the Messages API (RDC #789 N11).
     """
@@ -318,7 +318,7 @@ def test_anthropic_builder_strips_provider_prefix(
 
     model = resolver.resolve(operator, AgentTier.TRIAGE)
     assert isinstance(model, AnthropicModel)
-    assert model.model_name == "claude-sonnet-4-6"
+    assert model.model_name == "claude-sonnet-5-5"
 
 
 def test_anthropic_builder_accepts_bare_id(
@@ -348,7 +348,7 @@ async def test_anthropic_builder_pins_old_max_tokens(
     """Each agent request asks for at most 4096 output tokens, not streamed.
 
     Since pydantic-ai 2.52, an unset ``max_tokens`` becomes the model's
-    maximum (128,000 for claude-sonnet-4-6) and the request is streamed.
+    maximum (128,000 for claude-sonnet-5-5) and the request is streamed.
     The ``AGENT_MAX_OUTPUT_TOKENS`` default of 4096 keeps the request as before.
     """
     from ._anthropic_request_capture import capture_first_request, point_anthropic_sdk_at_nowhere
@@ -366,7 +366,7 @@ async def test_anthropic_builder_pins_old_max_tokens(
     model = resolver.resolve(_make_operator(tenant_id=_TENANT_B), AgentTier.TRIAGE)
     body = await capture_first_request(model, monkeypatch)
 
-    assert body["model"] == "claude-sonnet-4-6"
+    assert body["model"] == "claude-sonnet-5-5"
     assert body["max_tokens"] == 4096
     assert body.get("stream") is not True
 

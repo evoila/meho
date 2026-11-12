@@ -1,19 +1,22 @@
 # The `meho` CLI
 
+New here? Start with the [laptop guide](../install/laptop-tools.md).
+
 The `meho` CLI is a single static Go binary and the **starting point**
 for connecting to a backplane. It runs on a VPN-connected workstation,
 verifies TLS against your operating system's trust store, and
 authenticates with the OAuth 2.0 device-code flow — so it works on
 private networks with no browser redirect back to the client.
 
-Install it and log in before wiring any MCP client: registering targets
-and secrets happens only through the CLI (and the operator console /
-REST), never through MCP tools, so a useful agent session depends on
-this step having happened first.
+Install it and log in before wiring any MCP client. You register
+targets and secrets with the CLI, the operator console or REST. The
+default agent surface has no tool for this, so a useful agent session
+depends on this step having happened first.
 
 ## Install the signed binary
 
-Releases ship as four platform tarballs plus a `SHA256SUMS` file at the
+Releases ship as four platform tarballs (Linux and macOS), two Windows
+zip files, and a `SHA256SUMS` file at the
 [releases page](https://github.com/evoila/meho/releases). Each artefact
 carries a matching `.cosign.bundle` sigstore bundle — signed keyless
 via [cosign](https://docs.sigstore.dev/) (the GitHub Actions OIDC token
@@ -60,6 +63,57 @@ Unpack and install:
 tar xzf ${TARBALL}
 sudo install -m 0755 meho /usr/local/bin/meho
 meho version
+```
+
+### Windows
+
+Windows has two zip files: `meho_<version>_windows_amd64.zip` (Intel and
+AMD) and `meho_<version>_windows_arm64.zip` (ARM). Use PowerShell. This
+example uses the amd64 file.
+
+```powershell
+$Tag = "<the release tag matching your backplane, e.g. v0.27.0>"
+$Zip = "meho_$($Tag.TrimStart('v'))_windows_amd64.zip"   # or windows_arm64.zip
+$Base = "https://github.com/evoila/meho/releases/download/$Tag"
+
+Invoke-WebRequest "$Base/$Zip" -OutFile $Zip
+Invoke-WebRequest "$Base/$Zip.cosign.bundle" -OutFile "$Zip.cosign.bundle"
+Invoke-WebRequest "$Base/SHA256SUMS" -OutFile SHA256SUMS
+Invoke-WebRequest "$Base/SHA256SUMS.cosign.bundle" -OutFile SHA256SUMS.cosign.bundle
+```
+
+Check the signature of the checksums file with
+[cosign](https://docs.sigstore.dev/). It uses the same identity and
+issuer as above:
+
+```powershell
+cosign verify-blob `
+  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/cli-release\.yml@refs/tags/v.+$' `
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' `
+  --bundle SHA256SUMS.cosign.bundle `
+  SHA256SUMS
+```
+
+Then check the hash of the zip file against the line in `SHA256SUMS`.
+Both values must be the same:
+
+```powershell
+(Get-FileHash -Algorithm SHA256 $Zip).Hash.ToLower()
+(Select-String -Path SHA256SUMS -Pattern ([regex]::Escape($Zip))).Line.Split(' ')[0]
+```
+
+Unzip, put `meho.exe` in a folder on your user PATH, and run it. The
+steps below use `%LOCALAPPDATA%\Programs\meho`. Open a new terminal
+afterwards, so it picks up the new PATH.
+
+```powershell
+$Dir = "$env:LOCALAPPDATA\Programs\meho"
+Expand-Archive -Path $Zip -DestinationPath $Dir -Force
+$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if (($UserPath -split ';') -notcontains $Dir) {
+  [Environment]::SetEnvironmentVariable("Path", "$UserPath;$Dir", "User")
+}
+& "$Dir\meho.exe" version
 ```
 
 ## Keep the CLI in step with the backplane
@@ -164,9 +218,16 @@ meho status
 `meho status` calls `/api/v1/health` with the stored token, so a clean
 result confirms CLI, token, ingress, and backplane all agree.
 
+If your login has several tenants, choose the one you work in with
+`meho tenants use <name>`. Without a name, `meho tenants use` lists your
+tenants. See [Current tenant](../reference/cli.md#current-tenant).
+
 ## Known walls
 
-Two workstation-side issues account for most first-login failures:
+`meho doctor` checks this machine and names the layer that fails. See
+[Start with `meho doctor`](troubleshooting.md#start-with-meho-doctor).
+
+These issues account for most first-login failures:
 
 - **Internal-CA trust.** `meho login` dying at its discovery probe with
   `x509: certificate signed by unknown authority` means the
@@ -178,7 +239,18 @@ Two workstation-side issues account for most first-login failures:
   during a VPN-idle DNS flap) can blackhole the first lookup. Confirm
   the host resolves to its internal address from the machine you are
   logging in from; a temporary `/etc/hosts` pin to the internal VIP is
-  a reliable workaround while you sort DNS out.
+  a reliable workaround while you sort DNS out. When only the Keycloak
+  host does not resolve, `meho login --resolve <host>:<port>:<ip>` pins
+  it for the login alone. TLS still checks the real host name.
+- **Identity provider address.** `meho login` uses the identity
+  provider only over `https://` (plain `http://` only on `localhost`).
+  This also holds when the identity provider answers with a redirect:
+  the CLI follows it only to an `https://` address. The `issuer` in
+  its discovery document must be the realm address
+  MEHO gave, for example `https://<keycloak-host>/realms/<realm>`. If
+  `meho login` says the issuer is not the realm, set
+  `KEYCLOAK_ISSUER_URL` (or `config.keycloakIssuerUrl` in the chart)
+  to the exact `issuer` value of the realm.
 
 For realm-side login failures (`unauthorized_client`,
 `invalid_audience`, the `missing_sub` / `basic`-scope trap), the
@@ -189,11 +261,21 @@ and the deeper cross-wall walk is the
 
 ## Reading the raw token
 
-There is **no `meho ... --print-token` verb** — the CLI never prints
-the bearer token to stdout. When you genuinely need the raw JWT (to
-decode its claims, or to bake it into a shim — see
-[Other MCP clients](mcp-remote-shim.md)), force the file backend and
-read it from `credentials.json`:
+`meho status` never prints the bearer token. When you need the raw JWT
+(to decode its claims, or to give it to a shim — see
+[Other MCP clients](mcp-remote-shim.md)), log in with `--print-token`.
+The CLI then writes only the access token to standard output, and every
+other line to standard error:
+
+```bash
+TOKEN=$(meho login --print-token https://meho.example.com)
+```
+
+The value is a live bearer token. Never log it or paste it into a shared
+channel.
+
+To read the token of an existing login without a new login, force the
+file backend at login and read the token from `credentials.json`:
 
 ```bash
 MEHO_KEYRING_DISABLE=1 meho login https://meho.example.com

@@ -46,8 +46,8 @@ Behaviour:
 
   | Caller | Status code | Body |
   |---|---|---|
-  | Matching bearer token | 200 ready / 503 not ready | `status`, `checks`, `features` |
-  | No header, wrong token, or another scheme | 200 ready / 503 not ready | `status`, `checks` (no `features`) |
+  | Matching bearer token | 200 ready / 503 not ready | `status`, `checks`, `sandbox_mode`, `features` |
+  | No header, wrong token, or another scheme | 200 ready / 503 not ready | `status`, `checks`, `sandbox_mode` (no `features`) |
 
   The readiness verdict is not secret, and the kubelet already relies on it.
   The `features` block shows the deploy's feature and approval settings, so

@@ -43,6 +43,7 @@ from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import WebSession
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import DecryptedSession
 
 __all__ = [
@@ -196,7 +197,7 @@ async def fall_back_after_removal(
     )
     structlog.get_logger(__name__).info(
         "ui_session_tenant_removed",
-        session_id=str(decrypted.id),
+        session_ref=session_ref(decrypted.id),
         operator_sub=decrypted.operator_sub,
         old_tenant_id=str(decrypted.tenant_id),
         new_tenant_id=str(operator.tenant_id) if operator.tenant_chosen else None,

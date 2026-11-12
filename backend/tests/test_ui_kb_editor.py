@@ -39,6 +39,7 @@ import asyncio
 import uuid
 from collections.abc import Iterator
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -53,6 +54,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import Tenant
 from meho_backplane.kb.schemas import KbEntry
+from meho_backplane.kb.service import KbService
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import (
     SESSION_COOKIE_NAME,
@@ -78,6 +80,15 @@ from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests._kb_embedding_stub import fake_embedding_service
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
+
+from ._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -383,6 +394,46 @@ def test_editor_save_creates_entry_and_redirects() -> None:
     assert response.headers.get("HX-Redirect") == "/ui/kb/new-entry-slug"
 
 
+def test_editor_save_refuses_an_existing_slug_and_links_to_it() -> None:
+    """``POST /ui/kb/new`` for a slug that exists changes nothing and shows a link."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    existing = _seed_kb_entry(tenant_id=_TENANT_A, slug="taken-slug", body="# Original")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
+                new_callable=AsyncMock,
+                return_value=(None, _make_fake_admin_operator(_TENANT_A)),
+            ),
+            patch(
+                "meho_backplane.retrieval.indexer.get_embedding_service",
+                return_value=fake_embedding_service(),
+            ),
+        ):
+            response = client.post(
+                "/ui/kb/new",
+                data={"slug": "taken-slug", "body": "# Replacement", "tags": ""},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    assert "exists already" in response.text
+    assert "current revision 1" in response.text
+    assert 'href="/ui/kb/taken-slug"' in response.text
+
+    from meho_backplane.kb.service import KbService
+
+    kept = asyncio.run(KbService().get_entry(_TENANT_A, "taken-slug"))
+    assert kept is not None
+    assert kept.body == "# Original"
+    assert kept.revision_id == existing.revision_id
+
+
 def test_editor_save_operator_role_returns_403() -> None:
     """``POST /ui/kb/new`` with plain operator role returns 403."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -562,6 +613,66 @@ def test_detail_page_kb_body_class_present() -> None:
     assert 'class="prose prose-sm max-w-none kb-body"' in response.text
 
 
+def test_detail_page_shows_the_lesson_header_of_an_imported_note(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every lesson header field of a note from a directory import is on the page."""
+    monkeypatch.setenv("KB_INGEST_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    (tmp_path / "snap-lesson.md").write_text(
+        "---\n"
+        "type: lesson\n"
+        "applies_to: product-and-version\n"
+        "status: candidate\n"
+        "product: vcenter\n"
+        "version: 9.0\n"
+        "source: team wiki\n"
+        "author: ops team\n"
+        "summary: Snapshots block a clone.\n"
+        "learned_at: 2026-11-01\n"
+        "confirmed_at: 2026-11-02\n"
+        "expires_at: 2027-05-01\n"
+        "tags: [vm, snapshot]\n"
+        "---\n"
+        "Body.\n"
+    )
+    _seed_tenant(_TENANT_A, "tenant-a")
+
+    async def _import() -> None:
+        with patch(
+            "meho_backplane.retrieval.indexer.get_embedding_service",
+            return_value=fake_embedding_service(),
+        ):
+            result = await KbService().ingest_directory(tmp_path, _TENANT_A)
+        assert result.inserted_count == 1
+
+    asyncio.run(_import())
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/kb/snap-lesson")
+
+    assert response.status_code == 200, response.text
+    html = response.text
+    assert 'aria-label="Lesson header"' in html
+    for name, value in [
+        ("type", "lesson"),
+        ("applies_to", "product-and-version"),
+        ("status", "candidate"),
+        ("summary", "Snapshots block a clone."),
+        ("product", "vcenter"),
+        ("version", "9.0"),
+        ("source", "team wiki"),
+        ("author", "ops team"),
+        ("learned_at", "2026-11-01T00:00:00+00:00"),
+        ("confirmed_at", "2026-11-02T00:00:00+00:00"),
+        ("expires_at", "2027-05-01T00:00:00+00:00"),
+        ("tags", "vm, snapshot"),
+    ]:
+        assert f">{name}</dt>" in html
+        assert f">{value}</dd>" in html
+
+
 # ---------------------------------------------------------------------------
 # B1 — CSRF cookie refreshed on error re-render (fix verification)
 # ---------------------------------------------------------------------------
@@ -690,3 +801,140 @@ def test_editor_save_error_rerenders_modal_with_editor_anchor_and_csrf() -> None
     assert new_csrf_cookie in html, (
         "Fresh CSRF token must appear inside the re-rendered modal fragment"
     )
+
+
+_OLD_REVISION = uuid.UUID("00000000-0000-4000-8000-0000000000aa")
+_SHARED_REVISION = uuid.UUID("00000000-0000-4000-8000-0000000000bb")
+
+
+def _similar_check() -> object:
+    """A check with one entry the operator may change and one shared entry it may not."""
+    from meho_backplane.kb.similar import KbSimilarCheck, KbSimilarEntry
+
+    return KbSimilarCheck(
+        slug="new-entry-slug",
+        reason="similar_entries",
+        would_write=False,
+        slug_exists=False,
+        similar=[
+            KbSimilarEntry(
+                slug="old-entry",
+                entry_id=uuid.uuid4(),
+                revision_id=_OLD_REVISION,
+                summary="The old summary",
+                product="vcenter",
+                version="8.0",
+                status="candidate",
+                snippet="old text of the entry",
+                score=0.93,
+                match="same_product_version",
+                may_change=True,
+            ),
+            KbSimilarEntry(
+                slug="shared-entry",
+                entry_id=uuid.uuid4(),
+                revision_id=_SHARED_REVISION,
+                summary="The shared summary",
+                product=None,
+                version=None,
+                status=None,
+                snippet="shared text",
+                score=0.88,
+                match="close_meaning",
+                may_change=False,
+            ),
+        ],
+        min_score=0.85,
+        next_step="n",
+    )
+
+
+def test_editor_save_with_similar_entries_saves_nothing_and_shows_them() -> None:
+    """A new slug next to similar entries is not saved; the modal shows them in full."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    fake_create = AsyncMock()
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
+                new_callable=AsyncMock,
+                return_value=(None, _make_fake_admin_operator(_TENANT_A)),
+            ),
+            patch(
+                "meho_backplane.ui.routes.kb.routes.check_new_entry",
+                new_callable=AsyncMock,
+                return_value=_similar_check(),
+            ) as fake_check,
+            patch("meho_backplane.ui.routes.kb.routes.KbService.create_entry", fake_create),
+        ):
+            response = client.post(
+                "/ui/kb/new",
+                data={"slug": "new-entry-slug", "body": "# Hello", "tags": ""},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    html = response.text
+    assert "Similar entries exist" in html
+    assert 'name="create_anyway"' in html
+    # Every field of each entry, and whether the operator may change it.
+    assert "/ui/kb/old-entry" in html
+    assert "The old summary" in html
+    assert "vcenter" in html
+    assert "8.0" in html
+    assert "candidate" in html
+    assert str(_OLD_REVISION) in html
+    assert "old text of the entry" in html
+    assert "0.93" in html
+    assert "same product and version" in html
+    assert "You can update this entry" in html
+    assert "/ui/kb/shared-entry" in html
+    assert "The shared summary" in html
+    assert str(_SHARED_REVISION) in html
+    assert "shared text" in html
+    assert "0.88" in html
+    assert "you cannot change it" in html
+    fake_create.assert_not_awaited()
+    assert fake_check.await_args.kwargs["create_anyway"] is False
+
+
+def test_editor_save_create_anyway_is_passed_on() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    fake_entry = MagicMock(spec=KbEntry)
+    fake_entry.slug = "new-entry-slug"
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
+                new_callable=AsyncMock,
+                return_value=(None, _make_fake_admin_operator(_TENANT_A)),
+            ),
+            patch(
+                "meho_backplane.ui.routes.kb.routes.check_new_entry",
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as fake_check,
+            patch(
+                "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
+                new_callable=AsyncMock,
+                return_value=(fake_entry, True),
+            ),
+        ):
+            response = client.post(
+                "/ui/kb/new",
+                data={"slug": "new-entry-slug", "body": "# Hello", "create_anyway": "true"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 204, response.text
+    assert fake_check.await_args.kwargs["create_anyway"] is True

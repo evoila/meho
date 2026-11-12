@@ -66,6 +66,7 @@ from meho_backplane.checks.runner import (
     stop_sensor_runner,
 )
 from meho_backplane.checks.schemas import SensorCreate
+from meho_backplane.checks.sensor_edit import SensorUpdate, edit_sensor
 from meho_backplane.checks.service import (
     SensorAdminService,
     SensorIdentitySubForbiddenError,
@@ -682,6 +683,37 @@ async def test_dispatch_runs_as_synthetic_tenant_user_operator(
     assert operator.raw_jwt == ""
 
 
+@pytest.mark.asyncio
+async def test_stored_reveal_secret_param_is_dropped_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stored Sensor with ``reveal_secret`` in its params runs without it.
+
+    The create, edit and import checks refuse the flag. A row stored with it
+    still runs, and the runner sends the other params only, so the answer is
+    the default view with secret values hidden.
+    """
+    captured: dict[str, Any] = {}
+
+    async def _capturing_dispatch(*, params: dict[str, Any], **_kwargs: Any) -> OperationResult:
+        captured["params"] = params
+        return _ok_result({"count": 3})
+
+    monkeypatch.setattr("meho_backplane.checks.runner.dispatch", _capturing_dispatch)
+
+    sensor_id = await _create_interval_sensor(
+        interval_seconds=300, params={"reveal_secret": True, "limit": 5}
+    )
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    await run_one_sensor_tick()
+    await _drain_in_flight()
+
+    assert captured["params"] == {"limit": 5}
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "ok"
+
+
 def _service_create_payload(*, identity_sub: str) -> SensorCreate:
     """A minimal valid interval ``SensorCreate`` for the real create path."""
     return SensorCreate.model_validate(
@@ -1061,8 +1093,9 @@ async def test_overlap_guard_skips_second_dispatch_and_logs(
         await _wait_until(lambda: calls == 1)
 
         # Force it due again; the second tick must skip the still-in-flight
-        # sensor and log the overlap.
-        await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+        # sensor, log the overlap, and leave the row due for a later tick.
+        due_again = datetime.now(UTC) - timedelta(seconds=1)
+        await _force_due(sensor_id, due_again)
         with structlog.testing.capture_logs() as logs:
             dispatched = await run_one_sensor_tick()
 
@@ -1070,6 +1103,64 @@ async def test_overlap_guard_skips_second_dispatch_and_logs(
         assert calls == 1
         events = [entry.get("event") for entry in logs]
         assert "sensor_evaluation_overlap_skipped" in events
+        row = await _get_sensor(sensor_id)
+        assert _aware(row.next_fire_at) == due_again
+    finally:
+        gate.set()
+        await _drain_in_flight()
+
+
+@pytest.mark.asyncio
+async def test_edit_during_evaluation_runs_new_settings_on_next_free_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An edit while the old settings are still being checked is not lost.
+
+    The edit makes the sensor due at once. The next tick sees the running
+    evaluation and leaves the row due instead of advancing it; the first tick
+    after that evaluation ends runs the new settings. Without this, an hourly
+    sensor edited mid-check would wait a whole hour.
+    """
+    gate = asyncio.Event()
+    seen_params: list[dict[str, object]] = []
+
+    async def _blocked_dispatch(**kwargs: Any) -> OperationResult:
+        seen_params.append(dict(kwargs["params"]))
+        if len(seen_params) == 1:
+            await gate.wait()
+        return _ok_result({"count": 3})
+
+    monkeypatch.setattr("meho_backplane.checks.runner.dispatch", _blocked_dispatch)
+
+    sensor_id = await _create_interval_sensor(interval_seconds=3600)
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    try:
+        assert await run_one_sensor_tick() == 1
+        await _wait_until(lambda: len(seen_params) == 1)
+
+        edited_at = datetime.now(UTC).replace(microsecond=0)
+        result = await edit_sensor(
+            _TENANT, sensor_id, SensorUpdate(params={"limit": 5}), now=edited_at
+        )
+        assert result is not None
+        assert result.after == {"params": {"limit": 5}}
+
+        # The old check is still running: this tick must not advance the row.
+        assert await run_one_sensor_tick() == 0
+        assert len(seen_params) == 1
+        row = await _get_sensor(sensor_id)
+        assert _aware(row.next_fire_at) == edited_at
+
+        gate.set()
+        await _drain_in_flight()
+
+        # The first free tick runs the new settings and advances the cadence.
+        assert await run_one_sensor_tick() == 1
+        await _wait_until(lambda: len(seen_params) == 2)
+        assert seen_params[1] == {"limit": 5}
+        row = await _get_sensor(sensor_id)
+        assert _aware(row.next_fire_at) > edited_at + timedelta(minutes=59)
     finally:
         gate.set()
         await _drain_in_flight()

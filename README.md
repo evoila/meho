@@ -84,10 +84,14 @@ and results reduced to what an agent can use.
 The connectors for the VMware and Broadcom estate (vSphere, NSX, VCF
 Operations, VCF Automation, SDDC Manager, VCF Installer, Cloud Director,
 HCX, Site Recovery Manager, vSphere Replication, Orchestrator, Aria
-Automation Config and the VCF Identity Broker) are evoila's own. They
-ship as a commercial enterprise pack: an overlay image built on this
-public image, with the VMware connectors installed as packages. Contact
-evoila for the enterprise pack. The public image runs without it.
+Automation Config, VMware Holodeck and the VCF Identity Broker), the
+Fortinet connectors (FortiGate, FortiManager, FortiAnalyzer, FortiMail
+and FortiSIEM) and the CrowdStrike Falcon connector are evoila's own.
+They ship as a commercial enterprise pack: an overlay image built on
+this public image, with these connectors installed as packages. The
+full list is in the
+[connector inventory](docs-site/reference/connectors.md#evoilas-enterprise-pack).
+Contact evoila for the enterprise pack. The public image runs without it.
 
 Anyone can add a connector the same way: write a connector package
 against the connector kit and install it into your own build of MEHO
@@ -138,8 +142,9 @@ device-code flow) — the agent never sees a backend credential.
 > what's interesting on the MEHO backplane right now?
 
 The session calls the `search_memory` tool over MCP. MEHO authorises the
-call against your role, executes it under a just-in-time credential, and
-reduces the result before the agent ever sees it.
+call against your role, runs it, and reduces the result before the agent
+ever sees it. A call that reaches a backend system, through
+`call_operation`, runs under a just-in-time credential.
 
 **3. The operation leaves an audit trail.** Every `tools/call` lands one
 immutable audit row, attributed to *your* Keycloak `sub` — and emits a
@@ -147,7 +152,7 @@ broadcast event other watchers can see:
 
 ```bash
 meho audit query --op-id search_memory --limit 1 --json \
-  | jq '.rows[0] | {principal_sub, op_id, occurred_at}'
+  | jq '.rows[0] | {principal_sub, op_id, ts}'
 # -> {"principal_sub": "<your-keycloak-sub>", "op_id": "search_memory", ...}
 ```
 
@@ -177,7 +182,7 @@ flowchart LR
     MEHO -->|"governed operation"| I
 ```
 
-MEHO ships as three operator-facing artefacts:
+MEHO ships as five operator-facing artefacts:
 
 - **Backplane** — Python / FastAPI service that brokers MCP operations
   against infrastructure. Receives short-lived Keycloak-issued OIDC
@@ -188,23 +193,31 @@ MEHO ships as three operator-facing artefacts:
   [`docs/codebase/backend.md`](./docs/codebase/backend.md).
 - **Helm chart** — `meho-chart` published as an OCI artefact at
   `ghcr.io/evoila/meho-chart`. Renders the Deployment, Service, Ingress,
-  NetworkPolicy, pre-install migration Job, the bundled Valkey broadcast
-  subchart, and the typed `values.schema.json` contract that rejects
+  NetworkPolicy, pre-install migration Job, the bundled subcharts
+  (PostgreSQL, Keycloak, OpenBao, the Valkey broadcast store and an
+  optional Valkey result cache), and the typed `values.schema.json` contract that rejects
   misconfigured installs at `helm install` / `helm upgrade` /
   `helm template`. Chart walkthrough:
   [`docs/codebase/devops.md`](./docs/codebase/devops.md).
-- **Operator CLI** — `meho` Go binary (cobra) with ~40 command groups
-  spanning auth (`login`, `status`, `version`), the operation surface
+- **Operator CLI** — `meho` Go binary (cobra) with about 50 top-level
+  commands spanning auth (`login`, `status`, `version`), the operation surface
   (`operation`, `connector`, `targets`, `audit`, `broadcast`,
-  `retrieval`, `kb`, `runbook`, `memory`), agents + scheduling (`agent`,
+  `retrieval`, `kb`, `runbook`, and `remember` / `recall` for memory),
+  checks (`sensor`, `dashboard`), agents + scheduling (`agent`,
   `agent-principal`, `approvals`, `scheduler`), per-vendor connector
   aliases (`k8s`, `vault`, `harbor`, `keycloak`, `argocd`, `gcloud`,
   `bind9`, `pfsense`, and more; the `vmware` and `nsx` aliases need the
   enterprise pack on the server), and admin/migration
-  tooling (`admin`, `migrate`). Released as multi-platform tarballs
-  (`linux/macOS × amd64/arm64`) on every `v*` tag, each individually
+  tooling (`admin`, `migrate`). Released as multi-platform archives
+  (`linux/macOS/Windows × amd64/arm64`) on every `v*` tag, each individually
   cosign-signed. Full command reference:
   [`docs/codebase/cli.md`](./docs/codebase/cli.md).
+- **Claude Desktop bundle** — `meho-claude-desktop-X.Y.Z.mcpb`, attached
+  to every release. It connects Claude Desktop to MEHO. Setup:
+  [`docs-site/clients/claude-desktop.md`](./docs-site/clients/claude-desktop.md).
+- **Linux server download** — `meho-linux-X.Y.Z-amd64.tar`, attached to
+  every release. It installs MEHO on a plain Linux server. This install
+  is available, in testing.
 
 The agent runtime (Claude Code, Cursor, …) lives outside the deploy
 contract — operators bring their own MCP client.
@@ -229,8 +242,9 @@ contract — operators bring their own MCP client.
   model. Bring your own MCP client.
 - You only need read-only chat over infrastructure with no write path,
   no per-action authorisation, and no audit requirement.
-- You're looking for a hosted SaaS — MEHO is self-hosted (you run the
-  backplane, Postgres, Keycloak, and Vault).
+- You're looking for a hosted SaaS — MEHO is self-hosted (you run
+  it in your own network; the chart brings PostgreSQL, Keycloak and
+  OpenBao, or connects to yours).
 
 ## Deploy
 
@@ -257,8 +271,8 @@ kind create cluster --name meho-dev
 #    Keycloak is deployed and no real auth flow runs. Federation probes
 #    register but `meho login` will not work end-to-end.
 #    For real federation (working Vault token-exchange + Keycloak OIDC
-#    flow), use the existing-k8s path below instead — you provision Vault
-#    and Keycloak yourself.
+#    flow), use the existing-Kubernetes path below instead — there the
+#    chart brings its own Keycloak and OpenBao.
 #    See deploy/values-examples/values-kind.yaml for the Postgres manifest.
 
 # 3. Install the chart from its OCI artefact.
@@ -285,15 +299,17 @@ step 2, and supplies *placeholder* Vault + Keycloak URIs (no in-cluster
 mock for those — the chart's URI-validated fields just need to resolve
 at install time). Operator identity is **faked**; the federation probes
 register but `meho login` will not complete. For real federation, use
-the existing-k8s path below.
+the existing-Kubernetes path below.
 
-### Existing k8s (~5 min, requires Vault + Keycloak + Postgres)
+### Existing Kubernetes (built-in PostgreSQL, Keycloak and OpenBao by default)
 
-The supported deploy shape: a Kubernetes cluster running an
-ingress-nginx controller, a HashiCorp Vault with the `meho-mcp` OIDC
-role bound to your Keycloak issuer, a Keycloak realm + client fronting
-the backplane, and a PostgreSQL database reachable from the cluster.
-This is the shape the RDC Hetzner dogfooding lab runs.
+The supported deploy shape today: a Kubernetes cluster (1.28 or newer)
+with an ingress controller. Since v0.45.0 the chart brings its own
+PostgreSQL, Keycloak and OpenBao and connects MEHO to them. To use your
+own, set `corePostgres.enabled`, `coreKeycloak.enabled` or
+`coreVault.enabled` to `false` and fill the matching values. A Linux
+server install is available, in testing. The VMware appliance is in
+progress, not released.
 
 ```bash
 helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
@@ -302,12 +318,15 @@ helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
   -f your-values.yaml
 ```
 
-See [`deploy/values-examples/values-rdc-example.yaml`](./deploy/values-examples/values-rdc-example.yaml)
+With the built-in parts, `your-values.yaml` needs only the values listed
+under [Helm chart values reference](#helm-chart-values-reference).
+To bring your own parts, see
+[`deploy/values-examples/values-example-lab.yaml`](./deploy/values-examples/values-example-lab.yaml)
 for the shape `your-values.yaml` should follow and
 [`deploy/values-examples/README.md`](./deploy/values-examples/README.md)
 for the **External Secrets Operator (ESO) sync patterns** the chart
-expects. Required: Vault address + role, Keycloak issuer + audience,
-Postgres credentials Secret (synced from Vault by ESO).
+expects. Then you also need: Vault address + role, Keycloak issuer +
+audience, Postgres credentials Secret (synced from Vault by ESO).
 
 ### Verify image + chart + CLI signatures
 
@@ -355,7 +374,7 @@ docker pull ghcr.io/evoila/meho:sha-<40-char-git-sha>
 docker pull ghcr.io/evoila/meho:main
 
 # Tagged release:
-docker pull ghcr.io/evoila/meho:v0.9.0
+docker pull ghcr.io/evoila/meho:v<x.y.z>
 ```
 
 **No `:latest` tag is ever published.** `:main` is a moving alias for
@@ -375,11 +394,15 @@ Schema draft-07) rejects empty required values at `helm install` /
 `helm upgrade` / `helm template` time with a clear path. Unknown keys at
 any level fail with `additional properties '<name>' not allowed`.
 
-Install with the command shown under [Existing k8s](#existing-k8s-5-min-requires-vault--keycloak--postgres)
-above. **Required values** (must be set or the schema rejects the
-install): `image.tag`, `ingress.host`, `postgres.credentialsSecret`,
-`vault.address`, `keycloak.issuer`, the three `config.*` mirrors, and the
-three `networkPolicy.*CIDR` egress CIDRs — see the full
+Install with the command shown under [Existing Kubernetes](#existing-kubernetes-built-in-postgresql-keycloak-and-openbao-by-default)
+above. **Required values** (must be set or the install stops):
+`image.tag`, `ingress.host`, `coreKeycloak.hostname` and
+`coreKeycloak.firstTenantId` with the built-in parts. With your own
+parts, set instead `postgres.credentialsSecret`, `vault.address`,
+`keycloak.issuer`, the three `config.*` mirrors, and the three
+`networkPolicy.*CIDR` egress CIDRs (plus `image.tag`, `ingress.host`
+and, while TLS is on, `ingress.tls.secretName`, the Secret that holds
+the TLS certificate) — see the full
 [operator-required and common-override tables](./docs/codebase/devops.md#full-values-reference)
 in [`docs/codebase/devops.md`](./docs/codebase/devops.md), which also
 covers the chart contract, probe semantics, NetworkPolicy posture,
@@ -425,13 +448,11 @@ Read [Write a connector package](https://evoila.github.io/meho/latest/extend/con
 ## FAQ
 
 **Do I need Vault + Keycloak to try it?**
-Not to *look around*. The [local kind loop](#local-kind-5-min) runs the
-backplane against a Postgres mock with placeholder Vault + Keycloak URIs —
-enough to iterate on chart plumbing, the startup contract, and the CLI.
-But the federated-credential and OIDC-login features are MEHO's reason to
-exist, so any *real* use (working `meho login`, just-in-time backend
-credentials) needs a real Keycloak realm and a Vault with the `meho-mcp`
-OIDC role — the [existing-k8s path](#existing-k8s-5-min-requires-vault--keycloak--postgres).
+No. The chart brings its own Keycloak and OpenBao (an open-source fork
+of Vault). The [local kind loop](#local-kind-5-min) turns them off to
+stay small; for a working `meho login`, use the
+[existing-Kubernetes path](#existing-kubernetes-built-in-postgresql-keycloak-and-openbao-by-default)
+with the built-in parts.
 
 **Is the agent runtime included?**
 No — bring your own. MEHO governs what an agent is allowed to do; it does
@@ -445,13 +466,15 @@ vendors. See [How MEHO compares](#how-meho-compares).
 
 **Where are the VMware connectors?**
 In evoila's enterprise pack: an overlay image built on the public image
-with the VMware connectors installed as packages. The public repository
+with the VMware, Fortinet and CrowdStrike connectors installed as
+packages. The public repository
 ships the backplane and the connectors for common products. See
 [Why MEHO](#why-meho).
 
 **Is there a hosted SaaS?**
-No — MEHO is self-hosted. You run the backplane, Postgres, Keycloak, and
-Vault, and your audit trail stays in systems you control.
+No — MEHO is self-hosted. You run it in your own network; the chart
+brings PostgreSQL, Keycloak and OpenBao, or connects to yours. Your
+audit trail stays in systems you control.
 
 ## Community
 
@@ -465,9 +488,8 @@ governed by the [Code of Conduct](./CODE_OF_CONDUCT.md).
 
 See [`CONTRIBUTING.md`](./CONTRIBUTING.md). Contributions require a
 Developer Certificate of Origin sign-off (`git commit -s`) — there is
-no CLA. Public-from-day-1: every line of MEHO ships on `evoila/meho`
-from commit #1; operator-sensitive coordination lives in
-`evoila-bosnia/meho-internal` (issues + ADRs only, no code).
+no CLA. Public from day 1: all MEHO code ships on `evoila/meho`, from
+the first commit on.
 
 ## Security
 
@@ -498,8 +520,5 @@ for the sign-off discipline.
 
 ## History
 
-This repository was bootstrapped on 2026-05-09 as a strategic reset.
-The prior MEHO codebase lives at `evoila-bosnia/MEHO.X`, deprecated
-and retained for reference.
-</content>
-</invoke>
+This repository was started on 2026-05-09 as a fresh start. The
+earlier MEHO codebase is deprecated and kept for reference only.

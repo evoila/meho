@@ -33,6 +33,13 @@ _RELEASE = "rel"
 _TENANT = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
 
 _BASE_OVERRIDES = [
+    # Bring-your-own unless a test turns a built-in part on (#4047).
+    "--set",
+    "corePostgres.enabled=false",
+    "--set",
+    "coreKeycloak.enabled=false",
+    "--set",
+    "coreVault.enabled=false",
     "--set",
     "image.tag=test",
     "--set",
@@ -62,6 +69,8 @@ _CORE_ON = [
     "config.keycloakIssuerUrl=",
     "--set",
     "corePostgres.enabled=true",
+    "--set",
+    "postgres.credentialsSecret=",
     "--set",
     "coreKeycloak.enabled=true",
     "--set",
@@ -113,7 +122,10 @@ def _env(job: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def test_core_keycloak_off_renders_no_bootstrap_job() -> None:
     assert _job(_render()) is None
-    assert _job(_render("--set", "corePostgres.enabled=true")) is None
+    assert (
+        _job(_render("--set", "corePostgres.enabled=true", "--set", "postgres.credentialsSecret="))
+        is None
+    )
 
 
 def test_bootstrap_job_is_a_post_install_hook_under_the_hook_account() -> None:
@@ -319,6 +331,27 @@ def test_notes_name_the_first_login_secret_and_the_command_but_no_value() -> Non
     assert "MEHO-Admins" in block
     assert "MEHO-SA-Operators" in block
     assert "{{- if .Values.coreKeycloak.enabled }}" in notes[: notes.index("First login")]
+
+
+_SECRET_KEY_RE = re.compile(r"\.data\.(?!(?:admin_|approver_)?username\})")
+_CLIPBOARD_TOOLS = ("pbcopy", "xclip -selection clipboard", "wl-copy")
+
+
+def test_notes_send_secret_values_to_the_clipboard_not_the_screen() -> None:
+    notes = (_CHART_DIR / "templates" / "NOTES.txt").read_text(encoding="utf-8")
+    secret_lines = [
+        line.strip()
+        for line in notes.splitlines()
+        if "base64 -d" in line and _SECRET_KEY_RE.search(line)
+    ]
+    assert len(secret_lines) >= 7
+    for line in secret_lines:
+        assert line.endswith(_CLIPBOARD_TOOLS), line
+    for tool in _CLIPBOARD_TOOLS:
+        assert any(line.endswith(tool) for line in secret_lines)
+    assert "{.data.admin_password}" in notes
+    assert "{.data.key}" in notes
+    assert "without the last pipe" in notes
 
 
 def test_notes_name_the_console_admin_secret_and_console() -> None:

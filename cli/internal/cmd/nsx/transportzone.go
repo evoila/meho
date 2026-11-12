@@ -41,8 +41,8 @@ func newTransportZoneListCmd() *cobra.Command {
 			"Renders id / display_name / tz_type for human eyes; --json emits\n" +
 			"the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho nsx transport-zone list --target rdc-nsx\n" +
-			"  meho nsx transport-zone list --target rdc-nsx --json",
+		Example: "  meho nsx transport-zone list --target nsx-lab\n" +
+			"  meho nsx transport-zone list --target nsx-lab --json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

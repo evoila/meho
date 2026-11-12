@@ -72,7 +72,7 @@ The Secrets:
 | --- | --- | --- |
 | `<release>-core-vault-unseal` | `key` | stays; delete it for "keyholder at boot" (#4046) |
 | `<release>-core-vault-init` | `token` (the root token) | only while the first run runs; deleted at the end |
-| `<release>-core-vault-scheduler` | `token` | stays; the backplane renews it (wiring: #4047) |
+| `<release>-core-vault-scheduler` | `token` | stays; the backplane reads it as a file (`VAULT_SCHEDULER_TOKEN_FILE`, #4047). The scheduler renews it every hour and after each successful read or write; if it has expired anyway, a later run of this Job makes a new one |
 | `<release>-core-vault-snapshot` | `token` | stays; the backup job renews it (#3960) |
 
 ## Control flow
@@ -189,9 +189,6 @@ API). With the subcharts' NetworkPolicies on:
 
 ## Known issues and limits
 
-- **The backplane is not pointed at the built-in OpenBao yet.** That is
-  #4047 (with `coreVault` on by default). Until then, set `vault.address`
-  and the other `vault.*` values by hand to use it.
 - **The check runner cannot log in.** Its token has only the
   `meho-check-runner` audience and no tenant claims, so `meho-mcp` refuses
   it. Its own role belongs to the task that turns the runner on (#4766).
@@ -202,10 +199,8 @@ API). With the subcharts' NetworkPolicies on:
   server nobody can unseal. The window is two API calls. Fix: delete the
   OpenBao data disk (PVC `data-<release>-vault-0`) and the pod, then run
   the Job again.
-- **Helm runs the Job only once per setup.** The install still needs two
-  Helm runs today (the first with `--no-hooks`, #4047). If the second run
-  comes after the Job gave up waiting for Keycloak (4 tries of 10 minutes),
-  run the Job again (above).
+- **Helm runs the Job only once per setup.** If the Job gave up waiting
+  for Keycloak (4 tries of 10 minutes), run the Job again (above).
 - **Vault image (`coreVault.binary: vault`, tests only):** the Job does not
   turn on an audit device for it.
 

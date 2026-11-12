@@ -224,7 +224,11 @@ document.addEventListener("alpine:init", () => {
     // docstring. The broadcast event_id rides along as a query param for
     // display only. ``htmx.ajax`` issues the GET and swaps the response
     // into ``#event-drawer`` (outerHTML) so the returned fragment's own
-    // ``id="event-drawer"`` replaces the slot.
+    // ``id="event-drawer"`` replaces the slot. Below the ``lg`` width the
+    // drawer sits under the feed, out of sight on a phone, so once it is
+    // swapped in it is scrolled into view (#6000). ``settle:0ms``: htmx
+    // keeps the old element's classes (the slot is ``hidden`` on a phone)
+    // until the settle step, and a hidden element cannot be scrolled to.
     openDrawer(ev) {
       if (!ev || !ev.audit_id) {
         return;
@@ -238,10 +242,17 @@ document.addEventListener("alpine:init", () => {
         "/ui/broadcast/event/" +
         encodeURIComponent(ev.audit_id) +
         (qs ? "?" + qs : "");
-      window.htmx.ajax("GET", url, {
-        target: "#event-drawer",
-        swap: "outerHTML",
-      });
+      window.htmx
+        .ajax("GET", url, {
+          target: "#event-drawer",
+          swap: "outerHTML settle:0ms",
+        })
+        .then(() => {
+          const drawer = document.getElementById("event-drawer");
+          if (drawer && !window.matchMedia("(min-width: 64rem)").matches) {
+            drawer.scrollIntoView({ block: "start" });
+          }
+        });
     },
 
     // DaisyUI badge variant for an op_class; unknown classes fall back

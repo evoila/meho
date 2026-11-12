@@ -59,6 +59,12 @@ operator-context Vault KV-v2 read through the shared
 `load_basic_credentials` helper), caches it per tenant-unique
 `(tenant_id, id)` key, and sends `Authorization: Basic <base64>`. The
 connector locks to `auth_model = shared_service_account` (or `None`).
+A cached pair goes only to a caller whose own Vault read of the target's
+secret passed once in this process (`SecretReaders`, see
+[connectors-shared-secret-readers.md](connectors-shared-secret-readers.md)).
+When the broker refuses the login, the dispatcher calls
+`invalidate_credentials`, which drops the cached pair and its readers, so
+the next call reads Vault again with no restart.
 
 ### Read-only method gate
 
@@ -70,7 +76,8 @@ just by op registration.
 
 ### Ops
 
-16 ops across five functional groups, each carrying the RabbitMQ **user
+16 ops across six groups (five functional groups plus the raw
+passthrough), each carrying the RabbitMQ **user
 tag** its surface requires — the second load-bearing nuance beside
 redaction (the tag documents the broker permission the credential needs):
 

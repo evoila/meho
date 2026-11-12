@@ -82,7 +82,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "agent",
-		Short: "Manage agent definitions (list / show / create / edit / delete)",
+		Short: "Manage agent definitions, runs and grants (list / show / create / edit / delete / run / grant)",
 		Long: "Manage tenant-scoped agent definitions wired by G11.1. " +
 			"An agent definition holds the identity reference, logical " +
 			"model tier, system prompt, toolset spec, turn budget, and " +
@@ -111,6 +111,7 @@ func NewRootCmd() *cobra.Command {
 	// G11.2-T6 (#819): permission grant management sub-tree — grant list /
 	// show / create / elevate / revoke. All verbs require tenant_admin.
 	cmd.AddCommand(NewGrantRootCmd())
+	cmd.AddCommand(NewBudgetRootCmd())
 	return cmd
 }
 

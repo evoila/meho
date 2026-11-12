@@ -19,10 +19,11 @@ records the launcher's contract and invariants.
 
 | File | Role |
 |---|---|
-| `manifest.json` | MCPB 0.3 manifest. `mcp_config` runs `node server/index.mjs <backplane_url> <ca_cert>`; env carries `MEHO_MCP_CLIENT_ID`, `MEHO_MCP_SCOPES`, `MEHO_TENANT` (the optional `tenant` setting, #5242), and `NODE_EXTRA_CA_CERTS` (older-Node CA fallback). |
+| `manifest.json` | MCPB 0.3 manifest. `mcp_config` runs `node server/index.mjs <backplane_url> <ca_cert>`; env carries `MEHO_MCP_CLIENT_ID` (the optional `client_id` setting, no default since #6210), `MEHO_MCP_SCOPES`, `MEHO_TENANT` (the optional `tenant` setting, #5242), and `NODE_EXTRA_CA_CERTS` (older-Node CA fallback). |
 | `server/index.mjs` | The launcher. Validates argv, injects the internal CA, rewrites `process.argv`, imports the login guard, which takes the sign-in lock and imports the vendored `mcp-remote` entry in-process. |
 | `../claude-code-plugin/lib/login-guard.mjs` | The login guard (#4003), shared with the Claude Code plugin. Not in this folder: `build.sh` copies every `lib/*.mjs` file into `server/` in the staged bundle. |
 | `../claude-code-plugin/lib/signin-lock.mjs` | One sign-in at a time (#3857, #5514). A per-endpoint lock file, so two copies (of the bundle or of the plugin) do not both run the browser login. The guard uses the same code, with another file name, for the renewal lock. |
+| `../claude-code-plugin/lib/tool-client.mjs` | The login client of the tool (#6210). Reads `mcp_clients` from `GET /api/v1/auth-config` and picks the client and the `Meho-Tool` header. Shared with the Claude Code plugin, which runs it as a script. |
 | `../claude-code-plugin/lib/token-renewal.mjs` | The renewal rules (#5514): the shared login file is never deleted, one renewal at a time, a network or server error is tried again, a refused renewal first looks for a newer saved login. |
 | `package.json` / `package-lock.json` | Pin `mcp-remote@0.1.39` and its tree; `build.sh` vendors it with `npm ci --omit=dev`. |
 | `test/index.test.mjs` | `node --test` suite: runs the launcher against a stub `mcp-remote` that reports the argv, env, pid/ppid, and default-CA fingerprints it sees at import time. |
@@ -48,9 +49,9 @@ records the launcher's contract and invariants.
    path in the message. On an older Node it cannot inject; it relies on
    `NODE_EXTRA_CA_CERTS` having been read at boot and warns when that
    variable is absent.
-3. **Env seams.** `MEHO_MCP_CLIENT_ID` (default `meho-mcp`) and
+3. **Env seams.** `MEHO_MCP_CLIENT_ID` and
    `MEHO_MCP_SCOPES` (default `mcp:read mcp:execute offline_access`) are
-   read, defaulted when empty, and deleted from `process.env`.
+   read and deleted from `process.env`.
    `offline_access` gets an offline refresh token, so the login outlasts the
    realm's SSO idle limit (30 minutes by default).
    `MEHO_TENANT` (#5242) is read, trimmed, and deleted from `process.env`.
@@ -61,11 +62,28 @@ records the launcher's contract and invariants.
    (`auth/current_tenant.py`, `TENANT_HEADER`). `mcp-remote` puts custom
    headers into the key of its saved login, so each tenant value has its
    own saved login.
+   **Login client (#6210, `tool-client.mjs`).** A `MEHO_MCP_CLIENT_ID`
+   value wins; empty, whitespace, an unsubstituted
+   `${user_config.client_id}` placeholder and `meho-mcp` (the field's
+   default in older bundles, which an install may still hold) count as not
+   set. Not set: the launcher reads `GET <backplane>/api/v1/auth-config`
+   (5-second limit). When `mcp_clients["claude-desktop"]` names a client
+   (switch `MCP_CLIENT_PER_TOOL_KIND`), the launcher uses it and adds
+   `--header "Meho-Tool: claude-desktop"`. The header, not the client id,
+   gives Claude Desktop a saved login apart from Claude Code: the saved
+   login key of `mcp-remote` is the URL plus the headers. Otherwise (switch
+   off, older MEHO, an error, no answer) the client is `meho-mcp` and no
+   header is sent; the launcher prints one line on an error.
+   The backplane lists a client only after it found it in Keycloak with
+   the admin client (`auth/tool_clients.py`, answer kept one minute); a
+   missing client, or a check that could not run, is not listed, and
+   `/ready` shows the result as `features.mcp.tool_clients`.
 4. **mcp-remote entry.** Resolved from the bundle's `node_modules` via the
    package's `bin` mapping.
 5. **Hand-off.** `process.argv` becomes
    `[node, server/login-guard.mjs, entry, url, --static-oauth-client-info, {"client_id"}, --static-oauth-client-metadata, {"scope"}]`,
-   plus `--header, "Meho-Tenant: <tenant>"` when a tenant is set,
+   plus `--header, "Meho-Tenant: <tenant>"` when a tenant is set and
+   `--header, "Meho-Tool: claude-desktop"` when MEHO lists a client for it,
    the launcher sets `MEHO_LOGIN_GUARD_PREFIX` / `MEHO_LOGIN_GUARD_RECONNECT`
    (the bundle's log prefix and the "turn the extension off and on" hint),
    and imports the guard. The guard reads and deletes those two variables,

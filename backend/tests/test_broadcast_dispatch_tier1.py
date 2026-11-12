@@ -96,6 +96,12 @@ def test_scrub_tier1_pass_redacts_labelled_string_shapes() -> None:
         ("pre_shared_key", True),
         ("preSharedKey", True),
         ("presharedKey", True),
+        # a database or service URL with its password in it
+        ("connectionString", True),
+        ("connection_string", True),
+        ("primaryConnectionString", True),
+        ("connection_strings", True),
+        ("ConnectionStrings", True),
         # attribute / reference names — not the secret itself
         ("token_policies", False),
         ("token_ttl", False),
@@ -109,6 +115,9 @@ def test_scrub_tier1_pass_redacts_labelled_string_shapes() -> None:
         ("secret_key_ref", False),
         ("secretKeyRef", False),
         ("shared_key_name", False),
+        ("connectionTimeout", False),
+        ("connection_string_ref", False),
+        ("connectionStringSecretName", False),
         ("", False),
     ],
 )

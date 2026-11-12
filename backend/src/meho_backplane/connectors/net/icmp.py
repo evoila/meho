@@ -48,13 +48,12 @@ returns its structured ``available=false`` / ``completed=false`` result
 rather than raising.
 
 ``safety_level="safe"`` + ``requires_approval=False`` (same posture as
-the rest of the cohort): read-only path probes, so the probe allowlist
-is the sole floor.
+the rest of the cohort): read-only path probes; the allow-list limits
+where checks can connect.
 """
 
 from __future__ import annotations
 
-import asyncio
 import errno
 import os
 import select
@@ -64,6 +63,7 @@ import time
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.net.allowlist import assert_probe_allowed
+from meho_backplane.connectors.net.probe_pool import run_blocking_probe
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
@@ -488,7 +488,9 @@ async def net_ping(operator: Operator, target: Any, params: dict[str, Any]) -> d
 
     assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
-    return await asyncio.to_thread(_blocking_ping, host, count, timeout)
+    return await run_blocking_probe(
+        _blocking_ping, host, count, timeout, tenant_id=operator.tenant_id, timeout=timeout
+    )
 
 
 async def net_trace(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -510,7 +512,15 @@ async def net_trace(operator: Operator, target: Any, params: dict[str, Any]) -> 
 
     assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
-    return await asyncio.to_thread(_blocking_trace, host, port, max_hops, hop_timeout)
+    return await run_blocking_probe(
+        _blocking_trace,
+        host,
+        port,
+        max_hops,
+        hop_timeout,
+        tenant_id=operator.tenant_id,
+        timeout=hop_timeout,
+    )
 
 
 async def net_path_mtu(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -528,7 +538,9 @@ async def net_path_mtu(operator: Operator, target: Any, params: dict[str, Any]) 
 
     assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
-    return await asyncio.to_thread(_blocking_path_mtu, host, port, timeout)
+    return await run_blocking_probe(
+        _blocking_path_mtu, host, port, timeout, tenant_id=operator.tenant_id, timeout=timeout
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -761,7 +773,7 @@ async def register_net_icmp_operations(
     shared synthetic natural key
     (``product="net", version="1.x", impl_id="net-probe"``) so they carry
     the ``net-probe-1.x`` wire ``connector_id``. Idempotent. ``safe`` +
-    ``requires_approval=False`` — the probe allowlist is the only floor.
+    ``requires_approval=False`` — the allow-list limits where checks can connect.
     """
     await register_typed_operation(
         product="net",

@@ -64,7 +64,7 @@ from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations import typed_register as tr_module
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import PreviewContext
-from meho_backplane.operations.approval_object_check import REASON_APPEARED
+from meho_backplane.operations.approval_object_check import REASON_APPEARED, REASON_CHANGED
 from meho_backplane.operations.approval_queue import (
     SelfApprovalForbiddenError,
     approve_request,
@@ -1053,6 +1053,37 @@ async def test_approved_delete_of_an_absent_record_is_refused_when_it_appears(
     assert resume.status == "denied", resume
     assert resume.extras["error_code"] == "object_changed_since_approval"
     assert resume.extras["reason"] == REASON_APPEARED
+    assert recorder.sudo_calls == [], "nothing may be staged"
+
+
+async def test_approved_delete_is_refused_when_the_value_changed() -> None:
+    """Approved for value X; the live value under the name is Y: nothing is deleted."""
+    recorder = _RecordingBind9Connector()
+    await _bootstrap(recorder)
+    await _seed_target()
+
+    requester = _make_operator(sub="op-requester")
+    args = _args(params={"fqdn": "web.example.test", "type": "A"})
+    preview = await preview_operation(requester, args)
+    assert preview["status"] == "ok", preview
+    call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "awaiting_approval", call
+    request_id = UUID(call["extras"]["approval_request_id"])
+
+    # While the request waited, the value under the name was changed.
+    recorder._zonefile = _ZONEFILE.replace("web IN A 192.0.2.20", "web IN A 192.0.2.21")
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+    assert resume.status == "denied", resume
+    assert resume.extras["error_code"] == "object_changed_since_approval"
+    assert resume.extras["reason"] == REASON_CHANGED
     assert recorder.sudo_calls == [], "nothing may be staged"
 
 

@@ -84,6 +84,7 @@ from meho_backplane.connectors.harbor._paths import (
     encode_segment,
     fill_path,
 )
+from meho_backplane.connectors.harbor.robot_scope import check_robot_in_project
 from meho_backplane.connectors.harbor.session import (
     HarborCredentialsLoader,
     HarborTargetLike,
@@ -217,6 +218,8 @@ class HarborConnector(HttpConnector):
     impl_id = "harbor-rest"
     supported_version_range = ">=2.0,<3.0"
     priority = 1
+    # This class serves the operations of its ingested catalog.
+    accepts_ingested_operations = True
 
     def __init__(
         self,
@@ -557,6 +560,14 @@ class HarborConnector(HttpConnector):
         Op-id: ``harbor.robot.delete``. Classified ``write`` (suffix-based).
         No secret material in the response.
 
+        Before the delete, the handler reads the robot
+        (``GET /api/v2.0/robots/{robot_id}``) and deletes it only when it is
+        a project-level robot of ``params["project"]``
+        (:func:`~meho_backplane.connectors.harbor.robot_scope.check_robot_in_project`).
+        Any other robot raises
+        :class:`~meho_backplane.connectors.harbor.robot_scope.RobotOutsideProjectError`
+        and no ``DELETE`` is sent.
+
         Uses the pooled httpx client directly (non-retried DELETE —
         ``HttpConnector._IDEMPOTENT_METHODS`` is ``{GET, HEAD, OPTIONS}``
         and ``_request_json`` rejects non-idempotent verbs; no
@@ -592,11 +603,16 @@ class HarborConnector(HttpConnector):
         ------
         httpx.HTTPStatusError
             On any 4xx/5xx from Harbor (e.g. 404 if the robot ID does
-            not exist in the named project).
+            not exist).
+        RobotOutsideProjectError
+            When the robot is not a project robot of the named project.
         """
         robot_id = int(params["id"])
+        project = str(params["project"])
 
         path = fill_path(_ROBOT_PATH, {"robot_id": str(robot_id)})
+        robot = await self._get_json(target, path, operator=operator)
+        check_robot_in_project(robot, robot_id=robot_id, project=project)
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
         resp = await client.request("DELETE", path, headers=headers)

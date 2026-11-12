@@ -347,6 +347,43 @@ async def test_next_confirm_no_transitions_to_failed(
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
 @pytest.mark.asyncio
+async def test_next_retry_runs_a_failed_step_again(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """``retry=true`` on the next tool runs a failed step again; without it the step refuses."""
+    client, op = client_with_operator
+    await _seed_published_template(tenant_id=op.tenant_id, operator_sub=op.sub, slug="r1")
+    started = _result_payload(
+        _call(client, "meho_runbook_start", {"template_slug": "r1", "target": "host-1"})
+    )
+    args = {"run_id": started["run_id"], "last_verified": True}
+    failed = _call(
+        client,
+        "meho_runbook_next",
+        {**args, "verify_response": {"type": "confirm", "answer": "no"}},
+    )
+    assert failed["error"]["code"] == INVALID_PARAMS
+
+    refused = _call(
+        client,
+        "meho_runbook_next",
+        {**args, "verify_response": {"type": "confirm", "answer": "yes"}},
+    )
+    assert refused["error"]["code"] == INVALID_PARAMS
+
+    retried = _result_payload(
+        _call(
+            client,
+            "meho_runbook_next",
+            {**args, "verify_response": {"type": "confirm", "answer": "yes"}, "retry": True},
+        )
+    )
+    assert retried["kind"] != "failed"
+    assert retried["run_id"] == started["run_id"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
 async def test_next_completes_at_last_step(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:

@@ -11,6 +11,40 @@
       "minimum": 1,
       "description": "Number of backplane replicas. v0.1 is single-replica; HA lands in v0.2."
     },
+    "progressDeadlineSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Seconds before Kubernetes marks a rollout failed (#5812). Keep it above probes.startup.failureThreshold x probes.startup.periodSeconds."
+    },
+    "updateStrategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "description": "The Deployment update strategy (#5024). Recreate (the default) stops the old pod before the new one starts.",
+      "properties": {
+        "type": {"type": "string", "enum": ["Recreate", "RollingUpdate"]},
+        "rollingUpdate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxSurge": {"type": ["integer", "string"]},
+            "maxUnavailable": {"type": ["integer", "string"]}
+          }
+        }
+      },
+      "if": {"properties": {"type": {"const": "Recreate"}}},
+      "then": {"not": {"required": ["rollingUpdate"]}}
+    },
+    "shutdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preStopSleepSeconds", "drainSeconds"],
+      "description": "How the backplane pod stops (#5024). The grace period is preStopSleepSeconds + drainSeconds + 30.",
+      "properties": {
+        "preStopSleepSeconds": {"type": "integer", "minimum": 0, "maximum": 60},
+        "drainSeconds": {"type": "integer", "minimum": 0, "maximum": 3600}
+      }
+    },
     "image": {
       "type": "object",
       "additionalProperties": false,
@@ -286,7 +320,7 @@
             "enabled": { "type": "boolean" },
             "secretName": {
               "type": "string",
-              "description": "Kubernetes Secret name holding the TLS certificate. Required (non-empty) when both ingress.enabled and ingress.tls.enabled are true — enforced by the allOf below."
+              "description": "Kubernetes Secret name holding the TLS certificate. Required (non-empty) when both ingress.enabled and ingress.tls.enabled are true and no built-in core part is on — enforced by the root allOf. With a built-in part on, empty means `<release>-core-tls`, which the install makes (#4047)."
             }
           }
         }
@@ -304,28 +338,6 @@
                 "type": "string",
                 "minLength": 1,
                 "format": "hostname"
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "enabled": { "const": true },
-              "tls": {
-                "properties": { "enabled": { "const": true } },
-                "required": ["enabled"]
-              }
-            },
-            "required": ["enabled", "tls"]
-          },
-          "then": {
-            "properties": {
-              "tls": {
-                "properties": {
-                  "secretName": { "type": "string", "minLength": 1 }
-                },
-                "required": ["secretName"]
               }
             }
           }
@@ -453,7 +465,7 @@
         },
         "uiKeycloakClientId": {
           "type": "string",
-          "description": "Public `client_id` of the confidential `meho-web` client the operator-console (`/ui/*`) browser BFF login runs its OAuth 2.1 authorization-code grant against (#2594, Goal #336), rendered unconditionally as the `UI_KEYCLOAK_CLIENT_ID` env var. NOT a secret (the confidential `client_secret` + session key are wired via `secretKeyRef` from `uiConsole.secretName`). Default `\"\"` — deliberately absent from `config.required` and carrying no `minLength` so a chassis-only / API-only install validates with the browser console left dark; the console gate (`meho_backplane.features._ui_surface_block`) needs this AND the two `uiConsole` secrets non-empty, so an empty value here keeps `/ui/auth/login` at `503 ui_oauth_not_configured` without touching `/api/*` or the `meho login` CLI. When `uiConsole.enabled: true` the root-level `allOf` requires this non-empty — the console is all-or-nothing. See `docs/cross-repo/keycloak-web-client.md`."
+          "description": "Public `client_id` of the confidential `meho-web` client the operator-console (`/ui/*`) browser BFF login runs its OAuth 2.1 authorization-code grant against (#2594, Goal #336), rendered unconditionally as the `UI_KEYCLOAK_CLIENT_ID` env var. NOT a secret (the confidential `client_secret` + session key are wired via `secretKeyRef` from `uiConsole.secretName`). Default `\"\"` — deliberately absent from `config.required` and carrying no `minLength` so a chassis-only / API-only install validates with the browser console left dark; the console gate (`meho_backplane.features._ui_surface_block`) needs this AND the two `uiConsole` secrets non-empty, so an empty value here keeps `/ui/auth/login` at `503 ui_oauth_not_configured` without touching `/api/*` or the `meho login` CLI. When `uiConsole.enabled: true` with a bring-your-own Keycloak, the root-level `allOf` requires this non-empty — the console is all-or-nothing. With the built-in Keycloak, leave it empty or set `meho-web`. See `docs/cross-repo/keycloak-web-client.md`."
         },
         "approvalAllowSelfApproval": {
           "type": "string",
@@ -493,21 +505,120 @@
         "approvalOneTimeCodeAcrValues": {
           "type": "string",
           "description": "Comma-separated `acr` values that mean a one-time code step (#3979). Rendered into `APPROVAL_ONE_TIME_CODE_ACR_VALUES`. Empty (default) = off."
+        },
+        "teamKnowledgeRecall": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Show what the team knows without a search: a `team_knowledge` block on `preview_operation` and `call_operation` for a known target, and the caller's newest Memory notes in the MCP start text and in hosted runs. Rendered into `TEAM_KNOWLEDGE_RECALL`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/recall.md`."
+        },
+        "kbSimilarCheck": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Check a new knowledge entry for similar entries first; when some exist, nothing is written and the writer gets the list. Rendered into `KB_SIMILAR_CHECK`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/kb.md`."
+        },
+        "mcpShortToolTexts": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Send a short text for the biggest tools on the default MCP tool list. The inputs they accept stay the same. Rendered into `MCP_SHORT_TOOL_TEXTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
+        },
+        "mcpClientPerToolKind": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Claude Code and Claude Desktop sign in with their own login client (`meho-mcp-code`, `meho-mcp-desktop`). MEHO lists a client only when it finds it in Keycloak, through the admin client. Rendered into `MCP_CLIENT_PER_TOOL_KIND`. Default `\"false\"`: both tools keep the shared `meho-mcp` client. See `docs-site/install/keycloak-realm.md`."
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "classification": {
+              "type": "string",
+              "enum": ["true", "false"],
+              "description": "Let each connector, operation group and operation carry a category, labels and an \"always wait\" mark. Rendered into `POLICY_CLASSIFICATION`. Default `\"false\"`: MEHO reads none of it. See `docs/codebase/policy-classification.md`."
+            }
+          }
+        },
+        "sessionStore": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Agent session store settings. Each value is rendered into its `SESSION_STORE_*` variable; an empty value renders nothing, so MEHO uses its own default. The store is off until `endpoint`, `bucket` and `credentialsVaultPath` are all set. Limits match `backend/src/meho_backplane/session_store/config.py`. See `docs-site/guides/agent-sessions.md`.",
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "pattern": "^(|https?://\\S+)$",
+              "description": "URL of the S3-compatible object storage. Rendered into `SESSION_STORE_ENDPOINT`."
+            },
+            "bucket": {
+              "type": "string",
+              "description": "The bucket for the session files. Rendered into `SESSION_STORE_BUCKET`."
+            },
+            "credentialsVaultPath": {
+              "type": "string",
+              "description": "Vault KV-v2 API path (`secret/data/...`) with `access_key_id` and `secret_access_key`. Rendered into `SESSION_STORE_CREDENTIALS_VAULT_PATH`."
+            },
+            "region": {
+              "type": "string",
+              "description": "Region name sent to the store. Rendered into `SESSION_STORE_REGION`. Empty: `us-east-1`."
+            },
+            "retentionDaysDefault": {
+              "type": "string",
+              "pattern": "^(|[1-9][0-9]*)$",
+              "description": "Days a tenant's sessions are kept when the tenant set no period; a whole number of at least 1. Rendered into `SESSION_STORE_RETENTION_DAYS_DEFAULT`. Empty: 90."
+            },
+            "maxUploadBytes": {
+              "type": "string",
+              "pattern": "^(|[1-9][0-9]*)$",
+              "description": "Largest compressed archive in bytes; a whole number of at least 1. Rendered into `SESSION_STORE_MAX_UPLOAD_BYTES`. Empty: 25 MiB."
+            },
+            "maxUnpackedBytes": {
+              "type": "string",
+              "pattern": "^(|[1-9][0-9]*)$",
+              "description": "Largest unpacked archive in bytes; a whole number of at least 1. Rendered into `SESSION_STORE_MAX_UNPACKED_BYTES`. Empty: 256 MiB."
+            },
+            "maxFiles": {
+              "type": "string",
+              "pattern": "^(|[1-9][0-9]*)$",
+              "description": "Most entries (files and folders) in one archive; a whole number of at least 1. Rendered into `SESSION_STORE_MAX_FILES`. Empty: 2000."
+            },
+            "cleanupEnabled": {
+              "type": "string",
+              "enum": ["", "true", "false"],
+              "description": "Run the cleanup job. Rendered into `SESSION_STORE_CLEANUP_ENABLED`. Empty: `true`."
+            },
+            "cleanupIntervalSeconds": {
+              "type": "string",
+              "pattern": "^(|[6-9][0-9]|[1-9][0-9]{2,})$",
+              "description": "Seconds between cleanup runs; a whole number of at least 60. Rendered into `SESSION_STORE_CLEANUP_INTERVAL_SECONDS`. Empty: 3600."
+            }
+          }
+        },
+        "kbSharedTenantIds": {
+          "type": "string",
+          "pattern": "^ *([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12} *(, *[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12} *)*)?$",
+          "description": "Tenants whose knowledge entries marked `shared` every tenant on this instance can read. Comma-separated tenant ids (UUIDs). Rendered into `KB_SHARED_TENANT_IDS`. Default `\"\"`: no tenant may share. See `docs/codebase/kb.md`."
+        },
+        "knowledgeUpkeepEnabled": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Start the weekly knowledge upkeep job: it merges duplicate entries, retires expired ones and writes one report per tenant. Rendered into `KNOWLEDGE_UPKEEP_ENABLED`. Default `\"true\"`. See `docs/codebase/kb.md`."
+        },
+        "knowledgeUpkeepIntervalSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 604800,
+          "description": "How often the knowledge upkeep job runs, in seconds. Rendered into `KNOWLEDGE_UPKEEP_INTERVAL_SECONDS`. Range [60, 604800]; default 604800 (one week), the same range the backplane accepts."
         }
       }
     },
     "postgres": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["credentialsSecret"],
       "properties": {
         "host": { "type": "string" },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "database": { "type": "string", "minLength": 1 },
         "credentialsSecret": {
           "type": "string",
-          "minLength": 1,
-          "description": "Kubernetes Secret name holding the DATABASE_URL value at key `url` — required."
+          "description": "Kubernetes Secret name holding the DATABASE_URL value at key `url`. Required (non-empty) unless `corePostgres.enabled` is true; then it must be empty or `<release>-core-postgres-meho`, the Secret the install makes (root allOf, #4047)."
         },
         "runtime": {
           "type": "object",
@@ -534,7 +645,7 @@
       "properties": {
         "openshift": {
           "type": "boolean",
-          "description": "Set to true on OpenShift. The built-in core parts then leave out `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user id from the project's range. Default false: the pods run with fixed, non-root user ids."
+          "description": "Set to true on OpenShift. Every pod of the chart then leaves out `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user id from the project's range. Default false: the pods run with fixed, non-root user ids."
         },
         "imageRegistry": {
           "type": "string",
@@ -558,7 +669,7 @@
     "vault": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Vault credential backend. `address` is required (non-empty, `uri`) only when `config.credentialBackend: vault` — enforced by the root-level `allOf` conditional — so a `gsm` install may leave it blank. The block itself is always present (it ships safe-by-default values); the conditional gates the strictness.",
+      "description": "Vault credential backend. `address` is required (non-empty, `uri`) only when `config.credentialBackend: vault` and `coreVault.enabled` is not true (with the built-in OpenBao the chart sets the address and it must stay empty) — enforced by the root-level `allOf` conditional — so a `gsm` install may leave it blank. The block itself is always present (it ships safe-by-default values); the conditional gates the strictness.",
       "properties": {
         "address": {
           "type": "string",
@@ -625,13 +736,13 @@
     "checkRunner": {
       "type": "object",
       "additionalProperties": false,
-      "description": "In-process check-runner service principal (#2642). The sensor check-runner dispatches on a background tick with no calling operator, so it presents no bearer token and a target whose credentials need an operator-context read fails closed. When `enabled: true` the chart wires `CHECK_RUNNER_CLIENT_ID` as plain env and `CHECK_RUNNER_CLIENT_SECRET` via `secretKeyRef`, and the runner mints a `client_credentials` token for that confidential Keycloak client and dispatches under it. Required in practice on a `credentialBackend: gsm` install using per-operator WIF with no ambient pod identity — that token is the subject token exchanged at `sts.googleapis.com`, and without it no credentialed Sensor can evaluate. The schema enforces non-empty `clientId` + `clientSecret.secretName` under `enabled: true`. Default `enabled: false` renders nothing and preserves the pre-#2642 behaviour (background dispatch carries no token; such Sensors read `unknown`). Distinct from the #2415 satellite-runner principals, which authenticate external runners *to* MEHO.",
+      "description": "In-process check-runner service principal (#2642). The sensor check-runner dispatches on a background tick with no calling operator, so it presents no bearer token and a target whose credentials need an operator-context read fails closed. When `enabled: true` the chart wires `CHECK_RUNNER_CLIENT_ID` as plain env and `CHECK_RUNNER_CLIENT_SECRET` via `secretKeyRef`, and the runner mints a `client_credentials` token for that confidential Keycloak client and dispatches under it. Required in practice on a `credentialBackend: gsm` install using per-operator WIF with no ambient pod identity — that token is the subject token exchanged at `sts.googleapis.com`, and without it no credentialed Sensor can evaluate. The root-level `allOf` requires non-empty `clientId` + `clientSecret.secretName` under `enabled: true` for a bring-your-own Keycloak; with the built-in Keycloak the chart fills both in. Default `enabled: false` renders nothing and preserves the pre-#2642 behaviour (background dispatch carries no token; such Sensors read `unknown`). Distinct from the #2415 satellite-runner principals, which authenticate external runners *to* MEHO.",
       "required": ["enabled"],
       "properties": {
         "enabled": { "type": "boolean" },
         "clientId": {
           "type": "string",
-          "description": "`client_id` of the confidential Keycloak client the check-runner authenticates as. Plain env (`CHECK_RUNNER_CLIENT_ID`). Required (non-empty) when `checkRunner.enabled: true`."
+          "description": "`client_id` of the confidential Keycloak client the check-runner authenticates as. Plain env (`CHECK_RUNNER_CLIENT_ID`). Required (non-empty) when `checkRunner.enabled: true`, unless `coreKeycloak.enabled` is true: then leave it empty or set `meho-check-runner`."
         },
         "clientSecret": {
           "type": "object",
@@ -640,7 +751,7 @@
           "properties": {
             "secretName": {
               "type": "string",
-              "description": "Name of the Kubernetes Secret holding the client secret. Referenced by name only — provisioning is the consumer's responsibility (an ExternalSecret, a sealed-secret, or a directly-applied Secret), mirroring `uiConsole.secretName`. Required (non-empty) when `checkRunner.enabled: true`."
+              "description": "Name of the Kubernetes Secret holding the client secret. Referenced by name only — provisioning is the consumer's responsibility (an ExternalSecret, a sealed-secret, or a directly-applied Secret), mirroring `uiConsole.secretName`. Required (non-empty) when `checkRunner.enabled: true`, unless `coreKeycloak.enabled` is true: then leave it empty or set `<release>-core-check-runner`."
             },
             "secretKey": {
               "type": "string",
@@ -649,28 +760,7 @@
             }
           }
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          },
-          "then": {
-            "required": ["clientId", "clientSecret"],
-            "properties": {
-              "clientId": { "type": "string", "minLength": 1 },
-              "clientSecret": {
-                "type": "object",
-                "required": ["secretName"],
-                "properties": {
-                  "secretName": { "type": "string", "minLength": 1 }
-                }
-              }
-            }
-          }
-        }
-      ]
+      }
     },
     "keycloak": {
       "type": "object",
@@ -706,23 +796,59 @@
           "minimum": 1,
           "maximum": 128000,
           "description": "Most output tokens the agent asks the model for in one answer. Rendered as `AGENT_MAX_OUTPUT_TOKENS`. Used by the Anthropic backend only. Range [1, 128000], the same bounds the backplane checks at start. Default 4096."
+        },
+        "modelBackend": {
+          "type": "string",
+          "enum": ["", "anthropic", "openai", "bedrock", "vcf-paif"],
+          "description": "Which model backend every agent run uses, rendered as `AGENT_MODEL_BACKEND`. Empty: not rendered, and the backplane uses its own default (`anthropic`)."
+        },
+        "openai": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "An OpenAI-compatible model endpoint (#5851), separate from `agent.enabled`. When `enabled: true`, the chart sets `OPENAI_API_KEY` from a Secret (`secretKeyRef`, never a plain value), and `OPENAI_BASE_URL` / `OPENAI_DEFAULT_MODEL` when they are set. There is no field for the key itself, so a plain key is refused. The Secret is `secretName`, or the `<release>-agent-openai` Secret that `eso.agentOpenai.enabled: true` makes; with neither, `helm template` fails with a fix.",
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "baseUrl": {
+              "type": "string",
+              "pattern": "^$|^https?://",
+              "description": "Base URL of the endpoint, rendered as `OPENAI_BASE_URL`. Empty: not rendered, and the backplane uses OpenAI's own service."
+            },
+            "defaultModel": {
+              "type": "string",
+              "description": "Model id the endpoint serves, rendered as `OPENAI_DEFAULT_MODEL`. Empty: not rendered, and the backplane uses its own default."
+            },
+            "secretName": {
+              "type": "string",
+              "description": "Name of the Kubernetes Secret holding the API key. Leave empty with `eso.agentOpenai.enabled: true`."
+            },
+            "secretKey": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Key within the Secret whose value is the API key. Default `api_key`, matching the ESO target."
+            }
+          }
         }
       }
     },
     "keycloakAdmin": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Keycloak Admin API credentials (G11.2 #803) that gate agent-principal registration. When `enabled: true`, the chart wires `KEYCLOAK_ADMIN_URL` + `KEYCLOAK_ADMIN_CLIENT_ID` as plain env and `KEYCLOAK_ADMIN_CLIENT_SECRET` via `secretKeyRef` into the backplane Deployment. The schema enforces non-empty `url` and `clientId` under `enabled: true` (operator config that the chart can validate locally). The Secret-name resolution for the admin client secret mirrors `agent` — explicit `clientSecret.secretName` when set, otherwise the `<release>-keycloak-admin` Secret rendered by `eso.keycloakAdmin.enabled: true`. When neither path resolves a name, the chart-template gate fails at `helm template` time. `meho_backplane.features._agent_runtime_block` enforces the same `all-three-non-empty` posture at app startup. When `enabled: false`, `POST /api/v1/agent-principals` returns `503 keycloak_admin_not_configured` (same posture as a chart that doesn't ship this block).",
+      "description": "Keycloak Admin API credentials (G11.2 #803) that gate agent-principal registration. When `enabled: true`, the chart wires `KEYCLOAK_ADMIN_URL` + `KEYCLOAK_ADMIN_CLIENT_ID` as plain env and `KEYCLOAK_ADMIN_CLIENT_SECRET` via `secretKeyRef` into the backplane Deployment. The root-level `allOf` requires non-empty `url` and `clientId` under `enabled: true` for a bring-your-own Keycloak. With the built-in Keycloak (`coreKeycloak.enabled`) the Keycloak admin is always on and `enabled` is not needed. The Secret-name resolution for the admin client secret mirrors `agent` — explicit `clientSecret.secretName` when set, otherwise the `<release>-keycloak-admin` Secret rendered by `eso.keycloakAdmin.enabled: true`. When neither path resolves a name, the chart-template gate fails at `helm template` time. `meho_backplane.features._agent_runtime_block` enforces the same `all-three-non-empty` posture at app startup. When `enabled: false`, `POST /api/v1/agent-principals` returns `503 keycloak_admin_not_configured` (same posture as a chart that doesn't ship this block).",
       "required": ["enabled"],
       "properties": {
         "enabled": { "type": "boolean" },
         "url": {
           "type": "string",
-          "description": "Admin REST API base URL for the realm managing MEHO principals, e.g. `https://keycloak.example.com/admin/realms/meho`. Plain env (`KEYCLOAK_ADMIN_URL`). Required (non-empty, `http(s)://` URL) when `keycloakAdmin.enabled: true`."
+          "description": "Admin REST API base URL for the realm managing MEHO principals, e.g. `https://keycloak.example.com/admin/realms/meho`. Plain env (`KEYCLOAK_ADMIN_URL`). Required (non-empty, `http(s)://` URL) when `keycloakAdmin.enabled: true` and `coreKeycloak.enabled` is not true. With the built-in Keycloak, leave it empty: the chart connects to the `meho-admin` client through the Keycloak Service."
         },
         "clientId": {
           "type": "string",
-          "description": "`client_id` of the confidential Keycloak client backing the Admin REST API. Plain env (`KEYCLOAK_ADMIN_CLIENT_ID`). Required (non-empty) when `keycloakAdmin.enabled: true`."
+          "description": "`client_id` of the confidential Keycloak client backing the Admin REST API. Plain env (`KEYCLOAK_ADMIN_CLIENT_ID`). Required (non-empty) when `keycloakAdmin.enabled: true` and `coreKeycloak.enabled` is not true. With the built-in Keycloak, leave it empty or set `meho-admin`."
         },
         "clientSecret": {
           "type": "object",
@@ -740,27 +866,7 @@
             }
           }
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          },
-          "then": {
-            "required": ["url", "clientId"],
-            "properties": {
-              "url": {
-                "type": "string",
-                "minLength": 1,
-                "format": "uri",
-                "pattern": "^https?://"
-              },
-              "clientId": { "type": "string", "minLength": 1 }
-            }
-          }
-        }
-      ]
+      }
     },
     "sandboxMode": {
       "type": "object",
@@ -775,13 +881,13 @@
     "uiConsole": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Operator-console (`/ui/*`) browser BFF confidential credentials (#2594, Goal #336). When `enabled: true`, the chart wires `UI_KEYCLOAK_CLIENT_SECRET` (the confidential `meho-web` client secret) and `UI_SESSION_ENCRYPTION_KEY` (the BFF session-cookie Fernet key) into the backplane Deployment via `secretKeyRef` — never plaintext — both sourced from the single `secretName` Secret under the `clientSecretKey` / `sessionEncryptionKey` keys, mirroring the `postgres.credentialsSecret` by-name reference. The public `client_id` is the plain `config.uiKeycloakClientId` env. The schema enforces a non-empty `secretName` under `enabled: true`, and the root-level `allOf` additionally requires a non-empty `config.uiKeycloakClientId` — so a half-configured console fails at `helm install` rather than 503-ing at first browser login. `meho_backplane.features._ui_surface_block` enforces the same `all-three-non-empty` posture at app startup. When `enabled: false` (the default), no env is rendered and `GET /ui/auth/login` returns `503 ui_oauth_not_configured` with no effect on `/api/*` or the `meho login` CLI — same posture as a chart that doesn't ship this block.",
+      "description": "Operator-console (`/ui/*`) browser BFF confidential credentials (#2594, Goal #336). When `enabled: true`, the chart wires `UI_KEYCLOAK_CLIENT_SECRET` (the confidential `meho-web` client secret) and `UI_SESSION_ENCRYPTION_KEY` (the BFF session-cookie Fernet key) into the backplane Deployment via `secretKeyRef` — never plaintext — both sourced from the single `secretName` Secret under the `clientSecretKey` / `sessionEncryptionKey` keys, mirroring the `postgres.credentialsSecret` by-name reference. The public `client_id` is the plain `config.uiKeycloakClientId` env. For a bring-your-own Keycloak the root-level `allOf` requires a non-empty `secretName` and a non-empty `config.uiKeycloakClientId` under `enabled: true` (with the built-in Keycloak the chart fills both in) — so a half-configured console fails at `helm install` rather than 503-ing at first browser login. `meho_backplane.features._ui_surface_block` enforces the same `all-three-non-empty` posture at app startup. When `enabled: false` (the default), no env is rendered and `GET /ui/auth/login` returns `503 ui_oauth_not_configured` with no effect on `/api/*` or the `meho login` CLI — same posture as a chart that doesn't ship this block.",
       "required": ["enabled"],
       "properties": {
         "enabled": { "type": "boolean" },
         "secretName": {
           "type": "string",
-          "description": "Name of the Kubernetes Secret holding BOTH the confidential web client secret (under `clientSecretKey`) and the session encryption key (under `sessionEncryptionKey`). Referenced by name only — provisioning is the consumer's responsibility (a GSM-synced ExternalSecret, a sealed-secret, or a directly-applied Secret for a no-Vault deploy). Empty when `uiConsole.enabled: true` fails the schema."
+          "description": "Name of the Kubernetes Secret holding BOTH the confidential web client secret (under `clientSecretKey`) and the session encryption key (under `sessionEncryptionKey`). Referenced by name only — provisioning is the consumer's responsibility (a GSM-synced ExternalSecret, a sealed-secret, or a directly-applied Secret for a no-Vault deploy). Empty when `uiConsole.enabled: true` fails the schema, unless `coreKeycloak.enabled` is true: then leave it empty or set `<release>-core-ui-auth`, which the install makes."
         },
         "clientSecretKey": {
           "type": "string",
@@ -793,40 +899,43 @@
           "minLength": 1,
           "description": "Key within `secretName` whose value is the url-safe base64 32-byte Fernet session-cookie encryption key, wired into `UI_SESSION_ENCRYPTION_KEY`. Defaults to `session_encryption_key`."
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          },
-          "then": {
-            "required": ["secretName"],
-            "properties": {
-              "secretName": { "type": "string", "minLength": 1 }
-            }
-          }
-        }
-      ]
+      }
     },
     "approvalHandoff": {
       "type": "object",
       "additionalProperties": false,
       "description": "Encrypted custody for credential-write approval inputs. When enabled, APPROVAL_HANDOFF_ENCRYPTION_KEY is injected only via secretKeyRef. It is independent of the optional UI session key. REQUIRED if any credential-write operation must wait for approval: while this is disabled, MEHO denies every such operation instead of letting it wait. See docs/codebase/approvals.md.",
-      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "type": ["boolean", "null"],
+          "description": "Unset (null, the default) = on when a built-in core part is on, off otherwise (#4047). `true` with an empty `secretName` needs a built-in part, whose secrets Job makes `<release>-core-approval-handoff`; the render fails otherwise."
+        },
+        "secretName": { "type": "string", "description": "Your own Secret with the Fernet key. Empty = `<release>-core-approval-handoff`, which the install makes when a built-in part is on." },
+        "secretKey": { "type": "string", "minLength": 1 }
+      }
+    },
+    "paramsHashKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The key of the params hashes and value fingerprints in audit rows and approval requests, injected as PARAMS_HASH_KEY only via secretKeyRef. A new database password keeps this key. With no Secret, MEHO makes the key from DATABASE_URL. See docs/codebase/approvals.md.",
+      "properties": {
+        "secretName": { "type": "string", "description": "Your own Secret with the key. Empty = `<release>-core-params-hash`, which the install makes when a built-in part is on." },
+        "secretKey": { "type": "string", "minLength": 1 }
+      }
+    },
+    "webPush": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Approval notifications in the browser (web push). Off by default. The push key (VAPID) is injected as WEB_PUSH_VAPID_PRIVATE_KEY only via secretKeyRef. See docs/codebase/ui.md.",
       "properties": {
         "enabled": { "type": "boolean" },
-        "secretName": { "type": "string" },
+        "secretName": { "type": "string", "description": "Your own Secret with the push key. Empty = `<release>-core-web-push`, which the install makes when a built-in part is on." },
         "secretKey": { "type": "string", "minLength": 1 }
-      },
-      "allOf": [{
-        "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
-        "then": { "required": ["secretName"], "properties": { "secretName": { "type": "string", "minLength": 1 } } }
-      }]
+      }
     },
     "corePostgres": {
       "type": "object",
-      "description": "Built-in PostgreSQL subchart values (`charts/postgres/`, #4039): one PostgreSQL 17 server with pgvector and two databases, `meho` and `keycloak`, each owned by a role of the same name that is not a superuser. The chart creates the `vector` extension itself. It reads the Secrets `<release>-core-postgres-superuser`, `-meho` and `-keycloak` (key `password`), which the install's secrets Job makes. Off by default; with it off the chart renders exactly what it rendered before.",
+      "description": "Built-in PostgreSQL subchart values (`charts/postgres/`, #4039): one PostgreSQL 17 server with pgvector and two databases, `meho` and `keycloak`, each owned by a role of the same name that is not a superuser. The chart creates the `vector` extension itself. It reads the Secrets `<release>-core-postgres-superuser`, `-meho` and `-keycloak` (key `password`), which the install's secrets Job makes. On by default; with it on the chart also points the backplane's DATABASE_URL at `<release>-core-postgres-meho` and its NetworkPolicy at the PostgreSQL pod (#4047). With it off the chart renders exactly what it rendered before.",
       "additionalProperties": false,
       "required": ["enabled"],
       "properties": {
@@ -959,7 +1068,7 @@
     "coreKeycloak": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Built-in Keycloak. When enabled, the core secrets Job makes <release>-core-keycloak-bootstrap, -core-keycloak-admin, -core-ui-auth and -core-check-runner, and the Keycloak subchart (`charts/keycloak/`) is deployed. Only the bootstrap Secret may have your own name (`existingSecrets.bootstrap`). While `coreKeycloak.enabled` is on, `corePostgres.existingSecrets.keycloak`, `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and `checkRunner.clientSecret.secretName` must stay empty or name the `<release>-core-…` Secret, because Keycloak reads only that name; the render fails otherwise. The chart also sets the backplane's Keycloak settings from this block (issuer, in-cluster discovery URL, audience, client ids, `KEYCLOAK_ADMIN_*`). See docs/codebase/core-secrets.md. Needs `corePostgres.enabled: true` (allOf below). This block names every key the subchart has; Helm checks their full shape against `charts/keycloak/values.schema.json` when `enabled` is true.",
+      "description": "Built-in Keycloak. When enabled, the core secrets Job makes <release>-core-keycloak-bootstrap, -core-keycloak-admin, -core-ui-auth and -core-check-runner, and the Keycloak subchart (`charts/keycloak/`) is deployed. Only the bootstrap Secret may have your own name (`existingSecrets.bootstrap`). While `coreKeycloak.enabled` is on, `corePostgres.existingSecrets.keycloak`, `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and `checkRunner.clientSecret.secretName` must stay empty or name the `<release>-core-…` Secret, because Keycloak reads only that name; the render fails otherwise. The chart also sets the backplane's Keycloak settings from this block (issuer, in-cluster discovery URL, audience, client ids, `KEYCLOAK_ADMIN_*`). See docs/codebase/core-secrets.md. It works with the built-in PostgreSQL or with your own (`database`, below). This block names every key the subchart has; Helm checks their full shape against `charts/keycloak/values.schema.json` when `enabled` is true.",
       "properties": {
         "enabled": { "type": "boolean" },
         "hostname": { "type": "string", "description": "MEHO's public DNS name, equal to `ingress.host`. Keycloak's public address is `https://<hostname>/auth`. Required when enabled." },
@@ -1049,13 +1158,22 @@
             },
             "required": ["discoveryUrl", "clientId", "clientSecret"]
           }
+        },
+        "trustedCaBundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "A private CA that Keycloak trusts for every outgoing TLS call, also with the company login off: for example an AD or LDAP directory over LDAPS. A ConfigMap in the release namespace with the CA certificate (PEM). Empty `configMapName` = off. With `companyLogin.caBundle` too, `KC_TRUSTSTORE_PATHS` lists both files.",
+          "properties": {
+            "configMapName": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 }
+          }
         }
       }
     },
     "coreVault": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Built-in OpenBao, the password safe (ADR 0008). When enabled, the OpenBao subchart (`charts/openbao/`) is deployed. The `vault:` block stays for a Vault you bring yourself. This block names every key the subchart has; Helm checks their full shape against `charts/openbao/values.schema.json` when `enabled` is true.",
+      "description": "Built-in OpenBao, the password safe (ADR 0008). On by default. When enabled, the OpenBao subchart (`charts/openbao/`) is deployed and the chart sets the backplane's VAULT_ADDR, login role (`meho-mcp`), mount (`jwt`) and scheduler token itself (#4047); `config.vaultAddr` and `vault.address` must stay empty. The `vault:` block stays for a Vault you bring yourself. This block names every key the subchart has; Helm checks their full shape against `charts/openbao/values.schema.json` when `enabled` is true.",
       "properties": {
         "enabled": { "type": "boolean" },
         "authDelegator": { "type": "boolean", "description": "Render a ClusterRoleBinding of OpenBao's service account to `system:auth-delegator`, the chart's only cluster-wide object. Default false." },
@@ -1534,6 +1652,25 @@
             }
           }
         },
+        "agentOpenai": {
+          "type": "object",
+          "description": "Optional ExternalSecret for the API key of the OpenAI-compatible model endpoint (#5851). Target Secret is `<release>-agent-openai`, keyed `agent.openai.secretKey` (default `api_key`). Independent of `eso.enabled: true`.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "remoteKey": {
+              "type": "string",
+              "description": "Vault KV path holding the API key. Empty → the template derives it as `<vault.paths.kv>/agent-openai` at render time."
+            },
+            "remoteProperty": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Property within the remote KV entry that holds the API key."
+            }
+          }
+        },
         "keycloakAdmin": {
           "type": "object",
           "description": "Optional ExternalSecret for the Keycloak admin client secret (G11.2 #803). Target Secret is `<release>-keycloak-admin`, keyed `client_secret` (matches the chart default `keycloakAdmin.clientSecret.secretKey`). Independent of `eso.enabled: true`.",
@@ -1585,11 +1722,11 @@
         },
         "postgresCIDR": {
           "type": "string",
-          "description": "PostgreSQL egress CIDR (IPv4). Required and shape-validated (non-empty IPv4 CIDR) when networkPolicy.enabled is true — the rendered NetworkPolicy refuses to ship a wide subnet by accident. When networkPolicy.enabled is false the template skips the NetworkPolicy resource entirely and this field may be left blank."
+          "description": "PostgreSQL egress CIDR (IPv4). Not used with the built-in PostgreSQL (`corePostgres.enabled`): the backplane then reaches its pod by podSelector (root allOf). Otherwise required and shape-validated (non-empty IPv4 CIDR) when networkPolicy.enabled is true — the rendered NetworkPolicy refuses to ship a wide subnet by accident. When networkPolicy.enabled is false the template skips the NetworkPolicy resource entirely and this field may be left blank."
         },
         "vaultCIDR": {
           "type": "string",
-          "description": "Vault egress CIDR (IPv4). Same conditional shape rules as postgresCIDR."
+          "description": "Vault egress CIDR (IPv4). Same conditional shape rules as postgresCIDR; not used with the built-in OpenBao (`coreVault.enabled`)."
         },
         "keycloakCIDR": {
           "type": "string",
@@ -1641,30 +1778,7 @@
           },
           "description": "Extra outgoing rules for the backplane NetworkPolicy, each a Kubernetes egress rule added exactly as written (#3516): the networks of the systems MEHO manages, the AI service, and Vault / Keycloak behind an in-cluster ingress (name the ingress Pods and their targetPort — the rule is checked after the Service redirect). Each rule must have a non-empty `to` list, because Kubernetes reads a missing or empty `to` as every destination. Only the keys Kubernetes knows are accepted (`to`, `ports`; in `to`: `ipBlock`, `namespaceSelector`, `podSelector`; in `ports`: `port`, `endPort`, `protocol`), so a typo such as `port:` for `ports:` is refused instead of silently dropping the port limit. Default empty — nothing is added."
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          },
-          "then": {
-            "required": ["postgresCIDR", "vaultCIDR"],
-            "properties": {
-              "postgresCIDR": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
-              },
-              "vaultCIDR": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
-              }
-            }
-          }
-        }
-      ]
+      }
     },
     "nodeSelector": {
       "type": "object",
@@ -1823,12 +1937,15 @@
       }
     },
     {
-      "description": "When `config.credentialBackend` is `vault` (the default), the deployment reads credentials + the health federation proof from Vault, so `vault.address` must be a non-empty `uri`. A `gsm` install skips this and may leave `vault.address` blank.",
+      "description": "When `config.credentialBackend` is `vault` (the default), the deployment reads credentials + the health federation proof from Vault, so `vault.address` must be a non-empty `uri`. A `gsm` install skips this and may leave `vault.address` blank. With the built-in OpenBao (`coreVault.enabled`) the chart sets the address (#4047).",
       "if": {
         "properties": {
           "config": {
             "properties": { "credentialBackend": { "const": "vault" } },
             "required": ["credentialBackend"]
+          },
+          "coreVault": {
+            "not": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] }
           }
         },
         "required": ["config"]
@@ -1898,50 +2015,6 @@
       }
     },
     {
-      "description": "When the operator console is enabled (`uiConsole.enabled: true`), the browser BFF login needs a non-empty public `client_id` as well as the confidential secret — so `config.uiKeycloakClientId` must be non-empty. This makes enabling the console all-or-nothing: a half-configured console (secret wired, client_id blank) fails at `helm install` rather than 503-ing at first login (#2594).",
-      "if": {
-        "properties": {
-          "uiConsole": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          }
-        },
-        "required": ["uiConsole"]
-      },
-      "then": {
-        "properties": {
-          "config": {
-            "required": ["uiKeycloakClientId"],
-            "properties": {
-              "uiKeycloakClientId": { "type": "string", "minLength": 1 }
-            }
-          }
-        },
-        "required": ["config"]
-      }
-    },
-    {
-      "description": "The built-in Keycloak keeps its data in the built-in PostgreSQL, so `coreKeycloak.enabled: true` needs `corePostgres.enabled: true`.",
-      "if": {
-        "properties": {
-          "coreKeycloak": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          }
-        },
-        "required": ["coreKeycloak"]
-      },
-      "then": {
-        "properties": {
-          "corePostgres": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          }
-        },
-        "required": ["corePostgres"]
-      }
-    },
-    {
       "description": "A bring-your-own Keycloak (`coreKeycloak.enabled` not true) needs its issuer and audience, and with the NetworkPolicy on its egress CIDR. With the built-in Keycloak the chart derives the issuer and audience (#4591), the render fails if an issuer is set by hand, and the NetworkPolicy reaches the Keycloak pod by podSelector.",
       "if": {
         "properties": {
@@ -1978,6 +2051,189 @@
                   "minLength": 1,
                   "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
                 }
+              }
+            }
+          }
+        },
+        "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "uiConsole": {
+                    "properties": { "enabled": { "const": true } },
+                    "required": ["enabled"]
+                  }
+                },
+                "required": ["uiConsole"]
+              },
+              "then": {
+                "properties": {
+                  "uiConsole": {
+                    "required": ["secretName"],
+                    "properties": { "secretName": { "type": "string", "minLength": 1 } }
+                  },
+                  "config": {
+                    "required": ["uiKeycloakClientId"],
+                    "properties": { "uiKeycloakClientId": { "type": "string", "minLength": 1 } }
+                  }
+                },
+                "required": ["uiConsole", "config"]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "checkRunner": {
+                    "properties": { "enabled": { "const": true } },
+                    "required": ["enabled"]
+                  }
+                },
+                "required": ["checkRunner"]
+              },
+              "then": {
+                "properties": {
+                  "checkRunner": {
+                    "required": ["clientId", "clientSecret"],
+                    "properties": {
+                      "clientId": { "type": "string", "minLength": 1 },
+                      "clientSecret": {
+                        "type": "object",
+                        "required": ["secretName"],
+                        "properties": { "secretName": { "type": "string", "minLength": 1 } }
+                      }
+                    }
+                  }
+                },
+                "required": ["checkRunner"]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "keycloakAdmin": {
+                    "properties": { "enabled": { "const": true } },
+                    "required": ["enabled"]
+                  }
+                },
+                "required": ["keycloakAdmin"]
+              },
+              "then": {
+                "properties": {
+                  "keycloakAdmin": {
+                    "required": ["url", "clientId"],
+                    "properties": {
+                      "url": { "type": "string", "minLength": 1, "format": "uri", "pattern": "^https?://" },
+                      "clientId": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                },
+                "required": ["keycloakAdmin"]
+              }
+            }
+          ]
+      }
+    },
+    {
+      "description": "A bring-your-own PostgreSQL (`corePostgres.enabled` not true) needs `postgres.credentialsSecret`, and with the NetworkPolicy on its egress CIDR. With the built-in PostgreSQL the chart uses `<release>-core-postgres-meho` and reaches the PostgreSQL pod by podSelector (#4047).",
+      "if": {
+        "properties": {
+          "corePostgres": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["corePostgres"]
+      },
+      "else": {
+        "properties": {
+          "postgres": {
+            "required": ["credentialsSecret"],
+            "properties": { "credentialsSecret": { "minLength": 1 } }
+          },
+          "networkPolicy": {
+            "if": {
+              "properties": { "enabled": { "const": true } },
+              "required": ["enabled"]
+            },
+            "then": {
+              "required": ["postgresCIDR"],
+              "properties": {
+                "postgresCIDR": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "A bring-your-own Vault (`coreVault.enabled` not true) with the NetworkPolicy on needs its egress CIDR. With the built-in OpenBao the NetworkPolicy reaches the OpenBao pod by podSelector (#4047).",
+      "if": {
+        "properties": {
+          "coreVault": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["coreVault"]
+      },
+      "else": {
+        "properties": {
+          "networkPolicy": {
+            "if": {
+              "properties": { "enabled": { "const": true } },
+              "required": ["enabled"]
+            },
+            "then": {
+              "required": ["vaultCIDR"],
+              "properties": {
+                "vaultCIDR": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "With no built-in core part on, an Ingress with TLS needs `ingress.tls.secretName`. With one on, an empty name means `<release>-core-tls`, which the install's secrets Job makes (#4047).",
+      "if": {
+        "allOf": [
+          { "properties": { "corePostgres": { "not": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] } } } },
+          { "properties": { "coreKeycloak": { "not": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] } } } },
+          { "properties": { "coreVault": { "not": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] } } } },
+          {
+            "properties": {
+              "ingress": {
+                "properties": {
+                  "enabled": { "const": true },
+                  "tls": {
+                    "properties": { "enabled": { "const": true } },
+                    "required": ["enabled"]
+                  }
+                },
+                "required": ["enabled", "tls"]
+              }
+            },
+            "required": ["ingress"]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "ingress": {
+            "properties": {
+              "tls": {
+                "properties": {
+                  "secretName": { "type": "string", "minLength": 1 }
+                },
+                "required": ["secretName"]
               }
             }
           }

@@ -3,7 +3,9 @@
 
 """msad group ops — ``list`` / ``get`` / ``members`` (safe) + create and membership writes.
 
-``add-member`` / ``remove-member`` are ``caution`` (recoverable); ``create`` is
+``add-member`` / ``remove-member`` are ``caution`` (recoverable) +
+``requires_approval``: a group membership gives rights in the domain, so a
+person must approve each change, also in the web interface. ``create`` is
 ``caution`` + ``requires_approval`` and safe to run twice (an existing group
 with the same sAMAccountName is returned, not created again); ``delete`` is
 ``dangerous`` + ``requires_approval``. Groups are driven by the
@@ -303,7 +305,7 @@ _MEMBER_WRITE_RESPONSE_SCHEMA: dict[str, Any] = {
 
 
 def _member_write_op(op_id: str, handler_attr: str, verb: str, cmdlet: str) -> MsadOp:
-    """Build one caution-tier membership write op (add-member / remove-member)."""
+    """Build one membership write op (add-member / remove-member); both wait for approval."""
     return MsadOp(
         op_id=op_id,
         handler_attr=handler_attr,
@@ -311,7 +313,8 @@ def _member_write_op(op_id: str, handler_attr: str, verb: str, cmdlet: str) -> M
         description=(
             f"Runs ``{cmdlet} -Identity <group> -Members @(...) -Confirm:$false`` "
             "on the domain controller. Recoverable (the inverse op restores the "
-            "prior membership). safety_level=caution."
+            "prior membership). safety_level=caution, requires_approval=True: "
+            "a person must approve each call first, also in the web interface."
         ),
         parameter_schema={
             "type": "object",
@@ -323,12 +326,15 @@ def _member_write_op(op_id: str, handler_attr: str, verb: str, cmdlet: str) -> M
         group_key="groups",
         tags=("write", "group", verb),
         safety_level="caution",
-        requires_approval=False,
+        requires_approval=True,
         llm_instructions={
             "when_to_use": (
                 f"{verb.replace('-', ' ').capitalize()} of an AD group (e.g. "
                 "grant a service account into a role group). Recoverable; "
                 "safety_level=caution. " + SSH_TRANSPORT_NOTE
+            ),
+            "preconditions": (
+                "A person must approve the call. The call waits for that approval and then runs."
             ),
             "parameter_hints": {
                 "identity": "Required. The group identity.",

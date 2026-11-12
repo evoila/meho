@@ -39,6 +39,7 @@ from typing import Final
 from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl, ValidationInfo, field_validator
+from pydantic.config import JsonDict
 
 from meho_backplane.delete_names import DELETE_SHAPED_OP_ID_PATTERNS
 from meho_backplane.retrieval.embedding import (
@@ -47,11 +48,19 @@ from meho_backplane.retrieval.embedding import (
 )
 
 __all__ = [
+    "AGENT_FACING",
     "RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES",
     "Settings",
     "get_settings",
     "parse_bool_env",
 ]
+
+#: The mark of a setting that changes what an AI agent sees. Put it on a
+#: ``bool`` field as ``Field(default=False, json_schema_extra=AGENT_FACING)``.
+#: ``GET /version`` lists every marked setting with its value
+#: (:func:`meho_backplane.version.agent_switches`). Only ``bool`` settings
+#: may carry it, so no text, address or secret reaches that answer.
+AGENT_FACING: Final[JsonDict] = {"agent_facing": True}
 
 #: Driver schemes accepted on ``DATABASE_URL``. Both are async — the
 #: backplane refuses to construct a sync engine because every database
@@ -77,6 +86,15 @@ _SUPPORTED_BROADCAST_URL_SCHEMES: Final[tuple[str, ...]] = (
     "rediss://",
     "unix://",
 )
+
+#: The values ``AGENT_MODEL_BACKEND`` accepts (#5850). Each names one
+#: backend of :func:`meho_backplane.agent.models.settings_model_resolver`.
+AGENT_MODEL_BACKENDS: Final[tuple[str, ...]] = ("anthropic", "openai", "bedrock", "vcf-paif")
+
+#: The values ``AGENT_GRANT_REQUIRED`` accepts (#6189). ``off`` keeps the
+#: risk-level default for an agent with no matching grant; ``observe``
+#: keeps it and logs what ``on`` would refuse; ``on`` refuses the call.
+AGENT_GRANT_REQUIRED_MODES: Final[tuple[str, ...]] = ("off", "observe", "on")
 
 #: Truthy spellings accepted by :func:`_parse_bool`. Anything else
 #: (including the empty string and "disabled") is treated as ``False``
@@ -363,8 +381,10 @@ class Settings(BaseModel):
         that token gets the one-group-per-tenant check instead (#5239).
         A name with and without a leading ``/`` is the
         same group, because the group-membership mapper can send full
-        group paths. Override with ``JWT_ROLE_GROUPS`` (comma-separated)
-        when a site renames the groups; a blank value keeps the default.
+        group paths. Upper and lower case do not count either:
+        ``meho-operators`` is the same group as ``MEHO-Operators``.
+        Override with ``JWT_ROLE_GROUPS`` (comma-separated) when a site
+        renames the groups; a blank value keeps the default.
     jwt_principal_kind_claim_name:
         Name of the JWT claim that carries the principal-kind
         discriminator (``user`` / ``service`` / ``agent``) added by
@@ -457,7 +477,8 @@ class Settings(BaseModel):
         ``MEHO-SA-Operators``, the group the shipped login setup creates
         (``docs/decisions/login-role-groups.md``). ``verify_jwt`` sets
         :attr:`~meho_backplane.auth.operator.Operator.self_approver` when
-        the token's ``groups`` claim names this group. This is used only
+        the token's ``groups`` claim names this group (a leading ``/``
+        and upper or lower case do not count). This is used only
         when the token has no ``meho_tenants`` claim; with that claim, the
         current tenant's ``SA-Operators`` entry decides. Off when the
         group is missing; a machine login never gets the flag. Change it
@@ -695,6 +716,31 @@ class Settings(BaseModel):
         ``REQUEST_USAGE_RETENTION_DAYS``: without usage collection, routine
         activity would leave no record at all, so the pod refuses to start.
         Env var ``AUDIT_WRAPPER_ROWS_RETIRED``.
+    operation_search_store_query_text:
+        Also store the query text of each ``search_operations`` call in its
+        search record (#4750). Default ``False``: the record keeps only a
+        SHA-256 hash of the query, because the text can show what someone
+        was working on. The records exist only when
+        ``REQUEST_USAGE_RETENTION_DAYS`` is set, and the same daily job
+        deletes them. Env var ``OPERATION_SEARCH_STORE_QUERY_TEXT``.
+    audit_client_identity:
+        Write a ``client`` block into every audit row: the login client
+        (``azp``), the channel (``web`` or ``token``), the principal kind
+        and a short hash of the sign-in session. An approval request and an
+        approval decision also name the client of the person, and a new
+        MCP session writes one ``mcp.session_open`` row with the client
+        name and version the tool sent about itself. Default
+        ``False``: the rows stay as before. See
+        :mod:`meho_backplane.auth.client_identity`. Env var
+        ``AUDIT_CLIENT_IDENTITY``.
+    mcp_client_per_tool_kind:
+        List one login client per AI tool kind in ``GET /api/v1/auth-config``
+        (``mcp_clients``): ``meho-mcp-code`` for Claude Code and
+        ``meho-mcp-desktop`` for Claude Desktop. The Claude Code plugin and
+        the Claude Desktop extension then sign in with their own client and
+        keep separate saved logins. Default ``False``: the field is empty and
+        both tools keep the shared ``meho-mcp`` client. Turn it on only when
+        the realm has the two clients. Env var ``MCP_CLIENT_PER_TOOL_KIND``.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -811,6 +857,14 @@ class Settings(BaseModel):
         the smallest payload that would trigger reduction. Operators tune it
         via ``JSONFLUX_SAMPLE_BYTE_BUDGET``. Read once per reduce through
         :func:`get_settings`'s cache.
+    jsonflux_answer_ready:
+        Off by default. When on, a reduced reply also carries ``items``
+        (every row in 1 to 3 short columns, when that fits in about 3 KB)
+        and ``counts`` (how many rows have each value, for columns with 10
+        or fewer values), and the handle gets one short line on how to read
+        more instead of two long texts
+        (:mod:`meho_backplane.operations.answer_ready`). It stays off until
+        model tests show it helps. Env ``JSONFLUX_ANSWER_READY``.
     composite_max_depth:
         Hard cap on the recursion depth a composite operation
         (``source_kind='composite'``) may reach via successive
@@ -901,6 +955,17 @@ class Settings(BaseModel):
         :func:`~meho_backplane.memory._internal.is_expired` until the
         external job reaps them. Read once at lifespan startup; toggling
         post-start requires a pod restart to take effect.
+    knowledge_upkeep_interval_seconds:
+        How often the knowledge upkeep job runs, in seconds
+        (:mod:`meho_backplane.lessons.upkeep`). Default 604800 (one
+        week). The job merges duplicate knowledge entries, retires
+        expired ones, sets ``confirmed_at`` again on used confirmed
+        entries and writes one report per tenant. Its window for "used"
+        is the same length. The interval counts from the last recorded
+        run, so a restart does not start it again. Range ``[60, 604800]``.
+    knowledge_upkeep_enabled:
+        Whether to start the knowledge upkeep job in the FastAPI
+        lifespan. Default ``True``. Read once at startup.
     ui_keycloak_client_id:
         OAuth ``client_id`` of the **confidential** Keycloak client the
         operator-console BFF login flow authenticates against. Initiative
@@ -1107,7 +1172,7 @@ class Settings(BaseModel):
     agent_default_model:
         Pinned Anthropic model id the agent loop uses when an
         ``AgentDefinition`` does not override it. A full id
-        (``anthropic:claude-sonnet-4-6``), never a moving ``-latest`` tag,
+        (``anthropic:claude-sonnet-5-5``), never a moving ``-latest`` tag,
         so a model swap is a deliberate config push. Set via
         ``AGENT_DEFAULT_MODEL``.
     agent_max_output_tokens:
@@ -1120,6 +1185,19 @@ class Settings(BaseModel):
         costs more and can make one answer take much longer; above about
         21,000 the request is sent as a stream. Set via
         ``AGENT_MAX_OUTPUT_TOKENS``.
+    agent_model_backend:
+        Which model server MEHO's own agent runs use: hosted runs,
+        scheduled runs, event-triggered runs, agents started by an
+        agent, and the investigator. ``anthropic`` (the default) uses
+        ``ANTHROPIC_API_KEY`` and :attr:`agent_default_model`.
+        ``openai`` uses an OpenAI-compatible endpoint (OpenAI, vLLM,
+        Ollama, OpenRouter) from ``OPENAI_BASE_URL``, ``OPENAI_API_KEY``
+        and :attr:`openai_default_model`. ``bedrock`` uses AWS Bedrock
+        (:attr:`bedrock_default_model`), and ``vcf-paif`` uses VCF
+        Private AI Foundation (:attr:`vcf_paif_model`). Every risk level
+        of an agent uses this one backend. A run never falls back to
+        another backend: when the chosen backend is not set up, the run
+        fails and its record says why. Set via ``AGENT_MODEL_BACKEND``.
     bedrock_region:
         AWS region the Bedrock backend builder
         (:func:`meho_backplane.agent.models.bedrock_backend_builder`)
@@ -1160,26 +1238,49 @@ class Settings(BaseModel):
         human review across timezone-distant teams without tying up an
         agent loop indefinitely on a forgotten request. Set via
         ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
+    agent_operation_tools_from_mcp:
+        Off by default. When on, a hosted agent run gets
+        ``list_operation_groups``, ``search_operations`` and
+        ``call_operation`` with the input schema and text of the MCP tools
+        of the same name (:mod:`meho_backplane.agent.toolset_operations`):
+        exact-op mode on ``search_operations``, and ``preview_hash`` and
+        ``idempotency_key`` on ``call_operation``. When off, hosted runs
+        keep the older hand-written copies. It stays off until model tests
+        show it helps. Env ``AGENT_OPERATION_TOOLS_FROM_MCP``.
+    web_push_enabled:
+        Off by default. An admin turns it on (chart value
+        ``webPush.enabled``) to let a person switch on "Notify me about
+        approvals" per browser on the account page
+        (:mod:`meho_backplane.web_push`). Off: the switch is not shown, the
+        push routes answer 404 and the push key is not read. Env
+        ``WEB_PUSH_ENABLED``.
+    web_push_vapid_private_key:
+        The push key (VAPID): the base64url form of a raw 32-byte P-256
+        private key. It proves that push messages come from this MEHO. The
+        install makes it in the Secret ``<release>-core-web-push``. Never
+        logged and never shown. Env ``WEB_PUSH_VAPID_PRIVATE_KEY``.
+    spaces_enabled:
+        Off by default. Turns on spaces (who owns which system inside a
+        tenant, :mod:`meho_backplane.spaces`). The tables always exist; with
+        this off, nothing in an install changes. Env ``SPACES_ENABLED``.
     approval_allow_self_approval:
         Self-approval **emergency break-glass** switch (G11.7-T1 #1401).
-        Default ``False`` (fail-closed): the operator who requested a
-        parked approval may not approve their own request — requester !=
+        Default ``False`` (fail-closed): a person who is not a
+        MEHO-SA-Operator may not approve their own request — requester !=
         approver is enforced in
         :func:`~meho_backplane.operations.approval_queue.approve_request`,
         so a compromised or careless single account cannot both ask for
         and grant a privileged connector write. Set
         ``APPROVAL_ALLOW_SELF_APPROVAL=true`` only for a genuine,
-        audited break-glass; the self-approval still writes its decision
-        audit row, so the use is forensically visible. This is **not**
-        the single-operator answer — enabling it posture-wide re-opens,
-        for every op, the single-account request+grant hole #1401
-        closed. A single-operator tenant should instead park its
-        four-eyes writes under an **agent-requester** (a distinct
-        ``principal_kind=agent`` ``sub``, so requester != approver clears
-        with no flag); see the "Single-operator tenants: use an
-        agent-requester, not break-glass" section of
-        ``docs/codebase/approvals.md``. Reject is always allowed
-        regardless of this flag — an operator withdrawing their own
+        audited break-glass; it covers only ``safe`` and ``caution``
+        changes, and the self-approval still writes its decision audit
+        row, so the use is forensically visible. This is **not** the
+        single-operator answer — enabling it posture-wide re-opens, for
+        every ``safe`` and ``caution`` op, the single-account
+        request+grant hole #1401 closed. A single operator belongs in the
+        MEHO-SA-Operators group instead (#3325); see the "Single-operator
+        tenants" section of ``docs/codebase/approvals.md``. Reject is
+        always allowed regardless of this flag — an operator withdrawing their own
         pending request is never a privilege escalation.
     fresh_sign_in_max_age_seconds:
         The approval window (#5515): how old a person's sign-in may be
@@ -1198,6 +1299,13 @@ class Settings(BaseModel):
         is ``destructive``. Such an approval also needs a sign-in that has
         approved nothing else. Default ``300`` (five minutes). Set via
         ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
+    approval_presence_touch_valid_seconds:
+        How long a started passkey touch for an approval stays valid
+        (#6214). When a person clicks Approve, MEHO makes a one-time touch
+        challenge for that request. The person must finish the touch in
+        this time; after it the challenge is void and the person clicks
+        Approve again. Default ``120`` (two minutes), from 30 to 600. Set
+        via ``APPROVAL_PRESENCE_TOUCH_VALID_SECONDS``.
     approval_one_time_code_acr_values:
         The ``acr`` values that mean "the person entered a one-time code
         from their authenticator app" (#3979). An approve whose token
@@ -1269,12 +1377,14 @@ class Settings(BaseModel):
         rather than the settings-driven default.
     openai_default_model:
         Pinned model id the OpenAI-compatible backend uses when an
-        ``AgentDefinition`` does not override it. Full provider-qualified
-        id (``openai:gpt-4o-mini`` for OpenAI SaaS;
-        ``openai:meta-llama/Llama-3.1-8B-Instruct`` for a vLLM-hosted
-        Llama, etc. — pydantic_ai's :class:`OpenAIChatModel` accepts the
-        bare model name and the ``openai:`` prefix is stripped when
-        present). Same posture as ``agent_default_model``: a full id,
+        ``AgentDefinition`` does not override it. Either the bare model
+        name the endpoint serves (``gpt-4o-mini``,
+        ``meta-llama/Llama-3.1-8B-Instruct``, ``llama3.1:8b``) or the
+        same name with an ``openai:`` prefix (``openai:gpt-4o-mini``).
+        MEHO removes the ``openai:`` prefix before it sends the name;
+        pydantic_ai's :class:`OpenAIChatModel` sends the name unchanged,
+        and an endpoint answers "model not found" for the prefixed form.
+        Same posture as ``agent_default_model``: a full id,
         never a moving alias, so model swaps are deliberate config
         pushes. Set via ``OPENAI_DEFAULT_MODEL``.
     agent_budget_degrade_threshold:
@@ -1303,6 +1413,16 @@ class Settings(BaseModel):
         switched (G11.5-T6 #1080). Case-insensitive; whitespace
         between values ignored. An empty string (the default) means no
         tenants are disabled. Set via ``AGENT_RUNS_DISABLED_TENANTS``.
+    agent_grant_required:
+        What happens when an agent login calls an operation and none of
+        its grants matches (#6189). ``off`` (the default): the risk-level
+        default, as before (``safe`` runs at once, every other level waits
+        for approval). ``observe``: the same, and MEHO logs
+        ``agent_no_grant_would_deny`` for each call that ``on`` would
+        refuse. ``on``: the call is refused on every risk level with the
+        code ``agent_no_grant``. People, service accounts and runners are
+        not affected. Any other value stops the start. Set via
+        ``AGENT_GRANT_REQUIRED``.
     vcf_paif_base_url:
         Base URL of the VCF Private AI Foundation OpenAI-compatible
         endpoint (G11.5-T4 #1078), **including** the fixed sub-path
@@ -1318,11 +1438,11 @@ class Settings(BaseModel):
         directly rather than this single-knob default.
     vcf_paif_model:
         Pinned model id the PAIF backend uses when an
-        ``AgentDefinition`` does not override it. Full provider-qualified
-        id (``openai:meta-llama/Llama-3.1-8B-Instruct`` /
-        ``openai:mistralai/Mixtral-8x7B-Instruct``, etc. — pydantic_ai's
-        :class:`OpenAIChatModel` strips the ``openai:`` prefix). Set via
-        ``VCF_PAIF_MODEL``.
+        ``AgentDefinition`` does not override it. The bare model name
+        or the name with an ``openai:`` prefix
+        (``openai:meta-llama/Llama-3.1-8B-Instruct``). MEHO removes the
+        prefix before it sends the name, as for
+        :attr:`openai_default_model`. Set via ``VCF_PAIF_MODEL``.
     vcf_paif_oidc_token_url:
         The IdP token endpoint the bundled OIDC token provider POSTs
         the ``client_credentials`` grant against. Example (Keycloak):
@@ -1344,6 +1464,16 @@ class Settings(BaseModel):
         scope. Deployments with fine-grained scope enforcement set
         this to the value the IdP expects. Set via
         ``VCF_PAIF_OIDC_SCOPE``.
+    operation_contract_guidance:
+        Off by default (#4757). When on, the exact-op contract of
+        ``search_operations`` (a call with ``op_id``) also carries a
+        ``guidance`` block: the written advice from the operation's
+        ``llm_instructions`` (``when_to_call`` / ``when_to_use``,
+        ``preconditions``, ``parameter_hints``, ``output_shape``,
+        ``next_step``), with a size limit
+        (:mod:`meho_backplane.operations._contract_guidance`). Ranked hits
+        do not change. It stays off until model tests show it helps.
+        Env ``OPERATION_CONTRACT_GUIDANCE``.
     mcp_require_session_id:
         Whether ``POST /mcp`` rejects requests that omit the
         ``Mcp-Session-Id`` header (G8.2-T2 #1010 + G0.14-T6 #1147).
@@ -1371,6 +1501,46 @@ class Settings(BaseModel):
         :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
         so operators can confirm the deploy's audit-replay capture
         state without diffing env vars.
+    mcp_topology_off_default_list:
+        Whether ``query_topology`` leaves the default MCP tool list.
+        Default ``False``: every session lists it, as before. Set
+        ``MCP_TOPOLOGY_OFF_DEFAULT_LIST=true`` to move it to the tools a
+        session gets only when it asks for the ``mcp:admin`` scope. A
+        session without the scope does not list it, and a call answers
+        with the same message as for the other admin tools. This saves
+        its text in every session that has no use for the tool.
+    team_knowledge_recall:
+        Off by default. When on, MEHO shows what the team knows without a
+        search (:mod:`meho_backplane.recall`): ``preview_operation`` and
+        ``call_operation`` add a ``team_knowledge`` block for a known
+        target, and the MCP start text and the prompt of a hosted run carry
+        the caller's newest Memory notes. When off, none of this is shown.
+        It stays off until model tests show it helps. Env
+        ``TEAM_KNOWLEDGE_RECALL``.
+    mcp_short_tool_texts:
+        Off by default. When on, the biggest tools on the default MCP tool
+        list send a short description and short input texts
+        (:mod:`meho_backplane.mcp.short_texts`). The inputs a tool accepts
+        stay the same. A small model keeps more of its context window for
+        the job. It stays off until model tests show it helps. Env
+        ``MCP_SHORT_TOOL_TEXTS``.
+    mcp_reveal_fetch:
+        Off by default. When on, ``call_operation`` on MCP takes an
+        ``approval_request_id``: the person who asked to see a secret value
+        (``reveal_secret: true``) gets it there, once, after a second person
+        approved (:mod:`meho_backplane.mcp.tools._call_operation_reveal`).
+        When off, the tool has no text about this and refuses the input; the
+        person gets the value on the command line, in the console or over
+        REST. It stays off until model tests show it helps. Env
+        ``MCP_REVEAL_FETCH``.
+    policy_classification:
+        Off by default. When on, each connector, operation group and
+        operation can carry a category, labels and an "always wait" mark,
+        and an operation takes the values of its group and connector
+        (:mod:`meho_backplane.policy.classification`). When off, MEHO reads
+        none of it and every operation keeps today's risk level and
+        approval. Env ``POLICY_CLASSIFICATION``; Helm
+        ``config.policy.classification``.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -1425,6 +1595,15 @@ class Settings(BaseModel):
     #: a prior boot would mask a connector's registration change. See
     #: ``run_typed_op_registrars`` for the snapshot/replay contract.
     test_amortize_typed_op_registrars: bool = False
+    #: Test-only: when True, the start fails on purpose right after the
+    #: built-in operation rows and the release stamp were written, inside
+    #: their transaction, after changing every built-in row in a visible
+    #: way. The CI proof on a throwaway install (``helm-test`` in
+    #: ``chart.yml``) sets ``MEHO_TEST_FAIL_START_AFTER_REGISTRATION=1``
+    #: on a broken release to show that a failed start changes no row and
+    #: that ``helm rollback`` serves again (#5024). NEVER set in production:
+    #: the pod never starts.
+    test_fail_start_after_registration: bool = False
     backplane_url: str = ""
     mcp_resource_uri: str = ""
     vault_addr: HttpUrl | None = Field(default=None)
@@ -1522,6 +1701,25 @@ class Settings(BaseModel):
     # through :attr:`gsm_param_allowed_project_set`. Set via
     # ``GSM_PARAM_ALLOWED_PROJECTS``.
     gsm_param_allowed_projects: str = Field(default="")
+    # Tenants whose knowledge entries marked ``shared`` every tenant on this
+    # instance can read. Comma-separated tenant ids, whitespace ignored.
+    # Empty (the default) means no tenant may share and no entry is shared.
+    # Only the owner tenant can write them. Read through
+    # :attr:`kb_shared_tenant_set`. Set via ``KB_SHARED_TENANT_IDS``.
+    kb_shared_tenant_ids: str = Field(default="")
+    # Lowest cosine score (0 to 1) at which an existing knowledge entry
+    # counts as similar to a new one. A create of a new slug that finds
+    # such an entry writes nothing and lists it (kb/similar.py). With the
+    # default embedding model a reworded copy scores about 0.9 and a
+    # different note on the same product about 0.8. Set via
+    # ``KB_SIMILAR_MIN_SCORE``.
+    kb_similar_min_score: float = Field(default=0.85, ge=0.0, le=1.0)
+    # Off by default. When on, a create of a new knowledge slug first looks
+    # for similar entries and writes nothing when it finds some
+    # (kb/similar.py). When off, MEHO does not search: the create is
+    # written as before, and a dry run lists no entries. It stays off until
+    # model tests show it helps. Set via ``KB_SIMILAR_CHECK``.
+    kb_similar_check: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -1668,6 +1866,12 @@ class Settings(BaseModel):
     # #3757: off by default. Must stay declared after
     # ``request_usage_retention_days``: its validator reads that value.
     audit_wrapper_rows_retired: bool = False
+    # #4750: off by default; the search record keeps only the query hash.
+    operation_search_store_query_text: bool = False
+    # Off by default; with it off the audit rows stay as before.
+    audit_client_identity: bool = False
+    # Off by default; with it off auth-config lists no per-tool login client.
+    mcp_client_per_tool_kind: bool = False
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
     result_cache_redis_password: str | None = Field(default=None)
@@ -1696,12 +1900,16 @@ class Settings(BaseModel):
     result_complete_response_wire_max_bytes: int = Field(default=262144, gt=0)
     result_query_response_wire_max_bytes: int = Field(default=2097152, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
+    jsonflux_answer_ready: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     composite_max_depth: int = Field(default=8, gt=0)
     agent_invoke_max_depth: int = Field(default=4, gt=0)
     topology_refresh_interval_seconds: int = Field(default=3600, gt=0)
     memory_user_default_ttl_days: int = Field(default=7, ge=1, le=365)
     memory_expiry_tick_interval_seconds: int = Field(default=86400, ge=60, le=86400)
     memory_expiry_enabled: bool = True
+    # Weekly knowledge upkeep and its report (lessons/upkeep.py).
+    knowledge_upkeep_interval_seconds: int = Field(default=604800, ge=60, le=604800)
+    knowledge_upkeep_enabled: bool = True
     # G11.2-T6 #819 — grant-expiry sweeper knobs. ``GRANT_EXPIRY_ENABLED``
     # follows the same opt-out shape as ``MEMORY_EXPIRY_ENABLED``.
     # ``GRANT_EXPIRY_TICK_INTERVAL_SECONDS`` defaults to 300 (5 minutes)
@@ -1717,10 +1925,8 @@ class Settings(BaseModel):
     # ``APPROVAL_ALLOW_SELF_APPROVAL=true`` only for a genuine, audited
     # break-glass; every self-approval still writes its decision audit
     # row, so the use is forensically visible. NOT the single-operator
-    # answer -- single-operator tenants park four-eyes writes under an
-    # agent-requester (distinct principal_kind=agent sub) instead; see
-    # docs/codebase/approvals.md "Single-operator tenants: use an
-    # agent-requester, not break-glass".
+    # answer -- a single operator belongs in MEHO-SA-Operators (#3325);
+    # see docs/codebase/approvals.md "Single-operator tenants".
     approval_allow_self_approval: bool = False
     # #3693 -- delegated approval decisions (an ``Instructed-by:`` block in
     # the reason, #3692) are allowed only on lab-class deployments. Default
@@ -1733,6 +1939,8 @@ class Settings(BaseModel):
     # sign-in each time: turning approval off (#4711) and a destructive
     # approve.
     per_action_sign_in_max_age_seconds: int = Field(default=300, ge=30, le=3600)
+    # #6214 -- how long a started passkey touch for an approval stays valid.
+    approval_presence_touch_valid_seconds: int = Field(default=120, ge=30, le=600)
     # #3979 -- the acr values that mean a one-time code step. Empty = off.
     approval_one_time_code_acr_values: tuple[str, ...] = ()
     # #4622 -- sandbox mode: a standing grant may also cover deletes, only
@@ -1757,6 +1965,13 @@ class Settings(BaseModel):
     approval_default_ttl_seconds: int = Field(default=14 * 24 * 3600, ge=60)
     approval_expiry_enabled: bool = True
     approval_expiry_tick_interval_seconds: int = Field(default=300, ge=60, le=86400)
+    # #5026 -- an approved run that started and stored no result after this
+    # many minutes is listed for operators to check ("outcome unknown").
+    approval_outcome_unknown_after_minutes: int = Field(default=15, ge=1, le=1440)
+    # An approved secret reveal runs only when the person who asked fetches
+    # the value, once, and only within this many seconds after the approval
+    # (``operations.approved_reveal``).
+    approval_reveal_fetch_window_seconds: int = Field(default=900, ge=60, le=86400)
     # #3151 — op-id patterns a service-principal standing grant may never
     # cover (delete-shaped ops are the floor of what runs unattended, never
     # grantable). See ``operations.service_grants``.
@@ -1791,6 +2006,11 @@ class Settings(BaseModel):
     operation_run_reaper_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
     operation_run_reaper_max_per_tick: int = Field(default=50, ge=1, le=1000)
     operation_run_lease_ttl_seconds: int = Field(default=60, ge=10, le=3600)
+    # How long a stopping pod waits for running operations to finish
+    # (#5024). Counted from the stop signal. The chart sets it together with
+    # uvicorn's own limit (UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN) and keeps the
+    # pod's grace period longer. See docs/codebase/shutdown-drain.md.
+    shutdown_drain_seconds: int = Field(default=60, ge=0, le=3600)
     # Dispatch flight recorder (#3212, F1/F4/F6 of
     # ``docs/decisions/dispatch-flight-recorder.md``).
     #
@@ -1879,6 +2099,15 @@ class Settings(BaseModel):
     # Dedicated custody key for encrypted credential-write approval handoffs.
     # Unlike the optional UI key this is required only when such an approval parks.
     approval_handoff_encryption_key: str = ""
+    # The key of the params hashes and value fingerprints in audit rows and
+    # approval requests (operations/_validate.py). A secret of its own, so a
+    # new database password keeps every hash. Empty = made from DATABASE_URL.
+    params_hash_key: str = ""
+    # The push feature (web_push/) and its key; see the docstring.
+    web_push_enabled: bool = False
+    web_push_vapid_private_key: str = Field(default="", repr=False)
+    # Spaces (spaces/); see the docstring.
+    spaces_enabled: bool = False
     # G10.1-T3 #869 — BFF sliding-session knobs for the broadcast
     # wall-monitor's long-display requirement. The sliding extension
     # keeps an actively-viewed session alive past its login-time
@@ -1922,12 +2151,15 @@ class Settings(BaseModel):
     # is the pinned model id the loop uses when an ``AgentDefinition`` does
     # not override it (full id in config, not a moving ``-latest`` tag).
     anthropic_api_key: str = ""
-    agent_default_model: str = Field(default="anthropic:claude-sonnet-4-6", min_length=1)
+    agent_default_model: str = Field(default="anthropic:claude-sonnet-5-5", min_length=1)
     # #3997 -- output-token limit for each Anthropic agent request. Since
     # pydantic-ai 2.52 an unset ``max_tokens`` means the model's maximum
-    # (128,000 for claude-sonnet-4-6), sent as a stream, so the builders
+    # (128,000 for claude-sonnet-5-5), sent as a stream, so the builders
     # always send this value. 4096 keeps requests as they were before.
     agent_max_output_tokens: int = Field(default=4096, ge=1, le=128_000)
+    # #5850 -- which backend MEHO's own agent runs use. Every risk level
+    # goes to this one backend; there is no fallback to another one.
+    agent_model_backend: str = "anthropic"
     # G11.5-T2 #1076 — AWS Bedrock backend configuration. The Bedrock
     # builder (``meho_backplane.agent.models.bedrock_backend_builder``)
     # uses pydantic_ai's :class:`BedrockConverseModel` + ``boto3`` via
@@ -1963,6 +2195,8 @@ class Settings(BaseModel):
     # tying up an agent loop indefinitely on a forgotten request. Set via
     # ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
     agent_approval_wait_timeout_seconds: float = Field(default=1800.0, gt=0)
+    # #4754 — hosted operation tools from the MCP tools; see the docstring.
+    agent_operation_tools_from_mcp: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     # G11.5-T3 #1077 — OpenAI-compatible backend configuration for the
     # agent runtime's multi-provider resolver. Sources the credentials
     # the settings-driven default OpenAI backend builder consumes; tenants
@@ -2003,6 +2237,9 @@ class Settings(BaseModel):
     # exactly like the global switch. An empty string (the default) is
     # "no tenants disabled". Set via ``AGENT_RUNS_DISABLED_TENANTS``.
     agent_runs_disabled_tenants: str = ""
+    # #6189 — "no grant, no rights" for agent logins. See the class
+    # docstring; read by ``auth/permissions.py::resolve_verdict``.
+    agent_grant_required: str = "off"
     # G11.5-T4 #1078 — VCF Private AI Foundation backend. PAIF is the
     # air-gapped enterprise target: OpenAI-compatible wire format under
     # a fixed ``/api/v1/compatibility/openai/v1/`` sub-path, OpenID
@@ -2088,6 +2325,12 @@ class Settings(BaseModel):
     # ``CHECKS_INVESTIGATOR_AGENT`` / ``CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS``.
     checks_investigator_agent: str = "checks-investigator"
     checks_investigation_poll_timeout_seconds: int = Field(default=600, ge=1, le=86400)
+    # #6180 (Initiative #6179): with this switch on, a confirmed Sensor change
+    # and a Dashboard change are written to the event outbox
+    # (``check.sensor.changed`` / ``check.dashboard.changed``), so event
+    # triggers can match them. Off by default: nothing is written and nothing
+    # else changes. Set via ``CHECKS_AGENT_EVENTS``.
+    checks_agent_events: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     # #2717 (Initiative #2716) — mail.* typed connector: one deployment-level
     # SMTP block shared by the agent-callable ``mail.send`` op and the checks
     # notifier's ``send_email()`` transport. ``mail_smtp_host`` empty (the
@@ -2198,7 +2441,13 @@ class Settings(BaseModel):
     # external orchestrator (or running tests without the drain) opt out.
     event_drain_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
     event_drain_enabled: bool = True
+    operation_contract_guidance: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_require_session_id: bool = False
+    mcp_topology_off_default_list: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    policy_classification: bool = False
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
     #: forwarded operator JWT. Empty ("") means the add-on is not
@@ -2258,6 +2507,29 @@ class Settings(BaseModel):
     #: (:func:`~meho_backplane.docs_search.call_log.log_query_text`). Set via
     #: ``DOCS_DEBUG_LOG_QUERY_TEXT``.
     docs_debug_log_query_text: bool = False
+    #: Whether the agent reads an admin's ``custom_description`` (#4753).
+    #: ``False`` (default): ``search_operations`` hits, the exact-op contract
+    #: and the keyword half of search use the original ``description``, as
+    #: before. ``True``: when an admin set a non-empty ``custom_description``
+    #: with ``meho_connector_edit_op``, it takes the place of ``description``
+    #: in all three. The keyword half then uses the index of migration
+    #: ``0148`` (``endpoint_descriptor_bm25_custom_idx``). Set via
+    #: ``AGENT_READS_CUSTOM_DESCRIPTION``.
+    agent_reads_custom_description: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: How ``search_operations`` treats a plain sentence (#5490). ``False``
+    #: (default): as before. ``True``: the keyword half matches an operation
+    #: that holds any word of the query, not only every word, and a search
+    #: with a ``group`` filter that leaves exactly one operation answers
+    #: ``matched``. Hit order can change, so it stays off until the routing
+    #: evaluation and the model tests show it helps. Set via
+    #: ``SEARCH_PLAIN_SENTENCES``.
+    search_plain_sentences: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Stricter ``matched`` outcome of ``search_operations`` (#6014), behind
+    #: a switch that is off by default. When on, a search answers
+    #: ``ambiguous`` if another hit is closer in meaning than the top hit.
+    #: Only the outcome changes, never the hits or their order. Set via
+    #: ``SEARCH_CLEAR_LEAD``.
+    search_clear_lead: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -2288,6 +2560,17 @@ class Settings(BaseModel):
     #: refuses a ``keys`` list longer than this before it asks for approval.
     #: Set via ``VAULT_KV_FOLDER_MAX_KEYS``.
     vault_kv_folder_max_keys: int = Field(default=500, ge=1, le=10000)
+
+    @property
+    def kb_shared_tenant_set(self) -> frozenset[UUID]:
+        """The tenant ids in :attr:`kb_shared_tenant_ids`, as a set.
+
+        Raises :class:`ValueError` for an entry that is not a UUID, so a
+        typo does not quietly turn sharing off.
+        """
+        return frozenset(
+            UUID(entry.strip()) for entry in self.kb_shared_tenant_ids.split(",") if entry.strip()
+        )
 
     @property
     def gsm_param_allowed_project_set(self) -> frozenset[str]:
@@ -2352,6 +2635,32 @@ class Settings(BaseModel):
                 f"template whose only placeholder is '{{tenant_id}}'; got: "
                 f"{value!r}"
             ) from exc
+        return value
+
+    @field_validator("agent_model_backend")
+    @classmethod
+    def _agent_model_backend_must_be_known(cls, value: str) -> str:
+        """Stop the start when ``AGENT_MODEL_BACKEND`` names no known backend.
+
+        A typo must not send agent runs to a backend the operator did not
+        pick, so an unknown value fails at startup with the allowed list.
+        """
+        if value not in AGENT_MODEL_BACKENDS:
+            allowed = ", ".join(AGENT_MODEL_BACKENDS)
+            raise ValueError(f"AGENT_MODEL_BACKEND must be one of: {allowed}. Got: {value!r}")
+        return value
+
+    @field_validator("agent_grant_required")
+    @classmethod
+    def _agent_grant_required_must_be_known(cls, value: str) -> str:
+        """Stop the start when ``AGENT_GRANT_REQUIRED`` is not off, observe or on.
+
+        A typo must not leave agents with rights the operator meant to
+        take away, so an unknown value fails at startup.
+        """
+        if value not in AGENT_GRANT_REQUIRED_MODES:
+            allowed = ", ".join(AGENT_GRANT_REQUIRED_MODES)
+            raise ValueError(f"AGENT_GRANT_REQUIRED must be one of: {allowed}. Got: {value!r}")
         return value
 
     @field_validator("result_cache_redis_url")
@@ -2707,6 +3016,9 @@ def get_settings() -> Settings:
         test_amortize_typed_op_registrars=parse_bool_env(
             os.environ.get("MEHO_TEST_AMORTIZE_TYPED_OP_REGISTRARS"),
         ),
+        test_fail_start_after_registration=parse_bool_env(
+            os.environ.get("MEHO_TEST_FAIL_START_AFTER_REGISTRATION"),
+        ),
         backplane_url=os.environ.get("BACKPLANE_URL", ""),
         mcp_resource_uri=os.environ.get("MCP_RESOURCE_URI", ""),
         # Optional: a GSM-backend (Vault-free) install sets no VAULT_ADDR,
@@ -2758,6 +3070,9 @@ def get_settings() -> Settings:
             or "urn:ietf:params:oauth:token-type:jwt"
         ),
         gsm_param_allowed_projects=os.environ.get("GSM_PARAM_ALLOWED_PROJECTS", "").strip(),
+        kb_shared_tenant_ids=os.environ.get("KB_SHARED_TENANT_IDS", "").strip(),
+        kb_similar_min_score=float(os.environ.get("KB_SIMILAR_MIN_SCORE", "0.85")),
+        kb_similar_check=parse_bool_env(os.environ.get("KB_SIMILAR_CHECK")),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(
@@ -2847,6 +3162,15 @@ def get_settings() -> Settings:
         audit_wrapper_rows_retired=parse_bool_env(
             os.environ.get("AUDIT_WRAPPER_ROWS_RETIRED", "false"),
         ),
+        operation_search_store_query_text=parse_bool_env(
+            os.environ.get("OPERATION_SEARCH_STORE_QUERY_TEXT", "false"),
+        ),
+        audit_client_identity=parse_bool_env(
+            os.environ.get("AUDIT_CLIENT_IDENTITY", "false"),
+        ),
+        mcp_client_per_tool_kind=parse_bool_env(
+            os.environ.get("MCP_CLIENT_PER_TOOL_KIND", "false"),
+        ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
         ),
@@ -2894,6 +3218,9 @@ def get_settings() -> Settings:
         jsonflux_sample_byte_budget=int(
             os.environ.get("JSONFLUX_SAMPLE_BYTE_BUDGET", "4096"),
         ),
+        jsonflux_answer_ready=parse_bool_env(
+            os.environ.get("JSONFLUX_ANSWER_READY", "false"),
+        ),
         composite_max_depth=int(
             os.environ.get("COMPOSITE_MAX_DEPTH", "8"),
         ),
@@ -2911,6 +3238,12 @@ def get_settings() -> Settings:
         ),
         memory_expiry_enabled=parse_bool_env(
             os.environ.get("MEMORY_EXPIRY_ENABLED", "true"),
+        ),
+        knowledge_upkeep_interval_seconds=int(
+            os.environ.get("KNOWLEDGE_UPKEEP_INTERVAL_SECONDS", "604800"),
+        ),
+        knowledge_upkeep_enabled=parse_bool_env(
+            os.environ.get("KNOWLEDGE_UPKEEP_ENABLED", "true"),
         ),
         grant_expiry_tick_interval_seconds=int(
             os.environ.get("GRANT_EXPIRY_TICK_INTERVAL_SECONDS", "300"),
@@ -2936,6 +3269,10 @@ def get_settings() -> Settings:
         per_action_sign_in_max_age_seconds=int(
             os.environ.get("PER_ACTION_SIGN_IN_MAX_AGE_SECONDS", "300"),
         ),
+        # #6214 -- how long a started passkey touch stays valid.
+        approval_presence_touch_valid_seconds=int(
+            os.environ.get("APPROVAL_PRESENCE_TOUCH_VALID_SECONDS", "120"),
+        ),
         # #3979 -- which acr values mean a one-time code step.
         approval_one_time_code_acr_values=tuple(
             chunk.strip()
@@ -2960,6 +3297,10 @@ def get_settings() -> Settings:
         ),
         approval_expiry_tick_interval_seconds=int(
             os.environ.get("APPROVAL_EXPIRY_TICK_INTERVAL_SECONDS", "300"),
+        ),
+        # #5026 -- when a started run with no result counts as outcome unknown.
+        approval_outcome_unknown_after_minutes=int(
+            os.environ.get("APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES", "15"),
         ),
         # #3151 — delete-shaped op-id patterns never grantable to a service
         # principal. Comma-separated override; empty keeps the default set.
@@ -2991,6 +3332,7 @@ def get_settings() -> Settings:
         operation_run_lease_ttl_seconds=int(
             os.environ.get("OPERATION_RUN_LEASE_TTL_SECONDS", "60"),
         ),
+        shutdown_drain_seconds=int(os.environ.get("SHUTDOWN_DRAIN_SECONDS", "60")),
         # Dispatch flight recorder (#3212, F1/F4/F6).
         flight_recorder_enabled=parse_bool_env(
             os.environ.get("FLIGHT_RECORDER_ENABLED", "true"),
@@ -3031,6 +3373,10 @@ def get_settings() -> Settings:
         approval_handoff_encryption_key=os.environ.get(
             "APPROVAL_HANDOFF_ENCRYPTION_KEY", ""
         ).strip(),
+        params_hash_key=os.environ.get("PARAMS_HASH_KEY", "").strip(),
+        web_push_enabled=parse_bool_env(os.environ.get("WEB_PUSH_ENABLED", "false")),
+        web_push_vapid_private_key=os.environ.get("WEB_PUSH_VAPID_PRIVATE_KEY", "").strip(),
+        spaces_enabled=parse_bool_env(os.environ.get("SPACES_ENABLED", "false")),
         ui_session_sliding_extension_seconds=int(
             os.environ.get("UI_SESSION_SLIDING_EXTENSION_SECONDS", "3600"),
         ),
@@ -3061,11 +3407,12 @@ def get_settings() -> Settings:
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
         agent_default_model=os.environ.get(
             "AGENT_DEFAULT_MODEL",
-            "anthropic:claude-sonnet-4-6",
+            "anthropic:claude-sonnet-5-5",
         ),
         agent_max_output_tokens=int(
             os.environ.get("AGENT_MAX_OUTPUT_TOKENS", "4096"),
         ),
+        agent_model_backend=os.environ.get("AGENT_MODEL_BACKEND", "anthropic").strip().lower(),
         bedrock_region=os.environ.get("BEDROCK_REGION", "").strip(),
         bedrock_default_model=os.environ.get(
             "BEDROCK_DEFAULT_MODEL",
@@ -3076,6 +3423,9 @@ def get_settings() -> Settings:
         ),
         agent_approval_wait_timeout_seconds=float(
             os.environ.get("AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS", "1800.0"),
+        ),
+        agent_operation_tools_from_mcp=parse_bool_env(
+            os.environ.get("AGENT_OPERATION_TOOLS_FROM_MCP", "false"),
         ),
         openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
         openai_base_url=os.environ.get("OPENAI_BASE_URL", "").strip(),
@@ -3093,6 +3443,7 @@ def get_settings() -> Settings:
             "AGENT_RUNS_DISABLED_TENANTS",
             "",
         ),
+        agent_grant_required=os.environ.get("AGENT_GRANT_REQUIRED", "").strip().lower() or "off",
         vcf_paif_base_url=os.environ.get("VCF_PAIF_BASE_URL", "").strip(),
         vcf_paif_model=os.environ.get(
             "VCF_PAIF_MODEL",
@@ -3130,6 +3481,7 @@ def get_settings() -> Settings:
         checks_investigation_poll_timeout_seconds=int(
             os.environ.get("CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS", "600"),
         ),
+        checks_agent_events=parse_bool_env(os.environ.get("CHECKS_AGENT_EVENTS", "false")),
         mail_smtp_host=os.environ.get("MAIL_SMTP_HOST", "").strip(),
         mail_smtp_port=int(os.environ.get("MAIL_SMTP_PORT", "587")),
         mail_smtp_starttls=parse_bool_env(
@@ -3155,8 +3507,26 @@ def get_settings() -> Settings:
         event_drain_enabled=parse_bool_env(
             os.environ.get("EVENT_DRAIN_ENABLED", "true"),
         ),
+        operation_contract_guidance=parse_bool_env(
+            os.environ.get("OPERATION_CONTRACT_GUIDANCE", "false"),
+        ),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),
+        ),
+        mcp_topology_off_default_list=parse_bool_env(
+            os.environ.get("MCP_TOPOLOGY_OFF_DEFAULT_LIST"),
+        ),
+        team_knowledge_recall=parse_bool_env(
+            os.environ.get("TEAM_KNOWLEDGE_RECALL"),
+        ),
+        mcp_short_tool_texts=parse_bool_env(
+            os.environ.get("MCP_SHORT_TOOL_TEXTS"),
+        ),
+        mcp_reveal_fetch=parse_bool_env(
+            os.environ.get("MCP_REVEAL_FETCH"),
+        ),
+        policy_classification=parse_bool_env(
+            os.environ.get("POLICY_CLASSIFICATION"),
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),
@@ -3173,6 +3543,15 @@ def get_settings() -> Settings:
         ),
         docs_debug_log_query_text=parse_bool_env(
             os.environ.get("DOCS_DEBUG_LOG_QUERY_TEXT"),
+        ),
+        agent_reads_custom_description=parse_bool_env(
+            os.environ.get("AGENT_READS_CUSTOM_DESCRIPTION"),
+        ),
+        search_plain_sentences=parse_bool_env(
+            os.environ.get("SEARCH_PLAIN_SENTENCES"),
+        ),
+        search_clear_lead=parse_bool_env(
+            os.environ.get("SEARCH_CLEAR_LEAD"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

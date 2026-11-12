@@ -12,7 +12,7 @@ Copyright (c) 2026 evoila Group
 > [`backend/src/meho_backplane/connectors/hetzner_robot/`](../../backend/src/meho_backplane/connectors/hetzner_robot/);
 > the engineering canary runbook is
 > [`docs/cross-repo/g37-hetzner-canary.md`](./g37-hetzner-canary.md).
-> This doc is the cookbook every RDC operator reads when onboarding a
+> This doc is the cookbook an operator reads when onboarding a
 > Hetzner Robot account or retiring `scripts/hetzner-robot.sh`.
 
 ---
@@ -60,7 +60,7 @@ The connector's response to this risk:
 ## What this surface is
 
 The `hetzner-rest-2026.04` connector is a **generic-ingested** connector:
-all 10 curated read-only ops are loaded from the Hetzner Robot Webservice
+all 12 curated ops (10 reads and 2 vSwitch writes) are loaded from the Hetzner Robot Webservice
 OpenAPI spec via the G0.7 ingestion pipeline, stored as `EndpointDescriptor`
 rows with `source_kind='ingested'`, and enabled via
 [`apply_robot_core_curation`](../../backend/src/meho_backplane/connectors/hetzner_robot/core_ops.py).
@@ -69,14 +69,14 @@ The hand-rolled
 [`HetznerRobotConnector`](../../backend/src/meho_backplane/connectors/hetzner_robot/connector.py)
 class provides HTTP Basic auth (Webservice user, distinct from the Robot
 portal login) and the 401-IP-block protection logic. Generic ops dispatch
-through the httpx client the connector manages; no typed handlers exist in
-v0.2 (write ops are deferred to v0.2.next per Initiative #370).
+through the httpx client the connector manages; there are no typed
+handlers. Write bodies go out as form fields (see
+[Write ops](#write-ops--form-encoded-bodies)).
 
 All ops dispatch through the same `POST /api/v1/operations/call` route the
-agent surface uses — auth, policy, audit, broadcast, and JSONFlux all run as
-documented in [CLAUDE.md](../../CLAUDE.md) §6.
+agent surface uses — auth, policy, audit, broadcast, and JSONFlux all run on every call.
 
-The v0.2 op surface (Initiative [#370](https://github.com/evoila/meho/issues/370)):
+The curated op surface:
 
 | Group | CLI verb | `op_id` | Notes |
 | --- | --- | --- | --- |
@@ -90,6 +90,8 @@ The v0.2 op surface (Initiative [#370](https://github.com/evoila/meho/issues/370
 | robot-networking | `meho hetzner-robot rdns list` | `GET:/rdns` | All reverse DNS (PTR) entries |
 | robot-networking | `meho hetzner-robot firewall get <ip>` | `GET:/firewall/{server-ip}` | Per-server packet-filter firewall (#2848) |
 | robot-ssh-keys | `meho hetzner-robot ssh-key list` | `GET:/key` | SSH public keys in the Robot portal |
+| robot-networking | `meho hetzner-robot operation call` | `POST:/vswitch/{vswitch-id}/server` | Add dedicated servers to a vSwitch. `dangerous`; waits for a second person to approve |
+| robot-networking | `meho hetzner-robot operation call` | `DELETE:/vswitch/{vswitch-id}/server` | Remove dedicated servers from a vSwitch. `dangerous`; waits for a second person to approve |
 
 The former `about` verb (`GET:/query`) was removed by
 [#2985](https://github.com/evoila/meho/issues/2985): the spec-reconcile
@@ -108,7 +110,7 @@ the narrow-waist meta-tools (`list_operation_groups`, `search_operations`,
 - **A Webservice user** (see [Webservice user setup](#webservice-user-setup-distinct-from-robot-login)).
 - **Vault access** to store the Webservice-user credentials (see [Credentials in Vault](#credentials-in-vault)).
 - **A registered Robot target** in the MEHO targets registry (see [targets.yaml entry](#targetsyaml-entry)).
-- **The `hetzner-rest-2026.04` connector ingested** and the 10 core ops
+- **The `hetzner-rest-2026.04` connector ingested** and the 12 core ops
   curated (see [G3.7 Hetzner canary runbook](./g37-hetzner-canary.md)).
 
 ## Webservice user setup (distinct from Robot login)
@@ -123,7 +125,7 @@ log into the Robot portal with. To create one:
 1. Log in to [robot.hetzner.com](https://robot.hetzner.com).
 2. Navigate to **Account → Settings → Webservice and application**.
 3. Click **Create Webservice user**.
-4. Choose a username (e.g. `meho-rdc`) and a strong password.
+4. Choose a username (e.g. `meho-robot`) and a strong password.
 5. Note the username and password — you will not see the password again.
 6. Store them in Vault immediately (see [Credentials in Vault](#credentials-in-vault)).
 
@@ -136,15 +138,15 @@ Store the Webservice-user credentials at the target's `secret_ref` path in Vault
 
 ```bash
 # Replace <path> with the path recorded in targets.yaml secret_ref.
-# Example: kv/data/hetzner/rdc-robot
-vault kv put <path> username="<webservice-username>" password="<webservice-password>"
+# Example: hetzner/robot-01 under the "secret" mount
+vault kv put -mount=secret <path> username="<webservice-username>" password="<webservice-password>"
 ```
 
 The dict shape the connector expects:
 
 ```json
 {
-  "username": "meho-rdc",
+  "username": "meho-robot",
   "password": "<strong-password>"
 }
 ```
@@ -154,17 +156,17 @@ the target and the missing key — check the Vault path first.
 
 ## targets.yaml entry
 
-Add an entry to `targets.yaml` in `claude-rdc-hetzner-dc`:
+Add an entry to the `targets.yaml` in your consumer repo:
 
 ```yaml
-- name: rdc-robot          # stable slug used in --target flags
+- name: robot-01           # stable slug used in --target flags
   product: hetzner
   host: robot.hetzner.com
   port: 443                # HTTPS, optional (443 is the default)
-  secret_ref: kv/data/hetzner/rdc-robot
+  secret_ref: hetzner/robot-01   # path inside the KV mount, without "secret/" or "data/"
   auth_model: shared_service_account
   vpn_required: false
-  notes: "Hetzner Robot Webservice for the RDC production account."
+  notes: "Hetzner Robot Webservice for the production account."
 ```
 
 Import the target:
@@ -176,13 +178,13 @@ meho targets import targets.yaml
 Probe it (one TCP+TLS+auth call — uses one of your three 401 budget):
 
 ```bash
-meho targets probe rdc-robot
+meho targets probe robot-01
 ```
 
 Expected output:
 
 ```
-rdc-robot  ok  GET /server  hetzner/robot-webservice (3 servers)
+robot-01  ok  GET /server  hetzner/robot-webservice (3 servers)
 ```
 
 If you see `auth_failed`, stop — fix credentials before probing again.
@@ -193,10 +195,10 @@ If you see `auth_failed`, stop — fix credentials before probing again.
 
 ```bash
 # List all servers
-meho hetzner-robot server list --target rdc-robot
+meho hetzner-robot server list --target robot-01
 
 # Show full detail for one server
-meho hetzner-robot server info 1.2.3.4 --target rdc-robot
+meho hetzner-robot server info 1.2.3.4 --target robot-01
 ```
 
 Expected output (server list):
@@ -211,29 +213,29 @@ number       ip                 product              dc              status
 ### IP addresses
 
 ```bash
-meho hetzner-robot ip list --target rdc-robot
+meho hetzner-robot ip list --target robot-01
 ```
 
 ### Subnets
 
 ```bash
-meho hetzner-robot subnet list --target rdc-robot
+meho hetzner-robot subnet list --target robot-01
 ```
 
 ### vSwitches
 
 ```bash
 # List vSwitches
-meho hetzner-robot vswitch list --target rdc-robot
+meho hetzner-robot vswitch list --target robot-01
 
 # Inspect a vSwitch by numeric ID
-meho hetzner-robot vswitch info 4321 --target rdc-robot
+meho hetzner-robot vswitch info 4321 --target robot-01
 ```
 
 ### Failover IPs
 
 ```bash
-meho hetzner-robot failover list --target rdc-robot
+meho hetzner-robot failover list --target robot-01
 ```
 
 Output highlights active routing:
@@ -249,21 +251,21 @@ server — useful for diagnosing active failover states.
 ### Reverse DNS (PTR records)
 
 ```bash
-meho hetzner-robot rdns list --target rdc-robot
+meho hetzner-robot rdns list --target robot-01
 ```
 
 ### SSH keys in the Robot portal
 
 ```bash
-meho hetzner-robot ssh-key list --target rdc-robot
+meho hetzner-robot ssh-key list --target robot-01
 ```
 
 ### Raw operation call (escape hatch)
 
 ```bash
 # Use any op_id directly — useful for ops without alias verbs
-meho hetzner-robot operation call GET:/server --target rdc-robot
-meho hetzner-robot operation search "ip list" --target rdc-robot
+meho hetzner-robot operation call GET:/server --target robot-01
+meho hetzner-robot operation search "ip list"
 ```
 
 ## The agent meta-tool path
@@ -278,7 +280,7 @@ list_operation_groups(connector_id="hetzner-rest-2026.04")
 search_operations(connector_id="hetzner-rest-2026.04", query="list servers", group="robot-servers")
 → hit: GET:/server
 
-call_operation(connector_id="hetzner-rest-2026.04", op_id="GET:/server", target={"name": "rdc-robot"}, params={})
+call_operation(connector_id="hetzner-rest-2026.04", op_id="GET:/server", target={"name": "robot-01"}, params={})
 ```
 
 The `llm_instructions` attached to each op guide the agent on when to call,
@@ -291,7 +293,7 @@ do not retry on auth failures.
 Every CLI verb accepts `--json` to emit the full `OperationResult` envelope:
 
 ```bash
-meho hetzner-robot server list --target rdc-robot --json | jq '.result[] | .server.server_ip'
+meho hetzner-robot server list --target robot-01 --json | jq '.result[] | .server.server_ip'
 ```
 
 Large server lists (>~50 rows / 4 KB) return a JSONFlux handle instead of a
@@ -303,41 +305,55 @@ meho operation result-query <handle_id> --offset 0 --limit 50
 
 The dispatcher's default `JsonFluxReducer` spills large lists to a
 Valkey-backed handle; `result_query` pages the spilled rows by `offset` /
-`limit` a window at a time and takes no filter/aggregate argument.
+`limit`. It can also filter, pick, group and sort them (`--where`,
+`--select`, `--group-by`, `--aggregate`, `--order-by`).
 
-## Write ops — form-encoded bodies (future reference)
+## Write ops — form-encoded bodies
 
 The Hetzner Robot Webservice API requires
 `application/x-www-form-urlencoded` bodies for all write verbs. It
-**rejects** `application/json`. The connector ships a `_post_form` helper
-(wrapping httpx's `data=` parameter) for v0.2.next write readiness.
+**rejects** `application/json`. The connector sends every write body as
+form fields (`robot_form_fields`): a list goes as repeated `name[]`
+fields, and a nested object is refused before any HTTP call. A write is
+sent at most once.
 
-Write ops (server reset, boot, reinstall, rDNS update, vSwitch modification)
-are out of scope for v0.2 and deferred per Initiative #370. When they land,
-every write verb must use `_post_form` — never `json=` — against this API.
+Two writes are curated: add servers to a vSwitch
+(`POST:/vswitch/{vswitch-id}/server`) and remove servers from it
+(`DELETE:/vswitch/{vswitch-id}/server`). Both are `dangerous` and wait
+for a second person to approve. Example:
+
+```bash
+meho hetzner-robot operation call 'POST:/vswitch/{vswitch-id}/server' \
+  --target robot-01 --params '{"vswitch-id": "4321", "body": {"server": [321]}}'
+```
+
+Robot applies the change in the background. Check
+`meho hetzner-robot vswitch info 4321 --target robot-01` until each server
+shows `ready`. Every other Robot write (server reset, boot, reinstall,
+rDNS update) stays switched off.
 
 ## Retiring `scripts/hetzner-robot.sh`
 
 The consumer's `scripts/hetzner-robot.sh` wrapper in
-`evoila-bosnia/claude-rdc-hetzner-dc` is the predecessor surface this op
+your consumer repo is the predecessor surface this op
 layer replaces. The migration:
 
 | Shell wrapper | MEHO verb |
 | --- | --- |
-| `./hetzner-robot.sh server list` | `meho hetzner-robot server list --target rdc-robot` |
-| `./hetzner-robot.sh server get <ip>` | `meho hetzner-robot server info <ip> --target rdc-robot` |
-| `./hetzner-robot.sh ip list` | `meho hetzner-robot ip list --target rdc-robot` |
-| `./hetzner-robot.sh subnet list` | `meho hetzner-robot subnet list --target rdc-robot` |
-| `./hetzner-robot.sh vswitch list` | `meho hetzner-robot vswitch list --target rdc-robot` |
-| `./hetzner-robot.sh failover list` | `meho hetzner-robot failover list --target rdc-robot` |
-| `./hetzner-robot.sh rdns list` | `meho hetzner-robot rdns list --target rdc-robot` |
-| `./hetzner-robot.sh ssh-key list` | `meho hetzner-robot ssh-key list --target rdc-robot` |
+| `./hetzner-robot.sh server list` | `meho hetzner-robot server list --target robot-01` |
+| `./hetzner-robot.sh server get <ip>` | `meho hetzner-robot server info <ip> --target robot-01` |
+| `./hetzner-robot.sh ip list` | `meho hetzner-robot ip list --target robot-01` |
+| `./hetzner-robot.sh subnet list` | `meho hetzner-robot subnet list --target robot-01` |
+| `./hetzner-robot.sh vswitch list` | `meho hetzner-robot vswitch list --target robot-01` |
+| `./hetzner-robot.sh failover list` | `meho hetzner-robot failover list --target robot-01` |
+| `./hetzner-robot.sh rdns list` | `meho hetzner-robot rdns list --target robot-01` |
+| `./hetzner-robot.sh ssh-key list` | `meho hetzner-robot ssh-key list --target robot-01` |
 
-**Wrapper retirement checklist** (file in `claude-rdc-hetzner-dc`):
+**Wrapper retirement checklist** (file in your consumer repo):
 
 - [ ] `secret_ref` in `targets.yaml` points to the Webservice-user credentials in Vault.
-- [ ] `meho targets probe rdc-robot` returns `ok`.
-- [ ] `meho hetzner-robot server list --target rdc-robot` returns the expected inventory.
+- [ ] `meho targets probe robot-01` returns `ok`.
+- [ ] `meho hetzner-robot server list --target robot-01` returns the expected inventory.
 - [ ] All CI scripts using `scripts/hetzner-robot.sh` updated to `meho hetzner-robot …`.
 - [ ] `scripts/hetzner-robot.sh` deleted or marked deprecated.
 
@@ -351,7 +367,7 @@ layer replaces. The migration:
 ## References
 
 - Hetzner Robot Webservice API docs: https://robot.hetzner.com/doc/webservice/en.html
-- Consumer wrapper (being retired): `scripts/hetzner-robot.sh` in `evoila-bosnia/claude-rdc-hetzner-dc`
+- Consumer wrapper (being retired): `scripts/hetzner-robot.sh` in your consumer repo
 - Engineering canary runbook: [`docs/cross-repo/g37-hetzner-canary.md`](./g37-hetzner-canary.md)
 - Connector source: [`backend/src/meho_backplane/connectors/hetzner_robot/`](../../backend/src/meho_backplane/connectors/hetzner_robot/)
 - Core ops + llm_instructions: [`core_ops.py`](../../backend/src/meho_backplane/connectors/hetzner_robot/core_ops.py)

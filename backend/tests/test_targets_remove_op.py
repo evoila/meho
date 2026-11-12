@@ -15,7 +15,8 @@
   (#5480): in sandbox mode a service principal whose call runs at once
   under a delete grant needs no ``tenant_admin``.
 * **Policy** -- a person waits for a second person and cannot approve the
-  own request; an agent login is refused, also in sandbox mode; a service
+  own request; an agent login waits for a person (#3980), also in sandbox
+  mode, where a delete grant does not cover an agent; a service
   principal waits and cannot get a standing grant (422); in sandbox mode a
   delete grant lets a service principal run it at once.
 * **Preview** -- names the target, its product and the ``graph_node`` count.
@@ -57,7 +58,6 @@ from meho_backplane.delete_names import DELETE_SHAPED_OP_ID_PATTERNS
 from meho_backplane.main import app
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.approval_queue import (
-    SelfApprovalForbiddenError,
     approve_request,
     resume_dispatch_after_approval,
 )
@@ -357,7 +357,8 @@ async def test_the_target_goes_when_a_tenant_admin_approves() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_a_person_waits_and_cannot_approve_the_own_request() -> None:
+async def test_a_person_waits_and_an_admin_may_approve_the_own_request() -> None:
+    """The change waits; an admin then approves their own request on purpose (#5969)."""
     row = await _seed("person-asks")
     asker = _operator("op-asker")
 
@@ -367,18 +368,16 @@ async def test_a_person_waits_and_cannot_approve_the_own_request() -> None:
     request_id = uuid.UUID(str(call["extras"]["approval_request_id"]))
 
     async with get_sessionmaker()() as session:
-        with pytest.raises(SelfApprovalForbiddenError):
-            await approve_request(session, request_id, operator=asker)
-
-    async with get_sessionmaker()() as session:
-        approved = await approve_request(session, request_id, operator=_operator("op-other"))
+        approved = await approve_request(session, request_id, operator=asker)
         await session.commit()
     assert approved.status == "approved"
     assert await _audit_rows()
 
 
 @pytest.mark.parametrize("sandbox", [False, True])
-async def test_an_agent_login_is_refused(monkeypatch: pytest.MonkeyPatch, sandbox: bool) -> None:
+async def test_an_agent_login_waits_for_a_person(
+    monkeypatch: pytest.MonkeyPatch, sandbox: bool
+) -> None:
     row = await _seed("agent-asks")
     if sandbox:
         turn_sandbox_mode_on(monkeypatch)
@@ -392,11 +391,11 @@ async def test_an_agent_login_is_refused(monkeypatch: pytest.MonkeyPatch, sandbo
         turn_sandbox_mode_off(monkeypatch)
 
     call = await call_operation(_operator("agent-1", kind=PrincipalKind.AGENT), _args(row.id))
-    assert call["status"] == "denied", call
+    assert call["status"] == "awaiting_approval", call
     assert await _is_removed(row.id) is False
     async with get_sessionmaker()() as session:
         pending = (await session.execute(select(ApprovalRequest))).scalars().all()
-    assert pending == []
+    assert len(pending) == 1
     assert await grant_use_rows() == []
     assert await _audit_rows()
 

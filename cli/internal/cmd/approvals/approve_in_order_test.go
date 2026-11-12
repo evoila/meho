@@ -34,7 +34,10 @@ type groupRow struct {
 	sub      string
 	created  string
 	dispatch string // dispatch_status the decide route answers
+	outcome  string // dispatch_execution_outcome the decide route answers
 	decideHT int    // HTTP status the decide route answers (default 200)
+	reveal   bool   // the requester asked for the hidden values (reveal_secret)
+	change   bool   // the request changes something when it runs (reveal_changes_something)
 	// results the detail route answers as result_state after the decide,
 	// one per read; the last one repeats. Plays the waiting requester
 	// whose run ends later (dispatch "already_resumed").
@@ -71,6 +74,14 @@ func groupViews(t *testing.T, rows []groupRow) []api.ApprovalRequestView {
 		if r.status == "approved" {
 			rs := r.result
 			v.ResultState = &rs
+		}
+		if r.reveal {
+			reveal := true
+			v.RevealSecret = &reveal
+		}
+		if r.change {
+			change := true
+			v.RevealChangesSomething = &change
 		}
 		views = append(views, v)
 	}
@@ -140,6 +151,10 @@ func runInOrderWithMock(t *testing.T, rows []groupRow, stdin string, jsonOut boo
 			if status == "error" {
 				msg := "connector_error: file not found"
 				body.DispatchError = &msg
+			}
+			if row.outcome != "" {
+				outcome := row.outcome
+				body.DispatchExecutionOutcome = &outcome
 			}
 			writeJSON(t, w, http.StatusOK, body)
 		}
@@ -257,6 +272,35 @@ func TestInOrderOtherCallerClaimsThenFails(t *testing.T) {
 	}
 }
 
+// TestInOrderUncertainRunStopsWithoutSendItAgain checks that a step whose
+// own run ended without MEHO knowing if the change happened stops the run
+// with the target-check advice, never with "send it again" (#5025).
+func TestInOrderUncertainRunStopsWithoutSendItAgain(t *testing.T) {
+	rows := []groupRow{
+		{status: "pending", level: "caution", dispatch: "error", outcome: "uncertain"},
+		{status: "pending", level: "caution", dispatch: "ok"},
+	}
+	rec, stdout, _, err := runInOrderWithMock(t, rows, yesAll, true)
+	assertExitCode(t, err, 4)
+	if len(rec.decided) != 1 || rec.decided[0] != inOrderID(1) {
+		t.Fatalf("decided: got %v want only step 1", rec.decided)
+	}
+	var res inOrderResult
+	if jerr := json.Unmarshal([]byte(stdout), &res); jerr != nil {
+		t.Fatalf("stdout is not the JSON result: %v\n%s", jerr, stdout)
+	}
+	if res.Completed || res.StoppedAt != 1 || res.Steps[1].Outcome != stepNotRun {
+		t.Errorf("result: got %+v", res)
+	}
+	detail := res.Steps[0].Detail
+	if !strings.Contains(detail, "Do not run it again. Check the target first") || strings.Contains(detail, "send it again") {
+		t.Errorf("stopped step does not give the target-check advice: %q", detail)
+	}
+	if !strings.Contains(detail, "connector_error: file not found") {
+		t.Errorf("stopped step does not name the error: %q", detail)
+	}
+}
+
 // TestInOrderOtherCallerResultUnknownStops checks that a run the waiting
 // requester claimed, with no stored result in time, stops the run: the
 // outcome is unknown, so the next step is not decided.
@@ -291,6 +335,76 @@ func TestInOrderRerunStopsAtUnfinishedPredecessor(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "has not ended yet") || strings.Contains(stdout, "send it again") {
 		t.Errorf("stdout:\n%s", stdout)
+	}
+}
+
+// TestInOrderSecretReadWaitingForRequesterGoesOn: approving a read that
+// shows secret values runs nothing. The step counts as approved, names the
+// command of the person who asked, and the run goes on.
+func TestInOrderSecretReadWaitingForRequesterGoesOn(t *testing.T) {
+	rows := []groupRow{
+		{status: "pending", level: "dangerous", dispatch: dispatchWaitingForRequester, reveal: true},
+		{status: "pending", level: "caution", dispatch: "ok"},
+	}
+	rec, stdout, _, err := runInOrderWithMock(t, rows, yesAll, true)
+	if err != nil {
+		t.Fatalf("in-order run: %v", err)
+	}
+	if len(rec.decided) != 2 {
+		t.Fatalf("decided: got %v want both steps", rec.decided)
+	}
+	var res inOrderResult
+	if jerr := json.Unmarshal([]byte(stdout), &res); jerr != nil {
+		t.Fatalf("stdout is not the JSON result: %v\n%s", jerr, stdout)
+	}
+	if !res.Completed || res.Steps[0].Outcome != stepApproved || res.Steps[1].Outcome != stepApproved {
+		t.Errorf("result: got %+v", res)
+	}
+	if !strings.Contains(res.Steps[0].Detail, "meho secret read --approval "+inOrderID(1)) ||
+		strings.Contains(res.Steps[0].Detail, "send it again") {
+		t.Errorf("step 1 must name the fetch command of the person who asked: %q", res.Steps[0].Detail)
+	}
+}
+
+// TestInOrderStopsAtAWaitingRevealThatChangesSomething: an approved request
+// that creates a credential and asked for the value runs only when the
+// person who asked gets it, so the steps after it are not approved.
+func TestInOrderStopsAtAWaitingRevealThatChangesSomething(t *testing.T) {
+	rows := []groupRow{
+		{status: "pending", level: "dangerous", dispatch: dispatchWaitingForRequester, reveal: true, change: true},
+		{status: "pending", level: "caution", dispatch: "ok"},
+	}
+	rec, stdout, _, err := runInOrderWithMock(t, rows, yesAll, false)
+	assertExitCode(t, err, 4)
+	if len(rec.decided) != 1 || rec.decided[0] != inOrderID(1) {
+		t.Fatalf("decided: got %v want only step 1", rec.decided)
+	}
+	for _, want := range []string{"meho secret read --approval " + inOrderID(1), "The steps after it wait"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestInOrderRerunStopsAtAnUnfetchedSecretRead: on a rerun, a read that
+// shows secret values and has not run yet stops the run with a clear way on.
+func TestInOrderRerunStopsAtAnUnfetchedSecretRead(t *testing.T) {
+	rows := []groupRow{
+		{status: "approved", level: "dangerous", result: api.ApprovalResultStateNotStarted, reveal: true},
+		{status: "pending", level: "caution", dispatch: "ok"},
+	}
+	rec, stdout, _, err := runInOrderWithMock(t, rows, yesAll, false)
+	assertExitCode(t, err, 4)
+	if len(rec.decided) != 0 {
+		t.Fatalf("decided: got %v want none", rec.decided)
+	}
+	for _, want := range []string{"meho secret read --approval " + inOrderID(1), "approve the later steps by id"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "send it again") {
+		t.Errorf("stdout must not ask to send it again:\n%s", stdout)
 	}
 }
 

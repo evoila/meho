@@ -26,15 +26,18 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from meho_backplane.checks.assertions import AssertionSpec, CheckState
 from meho_backplane.db.models import SensorCadenceKind, SensorSeverity, SensorStatus
+from meho_backplane.operations._secret_values import REVEAL_SECRET_PARAM
 from meho_backplane.scheduler.cron import is_valid_cron_expr, resolve_timezone
 
 __all__ = [
+    "SensorConnectorFit",
     "SensorCreate",
     "SensorListResponse",
+    "SensorParams",
     "SensorRead",
     "SensorResultListResponse",
     "SensorResultRead",
@@ -85,6 +88,27 @@ _RETRY_BACKOFF_SECONDS_MIN = 5
 _RETRY_BACKOFF_SECONDS_MAX = 300
 
 
+def _refuse_reveal_secret(params: dict[str, object]) -> dict[str, object]:
+    """Refuse Sensor params that carry ``reveal_secret``.
+
+    A Sensor runs on a schedule with no person at the call, and it stores
+    what it reads where operators, agents and service logins can see it.
+    So a Sensor always gets the default view with hidden values. The
+    runner also takes the flag off the params of a stored Sensor before
+    each run.
+    """
+    if REVEAL_SECRET_PARAM in params:
+        raise ValueError(
+            f"a sensor cannot use {REVEAL_SECRET_PARAM}; remove it from params. "
+            "A sensor always reads the default view, with secret values hidden"
+        )
+    return params
+
+
+#: The ``params`` of a Sensor: free-form, without ``reveal_secret``.
+SensorParams = Annotated[dict[str, object], AfterValidator(_refuse_reveal_secret)]
+
+
 class SensorCreate(BaseModel):
     """Request body for ``POST /api/v1/sensors``.
 
@@ -119,7 +143,7 @@ class SensorCreate(BaseModel):
     connector_id: Annotated[str, Field(min_length=1, max_length=_CONNECTOR_ID_MAX_LENGTH)]
     op_id: Annotated[str, Field(min_length=1, max_length=_OP_ID_MAX_LENGTH)]
     target: dict[str, object] | None = None
-    params: dict[str, object] = Field(default_factory=dict)
+    params: SensorParams = Field(default_factory=dict)
     assertion: AssertionSpec
     cadence_kind: SensorCadenceKind
     interval_seconds: Annotated[
@@ -137,6 +161,10 @@ class SensorCreate(BaseModel):
     ] = 15
     identity_sub: Annotated[str, Field(max_length=_IDENTITY_SUB_MAX_LENGTH)] = "__sensor__"
     tenant_id: uuid.UUID | None = None
+    #: Create the Sensor even when its connector does not fit the target's
+    #: product and version. Without it such a create is refused with
+    #: ``sensor_connector_mismatch``. Not stored on the row.
+    force: bool = False
 
     @model_validator(mode="after")
     def _validate_cadence_and_assertion(self) -> SensorCreate:
@@ -172,6 +200,27 @@ class SensorCreate(BaseModel):
                 f"assertion exceeds the {_ASSERTION_MAX_SERIALIZED_BYTES}-byte serialized cap",
             )
         return self
+
+
+class SensorConnectorFit(BaseModel):
+    """How a Sensor's connector fits its target, checked each time it is read.
+
+    MEHO reads the target's detected product and version (the last probe,
+    else the version an operator set) and checks it against the version
+    range the connector declares, with the same match the dispatcher uses
+    to pick a connector for a target. ``warning`` is ``None`` when the
+    connector fits, or when MEHO cannot tell (no known product or version,
+    or a connector MEHO does not know). Otherwise it says in plain words
+    what does not match, and ``matching_connector_id`` names the connector
+    that fits the target, when there is one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    target_product: str | None
+    target_version: str | None
+    warning: str | None = None
+    matching_connector_id: str | None = None
 
 
 class SensorRead(BaseModel):
@@ -223,6 +272,11 @@ class SensorRead(BaseModel):
     created_by_sub: str
     created_at: datetime
     updated_at: datetime
+    # Not a column: filled by the service on list and create from the
+    # target's current product and version, so a new probe shows at once.
+    # ``None`` for a Sensor without a target, or one whose target MEHO
+    # cannot find.
+    connector_fit: SensorConnectorFit | None = None
 
 
 class SensorListResponse(BaseModel):

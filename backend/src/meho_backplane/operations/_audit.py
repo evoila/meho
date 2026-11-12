@@ -31,8 +31,11 @@ from decimal import Decimal
 from typing import Any
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.client_identity import apply_client_block
 from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import resolve_operation_op_class
 from meho_backplane.connectors.schemas import OperationResult
@@ -52,8 +55,10 @@ __all__ = [
     "parent_audit_id_var",
     "policy_decision_var",
     "resolve_agent_session_id",
+    "restore_audit_extras",
     "reveal_secret_var",
     "run_id_var",
+    "snapshot_audit_extras",
     "step_id_var",
     "with_audit_receipt",
     "work_ref_var",
@@ -305,7 +310,43 @@ agent_run_audit_meta_var: ContextVar[AgentRunAuditMeta | None] = ContextVar(
 #: result into the payload, mirroring the chassis HTTP behaviour so
 #: the typed-op dispatch path and the FastAPI route path produce the
 #: same shape of audit row.
+#:
+#: A handler's binds last for one dispatch (#5211): the dispatcher takes
+#: :func:`snapshot_audit_extras` on entry and :func:`restore_audit_extras`
+#: on exit, so the next call in the same context, a composite parent row
+#: written after its child, and the MCP / REST row around the call do not
+#: carry them. Keys the caller bound before the dispatch (the approved
+#: run's ``audit_approval_request_id``, a route's own labels) still reach
+#: the row and are kept afterwards.
 _AUDIT_PAYLOAD_PREFIX: str = "audit_"
+
+
+def snapshot_audit_extras() -> dict[str, Any]:
+    """Return the ``audit_*`` keys bound in the current context, ``None`` values too."""
+    return {
+        key: value
+        for key, value in structlog.contextvars.get_contextvars().items()
+        if key.startswith(_AUDIT_PAYLOAD_PREFIX)
+    }
+
+
+def restore_audit_extras(snapshot: dict[str, Any]) -> None:
+    """Put the ``audit_*`` keys back as they were in *snapshot*.
+
+    A key bound since the snapshot is unbound; a key whose value changed,
+    or that was unbound, gets its old value back.
+    """
+    current = snapshot_audit_extras()
+    added = [key for key in current if key not in snapshot]
+    if added:
+        structlog.contextvars.unbind_contextvars(*added)
+    changed = {
+        key: value
+        for key, value in snapshot.items()
+        if key not in current or current[key] is not value
+    }
+    if changed:
+        structlog.contextvars.bind_contextvars(**changed)
 
 
 def _resolve_audit_extras_from_contextvars() -> dict[str, Any]:
@@ -522,7 +563,9 @@ def _resolve_target_id(target: Any) -> uuid.UUID | None:
     return raw if isinstance(raw, uuid.UUID) else None
 
 
-def _apply_principal_name(payload: dict[str, Any], operator: Operator) -> None:
+async def _apply_principal_name(
+    session: AsyncSession, payload: dict[str, Any], operator: Operator
+) -> None:
     """Store the caller's display name in ``payload["principal_name"]`` (#4029).
 
     Audit readers (``meho audit show`` / ``query``, the console) read the
@@ -530,11 +573,14 @@ def _apply_principal_name(payload: dict[str, Any], operator: Operator) -> None:
     rows use. The name always belongs to the row's ``operator_sub``. On an
     approved run that is the approver when a person approves through the
     console, CLI or REST, and the agent when MEHO's own agent waits for
-    the approval and resumes the run itself. Left out when the token has no
-    ``name`` claim.
+    the approval and resumes the run itself. The name comes from
+    :func:`~meho_backplane.auth.display_name.principal_display_name`, so an
+    agent token without a ``name`` claim gets the registered agent name or
+    its client id (#3885). Left out when there is no name at all.
     """
-    if operator.name:
-        payload["principal_name"] = operator.name
+    name = await principal_display_name(session, operator)
+    if name:
+        payload["principal_name"] = name
 
 
 class AuditCommitError(RuntimeError):
@@ -604,7 +650,6 @@ async def write_audit_row(
         redaction_policy_id=redaction_policy_id,
         handle_metadata=handle_metadata,
     )
-    _apply_principal_name(payload, operator)
     target_id = _resolve_target_id(target)
     parent_audit_id = parent_audit_id_var.get()
     # The session this row belongs to (#4672): the agent run's id inside
@@ -639,6 +684,8 @@ async def write_audit_row(
     if hasattr(AuditLog, "policy_decision"):
         runbook_kwargs["policy_decision"] = policy_decision_var.get()
     async with sessionmaker() as session:
+        await _apply_principal_name(session, payload, operator)
+        apply_client_block(payload, operator)
         row = AuditLog(
             id=audit_id,
             occurred_at=datetime.now(UTC),

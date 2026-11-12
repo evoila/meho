@@ -50,15 +50,11 @@ features also edit? If yes, move that part into your own module.
 
 ## Examples in this repo
 
-- **vSphere multi-step operations.** Each module in
-  `connectors/vmware_rest/composites/` exports `COMPOSITES`.
-  `collect_composites` in `_register.py` finds the modules with `pkgutil`
-  and collects the rows. The guard test
-  `test_connectors_vmware_rest_composites_collect.py` fails when a
-  module's rows are not collected.
-- **vSphere typed operations.** Each `typed_ops_<feature>.py` module in
-  `connectors/vmware_rest/` exports `TYPED_OPS` and `WHEN_TO_USE_BY_GROUP`.
-  `typed_ops.py` collects them and keeps no list of operations.
+- **Kubernetes typed operations.** Each `ops_<feature>.py` module in
+  `connectors/kubernetes/` exports `OPS`. `collect_ops` in `ops.py` finds
+  the modules with `pkgutil` and collects their rows, sorted by op id. The
+  guard test `test_connectors_k8s_ops_collect.py` fails when a module's
+  rows are not collected.
 - **Operation classes.** Each connector declares the class of its own
   operations (for example "credential write") in its own package, in
   `connectors/<name>/op_classes.py`. The core file `broadcast/events.py`

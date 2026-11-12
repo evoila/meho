@@ -16,7 +16,6 @@ package backplane
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"strings"
 
@@ -127,7 +126,7 @@ func validateScheme(u *url.URL, allowHTTP bool) error {
 		// Routed-host plaintext is rejected regardless of allowHTTP:
 		// the token would cross the network in the clear no matter the
 		// operator's intent.
-		if !isLoopbackHost(u.Hostname()) {
+		if !auth.IsLoopbackHost(u.Hostname()) {
 			return fmt.Errorf(
 				"backplane URL %q uses plaintext http:// to a routed host — the bearer token would be "+
 					"sent in the clear; use https://", u.String())
@@ -143,16 +142,4 @@ func validateScheme(u *url.URL, allowHTTP bool) error {
 	default:
 		return fmt.Errorf("backplane URL %q must use https (or http for a localhost backplane)", u.String())
 	}
-}
-
-// isLoopbackHost reports whether host (a URL hostname, port already
-// stripped) refers to the local machine: the literal "localhost"
-// (case-insensitive, since hostnames are per RFC 4343), or any IP
-// literal in a loopback range (127.0.0.0/8, ::1).
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }

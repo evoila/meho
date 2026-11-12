@@ -22,7 +22,7 @@ across four submodules so the layering is grep-explicit:
   ``LOGIN_PATH`` are exported for the middleware to share.
 * :mod:`meho_backplane.ui.auth.middleware` (Task #865) -- the pure-ASGI
   :class:`UISessionMiddleware` that loads operator identity from the
-  ``meho_session`` cookie on every ``/ui/*`` request and 302-redirects
+  ``__Host-meho_session`` cookie on every ``/ui/*`` request and 302-redirects
   to login on missing/expired session.
 * :mod:`meho_backplane.ui.auth.refresh` (G0.25 #1694) -- the inline
   token-refresh lifecycle. ``load_fresh_session`` (proactive,

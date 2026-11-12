@@ -18,7 +18,7 @@ import (
 
 // newListCmd returns the `meho approvals list` command.
 //
-//	meho approvals list [--status pending|approved|rejected|expired|all] [--filter-work-ref REF] [--order oldest|newest] [--limit N] [--offset N] [--json] [--backplane <url>]
+//	meho approvals list [--status pending|approved|rejected|expired|all] [--outcome-unknown] [--filter-work-ref REF] [--order oldest|newest] [--limit N] [--offset N] [--json] [--backplane <url>]
 //
 // Role: operator. Lists approval requests for the operator's tenant via
 // GET /api/v1/approvals: newest first, or oldest first with
@@ -28,6 +28,7 @@ import (
 func newListCmd() *cobra.Command {
 	var (
 		statusFilter      string
+		outcomeUnknown    bool
 		workRef           string
 		order             string
 		limit             int
@@ -51,13 +52,34 @@ func newListCmd() *cobra.Command {
 			"in the order they were sent. --limit caps how many requests " +
 			"come back (1..500; no limit when omitted). --offset " +
 			"skips that many requests first. --json emits the raw " +
-			"JSON array for jq pipelines.",
+			"JSON array for jq pipelines.\n\n" +
+			"--outcome-unknown lists the approved changes whose outcome " +
+			"MEHO does not know and that nobody marked as checked: the run " +
+			"ended uncertain, or its latest run started more than the set " +
+			"minutes ago and stored no result. The server setting " +
+			"APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES sets the minutes (15 by " +
+			"default). Do not run these again: check the target, " +
+			"then record what you found with `meho approvals mark-checked`. " +
+			"It cannot be combined with --status.\n\n" +
+			"The APPROVE column says whether you may approve each " +
+			"pending request. MEHO works this out with the same checks " +
+			"as the approve: yes; yes:own_change (your own change, " +
+			"which a MEHO-SA-Operator or a MEHO-Admin may approve: a " +
+			"self-approval); " +
+			"no:own_change; no:wrong_group (another person's dangerous " +
+			"or destructive change needs a MEHO-SA-Operator or a " +
+			"MEHO-Admin); no:role_too_low; no:rights_change (a change " +
+			"of rights: another admin must approve); no:no_approval_access; " +
+			"no:not_a_person. A request that is not pending shows -. " +
+			"In --json the same answer is may_approve and " +
+			"may_approve_reason.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runList(cmd, listOpts{
 				StatusFilter:      statusFilter,
+				OutcomeUnknown:    outcomeUnknown,
 				WorkRef:           workref.Filter(cmd, workRef),
 				Order:             order,
 				Limit:             limit,
@@ -69,6 +91,8 @@ func newListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&statusFilter, "status", "",
 		"filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)")
+	cmd.Flags().BoolVar(&outcomeUnknown, "outcome-unknown", false,
+		"list approved changes whose outcome MEHO does not know, for you to check")
 	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
 		"filter by external change-ticket reference, exact match (e.g. gh:evoila/meho#1)")
 	cmd.Flags().StringVar(&order, "order", "",
@@ -88,6 +112,7 @@ func newListCmd() *cobra.Command {
 
 type listOpts struct {
 	StatusFilter      string
+	OutcomeUnknown    bool
 	WorkRef           string
 	Order             string
 	Limit             int
@@ -108,6 +133,13 @@ func runList(cmd *cobra.Command, opts listOpts) error {
 				"--status must be one of: pending, approved, rejected, expired, withdrawn, all; got %q",
 				opts.StatusFilter,
 			)),
+			opts.JSONOut,
+		)
+	}
+	if opts.OutcomeUnknown && opts.StatusFilter != "" {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected("--outcome-unknown cannot be combined with --status"),
 			opts.JSONOut,
 		)
 	}
@@ -158,6 +190,10 @@ func runList(cmd *cobra.Command, opts listOpts) error {
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), items)
 	}
+	if opts.OutcomeUnknown {
+		printOutcomeUnknownTable(cmd.OutOrStdout(), items, opts.Offset)
+		return nil
+	}
 	printListTable(cmd.OutOrStdout(), items, opts.StatusFilter, opts.WorkRef, opts.Offset)
 	return nil
 }
@@ -181,6 +217,10 @@ func fetchList(
 	if opts.WorkRef != "" {
 		w := opts.WorkRef
 		params.WorkRef = &w
+	}
+	if opts.OutcomeUnknown {
+		u := true
+		params.OutcomeUnknown = &u
 	}
 	if order := listOrder(opts); order != "" {
 		o := api.ListApprovalsApiV1ApprovalsGetParamsOrder(order)
@@ -231,9 +271,11 @@ func listOrder(opts listOpts) string {
 }
 
 // printListTable renders the list as a compact table.
-// Columns: ID, STATUS, RUN, CONNECTOR, OP, PRINCIPAL, CREATED. RUN (#3543)
-// says whether an approved request ran and how it ended, so a run that
-// failed after the approval does not look like a plain "approved".
+// Columns: ID, STATUS, RUN, APPROVE, CONNECTOR, OP, PRINCIPAL, CREATED.
+// RUN (#3543) says whether an approved request ran and how it ended, so a
+// run that failed after the approval does not look like a plain
+// "approved". APPROVE (#3329) says whether the caller may approve the
+// request, as the server worked it out.
 // statusFilter, workRef and offset are the --status, --filter-work-ref and
 // --offset values; an empty list names them, so an empty default
 // (pending-only) list, an empty match for one change ticket, or an empty
@@ -243,17 +285,18 @@ func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter, 
 		fmt.Fprintln(w, emptyListMessage(statusFilter, workRef, offset))
 		return
 	}
-	fmt.Fprintf(w, "%-36s %-9s %-11s %-24s %-32s %-20s %s\n",
-		"ID", "STATUS", "RUN", "CONNECTOR", "OP", "PRINCIPAL", "CREATED")
+	fmt.Fprintf(w, "%-36s %-9s %-11s %-23s %-24s %-32s %-20s %s\n",
+		"ID", "STATUS", "RUN", "APPROVE", "CONNECTOR", "OP", "PRINCIPAL", "CREATED")
 	for _, e := range items {
-		fmt.Fprintf(w, "%-36s %-9s %-11s %-24s %-32s %-20s %s\n",
+		fmt.Fprintf(w, "%-36s %-9s %-11s %-23s %-24s %-32s %-20s %s\n",
 			e.Id.String(),
-			string(e.Status),
-			runStateLabel(e.ResultState),
-			truncate(e.ConnectorId, 24),
-			truncate(e.OpId, 32),
-			truncate(principalScanLabel(e.PrincipalSub, e.PrincipalName), 20),
-			e.CreatedAt,
+			output.SafeText(string(e.Status)),
+			output.SafeText(runStateLabel(e.ResultState)),
+			output.SafeText(approveRightLabel(e.MayApprove, e.MayApproveReason)),
+			truncate(output.SafeText(e.ConnectorId), 24),
+			truncate(output.SafeText(e.OpId), 32),
+			truncate(requesterScanLabel(e.PrincipalSub, e.PrincipalName, e.PrincipalKind), 20),
+			output.SafeText(e.CreatedAt),
 		)
 	}
 	fmt.Fprintf(w, "\nShowing %d.\n", len(items))

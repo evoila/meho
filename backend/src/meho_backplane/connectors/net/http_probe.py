@@ -46,7 +46,7 @@ a **fresh** ``httpx.AsyncClient(follow_redirects=False)`` per call and
 walks redirects manually so it can re-gate each hop — httpx's own
 redirect follower would dial the next host before the allowlist could
 see it. ``safety_level="safe"`` + ``requires_approval=False`` make the
-probe agent-auto-runnable; the probe allowlist is the sole floor.
+probe agent-auto-runnable; the allow-list limits where checks can connect.
 """
 
 from __future__ import annotations
@@ -890,7 +890,7 @@ async def register_net_http_probe_operations(
     :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
     after the connector eager-import pass. Idempotent: a re-run against
     unchanged text is a no-op for the embedding pipeline. ``safe`` +
-    ``requires_approval=False`` — the probe allowlist is the only floor.
+    ``requires_approval=False`` — the allow-list limits where checks can connect.
     """
     await register_typed_operation(
         product="net",

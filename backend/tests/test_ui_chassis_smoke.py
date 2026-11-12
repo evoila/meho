@@ -94,6 +94,15 @@ from tests.conftest import (
     public_jwks,
 )
 
+from ._ui_role_helpers import allow_ui_operator_role
+
+
+@pytest.fixture(autouse=True)
+def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console pages under test sit behind the ``operator`` role check."""
+    allow_ui_operator_role(monkeypatch)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -949,14 +958,10 @@ def test_full_flow_unauth_login_callback_then_dashboard(monkeypatch: pytest.Monk
         )
         assert callback.status_code == 302
         assert callback.headers["location"] == "/ui/"
-        # The session cookie carries ``Secure=True`` (production
-        # terminates TLS at ingress); httpx's cookie jar refuses to
-        # send Secure cookies over the TestClient's HTTP transport, so
-        # we lift the cookie out of the callback response and re-set
-        # it on the jar to bypass the Secure filter. Production
-        # browsers see this transparently over HTTPS.
-        session_cookie = callback.cookies[SESSION_COOKIE_NAME]
-        client.cookies.set(SESSION_COOKIE_NAME, session_cookie)
+        # The HTTPS client keeps the session cookie from the callback
+        # and sends it once. A second copy set by hand would make the
+        # request carry it twice, which counts as no session.
+        assert callback.cookies[SESSION_COOKIE_NAME]
         # Step 4: hit /ui/ again -> 200 + dashboard HTML.
         dash = client.get("/ui/")
     assert dash.status_code == 200

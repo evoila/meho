@@ -360,8 +360,11 @@ class KeycloakAdminClient:
             raise KeycloakAdminError(
                 f"Keycloak admin auth unreachable: {type(exc).__name__}"
             ) from exc
-        data: Any = resp.json()
-        self._token = data.get("access_token", "")
+        try:
+            data: Any = resp.json()
+        except ValueError as exc:
+            raise KeycloakAdminError("Keycloak admin auth answered with no JSON body") from exc
+        self._token = data.get("access_token", "") if isinstance(data, dict) else ""
         if not self._token:
             raise KeycloakAdminError("Keycloak admin auth returned no access_token")
 
@@ -462,6 +465,57 @@ class KeycloakAdminClient:
                 "Keycloak create_client succeeded but returned no Location header"
             )
         return internal_id
+
+    async def client_exists(self, client_id: str) -> bool:
+        """Return ``True`` when the realm has a client with this ``clientId``.
+
+        Calls ``GET /clients?clientId=<id>``. Without ``search=true`` Keycloak
+        matches the id exactly and answers a list: one entry, or none. Any
+        other answer raises :class:`KeycloakAdminError`, so a failed lookup
+        never reads as "the client is missing".
+        """
+        assert self._http is not None
+        assert self._token
+        try:
+            resp = await self._http.get(
+                f"{self._admin_url}/clients",
+                params={"clientId": client_id},
+                headers=self._auth_headers(),
+            )
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(
+                f"Keycloak client lookup network error: {type(exc).__name__}"
+            ) from exc
+        if resp.status_code != 200:
+            raise KeycloakAdminError(f"Keycloak client lookup failed: HTTP {resp.status_code}")
+        try:
+            found: Any = resp.json()
+        except ValueError as exc:
+            raise KeycloakAdminError("Keycloak client lookup returned no JSON") from exc
+        if not isinstance(found, list):
+            raise KeycloakAdminError("Keycloak client lookup returned no list")
+        return any(isinstance(c, dict) and c.get("clientId") == client_id for c in found)
+
+    async def read(self, path: str, params: dict[str, str] | None = None) -> tuple[int, Any]:
+        """GET *path* under the realm's admin URL: the status and the JSON body.
+
+        The body is ``None`` when the answer is not JSON. Used by the
+        approval sign-in check of ``/api/v1/health`` (#6280), which turns
+        each status into a state of its own.
+        """
+        assert self._http is not None
+        assert self._token
+        try:
+            resp = await self._http.get(
+                f"{self._admin_url}{path}", params=params, headers=self._auth_headers()
+            )
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(f"Keycloak read network error: {type(exc).__name__}") from exc
+        try:
+            body: Any = resp.json()
+        except ValueError:
+            body = None
+        return resp.status_code, body
 
     async def get_client_secret(self, keycloak_internal_id: str) -> str:
         """Return the ``client_credentials`` secret for an existing client.

@@ -50,7 +50,7 @@ from meho_backplane.connectors.azure.automation_schemas import (
     RUNBOOK_LIST_RESPONSE,
     SCHEDULE_LIST_RESPONSE,
 )
-from meho_backplane.connectors.azure.automation_trace import LEFT_OUT, masked_answer
+from meho_backplane.connectors.azure.trace_mask import LEFT_OUT, mask_answer
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.db.engine import get_sessionmaker
@@ -97,6 +97,8 @@ ACCOUNT_PARAMS = {"resource_group": RG, "account": ACCOUNT}
 CONTENT_LINK = "https://example.invalid/content-link-must-not-leave.ps1"
 DEFAULT_VALUE = "runbook-default-value-must-not-leave"
 SCHEDULE_PARAMETER = "job-schedule-parameter-must-not-leave"
+#: A key field every Azure family masks, not only Automation (#5212).
+AZURE_WIDE_SECRET = "automation-primary-key-must-not-leave"
 HYBRID_URL = "https://hybrid-url-must-not-leave.example.invalid/"
 
 
@@ -413,7 +415,7 @@ def test_the_trace_answer_leaves_out_every_secret_bearing_field() -> None:
         },
     )
 
-    masked = masked_answer(answer)
+    masked = mask_answer(answer.json())
 
     text = json.dumps(masked)
     assert "content-link-must-not-leave" not in text
@@ -426,9 +428,6 @@ def test_the_trace_answer_leaves_out_every_secret_bearing_field() -> None:
         assert runbook["properties"][field] == LEFT_OUT
     assert job_schedule["properties"]["parameters"] == LEFT_OUT
     assert job_schedule["properties"]["schedule"] == {"name": "Nightly"}
-    error = {"error": {"code": "AuthorizationFailed", "message": "Example message."}}
-    assert masked_answer(httpx.Response(403, json=error)) == error
-    assert masked_answer(httpx.Response(502, text="<html>Bad gateway</html>")) is None
 
 
 @pytest.mark.parametrize(
@@ -876,7 +875,9 @@ async def test_the_trace_keeps_the_answers_without_their_secrets(
 
     with respx.mock() as mock:
         _login(mock)
-        _route(mock, f"{ACCOUNT_PATH}/runbooks").mock(return_value=_ok([_runbook("rb-restart")]))
+        runbook = _runbook("rb-restart")
+        runbook["properties"]["primaryKey"] = AZURE_WIDE_SECRET
+        _route(mock, f"{ACCOUNT_PATH}/runbooks").mock(return_value=_ok([runbook]))
         _route(mock, f"{ACCOUNT_PATH}/schedules").mock(return_value=_ok([_schedule("Nightly")]))
         _route(mock, f"{ACCOUNT_PATH}/jobSchedules").mock(
             return_value=_ok([_job_schedule(1, "Nightly", "rb-restart")])
@@ -894,6 +895,7 @@ async def test_the_trace_keeps_the_answers_without_their_secrets(
     assert "content-link-must-not-leave" not in traced
     assert DEFAULT_VALUE not in traced
     assert SCHEDULE_PARAMETER not in traced
+    assert AZURE_WIDE_SECRET not in traced
     assert LEFT_OUT in traced
     assert "rb-restart" in traced
     assert "Nightly" in traced

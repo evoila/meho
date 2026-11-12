@@ -49,8 +49,8 @@ func TestBootstrap_ReRunAddsMCPOfflineIdleToExistingClient(t *testing.T) {
 	if got := fake.clients[old.ID].Attributes[offlineIdleAttr]; got != "172800" {
 		t.Errorf("existing meho-mcp %s = %q, want 172800", offlineIdleAttr, got)
 	}
-	if n := fake.calls["POST /clients"]; n != 2 {
-		t.Errorf("POST /clients called %d times, want 2 (only meho-cli and meho-cli-approve are new)", n)
+	if n := fake.calls["POST /clients"]; n != 4 {
+		t.Errorf("POST /clients called %d times, want 4 (meho-cli, meho-cli-approve and the two tool clients are new)", n)
 	}
 }
 
@@ -68,7 +68,7 @@ func TestBootstrap_ReRunKeepsMCPOfflineIdle(t *testing.T) {
 	if got := mcpClient(t, fake).Attributes[offlineIdleAttr]; got != "172800" {
 		t.Errorf("meho-mcp %s = %q after re-run, want 172800", offlineIdleAttr, got)
 	}
-	if fake.calls["POST /clients"] != posts || len(fake.clients) != 3 {
+	if fake.calls["POST /clients"] != posts || len(fake.clients) != 5 {
 		t.Errorf("re-run created clients: posts %d -> %d, clients=%d",
 			posts, fake.calls["POST /clients"], len(fake.clients))
 	}

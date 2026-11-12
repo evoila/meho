@@ -4,17 +4,18 @@
 
 The `winsrv` connector is the typed `Connector` subclass that manages **Windows
 Server core** — system facts, service and feature management, reboot/shutdown,
-local users, and disk / iSCSI-initiator storage — over SSH → PowerShell (the
+local users, disk / iSCSI-initiator storage, hardware facts and the NTP time
+source — over SSH → PowerShell (the
 built-in Windows PowerShell 5.1 cmdlets). It is registered under the
 `(product="winsrv", version="2022.x", impl_id="winsrv-ssh")` registry triple
 plus the `("winsrv", "", "")` wildcard fallback row, and is a child of the
 shared `SshConnector` adapter (`connectors/adapters/ssh.py`) — the same
-transport base as `WindowsDnsConnector`, `HolodeckConnector`, and
+transport base as `WindowsDnsConnector`, `WsfcConnector`, and
 `Rke2SshConnector`.
 
 Windows Server core management exposes **no unified REST API**; before this
-connector the c1sql1 program (evoila-bosnia/claude-rdc-hetzner-dc#2789) drove
-feature installs and reboots through raw `govc guest.run` — ungoverned. The
+connector, feature installs and reboots ran through raw guest commands outside
+MEHO's approval and audit path. The
 connector is a structural sibling of `windows_dns` (identity canary + per-domain
 op groups on the `SshConnector` base) built on the PowerShell-over-SSH transport
 `_shared/pwsh` (base64 UTF-16LE `-EncodedCommand` + stdlib `json` parse). It
@@ -42,6 +43,14 @@ executable only through the Stage-3 composed write gate, #2901); destructive =
 `dangerous` + `requires_approval` (satellite-EXCLUDED by the tier ladder,
 central-dial / on-site only).
 
+A call made with a token (MCP, the command line, REST) runs only `safe` ops at
+once. A `caution` op without its own approval flag then waits for an approval
+click; in the web interface it runs at once (`_person_park_reason` in
+`operations/_validate.py`). An agent's call of any op that is not `safe` waits
+for a person (`auth/permissions.py`). An op with a caller-address field
+(`winsrv.storage.iscsi.connect`) waits for a person on every call, and no standing grant
+covers it (`operations/caller_address.py`).
+
 | op | safety | approval | cmdlet(s) |
 | --- | --- | --- | --- |
 | `winsrv.about` | safe | no | `Get-CimInstance Win32_OperatingSystem` + `$PSVersionTable` |
@@ -66,7 +75,7 @@ central-dial / on-site only).
 | `winsrv.storage.disk.list` | safe | no | `Get-Disk` |
 | `winsrv.storage.volume.list` | safe | no | `Get-Volume` |
 | `winsrv.storage.iscsi.list` | safe | no | `Get-IscsiTarget` |
-| `winsrv.storage.iscsi.connect` | caution | no | `Connect-IscsiTarget` |
+| `winsrv.storage.iscsi.connect` | caution | **yes** | `Connect-IscsiTarget` (the host connects to `target_portal_address`, a caller address: the field carries the caller-address marker) |
 | `winsrv.storage.disk.format` | caution | no | `Initialize-Disk` + `New-Partition` + `Format-Volume` |
 | `winsrv.time.get` | safe | no | W32Time registry (`NtpServer`, `Type`, `AnnounceFlags`) + `w32tm /query /source` |
 | `winsrv.time.set` | caution | **yes** | `w32tm /config /manualpeerlist:<peers> /syncfromflags:manual [/reliable:yes\|no] /update` |
@@ -117,8 +126,8 @@ shape. It lives in `connectors/inventory/source_hosts.py`; see
 - **`WinsrvConnector`** (`connector.py`) — `SshConnector` subclass. Class
   attributes: `product="winsrv"`, `version="2022.x"`, `impl_id="winsrv-ssh"`,
   `POWERSHELL_EXECUTABLE="powershell"`. Ships `fingerprint`, `probe`, `about`,
-  the 22 bound-method op shims, `register_operations`, and the operator-less
-  `execute` dispatcher shim. Inherits the per-target asyncssh connection pool,
+  the 25 bound-method op shims, `register_operations`, and the operator-less
+  `execute` dispatcher shim. Inherits the asyncssh connection pool (one login per caller and target),
   `_auth_config`, `_run_command`, `_assert_reachable`, and `aclose()` from the
   adapter.
 - **Shared pwsh transport** (`_shared/pwsh.py`, #3260) — `pwsh_run` (the single
@@ -128,13 +137,15 @@ shape. It lives in `connectors/inventory/source_hosts.py`; see
   `POWERSHELL_EXECUTABLE` (`powershell` here), `POWERSHELL_SCRIPT_PREFIX` (the
   `$ProgressPreference` guard), `POWERSHELL_LOG_EVENT` (`winsrv_pwsh_executed`).
 - **Op metadata** (`ops.py`) — `WinsrvOp` frozen dataclass (mirrors `WindowsDnsOp`
-  / `Rke2Op`), `WINSRV_OPS` (`about` + the six per-domain tuples),
+  / `Rke2Op`), `WINSRV_OPS` (`about` + the eight per-domain tuples: system, hardware,
+  services, features, power, localusers, storage, time),
   `WINSRV_WHEN_TO_USE_BY_GROUP` (curated per-group blurbs, imported into the
   connector — the rke2 `RKE2_WHEN_TO_USE_WRITE_BY_GROUP` precedent), and
   `normalise_json_rows` (collapses `ConvertTo-Json`'s dict / list / null shapes
   to `list[dict]`).
 - **Per-domain op modules** — `ops_system.py`, `ops_services.py`,
-  `ops_features.py`, `ops_power.py`, `ops_localusers.py`, `ops_storage.py`. Each
+  `ops_features.py`, `ops_power.py`, `ops_localusers.py`, `ops_storage.py`,
+  `ops_hardware.py`, `ops_time.py`. Each
   owns its handlers + op tuple, imports `WinsrvOp` from `ops.py`, and (for
   parameterized scripts) `ps_single_quote` from `_shared/pwsh`.
 - **Registration** (`__init__.py`) — two-phase, mirroring windows_dns / rke2:
@@ -180,7 +191,7 @@ over the pooled SSH connection:
 ### Injection safety
 
 Operator-supplied strings (service / feature / user names, iSCSI IQN, volume
-label, reboot message) are interpolated only inside **single-quoted** PowerShell
+label, reboot message, NTP peers) are interpolated only inside **single-quoted** PowerShell
 literals via `ps_single_quote` (every single-quote character PowerShell accepts —
 `'` and the typographic quotes U+2018 to U+201B — is doubled, which is complete
 escaping inside a single-quoted PowerShell string). Integers (delay, disk number, iSCSI port) are
@@ -244,7 +255,10 @@ Any transport / credential failure (`OSError`, `asyncssh.Error`, `ValueError`,
 Uses the base `SshConnector._auth_config` **unchanged** — a Vault secret with
 `ssh_private_key` prefers key auth, otherwise password auth runs. Credentials
 resolve via `_shared/vault_creds` from the Vault KV-v2 path string in
-`target.secret_ref`. The transport prerequisite is an **OpenSSH server on the
+`target.secret_ref`. The secret also holds a `known_hosts` line for the host
+(the safe `net.ssh_keyscan` op reads it) or `known_hosts_insecure: true`;
+without either the connect fails closed and `probe` reports `ssh_auth_failed`.
+The transport prerequisite is an **OpenSSH server on the
 Windows target** (same as windows_dns), with `powershell` reachable as the login
 shell or via the default shell. Server-side setup:
 
@@ -274,7 +288,7 @@ system operator and fails closed to `ssh_auth_failed`.
    `connector_id="winsrv-ssh-2022.x"` + the target and invokes the bound handler
    through the policy/audit path. `dangerous` + `requires_approval` ops park at
    `needs-approval` first. The CLI reaches the same path via `meho operation call
-   winsrv-ssh-2022.x <op_id> --params-json '{...}'` (no dedicated `meho winsrv`
+   winsrv-ssh-2022.x <op_id> --target <name> --params '{...}'` (no dedicated `meho winsrv`
    verb package — the windows_dns / rke2 precedent for SSH-typed connectors).
 
 ## Building the next estate connector
@@ -288,9 +302,8 @@ system operator and fails closed to `ssh_auth_failed`.
 > ("`pwsh` is not recognized") on every 5.1-only Windows host. **Every
 > Windows-estate connector MUST set `POWERSHELL_EXECUTABLE = "powershell"`
 > explicitly** (as `winsrv` and `windows_dns` do). The transport keeps the `pwsh`
-> default deliberately, so a bare mock connector resolves to the documented
-> default in the shared-transport unit suite (`test_connectors_holodeck_pwsh.py`);
-> the estate connectors override it, so the default is never hit in production.
+> default (`_DEFAULT_PS_EXECUTABLE` in `_shared/pwsh.py`); the estate connectors
+> override it, so the default is never hit in production.
 
 Other copy points: set `POWERSHELL_SCRIPT_PREFIX` to the `$ProgressPreference`
 guard if the connector's cmdlet module emits first-use progress; give
@@ -306,7 +319,7 @@ script; and put destructive ops on the `dangerous` + `requires_approval` tier
 (`_StubTarget`, `_completed_process`, `patch.object(connector, "_run_command",
 AsyncMock(...))`); assertions decode the `-EncodedCommand` base64 back to the
 script text. Covers the transport (`powershell` + `$ProgressPreference`), the
-registry-triple round-trip, the 23-op surface + safety-tier + group-coverage
+registry-triple round-trip, the 26-op surface + safety-tier + group-coverage
 invariants, every op group's script construction, the injection-safety escape on
 every parameterized script (service / feature / user name, iSCSI IQN, volume
 label, reboot message — single-quote doubling), the secret-hygiene invariant (no
@@ -315,12 +328,16 @@ RAW-disk guard + `force` override + input validation, the `about` fingerprint
 mapping, and the probe reason matrix. **No spec-reconcile lane** — the cmdlet
 surface ships no OpenAPI (the confirmed convention for SSH-typed connectors);
 drift protection is this ordinary unit suite.
+`backend/tests/test_connectors_winsrv_feature_remove.py` pins the `dangerous` +
+approval tier of `feature.remove`, and
+`backend/tests/test_connectors_windows_dc_build_ops.py` covers `time.get` /
+`time.set`.
 
 ## CLI
 
 No dedicated `meho winsrv` verb package (the windows_dns / rke2 precedent for
 SSH-typed connectors). CLI parity is the generic dispatch path — `meho operation
-call winsrv-ssh-2022.x <op_id> --params-json '{...}'` — plus the `winsrv` product
+call winsrv-ssh-2022.x <op_id> --target <name> --params '{...}'` — plus the `winsrv` product
 token added to the OpenAPI `TargetCreate.product` enum (regenerated from the live
 registry, so `meho targets create --product winsrv ...` validates and the
 generated Go client knows the token).
@@ -339,12 +356,13 @@ generated Go client knows the token).
   does **not** wipe. A true data-destroying wipe (`Clear-Disk -RemoveData`) is
   deliberately not offered on this `caution` op: per the #3259 tier doctrine a
   wipe belongs to a separate `dangerous` op with its own ticket.
-- **Consumer proof against a live c1sql1 lab node is an OPEN acceptance
-  criterion** — the c1sql1 Windows Server 2022 VMs do not exist yet; the probe +
-  feature-install + service-ops proof is deferred to the lab program
-  (evoila-bosnia/claude-rdc-hetzner-dc#2789).
-- Host-key checking is disabled (`known_hosts=None`) at the adapter level for
-  v0.2, shared across the whole SSH family; pinning is deferred repo-wide.
+- **No live proof against a Windows Server host yet.** The probe,
+  feature-install and service ops are checked by the unit tests only.
+- Host-key checking is on for the whole SSH family. The target's Vault secret
+  holds a `known_hosts` pin for the host, or `known_hosts_insecure: true` to
+  turn the check off for that one target. A secret with neither stops the
+  connection before any credential is sent (`SshHostKeyUnpinnedError` in
+  `connectors/adapters/ssh.py`).
 
 ## References
 

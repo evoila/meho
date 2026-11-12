@@ -16,14 +16,13 @@ alias verbs that ship with G3.2-T6 (`meho k8s <verb> --target <name>
 and documented in
 [`docs/cross-repo/kubernetes-onboarding.md`](../cross-repo/kubernetes-onboarding.md).
 
-The connector replaces the operator's daily `kubectl-vcf.sh` wrapper for
-read workflows -- inventory listing, workload inspection, log fetching --
-and, as of G3.14-T1 (#1403), for the single-call **write** surface
-(scale / rollout-restart / namespace-create / annotate / label / cordon /
-apply / delete / secret-create / job-create). Every write op is
-`requires_approval=True`, so once #1401's human-queue routing is live an
-operator's write dispatch is parked for approval rather than auto-run or
-hard-denied. `k8s.exec` (G3.14-T2) and `k8s.drain` stay in the wrapper.
+The connector covers the operator's daily `kubectl` work: reads
+(inventory listing, workload inspection, log fetching), the single-call
+**write** surface (scale / rollout-restart / namespace-create / annotate /
+label / cordon / apply / delete / secret-create / secret-update /
+secret-delete / job-create / cronjob-run) and a bounded `k8s.exec`. Every
+op that is not `safe` has `requires_approval=True`, so the call waits for
+approval (see `approvals.md`). There is no `k8s.drain` op.
 
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
@@ -31,9 +30,11 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
 - **`KubernetesConnector`** (`connector.py`) -- `Connector` subclass.
   Class attributes: `product="k8s"`, `version="1.x"`,
-  `impl_id="k8s"`. Caches a per-target
-  `kubernetes_asyncio.client.ApiClient` keyed on `secret_ref`; the
-  kubeconfig loader is injectable for tests.
+  `impl_id="k8s"`. Caches one
+  `kubernetes_asyncio.client.ApiClient` per target, keyed on the
+  target's `(tenant_id, id)` from `target_cache_key` (see
+  [`kubernetes-connector.md`](kubernetes-connector.md) for why). The
+  credential loader is injectable for tests.
 - **Op metadata** (`ops.py`) -- the `KubernetesOp` dataclass plus the
   `KUBERNETES_OPS` tuple the connector's `register_operations` walks
   at startup. `collect_ops` builds the tuple from the `OPS` of every
@@ -81,9 +82,8 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   `k8s.admission_webhook.list`.
 - **`KubernetesTargetLike`** (`kubeconfig.py`) -- runtime-checkable
   Protocol capturing the minimum target shape the connector reads:
-  `name`, `host`, `port`, `secret_ref`. Replaced by the concrete
-  `Target` model once G0.3 (#224) lands; the structural shape there
-  satisfies the Protocol unchanged.
+  `id`, `tenant_id`, `name`, `host`, `port`, `secret_ref`. The `Target`
+  model satisfies the Protocol structurally.
 - **`load_kubeconfig_from_vault`** (`kubeconfig.py`) -- the default
   kubeconfig loader. Since #2397 it reads through the shared
   **credential-backend seam** rather than opening Vault directly: it
@@ -121,8 +121,8 @@ so the read-only-ServiceAccount + non-expiring-token recipe every normal
 appliance/kubeadm cluster allows is unavailable. The only credential a
 Supervisor hands out is the **short-lived vSphere-SSO token** from its
 `POST /wcp/login` exchange (it expires with the SSO session). The static
-`kubeconfig` path can't consume that durably — so the Supervisor was the
-one k8s tier the connector couldn't register.
+`kubeconfig` path cannot use that token for long, so a Supervisor uses
+the WCP mode below.
 
 The WCP mode makes the connector hold the SSO credential and run the
 login dance itself — the same shape `kubectl vsphere login` /
@@ -178,8 +178,8 @@ re-mints once the cached token is inside `WCP_TOKEN_REFRESH_MARGIN_SECONDS`
 of expiry (single-flight under a lock). Expiry is stamped from the
 token's JWT `exp` claim (read unverified — it's our own token, used only
 to schedule refresh) with a short `DEFAULT_WCP_TOKEN_TTL_SECONDS` fallback
-for a non-JWT token. The cached `ApiClient` (keyed on `secret_ref` like
-the static path) stays put across the token's lifetime — only its bearer
+for a non-JWT token. The cached `ApiClient` (keyed on the target's
+`(tenant_id, id)` like the static path) stays put across the token's lifetime — only its bearer
 rotates — so both the read `ApiClient` and the exec `WsApiClient` get the
 self-refreshing client with no per-op login round-trip.
 
@@ -201,9 +201,9 @@ that SAN.
 `tls_server_name` is threaded onto **both legs** — the `/wcp/login` POST
 (httpx `extensions={"sni_hostname": …}`) and the kube-API leg
 (`Configuration.tls_server_name`, which `kubernetes_asyncio` maps onto the
-aiohttp `server_hostname`) — via one shared TLS-policy builder, so the
-login exchange no longer fails hostname verification while the API leg
-succeeds (#3832). A hostname/CA mismatch on the login leg now surfaces as
+aiohttp `server_hostname`) — via one shared TLS-policy builder, so both
+legs check the cert against the same name. A hostname/CA mismatch on the
+login leg surfaces as
 `WcpLoginError: TLS verification failed for '<host>' (server_name
 '<name>')…` rather than a bare `ConnectError`.
 
@@ -226,7 +226,7 @@ CA via the target's `tls_ca_pin` (recommended) or set `verify_tls=false`
 for a lab. When the Supervisor is reached through a NAT alias whose
 address is **not** in the cert's SAN, set `tls_server_name` to the address
 the cert SANs (the internal VIP) so both the login and API legs verify the
-cert against it with hostname checking on. **Least privilege:** the SSO
+cert against it with hostname checking on. **Smallest rights:** the SSO
 super-admin works but the
 recommended long-term credential is a scoped read-only vSphere SSO user
 granted a read-only vSphere-Namespace role; the connector is
@@ -264,8 +264,7 @@ reach that loader. It:
   through the loaders' documented `ValueError` contract and the
   dispatcher's catch-all → `connector_error`). The message names only the
   offending section/field — never a credential value, endpoint, or
-  certificate — so it is safe to log (preserves the no-leak canary
-  discipline);
+  certificate — so it is safe to log;
 - **explicitly validates** the cluster `server` endpoint (must be an
   http(s) URL with a host), `proxy-url` (http/https/socks5 URL with a
   host), `insecure-skip-tls-verify` (boolean), `tls-server-name`, and the
@@ -296,12 +295,27 @@ here). This mirrors the Kubernetes upstream warning that untrusted
 kubeconfig can cause code execution or file exposure
 ([kubeconfig guidance](https://kubernetes.io/docs/concepts/configuration/organize-cluster-access-kubeconfig/)).
 
+## Where the client connects (`_kubeconfig_dialing_target`, `_dial_check.py`)
+
+- **Static kubeconfig.** When the target has a `host`,
+  `_kubeconfig_dialing_target` (`connector.py`) rewrites a copy of the
+  active cluster before the client is built: `server` becomes
+  `https://{host}:{port}` (port default 6443), `tls-server-name` becomes
+  the target's `tls_server_name` when set, and `insecure-skip-tls-verify`
+  becomes `not verify_tls`. The embedded CA stays. A target with no
+  `host` keeps the kubeconfig's own `server`. The REST and the exec
+  client both use this rewrite.
+- **Address check.** `check_api_client_dials` (`_dial_check.py`) puts the
+  shared connect-time address check (`_shared/dial_guard.py`) on both
+  clients. It checks the API server when the client is built, and every
+  host right before a new connection: the API server, a redirect host,
+  and a proxy host. Through a proxy, MEHO sends only TLS requests; a
+  plain HTTP request through a proxy is refused.
+
 ## Probe ↔ dispatch convergence on the route operator (G0.16-T4 #1306)
 
-The `Connector.fingerprint(target, operator=None)` ABC signature
-gained the optional `operator` parameter in G0.16-T4. The four
-fingerprint surfaces that authenticate via Vault (this connector,
-`vmware-rest-9.0`, `sddc-rest-9.0`, `nsx-rest-4.2`) now read the
+The `Connector.fingerprint(target, operator=None)` ABC signature takes
+an optional `operator` parameter. This connector's fingerprint reads the
 per-target credentials under the **same identity** the dispatch path
 uses:
 
@@ -312,27 +326,16 @@ uses:
 - **UI re-probe route** (`POST /ui/connectors/{name}/probe`) —
   `resolve_operator_or_403` lifts an operator gated on
   `TENANT_ADMIN`, and the handler forwards it identically.
-- **Dispatch path** (`POST /api/v1/operations/call`) — unchanged; the
-  dispatcher has always threaded the operator into the connector's
-  HTTP auth surface.
+- **Dispatch path** (`POST /api/v1/operations/call`) — the dispatcher
+  passes the operator to the connector's credential loader.
 
 The fallback `operator=None` synthesises a system operator (whose
 non-empty placeholder JWT fails closed at the live Vault round-trip)
 for callers that have no real operator in scope (the readiness probe
 worker, the K8s topology refresh service). This preserves the
 locked Option A decision's system-call carve-out — *system-initiated
-calls cannot perform an operator-context Vault read*.
-
-Pre-#1306 the probe routes hard-coded the system operator
-synthesis inside each connector's `fingerprint()`. Vault's JWT/OIDC
-auth method rejected the placeholder JWT as `malformed jwt: must
-have three parts` (compact-JWS format requires three dot-separated
-parts; the placeholder
-`"system:connector-probe-placeholder-jwt"` has zero), which surfaced
-on every probe of the four affected connectors in the v0.8.0 dogfood
-cycle (`claude-rdc-hetzner-dc#771` Finding 4). The fix is the
-single-source-of-truth shape — probe + dispatch both flow the same
-real operator through the same loader.
+calls cannot perform an operator-context Vault read*. So probe and
+dispatch both pass the same real operator through the same loader.
 
 ## Module layout: where an op lives
 
@@ -380,15 +383,15 @@ Pod exec is an HTTP `Upgrade` to a websocket carrying the multiplexed
 `v4.channel.k8s.io` sub-protocol, which `kubernetes_asyncio` only speaks
 through its `kubernetes_asyncio.stream.WsApiClient` subclass. The
 connector therefore keeps a **parallel** per-target cache
-(`KubernetesConnector._ws_api_clients`, keyed on `secret_ref` exactly
-like `_api_clients`), built lazily from the same operator-identity
-kubeconfig via `_get_ws_api_client` and closed alongside the read
-clients in `aclose` (no leaked sockets).
+(`KubernetesConnector._ws_api_clients`, keyed on the target's
+`(tenant_id, id)` exactly like `_api_clients`), built lazily from the
+same operator-identity kubeconfig via `_get_ws_api_client` and closed
+alongside the read clients in `aclose` (no open sockets left behind).
 
 The library's `WsApiClient.request` with `_preload_content=True` (the
 default) concatenates stdout + stderr into one blob *and discards the
-status frame* -- so the exit code is lost and the two streams can no
-longer be told apart. To meet the op's contract the handler passes
+status frame* -- so the exit code is lost and the two streams cannot
+be told apart. To meet the op's contract the handler passes
 `_preload_content=False`, which returns the raw aiohttp websocket
 context manager; it then `async with`-es the socket, demuxes the leading
 channel byte itself (1 = stdout, 2 = stderr, 3 = error/status), and
@@ -455,13 +458,15 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.annotate`         | caution   | Strategic-merge patch of `metadata.annotations` over a kind table (deployment/pod/service/namespace/node); null value removes a key. |
 | `k8s.label`            | caution   | Same as annotate over `metadata.labels`; relabeling a Service-selected workload can re-route traffic. |
 | `k8s.cordon`           | caution   | `CoreV1Api.patch_node(spec.unschedulable)`; `uncordon=true` reverses. Eviction-free. |
-| `k8s.apply`            | dangerous | Server-side apply over `DynamicClient.server_side_apply` (`field_manager="meho"`), GVK resolved per manifest doc from discovery. `dry_run="server"` -> API `?dryRun=All` (mutates nothing, returns the would-be object). |
+| `k8s.apply`            | dangerous | Server-side apply over `DynamicClient.server_side_apply` (`field_manager="meho"`), GVK resolved per manifest doc from discovery. `dry_run="server"` -> API `?dryRun=All` (mutates nothing, returns the would-be object). `force_conflicts=true` takes over fields another tool owns. |
 | `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
 | `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). Optional `labels` / `annotations` maps go on the Secret's metadata. |
 | `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
+| `k8s.cronjob.list`     | safe      | `BatchV1Api.list_namespaced_cron_job` (or `list_cron_job_for_all_namespaces`): name, namespace, schedule, suspended, last schedule time (`ops_cronjob_list.py`). |
 | `k8s.cronjob.run`      | caution   | `BatchV1Api.read_namespaced_cron_job`, then `BatchV1Api.create_namespaced_job`: one Job from the CronJob's job template, now (`ops_cronjob.py`). |
 | `k8s.secret.update`    | dangerous | `CoreV1Api.patch_namespaced_secret` (mode `patch`, keeps other keys) or `read_namespaced_secret` + `replace_namespaced_secret` (mode `replace`, keeps only the given keys). Same value inputs as `k8s.secret.create`; response is key names only. `ops_secret_write.py`. |
 | `k8s.secret.delete`    | **destructive** | `CoreV1Api.delete_namespaced_secret`. Preview first, then call with the `preview_hash`; a second person must approve; an agent cannot run it. `ops_secret_write.py`. |
+| `k8s.finalizer.remove` | **destructive** | `ApiClient.call_api` JSON Patch: tests the finalizer list, then writes it without the named finalizer, on one object that already has a deletion time. Preview first, then call with the `preview_hash`; a second person must approve; an agent cannot run it. `ops_finalizer.py`. |
 
 **`k8s.cronjob.run` (`ops_cronjob.py`).** Starts a CronJob's job without
 waiting for its schedule, the way `kubectl create job <name>
@@ -507,6 +512,8 @@ included, and an unquoted shell operator (`;` `&` `|` `<` `>` `(` `)`)
 ends it, so `sh -ec "PGPASSWORD=x;id"` keeps `id` and the commands after
 a secret stay visible. An option group without `c` (`sh -e`) does not
 start a shell string: the next item is a direct argument.
+The command-line hider lives in `redaction/command_line.py`; the
+`linux.script.run` preview uses it too, for the script text.
 Then the same two-step redaction as the generic params echo
 runs over the spec: it hides secret-shaped text anywhere (JWTs, bearer
 tokens) and the value of a field with a secret-shaped name (a `secret`
@@ -524,10 +531,9 @@ a Slack mirror. The handlers also return value-free summaries, so the
 `OperationResult` itself carries no secret.
 
 **`k8s.secret.create` ref-valued params (#2860).** Redaction keeps a
-secret off audit/broadcast once it is *in* `params`, but an agent driving
-the op still had to put the value there -- and an inline value transits
-the caller's context (the model API) before MEHO ever sees it. To close
-that leak vector, `k8s.secret.create` accepts ref-valued siblings that are
+secret off audit/broadcast once it is *in* `params`. An inline value
+still passes through the caller's context (the model API) before MEHO
+sees it. So `k8s.secret.create` also accepts ref-valued siblings that are
 resolved **server-side, mid-dispatch**, so a Vault/GSM-resident value
 materialises into the Secret without the value ever entering the caller's
 context (the same pattern as keycloak's `password_secret_ref`, #2401):
@@ -569,9 +575,8 @@ from Secrets labelled `argocd.argoproj.io/secret-type: repository`. So
 - `annotations` -- set as the new Secret's `metadata.annotations`.
 
 With them, one call (and one approval) creates such a Secret, also when
-its value comes from a `*_secret_ref`. Before, this took a create plus a
-`k8s.apply` to add the label. Labels and annotations are not secret: the
-approval preview shows them in full. Any other unknown key is still
+its value comes from a `*_secret_ref`. Labels and annotations are not
+secret: the approval preview shows all of them. Any other unknown key is
 rejected (`additionalProperties: false`). `k8s.secret.update` keeps the
 labels and annotations of an existing Secret as they are.
 
@@ -595,9 +600,31 @@ walk: the entry's other fields are checked as well. Then the shared
 params redaction of the generic echo runs over the documents. The size
 limit comes last, after all redaction, because a redaction marker can be
 longer than the value it replaces: the echo keeps at most 16 KB in total
-as stored, counting every entry. A document that does not fit in full
+as stored, counting every entry. A document that does not fit whole
 keeps only its identity; when not even that fits, one closing entry
 counts the documents left out.
+
+**`k8s.apply` and `force_conflicts`.** Kubernetes records which tool owns
+each field of an object. `k8s.apply` applies under the owner `meho`. When
+an object was applied before by another tool (`kubectl apply`, Helm), a
+change to a field that tool owns is a conflict (HTTP 409). A list such as a
+NetworkPolicy's `spec.egress` is one field, so adding one entry to it
+conflicts too. Two ways to handle it:
+
+- **Default (`force_conflicts: false`).** The apply fails. The error names
+  each other owner and its fields, and says that `force_conflicts: true`
+  takes them over.
+- **`force_conflicts: true`.** The apply sends the force switch and takes
+  the conflicting fields over. Use it to change an object that another
+  tool applied. It changes who owns those fields: a later server-side
+  apply of the old file by that tool (`kubectl apply --server-side`) will
+  then conflict with `meho`.
+
+The approval request shows the switch. The dry-run of a forced apply first
+asks the API server without force, then lists each field it takes over in
+`preview.applied[].takes_over` (`{owner, field}` pairs), so the approver
+sees which fields move from which owner. The real apply forces whatever
+conflicts at that moment.
 
 **`k8s.apply` API-server rejections (#3876).** `DynamicClient.request`
 calls the API with `_preload_content=False`, and kubernetes_asyncio only
@@ -639,10 +666,10 @@ write ops do not return warnings yet.
 ### Change or delete an existing Secret -- `k8s.secret.update` / `k8s.secret.delete`
 
 `k8s.secret.create` only creates (a second create answers 409), and
-`k8s.delete` accepts only pod / job / replicaset. So a credential change
+`k8s.delete` accepts only pod / job / replicaset. A credential change
 (a new token or password in a Secret a workload already reads) and the
-removal of a Secret had no governed path. `ops_secret_write.py` adds the
-two ops in the `config` group, next to `k8s.secret.create`.
+removal of a Secret use the two ops in `ops_secret_write.py`, in the
+`config` group, next to `k8s.secret.create`.
 
 **`k8s.secret.update` (dangerous, `requires_approval=True`).**
 
@@ -708,30 +735,62 @@ two ops in the `config` group, next to `k8s.secret.create`.
 
 Tests: `tests/test_connectors_k8s_secret_write.py`.
 
+### Free a stuck object -- `k8s.finalizer.remove`
+
+A finalizer is a hold: Kubernetes keeps an object that has a deletion time
+until every finalizer is gone. When the controller's clean-up can never
+succeed, the object stays "being deleted". `k8s.finalizer.remove`
+(`ops_finalizer.py`, destructive, `requires_approval=True`, group `config`)
+removes exactly one named finalizer from exactly one named object, through
+approval and the audit log.
+
+- Takes `group` (empty for a core kind), `version`, `plural`, optional
+  `namespace`, `name`, `finalizer`, and optional `expected_finalizers`.
+  Result: `{group, version, plural, namespace, name, finalizer, removed,
+  remaining_finalizers}`.
+- It refuses, and writes nothing, when the object is missing, has no deletion
+  time, does not have the named finalizer, or its finalizer list differs from
+  the list on the approval card (or from `expected_finalizers`). A core `secrets` object is refused (the API answer
+  carries the values); use `k8s.secret.delete`.
+- The write is a JSON Patch (`application/json-patch+json`): a `test` step on
+  the whole `/metadata/finalizers` list, then a `replace` without the named
+  finalizer. If the list changes between the read and the write, the API
+  server answers 422 and the op reports "changed while the call ran". Other
+  finalizers stay. It goes through `ApiClient.call_api`, so one code path
+  covers core kinds (`/api/...`) and custom resources (`/apis/...`).
+- The preview builder runs the same read and checks, so a refusal fails the
+  preview and nothing waits for approval. The `blast_radius.object` shows the
+  kind, name, deletion time and finalizers, and the preview carries a warning
+  that the controller's clean-up is skipped. `children` is empty and
+  `irreversibility` is `permanent`.
+- The preview hash covers the params only, so the handler checks the list
+  itself. In the approved run it reads the card the approver saw
+  (`approved_preview`) and refuses when the live list is different, so a
+  change while the request waited never removes a finalizer. A card without
+  a finalizer list is refused too. Outside an approved run, the optional
+  `expected_finalizers` (the list the preview showed) does the same check.
+
+Tests: `tests/test_connectors_k8s_finalizer_remove.py`.
+
 ### Governed guest-cluster kubeconfig read -- `k8s.secret.read_to_ref` (#3496)
 
-The `ops_secret_read.py` op closes the one gap the write surface left:
-there was `k8s.secret.create` but **no data-returning Secret read**
-(Secret `data` is clamped on broadcast). Extracting a credential from a
-Secret therefore meant an out-of-band `kubectl get secret … -o
-jsonpath`, escaping audit / policy / approval. The motivating case is
+The `ops_secret_read.py` op copies a value out of a Secret under audit,
+policy and approval, so nobody needs `kubectl get secret … -o jsonpath`
+by hand. The main case is
 registering a **VKS guest cluster** as a second `product=k8s` target: the
 shipped WCP SSO auth mode (#2905) reaches only the Supervisor, so a guest
 cluster is registered from its Cluster-API-generated
 `<cluster>-kubeconfig` Secret (the admin client-cert kubeconfig, stored
 under the `value` data key) in the Supervisor namespace.
 
-**No-transit shape (not the issue's `read_data` sketch).** The op does
+**No-transit shape.** The op does
 **not** return the decoded kubeconfig to the caller. Borrowing the secret
 broker's core invariant (`connectors/secret`, #1577), it reads the value
 inside the backplane and writes it straight to a Vault `secret_ref`,
 returning only `{secret_ref, field, registered_as, name, namespace,
 data_key, value_fingerprint, length}`. So the kubeconfig never reaches the
 `call_operation` result / the agent transcript at all -- not merely the
-audit row. This is a deliberate hardening of #3496's `read_data` sketch
-(which returned the value to the approval-gated caller); the round-trip
-the issue asks for is served directly, because the op **is** the staging
-step.
+audit row. The op **is** the staging step of the round-trip below.
 
 **Round-trip.** The destination path is derived with
 `tenant_secret_ref(operator.tenant_id, register_as)`
@@ -744,13 +803,13 @@ flow is: `call_operation k8s.secret.read_to_ref … register_as=<guest>`
 --port 6443` (secret_ref omitted; it defaults to the returned path) ->
 `k8s.node.list` against the guest works.
 
-**Governance (mirrors `sddc.credential.list`).** Three layers: (1)
+**Governance.** Three layers: (1)
 `safety_level="caution"` + `requires_approval=True` (the policy gate
 parks an unapproved dispatch); (2) the op-id is declared `credential_read`
 in `kubernetes/op_classes.py`, so `classify_op` returns
 `credential_read` and audit + broadcast rows collapse to aggregate-only;
 (3) the result is value-free **by construction** (only the ref + a
-SHA-256 + byte length), so the connector-boundary `credential_read`
+keyed fingerprint + byte length), so the connector-boundary `credential_read`
 response scrub (#2467) and the defensive Tier-1 engine have no secret to
 strip.
 
@@ -835,8 +894,9 @@ match. `ops_secret_compare.py` answers that without showing the value.
 ### Shared list-op request shape (`ops_listparams.py`)
 
 Every namespaced list op on this connector
-(`k8s.pod.list`, `k8s.deployment.list`, `k8s.job.list`, `k8s.event.list`,
-`k8s.service.list`, `k8s.ingress.list`, `k8s.configmap.list`) shares
+(`k8s.pod.list`, `k8s.deployment.list`, `k8s.workload.list`,
+`k8s.job.list`, `k8s.cronjob.list`, `k8s.event.list`, `k8s.service.list`,
+`k8s.ingress.list`, `k8s.configmap.list`, `k8s.secret.list`) shares
 the same input-parameter shape via the building blocks in
 [`ops_listparams.py`](../../backend/src/meho_backplane/connectors/kubernetes/ops_listparams.py):
 
@@ -848,7 +908,7 @@ the same input-parameter shape via the building blocks in
 - `label_selector` -- forwarded server-side; same K8s selector syntax
   for every op.
 
-Pod / deployment / job list additionally use the full base via
+Pod / deployment / workload / job list additionally use the full base via
 `LIST_BASE_PROPERTIES`, which adds `field_selector` + `limit` +
 `continue_token`. The operator passes `limit=N` plus optional
 `continue_token=<cursor>` on each call; the response carries
@@ -857,18 +917,21 @@ server-defined and expire after ~5-15 minutes; a stale token returns
 410 ResourceExpired, and the handler propagates the API exception
 verbatim so the caller can restart without the token.
 
-The event / service / ingress / configmap list ops deliberately omit
-some knobs of the full base:
+The event / service / ingress / configmap / secret list ops deliberately
+omit some knobs of the full base:
 
 - `k8s.event.list` keeps `field_selector` + `limit` but omits
   `continue_token` -- the handler's client-side recency-sort +
   truncation contract supersedes server-side paging; the omission is
   documented in `K8S_EVENT_LIST_PAGINATION_HINT`.
-- `k8s.service.list`, `k8s.ingress.list`, `k8s.configmap.list` omit
-  `field_selector` + `limit` + `continue_token` -- these resources
+- `k8s.service.list`, `k8s.ingress.list`, `k8s.configmap.list`,
+  `k8s.secret.list` omit `field_selector` + `limit` + `continue_token` -- these resources
   are typically O(10) per namespace and the
   [G0.17-T1](https://github.com/evoila/meho/issues/1330) sweep
   deferred the paging widening as a mechanical follow-up.
+
+`k8s.persistentvolumeclaim.list` takes only `namespace` XOR
+`all_namespaces`: no `label_selector` and no paging.
 
 See [`docs/codebase/api-shape-conventions.md`](api-shape-conventions.md)
 §10 for the convention this shared shape anchors (intra-connector
@@ -922,9 +985,8 @@ their one-word shape.
 ### Environment variable sources in `k8s.pod.info` and `k8s.deployment.info` (#4890)
 
 A variable that takes its value from a Secret or a ConfigMap has no
-literal value in the pod definition. Before #4890 both ops showed it
-as `{"name": ..., "value": null}`, the same as an empty variable. Now
-each `containers[].env` and `init_containers[].env` entry built by
+literal value in the pod definition, so its `value` is `null`, the same
+as an empty variable. So each `containers[].env` and `init_containers[].env` entry built by
 `_env_var_row()` in `ops_workload.py` keeps `name` and `value`, and
 adds `value_from` when the entry has a source:
 
@@ -966,7 +1028,8 @@ the result.
 `k8s.logs` passes `include_init_containers=True` to
 `resolve_pod_and_container()` in `ops_logs.py`. So an init container
 name (for example a `migrate` step) is a valid `container` value, and
-the `MultiContainerAmbiguityError` candidate list shows the app
+the candidate list of `MultiContainerAmbiguityError` (no `container`
+given) and `ContainerNotFoundError` (a wrong `container` name) shows the app
 containers first, then the init containers. Auto-pick still looks only
 at the app containers: a pod with one app container and some init
 containers still resolves to the app container. `k8s.exec` uses the same
@@ -1006,8 +1069,10 @@ in the `workload` group over `BatchV1Api`.
   the counts stay inline if the JSONFlux reducer ever spills the pod
   list to a handle.
 
-Not covered: CronJob reads, and `k8s.ls /<namespace>` does not count
-Jobs yet (`K8S_NAMESPACED_KIND_LISTERS` is unchanged).
+`k8s.cronjob.list` (`ops_cronjob_list.py`) lists CronJobs with the
+same selectors and paging as `k8s.job.list`. A row has `name`,
+`namespace`, `schedule`, `suspended` and `last_schedule_time`. Not
+covered: `k8s.ls /<namespace>` does not count Jobs or CronJobs yet (`K8S_NAMESPACED_KIND_LISTERS` is unchanged).
 
 ### ConfigMap privacy split
 
@@ -1025,8 +1090,8 @@ upgrade specific configmap-name patterns (managed-by
 
 ### Storage + custom-resource read tier (#2830, `ops_storage.py` / `ops_customresource.py`)
 
-Six safe reads that close the pre-flight sizing gap (the RDC Hetzner
-consumer session that fell back to raw kubectl):
+Six safe reads, so a storage sizing check and a custom-resource read
+need no raw kubectl:
 
 - **Storage** (`ops_storage.py`): `k8s.storageclass.list`,
   `k8s.persistentvolume.list`, `k8s.persistentvolumeclaim.list`. The two
@@ -1098,15 +1163,115 @@ Both reviews are HTTP `POST` calls, but the API server stores nothing,
 so they are `safe`. They always check the identity in the target's
 kubeconfig (the identity MEHO uses for that target), not the caller.
 
-This tier also retires the `cluster_kinds` **dead-end advertisements**:
-`k8s.ls /` had long listed `storageclasses` / `persistentvolumes` in its
-root output (and the namespace walk counted `persistentvolumeclaims`)
-with no op behind them. The op ids are exactly
+`k8s.ls /` lists `storageclasses` / `persistentvolumes` in its root
+output (`K8S_CLUSTER_KINDS`), and the namespace walk counts
+`persistentvolumeclaims`. Each has a storage op behind it. The op ids are
+exactly
 `k8s.storageclass.list` / `k8s.persistentvolume.list` /
 `k8s.persistentvolumeclaim.list` so the `k8s.ls` singular-normalisation
 map (`_PLURAL_TO_SINGULAR_KIND`, pre-wired) forwards
 `k8s.ls /<ns>/persistentvolumeclaims` to the new op instead of the
 `unknown_op` envelope.
+
+### What a MEHO install runs -- `k8s.meho.release.info` (`ops_meho_release.py`)
+
+The op shows what a MEHO install on a Kubernetes target runs today. It
+changes nothing. It is the first step of a governed MEHO update: the update
+must know what runs before it changes anything, and what to go back to.
+Group `cluster`. Risk level `caution`, and it waits for approval: `host`
+is an address the caller gives, so it carries `x-meho-caller-address: true`
+and MEHO applies the floor for such an address
+(`operations/caller_address.py`). The op still only reads.
+
+| Parameter   | Meaning |
+| ----------- | ------- |
+| `namespace` | Required. The namespace of the install. |
+| `release`   | Optional, default `meho`. The Helm release name: the value of the `app.kubernetes.io/instance` label the chart puts on every object, and the name of the `HelmChart` object. |
+| `host`      | Optional. A host name or IP address, with an optional `:port`, of this MEHO install. MEHO calls `https://<host>/version` and `/ready` through the address-pinning transport, so the same address check as for a target applies. |
+
+The result has one part for each source. Each part has a `state`:
+`present`, `not present` or `unknown`.
+
+| Part            | Source | Content |
+| --------------- | ------ | ------- |
+| `deployment`    | `AppsV1Api.list_namespaced_deployment` with `app.kubernetes.io/instance=<release>`; the one with a container named `backplane` | name, image, tag, digest, replicas. With a tag-only image the digest is the `imageID` of the `backplane` container of the running pods. |
+| `helm_chart`    | `HelmChart` object `helm.cattle.io/v1` (RKE2 installs) named `<release>`: in the install namespace, else the cluster's chart whose `spec.targetNamespace` is the install namespace | `chart_namespace`, chart, chart version, `values_hash` (keyed HMAC-SHA256 of `valuesContent` and `set`, under the server key, so it cannot be computed again from guessed values). |
+| `helm_releases` | `CoreV1Api.list_namespaced_secret`, labels `owner=helm,name=<release>` | revision, status, Secret name, `modified_at`; `incomplete` is true when the page cap (10 pages of 200) was reached. |
+| `meho`          | only with `host` | `version`: the `/version` fields; `ready`: `ready`, `status`, `http_status`, `db_ahead`, and name and `ok` of each check. |
+
+How it behaves:
+
+- The Deployment is never read by name. The chart names it after the
+  release (`meho.fullname` in `deploy/charts/meho/templates/_helpers.tpl`:
+  `meho` for release `meho`, `demo-meho` for release `demo`, or
+  `fullnameOverride`). The op lists the Deployments with the release's
+  instance label and takes the one with a `backplane` container; the
+  subcharts (Keycloak, PostgreSQL, ...) carry the same label but not that
+  container. No match is `not present`. Two or more matches are `unknown`
+  with the `candidates` names.
+- The digest from the pods uses only the `backplane` container, never a
+  sidecar, and only pods that run the same image as the Deployment (a pod
+  of the previous rollout runs another tag and is skipped). When the pods
+  run two builds of the same tag, `digest` stays null and `pod_digests`
+  lists both. When the pods cannot be read, `digest` is null and
+  `digest_error` says why.
+- The `HelmChart` is looked up in the install namespace first. RKE2 can
+  keep it in `kube-system` and install into another namespace through
+  `spec.targetNamespace`; then the op lists the cluster's HelmCharts and
+  takes the one named `<release>` that targets the install namespace.
+  A list the target does not allow is `unknown`, not `not present`.
+- A 404 is `not present`. Any other failed read (no right, server error,
+  timeout, host not reachable or refused by the address check) is
+  `unknown` with a short `error`, never `not present`. A 401 is raised, so
+  the dispatcher can renew the login.
+- `db_ahead` is true when `/ready` reports `db_ahead=true`: the database
+  has a revision the running image does not know. The older image still
+  starts and stays ready, so going back to the previous chart needs no
+  database restore (`db/migrate.py`, `db/migrations.py`).
+- Secrets: only the names and labels of the Helm release Secrets are read.
+  Their `data` is never copied. The values text of the `HelmChart` is never
+  returned, only the hash. A userinfo part in the chart URL is removed.
+  The flight recorder masks Secret data, `HelmChart` values and `HelmChart`
+  annotations (the last-applied annotation repeats the values) before it
+  stores a trace (`redaction.py`, `_wire_span.py`), so the recorded API
+  answers hold no values text either
+  (`test_trace_capture_records_no_values_text_and_no_secret_data`).
+
+### A node's disk and images -- `k8s.node.disk` / `k8s.node.images` (`ops_node_disk.py`)
+
+Two read-only ops (group `inventory`, risk level `safe`). They answer
+"has the node recovered, and is the big image still there?". Both take an
+optional `node`. Without it they read every node, at most 50, and set
+`incomplete` when more exist. A named node that does not exist gives an
+empty `rows` and `node_state: "not present"`.
+
+- `k8s.node.disk`: per node, the capacity, used, available bytes and the
+  used percent of the node file system, the image store (`image_fs`) and, on
+  newer kubelets, the container store (`container_fs`). The sizes come from
+  the kubelet summary, read through the API server
+  (`/api/v1/nodes/<node>/proxy/stats/summary`, needs the `nodes/proxy`
+  right). The conditions `DiskPressure`, `MemoryPressure` and `PIDPressure`
+  (status, reason, last change time) come from the node status. When the
+  summary cannot be read, `summary.state` is `unknown` with a short error
+  and the sizes are `null`. The conditions still show.
+- `k8s.node.images`: per node, the images of the node status (`names`,
+  `size_bytes`), biggest first, each with `used_by_running_pod`. The flag
+  comes from the pods that run on the node (field selector
+  `spec.nodeName`). A pod counts unless it is `Succeeded` or `Failed`. An
+  image matches by name or by digest, also for init containers and debug
+  (ephemeral) containers. `nodes[]` holds the totals: image count, total
+  bytes, unused count and bytes. When the pods cannot be read, the flag and
+  the unused totals are `null`, never `false`, and `nodes[].pods.state` says
+  why. A byte total is `null` when one of its images has no size, so it
+  never shows less disk use than there is.
+- The kubelet lists at most 50 images in the node status by default. A node
+  with 50 or more rows carries `list_may_be_cut: true`.
+- A 401 is raised, so the dispatcher can renew the login. Long answers
+  become a result handle like every list read.
+
+Example question: "is the big image still on the node?" -- call
+`k8s.node.images` with the node name, read the first row (the biggest), and
+call `k8s.node.disk` for the free space.
 
 ### Read-side Secret redaction (#3501, `redaction.py`)
 
@@ -1120,34 +1285,53 @@ named pattern.
 closes that read-side gap with a pure, **structural** redactor
 (`redact_kubernetes_payload`): it recognises any `kind: Secret` object
 and replaces every `data` / `stringData` value with a fixed placeholder
-carrying a `sha256:` digest — key names kept — regardless of whether the
-value matches a pattern. It is the k8s sibling of the keycloak / rabbitmq
+carrying a short keyed fingerprint — key names kept — regardless of whether
+the value matches a pattern. The fingerprint is the string the redaction
+engine's `hash` action writes: `hmac-sha256:` and 12 hex characters of
+HMAC-SHA256 under the server key (`PARAMS_HASH_KEY`, see
+[`redaction.md`](redaction.md)). Two reads of the same value inside one
+install show the same marker, and the marker cannot be computed again from
+a guessed value. It is the k8s sibling of the keycloak / rabbitmq
 per-connector redactors (see [`redaction.md`](redaction.md)).
+
+The same walk masks the Helm values of a `kind: HelmChart` object (the
+k3s / RKE2 `helm.cattle.io/v1` resource) and of the kind-less items of a
+`HelmChartList`: `spec.valuesContent` becomes one placeholder, and every
+value of `spec.set` becomes one (keys kept). Chart values often hold
+passwords. A chart made with `kubectl apply` also carries its whole
+manifest, values included, in the last-applied annotation, so every
+annotation value of a `HelmChart` becomes a placeholder too (keys kept),
+as on a Secret. `k8s.meho.release.info` reads such objects, and the flight
+recorder (next paragraph) records the answer only in this masked form.
 
 The redactor is wired into `custom_resource_row`
 (`ops_customresource.py`), the projection both `k8s.cr.list` and
-`k8s.cr.info` share, so a dynamic read pointed at core Secrets
-(`group=""` / `version="v1"` / `plural="secrets"`) is scrubbed before
-JSONFlux / audit / broadcast. For a list read, each item first gets
-`kind: Secret` from its `SecretList` (see "Built-in kinds" above),
-because the API server leaves `kind` off list items. The dedicated way
+`k8s.cr.info` share. It runs on every `kind: Secret` and every
+`kind: HelmChart` object, so a dynamic read pointed at core Secrets
+(`group=""` / `version="v1"` / `plural="secrets"`) or at the charts
+(`group="helm.cattle.io"` / `version="v1"` / `plural="helmcharts"`) is
+scrubbed before JSONFlux / audit / broadcast: a chart row's spec excerpt
+and annotations carry placeholders, never the values text. For a list
+read, each item first gets its `kind` from the list envelope
+(`Secret` from a `SecretList`, `HelmChart` from a `HelmChartList`; see
+"Built-in kinds" above), because the API server leaves `kind` off list
+items. The dedicated way
 to look at core Secrets is `k8s.secret.list` / `k8s.secret.info` (next
 section), which also run this redactor as a second net.
 
 **Projection note.** `custom_resource_row` otherwise keeps only
 `metadata` + bounded `.spec` / `.status` excerpts and drops every other
 top-level field (a Secret's annotation keys show, but every annotation
-value is replaced by the placeholder); a `Secret` has no `.spec`, so before #3501 a CR read of a Secret
-returned no `data` at all (safe, but uninformative). The redactor lets
+value is replaced by the placeholder); a `Secret` has no `.spec`. The redactor lets
 the projection surface a `data` / `string_data` **key inventory** (values
-redacted, digests attached) for a `kind: Secret` object instead — safe
+redacted, keyed fingerprints attached) for a `kind: Secret` object instead — safe
 *and* useful. Non-Secret CR rows gain neither field. The op remains
-`safe` / no-approval — the redaction, not a gate, is what makes a Secret
-read leak-free.
+`safe` / no-approval — the redaction, not a gate, is what keeps Secret
+values out of the answer.
 
 **Carve-out.** `k8s.secret.read_to_ref` (#3496) is untouched by this
 pass: it reads the value inside the backplane and stages it to a Vault
-`secret_ref`, returning only the ref + a SHA-256 + byte length — no
+`secret_ref`, returning only the ref + a keyed fingerprint + byte length — no
 `data` map and no `kind: Secret` object, so the structural walk finds
 nothing to redact and the op's no-transit contract is preserved.
 
@@ -1226,8 +1410,7 @@ The resolver's step 1 catches this: when ≥1 entry carries a
 non-empty `(version, impl_id)` slot, the wildcard `(product, "", "")`
 is demoted before the rest of the ladder runs. The versioned entry
 wins; the operator never sees the
-`AmbiguousConnectorResolution` bare-500 (signal 9 in
-`claude-rdc-hetzner-dc#697`). The rule generalizes to any future
+`AmbiguousConnectorResolution` bare-500. The rule generalizes to any future
 connector that uses the same double-registration shape — only
 wildcards lose to a co-registered versioned sibling, never the
 reverse. When the wildcard is the *only* candidate (a connector
@@ -1257,9 +1440,8 @@ conditional on a versioned entry being present.
 ### Flight-recorder span per API request (`_wire_span.py`, #3841)
 
 When the flight recorder captures a dispatch, every Kubernetes API HTTP
-request now gets its own `vendor_call` span under the op's `typed` span.
-Before, the trace showed only the `typed` span, so a "200 but nothing
-happened" apply could not be explained from the trace.
+request gets its own `vendor_call` span under the op's `typed` span, so
+a "200 but nothing happened" apply can be explained from the trace.
 
 - `instrument_api_client()` wraps `RESTClientObject.request` on each
   cached `ApiClient` once, when `_get_api_client` builds it. All typed
@@ -1292,11 +1474,14 @@ happened" apply could not be explained from the trace.
   response body first goes through the connector's structural Secret
   redactor (`redaction.py`, the same walk `k8s.cr.*` reads use). Every
   `data` / `stringData` value of a `kind: Secret` object, and every
-  annotation value on it, is replaced by a placeholder plus a digest;
+  annotation value on it, is replaced by a placeholder plus a keyed
+  fingerprint;
   key names stay. This covers a `k8s.apply` of a Secret
   manifest, a `k8s.cr.info` read of one, and the items of a
   `SecretList` (which carry no `kind` of their own). The normal body
-  redaction then runs over the masked body.
+  redaction then runs over the masked body. The same walk masks the
+  values of a `kind: HelmChart` object and of the items of a
+  `HelmChartList` (`spec.valuesContent`, every `spec.set` value).
 - Non-2xx (`ApiException`) and transport errors are recorded
   (`status` = HTTP code or `error:<ExceptionClass>`) and re-raised
   unchanged. With `_preload_content=False` the wrapper reads the body
@@ -1405,15 +1590,22 @@ The `k8s.ls` handler is a thin path parser:
   pays one round-trip per probed kind, not one per row.
 - `/<namespace>/<kind>` -- forwards through
   `KubernetesConnector.execute()` to `k8s.<kind>.list`. The shim is the
-  same dispatcher path direct callers use; an unknown kind comes back
-  as the structured `unknown_op` envelope and the forwarder surfaces it
-  verbatim under `result`.
+  same dispatcher path direct callers use. The forwarder passes the
+  caller's operator (`execute(..., operator=operator)`), so the sub-op
+  reads the target's credentials under the caller's identity; a system
+  operator could not (the client cache refuses it and Vault rejects its
+  placeholder token). `statefulsets` and
+  `daemonsets` go to `k8s.workload.list` with the matching `kind`. A
+  kind with no list op, and any sub-op that does not return `ok`, make
+  `k8s.ls` raise, so the top-level answer is an error and not `ok` with
+  an error inside. The `unknown_op` message names the kinds `k8s.ls` can
+  list (`_LS_LISTABLE_KINDS`; a test checks each one has an op).
 
 ## Dependencies
 
-- **`kubernetes_asyncio` >=32,<33** -- async fork of the official
-  Python client. Targets the K8s 1.32 API surface (matches the k3s
-  container image pinned for integration tests).
+- **`kubernetes_asyncio` >=36.1,<37** -- async fork of the official
+  Python client. The integration tests run against a pinned k3s image
+  (`rancher/k3s:v1.32.5-k3s1`).
 - **G0.2 chassis** -- `Connector` ABC plus the connector registry
   (v1 + v2 entries).
 - **G0.6 substrate** -- `register_typed_operation()` for descriptor
@@ -1446,23 +1638,11 @@ threshold code; per the substrate split documented on
 `meho_backplane.operations.reducer`, set-shaped reduction is the
 reducer's job, not the connector's.
 
-The `total` key in the response envelope is the un-truncated row count
-the reducer will read to decide whether to spill; today the value is
-just `len(rows)` because nothing reduces.
+The `total` key in the response envelope is the full row count
+(`len(rows)`); the reducer, not the handler, decides whether to spill.
 
 ## Known issues
 
-- `_get_api_client` caches by `target.secret_ref`. Two tenants that
-  legitimately register a target named `"rke2-meho"` in their own
-  `targets.yaml` will not share the same `ApiClient` (different Vault
-  paths, different secret_refs), but until G0.3 ships its `Target.id`
-  the cache key is the operator's chosen opaque identifier. Swap to
-  `target.id` when G0.3 finalises a row-PK shape.
-- The kubeconfig loader is a stub
-  (`load_kubeconfig_from_vault` raises `NotImplementedError`). T2+
-  ships inject a custom loader at connector construction; the
-  integration suite uses the testcontainers-emitted kubeconfig
-  directly.
 - `k8s.ls /<namespace>` queries a **fixed** list of kinds, not the
   full `kubectl api-resources --namespaced=true` enumeration. The
   trade-off is documented on `K8S_NAMESPACED_KIND_LISTERS`: full
@@ -1474,8 +1654,7 @@ just `len(rows)` because nothing reduces.
 
 - Topology populator: [#1201 G0.14-T12](https://github.com/evoila/meho/issues/1201)
   -- `KubernetesConnector.discover_topology` (cluster + namespaces +
-  nodes); closes the v0.6.0 release-body amendment promise on
-  `claude-rdc-hetzner-dc#697` signal 13.
+  nodes).
 - Parent Initiative: [#320 G3.2](https://github.com/evoila/meho/issues/320)
   -- `k8s-1.x` typed connector (library: `kubernetes_asyncio`).
 - Predecessor Tasks:

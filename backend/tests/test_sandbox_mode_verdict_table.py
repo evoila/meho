@@ -9,7 +9,8 @@ caution, dangerous, destructive) x ``requires_approval`` (yes, no) x
 delete sign at call time (none, HTTP ``DELETE``, tag ``destructive``,
 delete name only) x grant (none, ordinary, delete grant) x gate (a direct
 call, a step gate) -- the policy gate's verdict is recorded as ``runs``,
-``waits`` or ``refused``.
+``waits`` or ``refused``. The person here calls with a token (no web
+session), so only ``safe`` runs at once for them (#3980).
 
 * **Mode off:** every cell equals the checked-in table
   (``tests/data/sandbox_mode_verdict_table_off.json``), a delete grant

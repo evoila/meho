@@ -83,6 +83,12 @@ If you prefer to inline the value in the file, replace every
 diff-against-upstream stays clean as long as you keep the rest of
 the template structure intact.
 
+Who reads `MEHO_INSTANCE`: your shell commands (for example
+`meho login "$MEHO_INSTANCE"`) and the Claude Code plugin, which builds
+its MCP address from it. The `meho` CLI itself does not read the
+variable. It uses the address you gave to `meho login`, which it stores
+in `~/.config/meho/config.json`, or the `--backplane <url>` flag.
+
 Commit the new (or merged) `CLAUDE.md` to your consumer repo. From
 this commit onward, every Claude Code session that opens your repo
 reads it on session start.
@@ -99,16 +105,23 @@ end confirms the session is actually preferring MEHO.
 ### 2a. Confirm the CLI is installed and authenticated
 
 ```console
-$ meho version
-meho/v0.2.x (commit <sha>; built <date>)
-
 $ meho login "$MEHO_INSTANCE"   # if not already authenticated
 # Follow the device-code flow in your browser.
 
+$ meho version
+meho v<x.y.z> (commit <sha>, built <date>)
+backplane v<x.y.z> (commit <sha>, built <date>) at https://meho.example.com
+
 $ meho status
-Backplane: $MEHO_INSTANCE (reachable)
-Operator: <your-sub>  Tenant: <your-tenant>  Role: <your-role>
+Logged in as <your-name> (sub: <your-sub>)
+  Tenants:
+    <your-tenant>  <your-role>  (current)
+  Vault: ...
+  DB:    ...
 ```
+
+If you work in more than one tenant, pick one with
+`meho tenants use <name>`. `meho status` marks it `(current)`.
 
 If `meho status` returns "unreachable" or "auth_expired", fix that
 first; the template's routing rules assume the CLI works.
@@ -209,8 +222,8 @@ Patterns to follow:
   disagree with a canonical rule, file an issue upstream so the
   discussion lands in one place instead of fragmenting across tenants.
 * **Tenant-wide operational rules belong in Layer 1, not Layer 2.**
-  Use `meho conventions edit <slug>` (when the verb ships via
-  [G7.1-T3 #315](https://github.com/evoila/meho/issues/315)) to
+  Use `meho conventions create` (a new rule) or
+  `meho conventions edit <slug>` (an existing rule) to
   publish them server-side so they reach agents connecting from
   *anywhere*, not just from this cloned repo. Reserve Layer 2 for
   things that genuinely apply only to operators working in this
@@ -248,8 +261,7 @@ What this means in practice:
   entry by exact uuid match — regardless of whether any live session
   sees the change mid-run.
 
-This is the **v0.2 baseline** behaviour. A mid-session refresh path
-is specified but conditional on MCP's
+A mid-session refresh path is specified but conditional on MCP's
 `capabilities.resources.subscribe` being advertised as `true`. When
 that capability is enabled, edits emit
 `notifications/resources/updated` for the
@@ -257,21 +269,25 @@ that capability is enabled, edits emit
 subscribing clients re-read the resource to refresh their preamble
 mid-session.
 
-**Current posture:** v0.2 ships `resources.subscribe: false` — the
-`_initialize` capabilities envelope advertises `subscribe: false`,
-and the helper that wraps every convention write
-(`_maybe_emit_resource_updated`) is a no-op. v0.2.next flips both
-halves together (capability advertisement + emit on write), kept in
-sync by a single constant
-(`RESOURCES_SUBSCRIBE_ENABLED` in
-[`backend/src/meho_backplane/mcp/server.py`](https://github.com/evoila/meho/blob/main/backend/src/meho_backplane/mcp/server.py)).
-Until then, **reconnect-to-refresh** above is the documented contract.
+**Current posture:** MEHO advertises `resources.subscribe: false` in
+its `initialize` answer, and the helper that wraps every convention
+write (`_maybe_emit_resource_updated` in
+`backend/src/meho_backplane/api/v1/conventions.py`) does nothing. One
+constant turns both halves on together (capability advertisement +
+emit on write): `RESOURCES_SUBSCRIBE_ENABLED` in
+[`backend/src/meho_backplane/mcp/server.py`](https://github.com/evoila/meho/blob/main/backend/src/meho_backplane/mcp/server.py).
+It is `False`, so **reconnect-to-refresh** above is the documented
+contract.
 
 ## Step 4 — Refresh when MEHO ships a new minor version
 
-`meho version` reports the CLI version; `meho status` reports the
-backplane version. When either bumps a minor (v0.2 → v0.3, etc.),
-re-pull the template and merge.
+`meho version` reports the CLI version and the backplane version.
+`meho status` prints a warning when the two are too far apart. When
+either bumps a minor version (for example v0.44 → v0.45), re-pull the
+template and merge.
+
+Claude Code plugin users do not copy files: run
+`claude plugin update meho@meho`, then restart Claude Code.
 
 ```bash
 # In your consumer repo:
@@ -307,16 +323,18 @@ matching upstream verbatim, with your additions strictly below.
 
 ### `meho ...` verb fails with `unreachable`
 
-The CLI can't reach `$MEHO_INSTANCE`. Walk the connectivity:
+The CLI can't reach the backplane. The CLI uses the address from
+your last `meho login` (or the `--backplane` flag), not
+`$MEHO_INSTANCE`. Walk the connectivity:
 
 ```console
-$ echo "$MEHO_INSTANCE"
-$ curl -fsS "$MEHO_INSTANCE/api/v1/health"
+$ grep backplane_url ~/.config/meho/config.json
+$ curl -fsS "https://meho.example.com/healthz"   # the address from the line above
 ```
 
-Empty `$MEHO_INSTANCE` → re-export it in your shell profile.
-404/500 → MEHO is down or the URL is wrong; check with the
-operator who provisioned the backplane.
+Wrong address → run `meho login <right-url>` again.
+No answer, 404 or 5xx from `/healthz` → MEHO is down or the URL is
+wrong; check with the operator who provisioned the backplane.
 
 ### `meho ...` verb fails with `insufficient_role`
 
@@ -358,8 +376,11 @@ you expect, walk these checks:
    assembled for the operator's tenant. Run `meho status` and
    confirm it renders the tenant you expect; a token bound to the
    wrong (or no) tenant assembles the preamble from the wrong
-   tenant's rows. Re-authenticate with `meho login "$MEHO_INSTANCE"`
-   if the tenant is wrong.
+   tenant's rows. If you are in several tenants, the session works in
+   the one the client sent at the start (the Claude Code plugin sends
+   `MEHO_TENANT`; the CLI uses `meho tenants use <name>`). Fix that
+   setting and start a new session. Re-authenticate with
+   `meho login "$MEHO_INSTANCE"` if your login has the wrong tenants.
 
 Layer 2 (this template) is independent of all three — the local
 Claude session reads `CLAUDE.md` directly from disk, regardless of
@@ -386,9 +407,11 @@ under "Dual-surface tool inventory". A CI guard
 template — or any consumer-facing doc/skill — names a tool that is
 not registered under that inventory.
 
-Human operators still have the read-side CLI equivalents when they are
-not driving through MCP:
+Human operators have CLI equivalents when they are not driving
+through MCP:
 
+* `meho broadcast recent`, `meho broadcast announce <activity>` and
+  `meho broadcast watch` — the same three actions as the MCP tools.
 * Step 1 (check before starting) — `meho audit who-touched <name>
   --since 30m` for "who's been here recently".
 * Step 3 (check in mid-flight) — `meho status --watch --target

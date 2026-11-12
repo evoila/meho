@@ -31,7 +31,8 @@ load-bearing:
 - **No `resume` in-flight policy.** A governed op can wrap a non-idempotent
   vendor write. Re-dispatching a half-executed write on pod death would
   double-execute it, so an orphaned run is **never** re-dispatched — the
-  reaper drives it to `failed` (an audited terminal state). This is the safe
+  reaper drives it to `uncertain` (an operation that may change something) or
+  `failed` (a read), an audited terminal state. This is the safe
   half of the acceptance criterion "survives pod restart via lease/reaper
   semantics **or** terminates into an audited terminal state — never
   silently lost."
@@ -76,7 +77,11 @@ load-bearing:
 Async submit (`POST /operations/call`, `async: true`):
 
 1. `post_call` strips the transport-only `async_` control and calls
-   `OperationRunService.submit_call(operator, arguments)`.
+   `OperationRunService.submit_call(operator, arguments)`. A call with
+   `reveal_secret: true` in its params is refused first (HTTP 422
+   `reveal_secret_with_async`; on MCP, bad input with the same reason):
+   a reveal call runs at once, or through an approval
+   ([approvals.md](approvals.md)).
 2. `submit_call` computes a `params_hash`, inserts a `pending` row, and
    claims a lease under this worker's `"<hostname>:<pid>"` owner (one
    committed transaction), then launches a background task and returns the
@@ -105,7 +110,7 @@ background substrate and the route returns 202 + the handle. The
 exactly-one-resumer claim (#2293) still guards the single execution, now won
 inside the background task.
 
-State machine (`pending → running → succeeded | failed`, plus
+State machine (`pending → running → succeeded | failed | uncertain`, plus
 `→ cancelled` from any non-terminal state):
 
 - `succeeded` means the **run** completed and its envelope is durable —
@@ -114,6 +119,13 @@ State machine (`pending → running → succeeded | failed`, plus
   not the run status.
 - `failed` is reserved for a run that never produced an envelope (worker
   died / reaped, or the dispatch raised).
+- `uncertain` (#5025, migration `0139`) is the reaper's end for a dead run of
+  an operation that may change the target: MEHO does not know if the change
+  happened, so it is not `failed`, and it never runs again. The advice is the
+  same as in the approval views: do not run it again, check the target first.
+  A dead run that resumes an approved request is always `uncertain`. Any
+  other run is `uncertain` unless its operation has `safety_level` `safe`;
+  an operation that cannot be found counts as a change.
 - `cancelled` is best-effort: the durable intent is recorded; an in-flight
   task loses its lease on the next heartbeat and its result is discarded
   when it finalises against the now-terminal row (the dispatch's own
@@ -124,8 +136,8 @@ State machine (`pending → running → succeeded | failed`, plus
 `operation_run_reaper` scans `status='running' AND lease_expires_at < now()`
 on a fixed cadence (advisory-lock leader election per tick, `FOR UPDATE SKIP
 LOCKED` claim, per-row savepoint isolation, one commit per tick — the same
-discipline as the agent-run reaper) and drives each orphaned run to `failed`
-with a stable interruption reason, writing an internal audit row
+discipline as the agent-run reaper) and drives each orphaned run to
+`uncertain` (a change) or `failed` (a read) with a stable interruption reason, writing an internal audit row
 (`operator_sub='system:operation-run-reaper'`, `run_id` = the operation-run
 id, migration-`0034` audit correlation) in the same transaction. It never
 re-dispatches. Gated on `OPERATION_RUN_REAPER_ENABLED`; started/stopped in
@@ -175,6 +187,27 @@ comes as soon as the run ends, or after N seconds with the run still
 - **Other replicas.** When another process runs the task, the wait reads
   the row again every `wait_recheck_seconds` (2 seconds).
 
+## Approvals that answer at once (#5110)
+
+Three approve paths use `submit_approval_resume`:
+
+- REST `POST /api/v1/approvals/{id}/approve` with `"async": true` (#3079):
+  202 + `{run_id, status, async}`.
+- REST `POST /api/v1/approvals/{id}/decide` with `"async": true`: 202 +
+  `DecideAcceptedBody` (the decision fields of `DecideResponseBody` plus
+  `run_id`, `status: "pending"`, `async: true`). A rejection ignores the
+  switch. Without it, both routes run the operation before they answer,
+  as before. `meho approvals approve` sends it (`--wait` waits by reading
+  the request every few seconds).
+- The console approve always starts the run in the background, waits at
+  most one second, and the page then follows the run
+  ([`approvals.md`](approvals.md), "Operator console").
+
+The run row carries `approval_request_id`; the console finds the latest
+run of a request through it (index `operation_run_approval_request_id_idx`).
+`identity_sub` is the approver, so the "the run has ended" notice goes to
+the approver.
+
 ## Synchronous path: caller gone (#3696)
 
 Without `async: true`, the REST `/call` route and the MCP `POST /mcp` route
@@ -192,10 +225,16 @@ does not need this: its outcome is stored on the run row.
 
 ## Known issues / notes
 
-- **No CLI verbs yet.** The generated Go client (`cli/api/openapi.json` /
-  `client.gen.go`) carries the new paths after `make snapshot-openapi &&
-  make generate`, but no `meho operation runs …` CLI command is wired.
-  Adding operator CLI verbs is a follow-up.
+- **CLI verbs.** `meho operation call --async` sends `async: true`, accepts
+  the HTTP 202 answer and prints the run id and the command to check it.
+  `meho operation run-status <run id>` reads the run with
+  `GET /operations/runs/{handle}`. It prints the state while the run waits
+  or runs, the stored result when the run ended (the same render as
+  `meho operation call`), and the reason for a `failed`, `cancelled` or
+  `uncertain` run. The run state `succeeded` only says a result was stored:
+  the stored `status` decides the output and the exit code. `--wait` checks
+  again and again, each time with `wait_seconds=20`, until the run ends.
+  Listing and cancelling runs have no CLI verb yet.
 - **Pending rows are not reaped.** The reaper only reclaims `running` rows
   (a `pending` row has no lease window that matters). The task transitions
   `pending → running` within milliseconds of the row insert, so the window
@@ -203,7 +242,7 @@ does not need this: its outcome is stored on the run row.
 - **In-process task store is per-replica.** The durable row is the source of
   truth, so `poll` works from any replica, but the launching replica holds
   the live task. If that replica dies, the reaper (any replica) reclaims the
-  row into `failed`.
+  row into `uncertain` or `failed`.
 
 ## References
 

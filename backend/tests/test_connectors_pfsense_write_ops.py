@@ -44,6 +44,7 @@ from meho_backplane.connectors.pfsense.ops_write import (
     _php_squote,
     parse_static_routes_xml,
 )
+from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 from meho_backplane.settings import get_settings
 
 # ---------------------------------------------------------------------------
@@ -242,6 +243,45 @@ async def test_gateway_add_already_present_is_noop() -> None:
     assert _commands(mock_cmd) == ["cat /cf/conf/config.xml"]
 
 
+@pytest.mark.parametrize(
+    ("params", "differs"),
+    [
+        ({"name": "LAB_GW", "interface": "opt1", "gateway": "10.0.0.1"}, "interface"),
+        ({"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.2"}, "address"),
+    ],
+)
+async def test_gateway_add_same_name_other_settings_is_conflict(
+    params: dict[str, Any], differs: str
+) -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [_proc(_CONFIG_WITH_LAB_GW)]
+        with pytest.raises(PfSenseRefusedError) as exc_info:
+            await connector.gateway_add(_TARGET, params)
+    exc = exc_info.value
+    assert exc.code == "conflict"
+    assert "refused (conflict)" in str(exc)
+    assert differs in exc.guidance
+    # Only the guard read ran: nothing was staged or played back.
+    assert _commands(mock_cmd) == ["cat /cf/conf/config.xml"]
+
+
+async def test_gateway_add_same_settings_other_ip_spelling_is_noop() -> None:
+    """An IPv6 address written another way is still the same address."""
+    config = _CONFIG_WITH_LAB_GW.replace(
+        "<gateway>10.0.0.1</gateway></gateway_item></gateways>",
+        "<gateway>2001:0db8:0:0:0:0:0:1</gateway></gateway_item></gateways>",
+    )
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [_proc(config)]
+        result = await connector.gateway_add(
+            _TARGET, {"name": "LAB_GW", "interface": "lan", "gateway": "2001:db8::1"}
+        )
+    assert result["existed_before"] is True
+    assert result["applied"] is False
+
+
 # ---------------------------------------------------------------------------
 # pfsense.gateway.add -- config-write failure propagation
 # ---------------------------------------------------------------------------
@@ -304,6 +344,10 @@ async def test_gateway_add_config_read_failure_raises() -> None:
         {"name": "LAB_GW", "interface": "lan rm", "gateway": "10.0.0.1"},
         {"name": "LAB_GW", "interface": "lan", "gateway": "not-an-ip"},
         {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1; rm -rf /"},
+        {"name": "LAB_GW", "interface": "lan", "gateway": "fe80::1%x;id"},
+        {"name": "LAB_GW", "interface": "lan", "gateway": "2001:db8::1%a b"},
+        {"name": "LAB_GW", "interface": "lan", "gateway": "fe80::1%em0"},
+        {"name": "LAB_GW", "interface": "lan", "gateway": " 10.0.0.1"},
         {"name": "LAB_GW", "interface": "lan"},  # missing gateway
         {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1", "descr": "a\nb"},
         {"name": "LAB_GW", "interface": "lan", "gateway": "10.0.0.1", "descr": "   "},
@@ -477,6 +521,26 @@ async def test_route_add_already_present_is_noop() -> None:
     assert result["applied"] is False
     assert result["existing"]["network"] == "10.9.0.0/24"
     assert mock_cmd.await_count == 1
+
+
+async def test_route_add_same_network_other_gateway_is_conflict() -> None:
+    config = _CONFIG_GW_WITH_ROUTE.replace(
+        "</gateways>",
+        "<gateway_item><name>OTHER_GW</name><interface>lan</interface>"
+        "<gateway>10.0.0.2</gateway></gateway_item></gateways>",
+    )
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [_proc(config)]
+        with pytest.raises(PfSenseRefusedError) as exc_info:
+            await connector.route_static_add(
+                _TARGET, {"network": "10.9.0.0/24", "gateway": "OTHER_GW"}
+            )
+    exc = exc_info.value
+    assert exc.code == "conflict"
+    assert "refused (conflict)" in str(exc)
+    assert "LAB_GW" in exc.guidance
+    assert _commands(mock_cmd) == ["cat /cf/conf/config.xml"]
 
 
 async def test_route_add_unknown_gateway_raises_after_read() -> None:
@@ -655,3 +719,22 @@ def test_write_ops_are_caution_no_approval_with_write_tag() -> None:
         assert op.parameter_schema.get("additionalProperties") is False, op.op_id
         assert op.llm_instructions and op.llm_instructions.get("when_to_use"), op.op_id
     assert seen == write_ids
+
+
+@pytest.mark.parametrize(
+    ("gateway", "valid"),
+    [
+        ("10.0.0.1", True),
+        ("2001:db8::1", True),
+        ("fe80::1%x;id", False),
+        ("2001:db8::1%a b", False),
+        (" 10.0.0.1", False),
+    ],
+)
+def test_gateway_add_schema_refuses_a_zone_or_spaces(gateway: str, valid: bool) -> None:
+    from jsonschema import Draft202012Validator
+
+    op = next(o for o in PFSENSE_OPS if o.op_id == "pfsense.gateway.add")
+    validator = Draft202012Validator(op.parameter_schema)
+    params = {"name": "LAB_GW", "interface": "lan", "gateway": gateway}
+    assert validator.is_valid(params) is valid

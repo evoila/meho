@@ -1,6 +1,7 @@
 # Sandbox mode: a standing grant may also cover deletes on an instance for disposable test systems (decision)
 
 **Status:** decided — program owner, 2026-10-19. This record: 2026-10-20, revised the same day after a second review. Amended 2026-10-26: a scoped login on a shared vCenter.
+**Shipped:** in 0.36.0.
 **Issue:** [#4622](https://github.com/evoila/meho/issues/4622), step 2. Source: the [step 1 review](https://github.com/evoila/meho/issues/4622#issuecomment-6286729259).
 **Initiative:** [#4621](https://github.com/evoila/meho/issues/4621) — sandbox mode for disposable test systems
 **Adds one exception to:** requirement 1 of [governed-delete-operations.md](governed-delete-operations.md), on a sandbox instance only

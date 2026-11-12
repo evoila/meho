@@ -52,6 +52,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/secret"
 	"github.com/evoila/meho/cli/internal/cmd/sensor"
 	serviceprincipal "github.com/evoila/meho/cli/internal/cmd/service-principal"
+	"github.com/evoila/meho/cli/internal/cmd/sessions"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/tenants"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
@@ -142,10 +143,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	root.AddCommand(newStatusCmd())
 	root.AddCommand(newDoctorCmd())
 
-	// G4.3-T2 (#441) -- retrieval-quality + migration-decision tooling.
-	// `meho retrieval eval` ships first; sibling verbs (usage T5b #464,
-	// retire-checklist T6 #445) graft onto the same parent in their own
-	// PRs.
+	// `meho retrieval usage` -- retrieval usage telemetry.
 	root.AddCommand(retrieval.NewRootCmd())
 
 	// G0.6-T13 (#481) -- operation meta-tool surface for the G0.6
@@ -173,6 +171,9 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// (`meho tenants flight-recorder-policy set`). Wraps PATCH
 	// /api/v1/tenants/flight-recorder-policy; tenant-scoped, tenant_admin.
 	root.AddCommand(tenants.NewRootCmd())
+	// #4901 -- agent session store admin verbs (list / show / delete).
+	// Wraps /api/v1/sessions; operator to read, tenant_admin to delete.
+	root.AddCommand(sessions.NewRootCmd())
 	// T3 (#2880) -- event_source registry admin verbs (add / list /
 	// describe / update / delete). Wraps /api/v1/event-sources/*.
 	root.AddCommand(eventsource.NewRootCmd())
@@ -382,7 +383,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// vRLI core verbs (about, query, aggregated, field list, host list,
 	// content-pack list, alert list) plus operation search/call
 	// meta-tool wrappers. `meho vcf-logs query --time-range 1h
-	// --target rdc-vrli` replaces the consumer's `./scripts/vcf-logs.sh`
+	// --target vrli-lab` replaces the consumer's `./scripts/vcf-logs.sh`
 	// wrapper. Registered before registerDynamicSubcommands so the
 	// backplane manifest cannot shadow the built-in `vcf-logs` parent.
 	root.AddCommand(vcflogs.NewRootCmd())
@@ -427,7 +428,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// (read/list/put/versions/delete), sys (health/seal-status/mounts-
 	// list/auth-list), and auth (userpass/approle list+read) verbs over
 	// the typed ops registered by G3.3-T1/T2/T3 (#545/#546/#547).
-	// `meho vault kv read --target rdc-vault secret <path>` replaces the
+	// `meho vault kv read --target vault-lab secret <path>` replaces the
 	// consumer's `_secret-read.sh` wrapper. Registered before
 	// registerDynamicSubcommands so the backplane manifest cannot shadow
 	// the built-in `vault` parent.
@@ -476,7 +477,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// esx-dc6.evba.lab 10.5.50.25 --zone evba.lab --target
 	// vcf-router-bind9` replaces the consumer's
 	// `bind9-dns.sh --add-a-record` wrapper (the 2026-05-04 / 2026-05-05
-	// credential-leak surface — evoila-bosnia/claude-rdc-hetzner-dc#86).
+	// credential surface).
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `bind9` parent.
 	root.AddCommand(bind9.NewRootCmd())

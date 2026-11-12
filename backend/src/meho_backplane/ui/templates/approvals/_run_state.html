@@ -1,0 +1,186 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The run part of the outcome card of an approve (#3543, #5110).
+
+  Included by ``_decided.html`` right after an approve, and returned on its
+  own by ``GET /ui/approvals/{id}/run`` each time the card asks again. While
+  ``run.polling`` is true the wrapper asks again every ``poll_seconds``
+  seconds and is swapped in place (``outerHTML``); a final state drops the
+  ``hx-*`` attributes, so the asking stops.
+
+  ``data-meho-watch-run`` marks a background run whose state is not final
+  yet (also when another caller runs the operation), so ``run-notices.js``
+  shows the "the run has ended" notice later, on any page. ``data-meho-run-seen`` marks a final state shown in an open dialog,
+  so the notice for that run is not shown again.
+
+  Context:
+    request      -- dict: the projected request (id / op_id / ...)
+    run          -- dict | None: ``result_state``, ``outcome``, ``polling``,
+                    ``run_id`` (see ``run_watch.live_run``); None shows the
+                    plain approved card
+    poll_seconds -- int: how often to ask again
+-#}
+{% from "_icons.html" import icon %}
+<div
+  id="approval-run-{{ request.id }}"
+  class="flex flex-col items-center gap-3 text-center"
+  data-testid="approval-run-state"
+  data-result-state="{{ run.result_state if run else 'executed' }}"
+  {% if run and run.polling %}
+  hx-get="/ui/approvals/{{ request.id }}/run"
+  hx-trigger="every {{ poll_seconds }}s"
+  hx-target="this"
+  hx-swap="outerHTML"
+  {% endif %}
+  {% if run and run.run_id and run.polling %}data-meho-watch-run="{{ run.run_id }}"{% endif %}
+  {% if run and run.run_id and not run.polling %}data-meho-run-seen="{{ run.run_id }}"{% endif %}
+>
+  {% if run and run.result_state == "failed" %}
+    {#- Approved, but the run did not succeed (#3543): say so instead
+        of a plain success card. When MEHO refused the run before it ran
+        (MEHO was updated, the target changed or is gone, the preview
+        changed), nothing ran, so say that instead. -#}
+    <span class="grid size-12 place-items-center rounded-full bg-error/15 text-error">
+      {{ icon("ban", class="size-6") }}
+    </span>
+    {% if run.outcome and run.outcome.refused_message %}
+      <h3 class="text-lg font-semibold">Approved, but MEHO did not run it</h3>
+      <p class="text-sm text-base-content/60" data-testid="approval-run-refused" data-error-code="{{ run.outcome.error_code }}">
+        The request for <span class="font-mono">{{ request.op_id }}</span> was refused.
+        {{ run.outcome.refused_message }}
+      </p>
+    {% else %}
+      <h3 class="text-lg font-semibold">Approved, but the run failed</h3>
+      <p class="text-sm text-base-content/60">
+        The operation for <span class="font-mono">{{ request.op_id }}</span>
+        was approved and ran, but it did not succeed.
+      </p>
+    {% endif %}
+    {% if run.outcome %}
+      <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome">
+        {% if run.outcome.result_status %}
+          <dt class="opacity-70">Result status</dt>
+          <dd class="font-mono">{{ run.outcome.result_status }}</dd>
+        {% endif %}
+        {% if run.outcome.error_code %}
+          <dt class="opacity-70">Error code</dt>
+          <dd class="font-mono [overflow-wrap:anywhere]">{{ run.outcome.error_code }}</dd>
+        {% endif %}
+        {% if run.outcome.guidance %}
+          <dt class="opacity-70">Next step</dt>
+          <dd class="[overflow-wrap:anywhere]" data-testid="approval-guidance">{{ run.outcome.guidance }}</dd>
+        {% endif %}
+        {% if run.outcome.audit_href %}
+          <dt class="opacity-70">Audit</dt>
+          <dd><a class="link font-mono text-xs" href="{{ run.outcome.audit_href }}">{{ run.outcome.audit_id }}</a></dd>
+        {% endif %}
+      </dl>
+    {% endif %}
+  {% elif run and run.result_state == "uncertain" %}
+    {#- Approved, but MEHO does not know if the change happened (#5025):
+        not "failed". The advice is to not run it again. -#}
+    <span class="grid size-12 place-items-center rounded-full bg-warning/15 text-warning">
+      {{ icon("ban", class="size-6") }}
+    </span>
+    <h3 class="text-lg font-semibold">Approved, but the outcome is unknown</h3>
+    <p class="text-sm text-base-content/60" data-testid="approval-run-uncertain">
+      The operation for <span class="font-mono">{{ request.op_id }}</span> was approved.
+      MEHO does not know if the change happened. Do not run it again.
+      Check the target first.
+    </p>
+    {% if run.outcome %}
+      <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome">
+        {% if run.outcome.error_code %}
+          <dt class="opacity-70">Error code</dt>
+          <dd class="font-mono [overflow-wrap:anywhere]">{{ run.outcome.error_code }}</dd>
+        {% endif %}
+        {% if run.outcome.audit_href %}
+          <dt class="opacity-70">Audit</dt>
+          <dd><a class="link font-mono text-xs" href="{{ run.outcome.audit_href }}">{{ run.outcome.audit_id }}</a></dd>
+        {% endif %}
+      </dl>
+    {% endif %}
+  {% elif run and run.result_state == "ended_no_result" %}
+    {#- The background run ended, but no result was stored (#5110): a
+        crash, a server restart or a cancel. Never "running" forever. -#}
+    <span class="grid size-12 place-items-center rounded-full bg-warning/15 text-warning">
+      {{ icon("ban", class="size-6") }}
+    </span>
+    <h3 class="text-lg font-semibold">Approved, but the run ended without a result</h3>
+    <p class="text-sm text-base-content/60" data-testid="approval-run-ended-no-result">
+      The run of <span class="font-mono">{{ request.op_id }}</span> ended, but
+      MEHO stored no result. MEHO does not know if the change happened.
+      Do not run it again. Check the target first.
+    </p>
+  {% elif run and run.result_state == "running" %}
+    {#- The console's own background run is still going (#5110). -#}
+    <span class="grid size-12 place-items-center rounded-full bg-info/15 text-info">
+      <span class="loading loading-spinner loading-md" aria-hidden="true"></span>
+    </span>
+    <h3 class="text-lg font-semibold">Approved. The operation is running.</h3>
+    <p class="text-sm text-base-content/60" data-testid="approval-run-running">
+      <span class="font-mono">{{ request.op_id }}</span> runs in the background.
+      You can close this window. Closing does not stop the operation.
+      The approvals list shows how it ends, and a notice tells you when it ends.
+    </p>
+  {% elif run and run.result_state == "started" %}
+    {#- Another resumer won the run claim and no result is stored yet.
+        Do not say the operation ran: say the run is still going and
+        where its result will show. -#}
+    <span class="grid size-12 place-items-center rounded-full bg-info/15 text-info">
+      {{ icon("clock", class="size-6") }}
+    </span>
+    <h3 class="text-lg font-semibold">Approved, the run is still going</h3>
+    <p class="text-sm text-base-content/60" data-testid="approval-run-started">
+      Another caller runs
+      <span class="font-mono">{{ request.op_id }}</span>. The result shows on
+      this request in the approvals history when the run ends.
+    </p>
+  {% elif run and run.result_state == "started_no_result" %}
+    {#- Another caller runs it, and the run started long ago with no
+        result (#5110): the page stops asking. Say so, never "still
+        going" forever. -#}
+    <span class="grid size-12 place-items-center rounded-full bg-warning/15 text-warning">
+      {{ icon("ban", class="size-6") }}
+    </span>
+    <h3 class="text-lg font-semibold">Approved, but MEHO has no result</h3>
+    <p class="text-sm text-base-content/60" data-testid="approval-run-started-no-result">
+      The run of <span class="font-mono">{{ request.op_id }}</span> started
+      long ago and stored no result. MEHO does not know if the change
+      happened. Do not run it again. Check the target first.
+    </p>
+  {% elif run and run.result_state == "waiting_for_requester" %}
+    {#- A secret reveal: the approve runs nothing. The person who asked
+        gets the value once, in their own answer. -#}
+    <span class="grid size-12 place-items-center rounded-full bg-success/15 text-success">
+      {{ icon("check", class="size-6") }}
+    </span>
+    <h3 class="text-lg font-semibold">Approved. The person who asked can now get the value.</h3>
+    <p class="text-sm text-base-content/60" data-testid="approval-run-waiting-for-requester">
+      <span class="font-mono">{{ request.op_id }}</span> did not run.
+      It runs once, when the person who asked fetches the value, within a
+      short time. You do not see the value.
+    </p>
+  {% elif run and run.result_state == "not_started" %}
+    <span class="grid size-12 place-items-center rounded-full bg-info/15 text-info">
+      {{ icon("clock", class="size-6") }}
+    </span>
+    <h3 class="text-lg font-semibold">Approved, the run has not started yet</h3>
+    <p class="text-sm text-base-content/60" data-testid="approval-run-not-started">
+      The operation for <span class="font-mono">{{ request.op_id }}</span>
+      was approved. The result shows on this request in the approvals
+      history when it has run.
+    </p>
+  {% else %}
+    <span class="grid size-12 place-items-center rounded-full bg-success/15 text-success">
+      {{ icon("check", class="size-6") }}
+    </span>
+    <h3 class="text-lg font-semibold">Request approved</h3>
+    <p class="text-sm text-base-content/60" data-testid="approval-run-executed">
+      The operation for <span class="font-mono">{{ request.op_id }}</span>
+      was approved and ran OK.
+    </p>
+  {% endif %}
+</div>

@@ -109,7 +109,8 @@ class Connector(ABC):
     * :attr:`supported_version_range` — PEP 440-style version spec
       (e.g. ``">=8.5,<10.0"``) the connector advertises against a
       target's fingerprinted product version. ``None`` means "any
-      version" and preserves v1 behaviour.
+      version" and preserves v1 behaviour. A class that leaves it
+      ``None`` also sets :attr:`version_range_reason`.
     * :attr:`priority` — integer tie-break for the registry v2 resolver
       (#393) when two connectors match the same ``(product, version)``;
       higher wins.
@@ -130,6 +131,19 @@ class Connector(ABC):
     supported_version_range: str | None = None
     priority: int = 0
 
+    #: Why ``supported_version_range`` is ``None``, in one plain sentence
+    #: (for example "Microsoft Graph is called at API version 1.0"). A
+    #: connector class that leaves the range ``None`` must set this, or the
+    #: check in ``backend/tests/test_connector_version_ranges.py`` fails.
+    #: The generated connector page shows it in the "Built for" column.
+    #: Setting it means "any product version is fine, on purpose".
+    version_range_reason: str | None = None
+
+    #: One plain sentence on what the connector does, shown in the
+    #: "What it does" column of the generated connector list on the docs
+    #: site. ``None`` (the default) leaves the column empty for this row.
+    summary: str | None = None
+
     # G0.28-T1 (#1967) — tri-state dispatchability classification. The
     # default ``"none"`` marks every connector a hand-coded class unless it
     # explicitly opts into a shim tier: ``GenericRestConnector`` sets
@@ -142,6 +156,16 @@ class Connector(ABC):
     #: descriptor with a resolved target before dispatch policy runs. The
     #: default keeps existing connectors and descriptor kinds unchanged.
     enforces_catalog_target_compatibility: bool = False
+
+    #: Whether operations ingested from an API file may run on this class.
+    #: An ingested operation sends the method and path of its file with the
+    #: connector's login, and runs none of the checks a hand-written
+    #: operation of the class runs. So the default is ``False``: the
+    #: dispatcher refuses such an operation with ``ingested_ops_not_accepted``
+    #: and the ingest pipeline refuses a file under the name of such a class.
+    #: The generic and profiled classes, and the hand-written classes built
+    #: to serve an ingested catalog, set it to ``True``.
+    accepts_ingested_operations: bool = False
 
     #: PEP 440 version spec (for example ``">=8.0,<9.0"``) of the target
     #: versions every composite (multi-step) operation of this connector's

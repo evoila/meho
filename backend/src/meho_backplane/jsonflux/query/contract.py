@@ -13,7 +13,7 @@ Why compile, not sanitize (#3366)
 =================================
 
 The alternative — accept a caller SQL string and try to prove it safe —
-was rejected against the locked ``duckdb==1.5.5``: a ``:memory:`` database
+was rejected because of how DuckDB behaves: a ``:memory:`` database
 cannot be opened ``read_only`` (raises ``CatalogException``); with
 ``enable_external_access=false`` an in-memory ``CREATE TABLE ... AS SELECT``
 still succeeds; and ``execute("A; B")`` silently runs both statements. A

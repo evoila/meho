@@ -525,7 +525,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := conn.Call(context.Background(), srv.URL, "GET:/suite-api/api/versions/current", "rdc-vrops", nil)
+	r, err := conn.Call(context.Background(), srv.URL, "GET:/suite-api/api/versions/current", "vrops-lab", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -567,7 +567,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 				return
 			}
 			tgt, _ := raw["target"].(map[string]any)
-			if tgt == nil || tgt["name"] != "rdc-vrops" {
+			if tgt == nil || tgt["name"] != "vrops-lab" {
 				t.Errorf("target should wrap slug as {name: ...}; got %v", raw["target"])
 			}
 			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: "x"})
@@ -576,7 +576,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := conn.Call(context.Background(), srv.URL, "x", "rdc-vrops", nil); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "x", "vrops-lab", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -614,7 +614,7 @@ func TestDispatchResourceGetSendsIDParam(t *testing.T) {
 	r, err := conn.Call(
 		context.Background(), srv.URL,
 		"GET:/suite-api/api/resources/{id}",
-		"rdc-vrops",
+		"vrops-lab",
 		map[string]any{"id": "vrops-resource-uuid"},
 	)
 	if err != nil {

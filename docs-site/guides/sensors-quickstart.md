@@ -55,6 +55,31 @@ call we want the runner to repeat is the one you already ran by hand:
 `k8s.pod.list` with `{"all_namespaces": true, "field_selector":
 "status.phase!=Running"}` — a healthy estate returns `total: 0`.
 
+### Pick the connector version that matches the target
+
+A connector can state the target versions its operations work on, for
+example `vmware-rest-8.0` for vCenter 8.0.x and `vmware-rest-9.0` for
+vCenter 9.0.x. MEHO checks the target's version each time the sensor
+runs. When the version is outside the connector's range, MEHO does not
+run the operation, and the sensor can read `unknown`. Its evidence has the
+reason `dispatch_not_ok`, and the field `dispatch_error` holds an error
+like this one:
+
+```text
+unqualified_target_version: this operation works only on target versions >=9.0,<10.0; the target runs version 8.0.3
+```
+
+The text after `unqualified_target_version:` can differ between
+connectors. For an operation from an API file, MEHO first looks for the
+same operation on the connector version that matches the target, and
+runs it there when it exists and is turned on.
+
+So pin the connector whose version matches the target. To see the
+target's version, run `meho targets describe <name>`. To move a sensor
+to the right connector, change it with
+`meho sensor edit <sensor_id> --connector-id <id>` (see
+[Change a sensor or a dashboard](#change-a-sensor-or-a-dashboard)).
+
 ## Step 2 — create the sensor
 
 The **assertion** is a bounded two-part spec: one `select` (a path
@@ -98,12 +123,47 @@ Verify:
 
 ```bash
 meho sensor list
-# ID          NAME              STATUS  LAST_STATE  CADENCE     NEXT_FIRE_AT          SEVERITY
-# <uuid>      pods-not-running  active  ok          every 60s   2026-07-31T09:21:12Z  critical
+# ID      NAME              CONNECTOR  TARGET       STATUS  LAST_STATE  CADENCE    NEXT_FIRE_AT          SEVERITY
+# <uuid>  pods-not-running  k8s-1.x    k8s 1.31.4   active  ok          every 60s  2026-07-31T09:21:12Z  critical
 ```
 
-There is deliberately **no update or pause verb** — a sensor is
-immutable after create ("edit" is delete + recreate). Nor is `paused`
+`CONNECTOR` is the connector the sensor uses. `TARGET` is the target's
+product and version, as the last probe found them (or as you set them).
+
+### When the connector does not fit the target
+
+Each connector works with a range of product versions. MEHO runs an
+operation only on a target inside that range. So a sensor on the wrong
+connector reads `unknown` at its next run. This happens most often after
+an upgrade: a new probe finds a new version, and the sensor's connector
+does not cover it.
+
+MEHO checks this for you. The check uses the version from the target's
+last probe, so it is always up to date:
+
+- **`meho sensor list`** and the **Sensors** page (`/ui/sensors`) show a
+  warning for each sensor whose connector does not fit its target. The
+  warning names the connector that fits, when there is one:
+
+    ```text
+    warning: sensor vm-count: The target runs vmware 8.0.3. Connector
+    vmware-rest-9.0 works only with versions >=9,<10. Connector
+    vmware-rest-8.0 fits this target. The Sensor may read unknown until
+    this is fixed.
+    ```
+
+- **`meho sensor create`** refuses a sensor whose connector does not fit
+  its target, with 422 `sensor_connector_mismatch` and the same warning.
+  Use the connector the warning names. If you want this sensor anyway,
+  add `--force` (`force: true` in REST and MCP). The warning then stays
+  in the list.
+
+MEHO cannot check a sensor whose target has no known version yet. Probe
+the target, or set its version, and the list shows the result.
+
+To change a sensor later, use `meho sensor edit` (see
+[Change a sensor or a dashboard](#change-a-sensor-or-a-dashboard)).
+There is deliberately **no pause verb**. Nor is `paused`
 a self-protection you can wait for: the runner parks a sensor **only**
 when its stored cadence (`cron_expr` / `timezone`) no longer parses,
 stamping `status_reason` with `invalid_cadence:<error>`. There is no
@@ -122,7 +182,9 @@ meho dashboard create --name estate-health \
   --sensor-id <uuid-from-sensor-list>
 ```
 
-`--sensor-id` repeats for more members (membership is create-only).
+`--sensor-id` repeats for more members. To add or remove members later,
+use `meho dashboard edit` (see
+[Change a sensor or a dashboard](#change-a-sensor-or-a-dashboard)).
 Read it back:
 
 ```bash
@@ -143,7 +205,8 @@ with these rules:
 The same view lives in the operator console at `/ui/checks` (list)
 and `/ui/checks/{dashboard_id}` (member breakdown). Dashboards have
 CLI, REST, and UI surfaces; sensors additionally have MCP tools
-(`meho_sensor_list` / `meho_sensor_create` / `meho_sensor_delete`) —
+(`meho_sensor_list` / `meho_sensor_create` / `meho_sensor_delete` /
+`meho_sensor_results`) —
 **dashboards have no MCP
 tools today**.
 
@@ -176,7 +239,249 @@ Then watch the timeline unfold:
 
 Each evaluation stores its evidence on the sensor's projection
 (`last_value`, `last_evidence`, `last_evaluated_at`) — enough to see
-*what* the assertion saw without a results-history table.
+*what* the assertion saw last. MEHO also keeps each evaluation: see the
+history with `meho sensor results <sensor_id>` (filters `--from`,
+`--to`, `--state`). MEHO keeps this history for 7 days by default
+(`CHECKS_EVIDENCE_RETENTION_DAYS`).
+
+## Change a sensor or a dashboard
+
+You can change a sensor or a dashboard in place. Its id stays. A sensor
+also keeps its result history and its place in every dashboard. Only the
+flags you give change.
+
+Change a sensor, for example to move it to another connector version:
+
+```bash
+meho sensor edit <sensor_id> --connector-id <new-connector-id>
+```
+
+You can change `--name`, `--connector-id`, `--op-id`, `--params`,
+`--assertion`, the cadence and `--severity`. To switch from an interval
+to a cron cadence, give the kind and its field together:
+
+```bash
+meho sensor edit <sensor_id> --cadence-kind cron --cron-expr "*/5 * * * *"
+```
+
+MEHO checks the changed sensor like a new one: the operation must exist
+and be `safe`. The sensor runs once right after the change, so you see
+the new result on the next runner tick.
+
+Change a dashboard: add or remove members, change the name or the mail
+settings:
+
+```bash
+meho dashboard edit <dashboard_id> \
+  --add-sensor <uuid> --remove-sensor <uuid> \
+  --notify-min-state degraded
+```
+
+`--add-sensor` and `--remove-sensor` repeat. `--notify-email` sets new
+recipients; `--notify-off` turns mail off. Sending the same edit twice
+changes nothing the second time.
+
+Both edits need the `tenant_admin` role. The audit log records the old
+and the new value of each changed field. The REST routes are
+`PATCH /api/v1/sensors/{id}` and `PATCH /api/v1/checks/dashboards/{id}`.
+
+## Acknowledge a finding
+
+Sometimes a red sensor is known and someone is on it. You can
+acknowledge it for a set time, with a reason. The sensor keeps running
+and its real state stays visible.
+
+```bash
+meho sensor ack <sensor_id> --until 72h \
+  --reason fix_planned --note "Disk swap on Friday"
+```
+
+- `--until` is required: a time (`2026-12-01T18:00:00Z`) or a duration
+  from now (`72h`). At most 90 days.
+- `--reason` is `accepted_risk`, `fix_planned` or `false_alarm`.
+- `--note` is a short text that says why.
+
+While the acknowledgement is active:
+
+- the advisory on operation answers says "acknowledged" instead of the
+  warning;
+- the warning mails for this sensor are not sent again (the all-clear
+  mail still goes out);
+- the dashboard page shows who acknowledged it, until when and why,
+  next to the real state.
+
+It ends at the end time. It ends earlier when the sensor gets worse,
+for example from `degraded` to `critical`. Then the warnings come back:
+the advisory warns again, and when the sensor still fails at the end
+time, the dashboard's recipients get a mail that says the
+acknowledgement ended. MEHO writes an audit row when you acknowledge,
+and when it ends.
+
+You need the `operator` role or higher, or the approver right (a person
+who may approve requests can acknowledge too, even with the `read_only`
+role). An agent cannot acknowledge, and there is no MCP tool for it. The REST route is
+`POST /api/v1/sensors/{id}/acknowledgement`. A green sensor is refused,
+and so is a sensor that is already acknowledged.
+
+## Copy a dashboard to another site
+
+Write a dashboard and its sensors to one file:
+
+```bash
+meho dashboard export <name> --output health-check.json
+```
+
+The file holds the operation, params, rule, cadence and severity of each
+sensor. It holds no ids, no state and no mail address. Each target name
+in it is a placeholder.
+
+At the other site, map each placeholder to a target there, and look
+first with `--dry-run`:
+
+```bash
+meho dashboard import health-check.json \
+  --map-target <placeholder>=<target> --dry-run
+meho dashboard import health-check.json \
+  --map-target <placeholder>=<target>
+```
+
+- MEHO checks the whole file first. When a placeholder is not mapped, a
+  target is not found, an operation is unknown or not `safe`, or a
+  connector does not fit its target, it changes nothing and lists every
+  problem. `--force` imports a sensor whose connector does not fit.
+- Sensors and the dashboard are matched by name. A missing one is
+  created, a different one is updated, an equal one stays. Importing the
+  same file twice changes nothing the second time.
+- The dashboard's members become the sensors of the file. A member that
+  is not in the file leaves the dashboard, but MEHO does not delete it.
+  The mail address of the dashboard stays as it is.
+
+Export needs the `operator` role, import `tenant_admin`. Each import
+writes an audit row. The REST routes are
+`GET /api/v1/checks/dashboard-files/export?name=<name>` and
+`POST /api/v1/checks/dashboard-files/import`.
+
+## Watch an Azure subscription (budget, policy, Advisor)
+
+Three sensors and one dashboard for one Azure subscription. The file below
+is a dashboard file, so you import it in one step.
+
+What each sensor measures:
+
+| Sensor | Value | Degraded | Critical | Checked |
+|---|---|---|---|---|
+| `<dashboard>-budget-used` | Highest percent used of the budgets, in the current budget period | 80 or more | 100 or more | every day |
+| `<dashboard>-policy-non-compliant` | Non-compliant resources now | above the baseline | more than 10 above the baseline | every 6 hours |
+| `<dashboard>-advisor-high-impact` | Open high-impact Advisor recommendations now | above the baseline | more than 10 above the baseline | every day |
+
+The baseline is the count on the day you make the sensor. Read it once:
+
+```bash
+meho operation call azure-arm-2026.10 azure.policy.compliance.summary \
+  --target <azure-target>
+meho operation call azure-arm-2026.10 azure.advisor.recommendation.list \
+  --target <azure-target> --params '{"impact": "High"}'
+```
+
+Put the `non_compliant_resources` number and the Advisor `count` into the
+file as the `degraded` bounds (`12` and `3` below), and add 10 for the
+`critical` bounds (`22` and `13`). Save the file, then import it:
+
+```json
+{
+  "format": "meho-dashboard/1",
+  "dashboard": {
+    "name": "azure-subscription-health",
+    "description": "One Azure subscription: budget used in the current period, non-compliant resources and high-impact Advisor recommendations against their baseline.",
+    "notify_min_state": "critical"
+  },
+  "sensors": [
+    {
+      "name": "azure-subscription-health-budget-used",
+      "connector_id": "azure-arm-2026.10",
+      "op_id": "azure.cost.budget.list",
+      "target": "azure-subscription",
+      "params": {},
+      "assertion": {
+        "select": {
+          "path": "$.budgets[*].percent_used",
+          "aggregate": "max"
+        },
+        "compare": {
+          "type": "threshold",
+          "op": "gte",
+          "degraded": 80,
+          "critical": 100
+        }
+      },
+      "cadence_kind": "interval",
+      "interval_seconds": 86400,
+      "severity": "critical"
+    },
+    {
+      "name": "azure-subscription-health-policy-non-compliant",
+      "connector_id": "azure-arm-2026.10",
+      "op_id": "azure.policy.compliance.summary",
+      "target": "azure-subscription",
+      "params": {},
+      "assertion": {
+        "select": {
+          "path": "$.non_compliant_resources"
+        },
+        "compare": {
+          "type": "threshold",
+          "op": "gt",
+          "degraded": 12,
+          "critical": 22
+        }
+      },
+      "cadence_kind": "interval",
+      "interval_seconds": 21600,
+      "severity": "critical"
+    },
+    {
+      "name": "azure-subscription-health-advisor-high-impact",
+      "connector_id": "azure-arm-2026.10",
+      "op_id": "azure.advisor.recommendation.list",
+      "target": "azure-subscription",
+      "params": {
+        "impact": "High"
+      },
+      "assertion": {
+        "select": {
+          "path": "$.count"
+        },
+        "compare": {
+          "type": "threshold",
+          "op": "gt",
+          "degraded": 3,
+          "critical": 13
+        }
+      },
+      "cadence_kind": "interval",
+      "interval_seconds": 86400,
+      "severity": "critical"
+    }
+  ]
+}
+```
+
+```bash
+meho dashboard import azure-health.json \
+  --map-target azure-subscription=<azure-target> --dry-run
+meho dashboard import azure-health.json \
+  --map-target azure-subscription=<azure-target>
+```
+
+Import finds a sensor by its name. So each sensor name starts with the
+dashboard name. To watch a second subscription, change the dashboard name
+in a copy of the file (for example `azure-sub-b-health`) and change the start
+of the three sensor names the same way. Otherwise the second import changes
+the sensors of the first subscription.
+
+A budget with no amount has no percent, and a sensor with no value shows
+`unknown`, never `ok`. The Python version of these recipes is
+`meho_backplane.connectors.azure.sensor_templates`.
 
 ## The investigator (optional deep tier)
 
@@ -203,6 +508,10 @@ It is off until you opt in, and it has real prerequisites:
 The investigator never executes a change: any write op its agent
 attempts parks in the approval queue like everyone else's.
 
+**Next: start an agent.** A Sensor or a Dashboard can also start an agent when
+it changes state, for example to find the cause. See
+[Start an agent when a Sensor or Dashboard changes](scheduler.md#start-an-agent-when-a-sensor-or-dashboard-changes).
+
 ## Going further
 
 The quickstart above is the core loop. A few surfaces extend it:
@@ -218,10 +527,10 @@ The quickstart above is the core loop. A few surfaces extend it:
   offending rows — the specific objects or series that broke the check —
   so a notification or an investigation names *what* breached, not just
   *that* something did. A healthy tick's evidence is unchanged.
-- **A broadcast feed.** Every dashboard rollup transition is also
-  published to the tenant broadcast feed, so operators and agents can
-  watch check-state changes the way they watch every other action
-  (`meho_broadcast_recent`, `meho_broadcast_watch`, `GET /api/v1/feed`).
+- **Where a change shows.** A dashboard change is shown in the console
+  and the checks API, and it can send a mail (see notifications above).
+  It is not posted to the activity feed. The feed carries notes that
+  agents and people post.
 - **The investigator.** The diagnose-only agent above turns a red
   dashboard into a structured, retrievable finding — read-only by
   design.
@@ -258,11 +567,9 @@ fine on every backend, with zero extra configuration.
     and
     [`docs/cross-repo/vault-provisioning.md` § Bounding the check-runner principal](https://github.com/evoila/meho/blob/main/docs/cross-repo/vault-provisioning.md).
 
-Long-unattended operation has one more open edge: durable machine
-credentials for background execution (the "still running on day 30"
-promise) are actively being hardened — tracked in
-[evoila/meho#2668](https://github.com/evoila/meho/issues/2668), which
-is also the sensors feature's road-to-GA tracker.
+For the agent-run side of long unattended operation, see
+[Durable credentials](scheduler.md#durable-credentials-surviving-unattended)
+in the scheduler guide.
 
 ## What can go wrong here
 
@@ -271,13 +578,15 @@ is also the sensors feature's road-to-GA tracker.
 | 422 `sensor_requires_safe_operation` | The pinned op is `caution`/`dangerous`. Sensors auto-execute unattended, so only `safe` ops qualify — by design. | Pick a read-class op; check `safety_level` on the search hit. |
 | 422 `sensor_operation_not_found` | `(connector_id, op_id)` resolves to nothing — usually a bare product name as `connector_id`. | Use the `<impl_id>-<version>` form (`k8s-1.x`), and an `op_id` from `meho operation search`. |
 | 409 `sensor_name_conflict` | Sensor names are unique per tenant. | Rename or delete the old one. |
+| 422 `sensor_connector_mismatch`, or a warning in `meho sensor list` | The connector does not work with the target's product or version. The sensor would read `unknown`. | Use the connector the warning names. See [When the connector does not fit the target](#when-the-connector-does-not-fit-the-target). |
 | A plain 422 validation error *before* any of the codes above | Schema validation runs first: the comparator `type` must be one of `threshold` / `equals` / `in` / `bool` / `freshness` (not `gt`/`lt` — those are the threshold's `op`), the cadence must be exactly one of interval (5–86400 s) XOR cron, the assertion is capped at 8 KiB, and a `status` field in the body is rejected. | Fix the spec shape; the error names the field. |
 | Sensor stuck `unknown`, evidence says *"selection is not a scalar, found array"* | Your `select.path` points at a list (e.g. `$.rows`), not a scalar. | Select a scalar — `$.total` for list-shaped Kubernetes results — or add an `aggregate` (`count`, `max`, …) to the select. |
 | Target-bound sensor `unknown` forever, dispatch error names a credential read | No background credential identity on this deploy — the table above. | Work [Sensors and your credential backend](#sensors-and-your-credential-backend). |
 | No sensor is evaluated; the backplane log shows `sensor_runner_refused` | `checkRunner.*` is on, Vault is in use, and `VAULT_CHECK_RUNNER_ROLE` is unset or the same as `VAULT_OIDC_ROLE`. | Give the runner a Vault role of its own and set `VAULT_CHECK_RUNNER_ROLE` (see the warning above), or turn `checkRunner.enabled` off. |
-| Sensor `unknown` though it was green a minute ago | Staleness: no fresh evaluation past `next_fire_at` + 60 s grace — the runner is down, or the previous evaluation is still in flight and the overlap guard skipped this tick. | Check the runner's health. A *parked* sensor is a different symptom: it shows `paused` and rolls up `skip`, never `unknown`. |
-| Dashboard `unknown` with all members green | The dashboard has zero members — an empty member set rolls up `unknown` by rule. | Add members (delete + recreate the dashboard). |
-| A sensor keeps auto-running an op that is no longer harmless | The safe-only guard is **create-time only**. If a connector re-ingest changes a pinned op's safety class, existing sensors keep firing; the ingest result surfaces exactly which sensors are affected (`safety_changes`, warning `ingest_safety_class_changed`). | Re-audit the named sensors after any re-ingest that touches safety classes; delete the ones that no longer qualify. |
+| Sensor `unknown` though it was green a minute ago | Staleness: no fresh evaluation past `next_fire_at` + 60 s grace — the runner is down, or the previous evaluation is still in flight, so the sensor stays due until it ends. | Check the runner's health. A *parked* sensor is a different symptom: it shows `paused` and rolls up `skip`, never `unknown`. |
+| Dashboard `unknown` with all members green | The dashboard has zero members — an empty member set rolls up `unknown` by rule. | Add members: `meho dashboard edit <dashboard_id> --add-sensor <uuid>`. |
+| A sensor reads `unknown` with the reason `op_not_safe_at_dispatch` | The pinned operation is not `safe` now. For example, a connector re-ingest changed its safety class (the ingest result names the affected sensors in `safety_changes`), or the operation connects to an address you give (`pfsense.diag.ping` since v0.45.0). Sensors never run an operation that is not `safe`. | Pin a safe operation instead. For a ping, use `net.ping`. |
+| A sensor reads `unknown`, reason `dispatch_not_ok`, and `dispatch_error` starts with `unqualified_target_version` | The target's version is outside the version range of the sensor's connector, for example `vmware-rest-9.0` on a vCenter 8.0.3 target. The error names the range and the target's version. If it says the target has no known version, MEHO does not know the target's version yet. | Delete the sensor and create it again on the connector that matches the target's version (`vmware-rest-8.0` for vCenter 8.0.x). For a target with no known version, run `meho targets probe <name>` or set its version. See [Pick the connector version that matches the target](#pick-the-connector-version-that-matches-the-target). |
 
 **Where next:** compose sensors with the approvals workflow (a red
 dashboard, an investigator finding, a gated remediation) — the

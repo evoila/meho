@@ -11,7 +11,7 @@ Copyright (c) 2026 evoila Group
 
 Today, answering "who patched the NSX firewall on Tuesday and why?" requires stitching a Slack thread, a ticket, a PR, and maybe a knowledge-base entry. That's archaeology, not investigation.
 
-After G8.1, `meho audit query --target rdc-nsx --since 7d --op-class write` returns the rows in under 30 seconds. Same data, structured rows, tenant-scoped automatically.
+After G8.1, `meho audit query --target nsx-prod --since 7d --op-class write` returns the rows in under 30 seconds. Same data, structured rows, tenant-scoped automatically.
 
 The audit log is **WORM-grade** (write-once, read-many) — written synchronously on every authenticated request by the backplane's chassis middleware. There is no operator-facing edit path; queries here read what was logged, never mutate it.
 
@@ -21,9 +21,9 @@ The audit log is **WORM-grade** (write-once, read-many) — written synchronousl
 - **A running backplane.** `meho login <backplane-url>` writes a session token the CLI reuses across every verb. Override per-call with `--backplane <url>` when needed.
 - **Filter intent stays local.** Per [decision #3](../decisions/locked-decisions.md), the broadcast event emitted for every `query_audit` call is **aggregate-only** — `{op_id, result_status, row_count}`. Slack subscribers and the SSE feed never see which principal you queried, which target, or which op_id pattern. Your investigation intent is yours.
 
-## The five CLI verbs
+## The five query CLI verbs
 
-The G8.1-T3 CLI ships five verbs under `meho audit ...`. All five wrap the [G8.1-T2 REST routes](../../backend/src/meho_backplane/api/v1/audit.py) under `/api/v1/audit/*` and produce identical results to the equivalent HTTP request — the CLI is a render surface, not a separate data path.
+The G8.1-T3 CLI ships five query verbs under `meho audit ...`. All five wrap the [G8.1-T2 REST routes](../../backend/src/meho_backplane/api/v1/audit.py) under `/api/v1/audit/*` and produce identical results to the equivalent HTTP request — the CLI is a render surface, not a separate data path.
 
 | Verb | REST route | Filter shape |
 |---|---|---|
@@ -35,19 +35,21 @@ The G8.1-T3 CLI ships five verbs under `meho audit ...`. All five wrap the [G8.1
 
 Every verb accepts `--json` to print the raw `AuditQueryResult` envelope (rows + cursor) for piping into `jq`. Without `--json` the verbs print a tabular summary plus a `NEXT: --cursor=...` line when more pages remain.
 
+`meho audit` has four more verbs: `count` (count the rows that match a filter, per kind of record), `replay` (one session as a tree, see [`audit-replay.md`](./audit-replay.md)), `reflex` (reflex-adoption numbers), and `trace` (stored flight-recorder traces of operation runs).
+
 ## Common forensic questions
 
-### "Who patched rdc-nsx on Tuesday?"
+### "Who patched nsx-prod on Tuesday?"
 
 ```bash
-meho audit query --target rdc-nsx --since 7d --op-class write
+meho audit query --target nsx-prod --since 7d --op-class write
 ```
 
 `--op-class write` narrows to typed-connector write operations (those registered with `op_class="write"` on the `ToolDefinition` / `EndpointDescriptor`) plus any HTTP route that explicitly binds `audit_op_class="write"` via the contextvar override. Chassis HTTP POST / PUT / PATCH / DELETE rows whose op_id is the synthetic `http.{method}:{path}` get `op_class="other"` (the synthetic op_id has no write-verb suffix that `classify_op` recognises), so they don't match this filter. Drop `--op-class write` to see them.
 
-### "What did Damir do across all targets in the last 24 hours?"
+### "What did Alice do across all targets in the last 24 hours?"
 
-If you are Damir:
+If you are Alice:
 
 ```bash
 meho audit my-recent --since 24h
@@ -56,10 +58,10 @@ meho audit my-recent --since 24h
 If you are auditing someone else's activity:
 
 ```bash
-meho audit query --principal damir --since 24h
+meho audit query --principal alice --since 24h
 ```
 
-`--principal` is a partial, case-insensitive match on the user id (`audit_log.operator_sub`) **or** on the name the row stores (`principal_name`), so `--principal damir` finds the rows of a person named Damir as well as rows whose user id contains `damir`. The pre-canned `my-recent` matches your own JWT subject exactly and never accepts a `--principal` override — it always reports on you.
+`--principal` is a partial, case-insensitive match on the user id (`audit_log.operator_sub`) **or** on the name the row stores (`principal_name`), so `--principal alice` finds the rows of a person named Alice as well as rows whose user id contains `alice`. The pre-canned `my-recent` matches your own JWT subject exactly and never accepts a `--principal` override — it always reports on you.
 
 ### "All denied operations across the tenant in the last week"
 
@@ -104,13 +106,15 @@ For the full parent/child **session-graph tree** (lineage between composite oper
 | Flag | Type | Notes |
 |---|---|---|
 | `--target` | string (target name or alias) | Matches against `targets.name` scoped to your tenant. Unknown name returns zero rows, not an error. |
-| `--principal` | string | Substring `ILIKE` match on `operator_sub`. Empty string is treated as no filter. |
+| `--principal` | string | Substring `ILIKE` match on `operator_sub` or on the stored `principal_name`. Empty string is treated as no filter. |
 | `--op-id` | glob | `*` → SQL `%`. Literal `%` / `_` escaped. Matches both `payload->>'op_id'` (MCP / typed) and `http.{method}:{path}` (chassis). |
-| `--op-class` | enum | One of `read` / `write` / `credential_read` / `audit_query` / `other`. Exact match against `payload->>'op_class'`. |
-| `--result-status` | enum | One of `ok` / `error` / `denied` / `pending`. Maps to status-code ranges. `pending` is history: the run stopped to wait for approval, and the row stays `pending` after the decision. To see what waits now, use `meho approvals list`. |
+| `--op-class` | enum | One of `read` / `write` / `credential_read` / `credential_write` / `credential_mint` / `audit_query` / `approval` / `checks` / `other`. Exact match against `payload->>'op_class'`. |
+| `--result-status` | enum | One of `ok` / `error` / `denied` / `pending` / `withdrawn`. Most values map to status-code ranges. `withdrawn` matches the row where the sender took its approval request back; that operation never ran. `pending` is history: the run stopped to wait for approval, and the row stays `pending` after the decision. To see what waits now, use `meho approvals list`. |
 | `--since` / `--until` | duration shorthand or ISO-8601 | Shorthand grammar: `<N><unit>` where unit ∈ `{s, m, h, d, w}` and N ≤ 9999. ISO-8601 accepted via `datetime.fromisoformat` (Python 3.11+, including the `Z` suffix). |
 | `--audit-id` | UUID | Exact-id lookup. Combined with the tenant boundary, produces 0 or 1 row. |
 | `--parent-audit-id` | UUID | Exact match on `parent_audit_id`. Returns the direct children of one row, for example the decision row and the run row of an approval request. |
+| `--session-id` | UUID | Exact match on `agent_session_id`. Returns the rows of one agent session as a flat page. |
+| `--filter-work-ref` | string | Exact match on the external change-ticket reference (`work_ref`) of the row. |
 | `--limit` | int 1..1000 | Default 100, max 1000. |
 | `--cursor` | string (opaque) | Forward-only base64 cursor from a prior page's `next_cursor`. Tampered cursors return 400. |
 
@@ -153,7 +157,7 @@ The REST surface emits the canonical op_id `meho.audit.query` for these audit ro
 
 ## MCP agent surface
 
-Agents see exactly one tool for audit data: `query_audit(filters)`. The narrow-waist contract ([CLAUDE.md](../../CLAUDE.md) postulate 5) collapses the per-shape CLI conveniences (`show` / `who-touched` / `my-recent`) into filter combinations on the same tool:
+Agents see exactly one tool for audit data: `query_audit(filters)`. It is an operator-plane tool, so it lists only for an MCP session that asked for the `mcp:admin` scope. The narrow-waist contract ([CLAUDE.md](../../CLAUDE.md) postulate 5) collapses the per-shape CLI conveniences (`show` / `who-touched` / `my-recent`) into filter combinations on the same tool:
 
 | CLI verb | Equivalent MCP call |
 |---|---|

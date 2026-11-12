@@ -55,7 +55,12 @@ All public types are re-exported from `meho_backplane.agent`
   accounting. On a successful run `request_count` is persisted as the run
   row's `turns` at finalize (#2743) — the streamed path tallies the same
   count off its `TURN` events — so `run_status` reports the model-request
-  turn total instead of a constant 0.
+  turn total instead of a constant 0. `request_usages` carries the token
+  usage of each model request (the run's own and those of its child
+  runs, also the requests a child run completed before it failed), so
+  the cost can use a per-request price (see
+  `docs/codebase/identity-budget.md`). The token totals hold the
+  uncached input apart from the cached streams, as `TokenUsage` does.
 - **`AgentRunStatus`** — closed enum: `RUNNING` / `SUCCEEDED` / `FAILED`.
 - **`AgentRunError`** — domain exception raised when a run cannot start or
   its result is unavailable (turn budget exhausted, a tool raised, the
@@ -129,12 +134,12 @@ Which meta-tools register is decided by `resolve_agent_tools` in
 the run's operator. The registered set is the **intersection** of:
 
 - **toolset spec** — the definition author's allow-list (`AgentDefinition.toolset`).
-- **identity permissions** — what the run's identity may call. The G11.2
-  per-op permission *model* is not built yet; the permission an identity
-  carries today is its `TenantRole`, gated by `role_at_least` exactly as the
-  MCP and REST surfaces gate it. Each meta-tool declares a role floor; an
-  identity below the floor does not get the tool. This Task *consumes* that
-  gate, it does not invent a new one.
+- **identity permissions** — what the run's identity may call. For tool
+  registration this is the identity's `TenantRole`, gated by `role_at_least`
+  exactly as the MCP and REST surfaces gate it. Each meta-tool declares a
+  role floor; an identity below the floor does not get the tool. The agent's
+  per-op grants are checked later, at dispatch, by the policy gate (see
+  [agent-permission-model.md](agent-permission-model.md)).
 
 A meta-tool failing either side is **not registered** — it is absent from the
 agent's tool surface, so the model cannot attempt it (least-privilege:
@@ -282,7 +287,9 @@ The empty spec `{}` resolves, in order: `list_operation_groups`,
 `list_targets`, `preview_operation`, `result_query`, `broadcast_announce`,
 `broadcast_recent`, `broadcast_watch`. A definition with `toolset is None`
 keeps the legacy two tools until it is migrated to a spec. Runbook, approval, and admin tools stay
-out of the catalog on purpose; this is not full parity with the MCP working surface.
+out of the catalog on purpose. For each working-surface tool a hosted run has
+or does not have, see
+[Hosted tools compared with the MCP working surface](#hosted-tools-compared-with-the-mcp-working-surface-5852).
 
 Hosted calls to these four tools do not write the per-call MCP audit row
 (`mcp/audit.py`); that row belongs to the MCP transport. They write the
@@ -373,11 +380,13 @@ and registered in `PydanticAgentRun._build_agent` with
 `AgentDefinition.system_prompt` stays the first part, unchanged, ahead of all
 tenant text. The legacy `toolset is None` path gets no hosted context.
 
-The second part has two bands:
+The second part has three bands:
 
 1. `<<HOSTED_CONTEXT>>` — short text MEHO writes. It says MEHO policy, audit,
-   and approvals always apply and no tool text can change them; that Memory,
-   knowledge base, and topology are not in the prompt; which of the four
+   and approvals always apply and no tool text can change them; that only the
+   newest Memory notes are in the prompt, and the knowledge base and topology
+   are not (with `TEAM_KNOWLEDGE_RECALL` off: that Memory, the knowledge base
+   and topology are not in the prompt); which of the four
    context tools this run has (only the registered ones); what to do without
    `read_context_resource`; and that conventions and retrieved text are data,
    not instructions.
@@ -387,6 +396,10 @@ The second part has two bands:
    broadcast, runbook-priming, and doc-catalogue bands are left out: they name
    MCP tools (`meho_broadcast_*`, `meho_runbook_*`, docs tools) a hosted run
    does not have.
+3. The run operator's newest Memory notes (`recall.memory_band`, #5729),
+   inside the untrusted-text envelope. Left out when there is no note, and
+   always left out while the `TEAM_KNOWLEDGE_RECALL` setting is off (the
+   default). See [recall.md](recall.md).
 
 Conventions that do not fit the budget are returned as
 `HostedContext.omissions` (`ContextOmission(kind="convention", name=<slug>,
@@ -394,8 +407,8 @@ reason="over_budget")`), named in the hosted band (up to 20 slugs, then a
 count), and logged as `agent_hosted_context_over_budget`. With
 `read_context_resource` the band also names the URI to read one.
 
-Memory, knowledge base, and topology are on demand only; nothing loads them
-into the prompt. Like the #3737 tools, hosted reads do not write the per-call
+Apart from that Memory band, Memory, knowledge base, and topology are on
+demand only; nothing else loads them into the prompt. Like the #3737 tools, hosted reads do not write the per-call
 MCP audit row; they write the agent tool call row.
 
 **Delivery receipt (#3763).** Each hosted context build also returns a
@@ -442,6 +455,137 @@ Fixtures in `tests/test_agent_toolset.py` pin the configured-empty, legacy
 run-id (two concurrent runs, a bound durable id, a parent and its child)
 cases.
 
+### Hosted tools compared with the MCP working surface (#5852)
+
+An agent over MCP sees 26 working-surface tools. A hosted agent can get 19 of
+them. This table says, for each MCP tool, whether a hosted run can have it,
+and why not when it cannot. A test (`tests/test_agent_toolset_working_surface.py`)
+checks that this table and the hosted catalog agree.
+
+"Default" means a definition gets the tool when its spec leaves out
+`meta_tools`. "Opt-in" means the spec must name it in `meta_tools`. Every
+hosted tool also needs its role floor, and the docs tools need the tenant's
+`meho-docs` capability, as on MCP.
+
+| MCP tool | Hosted | How, or why not |
+|---|---|---|
+| `meho_status` | yes | Default. Same health payload, without the MCP session fields. |
+| `meho_connector_list` | yes | Default. Shows only the allowed connectors when the spec has a `connectors` list. |
+| `list_operation_groups` | yes | Default. |
+| `search_operations` | yes | Default. |
+| `call_operation` | yes | Default. Same dispatch: policy, grants, approval and audit. |
+| `preview_operation` | yes | Default. |
+| `result_query` | yes | Default. |
+| `list_targets` | yes | Default. |
+| `meho_broadcast_announce` | yes | Default, named `broadcast_announce`. |
+| `meho_broadcast_recent` | yes | Default, named `broadcast_recent`. |
+| `meho_broadcast_watch` | yes | Default, named `broadcast_watch`. |
+| `query_topology` | yes | Opt-in. |
+| `search_memory` | yes | Opt-in. |
+| `search_knowledge` | yes | Opt-in. |
+| `add_to_memory` | yes | Opt-in. Writes with the agent's limits: only a `tenant_admin` writes `tenant` scope, and a direct run narrows a `tenant_admin` caller to `operator`. |
+| `add_to_knowledge` | yes | Opt-in. Writes with the agent's limits: an `operator` changes only its own entries and cannot set `source_kind`. |
+| `list_doc_collections` | yes | Opt-in. Needs the docs add-on. |
+| `search_docs` | yes | Opt-in. Needs the docs add-on. |
+| `read_docs` | yes | Opt-in. Needs the docs add-on. |
+| `ask_docs` | no | It makes its own model call to write the answer. That call does not use the run's model setting, so a run on our own model server would still send text to another model provider. Its cost is also not counted in the run's budget. A hosted agent uses `search_docs` and `read_docs` and writes the answer itself. |
+| `meho_runbook_start` | no | Each runbook step must be confirmed by a person. An agent loop cannot do that for them (#2077). A run whose prompt asks to run a runbook is refused at start. |
+| `meho_runbook_next` | no | Same reason as `meho_runbook_start`: it confirms or answers a step, and only a person may do that. |
+| `meho_runbook_abort` | no | Ends a runbook run. A hosted agent cannot start one, and stopping a person's run is their decision. |
+| `meho_runbook_list_runs` | no | Lists runbook runs. Useful only with the run tools above, which a hosted agent does not have. |
+| `meho_runbook_list_templates` | no | A hosted agent cannot run a runbook. With the steps in front of it, a model may do them one by one through `call_operation` and skip the confirm a person gives at each step. |
+| `meho_runbook_show_template` | no | Same reason as `meho_runbook_list_templates`. |
+
+Tools that come with a paired add-on (for example the automation add-on) are
+not part of the 26 and are not in the hosted catalog.
+
+The hosted run also has two tools MCP does not: `read_context_resource`
+(reads a Memory, knowledge or convention URI; MCP clients use
+`resources/read`) and `invoke_agent` (starts a child run).
+
+How the five added tools are wired (`agent/toolset_discovery.py`):
+
+- `build_write_meta_tools` and `build_docs_meta_tools` use the same `_bridge`
+  and `_governed_handler` as the tools above. So the MCP handler, the MCP
+  wire schema, the role floor, the capability, and the input schema check
+  are the same code as on MCP. `MetaToolSpec.required_capability` carries the
+  capability; `resolve_agent_toolset` leaves a tool out with the reason
+  `capability_missing` when the tenant does not have it.
+- A docs backend that is down (`CorpusUnavailable`) or a collection that is
+  not ready yet (`CollectionNotReadyError`) goes back to the model as a
+  failed tool result (`ToolFailed`). On MCP it is a retryable internal error;
+  in a hosted run any other exception would end the run. The text for a
+  backend that is down is fixed, so it never names the backend.
+- The hosted descriptions add one sentence to `add_to_knowledge` and
+  `search_docs`: there is no `resources/read`, so use `read_context_resource`
+  or `read_docs`.
+- Each call writes the agent tool call row, with the MCP tool's `op_class`
+  (`write` for the two add tools).
+
+### Operation tools from the MCP tools (#4754)
+
+The three operation tools (`list_operation_groups`, `search_operations`,
+`call_operation`) have two forms. A setting picks one for every hosted run:
+
+- **Off (the default):** the older hand-written copies in `agent/toolset.py`.
+  They have no exact-op mode (`op_id` on `search_operations`) and no
+  `preview_hash` or `idempotency_key` on `call_operation`.
+- **On (`AGENT_OPERATION_TOOLS_FROM_MCP=true`):** `agent/toolset_operations.py`
+  builds the three tools from the MCP tools. The input schema is the MCP wire
+  schema, the text is the MCP text, and the role floor is the MCP floor. The
+  handlers are the same shared handlers as before, so the approval wait of
+  `call_operation` does not change.
+
+The setting stays off until model tests show the new form helps. Tool names
+do not change, so a definition's `meta_tools` list works with both forms.
+
+Left out of the hosted `call_operation` when the setting is on
+(`LEFT_OUT_FIELDS` in `agent/toolset_operations.py`, with the reason next to
+it):
+
+| Field | Why a hosted run does not get it |
+|---|---|
+| `work_ref` | MEHO sets the run's change reference itself, from the trigger that started the run. The model must not replace it on the audit rows. The same rule holds for `work_ref` on `broadcast_announce`. |
+| `async`, `run_id`, `wait_seconds` | The hosted tool waits until each call ends, also while the call waits for an approval. A background call and its status check are not needed. |
+
+`list_operation_groups` and `search_operations` leave out nothing. The
+hosted `call_operation` text is the MCP text without the part about `async`,
+plus one sentence that says each call waits until it ends.
+
+Two checks run before each handler:
+
+- The arguments are checked against the MCP input schema without the
+  left-out fields. A bad argument, or `search_operations` with neither
+  `query` nor `op_id`, goes back to the model as a retry.
+- An unknown `op_id` in exact-op mode goes back to the model as a failed tool
+  result with `reason: unknown_op` and the next step. The run goes on.
+
+With the setting off, the hand-written tools run the same schema check,
+against their own schema (`_with_argument_check` in `agent/toolset.py`).
+Each of these schemas has `additionalProperties: false`. So a field the
+schema does not name goes back to the model as a retry and never reaches
+the handler. For `call_operation` that covers `preview_hash`,
+`idempotency_key` and `work_ref`.
+
+Destructive operations: with the setting on, a hosted run can call a
+`destructive` operation the same way an MCP client can. It must first call
+`preview_operation` with the same arguments and pass the `preview_hash`.
+Then the call waits until a person approves it. With the setting off, the
+schema check above refuses a `preview_hash` on `call_operation`, so a
+hosted run cannot pass one. The dispatcher refuses a destructive call
+without a `preview_hash`, so with the setting off MEHO refuses every
+destructive call from a hosted run. Tests in
+`tests/test_agent_toolset_operations.py` check that, with the setting off,
+`preview_hash`, `idempotency_key` and `work_ref` do not reach the
+dispatcher.
+
+A test (`tests/test_agent_toolset_operations.py`) checks that each hosted
+schema is the MCP wire schema minus the fields above.
+
+Known gap: the delivery receipt lists a tool the role may not use
+(`role_below_floor`), but not a docs tool left out for `capability_missing`.
+The `agent_toolset_resolved` log line shows both.
+
 ### Audit of agent tool calls (#4234)
 
 Every tool call a hosted agent makes leaves one `audit_log` row, keyed by
@@ -470,8 +614,14 @@ carry the child's run id (see [Lineage](#lineage--the-cascade-tree-is-reconstruc
   as the record of the parent's `invoke_agent` call.
 - **Row shape.** `method="AGENT"`, `path="/agent/tools/call/<tool>"`. The
   payload holds `op_id` (the tool name), `params_hash`, `op_class`,
-  `error_type` on a failure, and the agent model and provider. Arguments and
-  error text are never stored.
+  `error_type` on a failure, and the agent model and provider. A call the
+  toolset refused also holds `error` with `error_code` `denied`, a
+  `reason_code` (`role_insufficient` or `connector_not_allowed`) and a short
+  `reason` that names the rule. A call the dispatcher refuses carries the
+  same kind of `reason_code` in its own dispatch row (the list is in
+  `operations/deny_reasons.py`, for example `agent_grant_denied`). Audit
+  answers name the agent (`actor_sub`, `actor_name`). Arguments and error
+  text are never stored.
 - **Status.** 200 success, 403 a call the toolset refused (role floor or
   connector allow-list; `_make_meta_tool` raises `ToolRefusedRetry`), 400 bad
   arguments, a retry the tool asked for, or a call to a tool name the run
@@ -515,6 +665,14 @@ persisted definition (T2 `AgentDefinitionService`), and the durable run row
   `agent_run` row (the source of truth), so it works after the request that
   started the run has returned, and even after the in-memory task is gone
   (worker restart). Cross-tenant / unknown ids raise `AgentRunNotFoundError`.
+  `output` and `error` are set only when `run_output_visible_to` allows
+  it: a direct run (and each child run under it) acts for the person who
+  started it, so only that person reads them; other people in the tenant
+  see the state and token usage. A scheduled or event run (and each child
+  run under it) acts as the agent's own login, so the whole tenant reads
+  it. For a child run, `poll` follows `parent_run_id` up to the first run
+  to find which case applies. The REST poll, the MCP
+  `meho_agents_run_status` tool and the console run page all use `poll`.
 - **`stream_events(operator, name, inputs)`** — drives the seam's
   `stream_events` inline (one connection = one run's lifetime), yielding
   `(run_id, AgentRunEvent)` and recording the terminal outcome on the run
@@ -571,7 +729,8 @@ caller may also be another agent (an `agent`-kind token). Then the caller's
 own grants and the hosted agent's grants both apply, and the stricter wins:
 a caller deny grant refuses the call even when the hosted agent would only
 wait for approval. A call that must wait for approval follows the normal approval rules (the
-person who asked cannot approve their own request, unless the deploy allows it). See
+person who asked cannot approve their own request, unless they are in MEHO-SA-Operators or
+MEHO-Admins, or the deploy allows it). See
 `agent-permission-model.md`.
 
 MEHO does not swap the person's token for the agent's on a direct run. That
@@ -595,12 +754,17 @@ stream T1's `stream` deferred to T4. It drives the framework node graph
 the seam (`AgentRunEvent` is a plain value object; `AgentRunEventKind` a
 closed enum). A tripped turn budget surfaces as a terminal `error` event,
 not a raised exception, so an SSE consumer always sees a terminal frame.
+The `final` event also carries the run's usage (`usage` and
+`request_usages`, with the requests of child runs), outside `data`. The
+invoker passes it to `_finalize_run`, so a streamed run gets its cost and
+is charged to the person's spend cap like a run that is not streamed.
 
 ### Fronts
 
 - **REST** (`api/v1/agent_runs.py`): `POST /api/v1/agents/{name}/run`
   (200 with the result for a terminal sync run; 202 with a handle for async
-  / converted-to-async), `GET /api/v1/agents/runs/{handle}` (poll),
+  / converted-to-async), `GET /api/v1/agents/runs` (list runs, newest
+  first), `GET /api/v1/agents/runs/{handle}` (poll),
   `POST /api/v1/agents/runs/{handle}/cancel` (cancel — #1828: transitions a
   non-terminal run to `cancelled` via the shared `cancel_run` service path,
   returns the updated `AgentRunSummaryResponse`; 404 for an unknown /
@@ -610,14 +774,17 @@ not a raised exception, so an SSE consumer always sees a terminal frame.
   two-or-more segments deep so they never collide with the one-segment
   `/{name}` definition-CRUD routes.
 - **MCP** (`mcp/tools/agent_runs.py`): `meho_agents_run` (sync/async via an
-  `async` arg) + `meho_agents_run_status` (poll). SSE is REST-only; an MCP
+  `async` arg), `meho_agents_run_status` (poll) and `meho_agents_list_runs`
+  (list runs). All three are on the operator surface, so they list only
+  for a session with the `mcp:admin` scope. SSE is REST-only; an MCP
   caller polls. Cancel is REST/CLI-only (no MCP verb). Both drive the same
   `AgentInvoker` singleton, so a run started over MCP is poll-able over REST
   and vice versa.
 - **CLI** (`cli/internal/cmd/agent/run.go`, `run_status.go`,
-  `run_cancel.go`, `run_events.go`): `meho agent run <name> --input …
-  [--async]`, `meho agent run-status <handle>`, `meho agent run-cancel
-  <handle>` (#1828), `meho agent run-events <name> --input …`.
+  `run_cancel.go`, `run_events.go`, `run_list.go`): `meho agent run <name>
+  --input … [--async]`, `meho agent run-status <handle>`, `meho agent
+  run-cancel <handle>`, `meho agent run-events <name> --input …`, and
+  `meho agent run-list`.
 
 All fronts require the `operator` role and are tenant-scoped via the JWT.
 
@@ -746,7 +913,7 @@ model may write back in one answer. The setting
 
 Why the builders always send a value: since pydantic-ai 2.52, an unset
 `max_tokens` means the model's maximum (128,000 for
-`claude-sonnet-4-6`), and pydantic-ai then sends the request as a
+`claude-sonnet-5-5`), and pydantic-ai then sends the request as a
 stream.
 
 What a higher value costs:
@@ -773,7 +940,23 @@ escalate a cheap-tier agent to a deep-tier agent, but MEHO sees one agent run
 invoking another.
 
 `invoke_agent` is **off by default**. It is appended to a built agent only when
-the `PydanticAgentRun` carries a `child_agent_resolver`. The live `AgentInvoker`
+the `PydanticAgentRun` carries a `child_agent_resolver` **and** the definition's
+toolset spec names `invoke_agent` in `meta_tools`
+(`toolset_admits_invoke_agent` in `agent/toolset.py`). No spec, an omitted
+`meta_tools` list, or an empty list gives no `invoke_agent`.
+
+A child run gets at most what both specs allow. `_maybe_build_invoke_tool` in
+`agent/run.py` wraps `run_child`: before the child loop starts, it replaces the
+child's spec with `narrow_child_toolset(parent spec, child spec)` — the tools on
+both `meta_tools` lists (an omitted list stands for the default, non-opt-in set)
+and the connectors on both `connectors` lists (an omitted list means no limit).
+The child's own `invoke_agent` is built from that limited spec, so a grandchild
+is limited again. `_resolve_child_definition` uses the same owner rule as a
+direct run (`AgentInvoker._load_definition`): an agent login resolves only the
+definitions whose `identity_ref` is its own client id; a person resolves any
+enabled definition of the tenant.
+
+The live `AgentInvoker`
 (T7 #1067) wires it: its default runtime injects `_resolve_child_definition`
 (the tenant-scoped `AgentDefinitionService` lookup), `_record_child_run` (the
 `agent_run` lineage recorder), and `_finalize_child_run` (T8 #1087 — the
@@ -962,10 +1145,11 @@ correlated by `approval_request_id`.
 
 ## Dependencies
 
-- **`pydantic-ai-slim[anthropic,bedrock]`** (pinned in
+- **`pydantic-ai-slim[anthropic,bedrock,openai]>=2.53.0`** (in
   `backend/pyproject.toml`) — the loop framework + the Anthropic
   provider (`[anthropic]`) + the Bedrock Converse provider (`[bedrock]`,
-  G11.5-T2 #1076; pulls in `boto3`). Both providers are confined to
+  pulls in `boto3`) + the OpenAI-compatible provider (`[openai]`, see
+  "OpenAI-compatible backend" below). The providers are confined to
   `meho_backplane.agent.run` (legacy `default_model_factory`) and
   `meho_backplane.agent.models` (the per-tenant builders).
 - **`anthropic`** — the Anthropic SDK, pulled in transitively from
@@ -1009,6 +1193,63 @@ its loop through a framework `Model`, so the agent seam mirrors the
 than the one-shot method. The G11 initiative shipped against Anthropic;
 G11.5-T1 layered a per-tenant resolver on top of that pattern.
 
+## How a live run picks its model (#5850)
+
+One setting picks the model server for every agent run that MEHO starts:
+hosted runs (REST, MCP, console, the event stream), scheduled runs,
+event-triggered runs, agents started by an agent, and the investigator.
+
+| `AGENT_MODEL_BACKEND` | Model server | Model name from |
+|---|---|---|
+| `anthropic` (default) | Anthropic, key `ANTHROPIC_API_KEY` | `AGENT_DEFAULT_MODEL` |
+| `openai` | An OpenAI-compatible endpoint (OpenAI, vLLM, Ollama, OpenRouter): `OPENAI_BASE_URL`, key `OPENAI_API_KEY` | `OPENAI_DEFAULT_MODEL` |
+| `bedrock` | AWS Bedrock | `BEDROCK_DEFAULT_MODEL` |
+| `vcf-paif` | VCF Private AI Foundation | `VCF_PAIF_MODEL` |
+
+An unknown value stops the start. How a run gets its model:
+
+1. **Risk level to tier.** A stored agent has a model tier: `fast`,
+   `standard` or `deep`. `AgentInvoker._to_agent_definition` maps it
+   with `agent_tier_for` (`agent/models.py`): `fast` → `triage`,
+   `standard` → `summarize`, `deep` → `investigate`. The map follows
+   cost, so the budget gate's "one tier cheaper" step (`investigate` →
+   `summarize` → `triage`) is the same as `deep` → `standard` → `fast`.
+2. **Resolver.** The live `AgentInvoker` builds its `PydanticAgentRun`
+   with `settings_model_resolver()`. It reads `AGENT_MODEL_BACKEND` on
+   each run and sends every tier of every tenant to that one backend,
+   through the settings-driven builders below. There is no fallback:
+   when the chosen backend is not set up (for example no
+   `OPENAI_API_KEY`), the run fails and sends no model request at all.
+3. **Choose before the run row.** `AgentInvoker._choose_model` calls
+   `PydanticAgentRun.choose_model`, which builds the model once. The
+   model is passed on to `start` / `stream_events`, so the run uses
+   exactly the model that its records name.
+4. **Records.** The run row (`agent_run.provider`, `agent_run.model`)
+   and the model names on every audit row of the run's tool calls
+   (`AgentRunAuditMeta`) come from the built model: `Model.system`
+   (`anthropic`, `openai`, `bedrock`) and `Model.model_name`, the name
+   sent to the server. When the model cannot be built, the row names
+   the backend and model the setting chose (`settings_model_id()`), and
+   the run fails with the builder's error. A child run started by an
+   agent records its parent's model; with one backend for every tier,
+   that is the model the child uses.
+
+**The `openai:` prefix.** The default model settings are written as
+`openai:<name>`. pydantic-ai removes that prefix only when it builds a
+model from a string (`Agent("openai:gpt-4o-mini")`). `OpenAIChatModel`
+sends its model name unchanged (pydantic-ai-slim 2.53), and an endpoint
+answers "model not found" for `openai:gpt-4o-mini`. So both
+OpenAI-compatible builders call `bare_openai_model_name` first. It
+removes only a leading `openai:`; an Ollama name such as `llama3.1:8b`
+stays whole.
+
+Tests use fake servers only (`test_agent_model_backend_setting.py`). A
+run against a real OpenAI-compatible server is a separate step of the
+same work.
+
+Why MEHO picks the server itself, why there is no gateway and why a run
+never falls back: [model routing decision](../decisions/2026-11-10-model-routing.md).
+
 ## Per-tenant tier→Model resolver (G11.5-T1 #1075)
 
 The zero-arg `ModelFactory` shape was right for one-deploy → one-provider.
@@ -1028,6 +1269,13 @@ resolver builds the model; otherwise the legacy `model_factory` runs.
 This dual path keeps every existing test (which injects
 `model_factory=lambda: FunctionModel(...)`) unmodified — definitions
 without a tier still resolve through the factory.
+
+A stored agent definition never sets this tier. Its `model_tier`
+(`standard` / `fast` / `deep`) is a different set of names, and
+`AgentInvoker._to_agent_definition` does not map it. So every hosted run
+of a stored definition uses the `model_factory` path; the resolver is
+reached only by code that builds an `AgentDefinition` with a `tier`
+directly.
 
 ### The three gates
 
@@ -1188,10 +1436,15 @@ of two sources, in order of authority:
    reaches into `Settings`.
 2. **Settings-driven default.** `default_openai_backend_builder()`
    reads `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_DEFAULT_MODEL`
-   from process environment — wired the same way `ANTHROPIC_API_KEY`
-   is on Helm deploys (G0.18-T10 #1363): a first-class chart `agent.*`
-   block, `secretKeyRef` only, optional ExternalSecret rendering via
-   `eso.agent.enabled`. Empty `OPENAI_API_KEY` is fail-closed: the
+   from process environment. On Helm deploys the chart's
+   `agent.openai` block sets them (#5851): the key as a `secretKeyRef`
+   only (to `agent.openai.secretName`, or to the Secret that
+   `eso.agentOpenai.enabled` makes), the base URL and the model as plain
+   values. It is separate from `agent.enabled`, which sets
+   `ANTHROPIC_API_KEY`. The network policy blocks the endpoint until the
+   operator opens it in `networkPolicy.extraEgress`
+   (`deploy/values-examples/README.md`, "OpenAI-compatible model
+   endpoint"). Empty `OPENAI_API_KEY` is fail-closed: the
    builder raises `AgentRunError` rather than starting a loop with no
    credentials. Use this only when the whole deploy talks to one
    OpenAI-compat endpoint — the moment you need per-tenant routing,
@@ -1398,6 +1651,13 @@ the architecture grounding it links back to.
   streamed, and that `AGENT_MAX_OUTPUT_TOKENS=8192` reaches the
   request. `test_settings.py` checks the default, an override, and that
   a value outside [1, 128000] stops the start.
+- `backend/tests/test_agent_model_backend_setting.py` (#5850) — the live
+  invoker with `AGENT_MODEL_BACKEND`: direct, scheduled and streamed
+  runs finish on a fake OpenAI-compatible server that answers "model not
+  found" for any name but the bare one, no request goes elsewhere, and
+  the run row and audit names are the endpoint's model; the default
+  setting still runs on Anthropic; a missing key fails with no request;
+  the tier map, the prefix handling and the setting check.
 - `backend/tests/test_agent_openai_compat_backend.py` (G11.5-T3) — unit
   tests for the OpenAI-compat builder, per-vendor profile dispatch
   (OpenAI / vLLM / Ollama), the air-gapped + on-prem registration path,
@@ -1491,11 +1751,11 @@ the architecture grounding it links back to.
   child row already in a terminal state when the finalizer runs — e.g. a direct
   cancel against the child — is handled: the finalizer swallows the resulting
   `IllegalTransitionError`.)
-- The identity-permission side of the intersection is the tenant role today.
-  When the G11.2 per-op permission model lands, the resolver's role gate is
-  the seam to extend (or replace) with the real per-op grant check — the
-  intersection shape (spec ∩ identity perms) and the "absent, not denied"
-  posture stay the same.
+- The identity-permission side of the toolset intersection is the tenant
+  role. The per-op grants of the agent permission model do not decide
+  which tools register; they apply per call in the dispatcher's policy
+  gate. So a
+  tool can be on the agent's surface while a grant denies the op it calls.
 
 ## References
 

@@ -40,6 +40,15 @@ service (returns ``False`` on the idempotent no-op -> "already X, nothing
 changed"); a :class:`DocCollectionStateError` surfaces as a legible 409
 ``invalid_collection_transition`` alert, never a 500 / stack trace.
 
+Probe, enable and disable of a global (``tenant_id IS NULL``) row need a
+platform admin. The service refuses anyone else with
+:class:`DocCollectionGlobalUpdateForbiddenError`; the console shows a 403
+``global_collection_update_forbidden`` alert and the row does not change.
+Every refusal alert (403, 409, 503) is an HTML fragment that carries the
+readiness card's id; htmx does not swap an error response on its own, so
+the detail page loads ``static/src/app/corpus-collection-actions.js``,
+which turns the swap on for the probe, enable and disable controls.
+
 Why in-process services, not the Bearer REST API
 ------------------------------------------------
 
@@ -99,13 +108,14 @@ from meho_backplane.auth.corpus import CorpusUnavailable
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_session
 from meho_backplane.docs_collections import (
+    DocCollectionGlobalUpdateForbiddenError,
     DocCollectionStateError,
     probe_collection,
     project_doc_collection,
     resolve_doc_collection,
     set_collection_enabled,
 )
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
@@ -128,7 +138,7 @@ _COLLECTION_KEY_MAX = 128
 #: Module-level :class:`fastapi.Depends` closures -- ruff B008 idiom matching
 #: the connectors detail / probe routes (no function calls in default
 #: argument positions).
-_require_session_dep = Depends(require_ui_session)
+_require_operator_dep = Depends(require_ui_operator)
 _get_session_dep = Depends(get_session)
 _role_probe_dep = Depends(resolve_role_probe)
 _require_admin_dep = Depends(resolve_operator_or_403)
@@ -264,12 +274,15 @@ async def _do_probe(
     is left untouched because the service's write-back runs only after the
     probe returns (success-only) -- nothing was flushed on the failure path.
     A :class:`DocCollectionStateError` -> 409 alert (e.g. probing a disabled
-    collection). On success the refreshed readiness card is returned for the
+    collection). A global row probed by a non-platform-admin -> 403 alert.
+    On success the refreshed readiness card is returned for the
     ``#collection-readiness-card`` swap.
     """
     collection = await resolve_doc_collection(db_session, collection_key, operator.tenant_id)
     try:
         await probe_collection(db_session, operator, collection)
+    except DocCollectionGlobalUpdateForbiddenError:
+        return _render_global_forbidden_alert(request, collection_key=collection_key, verb="probe")
     except CorpusUnavailable as exc:
         _log.warning(
             "ui_doc_collection_probe_unavailable",
@@ -314,6 +327,25 @@ async def _do_probe(
     )
 
 
+def _render_global_forbidden_alert(
+    request: Request,
+    *,
+    collection_key: str,
+    verb: str,
+) -> HTMLResponse:
+    """Render the 403 alert for a change to a global row without platform admin."""
+    return _render_probe_alert(
+        request,
+        title=f"Cannot {verb} a global collection",
+        message=(
+            f"Collection {collection_key!r} is a global (platform-owned) "
+            f"collection that every tenant uses. Only a platform admin can "
+            f"{verb} it (global_collection_update_forbidden)."
+        ),
+        status_code=403,
+    )
+
+
 def _render_disable_modal(
     request: Request,
     *,
@@ -355,12 +387,19 @@ async def _set_enabled(
     Resolves the row tenant-first, calls :func:`set_collection_enabled`
     (idempotent no-op returns ``False``), and maps a forbidden transition to
     a legible 409 ``invalid_collection_transition`` alert rather than a 500.
+    A global row changed by a non-platform-admin -> 403 alert.
     On success returns 204 + ``HX-Redirect`` to the detail page so HTMX
     re-renders the page with the new status pill + action buttons.
     """
     collection = await resolve_doc_collection(db_session, collection_key, operator.tenant_id)
     try:
-        changed = await set_collection_enabled(db_session, collection, enabled=enabled)
+        changed = await set_collection_enabled(db_session, operator, collection, enabled=enabled)
+    except DocCollectionGlobalUpdateForbiddenError:
+        return _render_global_forbidden_alert(
+            request,
+            collection_key=collection_key,
+            verb="enable" if enabled else "disable",
+        )
     except DocCollectionStateError as exc:
         verb = "enable" if enabled else "disable"
         return _render_probe_alert(
@@ -410,7 +449,7 @@ def build_corpus_collection_detail_router() -> APIRouter:
     async def _probe_handler(
         request: Request,
         collection_key: str,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         db_session: AsyncSession = _get_session_dep,
         operator: Operator = _require_admin_dep,
     ) -> HTMLResponse:
@@ -426,7 +465,7 @@ def build_corpus_collection_detail_router() -> APIRouter:
     async def _disable_modal_handler(
         request: Request,
         collection_key: str,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         db_session: AsyncSession = _get_session_dep,
         operator: Operator = _require_admin_dep,
     ) -> HTMLResponse:
@@ -438,7 +477,7 @@ def build_corpus_collection_detail_router() -> APIRouter:
     async def _disable_handler(
         request: Request,
         collection_key: str,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         db_session: AsyncSession = _get_session_dep,
         operator: Operator = _require_admin_dep,
     ) -> HTMLResponse:
@@ -455,7 +494,7 @@ def build_corpus_collection_detail_router() -> APIRouter:
     async def _enable_handler(
         request: Request,
         collection_key: str,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         db_session: AsyncSession = _get_session_dep,
         operator: Operator = _require_admin_dep,
     ) -> HTMLResponse:
@@ -472,7 +511,7 @@ def build_corpus_collection_detail_router() -> APIRouter:
     async def _detail_handler(
         request: Request,
         collection_key: str,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         db_session: AsyncSession = _get_session_dep,
         role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:

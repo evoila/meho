@@ -33,7 +33,7 @@ func newSysCmd() *cobra.Command {
 		"health dispatches op_id=\"vault.sys.health\" against connector_id=\n"+
 			"\"vault-1.x\". Read-only; the result envelope carries\n"+
 			"{ok: <bool>, detail: <str>} plus the raw sys/health fields.",
-		"  meho vault sys health --target rdc-vault",
+		"  meho vault sys health --target vault-lab",
 	))
 	cmd.AddCommand(newSysVerbCmd(
 		"seal-status", opSysSealStatus,
@@ -41,7 +41,7 @@ func newSysCmd() *cobra.Command {
 		"seal-status dispatches op_id=\"vault.sys.seal_status\" against\n"+
 			"connector_id=\"vault-1.x\". Read-only; result carries\n"+
 			"{sealed: <bool>, initialized: <bool>, ...}.",
-		"  meho vault sys seal-status --target rdc-vault",
+		"  meho vault sys seal-status --target vault-lab",
 	))
 	cmd.AddCommand(newSysVerbCmd(
 		"mounts-list", opSysMountsList,
@@ -49,7 +49,7 @@ func newSysCmd() *cobra.Command {
 		"mounts-list dispatches op_id=\"vault.sys.mounts.list\" against\n"+
 			"connector_id=\"vault-1.x\". Read-only; result carries the\n"+
 			"enabled secret-engine mount map.",
-		"  meho vault sys mounts-list --target rdc-vault",
+		"  meho vault sys mounts-list --target vault-lab",
 	))
 	cmd.AddCommand(newSysVerbCmd(
 		"auth-list", opSysAuthList,
@@ -57,7 +57,7 @@ func newSysCmd() *cobra.Command {
 		"auth-list dispatches op_id=\"vault.sys.auth.list\" against\n"+
 			"connector_id=\"vault-1.x\". Read-only; result carries the\n"+
 			"enabled auth-method map.",
-		"  meho vault sys auth-list --target rdc-vault",
+		"  meho vault sys auth-list --target vault-lab",
 	))
 	return cmd
 }

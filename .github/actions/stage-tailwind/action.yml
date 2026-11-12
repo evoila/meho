@@ -1,0 +1,41 @@
+name: Stage the Tailwind CLI for the image build
+description: >-
+  Put the pinned Tailwind CLI in backend/.tool-preseed/, so the image build
+  makes no download. Each binary comes from its own cache entry (keyed by
+  the binary name and scripts/ci/tool-versions.env) and is downloaded with
+  long retries only as the last choice. backend/Dockerfile checks its
+  checksum before it uses it.
+inputs:
+  archs:
+    description: Space-separated CPU types to stage (amd64, arm64).
+    required: false
+    default: amd64
+
+runs:
+  using: composite
+  steps:
+    # One cache entry per binary. With one entry for all binaries, a job
+    # that needs only amd64 could save the entry first, and a job that
+    # needs arm64 too would then restore it without arm64 on every run.
+    - name: Restore the amd64 Tailwind CLI from the cache
+      if: contains(inputs.archs, 'amd64')
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ~/.cache/meho-ci-tools/tailwindcss-*/tailwindcss-linux-x64
+        key: ci-tools-tailwind-linux-x64-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
+
+    - name: Restore the arm64 Tailwind CLI from the cache
+      if: contains(inputs.archs, 'arm64')
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ~/.cache/meho-ci-tools/tailwindcss-*/tailwindcss-linux-arm64
+        key: ci-tools-tailwind-linux-arm64-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
+
+    - name: Stage the Tailwind CLI
+      shell: bash
+      env:
+        ARCHS: ${{ inputs.archs }}
+      run: |
+        set -euo pipefail
+        # shellcheck disable=SC2086
+        "${GITHUB_WORKSPACE}/scripts/ci/stage_tailwind.sh" ${ARCHS}

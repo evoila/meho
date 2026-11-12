@@ -1,0 +1,31 @@
+{#- SPDX-License-Identifier: Apache-2.0
+    Copyright (c) 2026 evoila Group
+
+    How the console names the active tenant (#810).
+
+    ``session_tenant`` is injected into every render by
+    :func:`~meho_backplane.ui.templating._ui_session_context_processor`
+    and carries ``id`` / ``slug`` / ``name``. A UUID tells an operator
+    nothing about which tenant they are in -- and that is the one thing
+    on screen that matters when someone holds several tenants and is
+    about to run a write. So: the human name, the slug when the name is
+    unset, and the id only when a tenant has neither.
+
+    Text only, no markup: each call site wraps it in its own element.
+
+    Four of the six also carry the id in ``title=``, so the UUID an
+    operator needs for a support thread stays one hover away -- the
+    dashboard header, the broadcast feed subtitle, the broadcast wall
+    header and the account page's tenant row. The other two keep the
+    titles they already had: the sidebar chip's say what clicking does
+    ("Switch tenant" / "Active tenant"), and the approvals heading has
+    none, because ``test_ui_approvals.py`` pins that span's markup
+    exactly and a hover hint there was not asked for.
+
+    Callers guard ``none`` themselves: the sidebar has its own
+    "(sign in to choose)" wording for the pre-session surfaces, which a
+    shared default would flatten.
+-#}
+{% macro tenant_label(tenant) -%}
+{{- tenant.name or tenant.slug or tenant.id -}}
+{%- endmacro %}

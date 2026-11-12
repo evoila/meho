@@ -35,7 +35,9 @@
 # `python-unit-shard` (heavy pool), `python-integration-shard`,
 # `python-migration-tests` and the nightly coverage jobs. Every moved job
 # keeps its name, `if:` guard and triggers, so the required checks are
-# unchanged.
+# unchanged. Merge-queue runs are the exception (#6325): there these jobs
+# and the merge-queue watchdog use the internal `meho-runners-ci` pool, so
+# the queue never waits for GitHub-hosted runners.
 #
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
@@ -259,7 +261,8 @@ jobs:
     # Same fork-PR guard as the other jobs; the dependent jobs re-check
     # head.repo in their own `if:`.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     # actions: read lets the step `map` list and download the test map
     # artifact of the nightly run (#5642).
@@ -400,9 +403,9 @@ jobs:
               return 1
             fi
             rc=0
-            grep -qE '^(backend/|\.github/workflows/ci\.yml$|ci/spec-shelf/|scripts/ci/spec_shelf\.sh$)' "${non_md}" || rc=$?
+            grep -qE '^(backend/|\.github/workflows/ci\.yml$|ci/spec-shelf/|scripts/ci/(spec_shelf\.sh|install_spacy_model\.sh|tool-versions\.env)$)' "${non_md}" || rc=$?
             case "${rc}" in
-              0) c_backend_python=true; echo "backend/, ci.yml or spec-shelf list change detected -> backend_python=true (full run)" ;;
+              0) c_backend_python=true; echo "backend/, ci.yml, spec-shelf list or spaCy model pin change detected -> backend_python=true (full run)" ;;
               1) c_backend_python=false; echo "no backend/ change -> backend_python=false (only the tests that read outside backend/)" ;;
               *) reason="backend check failed (grep exit ${rc})"; return 1 ;;
             esac
@@ -520,7 +523,7 @@ jobs:
     # python-unit-lane fan-in below. Whole-tree ruff + ruff format + mypy: none
     # of it is shardable by test file, none of it needs testcontainers / the
     # vendor spec-shelf / the embedding or spaCy models, and it is CPU-cheap
-    # (~1-2 min), so it runs ONCE here on a GitHub-hosted runner rather than N
+    # (~1-2 min), so it runs ONCE here on a small runner rather than N
     # times inside every pytest shard. Nothing in it needs the internal network
     # (#4626). Same fork-PR guard as every other job,
     # plus the #3252 docs-only skip: a proven docs-only PR skips this job (and
@@ -536,7 +539,8 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true' &&
        needs.changes.outputs.backend_python != 'false')
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # Twice the ~1-2 min observed cost, per the file's per-job cap convention.
     timeout-minutes: 10
     defaults:
@@ -562,7 +566,7 @@ jobs:
         # The Python version comes from backend/.python-version (3.14, the
         # same as the image's python:3.14-slim). uv reads that file for every
         # uv command in CI: they all run in backend/ or pass --project backend.
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           version: "0.13.0"
           enable-cache: true
@@ -634,7 +638,7 @@ jobs:
        needs.changes.outputs.backend_python != 'false')
     # The heavy runner pool (#761); its sizes live outside this repo. Only the
     # pytest sweep is CPU/memory-bound enough to want the extra cores;
-    # ruff/mypy run once in python-lint on a GitHub-hosted runner.
+    # ruff/mypy run once in python-lint on a small runner.
     # Two heavy runner sets share the same machines. Only merge-queue runs
     # use `meho-runners-ci-heavy-queue` (6 runners: one per shard of one
     # merge-queue run, so its size changes with the shard count). Every
@@ -662,13 +666,16 @@ jobs:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON((needs.changes.outputs.single_connector != '' || needs.changes.outputs.test_map == 'true') && '[1]' || '[1, 2, 3, 4, 5, 6]') }}
-    # 20-min cap: hang backstop only. Expected job wall is ~8 min (setup ~2 min
-    # + pytest ~6 min); the perf-budget step below is the PR-level early-warning
-    # gate that fires well before this cap. The pre-shard lane's 25-min cap
+    # 30-min cap: hang backstop only. Expected job wall is ~8-12 min (setup
+    # ~2 min + pytest ~6-10 min); on busy nights passed shards took up to ~20
+    # min, and a 20-min cap cut good shards. The perf-budget step below is the
+    # PR-level early-warning gate that fires well before this cap. The slow
+    # "Install PHP CLI" step has its own short limit, so one stalled download
+    # cannot use up the job's time. The pre-shard lane's 25-min cap
     # covered a ~18-min serial pytest wall; a ~6-min shard needs far less. The
     # old lane's OOM/heartbeat history (why the whole-suite lane dropped --cov
     # and pinned -n 3) is preserved verbatim in the pytest step comment below.
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       # Surfaced as a job-level env var purely so the Docker Hub login
       # step can test it in an `if:`. The `secrets` context is NOT
@@ -881,7 +888,7 @@ jobs:
         # *skipping* on Dependabot PRs again, the org Dependabot secret
         # is gone or expired — check there before touching the workflow.
         if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -894,7 +901,7 @@ jobs:
         # same lockfile are near-instant, so the six shards share one
         # warm uv cache. `version` pins uv; see the python-lint job for
         # why, and for where the Python version comes from.
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           version: "0.13.0"
           enable-cache: true
@@ -943,7 +950,16 @@ jobs:
         env:
           MEHO_WARM_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: uv run python -m meho_backplane.retrieval.warm
+        run: |
+          "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" uv run python -m meho_backplane.retrieval.warm
+
+      - name: Restore the spaCy model from the cache
+        # install_spacy_model.sh uses the model when it is installed at the
+        # pinned version, then this cache, and downloads (three tries) last.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-tools
+          key: ci-tools-spacy-model-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
 
       - name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
         # G11.4-T3 (#1072) ships the Tier-2 Presidio NER adapter
@@ -960,8 +976,8 @@ jobs:
         # accepting either model -- so this step suffices for the
         # unit lane's correctness signal without paying the ``lg``
         # download wall every run. Each shard provisions the sm model
-        # (its file set may include the Tier-2 lanes); the ~12 MB
-        # download is cheap enough to not warrant caching.
+        # (its file set may include the Tier-2 lanes). The model version
+        # is pinned in scripts/ci/tool-versions.env.
         #
         # ``MEHO_REDACTION_SPACY_MODEL`` is the runtime override the
         # presidio.py adapter reads; setting it here pins the unit
@@ -969,7 +985,9 @@ jobs:
         # adapter's default. Production deployments leave the env
         # unset and let the adapter pick the documented default.
         run: |
-          uv run python -m spacy download en_core_web_sm
+          # shellcheck source=/dev/null
+          source "${GITHUB_WORKSPACE}/scripts/ci/tool-versions.env"
+          "${GITHUB_WORKSPACE}/scripts/ci/install_spacy_model.sh" en_core_web_sm "${SPACY_MODEL_VER}" "${SPACY_MODEL_SHA}"
           # Smoke-test the import path so a presidio<->spacy model-
           # version mismatch fails THIS PR, not the integration lane.
           MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
@@ -985,7 +1003,27 @@ jobs:
         with:
           version: v3.16.4
 
+      - name: Name the PHP package cache
+        # The key holds the OS release and the CPU type, because the cached
+        # package files fit only that. Bump the -v1 at the end to drop a
+        # bad cache entry.
+        id: php-debs
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          . /etc/os-release
+          echo "key=php-cli-debs-${ID}-${VERSION_ID}-$(dpkg --print-architecture)-v1" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the PHP package files from the cache
+        id: php-debs-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-php-debs
+          key: ${{ steps.php-debs.outputs.key }}
+
       - name: Install PHP CLI
+        id: php-install
         # The pfSense user-write tests
         # (tests/test_connectors_pfsense_user_write_ops.py) run the
         # `pfSsh.php playback` fragment with the php command-line
@@ -995,27 +1033,90 @@ jobs:
         # step below. Every shard needs it: the file split can put the
         # test file in any shard.
         #
-        # `apt-get update` exits 100 when any one package index fails to
-        # download, even one that php-cli does not need. The runner image
-        # carries the git-core PPA (it installs a newer git from there), and
-        # that mirror answered 503 in a merge-queue run (#4759), which
-        # dropped the pull request from the queue. apt had already retried
-        # the file three times in that run, so more retries alone do not
-        # help. So a failed update is a warning, not the end of the step:
-        # apt keeps the indexes it did download, and the install below
-        # fails on its own when the Ubuntu indexes are missing.
+        # How php gets on the runner, in this order:
+        # 1. The runner image already has php: nothing to do.
+        # 2. The package files are in the cache (the step before restores
+        #    them): `dpkg -i` installs them. This needs no network, so a
+        #    package mirror that does not answer cannot fail the shard.
+        # 3. Else apt downloads php-cli into the cache folder and installs
+        #    it, and the step after saves the folder. A push to main fills
+        #    the cache, and pull request and merge-queue runs read it, so
+        #    the download happens about once per OS release.
+        # If the cached files do not install (the runner image changed),
+        # the step warns and falls back to 3. `--fix-broken` repairs what
+        # the failed `dpkg -i` left half done.
+        #
+        # Why downloads failed in merge-queue runs (#6312): the runner image
+        # carries the git-core PPA, and that mirror sometimes does not
+        # answer at all. apt waited 120 seconds for each try of the file,
+        # so `apt-get update` ran into the 150 second `timeout`, was killed
+        # before it stored any index, and the install then said "Unable to
+        # locate package php-cli". So the download in 3 gives apt a 10
+        # second wait and no retry for each file (`Acquire::*::Timeout`,
+        # `Acquire::Retries`): a dead mirror is skipped, and the update
+        # stores the Ubuntu indexes. `apt-get update` still exits 100 for
+        # the skipped mirror, so a failed update is only a warning.
+        #
+        # Own limit: the step stops after 6 minutes, and each apt or dpkg
+        # call stops after 150 seconds with `timeout`. There are two
+        # download tries. If the install still fails, the step prints
+        # "SETUP FAILURE" so a person and the fleet loop can tell it from a
+        # test failure. The pfSense tests still run with php in every shard
+        # (MEHO_REQUIRE_PHP below makes them fail, not skip, when php is
+        # missing).
         shell: bash
+        timeout-minutes: 6
+        env:
+          PHP_DEBS_CACHE_HIT: ${{ steps.php-debs-cache.outputs.cache-hit }}
         run: |
           set -euo pipefail
           if command -v php >/dev/null 2>&1; then
             echo "php ready: $(php --version | head -1)"
             exit 0
           fi
-          if ! sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y; then
-            echo "::warning::apt-get update could not refresh every package index; installing php-cli from the indexes that did download"
+          debs="${HOME}/.cache/meho-ci-php-debs"
+          shopt -s nullglob
+          cached=("${debs}"/*.deb)
+          if [ "${#cached[@]}" -gt 0 ]; then
+            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive dpkg -i "${cached[@]}"; then
+              echo "php ready from the package cache: $(php --version | head -1)"
+              exit 0
+            fi
+            echo "::warning::the cached php-cli package files did not install; downloading php-cli"
           fi
-          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli
+          mkdir -p "${debs}/partial"
+          apt_opts=(-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=0)
+          for attempt in 1 2; do
+            if ! timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" update -y; then
+              echo "::warning::apt-get update could not refresh every package index (try ${attempt} of 2); installing php-cli from the indexes that did download"
+            fi
+            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" \
+                -o Dir::Cache::archives="${debs}" -o APT::Keep-Downloaded-Packages=true \
+                install -y --fix-broken --no-install-recommends php-cli; then
+              break
+            fi
+            if [ "${attempt}" = "2" ]; then
+              echo "::error::SETUP FAILURE, not a test failure: php-cli install failed after 2 tries (package mirror problem on the runner)"
+              exit 1
+            fi
+            echo "::warning::php-cli install failed or timed out; trying once more"
+          done
+          # apt ran as root; the cache save runs as the runner user.
+          sudo -n chown -R "$(id -u):$(id -g)" "${debs}"
+          if [ "${PHP_DEBS_CACHE_HIT:-}" != "true" ]; then
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
           php --version | head -1
+
+      - name: Save the PHP package files to the cache
+        # Only after a download into an empty cache. A cache entry cannot
+        # be changed, so a bad one needs a new key (see "Name the PHP
+        # package cache").
+        if: steps.php-install.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-php-debs
+          key: ${{ steps.php-debs.outputs.key }}
 
       - name: Download the picked unit tests
         # Test map run (#5642): the list the `changes` job stored.
@@ -1033,6 +1134,11 @@ jobs:
         # perf-budget check below can never mask a red suite.
         shell: bash
         env:
+          # Time limits in tests (marker slow_runner_tolerant) do not fail
+          # this required job; the tests still run and their other checks
+          # still count. The non-required python-timing-tests job checks
+          # the limits (#6270, tests/_time_limits.py).
+          MEHO_SKIP_TIME_LIMITS: "1"
           # The chart render tests FAIL (not skip) when helm is missing,
           # so losing the Install Helm step above cannot hide them again.
           MEHO_REQUIRE_HELM: "1"
@@ -1130,7 +1236,7 @@ jobs:
           # kept 660 s when the shard count went 3 → 4: the 3 shards had
           # reached 580-660 s; the #4655 measurement put the slowest of 4
           # shards at ~470 s with the same budget. The budget still fires below the
-          # 20-min job `timeout-minutes` hang backstop. This step measures the
+          # 30-min job `timeout-minutes` hang backstop. This step measures the
           # pytest wall, always prints it (trend visibility), and FAILS at the
           # budget so a regression is caught at the PR that causes it.
           # MEASURE before raising budget_s (see #793/#827/#898): re-run with
@@ -1154,7 +1260,7 @@ jobs:
           # in each xdist worker, so a test that stops making progress fails
           # on its own after 180 s with its name and a stack dump of every
           # thread, instead of sitting silent (one dot per test, no names)
-          # until the 20-min job cap. The shard then still lands inside the
+          # until the 30-min job cap. The shard then still lands inside the
           # 900 s budget below. Mirrors the python-coverage job's guard;
           # --timeout-method=signal (NOT thread) is load-bearing under xdist:
           # thread calls os._exit(), which xdist reads as a worker crash and
@@ -1285,7 +1391,7 @@ jobs:
 
       - name: Install uv
         # Same pinned uv as the other Python jobs (see python-lint).
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           version: "0.13.0"
           enable-cache: true
@@ -1330,14 +1436,16 @@ jobs:
     # Python jobs. It does not skip when backend_python is false: a pull
     # request that changes only the template must still test it.
     #
-    # GitHub-hosted runner: it needs public tools only (uv, the PyPI index for
-    # the wheel build backend).
+    # GitHub-hosted runner, and the internal pool in merge-queue runs (#6325):
+    # it needs public tools only (uv, the PyPI index for the wheel build
+    # backend).
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true')
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # About 3 minutes; the cap is a hang backstop.
     timeout-minutes: 20
     defaults:
@@ -1349,7 +1457,7 @@ jobs:
 
       - name: Install uv
         # Same pinned uv as the other Python jobs (see python-lint).
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           version: "0.13.0"
           enable-cache: true
@@ -1443,8 +1551,9 @@ jobs:
     # in-flight run as a SET and a fresh run supersedes it — there is no
     # partial-cancel path that could leave this gate green on stale shards.
     # GitHub-hosted runner (#4626): this job does no setup and runs one bash
-    # step, and it is the last job of every CI run — it must never wait for a
-    # slot on the internal pool.
+    # step, and it is the last job of every CI run. Merge-queue runs use the
+    # internal pool instead (#6325), so the queue never waits for
+    # GitHub-hosted runners.
     #  4. No-backend path (#5296). When `backend_python` is `false`, lint and
     #     the shards skip by their own `if:`, and `python-outside-backend`
     #     must pass instead. On every other path that job is skipped.
@@ -1453,7 +1562,8 @@ jobs:
       always() &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Assert lint + typecheck + every pytest shard passed
@@ -1760,13 +1870,13 @@ jobs:
         # Empty-secret guard — see the python-tests job's login step for
         # why Dependabot runs need it.
         if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1791,13 +1901,24 @@ jobs:
         env:
           MEHO_WARM_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: uv run python -m meho_backplane.retrieval.warm
+        run: |
+          "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" uv run python -m meho_backplane.retrieval.warm
+
+      - name: Restore the spaCy model from the cache
+        # install_spacy_model.sh uses the model when it is installed at the
+        # pinned version, then this cache, and downloads (three tries) last.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-tools
+          key: ci-tools-spacy-model-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
 
       - name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
         # Same model the unit lane provisions — the Tier-2 redaction tests in
         # the unit sweep need it, and this job re-runs that sweep.
         run: |
-          uv run python -m spacy download en_core_web_sm
+          # shellcheck source=/dev/null
+          source "${GITHUB_WORKSPACE}/scripts/ci/tool-versions.env"
+          "${GITHUB_WORKSPACE}/scripts/ci/install_spacy_model.sh" en_core_web_sm "${SPACY_MODEL_VER}" "${SPACY_MODEL_SHA}"
           MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
             uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
 
@@ -2024,7 +2145,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -2371,7 +2492,7 @@ jobs:
         # is an argument for mirroring the Dependabot secrets, not for
         # letting the step hard-fail.
         if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -2383,12 +2504,12 @@ jobs:
         # go-lint-test lane.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: '1.26'
+          go-version: '1.26.11'
           check-latest: true
           cache-dependency-path: cli/go.sum
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -2408,6 +2529,12 @@ jobs:
         # -rs prints the reason of every skipped test. The k3s tests skip
         # when the cluster cannot pull an image; without the reason a green
         # lane hides that nothing ran on the cluster.
+        env:
+          # Time limits in tests (marker slow_runner_tolerant) do not fail
+          # this required job; the tests still run and their other checks
+          # still count. The non-required python-timing-tests job checks
+          # the limits (#6270, tests/_time_limits.py).
+          MEHO_SKIP_TIME_LIMITS: "1"
         run: |
           # Split by measured file time, the same tool as the unit shards
           # (tests/_unit_shard_split.py) with the integration measurements
@@ -2446,6 +2573,66 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  python-timing-tests:
+    name: Python timing tests (non-blocking)
+    # The tests marked slow_runner_tolerant compare real elapsed time with
+    # a wide fixed limit (#6270). On a busy runner such a limit can still
+    # fail, so the required jobs turn the limits off (MEHO_SKIP_TIME_LIMITS;
+    # the tests and their other checks still run there) and only this job
+    # checks them. This job is NOT a required check and has
+    # continue-on-error, so a red result shows a slowdown but never blocks
+    # a merge.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       needs.changes.outputs.docs_only != 'true' &&
+       needs.changes.outputs.backend_python != 'false')
+    needs: changes
+    runs-on: meho-runners-ci
+    continue-on-error: true
+    timeout-minutes: 20
+    env:
+      # See the python-integration-shard job: the secrets context is not
+      # readable in a step-level `if:`.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Docker Hub login (for testcontainers pulls)
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          # Pinned uv; see the python-lint job for why.
+          version: "0.13.0"
+          enable-cache: true
+          add-problem-matchers: false
+
+      - name: Sync Python environment (locked)
+        run: uv sync --locked --all-groups
+
+      - name: Pytest (timing tests only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t FILES < <(grep -rl --include='test_*.py' 'mark.slow_runner_tolerant' tests | sort)
+          echo "${#FILES[@]} test files hold timing tests"
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "::error::no test file is marked slow_runner_tolerant"
+            exit 1
+          fi
+          uv run pytest -rs -m slow_runner_tolerant \
+            --timeout=300 --timeout-method=signal "${FILES[@]}"
+
   python-integration:
     name: Python (integration testcontainers)
     # FAN-IN carrying the branch-protection required context (#5384). This
@@ -2467,14 +2654,16 @@ jobs:
     #  4. No-backend PRs (#5296): the shards skip the same way when
     #     `backend_python` is `false`, and this step accepts `skipped` then
     #     too. The merge queue runs the shards on the merged result.
-    # GitHub-hosted runner (#4626): one bash step, no setup; it must never
-    # wait for a slot on the internal pool.
+    # GitHub-hosted runner (#4626): one bash step, no setup. Merge-queue runs
+    # use the internal pool instead (#6325), so the queue never waits for
+    # GitHub-hosted runners.
     needs: [changes, python-integration-shard]
     if: >-
       always() &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Assert every integration shard passed
@@ -2566,13 +2755,13 @@ jobs:
         # Empty-secret guard — see the python-tests job's login step for
         # why Dependabot runs need it.
         if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -2588,10 +2777,11 @@ jobs:
   go-lint-test:
     name: Go (golangci-lint + go test)
     # Fork-PR guard mirrors the Python job — same rationale. Runs on a
-    # GitHub-hosted runner since #4626: it needs only the Go toolchain and
-    # public egress.
+    # GitHub-hosted runner since #4626 (the internal pool in merge-queue runs,
+    # #6325): it needs only the Go toolchain and public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -2604,43 +2794,46 @@ jobs:
         # the tree today.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          # Tracks `cli/go.mod`'s `go 1.26.10` directive. golangci-lint
+          # Tracks the `go` directive in `cli/go.mod`. golangci-lint
           # invokes `go/packages` which honors the go.mod-required Go
           # version; running an older Go than go.mod requires fails with
           # `go.mod requires go >= X` (CI run 25680051917).
           # Bumped from 1.25 → 1.26 because Go 1.25 gets no more
-          # security fixes: nine standard-library CVEs (net/http,
-          # crypto/tls, net/textproto) need go1.26.9 or newer, and
-          # GO-2026-6809 (crypto/x509) needs go1.26.10 or newer.
-          # '1.26' resolves the newest 1.26.x patch; go.mod's 1.26.10
-          # floor (with GOTOOLCHAIN=local, which setup-go sets) makes
-          # an older 1.26.x fail the build instead of shipping the CVEs.
-          # check-latest: the runner image can cache an older 1.26.x
-          # (it had 1.26.9 when go.mod moved to 1.26.10), and setup-go
-          # uses a cached match unless asked to check for a newer one.
-          go-version: '1.26'
+          # security fixes. The go.mod version is a floor (with
+          # GOTOOLCHAIN=local, which setup-go sets), so an older 1.26.x
+          # fails the build instead of shipping known CVEs.
+          # check-latest: the runner image can cache an older 1.26.x,
+          # and setup-go uses a cached match unless asked to check for
+          # a newer one.
+          go-version: '1.26.11'
           check-latest: true
           cache-dependency-path: cli/go.sum
 
-      - name: golangci-lint
-        # v9.2.0: cli/.golangci.yml was migrated from v1 to v2 schema in
-        # PR #640 (alongside the go 1.25 bump) so the action major upgrade
-        # is now safe. golangci-lint must be built with a Go whose
-        # language version (1.26) is not lower than the targeted one, or
-        # it fails with "the Go language version used to build
-        # golangci-lint is lower than the targeted Go version" (as v1.64.8,
-        # built with Go 1.24, did once go-version was bumped to 1.25).
-        # The v2.12.2 release binary is built with go1.26.2, so it
-        # supports the Go 1.26 target without a bump.
-        # golangci-lint-action v7+ refuses v1.x binaries; v9.2.0 requires
-        # golangci-lint >= v2.x and fully supports the v2 config schema.
-        # SHA pinned to v9.2.0 commit (devops_best_practices: pin to
-        # immutable SHA). Dependabot ignore list updated to track v9.x
-        # minor/patch bumps rather than the now-retired v6 pin.
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
+      - name: Restore golangci-lint from the cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          version: v2.12.2
-          working-directory: cli
+          path: ~/.cache/meho-ci-tools
+          key: ci-tools-golangci-lint-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
+
+      - name: Install golangci-lint
+        # The program comes from the runner, then the cache, and is
+        # downloaded with retries last. The version is pinned in
+        # scripts/ci/tool-versions.env. The release binary of v2.12.2 is
+        # built with go1.26.2, so it supports the Go 1.26 target (an
+        # older build fails with "the Go language version used to build
+        # golangci-lint is lower than the targeted Go version").
+        # cli/.golangci.yml uses the v2 schema.
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source "${GITHUB_WORKSPACE}/scripts/ci/tool-versions.env"
+          "${GITHUB_WORKSPACE}/scripts/ci/install_tool.sh" golangci-lint "${GOLANGCI_LINT_VER}" \
+            "https://github.com/golangci/golangci-lint/releases/download/${GOLANGCI_LINT_VER}/golangci-lint-${GOLANGCI_LINT_VER#v}-linux-amd64.tar.gz" \
+            "${GOLANGCI_LINT_SHA}" "golangci-lint-${GOLANGCI_LINT_VER#v}-linux-amd64/golangci-lint"
+
+      - name: golangci-lint
+        working-directory: cli
+        run: golangci-lint run
 
       - name: Go build
         # Smoke build of every package — fails fast on a broken import
@@ -2648,6 +2841,19 @@ jobs:
         # cli/ so `./...` resolves to the CLI module's packages only.
         working-directory: cli
         run: go build ./...
+
+      - name: Go build (Windows)
+        # The release ships meho.exe for Windows (amd64 and arm64). Build
+        # both here, so a pull request that breaks the Windows build fails
+        # before release day. Builds the program only: the Go tests do not
+        # compile on Windows yet.
+        working-directory: cli
+        env:
+          GOOS: windows
+          CGO_ENABLED: "0"
+        run: |
+          GOARCH=amd64 go build ./...
+          GOARCH=arm64 go build ./...
 
       - name: govulncheck (Go dependency CVE scan)
         # Surfaces known CVEs in the CLI's Go dependency graph.
@@ -2694,8 +2900,8 @@ jobs:
         # then this step keeps PR CI green without expanding the
         # workflow's blast radius. On the GitHub-hosted runner this job
         # uses since #4626, gcc and libc6-dev are preinstalled, so the
-        # probe passes and apt never runs; the step stays so the job can
-        # move back to the internal pool without edits.
+        # probe passes and apt never runs. Merge-queue runs use the
+        # internal pool (#6325), where this step is needed.
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -2753,9 +2959,11 @@ jobs:
   cli-api-snapshot-freshness:
     name: CLI API snapshot freshness
     # Fork-PR guard mirrors the other jobs (kept unchanged by #4626). Runs on
-    # a GitHub-hosted runner: it needs only Go, uv and public egress.
+    # a GitHub-hosted runner (the internal pool in merge-queue runs, #6325):
+    # it needs only Go, uv and public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -2772,7 +2980,7 @@ jobs:
         # shape as the go-lint-test lane.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: '1.26'
+          go-version: '1.26.11'
           check-latest: true
           cache-dependency-path: cli/go.sum
 
@@ -2784,7 +2992,8 @@ jobs:
         # Same `sudo -n apt-get` pattern as the go-lint-test C-toolchain
         # step; baking make into the base image is the long-term fix.
         # The GitHub-hosted runner this job uses since #4626 ships make,
-        # so the step is a no-op there and stays for a possible move back.
+        # so the step is a no-op there. Merge-queue runs use the internal
+        # pool (#6325), where this step is needed.
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -2801,7 +3010,7 @@ jobs:
         # `uv run` (cli/api/snapshot-openapi.py imports meho_backplane.main
         # and calls app.openapi()), so the backend env must resolve. Same
         # action + cache shape as the Python lanes.
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -2844,9 +3053,11 @@ jobs:
   helm-lint-template:
     name: Helm (lint + template + kubeconform)
     # Fork-PR guard mirrors the other jobs. Runs on a GitHub-hosted runner
-    # since #4626: helm + kubeconform need only public egress.
+    # since #4626 (the internal pool in merge-queue runs, #6325): helm +
+    # kubeconform need only public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -2861,9 +3072,17 @@ jobs:
         with:
           version: v3.16.4
 
+      - name: Restore kubeconform from the cache
+        # install_tool.sh uses kubeconform from the runner when it has the
+        # pinned version, then this cache, and downloads (three tries) last.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-tools
+          key: ci-tools-kubeconform-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
+
       - name: Install kubeconform
         # kubeconform validates rendered manifests against Kubernetes
-        # JSON Schemas offline. Pin to v0.6.7 by SHA256 — same shape
+        # JSON Schemas offline. Pinned by SHA256 in scripts/ci/tool-versions.env — same shape
         # chart.yml uses (devops_best_practices: no `curl|sh` of
         # unpinned binaries). Install to $HOME/.local/bin because the
         # self-hosted meho-runners-ci pool runs as a non-root user that
@@ -2871,19 +3090,14 @@ jobs:
         # / CI run 25644668781). Appending to $GITHUB_PATH surfaces
         # the binary to subsequent steps without relying on the install
         # step's frozen PATH. $HOME/.local/bin works the same on the
-        # GitHub-hosted runner this job uses since #4626.
+        # GitHub-hosted runner and on the internal pool.
         run: |
           set -euo pipefail
-          KC_VER=v0.6.7
-          KC_SHA=95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
-          curl -fsSL -o /tmp/kubeconform.tar.gz \
-            "https://github.com/yannh/kubeconform/releases/download/${KC_VER}/kubeconform-linux-amd64.tar.gz"
-          echo "${KC_SHA}  /tmp/kubeconform.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/kubeconform.tar.gz -C /tmp/ kubeconform
-          mkdir -p "${HOME}/.local/bin"
-          install -m 0755 /tmp/kubeconform "${HOME}/.local/bin/kubeconform"
-          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
-          "${HOME}/.local/bin/kubeconform" -v
+          # shellcheck source=/dev/null
+          source "${GITHUB_WORKSPACE}/scripts/ci/tool-versions.env"
+          VERSION_ARG=-v "${GITHUB_WORKSPACE}/scripts/ci/install_tool.sh" kubeconform "${KUBECONFORM_VER}" \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VER}/kubeconform-linux-amd64.tar.gz" \
+            "${KUBECONFORM_SHA}" kubeconform
 
       - name: Helm lint
         # The chart ships safe-by-default empty fields that
@@ -2897,6 +3111,9 @@ jobs:
             --set image.tag=test \
             --set ingress.host=meho.test \
             --set ingress.tls.secretName=meho-tls \
+            --set corePostgres.enabled=false \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set postgres.credentialsSecret=meho-postgres \
             --set vault.address=https://vault.test \
             --set keycloak.issuer=https://keycloak.test/realms/meho \
@@ -2919,6 +3136,9 @@ jobs:
             --set image.tag=test \
             --set ingress.host=meho.test \
             --set ingress.tls.secretName=meho-tls \
+            --set corePostgres.enabled=false \
+            --set coreKeycloak.enabled=false \
+            --set coreVault.enabled=false \
             --set postgres.credentialsSecret=meho-postgres \
             --set vault.address=https://vault.test \
             --set keycloak.issuer=https://keycloak.test/realms/meho \
@@ -2987,8 +3207,10 @@ jobs:
   # call is checked; a failed or unreadable call only means "look again
   # next minute", and no branch check runs while the jobs' state is
   # unknown), it is not a required check, and
-  # it runs on a GitHub-hosted runner so it never takes a slot from the
-  # jobs it watches. The queue builds at most 4 groups at once, so at most
+  # it runs on the internal `meho-runners-ci` pool (#6325). It holds one
+  # slot there for the whole run; the test shards it watches run on the
+  # heavy pools, so it does not take their slots. The queue builds at most
+  # 4 groups at once, so at most
   # 4 watchdogs run at the same time: about 480 of the 1,000 API calls an
   # hour that the job token may make per repository, worst case.
   # ---------------------------------------------------------------------------
@@ -2997,7 +3219,8 @@ jobs:
     # Only merge-queue runs. A pull-request run must still show every failing
     # job, and a push to `main` has no queue group that can be dropped.
     if: github.event_name == 'merge_group'
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # Backstop only: the loop below stops itself, with success, after 170
     # minutes. A green merge-queue run took at most 78 minutes (#4732), and
     # the queue itself gives up on a group long before this cap.
@@ -3009,6 +3232,28 @@ jobs:
       contents: read
       actions: write
     steps:
+      - name: Install gh and jq
+        # The internal runner image ships without the `gh` CLI (#3171).
+        # Same `sudo -n apt-get` pattern as the go-lint-test C-toolchain
+        # step. continue-on-error keeps the watchdog from ever failing: if
+        # the install fails, every gh call below fails too, and the loop
+        # only looks again next minute.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          missing=()
+          command -v gh >/dev/null 2>&1 || missing+=(gh)
+          command -v jq >/dev/null 2>&1 || missing+=(jq)
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "gh and jq are already installed"
+            exit 0
+          fi
+          if ! { sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y \
+            && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}" \
+            && gh --version; }; then
+            echo "::warning::Could not install ${missing[*]}. The watchdog cannot call the API and will not cancel this run."
+            exit 1
+          fi
       - name: Cancel this run once the queue has dropped its group
         env:
           GH_TOKEN: ${{ github.token }}

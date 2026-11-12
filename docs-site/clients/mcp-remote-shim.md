@@ -28,16 +28,17 @@ internal network / VPN**.
 
 ## Mint a token
 
-There is no `--print-token` verb. Force the CLI's file token backend and
-read the access token out of `credentials.json`:
+Log in with `--print-token`. The CLI then writes only the access token to
+standard output. The login prompt and all other lines go to standard
+error:
 
 ```bash
-MEHO_KEYRING_DISABLE=1 meho login https://meho.example.com
-
-export MEHO_TOKEN="Bearer $(jq -r --arg url https://meho.example.com \
-  '.entries[] | select(.backplane_url == $url) | .access_token' \
-  "${XDG_CONFIG_HOME:-$HOME/.config}/meho/credentials.json")"
+export MEHO_TOKEN="Bearer $(meho login --print-token https://meho.example.com)"
 ```
+
+To use the token of an existing login without a new login, read it from
+the CLI's credentials file instead; see
+[Reading the raw token](cli.md#reading-the-raw-token).
 
 Keep the `Bearer ` prefix (and its trailing space) inside the variable:
 `mcp-remote` splits `--header` on the first colon into name and value,

@@ -41,7 +41,7 @@ spec:
         {{- . | nindent 8 }}
       {{- end }}
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
       containers:
         - name: result-cache
           image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}

@@ -6,17 +6,17 @@
 Coverage matrix (Task #820 acceptance criteria):
 
 * Safety-level defaults — no AgentPermission rows:
-  ``safe`` → ``auto-execute``, ``caution`` → ``needs-approval``,
-  ``dangerous`` → ``deny``, unknown safety_level → ``deny``.
+  ``safe`` → ``auto-execute``; ``caution``, ``dangerous`` and
+  ``destructive`` → ``needs-approval`` (#3980); unknown safety_level →
+  ``deny``.
 * Explicit permission row overrides:
   row ``auto-execute`` on a ``safe`` op → ``auto-execute``;
   row ``needs-approval`` on a ``safe`` op → ``needs-approval``;
   row ``deny`` on a ``safe`` op → ``deny``.
 * Safety-level ceiling enforcement — a row cannot loosen beyond the
   ceiling: ``auto-execute`` row on a ``caution`` op → ``needs-approval``;
-  ``auto-execute`` row on a ``dangerous`` op → ``needs-approval`` (a
-  destructive op is grantable up to human approval, never auto-executed);
-  ``dangerous`` op with **no** grant → ``deny`` (default unchanged).
+  ``auto-execute`` row on a ``dangerous`` or ``destructive`` op →
+  ``needs-approval``; a ``deny`` row still makes such an op ``deny``.
 * Tie-break — two equally-specific matching patterns fold to the most
   restrictive verdict (fail-closed, order-independent).
 * Specificity honours ``?`` / ``[`` glob metachars (not just ``*``), so
@@ -189,10 +189,10 @@ async def test_caution_op_needs_approval_by_default() -> None:
     assert "safety_level default" in reason
 
 
-async def test_dangerous_op_denied_by_default() -> None:
-    """``safety_level='dangerous'`` with no rows → ``deny``."""
+async def test_dangerous_op_needs_approval_by_default() -> None:
+    """``safety_level='dangerous'`` with no rows → ``needs-approval`` (#3980)."""
     verdict, reason = await _resolve(safety_level="dangerous")
-    assert verdict == PermissionVerdict.DENY
+    assert verdict == PermissionVerdict.NEEDS_APPROVAL
     assert "safety_level default" in reason
 
 
@@ -245,9 +245,8 @@ async def test_explicit_needs_approval_row_on_safe_op() -> None:
 async def test_auto_execute_row_clamped_by_dangerous_ceiling() -> None:
     """``auto-execute`` row on a ``dangerous`` op → ``needs-approval``.
 
-    A destructive op is grantable ("deny **unless granted**", #820) but
-    never auto-executed: an explicit ``auto-execute`` grant is tightened
-    to the ``dangerous`` ceiling of ``needs-approval`` (human-gated).
+    An explicit ``auto-execute`` row is tightened to the ``dangerous``
+    ceiling of ``needs-approval``: an agent never runs it at once.
     """
     await _seed_tenant(_TENANT_ID, "t-ceil-dangerous")
     await _insert_permission(op_pattern="*", verdict="auto-execute")
@@ -259,9 +258,8 @@ async def test_auto_execute_row_clamped_by_dangerous_ceiling() -> None:
 async def test_needs_approval_row_honoured_on_dangerous_op() -> None:
     """``needs-approval`` row on a ``dangerous`` op → ``needs-approval``.
 
-    The grant sits exactly at the ``dangerous`` ceiling, so a destructive
-    op an operator explicitly granted lands on human approval rather than
-    a blanket deny.
+    The row sits exactly at the ``dangerous`` ceiling, so the op waits for
+    a person's approval.
     """
     await _seed_tenant(_TENANT_ID, "t-ceil-needs-dangerous")
     await _insert_permission(op_pattern="*", verdict="needs-approval")
@@ -269,54 +267,67 @@ async def test_needs_approval_row_honoured_on_dangerous_op() -> None:
     assert verdict == PermissionVerdict.NEEDS_APPROVAL
 
 
-async def test_dangerous_op_with_no_grant_denies() -> None:
-    """``dangerous`` op with no matching grant → ``deny`` (default).
+async def test_dangerous_op_with_no_grant_needs_approval() -> None:
+    """``dangerous`` op with no matching row → ``needs-approval`` (#3980).
 
-    Only the *ceiling* moved to ``needs-approval``; the no-grant
-    *default* for a destructive op stays ``deny``.
+    An agent's ``dangerous`` request waits for a person's approval; it is
+    no longer refused.
     """
     await _seed_tenant(_TENANT_ID, "t-dangerous-default")
     verdict, reason = await _resolve(safety_level="dangerous")
-    assert verdict == PermissionVerdict.DENY
+    assert verdict == PermissionVerdict.NEEDS_APPROVAL
     assert "dangerous" in reason
 
 
-# ---------------------------------------------------------------------------
-# Destructive tier (#3183) — deny by default, non-grantable for agents
-# ---------------------------------------------------------------------------
-
-
-async def test_destructive_op_denied_by_default() -> None:
-    """``safety_level='destructive'`` with no rows → ``deny``."""
-    verdict, reason = await _resolve(safety_level="destructive")
+async def test_deny_row_on_dangerous_op_still_denies() -> None:
+    """A ``deny`` row still makes an agent stricter on a ``dangerous`` op."""
+    await _seed_tenant(_TENANT_ID, "t-dangerous-deny-row")
+    await _insert_permission(op_pattern="*", verdict="deny")
+    verdict, _reason = await _resolve(safety_level="dangerous")
     assert verdict == PermissionVerdict.DENY
+
+
+# ---------------------------------------------------------------------------
+# Destructive tier (#3183, #3980) — waits for a person, never runs at once
+# ---------------------------------------------------------------------------
+
+
+async def test_destructive_op_needs_approval_by_default() -> None:
+    """``safety_level='destructive'`` with no rows → ``needs-approval`` (#3980).
+
+    The request waits for a person's approval under the group rules, after
+    the preview check of the dispatcher (#3197).
+    """
+    verdict, reason = await _resolve(safety_level="destructive")
+    assert verdict == PermissionVerdict.NEEDS_APPROVAL
     assert "safety_level default" in reason
 
 
-async def test_auto_execute_grant_cannot_lift_destructive_off_deny() -> None:
-    """An ``auto-execute`` grant on a ``destructive`` op stays ``deny``.
+async def test_auto_execute_grant_cannot_lift_destructive_past_needs_approval() -> None:
+    """An ``auto-execute`` row on a ``destructive`` op → ``needs-approval``.
 
-    The ``destructive`` tier (#3183) has a ``deny`` ceiling — unlike
-    ``dangerous`` (ceiling ``needs-approval``), *no* ``AgentPermission``
-    grant lifts an agent principal off ``deny``. This is the "no grant can
-    lift it" contract: even the most permissive grant is clamped back to
-    ``deny`` by the ceiling.
+    The ceiling is ``needs-approval``: no row lets an agent run a
+    destructive op at once.
     """
     await _seed_tenant(_TENANT_ID, "t-destructive-autoexec")
     await _insert_permission(op_pattern="*", verdict="auto-execute")
     verdict, reason = await _resolve(safety_level="destructive")
-    assert verdict == PermissionVerdict.DENY
+    assert verdict == PermissionVerdict.NEEDS_APPROVAL
     assert "ceiling" in reason
 
 
-async def test_needs_approval_grant_cannot_lift_destructive_off_deny() -> None:
-    """A ``needs-approval`` grant on a ``destructive`` op stays ``deny``.
-
-    Even a grant sitting at what would be a human-approval verdict cannot
-    park a destructive op for an agent — the ``deny`` ceiling pins it.
-    """
+async def test_needs_approval_grant_on_destructive_op_needs_approval() -> None:
+    """A ``needs-approval`` row on a ``destructive`` op → ``needs-approval``."""
     await _seed_tenant(_TENANT_ID, "t-destructive-needs")
     await _insert_permission(op_pattern="*", verdict="needs-approval")
+    verdict, _reason = await _resolve(safety_level="destructive")
+    assert verdict == PermissionVerdict.NEEDS_APPROVAL
+
+
+async def test_deny_row_on_destructive_op_still_denies() -> None:
+    """A ``deny`` row still makes an agent stricter on a ``destructive`` op."""
+    await _seed_tenant(_TENANT_ID, "t-destructive-deny")
+    await _insert_permission(op_pattern="*", verdict="deny")
     verdict, _reason = await _resolve(safety_level="destructive")
     assert verdict == PermissionVerdict.DENY
 

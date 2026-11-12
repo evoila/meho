@@ -37,6 +37,7 @@ way an event is built. It allows:
 | `outcome` | `ok`, `client_error`, `denied`, `not_found`, `rate_limited`, `server_error`. |
 | `duration_ms` | How long the request took. |
 | `correlation_id` | Only on `context_selected` events. |
+| `tool_texts` | `short` when the MCP session asked for the short tool texts (`?texts=short`); empty otherwise. The MCP route sets it with `note_request_tool_texts`. |
 
 The schema refuses anything else (`extra="forbid"`). So an event can never
 hold a request or response body, a token, a query string, tool arguments,
@@ -96,8 +97,8 @@ for each REST request and each MCP tool call or resource read:
 | Any other 4xx (validation failure, not found, conflict), or an MCP handler that rejects its arguments with a plain `McpInvalidParamsError` | Nothing. |
 | Anything else: a MEHO change with no record of its own (create a target, enable a connector, an MCP `write` tool), or one that failed with 5xx, or an MCP handler that raises `McpExecutionFailedError` (the change failed in Keycloak or Vault; REST answers 502 or 503 for the same failure) | One `operation_execution` row. |
 
-A request with no row also publishes no broadcast event. Every request
-still writes its usage event.
+A request publishes no broadcast event, with or without a row. Every
+request still writes its usage event.
 
 Tool calls made by a hosted agent keep their audit row after the cutover
 (#4234). An agent run has no usage event, so the row is the only record.
@@ -148,6 +149,19 @@ reads both the `meho_broadcast_recent` wrapper row and the session's
 `tool:meho_broadcast_recent` usage event, so it works before and after the
 cutover. Migration `0113` adds the `session_id` index it uses.
 
+## Operation search and call records
+
+The same switch also turns on the operation search and call records (#4750).
+They are two small tables of their own, not request usage events: one row per
+`search_operations` call (connector, group, limit, outcome, the returned
+operation ids in rank order, a hash of the query) and one row per
+`call_operation` call (connector, `op_id`, outcome, the search it followed and
+the rank of `op_id` in it). The query text is stored only when
+`OPERATION_SEARCH_STORE_QUERY_TEXT` is on (off by default). The retention job
+below deletes them with the same cutoff. The fields, the link rule and the
+report (`meho retrieval picks`) are in
+[operation-picks.md](operation-picks.md).
+
 ## Context selection
 
 `note_context_selected(correlation_id=None)` adds one `context_selected`
@@ -180,7 +194,9 @@ not name a selection the request can no longer write.
 `request_usage/retention.py` runs once a day when retention is set. It
 deletes events with `occurred_at` older than the window, using the
 `request_usage_event_occurred_at_idx` index, and writes one `INTERNAL`
-summary audit row on a system sentinel tenant. A failed tick is logged and
+summary audit row on a system sentinel tenant. The same cutoff deletes the
+operation search and call records; the audit row counts them as
+`dropped_pick_records`. A failed tick is logged and
 the loop goes on.
 
 ## Key files

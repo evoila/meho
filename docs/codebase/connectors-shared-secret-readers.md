@@ -109,21 +109,20 @@ login, and the target update route calls it after a target change
 
 | Connector | Cache | Key |
 | --- | --- | --- |
-| Shared VCF helper `CredentialsCache` (VCF Fleet, VCF Operations, VCF Operations for Logs, Fleet LCM) | `_cache` | target |
-| VCF Operations, VCF Operations for Logs, Fleet LCM | `_session_tokens` | credential (+ login inputs) |
-| VCF Automation | `_provider_tokens`, `_tenant_tokens` (one readers list per plane: the planes may read different secrets) | credential per plane |
-| vSphere (`vmware_rest`) | `_session_tokens`, and the SOAP sessions `_vsan_sessions`, `_pbm_cookies` / `_pbm_profile_managers`, `_file_access_cookies` | target |
-| NSX | `_session_tokens` | target |
-| Harbor, Argo CD, Hetzner Robot, RabbitMQ, Cloud Builder | `_creds_cache` | target |
-| VCF Installer, SDDC Manager (VCF 5 is `sddc_vcf5`) | `_creds_cache` and `_session_tokens` | target / credential |
+| Shared helper `CredentialsCache` (`_shared/vcf_auth.py`; no connector in this repo uses it, a connector package can) | `_cache` | target |
+| Harbor, Argo CD, Hetzner Robot, RabbitMQ | `_creds_cache` | target |
 | Proxmox | `_creds_cache` (the ticket cache follows it) | target / credential |
 | Kubernetes | `_api_clients`, `_ws_api_clients` | target |
 | GitHub | `_installation_tokens`, `_pat_tokens` | target |
 | Keycloak | `_admin_tokens` | target |
-| Cloud Director, vRA 8, HCX, Salt, SRM and vSphere Replication (`vmware_shared/dr_rest.py`), vRO | the session or login cache | credential (+ login inputs) |
 | Profiled (ingested) connectors | `_session_tokens` | credential |
 | Azure, Entra ID | `_credentials`, `_tokens` | target + secret / login + scope |
-| Identity Broker (`idb`), phpIPAM | `_credentials`, `_tokens` | credential / target + secret |
+| FreeIPA | `_sessions` | credential |
+| phpIPAM | `_credentials`, `_tokens` | credential / target + secret |
+
+The VMware connectors are not in this repo
+([decision](../decisions/2026-10-28-own-connectors-leave-the-public-tree.md)),
+so their caches are not listed here.
 
 Not in the list, on purpose:
 
@@ -132,6 +131,26 @@ Not in the list, on purpose:
 - Google Cloud (`gcloud`) reads the target's secret on every call before
   its token cache, so every caller is checked on every call already.
 - The SSH connection pool keeps one connection per caller and target.
+
+### Who uses the SSH connection pool
+
+The pool lives on `SshConnector` (`connectors/adapters/ssh.py`). Its key
+is the target, the kind of caller, and the caller's `sub`. These use it:
+
+- **The nine connectors that subclass `SshConnector`**: `bind9`, `hyperv`,
+  `linux`, `msad`, `pfsense`, `rke2`, `windows_dns`, `winsrv`, `wsfc`.
+  Their operations call `_run_command` (or `_connect`), so they share
+  one pool per connector instance.
+- **`connectors/_shared/pwsh.py`**: the PowerShell helper that the Windows
+  connectors use. It runs its script through the connector's `_run_command`.
+- **`connectors/bind9/topology.py`**: reads the BIND files through
+  `_run_command`.
+- **`connectors/linux/_sudo.py`, `connectors/rke2/_sudo.py` and the bind9
+  sudo path**: run sudo commands on the pooled connection with `run_capped`.
+
+These do not use the pool. `ops_firewall_rollback.py` (linux) opens its
+own connection with `_dial`, so the rollback does not depend on a pooled
+login. `net.ssh_keyscan` only reads host keys and does not log in.
 
 ## Dependencies
 

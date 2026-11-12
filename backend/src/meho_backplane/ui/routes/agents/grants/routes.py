@@ -62,7 +62,10 @@ from meho_backplane.ui.routes.agents.grants.forms import (
     submit_elevate,
     submit_revoke,
 )
-from meho_backplane.ui.routes.agents.grants.operator import resolve_grants_admin_or_403
+from meho_backplane.ui.routes.agents.grants.operator import (
+    resolve_grants_admin_or_403,
+    resolve_grants_human_admin_or_403,
+)
 from meho_backplane.ui.routes.agents.grants.views import (
     parse_grant_id_or_404,
     render_detail,
@@ -77,6 +80,8 @@ __all__ = ["build_agent_grants_router"]
 #: included) at tenant_admin, so there is one gate dep, not two.
 _require_session_dep = Depends(require_ui_session)
 _require_admin_dep = Depends(resolve_grants_admin_or_403)
+#: Create and elevate also need a person.
+_require_human_admin_dep = Depends(resolve_grants_human_admin_or_403)
 
 #: Filter-field length cap so the ``principal_sub`` query filter cannot
 #: be used to push an unbounded string through the form-body parse.
@@ -122,7 +127,7 @@ async def _create_submit_handler(
     verdict: str = Form(default=""),
     expires_at: str | None = Form(default=None, max_length=EXPIRES_AT_MAX),
     session_ctx: UISessionContext = _require_session_dep,
-    operator: Operator = _require_admin_dep,
+    operator: Operator = _require_human_admin_dep,
 ) -> HTMLResponse:
     """``POST /ui/agents/grants/create`` -- create one permission grant."""
     return await submit_create(
@@ -155,7 +160,7 @@ async def _elevate_submit_handler(
     verdict: str = Form(default=""),
     expires_at: str | None = Form(default=None, max_length=EXPIRES_AT_MAX),
     session_ctx: UISessionContext = _require_session_dep,
-    operator: Operator = _require_admin_dep,
+    operator: Operator = _require_human_admin_dep,
 ) -> HTMLResponse:
     """``POST /ui/agents/grants/elevate`` -- create one time-bounded elevation."""
     return await submit_elevate(

@@ -35,34 +35,38 @@ most restrictive across all three:
    before the first glob metacharacter ``*``/``?``/``[``) — more specific
    grants override broader defaults. On a specificity tie, fold to the
    most-restrictive verdict (fail-closed). When no row matches, use the
-   ``safety_level`` default.
+   ``safety_level`` default. With ``AGENT_GRANT_REQUIRED=on`` (#6189), an
+   agent login with no matching row gets ``deny`` on every level instead,
+   with a reason that starts with ``agent_no_grant:``; ``observe`` keeps
+   the default and logs ``agent_no_grant_would_deny``.
 
 3. **Op-requirement gate.** The op's ``safety_level`` drives the
-   minimum default verdict (used when no row matches) and a ceiling on
-   how permissive a grant can be. The default and the ceiling are
-   *distinct*: a ``dangerous`` op defaults to ``deny`` (no grant ⇒
-   denied), but an explicit grant *is* honoured up to the
-   ``needs-approval`` ceiling — i.e. "destructive = deny **unless
-   granted**" (#820), and even when granted a destructive op is never
-   ``auto-execute``d (it always lands on human approval). Tenant/
-   operator config can tighten (make a ``caution`` op ``deny``) but not
-   loosen past the ceiling (cannot make a ``dangerous`` op
-   ``auto-execute``).
+   default verdict (used when no row matches) and a ceiling on how
+   permissive a row can be. The rule (#3980, decision
+   ``approval-groups-and-self-approval.md``): an agent runs only ``safe``
+   operations at once; every other level waits for a person's approval.
+   A row can make an agent stricter (``deny``), but never lets a non-safe
+   op run at once.
 
    Safety-level defaults (no matching permission row):
 
    * ``safe`` → ``auto-execute``
    * ``caution`` → ``needs-approval``
-   * ``dangerous`` → ``deny``
+   * ``dangerous`` → ``needs-approval``
+   * ``destructive`` → ``needs-approval`` (the call must still carry the
+     preview hash before it can wait, #3197)
+   * an unknown level → ``deny`` (fail closed)
 
    Safety-level ceilings (hard upper-bound on what a row can grant):
 
    * ``safe`` — no ceiling (any verdict is valid).
-   * ``caution`` — ceiling is ``needs-approval``; ``auto-execute``
-     from a row is tightened to ``needs-approval``.
-   * ``dangerous`` — ceiling is ``needs-approval``; a grant of
-     ``auto-execute`` is tightened to ``needs-approval`` (the op stays
-     human-gated), while the *default* (no grant) remains ``deny``.
+   * ``caution``, ``dangerous``, ``destructive`` — ceiling is
+     ``needs-approval``; ``auto-execute`` from a row is tightened to
+     ``needs-approval``.
+
+   The same rule holds for a person's call made with a token
+   (:mod:`meho_backplane.operations._validate`); only the web interface
+   counts as a person.
 
 Role-gate interaction
 ---------------------
@@ -104,7 +108,9 @@ References
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from typing import Any
@@ -115,8 +121,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.models import AgentPermission, PermissionVerdict
+from meho_backplane.settings import get_settings
 
 __all__ = [
+    "agent_grant_name",
+    "agent_no_grant_log_scope",
     "resolve_verdict",
 ]
 
@@ -127,37 +136,30 @@ _log = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 #: Default verdict when no AgentPermission row matches, keyed by
-#: safety_level value. ``safe`` → auto-execute, ``caution`` →
-#: needs-approval, ``dangerous`` → deny, ``destructive`` → deny.
-#: Unknown safety_level falls back to deny (fail-closed).
+#: safety_level value (#3980). ``safe`` → auto-execute; ``caution``,
+#: ``dangerous`` and ``destructive`` → needs-approval: they wait for a
+#: person's approval. Unknown safety_level falls back to deny (fail-closed).
 _SAFETY_DEFAULT: dict[str, PermissionVerdict] = {
     "safe": PermissionVerdict.AUTO_EXECUTE,
     "caution": PermissionVerdict.NEEDS_APPROVAL,
-    "dangerous": PermissionVerdict.DENY,
-    "destructive": PermissionVerdict.DENY,
+    "dangerous": PermissionVerdict.NEEDS_APPROVAL,
+    "destructive": PermissionVerdict.NEEDS_APPROVAL,
 }
 
 #: Hard upper-bound ceiling for each safety_level.  A permission row
 #: carrying a verdict more permissive than the ceiling is tightened
 #: to the ceiling value.  ``safe`` has no ceiling (any verdict is
 #: valid -- the ``None`` sentinel is handled in ``_apply_ceiling``).
-#: ``dangerous`` is capped at ``needs-approval`` (not ``deny``) so an
-#: explicit grant *is* honoured -- "deny **unless granted**" (#820) --
-#: while a granted dangerous op still lands on human approval rather
-#: than auto-executing. The *default* (no grant) for ``dangerous``
-#: stays ``deny`` via ``_SAFETY_DEFAULT``.
-#:
-#: ``destructive`` (#3183) is the exception to "deny unless granted":
-#: its ceiling is ``deny``, so *no* AgentPermission grant can lift an
-#: agent principal off ``deny`` — the tier is non-grantable for agents
-#: by construction (default deny + deny ceiling). Governed execution of
-#: a destructive op is a human decision on the non-agent approval path
-#: (#3197 / #3198), never an agent verdict.
+#: Every other level is capped at ``needs-approval``, so no row lets an
+#: agent run a non-safe op at once (#3980). ``destructive`` waits for a
+#: person's approval under the group rules, after the preview check
+#: (#3197); it is still never grantable, because a row can only make it
+#: stricter. Agents never approve.
 _SAFETY_CEILING: dict[str, PermissionVerdict | None] = {
     "safe": None,
     "caution": PermissionVerdict.NEEDS_APPROVAL,
     "dangerous": PermissionVerdict.NEEDS_APPROVAL,
-    "destructive": PermissionVerdict.DENY,
+    "destructive": PermissionVerdict.NEEDS_APPROVAL,
 }
 
 # Verdict ordering: lower index = more permissive. Used to compare
@@ -342,6 +344,107 @@ def _pick_raw_verdict(
 
 
 # ---------------------------------------------------------------------------
+# No grant at all (AGENT_GRANT_REQUIRED, #6189)
+# ---------------------------------------------------------------------------
+
+
+#: The ``agent_no_grant_would_deny`` lines already written in this call, as
+#: ``(agent, op_id, target_id)``. ``None`` outside a call: then each check logs.
+_no_grant_logged: ContextVar[set[tuple[str, str, str | None]] | None] = ContextVar(
+    "_no_grant_logged", default=None
+)
+
+
+@contextmanager
+def agent_no_grant_log_scope(*, new: bool = False) -> Iterator[None]:
+    """Log ``agent_no_grant_would_deny`` at most once per call inside this block.
+
+    One call can check the same grant more than once: a destructive call
+    builds its preview again to check the preview hash, and a preview with
+    a check before the wait for approval runs the policy gate twice. Inside
+    this block, a second check of the same agent, operation and target
+    writes no second line. ``new=True`` starts a fresh call (a top-level
+    ``dispatch``); otherwise an open block is reused, so a preview built
+    inside a call counts as part of that call.
+    """
+    if not new and _no_grant_logged.get() is not None:
+        yield
+        return
+    token = _no_grant_logged.set(set())
+    try:
+        yield
+    finally:
+        _no_grant_logged.reset(token)
+
+
+def _log_would_deny(
+    *, operator: Operator, agent: str, op_id: str, target_str: str | None, safety_level: str
+) -> None:
+    """Write ``agent_no_grant_would_deny`` unless this call already wrote it."""
+    logged = _no_grant_logged.get()
+    key = (agent, op_id, target_str)
+    if logged is not None:
+        if key in logged:
+            return
+        logged.add(key)
+    _log.info(
+        "agent_no_grant_would_deny",
+        agent=agent,
+        tenant_id=str(operator.tenant_id),
+        op_id=op_id,
+        target_id=target_str,
+        safety_level=safety_level,
+    )
+
+
+def agent_grant_name(operator: Operator) -> str:
+    """The name a grant for *operator* is keyed on: ``agent:<name>`` when known."""
+    if operator.client_id and operator.client_id.startswith("agent:"):
+        return operator.client_id
+    return operator.sub
+
+
+def _no_grant_refusal(
+    *,
+    operator: Operator,
+    op_id: str,
+    safety_level: str,
+    target_str: str | None,
+) -> tuple[PermissionVerdict, str] | None:
+    """Apply ``AGENT_GRANT_REQUIRED`` to an agent call that no grant matches.
+
+    ``on`` returns a ``deny`` whose reason starts with ``agent_no_grant:``.
+    ``observe`` logs ``agent_no_grant_would_deny`` (once per call, see
+    :func:`agent_no_grant_log_scope`) and returns ``None``, so the
+    risk-level default applies as before. ``off`` returns ``None``.
+    Only agent logins are checked: people, service accounts and runners
+    never reach this table.
+    """
+    if operator.principal_kind is not PrincipalKind.AGENT:
+        return None
+    mode = get_settings().agent_grant_required
+    if mode == "off":
+        return None
+    agent = agent_grant_name(operator)
+    if mode == "observe":
+        _log_would_deny(
+            operator=operator,
+            agent=agent,
+            op_id=op_id,
+            target_str=target_str,
+            safety_level=safety_level,
+        )
+        return None
+    reason = (
+        f"agent_no_grant: agent {agent} has no grant that covers operation "
+        f"{op_id!r}, and MEHO requires a grant for every agent call. "
+        f"An admin adds a grant with `meho agent grant create --principal {agent} "
+        "--op <pattern> --verdict <verdict>`, or in the console under Agents."
+    )
+    return PermissionVerdict.DENY, reason
+
+
+# ---------------------------------------------------------------------------
 # Main resolver
 # ---------------------------------------------------------------------------
 
@@ -451,6 +554,12 @@ async def resolve_verdict(
         matching.append(row)
 
     # --- Gate 3: pick verdict -----------------------------------------
+    if not matching:
+        refusal = _no_grant_refusal(
+            operator=operator, op_id=op_id, safety_level=safety_level, target_str=target_str
+        )
+        if refusal is not None:
+            return refusal
     raw_verdict, source = _pick_raw_verdict(matching, safety_level)
 
     # Apply the safety_level + role ceilings and build the reason string.

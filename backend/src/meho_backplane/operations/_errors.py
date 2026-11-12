@@ -23,7 +23,7 @@ Each builder owns one ``error_code`` from the contract documented in
 ``connector_http_403`` / ``connector_http_422`` /
 ``connector_auth_failed`` / ``connector_tls_verify_failed`` /
 ``connector_vault_forbidden`` / ``connector_probe_refused`` /
-``write_capability_denied`` / ``not_found`` / ``connector_timeout`` /
+``probe_pool_busy`` / ``write_capability_denied`` / ``not_found`` / ``connector_timeout`` /
 ``vault_credentials_read_error`` / ``connector_error`` /
 ``release_changed_while_waiting``.
 The ``status`` field maps
@@ -47,6 +47,18 @@ from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
+from meho_backplane.operations.deny_reasons import (
+    AGENT_NO_GRANT,
+    AGENT_STEPS_NOT_DECLARED,
+    READ_SCOPE_DENIED,
+    deny_reason_code,
+    is_agent_no_grant,
+)
+from meho_backplane.operations.uncertain_outcome import (
+    UNCERTAIN_ADVICE,
+    UNCERTAIN_OUTCOME,
+    request_may_have_reached_vendor,
+)
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
@@ -87,10 +99,13 @@ __all__ = [
     "result_no_connector",
     "result_no_target",
     "result_object_changed_since_approval",
+    "result_park_check_refused",
     "result_preview_changed_since_approval",
+    "result_probe_pool_busy",
     "result_rate_limited",
     "result_receipt_too_large",
     "result_release_changed_while_waiting",
+    "result_resume_params_unavailable",
     "result_target_changed_since_approval",
     "result_target_gone_since_approval",
     "result_target_invalid_type",
@@ -424,8 +439,10 @@ def result_license_read_off(op_id: str, duration_ms: float) -> OperationResult:
     operator turned the row on by hand (see
     :mod:`meho_backplane.operations.license_reads`). The message names the
     way to read licences: the connector's hand-written licence read, which
-    shows each key masked. Same envelope as ``target_required``: no audit
-    row, because nothing ran.
+    shows each key masked. Same envelope as ``target_required``. A refused
+    call writes one ``policy_decision`` audit row with the op id and this
+    code (#5791, :mod:`meho_backplane.operations._license_refusal`); a
+    refused preview writes none.
     """
     return OperationResult(
         status="error",
@@ -686,10 +703,12 @@ def result_handler_unreachable(
 #: Stable error code for a service-principal read refused by its read
 #: scope (#4992). The policy gate starts the deny reason with this code
 #: and a colon; :func:`result_denied` then reports it as ``error_code``.
-READ_SCOPE_DENIED_CODE: Final[str] = "read_scope_denied"
+READ_SCOPE_DENIED_CODE: Final[str] = READ_SCOPE_DENIED
 
 
-def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResult:
+def result_denied(
+    op_id: str, reason: str, duration_ms: float, *, reason_code: str | None = None
+) -> OperationResult:
     """Policy gate denied the call.
 
     Returned when the effective verdict is
@@ -704,17 +723,35 @@ def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResul
     source and any ceilings that were applied so an agent can diagnose
     the refusal without human intervention. ``error_code`` is ``denied``,
     or :data:`READ_SCOPE_DENIED_CODE` when the reason starts with that
-    code (the gate's stable marker for a read-scope refusal).
+    code (the gate's stable marker for a read-scope refusal), or
+    ``agent_no_grant`` when an agent has no grant and the
+    ``AGENT_GRANT_REQUIRED`` switch is on (#6189), or
+    ``agent_steps_not_declared`` when an agent calls a multi-step operation
+    whose steps are not declared and the switch is on (#6298).
+
+    ``reason_code`` says which rule refused the call
+    (:mod:`~meho_backplane.operations.deny_reasons`). When the caller does
+    not give one, it is worked out from *reason*. The dispatcher stores the
+    extras on the audit row of the refusal, so the row keeps the code and
+    the text too.
     """
     error_code = "denied"
     if reason.startswith(f"{READ_SCOPE_DENIED_CODE}:"):
         error_code = READ_SCOPE_DENIED_CODE
+    elif is_agent_no_grant(reason):
+        error_code = AGENT_NO_GRANT
+    elif reason.startswith(f"{AGENT_STEPS_NOT_DECLARED}:"):
+        error_code = AGENT_STEPS_NOT_DECLARED
     return OperationResult(
         status="denied",
         op_id=op_id,
         error=f"denied: {reason}",
         duration_ms=duration_ms,
-        extras={"error_code": error_code, "reason": reason},
+        extras={
+            "error_code": error_code,
+            "reason_code": reason_code or deny_reason_code(reason),
+            "reason": reason,
+        },
     )
 
 
@@ -1022,6 +1059,31 @@ def result_preview_binding_required(op_id: str, reason: str, duration_ms: float)
     )
 
 
+def result_park_check_refused(op_id: str, reason: str, duration_ms: float) -> OperationResult:
+    """The op's check before the wait for approval refused the call.
+
+    The op needs approval, and its registered check
+    (:func:`~meho_backplane.operations._preview.run_park_check`) found a
+    param that must not be stored in an approval request, for example a
+    secret given as a plain value. MEHO stores no approval request and
+    sends nothing to the vendor; the caller fixes the call and sends it
+    again. Preview returns the same text. ``status`` is ``"denied"`` with a
+    distinct ``error_code``. *reason* comes from the check and can name an
+    exception class, so it goes through :func:`_sanitize_free_text`.
+    """
+    reason = _sanitize_free_text(reason)
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=(
+            f"denied: {reason}. MEHO does not store this call for approval; "
+            "fix the call and send it again"
+        ),
+        duration_ms=duration_ms,
+        extras={"error_code": "refused_before_approval", "reason": reason},
+    )
+
+
 def result_preview_hash_mismatch(op_id: str, duration_ms: float) -> OperationResult:
     """Destructive-tier park refused: presented preview hash did not match (#3197).
 
@@ -1211,6 +1273,36 @@ def result_release_changed_while_waiting(
             "approval_request_id": str(approval_request_id),
             "request_release": request_release,
             "running_release": running_release,
+        },
+    )
+
+
+def result_resume_params_unavailable(
+    op_id: str,
+    *,
+    approval_request_id: uuid.UUID,
+) -> OperationResult:
+    """An approved request did not run: MEHO does not have its params (#6064).
+
+    The approval surface sent no params, and the request row holds none
+    MEHO can run with: there are none, or MEHO already replaced the secret
+    values with a marker. Nothing was sent. The request ends as a failed
+    run, so the requester can run it again and send the params with it.
+    """
+    reason = (
+        "The request was approved, but MEHO does not have the settings it needs "
+        "to run it. The operation did not run. The requester can run it again "
+        "and send the settings with it, or ask again."
+    )
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"approval_resume_params_unavailable: {reason}",
+        duration_ms=0.0,
+        extras={
+            "error_code": "approval_resume_params_unavailable",
+            "reason": reason,
+            "approval_request_id": str(approval_request_id),
         },
     )
 
@@ -1508,8 +1600,17 @@ def result_connector_timeout(
     op_id: str,
     exc: httpx.TransportError,
     duration_ms: float,
+    *,
+    changes_target: bool = False,
 ) -> OperationResult:
     """Return a structured timeout or other HTTP transport-fault result.
+
+    *changes_target* is ``True`` for an operation that may change the target.
+    When the request may already have reached the vendor (a read timeout, or
+    a dropped connection after MEHO wrote the request), the result then
+    carries ``execution_outcome: uncertain`` and ``retry: False``, the same
+    as :func:`result_audit_commit_failed`. A connect timeout, and any fault
+    of a read operation, stay a plain error.
 
     ``httpx`` exposes a per-request timeout map through the request extension.
     A non-timeout transport failure has no truthful phase, so it is labelled
@@ -1545,10 +1646,16 @@ def result_connector_timeout(
         "configured_timeout": configured_timeout,
         "exception_message": _sanitize_free_text(str(exc)),
     }
+    error = f"connector_timeout: {type(exc).__name__}"
+    if changes_target and request_may_have_reached_vendor(exc):
+        extras["execution_outcome"] = UNCERTAIN_OUTCOME
+        extras["retry"] = False
+        extras["remediation"] = UNCERTAIN_ADVICE
+        error += f". {UNCERTAIN_ADVICE}"
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"connector_timeout: {type(exc).__name__}",
+        error=error,
         duration_ms=duration_ms,
         extras=extras,
     )
@@ -1656,6 +1763,64 @@ def result_connector_probe_refused(
             "error_code": "connector_probe_refused",
             "allowlist_env": PROBE_ALLOWLIST_ENV,
             "host": host,
+            "detail": detail,
+            "exception_class": type(exc).__name__,
+        },
+    )
+
+
+@lru_cache(maxsize=1)
+def _probe_pool_busy_error_type() -> type[BaseException] | None:
+    """Resolve ``ProbePoolBusyError`` lazily, or ``None`` if unresolvable.
+
+    Deferred for the same reason as :func:`_probe_refused_error_type`.
+    """
+    try:
+        from meho_backplane.connectors.net.probe_pool import ProbePoolBusyError
+    except Exception:  # pragma: no cover -- the package is a runtime dependency
+        return None
+    return ProbePoolBusyError
+
+
+def is_probe_pool_busy(exc: BaseException) -> bool:
+    """Whether *exc* is a ``net.*`` probe refused because it waited longer than its timeout."""
+    exc_type = _probe_pool_busy_error_type()
+    return exc_type is not None and isinstance(exc, exc_type)
+
+
+def result_probe_pool_busy(
+    op_id: str,
+    exc: BaseException,
+    duration_ms: float,
+) -> OperationResult:
+    """A ``net.*`` probe did not run: it waited longer than its own timeout.
+
+    Each tenant may have only a few blocking probes in the probe pool at one
+    time (``connectors/net/probe_pool.py``); more probes wait for a free
+    place up to their own timeout. No socket was opened, so this is not a
+    reachability answer; a Sensor on it reads ``unknown``.
+    """
+    from meho_backplane.connectors.net.probe_pool import PROBE_POOL_BUSY, PROBE_TENANT_SHARE
+
+    detail = _sanitize_free_text(str(getattr(exc, "reason", "") or exc))
+    summary = (
+        f"{PROBE_POOL_BUSY}: MEHO did not run this network probe, so this is NOT a "
+        f"reachability answer. Each tenant may have {PROBE_TENANT_SHARE} slow network "
+        f"probes (net.ping, net.trace, net.path_mtu, net.tls_inspect) in the probe pool "
+        f"at one time; more probes wait for a free place up to their own timeout, and "
+        f"this one waited longer. Retry when the other probes have ended. See "
+        f"docs/codebase/connectors-net-diagnostics.md."
+    )
+    if detail:
+        summary = f"{summary} Detail: {detail}"
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras={
+            "error_code": PROBE_POOL_BUSY,
+            "tenant_share": PROBE_TENANT_SHARE,
             "detail": detail,
             "exception_class": type(exc).__name__,
         },
@@ -2015,9 +2180,13 @@ def result_connector_http_403(
     ``claude-rdc-hetzner-dc#1138``).
 
     The cause is kept **connector-agnostic**: any upstream 403 means the
-    credential reached the upstream and was rejected on authorization,
-    not transport -- so the operator-facing ``error`` names the likely
-    insufficient-permission cause regardless of which connector raised.
+    upstream refused the call, not a transport fault. Most often the
+    account lacks a permission, but some vendors (NSX, for one) also
+    answer a wrong password or a locked account with 403. So the
+    operator-facing ``error`` claims no successful login and gives no
+    retry advice: it names both causes, points at ``upstream_message``,
+    and says to check the target's account first, because more calls
+    with a wrong password can lock the account (#6254).
     ``extras`` carries the machine-usable fields an agent can branch on
     without re-parsing a transport error: ``http_status`` (always
     ``403`` -- the dispatcher scopes this builder to that code; 401/429
@@ -2036,15 +2205,17 @@ def result_connector_http_403(
         if (value := response.headers.get(header)) is not None
     }
     summary = (
-        "connector_http_403: the upstream returned HTTP 403 Forbidden. The "
-        "target credential reached the upstream and was authenticated, but "
-        "may lack the permission this operation requires -- a credential "
-        "scope matter on the target, not a meho transport fault. Grant the "
-        "missing permission on the backing credential (for a GitHub App / "
-        "fine-grained PAT, the accepted permission is echoed in "
-        "extras.permission_headers when the upstream sent it) and retry. See "
-        "docs/codebase/error-message-shape.md for the dispatch error "
-        "convention."
+        "connector_http_403: the upstream returned HTTP 403 Forbidden -- it "
+        "refused this call. A 403 can mean that the target's account lacks a "
+        "permission this operation needs, or that its password is wrong or "
+        "the account is locked (some vendors answer a failed login with 403). "
+        "Read extras.upstream_message to see which. Do not retry yet: more "
+        "calls with a wrong password can lock the account, or keep it locked. "
+        "First check the target's account: its password, whether it is "
+        "locked, and its permissions (for a GitHub App / fine-grained PAT, "
+        "the accepted permission is echoed in extras.permission_headers when "
+        "the upstream sent it). See docs/codebase/error-message-shape.md for "
+        "the dispatch error convention."
     )
     if upstream_message is not None:
         summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
@@ -2246,10 +2417,11 @@ _AUTH_FAILED_DOC_TAIL = (
 def _auth_failed_summary(
     *,
     stage: Literal["establish", "dispatch", "after_relogin", "call"],
-    status_code: int,
+    status_label: str,
     host: str,
     remediation: str,
     relogin: Literal["not_available", "attempted_failed", "reestablished"],
+    over_http: bool,
 ) -> str:
     """Compose the stage-aware operator-facing ``connector_auth_failed`` summary (#2400).
 
@@ -2269,19 +2441,31 @@ def _auth_failed_summary(
     * ``call`` -- a connector rejected a normal call on a live session with
       an auth/permission fault that a fresh login cannot fix (#3566), so no
       re-login was tried.
+
+    *status_label* is ``HTTP <status>`` when the connector got a real HTTP
+    status, else ``cause <cause>``. With ``over_http=False`` (a database
+    login, for example) the establish text says that the system refused
+    the login, not that an HTTP login was rejected (#6154).
     """
     if stage == "call":
         return (
             f"connector_auth_failed: the upstream rejected this call with an "
-            f"auth/permission fault (HTTP {status_code}) for {host}. "
+            f"auth/permission fault ({status_label}) for {host}. "
             f"{remediation} {_AUTH_FAILED_DOC_TAIL}"
         )
     if stage == "establish":
-        lead = (
-            f"connector_auth_failed: the login itself was rejected (HTTP "
-            f"{status_code}) for {host} -- the credential was refused at "
-            f"session establish."
-        )
+        if over_http:
+            lead = (
+                f"connector_auth_failed: the login itself was rejected "
+                f"({status_label}) for {host} -- the credential was refused at "
+                f"session establish."
+            )
+        else:
+            lead = (
+                f"connector_auth_failed: the system at {host} refused the login "
+                f"({status_label}) -- the credential was refused at session "
+                f"establish."
+            )
         if relogin == "attempted_failed":
             lead = (
                 f"{lead} This followed a forced re-login after a mid-session "
@@ -2291,14 +2475,14 @@ def _auth_failed_summary(
     if stage == "after_relogin":
         return (
             f"connector_auth_failed: the upstream returned an auth/session "
-            f"failure (HTTP {status_code}) for {host}. The session was already "
+            f"failure ({status_label}) for {host}. The session was already "
             f"re-logged-in and retried once on a session-expiry status, and the "
             f"fresh session was still rejected. {remediation} "
             f"{_AUTH_FAILED_DOC_TAIL}"
         )
     return (
         f"connector_auth_failed: the upstream returned an auth/session failure "
-        f"(HTTP {status_code}) for {host}. The connector reached the host but "
+        f"({status_label}) for {host}. The connector reached the host but "
         f"its per-request credential was rejected; this connector holds no "
         f"re-loginable session (no invalidate_session hook), so no re-login was "
         f"attempted. {remediation} If this persists after restaging, verify the "
@@ -2446,12 +2630,17 @@ def result_connector_auth_failed(
         remediation = _auth_scheme_remediation(target_name)
     else:
         remediation = _auth_restage_remediation(target_name, secret_ref)
+    # #6154: a connector that does not use HTTP (a database login, for
+    # example) still passes a status code; the text then names its own
+    # cause instead of an HTTP status it never got.
+    over_http = exc.over_http if isinstance(exc, ConnectorAuthError) else True
     summary = _auth_failed_summary(
         stage=stage,
-        status_code=status_code,
+        status_label=f"HTTP {status_code}" if over_http else f"cause {cause}",
         host=host,
         remediation=remediation,
         relogin=relogin,
+        over_http=over_http,
     )
     if upstream_message is not None:
         summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"

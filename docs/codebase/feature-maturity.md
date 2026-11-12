@@ -116,8 +116,9 @@ in the same diff.
 
 ## Dependencies
 
-Stdlib `typing` (`Literal`, `TypedDict`, `NotRequired`) and
-`meho_backplane.settings.Settings` only. Nothing outside the module
+Stdlib `typing` (`Literal`, `TypedDict`, `NotRequired`),
+`cryptography.fernet.Fernet`, `meho_backplane.sandbox_mode` and
+`meho_backplane.settings.Settings`, plus lazy imports from `mcp`. Nothing outside the module
 may re-declare tier values; tests assert tiers structurally and derive
 expectations from the registry so a retier never requires a test edit.
 

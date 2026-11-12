@@ -68,7 +68,7 @@
 // more backplane routes and renders the response in either a human-
 // readable form or `--json` mode. Authentication piggybacks on the
 // token meho login wrote — same pattern as `meho operation` and
-// `meho retrieval eval`.
+// `meho retrieval usage`.
 //
 // Single-target create ships as `meho targets add <name>` (alias
 // `create`; Task #2862) — see add.go, which reuses import.go's
@@ -292,7 +292,7 @@ func renderHTTPStatus(
 		// targets resolver's structured {"detail": {"error":
 		// "no_target", "query": "...", "matches": [...]}}. Render
 		// near-miss suggestions when the structured form lands so the
-		// operator sees "did you mean rdc-vcenter? rdc-vsphere?".
+		// operator sees "did you mean vcenter-lab? vsphere-lab?".
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(formatNotFound(bodyStr)),
 			jsonOut,

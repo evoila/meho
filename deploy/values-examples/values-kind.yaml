@@ -14,7 +14,7 @@
 # built-in PostgreSQL, Keycloak and Vault instead: see "A throwaway install
 # with the built-in parts" in `docs/deploying.md`. For a production-shaped
 # install against your own Keycloak, Vault and PostgreSQL, see
-# `values-rdc-example.yaml`.
+# `values-example-lab.yaml`.
 #
 # Prerequisites (one-time per cluster):
 #
@@ -82,7 +82,7 @@ image:
   # rejects this `<REPLACE: ...>` literal AND an empty string equally,
   # but the placeholder form keeps the failure message human-readable
   # ("does not match pattern: <REPLACE: ...>") and stays consistent with
-  # `values-rdc-example.yaml`'s placeholder convention. A forgotten
+  # `values-example-lab.yaml`'s placeholder convention. A forgotten
   # substitution fails-loud at `helm install` time, never silently.
   tag: "<REPLACE: sha-<40-char-git-sha> or v0.1.0>"
 
@@ -132,7 +132,7 @@ config:
   # real deploy would serve. For a working `meho login` on a throwaway
   # cluster, the easier way is the chart's built-in Keycloak (see "A
   # throwaway install with the built-in parts" in `docs/deploying.md`).
-  # Against your own Keycloak realm, use `values-rdc-example.yaml` with
+  # Against your own Keycloak realm, use `values-example-lab.yaml` with
   # a pre-created public `meho-cli` client.
   keycloakCliClientId: meho-cli
   vaultAddr: http://mock-vault.meho.svc:8200
@@ -156,3 +156,12 @@ resources:
   requests:
     cpu: 50m
     memory: 128Mi
+
+# Bring-your-own: this file names its own PostgreSQL, Keycloak and Vault
+# (or GSM), so the built-in core parts (on by default, #4047) stay off.
+corePostgres:
+  enabled: false
+coreKeycloak:
+  enabled: false
+coreVault:
+  enabled: false

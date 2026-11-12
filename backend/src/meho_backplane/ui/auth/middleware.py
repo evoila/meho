@@ -15,7 +15,7 @@ For every request whose path starts with ``/ui/`` (except the BFF
 auth surfaces themselves -- those routes set or clear the cookie and
 must be reachable unauthenticated):
 
-1. Read ``meho_session`` cookie.
+1. Read the ``__Host-meho_session`` cookie (exactly one value, or no session).
 2. Parse it as a UUID -- malformed values are treated as "no
    session" (no exception leaks; the operator just gets bounced to
    login).
@@ -97,13 +97,14 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import structlog
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from meho_backplane.auth.client_identity import bind_request_client_block
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import SandboxDeleteGrant, Tenant
 from meho_backplane.health import ui_readiness_verdict
@@ -112,12 +113,13 @@ from meho_backplane.sandbox_mode import (
     sandbox_mode_active,
 )
 from meho_backplane.ui.audit import bind_ui_view_audit
-from meho_backplane.ui.auth.revalidation import revalidate_read_session
+from meho_backplane.ui.auth.revalidation import revalidate_read_session, session_client_block
 from meho_backplane.ui.auth.routes import (
-    SESSION_COOKIE_NAME,
     login_location,
     page_from_htmx_current_url,
 )
+from meho_backplane.ui.auth.session_cookie import read_session_cookie
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import load_session
 from meho_backplane.ui.auth.tenant import (
     TENANT_PICKER_PATH,
@@ -205,48 +207,15 @@ class UISessionContext:
     tenant_name: str | None = None
     tenant_chosen: bool = True
     can_switch_tenant: bool = False
+    #: The ``client`` block of the session's last token check
+    #: (AUDIT_CLIENT_IDENTITY), or ``None``.
+    client: dict[str, Any] | None = None
 
 
 def _select_path(scope: Scope) -> str:
     """Return the ASGI scope's path, defaulting to ``/`` on missing values."""
     raw = scope.get("path")
     return raw if isinstance(raw, str) and raw else "/"
-
-
-def _extract_session_cookie(scope: Scope) -> str | None:
-    """Pull the ``meho_session`` cookie value out of the raw headers.
-
-    Avoids the cost of constructing a :class:`Request` object for the
-    happy-path of "no cookie, redirect to login". The cookie header
-    is iterated once; allocation stays in raw bytes until the cookie
-    is found.
-    """
-    headers = scope.get("headers")
-    if not isinstance(headers, list):
-        return None
-    cookie_name_bytes = SESSION_COOKIE_NAME.encode("ascii")
-    for name, value in headers:
-        if not isinstance(name, (bytes, bytearray)) or name != b"cookie":
-            continue
-        if not isinstance(value, (bytes, bytearray)):
-            continue
-        # The cookie header is ``name1=value1; name2=value2; ...``.
-        # We decode lazily on the match -- non-meho cookies stay as
-        # bytes.
-        value_bytes = bytes(value)
-        for chunk in value_bytes.split(b";"):
-            chunk = chunk.strip()
-            if not chunk:
-                continue
-            if b"=" not in chunk:
-                continue
-            cookie_name, _, cookie_value = chunk.partition(b"=")
-            if cookie_name.strip() == cookie_name_bytes:
-                try:
-                    return cookie_value.decode("ascii")
-                except UnicodeDecodeError:
-                    return None
-    return None
 
 
 def _request_header(scope: Scope, name: bytes) -> bytes | None:
@@ -473,7 +442,7 @@ async def _load_session_context(cookie_value: str | None, *, path: str) -> UISes
         # back to the UUID).
         log.warning(
             "ui_session_tenant_row_missing",
-            session_id=str(revalidated.id),
+            session_ref=session_ref(revalidated.id),
             tenant_id=str(revalidated.tenant_id),
         )
     return UISessionContext(
@@ -484,6 +453,7 @@ async def _load_session_context(cookie_value: str | None, *, path: str) -> UISes
         tenant_name=tenant_row[1] if tenant_row is not None else None,
         tenant_chosen=revalidated.tenant_chosen,
         can_switch_tenant=revalidated.can_switch_tenant,
+        client=session_client_block(revalidated.id),
     )
 
 
@@ -538,7 +508,7 @@ class UISessionMiddleware:
         # UUID, missing row, revoked, expired) collapses to "redirect
         # to login".
         log = structlog.get_logger(__name__)
-        cookie_value = _extract_session_cookie(scope)
+        cookie_value = read_session_cookie(scope)
         try:
             session_context = await _load_session_context(cookie_value, path=path)
         except TenantRemovedError:
@@ -709,6 +679,9 @@ async def require_ui_session(request: Request) -> UISessionContext:
             operator_sub=session_context.operator_sub,
             tenant_id=str(session_context.tenant_id),
         )
+    # The audit middleware reset the ``client`` block after the session
+    # middleware's token check; bind it again (AUDIT_CLIENT_IDENTITY).
+    bind_request_client_block(session_context.client)
     return session_context
 
 
@@ -820,7 +793,7 @@ async def _require_ui_role(
         # expired in the gap). Treat as unauthenticated.
         log.info(
             f"{log_prefix}_session_gone",
-            session_id=str(session.session_id),
+            session_ref=session_ref(session.session_id),
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -836,7 +809,7 @@ async def _require_ui_role(
     except HTTPException as exc:
         log.info(
             f"{log_prefix}_jwt_invalid",
-            session_id=str(session.session_id),
+            session_ref=session_ref(session.session_id),
             status_code=exc.status_code,
         )
         raise
@@ -893,7 +866,7 @@ def _assert_min_role(
         log = structlog.get_logger(__name__)
         log.info(
             log_event,
-            session_id=str(session_id),
+            session_ref=session_ref(session_id),
             actual_role=tenant_role.value,
             required_role=minimum.value,
         )

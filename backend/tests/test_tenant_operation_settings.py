@@ -23,7 +23,12 @@ from sqlalchemy import delete, select, update
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor, TenantOperationSetting
+from meho_backplane.db.models import (
+    AuditEventClass,
+    AuditLog,
+    EndpointDescriptor,
+    TenantOperationSetting,
+)
 from meho_backplane.operations import dispatch
 from meho_backplane.operations.ingest.service import ReviewService
 from meho_backplane.operations.meta_tools import list_operation_groups, search_operations
@@ -277,6 +282,54 @@ async def test_each_change_writes_one_audit_row(embedding_service: AsyncMock) ->
     payloads = sorted((row.payload["tenant_enabled"] is None, row.payload["op_id"]) for row in rows)
     assert payloads == [(False, _LIST_OP), (True, _LIST_OP)]
     assert all(row.payload["target_tenant_id"] == str(_TENANT_A) for row in rows)
+
+
+async def _rows_that_ran() -> list[AuditLog]:
+    async with get_sessionmaker()() as session:
+        rows = await session.execute(
+            select(AuditLog).where(
+                AuditLog.path == OP_TENANT_OPERATION_SETTING,
+                AuditLog.event_class == AuditEventClass.OPERATION_EXECUTION,
+            )
+        )
+        return list(rows.scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_op_switch_is_a_config_change(embedding_service: AsyncMock) -> None:
+    """Off, on and back to the default are settings changes, not runs (#5864)."""
+    await _register(embedding_service)
+
+    await _set(_TENANT_A, _LIST_OP, False)
+    await _set(_TENANT_A, _LIST_OP, True)
+    await _set(_TENANT_A, _LIST_OP, None)
+
+    rows = await _audit_rows()
+    assert len(rows) == 3
+    assert {row.event_class for row in rows} == {AuditEventClass.CONFIG_CHANGE}
+    assert {row.payload["op_id"] for row in rows} == {_LIST_OP}
+    assert await _rows_that_ran() == []
+
+
+@pytest.mark.asyncio
+async def test_group_switch_is_a_config_change(embedding_service: AsyncMock) -> None:
+    """The one row of a group switch is a settings change too (#5864)."""
+    await _register(embedding_service)
+
+    for enabled in (False, None):
+        await set_group_setting(
+            _operator(_TENANT_A),
+            tenant_id=_TENANT_A,
+            connector_id=_CONNECTOR_ID,
+            group_key=_GROUP,
+            enabled=enabled,
+        )
+
+    rows = await _audit_rows()
+    assert len(rows) == 2
+    assert {row.event_class for row in rows} == {AuditEventClass.CONFIG_CHANGE}
+    assert {row.payload["group_key"] for row in rows} == {_GROUP}
+    assert await _rows_that_ran() == []
 
 
 @pytest.mark.asyncio

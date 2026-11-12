@@ -59,7 +59,7 @@ func TestRunShowHappyPath(t *testing.T) {
 		if r.URL.Path != expected {
 			t.Errorf("path: got %q; want %q", r.URL.Path, expected)
 		}
-		tname := "rdc-vcenter"
+		tname := "vcenter-lab"
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.AuditEntry{
 			Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
@@ -91,7 +91,7 @@ func TestRunShowHappyPath(t *testing.T) {
 	for _, want := range []string{
 		"id:", "11111111-1111-1111-1111-111111111111",
 		"principal_sub:", "damir",
-		"target_name:", "rdc-vcenter",
+		"target_name:", "vcenter-lab",
 		"op_id:", "vsphere.vm.list",
 		"op_class:", "read",
 		"result_status:", "ok",
@@ -219,6 +219,8 @@ func TestPrintEntrySummaryShowsDashForNullFields(t *testing.T) {
 		"tenant_id:         -",
 		"tenant_name:       -",
 		"principal_name:    -",
+		"actor_sub:         -",
+		"actor_name:        -",
 		"target_id:         -",
 		"target_name:       -",
 		"request_id:        -",
@@ -234,13 +236,87 @@ func TestPrintEntrySummaryShowsDashForNullFields(t *testing.T) {
 	}
 }
 
+// TestPrintEntrySummaryShowsActor — the summary names the agent that
+// acted for the person, and its name (#5773).
+func TestPrintEntrySummaryShowsActor(t *testing.T) {
+	actor, name := "agent:reader", "reader"
+	var buf bytes.Buffer
+	printEntrySummary(&buf, &api.AuditEntry{
+		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+		Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
+		PrincipalSub: "damir",
+		ActorSub:     &actor,
+		ActorName:    &name,
+		OpId:         "x.y",
+		ResultStatus: "denied",
+		Payload:      map[string]any{},
+	})
+	out := buf.String()
+	for _, want := range []string{"actor_sub:         agent:reader", "actor_name:        reader"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q in %s", want, out)
+		}
+	}
+}
+
+// TestPrintEntrySummaryShowsVia — the summary names the login client
+// and the channel from the payload's "client" block, and prints no
+// "via:" line for a row without one.
+func TestPrintEntrySummaryShowsVia(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]any
+		want    string
+	}{
+		{"no block", map[string]any{}, ""},
+		{
+			"token",
+			map[string]any{"client": map[string]any{"azp": "meho-cli", "channel": "token"}},
+			"via:               meho-cli (token)",
+		},
+		{
+			"web",
+			map[string]any{"client": map[string]any{"azp": "meho-ui", "channel": "web"}},
+			"via:               meho-ui (web)",
+		},
+		{
+			"no azp",
+			map[string]any{"client": map[string]any{"azp": nil, "channel": "token"}},
+			"via:               unknown client (token)",
+		},
+		{"not an object", map[string]any{"client": "meho-cli"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printEntrySummary(&buf, &api.AuditEntry{
+				Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+				Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
+				PrincipalSub: "damir",
+				OpId:         "x.y",
+				ResultStatus: "ok",
+				Payload:      tc.payload,
+			})
+			if tc.want == "" {
+				if strings.Contains(buf.String(), "via:") {
+					t.Errorf("summary has a via line for a row without a client block:\n%s", buf.String())
+				}
+				return
+			}
+			if !strings.Contains(buf.String(), tc.want+"\n") {
+				t.Errorf("summary missing %q in %s", tc.want, buf.String())
+			}
+		})
+	}
+}
+
 // TestPrintEntrySummaryRendersUUIDsAndOptionals — the populated-
 // field render path. UUIDs come back as canonical
 // lowercase-hyphenated strings; optional strings render verbatim.
 func TestPrintEntrySummaryRendersUUIDsAndOptionals(t *testing.T) {
 	var buf bytes.Buffer
 	pname := "Damir"
-	tname := "rdc-vcenter"
+	tname := "vcenter-lab"
 	tenantName := "team-a"
 	dur := "12.3"
 	printEntrySummary(&buf, &api.AuditEntry{
@@ -271,7 +347,7 @@ func TestPrintEntrySummaryRendersUUIDsAndOptionals(t *testing.T) {
 		"tenant_name:       team-a",
 		"principal_name:    Damir",
 		"target_id:         33333333-3333-3333-3333-333333333333",
-		"target_name:       rdc-vcenter",
+		"target_name:       vcenter-lab",
 		"request_id:        44444444-4444-4444-4444-444444444444",
 		"duration_ms:       12.3",
 		"parent_audit_id:   55555555-5555-5555-5555-555555555555",

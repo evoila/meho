@@ -103,7 +103,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "topology",
-		Short: "Query and refresh the MEHO topology graph (refresh / dependents / dependencies / path / timeline / diff / history / annotate / unannotate / list-edges)",
+		Short: "Query and refresh the MEHO topology graph (refresh / dependents / dependencies / path / timeline / diff / history / annotate / unannotate / bulk-import / list-edges)",
 		Long: "Operate the tenant-scoped topology graph wired by G9.1 + " +
 			"G9.2 + G9.3. Refresh a target's discovered topology, walk " +
 			"what depends on a node (dependents), walk what a node " +
@@ -422,7 +422,7 @@ func renderHTTPStatus(
 		// Only `refresh` can 404 — resolve_target's structured
 		// `{"error":"no_target","query":...,"matches":[...]}`
 		// envelope. Render near-miss suggestions when present so the
-		// operator sees "did you mean rdc-vcenter?". This is also the
+		// operator sees "did you mean vcenter-lab?". This is also the
 		// cross-tenant boundary surface for refresh: a target in
 		// another tenant resolves to no_target, identical to a typo.
 		return output.RenderError(cmd.ErrOrStderr(),

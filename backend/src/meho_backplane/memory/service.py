@@ -42,7 +42,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Document
+from meho_backplane.db.models import Document, MemoryRevision
+from meho_backplane.lesson_header import may_confirm, normalise_lesson_header
 from meho_backplane.memory._internal import (
     MEMORY_SOURCE,
     auto_slug,
@@ -60,6 +61,12 @@ from meho_backplane.memory.rbac import (
     PermissionDeniedError,
     assert_can_promote,
 )
+from meho_backplane.memory.revisions import (
+    MemoryEntryRevision,
+    add_revision,
+    list_revisions,
+    write_entry,
+)
 from meho_backplane.memory.schemas import (
     TARGET_SCOPED,
     USER_SCOPED,
@@ -73,6 +80,7 @@ from meho_backplane.memory.schemas import (
 from meho_backplane.memory.snippet import query_snippet
 from meho_backplane.retrieval.indexer import index_document
 from meho_backplane.retrieval.retriever import RetrievalHit, retrieve
+from meho_backplane.retrieval.time_window import TimeWindow
 
 __all__ = ["MemoryService"]
 
@@ -108,8 +116,10 @@ class MemoryService:
         """Persist a memory in *scope* for *operator*.
 
         ``slug`` is auto-generated (12-char UUID hex prefix) when
-        ``None``. ``metadata`` is merged with the bookkeeping fields
-        the service owns (``user_sub``, ``target_name``,
+        ``None``. ``metadata`` is checked as a lesson header
+        (:mod:`meho_backplane.lesson_header`; a wrong value raises
+        :class:`~meho_backplane.lesson_header.LessonHeaderError`), then
+        merged with the bookkeeping fields the service owns (``user_sub``, ``target_name``,
         ``expires_at``); a value the caller already supplies for one
         of those keys is overwritten by the service-derived value to
         keep the row's encoding canonical.
@@ -118,7 +128,9 @@ class MemoryService:
         ------
         PermissionDeniedError
             When the RBAC matrix denies the write (e.g. an ``operator``
-            role attempting to write a ``TENANT``-scoped memory).
+            role attempting to write a ``TENANT``-scoped memory), or when
+            *metadata* sets ``status: confirmed`` and *operator* is not a
+            reviewer (:func:`~meho_backplane.lesson_header.may_confirm`).
         ValueError
             When ``target_name`` is missing for a target-scoped write.
         """
@@ -128,6 +140,16 @@ class MemoryService:
                 scope,
                 f"role={operator.tenant_role.value} cannot write scope={scope.value}",
             )
+        if metadata is not None:
+            # ``scope`` is overwritten below with the real scope; the other
+            # names MEHO keeps are refused.
+            metadata = normalise_lesson_header(metadata, allowed_reserved=frozenset({"scope"}))
+            if metadata.get("status") == "confirmed" and not may_confirm(operator):
+                raise PermissionDeniedError(
+                    scope,
+                    "only a reviewer (a person who can decide approvals in this tenant) "
+                    "or a tenant admin may set status confirmed; save the entry as a candidate",
+                )
 
         # validate_slug runs in addition to MemoryEntryCreate's Field
         # pattern so direct callers (not going through Pydantic) cannot
@@ -149,13 +171,13 @@ class MemoryService:
             expires_at=expires_at,
         )
 
-        doc = await index_document(
+        doc = await write_entry(
             tenant_id=operator.tenant_id,
-            source=MEMORY_SOURCE,
             source_id=source_id,
             kind=kind_for_scope(scope),
             body=body,
             metadata=merged_metadata,
+            written_by_sub=operator.sub,
         )
         self._log.info(
             "memory_remember",
@@ -166,6 +188,20 @@ class MemoryService:
             target_name=target_name,
         )
         return document_to_entry(doc)
+
+    async def revisions(
+        self, operator: Operator, document_id: uuid.UUID
+    ) -> list[MemoryEntryRevision] | None:
+        """Return the retained versions of one memory, oldest first.
+
+        ``None`` when :meth:`read_by_id` would return ``None`` for the
+        same caller (missing, foreign, other owner, expired): the same
+        no-oracle rule.
+        """
+        entry = await self.read_by_id(operator, document_id)
+        if entry is None:
+            return None
+        return await list_revisions(operator.tenant_id, entry.id)
 
     async def forget(
         self,
@@ -372,8 +408,12 @@ class MemoryService:
             )
 
             if move:
+                await session.execute(
+                    delete(MemoryRevision).where(MemoryRevision.entry_id == source_doc.id)
+                )
                 await session.delete(source_doc)
 
+            await add_revision(session, target_doc, operator.sub)
             await session.commit()
 
         self._log.info(
@@ -649,6 +689,17 @@ class MemoryService:
         doc = await self._fetch_by_id(operator, document_id)
         if doc is None:
             return None
+        return self.readable_entry(operator, doc)
+
+    def readable_entry(
+        self, operator: Operator, doc: Document, *, include_expired: bool = False
+    ) -> MemoryEntry | None:
+        """Return *doc* as an entry when *operator* may read it, else ``None``.
+
+        *doc* is a memory row of the operator's tenant. The checks are
+        the ones :meth:`read_by_id` lists. With *include_expired*, an
+        expired row passes too.
+        """
         try:
             scope = scope_for_kind(doc.kind)
         except ValueError:
@@ -677,7 +728,7 @@ class MemoryService:
         if not readable:
             return None
         entry = document_to_entry(doc)
-        if entry.expires_at is not None and is_expired(entry.expires_at):
+        if not include_expired and entry.expires_at is not None and is_expired(entry.expires_at):
             return None
         return entry
 
@@ -690,6 +741,7 @@ class MemoryService:
         tag: str | None = None,
         include_expired: bool = False,
         limit: int = 100,
+        target_name: str | None = None,
     ) -> list[MemoryEntry]:
         """List memories the operator can read in this tenant.
 
@@ -707,6 +759,10 @@ class MemoryService:
         in-process filtering so common cases (some rows expired, some
         belong to other operators in the tenant) still return a full
         page when filters trim the candidate pool.
+
+        ``target_name`` keeps only the notes saved for that target (the
+        ``target`` and ``user-target`` scopes), matched exactly in SQL, so
+        notes of other targets never use up the candidate pull.
         """
         if limit < 1:
             return []
@@ -718,7 +774,7 @@ class MemoryService:
         # case. The 4x multiplier is empirical: tenant-shared corpora
         # rarely have >25% expired/cross-user rows.
         candidate_pull = max(limit * 4, 200)
-        docs = await self._list_documents(operator, candidate_kinds, candidate_pull)
+        docs = await self._list_documents(operator, candidate_kinds, candidate_pull, target_name)
 
         entries: list[MemoryEntry] = []
         for doc in docs:
@@ -743,6 +799,8 @@ class MemoryService:
         *,
         scope: MemoryScope | None = None,
         limit: int = 10,
+        metadata_filters: dict[str, Any] | None = None,
+        time_window: TimeWindow | None = None,
     ) -> list[MemoryEntrySearchHit]:
         """Hybrid BM25 + cosine search over the operator's eligible memories.
 
@@ -760,6 +818,12 @@ class MemoryService:
         * ``scope=<scope>`` narrows the eligibility to that scope's kind.
         * User-scoped rows match only the operator's ``sub``; tenant and
           target rows are shared within the tenant.
+        * ``metadata_filters`` (#5726) narrows by metadata containment, for
+          example ``{"status": "confirmed", "tags": ["vm"]}``: a list value
+          matches an entry that holds every listed item. ``time_window``
+          limits ``confirmed_at`` and the time of the last write. Both run
+          in the candidate SQL, next to the eligibility rule, so they can
+          only narrow what the caller may see.
 
         No Python post-filter trims the result: what the substrate returns
         is already eligible. An empty list is the same answer for "no
@@ -773,6 +837,8 @@ class MemoryService:
             source=MEMORY_SOURCE,
             limit=limit,
             memory_eligibility=self._rbac.eligibility(operator, scope),
+            metadata_filters=metadata_filters,
+            time_window=time_window,
         )
         results: list[MemoryEntrySearchHit] = []
         for hit in hits:
@@ -847,6 +913,7 @@ class MemoryService:
             doc_id = existing.scalar_one_or_none()
             if doc_id is None:
                 return False
+            await session.execute(delete(MemoryRevision).where(MemoryRevision.entry_id == doc_id))
             await session.execute(delete(Document).where(Document.id == doc_id))
             await session.commit()
             return True
@@ -856,6 +923,7 @@ class MemoryService:
         operator: Operator,
         candidate_kinds: list[str],
         candidate_pull: int,
+        target_name: str | None = None,
     ) -> list[Document]:
         """Pull the candidate ``Document`` rows for an in-process filter pass.
 
@@ -863,17 +931,17 @@ class MemoryService:
         memories surface first; matches the operator-intuition contract
         ("show me what I just wrote") for the list verb.
         """
+        stmt = select(Document).where(
+            Document.tenant_id == operator.tenant_id,
+            Document.source == MEMORY_SOURCE,
+            Document.kind.in_(candidate_kinds),
+        )
+        if target_name is not None:
+            stmt = stmt.where(Document.doc_metadata["target_name"].as_string() == target_name)
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             result = await session.execute(
-                select(Document)
-                .where(
-                    Document.tenant_id == operator.tenant_id,
-                    Document.source == MEMORY_SOURCE,
-                    Document.kind.in_(candidate_kinds),
-                )
-                .order_by(Document.updated_at.desc())
-                .limit(candidate_pull)
+                stmt.order_by(Document.updated_at.desc()).limit(candidate_pull)
             )
             return list(result.scalars().all())
 

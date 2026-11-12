@@ -102,7 +102,7 @@ func TestBuildAuditQueryRequestEmptyOptsWireShape(t *testing.T) {
 // each key by name.
 func TestBuildAuditQueryRequestEveryFlagLandsOnWire(t *testing.T) {
 	opts := queryOptions{
-		Target:        "rdc-vcenter",
+		Target:        "vcenter-lab",
 		Principal:     "damir",
 		OpID:          "vsphere.vm.*",
 		OpClass:       "write",
@@ -126,7 +126,7 @@ func TestBuildAuditQueryRequestEveryFlagLandsOnWire(t *testing.T) {
 	}
 	wire := string(raw)
 	for _, want := range []string{
-		`"target":"rdc-vcenter"`,
+		`"target":"vcenter-lab"`,
 		`"principal":"damir"`,
 		`"op_id":"vsphere.vm.*"`,
 		`"op_class":"write"`,
@@ -216,10 +216,10 @@ func TestRunQueryHappyPathTable(t *testing.T) {
 			t.Errorf("missing Authorization header")
 		}
 		body, _ := io.ReadAll(r.Body)
-		if !strings.Contains(string(body), `"target":"rdc-vcenter"`) {
+		if !strings.Contains(string(body), `"target":"vcenter-lab"`) {
 			t.Errorf("body missing target filter: %s", body)
 		}
-		tname := "rdc-vcenter"
+		tname := "vcenter-lab"
 		next := "opaque-next-cursor"
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.AuditQueryResult{
@@ -244,7 +244,7 @@ func TestRunQueryHappyPathTable(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	cmd, stdout, stderr := newRunCmd(t)
-	err := runQuery(cmd, queryOptions{Target: "rdc-vcenter", BackplaneOverride: srv.URL})
+	err := runQuery(cmd, queryOptions{Target: "vcenter-lab", BackplaneOverride: srv.URL})
 	if err != nil {
 		t.Fatalf("runQuery: %v; stderr=%s", err, stderr.String())
 	}
@@ -252,7 +252,7 @@ func TestRunQueryHappyPathTable(t *testing.T) {
 	for _, want := range []string{
 		"AUDIT_ID", "TIME", "TENANT", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS",
 		"00000000-0000-0000-0000-000000000001",
-		"damir", "rdc-vcenter", "vsphere.vm.list", "read", "ok",
+		"damir", "vcenter-lab", "vsphere.vm.list", "read", "ok",
 		"NEXT: --cursor=opaque-next-cursor",
 	} {
 		if !strings.Contains(out, want) {
@@ -617,6 +617,28 @@ func TestPrintQueryTableShowsPrincipalNameAlongsideSub(t *testing.T) {
 	}
 	if !strings.Contains(out, "bob-sub-only") {
 		t.Errorf("PRINCIPAL column dropped the sub fallback when the name was absent: %s", out)
+	}
+}
+
+// TestPrintQueryTableShowsActor — the PRINCIPAL column names the agent
+// that acted for the person (#5773).
+func TestPrintQueryTableShowsActor(t *testing.T) {
+	actor := "agent:reader"
+	var buf bytes.Buffer
+	printQueryTable(&buf, &api.AuditQueryResult{
+		Rows: []api.AuditEntry{
+			{
+				Ts:           mustTS(t, "2026-05-13T15:42:11Z"),
+				PrincipalSub: "alice-sub",
+				ActorSub:     &actor,
+				OpId:         "vault.kv.read",
+				OpClass:      "read",
+				ResultStatus: "denied",
+			},
+		},
+	})
+	if out := buf.String(); !strings.Contains(out, "alice-sub via agent:reader") {
+		t.Errorf("PRINCIPAL column did not show the actor: %s", out)
 	}
 }
 

@@ -12,9 +12,26 @@
 #                      MAJOR.MINOR version (one docs version per minor
 #                      — a patch tag republishes its minor in place)
 #                      and moves the `latest` alias, onto the gh-pages
-#                      branch that GitHub Pages serves. The docs join
+#                      branch that GitHub Pages serves. A pre-release
+#                      tag (v1.0.0-rc.1) never moves `latest` or the
+#                      site root, so the public site keeps showing the
+#                      last final release. It publishes under its
+#                      minor until that minor has a final tag, then
+#                      under its own name (1.0.1-rc.1); see
+#                      scripts/ci/docs_deploy.sh. The docs join
 #                      the image / chart / CLI as the fourth artefact a
 #                      `v*` tag publishes (docs/RELEASING.md).
+#   push to main     : when the push changes docs-site/ or mkdocs.yml, the
+#                      docs of the newest final release are published
+#                      again from main under that release's MAJOR.MINOR,
+#                      and `latest` points at it. A docs fix that merges
+#                      on Monday is on the public site the same week, with
+#                      no hand step. The newest final tag is found by
+#                      scripts/ci/docs_republish.sh. It pushes nothing
+#                      when the site is the same as on gh-pages, and it
+#                      refuses a push that would remove files outside the
+#                      version it publishes. A manual run of this workflow
+#                      on main does the same publish.
 #
 # One-time setup (mirrors image.yml's GHCR-visibility precedent — a
 # maintainer does this once, CI cannot safely mutate repo settings):
@@ -30,7 +47,8 @@
 #
 # mike's CI requirements (https://github.com/jimporter/mike):
 #   * the gh-pages branch must be fetched locally before deploying —
-#     mike commits the built site onto it;
+#     mike commits the built site onto it. Both deploy scripts fetch it
+#     themselves, on every attempt (scripts/ci/docs_pages.sh);
 #   * a git committer identity must be configured — we use the
 #     github-actions[bot] identity, matching the commits GitHub's own
 #     actions produce.
@@ -49,6 +67,10 @@ on:
       - 'docs-site/**'
       - 'backend/pyproject.toml'
       - 'backend/uv.lock'
+      - 'docs/compatibility/**'
+      - 'CHANGELOG.md'
+      - 'scripts/ci/check_tested_live_claims.py'
+      - 'backend/scripts/validate_live_tests.py'
       - '.github/workflows/docs-site.yml'
   # Fires when a PR enters the merge queue, so the check can be made
   # required in branch protection and still report against the
@@ -58,12 +80,17 @@ on:
   # (~seconds), so the redundant queue runs are negligible.
   merge_group:
   push:
-    # Tag-driven deploy only. Docs versions are cut per release, like
-    # the image / chart / CLI artefacts — a main push without a tag has
-    # no version to publish under. Pre-release tags (v1.0.0-rc.1)
-    # deploy under their minor (1.0): the rc docs *are* that minor's
-    # docs in progress.
+    # A tag publishes a new docs version, like the image / chart / CLI
+    # artefacts. Pre-release tags (v1.0.0-rc.1) publish too, but never
+    # move `latest` (see the deploy step).
     tags: ['v*']
+    # A push to main that changes the docs publishes them again under
+    # the newest final release's version (see the deploy step). The
+    # `paths` filter applies to branch pushes only, not to tags.
+    branches: [main]
+    paths:
+      - 'mkdocs.yml'
+      - 'docs-site/**'
   workflow_dispatch:
 
 # Read-only by default; the deploy job elevates to the minimum it
@@ -76,14 +103,17 @@ concurrency:
   # don't collide; cancel-in-progress is scoped OFF for merge_group
   # because a cancelled queue check fails the merge attempt. Same
   # shape as readme-version-check.yml.
+  # Push runs (main and tags) are never cancelled here: a newer main run
+  # would otherwise stop an older one in the middle of its publish. The
+  # publish is serialised by the job-level group below.
   group: docs-site-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' && github.event_name != 'push' }}
 
 jobs:
   build:
     name: mkdocs build --strict
     if: github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -91,13 +121,19 @@ jobs:
         # Pinned uv, the same version as ci.yml (its python-lint job says
         # why). Python comes from backend/.python-version; uv also finds
         # that file for the `uv run --project backend` calls below.
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           version: "0.13.0"
 
       - name: Install docs toolchain (locked)
         run: uv sync --locked --only-group docs
         working-directory: backend
+
+      - name: Check "tested live" claims
+        # A page or the release notes may say a version was tested live
+        # only when docs/compatibility/live-tests.yaml records the test.
+        # Needs only Python and PyYAML (a dependency of mkdocs).
+        run: uv run --project backend --no-sync python scripts/ci/check_tested_live_claims.py
 
       - name: Build site (strict)
         # --strict is redundant with `strict: true` in mkdocs.yml but
@@ -107,10 +143,14 @@ jobs:
   deploy:
     name: mike deploy (versioned Pages publish)
     # Covers the tag push AND a manual workflow_dispatch pointed at a
-    # tag ref (re-publish after a transient failure). A dispatch on a
-    # branch ref only runs the build job above — there is no version
-    # to publish under.
-    if: startsWith(github.ref, 'refs/tags/v')
+    # tag ref (re-publish after a transient failure). It also covers a
+    # push to main (docs changes only, see `on.push.paths`) and a manual
+    # run on main: those publish the newest release's version again from
+    # main. A dispatch on any other branch only runs the build job above.
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      || (github.ref == 'refs/heads/main'
+          && (github.event_name == 'push' || github.event_name == 'workflow_dispatch'))
     runs-on: ubuntu-latest
     # mike build/push runs a few minutes and the reachability gate below
     # waits up to 10; 20 keeps a genuinely stuck job from burning the
@@ -121,20 +161,16 @@ jobs:
     concurrency:
       # Serialise gh-pages pushes across tags — two near-simultaneous
       # tag pushes would otherwise race mike's branch update. Never
-      # cancel a publish in flight.
-      group: docs-site-gh-pages
+      # cancel a publish in flight. GitHub keeps one waiting run per
+      # group, so a main republish has its own group: a waiting tag
+      # deploy is never replaced by it. A main run and a tag run can
+      # overlap: then the second push is refused, and both
+      # docs_deploy.sh and docs_republish.sh fetch gh-pages again,
+      # build again and push again (scripts/ci/docs_pages.sh).
+      group: ${{ github.ref_type == 'tag' && 'docs-site-gh-pages' || 'docs-site-gh-pages-main' }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      - name: Fetch gh-pages
-        # mike commits onto the local gh-pages ref. Absent on the very
-        # first deploy — mike then creates it — so guard the fetch on
-        # remote existence rather than swallowing all fetch errors.
-        run: |
-          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
-            git fetch origin gh-pages --depth=1
-          fi
 
       - name: Configure git identity
         run: |
@@ -145,7 +181,7 @@ jobs:
         # Pinned uv, the same version as ci.yml (its python-lint job says
         # why). Python comes from backend/.python-version; uv also finds
         # that file for the `uv run --project backend` calls below.
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           version: "0.13.0"
 
@@ -156,31 +192,24 @@ jobs:
       - name: Deploy versioned docs
         id: deploy
         # One docs version per minor: v0.26.3 publishes as "0.26" and
-        # re-points `latest`. `--update-aliases` lets `latest` move
-        # off the previous minor; `set-default latest` (idempotent)
-        # makes the site root redirect to the newest docs.
-        # workflow_dispatch on a non-tag ref has no version to derive,
-        # so it only rebuilds the default: guard on the ref shape.
+        # re-points `latest`; the site root redirects to `latest`.
+        # A pre-release tag (it has a `-`, like v1.0.0-rc.1) never moves
+        # `latest` or the site root. It publishes under its minor while
+        # that minor has no final tag yet, else under its own name
+        # (1.0.1-rc.1), because `latest` serves the minor's folder
+        # (#3860). The script header lists the cases; it fails on a ref
+        # that is not a vMAJOR.MINOR tag, and hands the published
+        # version to the reachability check below.
+        # On main, scripts/ci/docs_republish.sh publishes the docs of main
+        # under the version of the newest final release tag, moves
+        # `latest` there (`mike --update-aliases`), and pushes nothing
+        # when the site is unchanged.
         run: |
-          set -euo pipefail
-          # Require a full vMAJOR.MINOR prefix — a malformed tag (e.g.
-          # `v1-hotfix`) must fail loudly here, not publish a garbage
-          # entry in the public version selector.
-          case "${GITHUB_REF_NAME}" in
-            v[0-9]*.[0-9]*)
-              VERSION=$(printf '%s' "${GITHUB_REF_NAME#v}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
-              uv run --project backend --no-sync mike deploy --push --update-aliases "${VERSION}" latest
-              uv run --project backend --no-sync mike set-default --push latest
-              # Hand the just-published MAJOR.MINOR to the reachability
-              # gate below so it polls THIS run's version path, not the
-              # site root.
-              printf 'version=%s\n' "${VERSION}" >> "${GITHUB_OUTPUT}"
-              ;;
-            *)
-              echo "Ref '${GITHUB_REF_NAME}' is not a vMAJOR.MINOR[.PATCH] tag — nothing to deploy." >&2
-              exit 1
-              ;;
-          esac
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            bash scripts/ci/docs_deploy.sh "${GITHUB_REF_NAME}"
+          else
+            bash scripts/ci/docs_republish.sh
+          fi
 
       - name: Verify published docs are reachable
         # A green `mike deploy` only means the built site was committed
@@ -196,6 +225,10 @@ jobs:
           VERSION: ${{ steps.deploy.outputs.version }}
         run: |
           set -euo pipefail
+          if [ -z "${VERSION}" ] && [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "Nothing was published from main (the site was already the same)."
+            exit 0
+          fi
           if [ -z "${VERSION}" ]; then
             echo "::error::No published version resolved from the deploy step; cannot verify reachability." >&2
             exit 1

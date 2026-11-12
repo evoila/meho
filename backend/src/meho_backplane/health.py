@@ -579,7 +579,25 @@ async def ready(request: Request) -> JSONResponse:
     ``sandbox_mode`` (#4622) sits at the top level, for every caller, on
     purpose: when the metrics token is set, ``features`` is hidden from a
     caller without it, and the mode must be readable on every instance.
+
+    Once the pod got its stop signal (#5024), ``/ready`` answers 503 with
+    ``{"status": "draining", "checks": []}`` and runs no probe, so no new
+    traffic is sent to a pod that is stopping.
     """
+    # Imported here: the drain module needs the database layer, and the
+    # auth package needs the Vault client; both import this module.
+    from meho_backplane.auth.tool_clients import tool_clients_report
+    from meho_backplane.operations.shutdown_drain import is_draining
+
+    if is_draining():
+        return JSONResponse(
+            content={
+                "status": "draining",
+                "checks": [],
+                "sandbox_mode": sandbox_mode_label(),
+            },
+            status_code=503,
+        )
     snapshot = await readiness_snapshot(max_age_s=DEFAULT_READINESS_TTL_S)
     ready_ok = bool(snapshot["ready"])
     checks = cast("list[dict[str, object]]", snapshot["checks"])
@@ -591,5 +609,10 @@ async def ready(request: Request) -> JSONResponse:
         "sandbox_mode": sandbox_mode_label(),
     }
     if has_metrics_access(request):
-        payload["features"] = build_features_block(get_settings())
+        settings = get_settings()
+        features = build_features_block(settings)
+        tool_clients = tool_clients_report(settings)
+        if tool_clients is not None:
+            features["mcp"]["tool_clients"] = tool_clients
+        payload["features"] = features
     return JSONResponse(content=payload, status_code=200 if ready_ok else 503)

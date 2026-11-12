@@ -71,8 +71,11 @@ from meho_backplane.kb.schemas import (
     KbIngestConflict,
     KbIngestionResult,
     KbProvenance,
+    KbSharedNotAllowedError,
+    KbSharedSlugError,
 )
 from meho_backplane.kb.service import KbIngestRootError
+from meho_backplane.lesson_header import LessonHeaderError
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 
@@ -453,6 +456,30 @@ def test_list_forwards_filter_limit_offset(client: TestClient) -> None:
     assert call_kwargs["offset"] == 10
 
 
+def test_list_order_defaults_to_slug_and_forwards_newest(client: TestClient) -> None:
+    """``order`` defaults to ``slug``; ``order=newest`` reaches the substrate (#5679)."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+
+    fake_list = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.kb.KbService.list_entries", fake_list),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        default_response = client.get("/api/v1/kb", headers=_authed(token))
+        default_order = fake_list.await_args.kwargs["order"]
+        newest_response = client.get("/api/v1/kb?order=newest", headers=_authed(token))
+        newest_order = fake_list.await_args.kwargs["order"]
+        bad_response = client.get("/api/v1/kb?order=oldest", headers=_authed(token))
+
+    assert default_response.status_code == 200
+    assert default_order == "slug"
+    assert newest_response.status_code == 200
+    assert newest_order == "newest"
+    assert bad_response.status_code == 422
+
+
 def test_list_canonical_q_reaches_substrate(client: TestClient) -> None:
     """The canonical ``q`` free-text filter (#1854) reaches the substrate."""
     tenant_a = uuid.uuid4()
@@ -633,6 +660,33 @@ def test_create_returns_201_and_entry(client: TestClient) -> None:
     assert call_kwargs["actor_sub"] == "op-admin"
 
 
+@pytest.mark.parametrize(
+    ("raised", "expected_status"),
+    [
+        (LessonHeaderError("type must be one of fact, lesson; got 'x'"), 422),
+        (KbSharedSlugError("lab-note"), 403),
+        (KbSharedNotAllowedError(uuid.uuid4()), 403),
+    ],
+)
+def test_create_maps_header_and_shared_errors(
+    client: TestClient, raised: Exception, expected_status: int
+) -> None:
+    """A wrong header is a 422; a refused shared write is a 403, both with the reason."""
+    key, token = _admin_token(tenant_id=uuid.uuid4())
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.kb.KbService.create_entry", AsyncMock(side_effect=raised)),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/kb",
+            json={"slug": "lab-note", "body": "b"},
+            headers=_authed(token),
+        )
+    assert response.status_code == expected_status
+    assert response.json()["detail"] == str(raised)
+
+
 def test_create_overwrite_returns_200(client: TestClient) -> None:
     """POST of an existing slug (overwrite) → 200, not 201 (#1845 ask 1).
 
@@ -660,6 +714,125 @@ def test_create_overwrite_returns_200(client: TestClient) -> None:
     body = response.json()
     assert body["slug"] == "k8s-ingress"
     assert body["body"] == "B body"
+
+
+def _post_kb(client: TestClient, token: str, payload: dict[str, Any]) -> httpx.Response:
+    """POST to the real service, with the embedding model replaced by a stub."""
+    from tests._kb_embedding_stub import fake_embedding_service
+
+    with patch(
+        "meho_backplane.retrieval.indexer.get_embedding_service",
+        return_value=fake_embedding_service(),
+    ):
+        return client.post("/api/v1/kb", json=payload, headers=_authed(token))
+
+
+def test_create_refuses_a_stale_revision_with_the_current_one(client: TestClient) -> None:
+    """Two writers read the same revision: one wins, the other gets 409 stale_revision."""
+    tenant = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        created = _post_kb(
+            client, token, {"slug": "race-note", "body": "one\n", "metadata": {"k": "a"}}
+        )
+        assert created.status_code == 201
+        read = created.json()["revision_id"]
+
+        winner = _post_kb(
+            client,
+            token,
+            {
+                "slug": "race-note",
+                "body": "two\n",
+                "metadata": {"k": "b"},
+                "expected_revision": read,
+            },
+        )
+        assert winner.status_code == 200
+        current = winner.json()["revision_id"]
+
+        loser = _post_kb(
+            client, token, {"slug": "race-note", "body": "three\n", "expected_revision": read}
+        )
+
+    assert loser.status_code == 409
+    detail = loser.json()["detail"]
+    assert detail["error"] == "stale_revision"
+    assert detail["cause"] == "stale"
+    assert detail["current_revision_id"] == current
+    assert detail["current_revision_number"] == 2
+    assert detail["changed_by"] is not None
+    assert detail["changed_at"] is not None
+    assert "k" in "".join(detail["changed_metadata_keys"])
+    assert "UNTRUSTED_AGENT_TEXT" in detail["body_diff"]
+    assert "+two" in detail["body_diff"]
+
+
+def test_create_without_a_revision_refuses_an_existing_slug(client: TestClient) -> None:
+    """A write that names no revision only creates; the current revision is shown."""
+    key, token = _admin_token(tenant_id=uuid.uuid4())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        first = _post_kb(client, token, {"slug": "once-only", "body": "v1"})
+        assert first.status_code == 201
+        again = _post_kb(client, token, {"slug": "once-only", "body": "v2"})
+        shown = client.get("/api/v1/kb/once-only", headers=_authed(token))
+
+    assert again.status_code == 409
+    detail = again.json()["detail"]
+    assert detail["cause"] == "exists"
+    assert detail["current_revision_id"] == first.json()["revision_id"]
+    assert detail["body_diff"] is None
+    assert shown.json()["body"] == "v1"
+
+
+def test_create_catches_a_change_to_the_metadata_alone(client: TestClient) -> None:
+    key, token = _admin_token(tenant_id=uuid.uuid4())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        first = _post_kb(client, token, {"slug": "header", "body": "same", "metadata": {"s": "a"}})
+        read = first.json()["revision_id"]
+        changed = _post_kb(
+            client,
+            token,
+            {"slug": "header", "body": "same", "metadata": {"s": "b"}, "expected_revision": read},
+        )
+        assert changed.status_code == 200
+        assert changed.json()["revision_id"] != read
+        stale = _post_kb(
+            client,
+            token,
+            {"slug": "header", "body": "same", "metadata": {"s": "c"}, "expected_revision": read},
+        )
+
+    assert stale.status_code == 409
+    assert "s" in "".join(stale.json()["detail"]["changed_metadata_keys"])
+
+
+def test_create_with_a_revision_for_a_missing_slug_is_refused(client: TestClient) -> None:
+    key, token = _admin_token(tenant_id=uuid.uuid4())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = _post_kb(
+            client,
+            token,
+            {"slug": "never-there", "body": "x", "expected_revision": str(uuid.uuid4())},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["cause"] == "gone"
+
+
+def test_create_rejects_a_revision_that_is_not_a_uuid(client: TestClient) -> None:
+    key, token = _admin_token(tenant_id=uuid.uuid4())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = _post_kb(
+            client, token, {"slug": "bad-rev", "body": "x", "expected_revision": "nope"}
+        )
+
+    assert response.status_code == 422
 
 
 def test_create_invalid_slug_returns_422(client: TestClient) -> None:

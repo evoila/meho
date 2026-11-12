@@ -30,6 +30,8 @@ the request only *annotates* the open boundary:
   status a JSON-RPC error envelope stands for, but only when no handler
   recorded a more specific one (a parse error, an unknown method, or a
   rate-limited ``initialize`` never reaches the audit writer).
+* :func:`note_request_tool_texts` -- the MCP route records that the
+  session asked for the short tool texts (``?texts=short``).
 * :func:`note_context_selected` -- optional; records that context was
   picked, on an opaque correlation id.
 
@@ -68,6 +70,7 @@ from meho_backplane.request_usage.schema import (
     UNMATCHED_ROUTE,
     RequestUsageEventData,
     RouteCatalog,
+    ToolTexts,
     Transport,
     outcome_for_status,
 )
@@ -79,10 +82,12 @@ __all__ = [
     "build_route_catalog",
     "collection_enabled",
     "current_request_id",
+    "current_session_id",
     "note_context_selected",
     "note_request_fallback_status",
     "note_request_route",
     "note_request_status",
+    "note_request_tool_texts",
     "open_request_usage",
 ]
 
@@ -108,6 +113,7 @@ class _BoundaryState:
     http_status: int = 0
     route: str | None = None
     projected_status: int | None = None
+    tool_texts: ToolTexts | None = None
     context_selections: list[uuid.UUID] = field(default_factory=list)
     #: Set when the boundary closes. A task started inside the request
     #: (a hosted agent run) keeps a copy of the context, so it can still
@@ -166,6 +172,18 @@ def note_request_fallback_status(status_code: int) -> None:
     state = _current_boundary.get()
     if state is not None and state.projected_status is None:
         state.projected_status = status_code
+
+
+def note_request_tool_texts(tool_texts: ToolTexts) -> None:
+    """Record the session's choice of tool texts on the open boundary.
+
+    With ``AUDIT_WRAPPER_ROWS_RETIRED`` on, a read or ``call_operation``
+    writes no ``tools/call`` audit row, so the usage event is the only
+    record that names the choice.
+    """
+    state = _current_boundary.get()
+    if state is not None:
+        state.tool_texts = tool_texts
 
 
 def note_context_selected(correlation_id: uuid.UUID | None = None) -> uuid.UUID | None:
@@ -249,6 +267,17 @@ def current_request_id() -> uuid.UUID | None:
     return _uuid_or_none(structlog.contextvars.get_contextvars().get("request_id"))
 
 
+def current_session_id() -> uuid.UUID | None:
+    """Return the current agent session id, or ``None``.
+
+    The MCP session id the client sent back (when it is a UUID), else the
+    hosted agent session id. The same value a ``request_finished`` event
+    stores as ``session_id``.
+    """
+    session_id, _ = _lineage_ids(structlog.contextvars.get_contextvars())
+    return session_id
+
+
 def _route_label(scope: Scope, state: _BoundaryState, transport: Transport) -> str:
     """Return the route label to store, before the catalog check."""
     if transport == "mcp":
@@ -329,6 +358,7 @@ class RequestUsageBoundary:
             "request_id": _uuid_or_none(contextvars.get("request_id")),
             "transport": transport,
             "route": route,
+            "tool_texts": state.tool_texts,
         }
         context = {CATALOG_CONTEXT_KEY: catalog}
         events = [

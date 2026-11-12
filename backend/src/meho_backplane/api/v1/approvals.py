@@ -84,7 +84,7 @@ import uuid
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi import status as http_status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -109,6 +109,18 @@ from meho_backplane.operations.approval_context import (
     resolve_reviewer_context,
 )
 from meho_backplane.operations.approval_outcome import resume_outcome
+from meho_backplane.operations.approval_outcome_check import (
+    OutcomeAlreadyCheckedError,
+    OutcomeCheckVerdict,
+    OutcomeNotUnknownError,
+    OutcomeUnknownReason,
+    list_outcome_unknown,
+    mark_outcome_checked,
+    outcome_check,
+)
+from meho_backplane.operations.approval_outcome_check import (
+    outcome_unknown as outcome_unknown_of,
+)
 from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
     MAX_REASON_LENGTH,
@@ -128,6 +140,7 @@ from meho_backplane.operations.approval_queue import (
     ParamsMismatchError,
     PreviewBindingMissingError,
     ResultAccessForbiddenError,
+    RightsChangeApprovalError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     WithdrawForbiddenError,
@@ -149,7 +162,11 @@ from meho_backplane.operations.approval_rerun import (
     RerunParamsRequiredError,
     rerun_failed_request,
 )
+from meho_backplane.operations.approval_rights import ApproveRight, approve_right
+from meho_backplane.operations.approved_reveal import is_secret_reveal, is_write_reveal
+from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
+from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
 from meho_backplane.settings import get_settings
 
 __all__ = ["router"]
@@ -273,6 +290,57 @@ class ApprovalResumeOutcomeView(BaseModel):
     #: (#5377), for example "The VM waits on question _vmx1: ...". ``None``
     #: for any other run, and always for an operation in a secret class.
     guidance: str | None
+    #: ``uncertain`` when MEHO does not know if the change happened (#5025):
+    #: do not run it again, check the target first. ``None`` for any other
+    #: run. Additive.
+    execution_outcome: str | None = None
+
+
+class OutcomeUnknownView(BaseModel):
+    """Why an approved request is on the "outcome unknown" list (#5026)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    #: ``uncertain`` (the stored result says MEHO does not know) or
+    #: ``started_no_result`` (the run started more than
+    #: ``APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES`` ago and stored no result).
+    reason: OutcomeUnknownReason
+    #: What to do: do not run it again, check the target first.
+    advice: str
+    #: When the latest run started (ISO 8601): the latest re-run, else the
+    #: first run (``resume_outcome.resumed_at``). The minutes of the list
+    #: count from this time.
+    run_started_at: str | None
+
+
+class OutcomeCheckView(BaseModel):
+    """What a person recorded after they checked the target (#5026)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    #: ``happened`` or ``did_not_happen``.
+    verdict: OutcomeCheckVerdict
+    #: What the person checked.
+    note: str
+    checked_by: str
+    #: Display name of the person, or ``None`` when the token had no name.
+    checked_by_name: str | None
+    checked_at: str
+
+
+class OutcomeCheckRequestBody(BaseModel):
+    """POST body for ``…/outcome-check`` (#5026)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: OutcomeCheckVerdict = Field(
+        description="What you found on the target: 'happened' or 'did_not_happen'.",
+    )
+    note: str = Field(
+        min_length=1,
+        max_length=_MAX_REASON_LENGTH,
+        description="What you checked, in your own words. Stored on the request and the audit row.",
+    )
 
 
 class ApprovalRequestView(BaseModel):
@@ -290,6 +358,11 @@ class ApprovalRequestView(BaseModel):
     #: surface fails open to the ``principal_sub`` GUID. Additive; a client
     #: that ignores it is unaffected.
     principal_name: str | None = None
+    #: The requester's principal kind: ``user`` for a person, ``agent`` /
+    #: ``service`` / ``runner`` for a machine login (#3885). The console and
+    #: the CLI mark a machine requester with it. ``None`` on a request made
+    #: before MEHO saved it. Additive.
+    principal_kind: str | None = None
     op_id: str
     connector_id: str
     target_id: uuid.UUID | None
@@ -299,9 +372,27 @@ class ApprovalRequestView(BaseModel):
     #: for a non-destructive request. Additive.
     preview_hash: str | None = None
     proposed_effect: dict[str, Any]
+    #: The requester asked for the hidden values of the answer
+    #: (``reveal_secret: true``). When ``True``, the run happens when the
+    #: requester fetches the value, and that fetch returns the secret values.
+    #: Read off the row. Additive.
+    reveal_secret: bool = False
+    #: ``True`` for every request with ``reveal_secret``: a read that shows
+    #: secret values, or an operation that creates a credential. Approving it
+    #: runs nothing: it runs only when the person who asked gets the value.
+    #: A client that lost the answer to its approve reads this instead of
+    #: waiting for a run. Additive.
+    waits_for_requester: bool = False
+    #: ``True`` when such a request also changes something when it runs
+    #: (for example it creates a token). Only an operation that only reads
+    #: (class ``read`` or ``credential_read``) gives ``False``; every other
+    #: class gives ``True``. Until the person who asked gets the value, the
+    #: change has not happened, so an approve in order stops at it. Additive.
+    reveal_changes_something: bool = False
     status: ApprovalRequestStatus
     #: Run phase of an approved request (#3486): ``not_started`` /
-    #: ``started`` / ``executed`` / ``failed``. ``None`` unless ``status`` is
+    #: ``started`` / ``executed`` / ``failed`` / ``uncertain`` (#5025, MEHO
+    #: does not know if the change happened). ``None`` unless ``status`` is
     #: ``approved``. Read off the row; ``status`` keeps its four values.
     #: Additive; a client that ignores it is unaffected.
     result_state: ApprovalResultState | None = None
@@ -309,6 +400,13 @@ class ApprovalRequestView(BaseModel):
     #: status, error code and the run's audit id. ``None`` until the run
     #: starts, and for a request that is not ``approved``. Additive.
     resume_outcome: ApprovalResumeOutcomeView | None = None
+    #: Set when the request is on the "outcome unknown" list (#5026): why,
+    #: and what to check. ``None`` for every other request. Additive.
+    outcome_unknown: OutcomeUnknownView | None = None
+    #: What a person recorded after they checked the target (#5026). The
+    #: stored result and ``result_state`` stay as they were. ``None`` until
+    #: someone marks the request as checked. Additive.
+    outcome_check: OutcomeCheckView | None = None
     #: Why an ``expired`` request expired (#5030): ``deadline_passed`` or
     #: ``release_changed`` (MEHO was updated while it waited). ``None``
     #: unless ``status`` is ``expired``. Read off the row. Additive.
@@ -346,6 +444,19 @@ class ApprovalRequestView(BaseModel):
     #: who instructed the approver, their words, and the refs. ``None`` on
     #: the list view, before a decision, and for an ordinary decision.
     delegation: DelegationView | None = None
+    #: Whether the caller may approve this request (#3329), worked out by
+    #: the server with the same checks as the approve. ``False`` for a
+    #: request that is not pending. ``None`` on the withdraw answer.
+    #: Additive; a client that ignores it is unaffected.
+    may_approve: bool | None = None
+    #: Why the caller may or may not approve (#3329): ``ok``,
+    #: ``own_change``, ``wrong_group``, ``role_too_low``, ``rights_change``,
+    #: ``no_approval_access``, ``not_a_person`` or ``not_pending``. With
+    #: ``may_approve`` true, ``own_change`` means a self-approval is
+    #: allowed. ``None`` when ``may_approve`` is ``None``.
+    may_approve_reason: str | None = None
+    #: This is a change of rights: another admin must approve it.
+    rights_change: bool = False
 
 
 class ApprovalResultView(BaseModel):
@@ -496,13 +607,48 @@ def _resume_outcome_view(row: ApprovalRequest) -> ApprovalResumeOutcomeView | No
         error_code=outcome.error_code,
         audit_id=outcome.audit_id,
         guidance=outcome.guidance,
+        execution_outcome=outcome.execution_outcome,
     )
+
+
+def _outcome_unknown_view(row: ApprovalRequest) -> OutcomeUnknownView | None:
+    """Why *row* is on the "outcome unknown" list (#5026), or ``None``."""
+    unknown = outcome_unknown_of(row)
+    if unknown is None:
+        return None
+    return OutcomeUnknownView(
+        reason=unknown.reason, advice=unknown.advice, run_started_at=unknown.run_started_at
+    )
+
+
+def _outcome_check_view(row: ApprovalRequest) -> OutcomeCheckView | None:
+    """What a person recorded for *row* (#5026), or ``None``."""
+    check = outcome_check(row)
+    if check is None:
+        return None
+    return OutcomeCheckView(
+        verdict=check.verdict,
+        note=check.note,
+        checked_by=check.checked_by,
+        checked_by_name=check.checked_by_name,
+        checked_at=check.checked_at,
+    )
+
+
+def _execution_outcome(dispatch_result: Any) -> str | None:
+    """``uncertain`` when the run's result says MEHO does not know (#5025), else ``None``."""
+    envelope = {
+        "status": getattr(dispatch_result, "status", None),
+        "extras": getattr(dispatch_result, "extras", None),
+    }
+    return UNCERTAIN_OUTCOME if envelope_is_uncertain(envelope) else None
 
 
 def _view(
     row: ApprovalRequest,
     reviewer_context: ReviewerContextView | None = None,
     delegation: Delegation | None = None,
+    right: ApproveRight | None = None,
 ) -> ApprovalRequestView:
     """Convert an ORM row to a response view.
 
@@ -510,7 +656,8 @@ def _view(
     supplied only on the single-request path (its resolution runs a few
     tenant-scoped reads); the list view passes ``None`` and the field is
     simply absent there. *delegation* (#3692) is likewise single-request
-    only -- it is read off the decision audit row.
+    only -- it is read off the decision audit row. *right* (#3329) says
+    whether the caller may approve the request; list and show pass it.
     """
     expired_reason = approval_expired_reason(row)
     return ApprovalRequestView(
@@ -520,15 +667,21 @@ def _view(
         principal_sub=row.principal_sub,
         principal_act=row.principal_act,
         principal_name=row.principal_name,
+        principal_kind=row.principal_kind,
         op_id=row.op_id,
         connector_id=row.connector_id,
         target_id=row.target_id,
         params_hash=row.params_hash,
         preview_hash=row.preview_hash,
         proposed_effect=row.proposed_effect,
+        reveal_secret=bool(row.reveal_secret),
+        waits_for_requester=is_secret_reveal(row),
+        reveal_changes_something=is_write_reveal(row),
         status=ApprovalRequestStatus(row.status),
         result_state=approval_result_state(row),
         resume_outcome=_resume_outcome_view(row),
+        outcome_unknown=_outcome_unknown_view(row),
+        outcome_check=_outcome_check_view(row),
         expired_reason=expired_reason,
         expired_message=EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
         release_id=row.release_id,
@@ -550,6 +703,9 @@ def _view(
             if delegation is not None
             else None
         ),
+        may_approve=right.may_approve if right is not None else None,
+        may_approve_reason=right.reason.value if right is not None else None,
+        rights_change=is_rights_change(row),
     )
 
 
@@ -579,6 +735,11 @@ def _approval_role_floor_http_error(exc: ApprovalRoleFloorError) -> HTTPExceptio
     Caught before the generic ``insufficient_role`` mapping of its parent
     class, so the detail names the role the operation needs.
     """
+    if isinstance(exc, RightsChangeApprovalError):
+        return HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=f"rights_change_required: {exc.reason_text}",
+        )
     return HTTPException(
         status_code=http_status.HTTP_403_FORBIDDEN,
         detail=f"role_floor_required: {exc}",
@@ -621,6 +782,7 @@ async def _capture_operator_decision(
     reason: str,
     operator: Operator,
     approval_auth: ApprovalAuth | None,
+    user_agent: str | None = None,
 ) -> ApprovalRequest:
     """Commit a ``/decide`` operator decision + publish, mapping errors to HTTP.
 
@@ -643,6 +805,7 @@ async def _capture_operator_decision(
                     params=None,
                     reason=reason,
                     approval_auth=approval_auth,
+                    user_agent=user_agent,
                 )
             else:
                 request = await reject_request(
@@ -752,6 +915,16 @@ async def list_approvals(
             "of requests under one change ticket was sent in."
         ),
     ),
+    outcome_unknown: bool = Query(
+        default=False,
+        description=(
+            "List only approved requests whose outcome MEHO does not know and "
+            "that nobody marked as checked: the result says 'uncertain', or the "
+            "latest run started more than APPROVAL_OUTCOME_UNKNOWN_AFTER_MINUTES "
+            "(default 15) ago and stored no result. When true, 'status' is "
+            "ignored. Defaults to false."
+        ),
+    ),
     operator: Operator = _require_approvals_access,
 ) -> list[ApprovalRequestView]:
     """List approval requests for the operator's tenant.
@@ -766,12 +939,25 @@ async def list_approvals(
     oldest-first (``created_at ASC``, ties broken on ``id``) so a chain of
     requests under one change ticket reads in the order it was sent
     (#3596). ``limit`` / ``offset`` page through the result; no ``limit``
-    returns every match.
+    returns every match. ``?outcome_unknown=true`` lists the approved
+    requests whose outcome MEHO does not know (#5026), the same list the
+    console, the CLI and MCP show; ``status`` is then ignored.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.list",
         audit_op_class="read",
     )
+    if outcome_unknown:
+        async with get_sessionmaker()() as session:
+            unknown_rows = await list_outcome_unknown(
+                session,
+                tenant_id=operator.tenant_id,
+                work_ref=work_ref,
+                limit=limit,
+                offset=offset,
+                order=order,
+            )
+        return [_view(r, right=approve_right(operator, r)) for r in unknown_rows]
     # Validate status value against the closed enum; "all" means no filter.
     status_filter: ApprovalRequestStatus | None = None
     if status != "all":
@@ -803,7 +989,7 @@ async def list_approvals(
         result = await session.execute(stmt)
         rows = list(result.scalars().all())
 
-    return [_view(r) for r in rows]
+    return [_view(r, right=approve_right(operator, r)) for r in rows]
 
 
 @router.get("/{request_id}", response_model=ApprovalRequestView)
@@ -838,7 +1024,7 @@ async def get_approval_request(
         # resolver never raises, so a resolution miss just omits the block.
         reviewer_context = _reviewer_context_view(await resolve_reviewer_context(session, row))
         delegation = await get_decision_delegation(session, row)
-    return _view(row, reviewer_context, delegation)
+    return _view(row, reviewer_context, delegation, approve_right(operator, row))
 
 
 @router.get("/{request_id}/result", response_model=ApprovalResultView)
@@ -908,6 +1094,7 @@ async def _record_approval_decision(
     operator: Operator,
     body: ApproveRequestBody,
     approval_auth: ApprovalAuth,
+    user_agent: str | None = None,
 ) -> ApprovalRequest:
     """Commit + audit the approval decision, publish the event, map errors.
 
@@ -928,6 +1115,7 @@ async def _record_approval_decision(
                 params=body.params,
                 reason=body.reason,
                 approval_auth=approval_auth,
+                user_agent=user_agent,
             )
             await session.commit()
         # Publish AFTER commit (G11.2-T5): a phantom event cannot
@@ -1006,6 +1194,7 @@ async def _record_approval_decision(
 async def approve_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
     body: ApproveRequestBody,
+    http_request: Request,
     operator: Operator = _require_approvals_access,
     approval_auth: ApprovalAuth = _require_fresh_sign_in,
 ) -> ApproveResponseBody | JSONResponse:
@@ -1052,7 +1241,11 @@ async def approve_approval_request(
         audit_approval_request_id=str(request_id),
     )
     request = await _record_approval_decision(
-        request_id, operator=operator, body=body, approval_auth=approval_auth
+        request_id,
+        operator=operator,
+        body=body,
+        approval_auth=approval_auth,
+        user_agent=http_request.headers.get("user-agent"),
     )
 
     # Async governed dispatch (#3079): hand the resume to the background
@@ -1060,7 +1253,9 @@ async def approve_approval_request(
     # The decision is already committed + audited above; the exactly-one-
     # resumer claim (#2293) still guards the single execution, now won
     # inside the background task.
-    if body.async_:
+    # A secret reveal runs nothing on an approve (``approved_reveal``), so it
+    # needs no background run.
+    if body.async_ and not is_secret_reveal(request):
         run_id = await get_operation_run_service().submit_approval_resume(
             operator, request, params=body.params
         )
@@ -1228,6 +1423,69 @@ async def withdraw_approval_request(
     return _view(request)
 
 
+@router.post(
+    "/{request_id}/outcome-check",
+    response_model=ApprovalRequestView,
+    dependencies=[_require_human],
+)
+async def mark_approval_outcome_checked(
+    request_id: Annotated[uuid.UUID, Path()],
+    body: OutcomeCheckRequestBody,
+    operator: Operator = _require_approvals_access,
+) -> ApprovalRequestView:
+    """Record what you found on the target of a run with an unknown outcome (#5026).
+
+    For an approved request on the "outcome unknown" list. A person who may
+    decide approvals records "it happened" or "it did not happen" with a
+    note. MEHO writes one ``approval.outcome_check`` audit row and the
+    request leaves the list. The stored result stays as it was, and nothing
+    runs.
+
+    HTTP status codes:
+
+    * 200 — recorded.
+    * 403 — not a person, or a role that may not decide approvals.
+    * 404 — request not found (or belongs to another tenant).
+    * 409 — ``outcome_already_checked`` when a check already covers the
+      request, or ``outcome_not_unknown`` when its outcome is known or not
+      yet due (not approved, not run, a known result, or a latest run that
+      started less than the set minutes ago).
+    * 422 — an unknown verdict, or an empty or too long note.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="approval.outcome_check",
+        audit_op_class="write",
+        audit_approval_request_id=str(request_id),
+    )
+    try:
+        async with get_sessionmaker()() as session:
+            request = await mark_outcome_checked(
+                session, request_id, operator=operator, verdict=body.verdict, note=body.note
+            )
+            await session.commit()
+    except UnauthorizedApprovalError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN, detail="insufficient_role"
+        ) from exc
+    except ApprovalNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail="approval_request_not_found"
+        ) from exc
+    except OutcomeAlreadyCheckedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT, detail="outcome_already_checked"
+        ) from exc
+    except OutcomeNotUnknownError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT, detail="outcome_not_unknown"
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT, detail="note_required"
+        ) from exc
+    return _view(request, right=approve_right(operator, request))
+
+
 class RerunRequestBody(BaseModel):
     """POST body for ``…/rerun`` (#5417)."""
 
@@ -1353,7 +1611,7 @@ class DecideRequestBody(BaseModel):
     row the dispatcher stored at park time (#1503).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     decision: str = Field(
         description="One of 'approved' / 'rejected'.",
@@ -1367,6 +1625,42 @@ class DecideRequestBody(BaseModel):
             "human instructed this decision."
         ),
     )
+    async_: bool = Field(
+        default=False,
+        alias="async",
+        description=(
+            "Answer at once (#5110). When true and the decision is "
+            "'approved', MEHO saves the decision, starts the operation in "
+            "the background and answers HTTP 202 with a run id. Read the "
+            "request with GET /api/v1/approvals/{id} to see the run end "
+            "(result_state). Ignored on a rejection. Default false: the "
+            "answer comes after the operation ends, as before."
+        ),
+    )
+
+
+class DecideAcceptedBody(BaseModel):
+    """Answer of ``/decide`` with ``async: true`` on an approval (HTTP 202, #5110).
+
+    The decision is saved and audited. The operation runs in the
+    background: ``run_id`` names that run. Read the request with
+    ``GET /api/v1/approvals/{id}`` until ``result_state`` is no longer
+    ``started`` or ``not_started``. The decision fields mean the same as
+    in :class:`DecideResponseBody`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    approval_request_id: uuid.UUID
+    decision: str
+    reason: str
+    decided_by: str | None = None
+    decided_by_name: str | None = None
+    self_approved: bool | None = None
+    approval_rule: str | None = None
+    run_id: uuid.UUID
+    status: str = "pending"
+    async_: bool = Field(default=True, alias="async")
 
 
 class DecideResponseBody(BaseModel):
@@ -1392,6 +1686,20 @@ class DecideResponseBody(BaseModel):
     so a client renders *who* without resolving the GUID itself. ``None``
     when the token carried no name — the client fails open to ``decided_by``.
     Display name only: no email or other profile field is added here.
+
+    ``self_approved`` and ``approval_rule`` (#3329) are the same values the
+    ``approval.decision`` audit row records: whether the person approved
+    their own change, and the rule that allowed the approval
+    (``sa_operator_self_approval``, ``break_glass_self_approval``,
+    ``sa_operator_or_admin`` or ``reviewer``). The command line prints a
+    self-approval line from them. Both are ``None`` on a rejection.
+
+    ``dispatch_execution_outcome`` (#5025) is ``uncertain`` when the run
+    ended without MEHO knowing if the change happened (a lost vendor answer
+    after the request was sent, or a failed audit write): do not run it
+    again, check the target first. ``None`` for any other run, so a client
+    that reads it can tell this run from a plain failure without a second
+    read. Additive.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -1405,18 +1713,28 @@ class DecideResponseBody(BaseModel):
     dispatch_op_id: str | None = None
     dispatch_result: dict[str, Any] | list[Any] | None = None
     dispatch_error: str | None = None
+    dispatch_execution_outcome: str | None = None
+    self_approved: bool | None = None
+    approval_rule: str | None = None
 
 
 @router.post(
     "/{request_id}/decide",
     response_model=DecideResponseBody,
     dependencies=[_require_human],
+    responses={
+        http_status.HTTP_202_ACCEPTED: {
+            "model": DecideAcceptedBody,
+            "description": "Approved; the operation runs in the background (async: true).",
+        }
+    },
 )
 async def decide_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
     body: DecideRequestBody,
+    http_request: Request,
     operator: Operator = _require_approvals_access,
-) -> DecideResponseBody:
+) -> DecideResponseBody | JSONResponse:
     """Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).
 
     Flips the request to ``approved`` or ``rejected``, writes the
@@ -1444,6 +1762,11 @@ async def decide_approval_request(
     ``WWW-Authenticate: Bearer error="insufficient_user_authentication"``
     and ``max_age`` (RFC 9470), and the request stays pending. A rejection
     needs no fresh sign-in.
+
+    With ``async: true`` an approval answers at once (#5110): the decision
+    is saved and audited as above, the operation starts in the background
+    through the same resume path (same run claim, same audit), and the
+    answer is HTTP 202 with the run id (:class:`DecideAcceptedBody`).
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.decide",
@@ -1467,6 +1790,7 @@ async def decide_approval_request(
         reason=body.reason,
         operator=operator,
         approval_auth=approval_auth,
+        user_agent=http_request.headers.get("user-agent"),
     )
 
     # Every approval drives the execute (#1503, #2293): stored params
@@ -1477,6 +1801,8 @@ async def decide_approval_request(
     # the claim is free (waiter gone), else it no-ops already_resumed —
     # so the run_id-is-not-None skip guard is gone: it was the source of
     # the silent-non-execution seam when the waiter had died.
+    if decision == "approved" and body.async_ and not is_secret_reveal(request):
+        return await _decide_in_background(operator, request, body)
     if decision == "approved":
         dispatch_result = await _resume_dispatch_after_approval(
             operator=operator, request=request, params=None
@@ -1499,6 +1825,9 @@ async def decide_approval_request(
             dispatch_op_id=dispatch_result.op_id,
             dispatch_result=dispatch_result.result,
             dispatch_error=dispatch_result.error,
+            dispatch_execution_outcome=_execution_outcome(dispatch_result),
+            self_approved=request.principal_sub == operator.sub,
+            approval_rule=str(request._approval_rule),  # type: ignore[attr-defined]
         )
 
     return DecideResponseBody(
@@ -1507,4 +1836,41 @@ async def decide_approval_request(
         reason=body.reason,
         decided_by=operator.sub,
         decided_by_name=operator.name,
+    )
+
+
+async def _decide_in_background(
+    operator: Operator, request: ApprovalRequest, body: DecideRequestBody
+) -> JSONResponse:
+    """Start the approved operation in the background; answer 202 (#5110).
+
+    The decision is already saved and audited. The run goes through
+    :meth:`~meho_backplane.operations.operation_run_service.OperationRunService.submit_approval_resume`,
+    the same path ``/approve`` uses with ``async: true``, so the run claim
+    and the audit stay the same.
+    """
+    run_id = await get_operation_run_service().submit_approval_resume(
+        operator, request, params=None
+    )
+    _log.info(
+        "approval_request_resume_dispatched_async",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        operation_run_id=str(run_id),
+        operator_sub=operator.sub,
+        via="decide",
+    )
+    accepted = DecideAcceptedBody(
+        approval_request_id=request.id,
+        decision="approved",
+        reason=body.reason,
+        decided_by=operator.sub,
+        decided_by_name=operator.name,
+        self_approved=request.principal_sub == operator.sub,
+        approval_rule=str(request._approval_rule),  # type: ignore[attr-defined]
+        run_id=run_id,
+    )
+    return JSONResponse(
+        content=accepted.model_dump(mode="json", by_alias=True),
+        status_code=http_status.HTTP_202_ACCEPTED,
     )

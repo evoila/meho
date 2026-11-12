@@ -78,7 +78,7 @@ per-operator Vault tenant-scope exemption in
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -86,8 +86,13 @@ import structlog
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.auth.approval_sign_in_flow import (
+    ApprovalSignInStatus,
+    read_approval_sign_in,
+)
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.jwt import verify_jwt_allow_unchosen
-from meho_backplane.auth.operator import Operator, TenantRole, group_grant
+from meho_backplane.auth.operator import Operator, TenantMembership, TenantRole, group_grant
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.checks.watchdog import sensor_runner_liveness
 from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
@@ -105,7 +110,9 @@ from meho_backplane.mcp.registry import (
     get_tool,
     has_addon_gated_tools,
     registered_tool_names,
+    role_at_least,
     surface_visible,
+    tool_surface,
 )
 from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 from meho_backplane.mcp.server import mcp_session_id_capture_mode
@@ -114,6 +121,7 @@ from meho_backplane.operations import dispatch
 from meho_backplane.operations.addon_pairing import AddonPairingService
 from meho_backplane.operations.addon_pairing_contract import is_contract_compatible
 from meho_backplane.operations.catalog_release import catalog_release_status
+from meho_backplane.operations.unpriced_model import is_model_priced
 from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import get_settings
 from meho_backplane.version import build_git_sha
@@ -187,6 +195,11 @@ class OperatorIdentity(BaseModel):
     login with several tenants that chose none gets ``tenant_id`` and
     ``tenant_role`` as ``None``: the status answer then only lists the
     tenants.
+
+    Inside an agent run that a person started (an agent is bound as the
+    actor), no role in ``tenants`` is higher than ``tenant_role``, the
+    role of the run that every check uses (#5773). The person's own
+    login groups may give a higher role, but the agent never gets it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -200,8 +213,20 @@ class OperatorIdentity(BaseModel):
 
 
 def _operator_identity(operator: Operator) -> OperatorIdentity:
-    """Build the identity block, with the person's tenants (#5239)."""
+    """Build the identity block, with the person's tenants (#5239).
+
+    In an agent run (an actor is bound), each tenant's role is capped at
+    the run's own role (#5773).
+    """
     chosen = operator.tenant_chosen
+    in_agent_run = resolve_actor_sub() is not None
+
+    def _entry_role(entry: TenantMembership) -> TenantRole:
+        role = group_grant(entry.group).role
+        if in_agent_run and not role_at_least(operator.tenant_role, role):
+            return operator.tenant_role
+        return role
+
     return OperatorIdentity(
         sub=operator.sub,
         name=operator.name,
@@ -212,7 +237,7 @@ def _operator_identity(operator: Operator) -> OperatorIdentity:
             TenantEntry(
                 tenant_id=entry.tenant_id,
                 name=entry.name,
-                tenant_role=group_grant(entry.group).role,
+                tenant_role=_entry_role(entry),
                 current=chosen and entry.tenant_id == operator.tenant_id,
             )
             for entry in operator.tenants
@@ -316,7 +341,9 @@ class ApprovalsStatus(BaseModel):
     ``delegated_decision_posture`` says whether a decision made on
     someone else's instruction is allowed. The three values come from
     :func:`meho_backplane.features.build_features_block`; they are state
-    words only, never a key value.
+    words only, never a key value. ``sign_in`` is the state of the
+    approval client's own login flow in Keycloak (#6280,
+    :mod:`meho_backplane.auth.approval_sign_in_flow`).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -324,6 +351,7 @@ class ApprovalsStatus(BaseModel):
     custody: str
     effective_posture: str
     delegated_decision_posture: str
+    sign_in: ApprovalSignInStatus | None = None
 
 
 class FeatureStatus(BaseModel):
@@ -421,6 +449,20 @@ class PairingHealth(BaseModel):
     contract_version: int
     contract_compatible: bool
     last_seen: datetime | None
+
+
+class AgentModelSpend(BaseModel):
+    """Whether the spend limits count the cost of the default agent model (#5771).
+
+    ``model`` is ``AGENT_DEFAULT_MODEL``. ``spend_counted`` is ``False``
+    when MEHO has no price for that model: a run on it then costs 0, so
+    the spend limit per login does not limit it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    model: str
+    spend_counted: bool
 
 
 class SurfaceSummary(BaseModel):
@@ -529,6 +571,17 @@ class HealthResponse(BaseModel):
     operation rows and says whether it is this pod's release
     (:class:`OperationCatalogStatus`). The ``None`` default keeps older
     response decoders working; the handler always fills it.
+
+    ``agent_model_spend`` (#5771) says whether the spend limits count the
+    cost of runs on the default agent model (:class:`AgentModelSpend`).
+    The ``None`` default keeps older response decoders working; the
+    handler always fills it.
+
+    ``server_time`` (#5504) is the server's time now, in UTC, to the
+    second (ISO 8601 with a ``Z`` suffix). An agent with no shell has no
+    other clock, so it reads this when it must write down the time. Both
+    answers fill it, also the one for a login that chose no tenant. The
+    ``None`` default keeps older response decoders working.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -548,6 +601,8 @@ class HealthResponse(BaseModel):
     features: list[FeatureStatus] = []
     connector_packages: list[ConnectorPackage] = []
     operation_catalog: OperationCatalogStatus | None = None
+    agent_model_spend: AgentModelSpend | None = None
+    server_time: datetime | None = None
 
 
 class LivenessResponse(BaseModel):
@@ -573,6 +628,11 @@ class LivenessResponse(BaseModel):
 
     ``db`` shares :class:`DbStatus` with the deep check, so it carries
     the migration revision too (#4830). It still never touches Vault.
+
+    ``server_time`` (#5504) is the same field as on the deep check: the
+    server's time now, in UTC, to the second. ``meho status`` falls back
+    to this route for a login with the ``read_only`` role, so that login
+    reads the time here. A clock read; no Vault, no connector.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -580,6 +640,7 @@ class LivenessResponse(BaseModel):
     operator: OperatorIdentity
     db: DbStatus
     sensor_runner: SensorRunnerStatus | None = None
+    server_time: datetime | None = None
 
 
 router = APIRouter(prefix="/api/v1", tags=["health"])
@@ -860,12 +921,12 @@ async def _surface_summary(operator: Operator) -> SurfaceSummary:
     expected = sorted(
         name
         for name in registered_tool_names()
-        if (entry := get_tool(name)) is not None and entry[0].surface is ToolSurface.WORKING
+        if (entry := get_tool(name)) is not None and tool_surface(entry[0]) is ToolSurface.WORKING
     )
     listed = sorted(
         defn.name
         for defn in all_tools_for(operator, active_addon_families=active_families)
-        if defn.surface is ToolSurface.WORKING
+        if tool_surface(defn) is ToolSurface.WORKING
     )
     listed_set = set(listed)
     return SurfaceSummary(
@@ -933,6 +994,7 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     vault_status = await _probe_federation(operator, log)
     db_state = await db_migration_status()
     approvals, features = _approvals_and_features()
+    approvals = approvals.model_copy(update={"sign_in": await read_approval_sign_in()})
     return HealthResponse(
         operator=_operator_identity(operator),
         vault=vault_status,
@@ -949,7 +1011,20 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         features=features,
         connector_packages=list(installed_connector_packages()),
         operation_catalog=await _operation_catalog_status(),
+        agent_model_spend=_agent_model_spend(),
+        server_time=_server_time(),
     )
+
+
+def _server_time() -> datetime:
+    """The time now in UTC, to the second (#5504)."""
+    return datetime.now(UTC).replace(microsecond=0)
+
+
+def _agent_model_spend() -> AgentModelSpend:
+    """Whether the spend limits count the default agent model (#5771)."""
+    model = get_settings().agent_default_model
+    return AgentModelSpend(model=model, spend_counted=is_model_priced(model))
 
 
 async def _tenant_not_chosen_response(operator: Operator) -> HealthResponse:
@@ -966,6 +1041,7 @@ async def _tenant_not_chosen_response(operator: Operator) -> HealthResponse:
         vault=VaultStatus(reachable=False, read_ok=False, detail="tenant_not_chosen"),
         db=_db_status(db_state),
         mcp_session_id_capture=mcp_session_id_capture_mode(),
+        server_time=_server_time(),
     )
 
 
@@ -1011,6 +1087,7 @@ async def liveness(
         operator=_operator_identity(operator),
         db=_db_status(db_state),
         sensor_runner=_sensor_runner_status(),
+        server_time=_server_time(),
     )
 
 

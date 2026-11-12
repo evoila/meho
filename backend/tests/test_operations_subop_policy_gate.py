@@ -51,6 +51,7 @@ from meho_backplane.operations.approval_queue import (
 )
 from meho_backplane.operations.composite import (
     CompositeResumeState,
+    approved_run_var,
     composite_dispatch_var,
     composite_resume_scope_var,
     composite_resume_state,
@@ -168,15 +169,14 @@ async def test_safe_subop_auto_executes(session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_dangerous_subop_denied_for_agent_without_grant(
+async def test_dangerous_subop_waits_for_agent_without_grant(
     session: AsyncSession,
 ) -> None:
-    """A ``dangerous`` sub-op with no grant denies — governance not lowered.
+    """A ``dangerous`` sub-op with no grant waits for a person (#3980).
 
-    For an agent principal the ``dangerous`` safety default is ``deny``.
-    The seam surfaces that as a ``denied`` result the handler returns
-    verbatim, so the write never runs and the sub-op cannot execute at a
-    lower governance level than it had through ``dispatch_child``.
+    For an agent principal the ``dangerous`` safety default is
+    ``needs-approval``. The seam parks the step, so the write never runs
+    before a person approves it.
     """
     result = await enforce_subop_policy(
         operator=_operator(principal_kind=PrincipalKind.AGENT),
@@ -188,12 +188,11 @@ async def test_dangerous_subop_denied_for_agent_without_grant(
         params={"vm": "vm-42"},
     )
     assert result is not None
-    assert result.status == "denied"
+    assert result.status == "awaiting_approval"
     assert result.op_id == "DELETE:/vcenter/vm/{vm}"
 
-    # No pending row: a deny is not a park.
     count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
-    assert count == 0
+    assert count == 1
 
 
 async def _seed_needs_approval_grant(op_pattern: str) -> None:
@@ -393,9 +392,13 @@ async def test_subop_resume_var_ignores_non_matching_subop(
     assert result.status == "awaiting_approval"
 
 
+@pytest.mark.parametrize(
+    ("safety_level", "requires_approval"),
+    [("dangerous", True), ("destructive", False), ("destructive", True)],
+)
 @pytest.mark.asyncio
 async def test_subop_resume_scope_guard_fails_closed_on_second_gate(
-    session: AsyncSession,
+    session: AsyncSession, safety_level: str, requires_approval: bool
 ) -> None:
     """A second governed gate during a resume fails closed, not re-parks (#3351 B1).
 
@@ -405,7 +408,9 @@ async def test_subop_resume_scope_guard_fails_closed_on_second_gate(
     ``enforce_subop_policy`` aborts with
     ``composite_resume_multi_gate_unsupported`` — naming the composite and both
     sub-ops — and writes **no** second :class:`ApprovalRequest`, rather than
-    parking a request whose resume would re-run the earlier legs.
+    parking a request whose resume would re-run the earlier legs. Since
+    #3980 only a ``destructive`` or ``requires_approval`` step reaches the
+    guard; the approval of the run covers every other step.
     """
     approved = ("POST:/vcenter/vm/{vm}/power?action=start", "approvedhash")
     before = await session.scalar(select(func.count()).select_from(ApprovalRequest))
@@ -418,8 +423,8 @@ async def test_subop_resume_scope_guard_fails_closed_on_second_gate(
             operator=_operator(),
             connector_id=_CONNECTOR_ID,
             op_id=_SUB_OP_ID,
-            safety_level="dangerous",
-            requires_approval=True,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
             target=None,
             params=_SUB_PARAMS,
         )
@@ -898,3 +903,149 @@ async def test_subop_park_refused_when_preflight_says_write_will_be_denied(
     assert rows[0].status_code == 403
     assert rows[0].payload["result_status"] == "denied"
     assert rows[0].payload["error"]["error_code"] == "write_capability_denied"
+
+
+# ===========================================================================
+# #3980 — one approval covers the internal steps of the approved run
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    ("principal_kind", "web_session"),
+    [(PrincipalKind.USER, False), (PrincipalKind.USER, True), (PrincipalKind.AGENT, False)],
+)
+@pytest.mark.asyncio
+async def test_dangerous_subop_waits_outside_an_approved_run(
+    session: AsyncSession, principal_kind: PrincipalKind, web_session: bool
+) -> None:
+    """A ``dangerous`` step waits for a token call, a web call and an agent."""
+    operator = _operator(principal_kind=principal_kind).model_copy(
+        update={"web_session": web_session}
+    )
+    result = await enforce_subop_policy(
+        operator=operator,
+        connector_id=_CONNECTOR_ID,
+        op_id=_SUB_OP_ID,
+        safety_level="dangerous",
+        requires_approval=False,
+        target=None,
+        params=_SUB_PARAMS,
+    )
+    assert result is not None
+    assert result.status == "awaiting_approval"
+
+
+@pytest.mark.parametrize("web_session", [False, True])
+@pytest.mark.asyncio
+async def test_approved_run_covers_a_dangerous_subop(
+    session: AsyncSession, web_session: bool
+) -> None:
+    """Inside an approved run a ``dangerous`` step goes ahead, no second request.
+
+    The run was approved by a person (``dispatch(..., _approved=True)``
+    binds ``approved_run_var``), so the step does not wait again, whether
+    the reviewer runs it from the web interface or the command line.
+    """
+    operator = _operator().model_copy(update={"web_session": web_session})
+    token = approved_run_var.set(True)
+    try:
+        result = await enforce_subop_policy(
+            operator=operator,
+            connector_id=_CONNECTOR_ID,
+            op_id=_SUB_OP_ID,
+            safety_level="dangerous",
+            requires_approval=False,
+            target=None,
+            params=_SUB_PARAMS,
+        )
+    finally:
+        approved_run_var.reset(token)
+    assert result is None
+    assert await _approval_count(session) == 0
+
+
+@pytest.mark.parametrize(
+    ("safety_level", "requires_approval"),
+    [("dangerous", True), ("caution", True)],
+)
+@pytest.mark.asyncio
+async def test_approved_run_does_not_cover_a_requires_approval_subop(
+    session: AsyncSession, safety_level: str, requires_approval: bool
+) -> None:
+    """A step marked ``requires_approval`` keeps its own approval in an approved run."""
+    token = approved_run_var.set(True)
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_SUB_OP_ID,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            target=None,
+            params=_SUB_PARAMS,
+        )
+    finally:
+        approved_run_var.reset(token)
+    assert result is not None
+    assert result.status == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_approved_run_keeps_an_agent_deny_row(session: AsyncSession) -> None:
+    """An approved run does not lift a ``deny`` row: a deny stays a deny."""
+    async with get_sessionmaker()() as s:
+        s.add(
+            AgentPermission(
+                tenant_id=_TENANT_ID,
+                principal_sub="ops-operator-sub",
+                op_pattern=_SUB_OP_ID,
+                verdict="deny",
+                created_by_sub="admin",
+            )
+        )
+        await s.commit()
+    token = approved_run_var.set(True)
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(principal_kind=PrincipalKind.AGENT),
+            connector_id=_CONNECTOR_ID,
+            op_id=_SUB_OP_ID,
+            safety_level="dangerous",
+            requires_approval=False,
+            target=None,
+            params=_SUB_PARAMS,
+        )
+    finally:
+        approved_run_var.reset(token)
+    assert result is not None
+    assert result.status == "denied"
+
+
+@pytest.mark.asyncio
+async def test_resume_scope_covers_a_second_dangerous_subop(session: AsyncSession) -> None:
+    """During the re-entry of an approved step, a later ``dangerous`` step goes ahead.
+
+    The approved step already cleared. A token reviewer (no web session)
+    would make the later step wait; the approval of the run covers it, so
+    the resume does not end with ``composite_resume_multi_gate_unsupported``.
+    """
+    approved = ("POST:/vcenter/vm/{vm}/power?action=start", "approvedhash")
+    dispatch_token = composite_dispatch_var.set(("vmware.composite.vm.create", {"name": "vm-x"}))
+    scope_token = composite_resume_scope_var.set(approved)
+    resume_token = composite_resume_var.set(None)
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_SUB_OP_ID,
+            safety_level="dangerous",
+            requires_approval=False,
+            target=None,
+            params=_SUB_PARAMS,
+        )
+    finally:
+        composite_resume_var.reset(resume_token)
+        composite_resume_scope_var.reset(scope_token)
+        composite_dispatch_var.reset(dispatch_token)
+    assert result is None
+    assert await _approval_count(session) == 0

@@ -173,6 +173,7 @@ def document_to_entry(doc: Document) -> MemoryEntry:
         expires_at=metadata_datetime(metadata, "expires_at"),
         user_sub=metadata_str(metadata, "user_sub"),
         target_name=metadata_str(metadata, "target_name"),
+        source=metadata_str(metadata, "source"),
         created_at=doc.created_at,
         updated_at=doc.updated_at,
     )

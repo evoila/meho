@@ -143,6 +143,9 @@ func TestNewRootCmd_Subcommands(t *testing.T) {
 		"show <dashboard_id>":   true,
 		"create":                true,
 		"delete <dashboard_id>": true,
+		"edit <dashboard_id>":   true,
+		"export <name>":         true,
+		"import <file>":         true,
 	}
 	for _, sub := range cmd.Commands() {
 		if !want[sub.Use] {

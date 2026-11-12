@@ -119,6 +119,7 @@ from meho_backplane.topology.bulk_import import (
     bulk_import_edges,
 )
 from meho_backplane.topology.refresh import refresh_target_topology
+from meho_backplane.topology.refresh_read_scope import RefreshReadScopeDeniedError
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals.render import set_csrf_cookie
@@ -470,6 +471,9 @@ async def _refresh(
     without an explicit txn; ``refresh_target_topology`` opens its own
     reconcile transaction) — the same lifecycle the REST refresh handler's
     ``get_raw_session`` dependency yields.
+
+    A target outside the read scope of a service login answers 403
+    ``read_scope_denied``, the same as the REST refresh route.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
@@ -485,7 +489,10 @@ async def _refresh(
             return _render_refresh_not_found(
                 request, target_name=target_name, exc=exc, status_code=409
             )
-        result = await refresh_target_topology(target, operator)
+        try:
+            result = await refresh_target_topology(target, operator)
+        except RefreshReadScopeDeniedError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.reason) from exc
 
     _log.info(
         "ui_topology_refresh",

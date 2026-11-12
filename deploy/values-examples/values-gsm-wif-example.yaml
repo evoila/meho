@@ -109,3 +109,12 @@ networkPolicy:
   # unused subnet (no Vault egress rule is exercised without a Vault backend).
   vaultCIDR: 10.0.2.0/24 # CHANGE ME (unused on GSM; kept to satisfy the schema)
   keycloakCIDR: 10.0.3.0/24 # CHANGE ME
+
+# Bring-your-own: this file names its own PostgreSQL, Keycloak and Vault
+# (or GSM), so the built-in core parts (on by default, #4047) stay off.
+corePostgres:
+  enabled: false
+coreKeycloak:
+  enabled: false
+coreVault:
+  enabled: false

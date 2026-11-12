@@ -393,19 +393,24 @@ async def test_legacy_entry_reads_as_legacy_until_next_ingest(
 
 
 @pytest.mark.asyncio
-async def test_direct_create_is_last_write_wins_with_direct_provenance(
+async def test_direct_update_replaces_the_entry_with_direct_provenance(
     stub_embedding: AsyncMock,
 ) -> None:
-    """Explicit create replaces the entry; provenance says ``direct``; caller cannot forge it."""
+    """An update from the revision read replaces the entry; provenance says ``direct``."""
     tenant_id = uuid.uuid4()
     service = KbService()
-    await service.create_entry(tenant_id, "shared", "First.", actor_sub="user-a")
+    first, _ = await service.create_entry(tenant_id, "shared", "First.", actor_sub="user-a")
     forged: dict[str, object] = {
         "provenance": {"source_kind": "directory", "relative_path": "x.md"}
     }
 
     entry, created = await service.create_entry(
-        tenant_id, "shared", "Second.", forged, actor_sub="user-b"
+        tenant_id,
+        "shared",
+        "Second.",
+        forged,
+        actor_sub="user-b",
+        expected_revision=first.revision_id,
     )
 
     assert created is False
@@ -667,6 +672,59 @@ async def test_list_entries_returns_slug_sorted_entries(
 
 
 @pytest.mark.asyncio
+async def test_list_entries_newest_order_sorts_by_updated_at(
+    tmp_path: Path,
+    stub_embedding: AsyncMock,
+) -> None:
+    """``order="newest"`` lists the most recently updated entry first (#5679).
+
+    Entries with the same ``updated_at`` fall back to slug order, so a
+    page boundary never splits them differently between two calls.
+    """
+    for slug in ("alpha", "beta", "gamma", "delta"):
+        _write(tmp_path / f"{slug}.md", f"{slug}.")
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    await service.ingest_directory(tmp_path, tenant_id)
+
+    stamps = {
+        "alpha": datetime(2026, 1, 1, tzinfo=UTC),
+        "beta": datetime(2026, 3, 1, tzinfo=UTC),
+        "gamma": datetime(2026, 2, 1, tzinfo=UTC),
+        "delta": datetime(2026, 3, 1, tzinfo=UTC),
+    }
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        docs = (
+            (
+                await s.execute(
+                    select(Document).where(
+                        Document.tenant_id == tenant_id,
+                        Document.source == KB_SOURCE,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for doc in docs:
+            doc.updated_at = stamps[doc.source_id]
+        await s.commit()
+
+    newest = await service.list_entries(tenant_id, order="newest")
+    assert [e.slug for e in newest] == ["beta", "delta", "gamma", "alpha"]
+    second_page = await service.list_entries(tenant_id, order="newest", limit=2, offset=2)
+    assert [e.slug for e in second_page] == ["gamma", "alpha"]
+    # The default stays slug order.
+    assert [e.slug for e in await service.list_entries(tenant_id)] == [
+        "alpha",
+        "beta",
+        "delta",
+        "gamma",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_list_entries_filter_pattern_narrows(
     tmp_path: Path,
     stub_embedding: AsyncMock,
@@ -795,7 +853,11 @@ async def test_create_entry_overwrite_preserves_creator_updates_mutator(
     assert created_a is True
 
     second, created_b = await service.create_entry(
-        tenant_id=tenant_id, slug="shared", body="B body", actor_sub="user-b"
+        tenant_id=tenant_id,
+        slug="shared",
+        body="B body",
+        actor_sub="user-b",
+        expected_revision=first.revision_id,
     )
     assert created_b is False  # overwrite, not create → route returns 200
     assert second.id == first.id  # same row
@@ -870,7 +932,12 @@ async def test_create_entry_own_entries_only_allows_create_and_own_overwrite(
     )
     assert created is True
     second, created_again = await service.create_entry(
-        tenant_id=tenant_id, slug="mine", body="v2", actor_sub="user-a", own_entries_only=True
+        tenant_id=tenant_id,
+        slug="mine",
+        body="v2",
+        actor_sub="user-a",
+        own_entries_only=True,
+        expected_revision=first.revision_id,
     )
     assert created_again is False
     assert second.id == first.id
@@ -959,23 +1026,28 @@ async def test_create_entry_own_entries_only_refuses_a_concurrent_create_by_anot
 
 
 @pytest.mark.asyncio
-async def test_create_entry_concurrent_create_by_a_tenant_admin_is_an_overwrite(
+async def test_create_entry_concurrent_create_by_a_tenant_admin_is_refused(
     stub_embedding: AsyncMock,
 ) -> None:
-    """An unlimited writer that loses the race overwrites, and reports it as one.
+    """An unlimited writer that loses the race is refused, not allowed to overwrite.
 
-    ``created`` comes from the read of the try that went through, so
-    the route answers 200, not 201, and the first creator is preserved.
+    Both writers read the slug as free. The rerun of the loser reads
+    the first writer's entry and names no revision, so it is refused
+    with the current revision. The first entry stays as it was.
     """
+    from meho_backplane.kb.stale_revision import KbStaleRevisionError
+
     tenant_id = uuid.uuid4()
     service = KbService()
-    entry, created = await _create_while_another_principal_creates_first(
-        service, tenant_id, own_entries_only=False
-    )
-    assert created is False
-    assert entry.body == "B body"
-    assert entry.metadata["created_by_sub"] == "user-a"
-    assert entry.metadata["last_updated_by_sub"] == "user-b"
+    with pytest.raises(KbStaleRevisionError) as info:
+        await _create_while_another_principal_creates_first(
+            service, tenant_id, own_entries_only=False
+        )
+    kept = await service.get_entry(tenant_id, "raced")
+    assert kept is not None
+    assert kept.body == "A body"
+    assert info.value.detail.cause == "exists"
+    assert info.value.detail.current_revision_id == kept.revision_id
 
 
 @pytest.mark.asyncio
@@ -1198,3 +1270,58 @@ async def test_search_entries_short_body_snippet_is_full_body(
         hits = await service.search_entries(uuid.uuid4(), "q")
     assert hits[0].snippet == short
     assert not hits[0].snippet.endswith("…")
+
+
+def _write_header_type_corpus(root: Path) -> None:
+    _write(root / "dated.md", "---\nlearned_at: 2026-11-03\nversion: 3.10\n---\nDated.")
+    _write(root / "stamped.md", "---\nconfirmed_at: 2026-11-03T10:00:00Z\n---\nStamped.")
+    _write(root / "quoted.md", '---\nlearned_at: "2026-11-03"\nversion: "3.10"\n---\nQuoted.')
+
+
+@pytest.mark.asyncio
+async def test_ingest_stores_header_dates_and_versions_as_text(
+    tmp_path: Path,
+    stub_embedding: AsyncMock,
+) -> None:
+    """Unquoted header dates and ``3.10`` are stored as text; the dry run agrees."""
+    _write_header_type_corpus(tmp_path)
+    tenant_id = uuid.uuid4()
+    service = KbService()
+
+    dry = await service.ingest_directory(tmp_path, tenant_id, dry_run=True)
+    assert (dry.inserted_count, dry.error_count) == (3, 0)
+
+    result = await service.ingest_directory(tmp_path, tenant_id)
+    assert (result.inserted_count, result.error_count) == (3, 0)
+
+    # learned_at and confirmed_at are lesson header dates, so they are
+    # stored in full ISO form.
+    expected = {
+        "dated": {"learned_at": "2026-11-03T00:00:00+00:00", "version": "3.10"},
+        "stamped": {"confirmed_at": "2026-11-03T10:00:00+00:00"},
+        "quoted": {"learned_at": "2026-11-03T00:00:00+00:00", "version": "3.10"},
+    }
+    for slug, header in expected.items():
+        entry = await service.get_entry(tenant_id, slug)
+        assert entry is not None
+        assert {k: entry.metadata[k] for k in header} == header
+
+
+@pytest.mark.asyncio
+async def test_dry_run_and_real_run_give_the_same_error_for_unstorable_header(
+    tmp_path: Path,
+    stub_embedding: AsyncMock,
+) -> None:
+    _write(tmp_path / "bin.md", "---\nblob: !!binary aGk=\n---\nBody.")
+    _write(tmp_path / "fine.md", "Plain note.")
+    tenant_id = uuid.uuid4()
+    service = KbService()
+
+    dry = await service.ingest_directory(tmp_path, tenant_id, dry_run=True)
+    real = await service.ingest_directory(tmp_path, tenant_id)
+    assert dry.errors == real.errors
+    assert len(real.errors) == 1
+    assert "bin.md" in real.errors[0]
+    assert "'blob'" in real.errors[0]
+    assert len(real.errors[0]) < 200
+    assert (dry.inserted_count, real.inserted_count) == (1, 1)

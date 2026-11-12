@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 license = "Apache-2.0"
 dependencies = [
-    "fastapi>=0.141.1,<0.147",
+    "fastapi>=0.141.1,<0.163",
     "uvicorn[standard]>=0.52.3",
     "pydantic[email]>=2.13.4",
     "structlog>=26.1.0",
@@ -78,7 +78,7 @@ dependencies = [
     # by :mod:`meho_backplane.redaction.presidio` so a Tier-1-only
     # policy never imports them at runtime (the dep is still installed
     # but stays untouched until a policy with a ``tier2`` block fires).
-    "presidio-analyzer==2.2.364",
+    "presidio-analyzer==2.2.366",
     "presidio-anonymizer==2.2.362",
     # G3.11-T1 (#1221) — GitHub App authentication mints a 10-minute
     # RS256 JWT (claims iat/exp/iss) and exchanges it for an
@@ -143,6 +143,10 @@ dependencies = [
     # Floor at 50.0.0: CVE-2026-69247 (PKCS#7 EnvelopedData Bleichenbacher
     # oracle) is fixed there and the trivy image gate fails on anything older.
     "cryptography>=50.0.0",
+    # S3-compatible object storage for the agent session store (#4901). Was
+    # already installed through ``pydantic-ai-slim[bedrock]``; declared here
+    # because the session store imports it directly.
+    "boto3>=1.43.0",
 ]
 
 [dependency-groups]
@@ -367,6 +371,13 @@ ignore_missing_imports = true
 # place. If hvac later ships stubs, drop this override.
 [[tool.mypy.overrides]]
 module = ["hvac.*"]
+ignore_missing_imports = true
+
+# boto3 / botocore (the session store's S3-compatible object storage,
+# #4901) ship no ``py.typed`` marker; the client is ``Any`` and its use is
+# kept inside :mod:`meho_backplane.session_store.object_store`.
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*"]
 ignore_missing_imports = true
 
 # ``requests`` is hvac's transport dependency. We only catch its
@@ -599,6 +610,7 @@ addopts = ["-m", "not load"]
 markers = [
     "slow: opt-in network/IO-heavy tests; gate via MEHO_RUN_SLOW_TESTS=1.",
     "load: opt-in resolver/cache microbenchmarks; gate via MEHO_RUN_LOAD_TESTS=1.",
+    "slow_runner_tolerant: compares real elapsed time with a wide fixed limit (tests/_time_limits.py); required CI jobs turn the limit off, the non-required 'Python timing tests' job checks it.",
 ]
 # Note: ``authlib.deprecate`` calls ``warnings.simplefilter("always",
 # AuthlibDeprecationWarning)`` at import time, so the

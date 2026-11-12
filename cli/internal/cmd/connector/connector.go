@@ -89,7 +89,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "connector",
-		Short:        "G0.7 spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / enable-reads / disable / delete)",
+		Short:        "Ingest vendor specs and review connectors (ingest / ingest-status / list / catalog / review / edit-group / edit-op / enable / enable-reads / disable / delete / overrides / remove-override / tenant-setting)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newIngestCmd())
@@ -557,7 +557,7 @@ func truncate(s string, maxLen int) string {
 //     reaches the backplane.
 //   - `docs:<product-version>/<spec>` -- resolved CLI-side against the
 //     consumer's checked-in docs/ directory ($CLAUDE_RDC_DOCS, e.g. a
-//     checkout of `claude-rdc-hetzner-dc/docs/meho-coordination/`), then
+//     checkout of the lab repo's `docs/meho-coordination/`), then
 //     read + uploaded as content with the `docs:` label kept as uri.
 //     When CLAUDE_RDC_DOCS is unset the shorthand is rejected here with a
 //     hint naming the env var (#1535).

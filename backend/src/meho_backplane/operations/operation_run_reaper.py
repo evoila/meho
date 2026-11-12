@@ -19,8 +19,10 @@ Unlike the agent-run reaper (which offers a ``resume`` policy for
 idempotent-friendly LLM loops), a governed operation can wrap a
 non-idempotent vendor write. Re-dispatching a half-executed write on pod
 death would double-execute it. So an orphaned operation run is **never**
-re-dispatched -- it is driven to ``failed`` (an audited terminal state) and
-an operator decides whether to re-submit. This is the conservative,
+re-dispatched -- it is driven to a terminal, audited state and an operator
+decides whether to re-submit. The state is ``uncertain`` (#5025) when the
+operation may change the target, because MEHO does not know if the change
+happened, and ``failed`` for a read. This is the conservative,
 safe half of the #3079 acceptance criterion ("survives pod restart via
 lease/reaper semantics **or** terminates into an audited terminal state --
 never silently lost").
@@ -49,16 +51,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditEventClass, AuditLog, OperationRun, OperationRunStatus
+from meho_backplane.db.models import (
+    AuditEventClass,
+    AuditLog,
+    OperationRun,
+    OperationRunOrigin,
+    OperationRunStatus,
+)
 from meho_backplane.metrics import note_loop_tick
+from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
 from meho_backplane.operations.operation_run import (
     IllegalOperationRunTransitionError,
     fail_run,
+    uncertain_run,
 )
+from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, changes_target
 from meho_backplane.settings import get_settings
 
 __all__ = [
     "OPERATION_RUN_REAPER_INTERRUPTION_REASON",
+    "OPERATION_RUN_REAPER_UNCERTAIN_REASON",
     "start_operation_run_reaper",
     "stop_operation_run_reaper",
 ]
@@ -92,6 +104,37 @@ OPERATION_RUN_REAPER_INTERRUPTION_REASON = (
     "interrupted: lease expired -- worker died mid-flight "
     "(reaped by operation_run_reaper; not re-dispatched)"
 )
+
+#: The ``error`` recorded on an ``uncertain`` run reaped here (a run that
+#: may have changed the target).
+OPERATION_RUN_REAPER_UNCERTAIN_REASON = (
+    f"{OPERATION_RUN_REAPER_INTERRUPTION_REASON}. {UNCERTAIN_ADVICE}"
+)
+
+
+async def _run_may_have_changed_target(row: OperationRun) -> bool:
+    """Whether the dead run may have changed its target (#5025).
+
+    A run that resumes an approved request always counts. For any other run
+    the operation's risk level decides. When the operation cannot be found
+    or the lookup fails, the run counts as a change: a doubt must end as
+    ``uncertain``, never as a plain failure.
+    """
+    if row.origin == OperationRunOrigin.APPROVAL_RESUME.value:
+        return True
+    try:
+        product, version, impl_id = parse_connector_id(row.connector_id)
+        descriptor = await lookup_descriptor(
+            tenant_id=row.tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            op_id=row.op_id,
+        )
+    except Exception:
+        _log.warning("operation_run_reaper_descriptor_lookup_failed", run_id=str(row.id))
+        return True
+    return descriptor is None or changes_target(descriptor.safety_level)
 
 
 def _stage_audit_row(
@@ -127,16 +170,19 @@ def _stage_audit_row(
 
 
 async def _reap_one_row(session: AsyncSession, row: OperationRun, *, now: datetime) -> None:
-    """Drive one expired-lease run to ``failed`` + stage its audit row.
+    """Drive one expired-lease run to ``uncertain`` or ``failed`` + stage its audit row.
 
-    ``fail_run`` transitions ``running`` -> ``failed`` (clearing the lease as
-    the terminal side effect). A status guard is implicit: the row could
-    have transitioned between the claim query and this write (an operator
-    cancel landed) -- ``fail_run`` raises
+    A run that may have changed its target ends ``uncertain``, a read ends
+    ``failed`` (:func:`_run_may_have_changed_target`). The transition clears
+    the lease as the terminal side effect. A status guard is implicit: the
+    row could have transitioned between the claim query and this write (an
+    operator cancel landed) -- the transition raises
     :class:`IllegalOperationRunTransitionError` on the bad edge; the caller's
     per-row ``try`` catches it.
     """
+    uncertain = await _run_may_have_changed_target(row)
     payload: dict[str, object] = {
+        "outcome": "uncertain" if uncertain else "failed",
         "run_id": str(row.id),
         "tenant_id": str(row.tenant_id),
         "op_id": row.op_id,
@@ -147,7 +193,10 @@ async def _reap_one_row(session: AsyncSession, row: OperationRun, *, now: dateti
         ),
         "reaped_at": now.isoformat(),
     }
-    await fail_run(session, row, error=OPERATION_RUN_REAPER_INTERRUPTION_REASON)
+    if uncertain:
+        await uncertain_run(session, row, error=OPERATION_RUN_REAPER_UNCERTAIN_REASON)
+    else:
+        await fail_run(session, row, error=OPERATION_RUN_REAPER_INTERRUPTION_REASON)
     _stage_audit_row(
         session=session,
         tenant_id=row.tenant_id,

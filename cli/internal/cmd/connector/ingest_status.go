@@ -52,7 +52,8 @@ func newIngestStatusCmd() *cobra.Command {
 			"job (the double-ingest failure mode the async handling prevents).\n\n" +
 			"Default (no --wait): one GET, render a snapshot, exit. A still-\n" +
 			"running job prints its identity + lifecycle (job_id, status,\n" +
-			"request descriptors, started_at) and exits 0; a terminal job\n" +
+			"request descriptors, started_at, and the current phase with\n" +
+			"the time it started) and exits 0; a terminal job\n" +
 			"renders exactly what the waiting-ingest path renders.\n\n" +
 			"--wait: poll the job (2s cadence) until it leaves running, then\n" +
 			"render the terminal shape — the inverse of `ingest --no-wait`.\n\n" +
@@ -129,7 +130,7 @@ func runIngestStatus(cmd *cobra.Command, opts ingestStatusOptions) error {
 		}
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"polling ingest job %s every %s until it reaches a terminal status\n", jobID, interval)
-		st, perr := pollIngestJob(cmd.Context(), authed, jobID, interval)
+		st, perr := pollIngestJob(cmd.Context(), authed, jobID, interval, cmd.ErrOrStderr())
 		if perr != nil {
 			return renderIngestStatusError(cmd, backplaneURL, jobID, perr, opts.JSONOut)
 		}
@@ -267,6 +268,9 @@ func printIngestJobSnapshot(w io.Writer, st *api.IngestJobStatusResponse) {
 		started := time.Unix(int64(st.StartedAt), 0).UTC()
 		fmt.Fprintf(w, "  started_at: %s\n", started.Format(time.RFC3339))
 	}
+	if phase := ingestJobPhase(st); phase != "" {
+		fmt.Fprintf(w, "  phase: %s\n", phase)
+	}
 	fmt.Fprintf(w,
 		"\nThe pipeline is still running server-side; re-running ingest would start a second job.\n"+
 			"Re-run this command (add --wait to block until it completes), or watch\n"+
@@ -299,4 +303,18 @@ func derefOr(p *string, fallback string) string {
 		return *p
 	}
 	return fallback
+}
+
+// ingestJobPhase renders the step a job is on and when it started, for
+// example "register (since 2026-11-05T10:00:00Z)". An empty return means
+// the backplane sent no phase (a server older than the field).
+func ingestJobPhase(st *api.IngestJobStatusResponse) string {
+	if st.Phase == "" {
+		return ""
+	}
+	if st.PhaseStartedAt <= 0 {
+		return string(st.Phase)
+	}
+	since := time.Unix(int64(st.PhaseStartedAt), 0).UTC()
+	return fmt.Sprintf("%s (since %s)", st.Phase, since.Format(time.RFC3339))
 }

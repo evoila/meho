@@ -37,16 +37,22 @@ release fails up-front instead of CrashLoopBackOff-ing at first request.
   [`../deploy/values-examples/values-kind.yaml`](../deploy/values-examples/values-kind.yaml).
   This guide covers **production-shaped** installs against an
   operator-managed cluster.
-- MEHO is on-prem-first: v0.1 expects an operator-managed PostgreSQL
-  cluster (no bundled PG subchart), an operator-run Vault **or** GCP
-  Secret Manager, and a Keycloak realm. See
+- MEHO is on-prem-first. By default the chart installs its own
+  PostgreSQL, Keycloak and OpenBao (an open-source Vault):
+  `corePostgres.enabled`, `coreKeycloak.enabled` and `coreVault.enabled`
+  are `true`. A production-shaped install usually brings its own
+  PostgreSQL, Vault **or** GCP Secret Manager, and Keycloak realm, and
+  sets the matching keys to `false`. See
   [`codebase/devops.md`](codebase/devops.md) for the chart's internals and
   [`acceptance/install.md`](acceptance/install.md) for the cold-deploy
   acceptance contract.
 
 ## Deploy from cold — prerequisites checklist
 
-Satisfy every row before the first `helm install`. Two of the original
+Satisfy every row before the first `helm install`. The rows are for an
+install that brings its own PostgreSQL, Keycloak and Vault (the
+`core*.enabled` keys set to `false`). With the built-in parts, the
+chart takes care of the pgvector, database Secret and Keycloak rows. Two of the original
 cold-install foot-guns (migrate-hook ServiceAccount ordering, #2391; the
 unresolvable-MCP-audience dark boot, #2394) are now handled **inside the
 chart** and are noted below as "chart-handled" — no operator step remains,
@@ -60,7 +66,7 @@ but they explain failure modes you may still hit if you mis-set values.
 | MCP audience resolvable — set `ingress.host`, or `config.backplaneUrl`, or `config.mcpResourceUri` | Every `/mcp` Bearer token must carry `aud == MCP_RESOURCE_URI`. The chart derives `BACKPLANE_URL`/`MCP_RESOURCE_URI` from the Ingress host by default. If none of the three resolves, the chart **fails at render time** (#2394) with a remediation naming all three knobs — it will not deploy a dark, silent `/mcp`. **Chart-handled**: a mis-set install fails `helm template`, not at runtime. | `helm template meho ./deploy/charts/meho -f values.yaml \| grep -A1 MCP_RESOURCE_URI` |
 | Internal-CA trust bundle (when Vault/Keycloak/Postgres use internal-CA certs) | Python's default TLS context only trusts public CAs. Mount the CA bundle via `extraVolumes` + `extraVolumeMounts` and point **both** `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` at it via `extraEnv` — httpx, asyncpg and SQLAlchemy honour `SSL_CERT_FILE`, while hvac drives `requests`, which ignores it and reads `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE` instead. See the [Internal-CA trust bundle](../deploy/values-examples/README.md#internal-ca-trust-bundle-extravolumes--extraenv) section. Clusters using only public CAs need nothing here. | `kubectl exec deploy/meho -- python -c "import os;print(os.environ.get('SSL_CERT_FILE'), os.environ.get('REQUESTS_CA_BUNDLE'))"` |
 | Pinned, immutable `image.tag` | Deploy discipline (Goal #11) forbids `:latest` and treats `:main` as a dev-only moving alias, never a deploy target. Use `sha-<git-sha>` from a green `main` run or a `vX.Y.Z` release tag. The schema rejects an empty tag. | `helm get values meho -o json \| jq -r '.image.tag'` (must be non-empty, not `latest`/`main`) |
-| First-boot timing budget | First boot registers the full typed-op catalog and preloads the fastembed embedding model **before** the app binds `:8000`. The default model (`BAAI/bge-small-en-v1.5`) is baked into the image (offline, version-locked), so the default deploy needs no HuggingFace egress or PVC; a **custom** `config.retrievalEmbeddingModel` downloads at runtime into the opt-in `retrieval.modelCache` PVC. The `startupProbe` budget is `failureThreshold × periodSeconds = 30 × 10s = 300s`. | `kubectl rollout status deploy/meho --timeout=360s` |
+| First-boot timing budget | First boot registers the full typed-op catalog and preloads the fastembed embedding model **before** the app binds `:8000`. The default model (`BAAI/bge-small-en-v1.5`) is baked into the image (offline, version-locked), so the default deploy needs no HuggingFace egress or PVC; a **custom** `config.retrievalEmbeddingModel` downloads at runtime into the opt-in `retrieval.modelCache` PVC. On an empty database every operation also gets its embedding: about 5 minutes at the 1-CPU limit (#4102). The `startupProbe` budget is `failureThreshold × periodSeconds = 90 × 10s = 900s`. | `kubectl rollout status deploy/meho --timeout=960s` |
 
 **Chart-handled cold-install fixes (no operator step, listed for failure-mode context):**
 
@@ -178,13 +184,13 @@ today's Vault KV-v2 read: a schemeless `targets/<id>` ref and an explicit
 `/api/v1/health` federation proof reads `secret/meho/test/federation`. The
 schema requires `vault.address` (and the Keycloak/Postgres/NetworkPolicy
 fields) for this backend. Full worked example:
-[`../deploy/values-examples/values-rdc-example.yaml`](../deploy/values-examples/values-rdc-example.yaml).
+[`../deploy/values-examples/values-example-lab.yaml`](../deploy/values-examples/values-example-lab.yaml).
 
 ```bash
 helm upgrade --install meho ./deploy/charts/meho/ \
   --namespace meho --create-namespace \
   --set image.tag=sha-<git-sha> \
-  -f values-rdc.yaml
+  -f values-site.yaml
 ```
 
 ### GSM / Vault-free
@@ -379,11 +385,10 @@ you need nothing outside the cluster. The kind example file
    Do not pass a tag on the `helm` command line (`--set image.tag=...`):
    it wins over the file and asks for an image the cluster does not have.
 
-3. **Keep the three keys at the end of `values-single-node.yaml`:**
-   `postgres.credentialsSecret`, `vault.address` and `config.vaultAddr`.
-   The chart needs them even with all built-in parts on, until it fills
-   them in itself (#4047). Without them, Helm refuses the values with
-   errors about empty or invalid fields, and does not say why.
+3. **Set nothing for the database or Vault.** The chart points MEHO at
+   the built-in PostgreSQL and OpenBao itself (#4047). Leave
+   `postgres.credentialsSecret`, `vault.address` and `config.vaultAddr`
+   unset: the render stops if they name anything else.
 4. **Install and wait:**
 
    ```bash
@@ -462,9 +467,12 @@ encrypted with this key while it waits. **Without the key, MEHO denies every
 such operation** — for human and service callers alike. A credential-write
 that runs at once under a standing grant does not need the key.
 
-The chart keeps `approvalHandoff` off by default, because the key must come
-from a Secret you create. So this step is **required** on any deployment that
-uses credential-write operations:
+With a built-in core part (`corePostgres`, `coreKeycloak` or `coreVault`
+on), the install makes the key itself in the Secret
+`<release>-core-approval-handoff` and keeps it on upgrades; there is no
+step. Without a built-in part, `approvalHandoff` is off by default, because
+the key must come from a Secret you create. Then this step is **required**
+on any deployment that uses credential-write operations:
 
 1. Create a Fernet key:
    `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
@@ -505,9 +513,10 @@ command and key rotation:
    - With the hook Job, the new Deployment rolls only after the migration
      succeeds.
    - With the built-in PostgreSQL, a failed migration keeps the new pod
-     out of Ready, and the old pods keep serving. Helm sees this failure
-     only with `--wait`. Without it, Helm reports success and only the
-     pod status shows the failure. So run `helm upgrade` with `--wait`.
+     out of Ready. The old pod has already stopped (step 4), so MEHO is
+     down until you run `helm rollback`. Helm sees this failure only with
+     `--wait`. Without it, Helm reports success and only the pod status
+     shows the failure. So run `helm upgrade` with `--wait`.
 3. The new version ends the approval requests that still wait (#5030). A
    person approves one exact release, so at start-up every `pending`
    request from an older release expires with the reason
@@ -515,6 +524,19 @@ command and key rotation:
    has not run is refused before any vendor call. The requester asks
    again. See
    [`codebase/approvals.md`](codebase/approvals.md#an-approval-covers-one-exact-release-5030).
+4. The old pod stops before the new pod starts (#5024). The chart's
+   update strategy is `Recreate` (`updateStrategy`), so two releases never
+   work on the database at the same time. The old pod first keeps serving
+   for 5 seconds (`shutdown.preStopSleepSeconds`), so the Service and the
+   ingress stop sending it requests. Then it takes no new calls and lets
+   running operations finish, for up to 60 seconds
+   (`shutdown.drainSeconds`). An operation that still runs then is
+   recorded as unfinished: a log line `operation_unfinished_at_shutdown`
+   and an audit row with `result_status: unfinished`. Check its target
+   before you run it again. An update therefore costs about one to two
+   minutes without MEHO: the drain, plus the start of the new pod. Plan
+   updates for a quiet time. Details:
+   [`codebase/shutdown-drain.md`](codebase/shutdown-drain.md).
 
 ### Helm 4 / server-side-apply field-conflict caveat
 
@@ -551,6 +573,19 @@ is **not** the right flag here — it ignores Helm's ownership *annotation*
 check and adopts whole un-owned *resources*, not individual SSA *fields*,
 so it does not clear a per-field conflict.
 
+### Upgrade from a chart without a strategy (#5962)
+
+An install made with a chart before v0.46.0 has `RollingUpdate` and a
+`rollingUpdate` block on its live Deployment (Kubernetes filled them in).
+Helm 4 server-side apply does not remove that block, and Kubernetes refuses
+it together with `Recreate` (`spec.strategy.rollingUpdate: Forbidden`). The
+chart therefore runs a `pre-upgrade` Job that removes the block and sets
+`Recreate` first. It renders only when `lookup` finds the block, so Argo CD
+(which renders with `helm template`) never runs it. Recovery for a revision
+that already failed, and for Argo CD:
+[Upgrades](../docs-site/install/upgrades.md#upgrade-fails-with-specstrategyrollingupdate-forbidden).
+Details: [`codebase/devops.md`](codebase/devops.md#update-strategy-and-pod-stop-5024).
+
 ### Rollback
 
 `helm rollback meho` is supported, but **migrations are forward-only**: the
@@ -558,7 +593,9 @@ migration hook has no pre-rollback `alembic downgrade`, so the schema stays
 at `N+1` after a rollback to an app version that expects `N`. The chart
 relies on backend forward-compat (an `N` app tolerating an `N+1` schema).
 See the [`helm rollback meho` acceptance contract](acceptance/rollback.md)
-for what "verified" means and the schema-check fallback.
+for what "verified" means and the schema-check fallback. When a new
+release fails to start, the old pod has already stopped (step 4 above), so
+MEHO is down until you roll back; the contract lists the recovery steps.
 
 ## Version-specific upgrade notes
 
@@ -573,6 +610,7 @@ Append a row here in the same PR that carries an upgrade-relevant change
 | **v0.31.0** | The MCP tool surface is claim-scoped (#3154): a default session lists and dispatches only the 25-tool working surface; the 53 operator-plane tools require the `mcp:admin` OAuth scope, and the three approval-decision verbs (`meho_approvals_approve`/`_reject`, `meho_agents_grant_elevate`) have no MCP path at all (#3155). | Agent sessions that used operator-plane tools break until they request elevation: add `mcp:admin` as an **optional** (request-only) client scope on the MCP client in your realm, then opt sessions in via `MEHO_MCP_SCOPES=mcp:admin` (Claude Code plugin) or the `.mcpb` `scopes` user_config — see [`codebase/mcp.md`](codebase/mcp.md). Approval decisions move to the operator console / CLI. Migrations `0077` (tenant announce-gate flag) and `0078` (`service_principal_grant` table, #3151) are both additive-only; no schema action. |
 | **v0.32.0** | A new most-restrictive `destructive` `safety_level` tier lands (`safe < caution < dangerous < destructive`, #3196), excluded by default at every gate — non-grantable to agents (`deny` ceiling), parked for service principals, and never minted to a satellite — reachable only through the governed-delete approval flow (preview-hash-bound `call_operation` + mandatory blast-radius, #3197). Several delete/remove ops adopt it: `vmware.composite.vm.destroy` (#3198), `bind9.record.delete` (#3231), pfSense NAT-rule + alias delete (#3232), `bind9.record.remove` **promoted** from a lower tier (#3247), plus three further caution-tier permanent-removal ops (#3288). | Automation, agents, or service principals that previously called these ops directly are now refused (dispatch is non-grantable); a human must approve each governed delete via the console/CLI approvals plane (`meho_approvals_approve`/`_reject` are human-only). No config change is needed to adopt the safer default. Migrations `0079`–`0096` are additive-only (`0084` widens the `ck_endpoint_descriptor_safety_level` CHECK constraint for the new tier); no manual schema step. See [`docs/decisions/governed-delete-operations.md`](decisions/governed-delete-operations.md). |
 | **v0.33.5** | First release since v0.32.0 to carry schema migrations — the alembic head advances **`0097` → `0099`**. `0098` (#3419) adds two nullable `service_principal_grant` columns (`target_product`, `target_name_pattern`) for standing-grant **target selectors** and narrows the targetless partial unique index to *pure* targetless grants; `0099` (#3420) adds the nullable `approval_request.resume_parent` column for composite sub-op approve-resume. | Both migrations are additive-only; no manual schema step — the `pre-install,pre-upgrade` migration Job runs `alembic upgrade head`. The additive-only `upgrade()` bodies keep a `helm rollback` across this upgrade readiness-safe (an older image reads the newer schema, `db_ahead=true`). |
+| **v0.34.0** | SSH connectors check the host key of every target (#3467). A target whose Vault secret has no `known_hosts` entry and no `known_hosts_insecure` setting is refused before the connection opens, with `SshHostKeyUnpinnedError`. This hits every connector that uses SSH (linux, bind9, pfSense, rke2 and others). | **Before you upgrade from an older release**, add a `known_hosts` entry to the Vault secret of every SSH target. Get the line with the safe `net.ssh_keyscan` operation and check its SHA256 fingerprint another way before you trust it. Or set `known_hosts_insecure: true` in the secret. Then MEHO does not check the host key, and it writes a warning to its log on each new connection. To find the targets to fix, run `scripts/acceptance/ssh-host-key-pins.sh` against the release you run now (see step 6 of [`RELEASING.md`](RELEASING.md#6-deploy--smoke)). It lists every SSH target and ends with exit code 1 when one has neither setting. Without one of the two, every SSH operation on that target fails after the upgrade. This includes the SSH reads that build the preview before a destructive change. |
 | **v0.35.0** | The vSphere 9.0 ingested `vmware-rest` catalog is now guarded against unqualified targets (#3565): an enabled 9.0 ingested descriptor dispatched against a non-`vmware` target or one whose version falls outside `>=9,<10` (missing, invalid, or **8.0.x**) is refused **before policy/approval** with the structured error `unqualified_target_version` and one synchronous audit row. The release also registers `vmware-rest-8.0` (#3569), but the bundled `vmware/8.0` catalog (`meho connector ingest --catalog vmware/8.0`) is a **minimal placeholder** — inventory reads only, no hardware writes or content-library ops. No schema migrations in this release (alembic head stays `0101`). | For fingerprinted **8.0.x** targets, ingest an 8.x catalog for `vmware-rest-8.0`. For full coverage, ingest the vendor vSphere 8.0 U3 OpenAPI documents — `meho connector ingest --product vmware --version 8.0 --impl vmware-rest --spec <vcenter.yaml> [--spec <vi-json.yaml>]` — then `meho connector review vmware-rest-8.0` and `meho connector enable vmware-rest-8.0 --confirm`. **Callers that pin `connector_id=vmware-rest-9.0` for 8.0.x targets must switch to `vmware-rest-8.0`** (see #3600). 9.x targets and typed/composite ops are unaffected; no config or schema action is required for the guard itself. |
 | **v0.35.1** | Enabling **read** operations on a built-in (global) connector now requires `platform_admin`; a plain `tenant_admin` mutating any built-in connector row (enable / disable / enable-reads / edit-op / edit-group, across REST, MCP and the console) is refused with the structured error `builtin_connector_write_forbidden` (`403`, was a misleading `404`, #3646). No schema migrations in this release (alembic head stays `0101`). | Operators who relied on `tenant_admin` to bulk-enable reads on built-in connectors must grant `platform_admin` — via the boolean `platform_admin` claim or the new realm-role setting `jwt_platform_admin_role_name` / `JWT_PLATFORM_ADMIN_ROLE_NAME` (#3651), which reaches the pod through the chart's `extraEnv`. Tenant-scoped connector rows are unaffected; no config or schema action is required otherwise. |
 | **v0.35.2** | First release since v0.33.5 to carry a schema migration — the alembic head advances **`0101` → `0102`** (#3664): `0102` adds the nullable `approval_request.execution_handle` column and a new `approval_execution_payload` table for the encrypted one-time credential-write hand-off. Operator-visible behaviour also changes in three places: `connector enable` now also enables a connector's **ungrouped** descriptors (`group_id IS NULL`) and a `disable` → `enable` cycle sweeps previously stranded ungrouped write/typed ops (#3691); a re-ingest whose LLM grouping pass fails **after** the register/upsert has committed now ends `degraded` with `error_class="grouping_failed_after_register"` (register counts preserved) instead of a bare `failed` (#3690); and the flight recorder now structurally redacts OVF property values in captured deploy request/response bodies (#3698). | The migration is additive-only; no manual schema step — the `pre-install,pre-upgrade` migration Job runs `alembic upgrade head`, and the nullable column plus the unused new table keep a `helm rollback` across this upgrade readiness-safe (an older image tolerates the newer schema, `db_ahead=true`). **REQUIRED (#3712):** configure `APPROVAL_HANDOFF_ENCRYPTION_KEY` via the Helm `approvalHandoff` Secret reference (#3664) before you roll this release on any deployment where a credential-write operation may wait for approval. The chart leaves `approvalHandoff` off by default, and with no key MEHO **denies** every such operation instead of letting it wait. Steps (create the key, store it in a Secret, set the values) are in [Approval custody key](#approval-custody-key--required-for-credential-write-approvals). Approvals already waiting before the upgrade are not backfilled and still run. Operators who ran an earlier full `connector enable` can re-run it (or `disable` then `enable`) to pick up ungrouped ops left at default-deny. Recorder redaction is forward-only: deploy-body traces captured before this release retain their plaintext OVF property values until they age out of the 30-day trace store. |
@@ -606,6 +644,14 @@ Append a row here in the same PR that carries an upgrade-relevant change
 | **v0.43.0** | The last release with the VMware connectors built into the public image; from the next release on, they come as a separate connector package built on top of the public image ([decision record](decisions/2026-10-28-own-connectors-leave-the-public-tree.md)). One schema migration: the alembic head advances **`0131` → `0132`**. It adds no column: in every approval request that no longer waits, it replaces each secret-named value of the stored params with `[REDACTED:param_name]`, and a rollback does not bring the values back. A re-run of a failed approved run needs the params again when they held such a value (#5608). The upgrade ends every approval request that still waits, as every upgrade since v0.39.0 does (`release_changed`); a change of the connector packages in the image now does the same (#5602). A caller whose own Vault read of a target's secret is refused gets the refusal also when another caller's login to that target is cached, over SSH too (#5619, #5603). Ingesting into the built-in scope and deleting built-in connector rows need `platform_admin` (#5607). Setting, changing or removing a target's `vault_role` or `vault_mount` needs `platform_admin`; other callers get 403 `vault_login_role_requires_platform_admin` (#5609). In the console, running or previewing an operation, writing a Vault secret and driving a runbook run need the `operator` role; a `read_only` session gets 403 `operator_required` (#5605). A mail recipient whose part before the `@` holds a character other than letters, digits and `. _ + -` is refused (#5604). On the Linux server install (form 2), the update turns on the console login and the approval hand-off of credential writes (#5647). | Back up the database. Decide waiting approvals before the upgrade, or ask the requesters to send them again. Give `platform_admin` to the account that runs built-in connector ingests. Check that every caller of a target may read its secret in Vault, the check runner's Vault role too. Existing Keycloak realm: do not set the PKCE method of the `meho login` clients (`meho-cli` by default) to required (`S256`), and clear it where it is set; do not run `meho admin keycloak bootstrap-clients` for this on an existing realm (#5627). With more than one tenant, tie each extra Vault login role that a target names to one tenant with `bound_claims` (section 8 of [`cross-repo/vault-provisioning.md`](cross-repo/vault-provisioning.md)). Give the `operator` role to the people who run operations in the console. Use plain mail addresses; optionally set the mail relay to the same rule (Postfix: `allow_percent_hack = no`, `swap_bangpath = no`). Full list: the "Breaking changes" and "Steps after the upgrade" parts of the `[0.43.0]` CHANGELOG section. |
 | **v0.44.0** | The first release whose public image has no VMware connectors; they come as a separate, signed connector package that runs on top of the public image, and a target of these products finds no connector in the public image ([decision record](decisions/2026-10-28-own-connectors-leave-the-public-tree.md), #5665). Three schema migrations: the alembic head advances **`0132` → `0135`**. They only add: `0133` two `web_session` columns, `0134` `replaced_at` on both grant tables (their unique indexes are built again), `0135` an index on `agent_announcement` (#5439, #5636, #5350). The upgrade ends every approval request that still waits (`release_changed`). The chart turns the per-person request limits on (600 operations per minute, 16 at the same time, 60 new MCP sessions per tenant and minute); they count in the chart's Valkey store (`broadcast.enabled`, on by default). A request body is capped at 32 MiB (#5708). `/metrics` and the `features` block of `/ready` need the metrics token: the chart makes the Secret `<release>-metrics-auth` and the ServiceMonitor sends it. The API docs pages are off unless `API_DOCS_ENABLED` is set (#5706). The separate database login of the running backplane stays off with your own PostgreSQL (the default) until you set `postgres.runtime.role` and `postgres.runtime.credentialsSecret`; the built-in PostgreSQL makes and uses the role `meho_app` (#5699). An ingested credential read waits for approval and an ingested licence read stays off, from the next ingest (#5700, #5718). Only an SA-Operator or a tenant admin approves another person's `dangerous` or `destructive` change (#5688). A `gsm:` target login is read only from a project in `GSM_PARAM_ALLOWED_PROJECTS` (#5702); the docs-service token goes only to `CORPUS_URL` or `CORPUS_ALLOWED_HOSTS` (#5696). | Back up the database. Decide waiting approvals before the upgrade. VMware users: run an overlay image built on this release that adds the VMware connector package. Keep `broadcast.enabled` on, or set `config.dispatchRateLimitPerMinute`, `config.dispatchMaxConcurrentOps` and `config.mcpSessionStartLimitPerMinute` to `"0"`. Give any scraper other than the chart's ServiceMonitor the token from `<release>-metrics-auth`. For the separate database login with your own PostgreSQL, create the role and its Secret before the upgrade, then set both `postgres.runtime` keys. Ingest your connectors again. Put approvers of dangerous changes in the SA-Operators group or give them `tenant_admin`. Set `GSM_PARAM_ALLOWED_PROJECTS` and `CORPUS_ALLOWED_HOSTS` where needed. Install the v0.44.0 CLI; Claude Desktop users install `meho-claude-desktop-0.44.0.mcpb`, Claude Code users run `claude plugin update meho@meho`. Full list: the "Breaking changes" and "Steps after the upgrade" parts of the `[0.44.0]` CHANGELOG section. |
 | **v0.44.0** | The chart sets a metrics token by default (`metricsAuth.enabled: true`): it makes the Secret `<release>-metrics-auth` on the first install and keeps it on upgrades. `/metrics` and the `features` block of `/ready` answer only a caller that sends the token; the verdict and the checks on `/ready`, and `/healthz`, stay open. The API docs pages (`/openapi.json`, `/docs`, `/redoc`) are off unless `API_DOCS_ENABLED` is set. | The chart's ServiceMonitor sends the token by itself. A scrape config of your own needs the token: `kubectl get secret <release>-metrics-auth -o jsonpath='{.data.token}' \| base64 -d`. To keep your own token, set `metricsAuth.existingSecret`; to set none, `metricsAuth.enabled: false`. For the API docs pages on an instance where that is fine, add `API_DOCS_ENABLED: "true"` with `extraEnv`. |
+| **v0.45.0** | Two schema migrations: the alembic head advances **`0135` → `0137`**. They change no existing row: `0136` adds the table `instance_settings_revision` (the history of settings imports; its rows cannot be changed or deleted), and `0137` adds `config_change` to the allowed audit event classes. An operation edit writes this class (#5655, #5794). While `0137` checks the existing audit rows, writes to the audit log wait. The upgrade ends every approval request that still waits (`release_changed`). The chart turns on the built-in PostgreSQL, Keycloak and OpenBao by default (`corePostgres.enabled`, `coreKeycloak.enabled` and `coreVault.enabled` are `true`) and connects MEHO to them: the database login, the OpenBao address and login role, the key for credential writes that wait for approval, and the NetworkPolicy egress by pod. With the built-in OpenBao, each tenant reads and writes only `secret/tenants/<tenant id>/` (#5654). Every token call and every agent runs only `safe` operations at once; the next row has the details (#5764). `meho approvals list` has a new `APPROVE` column after `RUN`, and the approval answers carry `may_approve` and `may_approve_reason` (#5763). An operation with a parameter that holds an address MEHO connects to waits for a person's approval, also with an override or a standing grant. This covers `pfsense.diag.ping`, `winsrv.storage.iscsi.connect` and `wsfc.witness.set`; the built-in `net.*` checks stay `safe` (#5787, #5796). An ingested licence operation stays off for every HTTP method (#5797). The startup probe allows 15 minutes for the first start (#5767). | **Bring-your-own installs, before the upgrade:** set `corePostgres.enabled`, `coreKeycloak.enabled` and `coreVault.enabled` to `false` for each part you bring yourself. Without them, Helm stops with an error that names the key. Installs with the built-in parts: remove `vault.address` and `config.vaultAddr` from your values; leave `postgres.credentialsSecret` empty or set to `<release>-core-postgres-meho`. Back up the database. Decide waiting approvals before the upgrade. Put at least one person in `MEHO-SA-Operators` (see the next row). Expect approvals for the three operations above. A sensor on `pfsense.diag.ping` reads `unknown`; use `net.ping` for sensors. Install the v0.45.0 CLI. A script that reads the `meho approvals list` table should use `--json`. Full list: the "Breaking changes" and "Steps after the upgrade" parts of the `[0.45.0]` CHANGELOG section. |
+| **v0.45.0** | Every token call runs only `safe` operations at once (#3980): MCP, the CLI and REST, also with a person's own token, and every agent. `caution`, `dangerous` and `destructive` changes from a token call wait for approval; the park stamps `waits_because: token_call` on a `caution` change that waits only for this reason. In the web interface (the only path that sets `web_session`), `caution` still runs at once and `dangerous` now waits, like `destructive` and `requires_approval`. Agents' `dangerous` and `destructive` requests now wait for a person's approval instead of `deny` (`_SAFETY_DEFAULT` / `_SAFETY_CEILING`). Service principals keep their standing-grant rule. The approval group rules shipped in v0.44.0 (#5688): only a MEHO-SA-Operator or a tenant admin approves another person's `dangerous` or `destructive` change, and only a MEHO-SA-Operator approves their own. | **Before the upgrade**, put at least one person in `MEHO-SA-Operators` (see `docs-site/install/keycloak-realm.md`, "Who may approve their own changes"); a tenant admin cannot approve their own `dangerous` or `destructive` change. Expect more waiting requests from CLI, MCP and REST users: they approve in the console, or with `meho approvals approve` and a fresh approval sign-in (#3979, #5515). A person may approve their own token `caution` change with a console click (`approval_rule` `token_call_self_approval`). Scripts that run `caution` changes with a token now get `awaiting_approval`; move fixed automation to a service principal with a standing grant. No schema migration for this change. See [`codebase/approvals.md`](codebase/approvals.md). |
+| **v0.45.0** | When a connector states the target versions its operations work on, MEHO runs an operation only on a target inside that range. MEHO checks this each time the operation runs. Outside the range, the call is refused with `unqualified_target_version`, and the error names the range and the target's version. For an operation from an API file, MEHO first looks for the same operation on the connector version that matches the target, and runs it there when it exists and is turned on. MEHO checks the range for operations from an API file and for multi-step operations. From v0.45.0 the VMware connectors state the target versions their multi-step operations work on, so MEHO now applies the check to them. A Sensor on a connector whose range does not include the target's version can read `unknown`. A scheduled job or another saved call on such a connector is refused. | **Before the upgrade**, list your Sensors with `meho sensor list --json` and check that each one uses the connector that matches its target's version. For example, use `vmware-rest-8.0` for a vCenter 8.0.x target and `vmware-rest-9.0` for a vCenter 9.0.x target. A Sensor cannot be changed, so delete a wrong one and create it again on the right connector. Check scheduled jobs and other saved calls the same way. See [Pick the connector version that matches the target](../docs-site/guides/sensors-quickstart.md#pick-the-connector-version-that-matches-the-target). |
+| **v0.46.0** | The key of the params hashes and value fingerprints (audit rows, approval requests, secret moves) is a secret of its own: `PARAMS_HASH_KEY`, chart block `paramsHashKey`. With a built-in core part, the install makes it in the Secret `<release>-core-params-hash` (key `params_hash_key`) and keeps it on every upgrade, so a new database password keeps every hash. Without it, MEHO makes the key from `DATABASE_URL`. New audit hashes and fingerprints do not match the ones made with the key from `DATABASE_URL`. | **Built-in core:** nothing to do. **No built-in part:** store at least 32 random characters in a Kubernetes Secret and set `paramsHashKey.secretName` (and `paramsHashKey.secretKey` if the key name is not `params_hash_key`). A request that waits for approval while you set the key still matches its own params. To rotate the key later, follow "Rotating `PARAMS_HASH_KEY`" in [`codebase/approvals.md`](codebase/approvals.md). |
+| **v0.46.0** | The chart sets `progressDeadlineSeconds` on the MEHO Deployment. The default is `1200` seconds (20 minutes). Before, Kubernetes used its own default of 600 seconds. That is shorter than the 15 minutes the startup probe allows for a first start. So a slow but healthy start was reported as a failed rollout. | Nothing is required. `kubectl rollout status` and Argo CD now wait up to 20 minutes before they report a failure. If you change `probes.startup`, keep `progressDeadlineSeconds` higher than `failureThreshold` × `periodSeconds`. |
+| **v0.46.0** | The chart uses the `Recreate` update strategy (#5024). An install made with an older chart has `RollingUpdate` and a `rollingUpdate` block on its live Deployment, which Helm 4 server-side apply does not remove (#5962). | Nothing to do: a `pre-upgrade` Job removes the block first. A revision that already failed with `spec.strategy.rollingUpdate: Forbidden`: run `helm upgrade` again with the fixed chart, or see [Upgrade from a chart without a strategy](#upgrade-from-a-chart-without-a-strategy-5962). |
+| **v0.46.0** | Fifteen schema migrations: the alembic head advances **`0137` → `0152`**. They only add tables, columns and one index; no existing row changes. `0139` adds the run state `uncertain`; a downgrade below `0139` turns every `uncertain` run into `failed`. On PostgreSQL, `0148` builds the keyword index `endpoint_descriptor_bm25_custom_idx`, and writes to `endpoint_descriptor` wait while it builds. The upgrade ends every approval request that still waits (`release_changed`). With the built-in Keycloak, `config.uiKeycloakClientId`, `checkRunner.clientId`, `keycloakAdmin.url` and `keycloakAdmin.clientId` must be empty or equal the chart's value, or the render stops with a sentence that names the key (#5936). The routes `POST /api/v1/retrieve/eval` and `POST /api/v1/retrieve/retire-checklist` and their CLI commands are removed (#6021). REST target and topology writes and grant writes on MCP and in the web interface are for people, and a tenant in a body or query follows the `Meho-Tenant` header rules (#5819, #5828, #5838, #5836). The built-in OpenBao uses the plain OpenBao image (#5945). An operation loaded from an API file runs only on a connector class that sets `accepts_ingested_operations = True` (default `False`; `True` on the generic connector, `ProfiledRestConnector` and the GitHub, Hetzner Robot, Harbor and Argo CD classes). On any other class MEHO refuses it with `ingested_ops_not_accepted` (#5830). | Back up the database, and decide waiting approval requests first. **Connector packages:** update every connector package before this version or together with it, to a package version that sets `accepts_ingested_operations = True` on each class that runs operations from an API file. Package authors set the flag, release the package, then the install updates. **Built-in Keycloak:** remove the four values from your values file, or set the value the render message names. Give `meho-admin` the `manage-realm` right once so the upgrade turns on recovery codes, or follow "Recovery codes on an older install" on the Keycloak realm page (#5938). **Machine logins** that wrote targets or topology over REST use `targets.register`, `targets.update`, `targets.remove` and `topology.*` through `call_operation`. **OpenShift:** set the UBI OpenBao image in `coreVault.image`. Install the 0.46.0 CLI. |
+| **v0.47.0** | With the built-in Keycloak, the bootstrap Job keeps the approval sign-in flow `meho approval sign-in` and its binding to `meho-cli-approve` up to date on every upgrade (#6280). The realm file now gives `meho-admin` the realm-management role `manage-realm`; the Job stops with a message that names the role when it is missing. `/api/v1/health` shows the state of the approval sign-in in `approvals.sign_in` (`ok`, `flow_missing`, `not_bound`, `flow_differs`, `not_checked`), and `meho doctor` shows it in one line. | **Built-in Keycloak first started before v0.47.0 with the company login off:** give `meho-admin` `manage-realm` once before the upgrade ([upgrades page](../docs-site/install/upgrades.md#the-bootstrap-job-needs-manage-realm)). **Your own Keycloak:** give the backplane's Keycloak admin client `view-realm` so MEHO can read the flow. |
 
 ## Operational chart knobs
 
@@ -649,16 +695,25 @@ each lives inline in
   the token by itself. For your own scrape config, read the token from the
   Secret; for your own token, set `metricsAuth.existingSecret`. See
   `docs/codebase/metrics-ready-access.md`.
+- **`webPush.*`** → `WEB_PUSH_ENABLED` and `WEB_PUSH_VAPID_PRIVATE_KEY`.
+  Approval notifications in the browser. Off by default (`webPush.enabled:
+  false`): no switch on the account page and no push key in use. With it on,
+  a person can switch on "Notify me about approvals in this browser". With a
+  built-in core part, the install makes the push key in
+  `<release>-core-web-push`; without one, set `webPush.secretName` to your
+  own Secret (key `vapid_private_key`), or the render stops. See
+  `docs/codebase/ui.md`, "Approval notifications".
 - **`API_DOCS_ENABLED`** (via `extraEnv`) — the API docs pages
   (`/openapi.json`, `/docs`, `/redoc`) are off unless this is `true`. They
   need no login, so turn them on only on an instance where that is fine.
-- **`probes.startup`** — the first-boot startup probe (300s budget). Clear
+- **`probes.startup`** — the first-boot startup probe (900s budget). Clear
   it to opt out on a fast cluster where op-catalog registration + fastembed
   preload finish inside the liveness `initialDelaySeconds`.
 - **`extraVolumes` / `extraVolumeMounts` / `extraEnv`** — the internal-CA
   trust-bundle mount point (`SSL_CERT_FILE`) and any other operator env.
-  Applied to **both** the backplane container and the migration Job
-  container.
+  Applied to **both** the backplane container and the migration container
+  (the migration Job, or the `migrate` init container with the built-in
+  PostgreSQL).
 - **`sandboxMode.*`** — only for an instance that holds disposable test
   systems ([decision](decisions/sandbox-mode.md)). All three are read at
   boot only; no request can change them.

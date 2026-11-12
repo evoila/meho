@@ -20,6 +20,8 @@ secret), matching ``test_connectors_k8s_storage_cr.py``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -37,6 +39,7 @@ from meho_backplane.connectors.kubernetes.redaction import (
     redact_kubernetes_payload,
     redact_secret_value,
 )
+from meho_backplane.operations._validate import compute_value_fingerprint
 from meho_backplane.settings import get_settings
 
 # A base64 ``data`` value and a plaintext ``stringData`` value that match
@@ -127,15 +130,42 @@ def _make_secret(
 
 def test_redact_secret_value_is_placeholder_plus_stable_digest() -> None:
     out = redact_secret_value(_TLS_KEY_B64)
-    assert out.startswith(REDACTED_PREFIX + ";sha256:")
+    assert out.startswith(REDACTED_PREFIX + ";hmac-sha256:")
     assert out.endswith("]")
     # Deterministic across calls (correlatable), and NOT the raw value.
     assert out == redact_secret_value(_TLS_KEY_B64)
     assert _TLS_KEY_B64 not in out
     # 12 hex chars of digest between the prefix and the closing bracket.
-    digest = out[len(REDACTED_PREFIX) + len(";sha256:") : -1]
+    digest = out[len(REDACTED_PREFIX) + len(";hmac-sha256:") : -1]
     assert len(digest) == 12
     assert all(c in "0123456789abcdef" for c in digest)
+
+
+@pytest.mark.parametrize("value", ["1234", "hunter2", _TLS_KEY_B64])
+def test_redact_secret_value_is_keyed_not_a_plain_sha256_prefix(value: str) -> None:
+    out = redact_secret_value(value)
+    plain = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    assert plain[:12] not in out
+    expected = compute_value_fingerprint(value.encode("utf-8"))[:12]
+    assert out == f"{REDACTED_PREFIX};hmac-sha256:{expected}]"
+
+
+def test_redact_secret_value_changes_with_the_server_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PARAMS_HASH_KEY", "made-up-install-key-one")
+    get_settings.cache_clear()
+    first = redact_secret_value("1234")
+    assert first == redact_secret_value("1234")
+    monkeypatch.setenv("PARAMS_HASH_KEY", "made-up-install-key-two")
+    get_settings.cache_clear()
+    second = redact_secret_value("1234")
+    assert second.startswith(REDACTED_PREFIX + ";hmac-sha256:")
+    assert second != first
+
+
+def test_redact_secret_value_coerces_a_non_string_value() -> None:
+    assert redact_secret_value(1234) == redact_secret_value("1234")
 
 
 def test_single_secret_object_data_and_stringdata_redacted() -> None:
@@ -368,3 +398,213 @@ async def test_cr_list_of_secrets_returns_no_bytes_in_envelope() -> None:
     # No base64 value survives anywhere in the rows/total envelope.
     assert _TLS_KEY_B64 not in str(result)
     assert _APP_TOKEN_B64 not in str(result)
+
+
+# ---------------------------------------------------------------------------
+# HelmChart values (k3s / RKE2 ``helm.cattle.io/v1``)
+# ---------------------------------------------------------------------------
+
+_CHART_VALUES_TEXT = "adminPassword: made-up-chart-values-4471"
+_CHART_SET_VALUE = "made-up-set-value-8832"
+
+
+def _make_helm_chart(*, with_kind: bool = True) -> dict[str, Any]:
+    chart: dict[str, Any] = {
+        "apiVersion": "helm.cattle.io/v1",
+        "metadata": {"name": "meho", "namespace": "kube-system"},
+        "spec": {
+            "chart": "https://charts.example/meho-1.4.0.tgz",
+            "version": "1.4.0",
+            "targetNamespace": "meho",
+            "valuesContent": _CHART_VALUES_TEXT,
+            "set": {"image.tag": "1.4.0", "adminPassword": _CHART_SET_VALUE},
+        },
+    }
+    if with_kind:
+        chart["kind"] = "HelmChart"
+    return chart
+
+
+def test_helm_chart_values_are_redacted_and_the_rest_kept() -> None:
+    out = redact_kubernetes_payload(_make_helm_chart())
+    spec = out["spec"]
+    assert spec["valuesContent"] == redact_secret_value(_CHART_VALUES_TEXT)
+    assert set(spec["set"]) == {"image.tag", "adminPassword"}
+    assert spec["set"]["adminPassword"] == redact_secret_value(_CHART_SET_VALUE)
+    assert spec["set"]["image.tag"].startswith(REDACTED_PREFIX)
+    assert spec["chart"] == "https://charts.example/meho-1.4.0.tgz"
+    assert spec["version"] == "1.4.0"
+    assert spec["targetNamespace"] == "meho"
+    assert out["metadata"] == {"name": "meho", "namespace": "kube-system"}
+    blob = str(out)
+    assert _CHART_VALUES_TEXT not in blob
+    assert _CHART_SET_VALUE not in blob
+
+
+def test_helm_chart_list_items_without_kind_are_redacted() -> None:
+    envelope = {
+        "kind": "HelmChartList",
+        "apiVersion": "helm.cattle.io/v1",
+        "metadata": {"continue": ""},
+        "items": [_make_helm_chart(with_kind=False), _make_helm_chart()],
+    }
+    out = redact_kubernetes_payload(envelope)
+    for item in out["items"]:
+        assert item["spec"]["valuesContent"].startswith(REDACTED_PREFIX)
+        assert item["spec"]["set"]["adminPassword"].startswith(REDACTED_PREFIX)
+    assert _CHART_VALUES_TEXT not in str(out)
+
+
+def test_helm_chart_without_values_is_unchanged() -> None:
+    chart = _make_helm_chart()
+    del chart["spec"]["valuesContent"]
+    del chart["spec"]["set"]
+    assert redact_kubernetes_payload(chart) == chart
+
+
+def test_values_fields_on_another_kind_are_untouched() -> None:
+    """Only a ``HelmChart`` has Helm values; the same field names elsewhere stay."""
+    other = {
+        "kind": "Workflow",
+        "spec": {"valuesContent": "not: a-chart", "set": {"x": "1"}},
+    }
+    assert redact_kubernetes_payload(other) == other
+
+
+def test_helm_chart_input_is_not_mutated() -> None:
+    original = _make_helm_chart()
+    redact_kubernetes_payload(original)
+    assert original["spec"]["valuesContent"] == _CHART_VALUES_TEXT
+    assert original["spec"]["set"]["adminPassword"] == _CHART_SET_VALUE
+
+
+def _chart_with_saved_manifest(*, with_kind: bool = True) -> dict[str, Any]:
+    """A chart made with ``kubectl apply``: its annotation repeats the manifest."""
+    chart = _make_helm_chart(with_kind=with_kind)
+    chart["metadata"]["annotations"] = {
+        LAST_APPLIED_ANNOTATION: json.dumps(_make_helm_chart()),
+        "owner": "platform-group",
+    }
+    return chart
+
+
+def test_helm_chart_annotation_values_are_redacted_keys_kept() -> None:
+    """The last-applied annotation holds the chart values too, so no value is shown."""
+    out = redact_kubernetes_payload(_chart_with_saved_manifest())
+
+    annotations = out["metadata"]["annotations"]
+    assert set(annotations) == {LAST_APPLIED_ANNOTATION, "owner"}
+    assert all(value.startswith(REDACTED_PREFIX) for value in annotations.values())
+    assert annotations["owner"] == redact_secret_value("platform-group")
+    assert out["metadata"]["name"] == "meho"
+    blob = json.dumps(out)
+    assert _CHART_VALUES_TEXT not in blob
+    assert _CHART_SET_VALUE not in blob
+
+
+def test_helm_chart_list_item_annotation_values_are_redacted() -> None:
+    """A kind-less list item with a saved manifest is masked like a named chart."""
+    chart_list = {
+        "kind": "HelmChartList",
+        "apiVersion": "helm.cattle.io/v1",
+        "metadata": {},
+        "items": [_chart_with_saved_manifest(with_kind=False)],
+    }
+    out = redact_kubernetes_payload(chart_list)
+
+    annotations = out["items"][0]["metadata"]["annotations"]
+    assert set(annotations) == {LAST_APPLIED_ANNOTATION, "owner"}
+    assert all(value.startswith(REDACTED_PREFIX) for value in annotations.values())
+    assert _CHART_VALUES_TEXT not in json.dumps(out)
+
+
+# ---------------------------------------------------------------------------
+# Wired handler path -- k8s.cr.info / k8s.cr.list projecting a HelmChart
+# ---------------------------------------------------------------------------
+
+_CHART_CR_PARAMS = {"group": "helm.cattle.io", "version": "v1", "plural": "helmcharts"}
+
+
+def _assert_chart_row_has_no_values(row: dict[str, Any]) -> None:
+    """The row keeps the chart's name, version and keys, but no values text."""
+    assert row["kind"] == "HelmChart"
+    assert row["name"] == "meho"
+    spec = json.loads(row["spec_excerpt"])
+    assert spec["version"] == "1.4.0"
+    assert spec["targetNamespace"] == "meho"
+    assert spec["valuesContent"] == redact_secret_value(_CHART_VALUES_TEXT)
+    assert set(spec["set"]) == {"image.tag", "adminPassword"}
+    assert spec["set"]["adminPassword"] == redact_secret_value(_CHART_SET_VALUE)
+    assert set(row["annotations"]) == {"owner"}
+    assert row["annotations"]["owner"] == redact_secret_value("platform-group")
+    blob = json.dumps(row)
+    assert _CHART_VALUES_TEXT not in blob
+    assert _CHART_SET_VALUE not in blob
+    assert "platform-group" not in blob
+
+
+def test_custom_resource_row_helm_chart_masks_values_and_annotations() -> None:
+    _assert_chart_row_has_no_values(custom_resource_row(_chart_with_saved_manifest()))
+
+
+def test_custom_resource_row_helm_chart_without_kind_is_not_masked_by_name() -> None:
+    """Only the ``kind`` decides; a list item gets it from the envelope first."""
+    row = custom_resource_row(_chart_with_saved_manifest(with_kind=False))
+    assert row["kind"] is None
+    assert _CHART_VALUES_TEXT in row["spec_excerpt"]
+
+
+@pytest.mark.asyncio
+async def test_cr_info_of_helm_chart_returns_no_values_text() -> None:
+    connector = _make_connector()
+    api_client = MagicMock(close=AsyncMock())
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=api_client,
+        ),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CustomObjectsApi") as co_cls,
+    ):
+        co_cls.return_value.get_namespaced_custom_object = AsyncMock(
+            return_value=_chart_with_saved_manifest()
+        )
+        result = await connector.k8s_cr_info(
+            _make_operator(),
+            _TARGET,
+            {**_CHART_CR_PARAMS, "name": "meho", "namespace": "kube-system"},
+        )
+
+    _assert_chart_row_has_no_values(result)
+
+
+@pytest.mark.asyncio
+async def test_cr_list_of_helm_charts_returns_no_values_text_in_envelope() -> None:
+    connector = _make_connector()
+    # The API server leaves ``kind`` off the items of a HelmChartList;
+    # only the list carries it. The rows must still be masked.
+    list_resp = {
+        "apiVersion": "helm.cattle.io/v1",
+        "kind": "HelmChartList",
+        "metadata": {"continue": ""},
+        "items": [
+            _chart_with_saved_manifest(with_kind=False),
+            _chart_with_saved_manifest(),
+        ],
+    }
+    api_client = MagicMock(close=AsyncMock())
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=api_client,
+        ),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CustomObjectsApi") as co_cls,
+    ):
+        co_cls.return_value.list_cluster_custom_object = AsyncMock(return_value=list_resp)
+        result = await connector.k8s_cr_list(_make_operator(), _TARGET, dict(_CHART_CR_PARAMS))
+
+    assert result["total"] == 2
+    for row in result["rows"]:
+        _assert_chart_row_has_no_values(row)
+    assert _CHART_VALUES_TEXT not in json.dumps(result)

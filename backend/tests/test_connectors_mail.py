@@ -8,8 +8,9 @@ Covers the connector's load-bearing contracts on the ``net.*`` mould:
 * ``mail.send`` is a **synthetic** targetless typed op: it dispatches
   with ``target=None``, the wire ``connector_id`` ``mail-smtp-1.x``
   round-trips through the parser, and the descriptor row carries
-  ``safety_level="caution"`` + ``requires_approval=False`` (operators
-  auto-run; agents ride the policy gate's needs-approval default).
+  ``safety_level="caution"`` + ``requires_approval=False`` (a person in
+  the web interface runs it at once; a token call and an agent wait for
+  approval, #3980).
 * The recipient allowlist ``MAIL_RECIPIENT_ALLOWLIST`` has **inverted**
   semantics: empty ⇒ every send refused *before any SMTP connection
   opens*; full-address and domain entries admit recipients.
@@ -289,6 +290,7 @@ async def _registered_mail_op(stub_embedding_service: AsyncMock) -> AsyncIterato
 
 
 def _make_operator() -> Operator:
+    # A person in the web interface, so the ``caution`` send runs at once (#3980).
     return Operator(
         sub="test-operator",
         name=None,
@@ -296,6 +298,7 @@ def _make_operator() -> Operator:
         raw_jwt="fake.jwt.value",
         tenant_id=UUID(int=0),
         tenant_role=TenantRole.OPERATOR,
+        web_session=True,
     )
 
 

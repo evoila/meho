@@ -27,7 +27,7 @@ key, migration ``0014``). Two row shapes matter here:
 * **MCP meta-tool envelope rows** — one per ``tools/call`` invocation,
   written by :func:`meho_backplane.mcp.audit.write_mcp_audit_row` with
   ``method="MCP"`` and ``path = f"{MCP_TOOL_PATH_PREFIX}{tool_name}"``.
-  The reflex meta-tools ``call_operation`` / ``broadcast_recent`` /
+  The reflex meta-tools ``call_operation`` / ``meho_broadcast_recent`` /
   ``add_to_knowledge`` / ``add_to_memory`` are counted from these rows,
   the same path-prefix filter #444 uses for the retrieval search tools.
 * **Dispatch rows** — one per connector operation, written by
@@ -67,7 +67,8 @@ Let a *session* be a distinct non-null ``agent_session_id``.
 1. **read-before-act** (``read_before_act_pct``) — of the sessions with
    at least one ``call_operation``, the fraction whose **first**
    ``call_operation`` is strictly preceded, in the same session, by a
-   ``broadcast_recent``. Denominator: sessions with ≥1
+   ``meho_broadcast_recent`` (or, in old rows, ``broadcast_recent``).
+   Denominator: sessions with ≥1
    ``call_operation``. ``None`` when that denominator is 0 (the
    ``cli_rest`` surface, and any window with no agent operations).
 
@@ -90,6 +91,15 @@ Let a *session* be a distinct non-null ``agent_session_id``.
 
 4. **surface split** — every metric above, reported once per surface
    (``agent`` / ``cli_rest``).
+
+Learning numbers
+----------------
+
+The report also carries ``learning``: the repeat-mistake rate, the hit
+rate and the precision of retrieved knowledge and memory entries, and the
+time to the first correct action on a known system. They are defined and
+computed in :mod:`meho_backplane.lessons.metrics`, from ``audit_log``
+dispatch rows and the recorded retrievals.
 
 Request usage events (#3734)
 ----------------------------
@@ -136,6 +146,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import AgentAnnouncement, AuditLog
+from meho_backplane.lessons.metrics import LearningMetrics, compute_learning_metrics
 from meho_backplane.request_usage.reader import (
     MCP_TOOL_ROUTE_PREFIX,
     UsageSource,
@@ -154,13 +165,16 @@ from meho_backplane.retrieval.usage import (
 
 __all__ = [
     "ADD_TOOLS",
+    "BROADCAST_READ_TOOLS",
     "BROADCAST_RECENT_TOOL",
     "CALL_OPERATION_TOOL",
     "DEFAULT_SINCE",
     "DISPATCH_METHOD",
     "MCP_TOOL_PATH_PREFIX",
+    "OLD_BROADCAST_RECENT_TOOL",
     "SUCCESS_STATUS",
     "WRITE_OP_CLASSES",
+    "LearningMetrics",
     "ReflexReport",
     "SinceValueError",
     "SurfaceMetrics",
@@ -172,7 +186,16 @@ __all__ = [
 #: from the envelope rows written with
 #: ``path = f"{MCP_TOOL_PATH_PREFIX}{tool_name}"``.
 CALL_OPERATION_TOOL: Final[str] = "call_operation"
-BROADCAST_RECENT_TOOL: Final[str] = "broadcast_recent"
+BROADCAST_RECENT_TOOL: Final[str] = "meho_broadcast_recent"
+
+#: The read tool's name without the ``meho_`` prefix. Only old rows carry it.
+OLD_BROADCAST_RECENT_TOOL: Final[str] = "broadcast_recent"
+
+#: Every name a broadcast read is counted under for read-before-act.
+BROADCAST_READ_TOOLS: Final[tuple[str, ...]] = (
+    BROADCAST_RECENT_TOOL,
+    OLD_BROADCAST_RECENT_TOOL,
+)
 
 #: The write-back meta-tools (knowledge + memory add). Their combined
 #: successful-call count is the write-back numerator.
@@ -241,6 +264,9 @@ class ReflexReport(BaseModel):
     empty window (both surfaces present with zero-valued / ``None``
     metrics). ``tenant_id`` is the scope the report was computed for
     (the operator's own tenant, or a ``platform_admin`` filter).
+    ``learning`` holds the four numbers that show whether stored lessons
+    help (:mod:`meho_backplane.lessons.metrics`); they are not split by
+    surface, because each one is about agent sessions.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -249,6 +275,7 @@ class ReflexReport(BaseModel):
     until: datetime
     tenant_id: UUID | None
     surfaces: list[SurfaceMetrics]
+    learning: LearningMetrics
 
 
 class _MetaToolRow(NamedTuple):
@@ -286,7 +313,7 @@ async def _fetch_meta_tool_rows(
     usage events, with the route label turned back into the audit path
     so the metric helpers stay source-agnostic.
     """
-    tools = [CALL_OPERATION_TOOL, BROADCAST_RECENT_TOOL, *ADD_TOOLS]
+    tools = [CALL_OPERATION_TOOL, *BROADCAST_READ_TOOLS, *ADD_TOOLS]
     if source == "request_usage":
         usage_stmt = select_finished_events(
             since=since,
@@ -390,11 +417,11 @@ def _read_before_act(
     """Return ``(read_first_sessions, sessions_with_call_op)`` for *surface*.
 
     A session (distinct ``agent_session_id``) counts once it has ≥1
-    ``call_operation``; it is "read-first" when a ``broadcast_recent``
-    strictly precedes the session's first ``call_operation``.
+    ``call_operation``; it is "read-first" when a broadcast read (any name
+    in :data:`BROADCAST_READ_TOOLS`) strictly precedes the session's first ``call_operation``.
     """
     call_path = _tool_path(CALL_OPERATION_TOOL)
-    recent_path = _tool_path(BROADCAST_RECENT_TOOL)
+    recent_paths = {_tool_path(tool) for tool in BROADCAST_READ_TOOLS}
     first_call: dict[UUID, datetime] = {}
     first_recent: dict[UUID, datetime] = {}
     for row in meta_rows:
@@ -405,7 +432,7 @@ def _read_before_act(
             current = first_call.get(sid)
             if current is None or row.occurred_at < current:
                 first_call[sid] = row.occurred_at
-        elif row.path == recent_path:
+        elif row.path in recent_paths:
             current = first_recent.get(sid)
             if current is None or row.occurred_at < current:
                 first_recent[sid] = row.occurred_at
@@ -546,9 +573,16 @@ async def compute_reflex_report(
         )
         for surface in _SURFACES
     ]
+    learning = await compute_learning_metrics(
+        session,
+        since=since,
+        until=until,
+        tenant_id=tenant_id,
+    )
     return ReflexReport(
         since=since,
         until=until,
         tenant_id=tenant_id,
         surfaces=surfaces,
+        learning=learning,
     )

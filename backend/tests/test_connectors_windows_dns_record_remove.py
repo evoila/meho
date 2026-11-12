@@ -57,7 +57,7 @@ from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations import typed_register as tr_module
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import PreviewContext
-from meho_backplane.operations.approval_object_check import REASON_APPEARED
+from meho_backplane.operations.approval_object_check import REASON_APPEARED, REASON_CHANGED
 from meho_backplane.operations.approval_queue import (
     SelfApprovalForbiddenError,
     approve_request,
@@ -444,6 +444,45 @@ async def test_approved_remove_of_an_absent_name_is_refused_when_records_appear(
     assert resume.status == "denied", resume
     assert resume.extras["error_code"] == "object_changed_since_approval"
     assert resume.extras["reason"] == REASON_APPEARED
+    assert recorder.remove_calls == [], "nothing may be cleared"
+
+
+async def test_approved_remove_is_refused_when_the_values_changed() -> None:
+    """Approved for the values on the card; the live values are others: nothing is cleared."""
+    recorder = _RecordingWindowsDnsConnector()
+    await _bootstrap(recorder)
+    await _seed_target()
+
+    requester = _make_operator(sub="op-requester")
+    args = _args()
+    preview = await preview_operation(requester, args)
+    assert preview["status"] == "ok", preview
+    call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "awaiting_approval", call
+    request_id = UUID(call["extras"]["approval_request_id"])
+
+    # While the request waited, one value under the name was changed.
+    recorder._get_output = json.dumps(
+        {
+            "rows": [
+                {"type": "A", "rdata": "192.0.2.30"},
+                {"type": "A", "rdata": "192.0.2.99"},
+            ],
+            "total": 2,
+        }
+    )
+
+    approver = _make_operator(sub="op-approver").model_copy(update={"self_approver": True})
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+    assert resume.status == "denied", resume
+    assert resume.extras["error_code"] == "object_changed_since_approval"
+    assert resume.extras["reason"] == REASON_CHANGED
     assert recorder.remove_calls == [], "nothing may be cleared"
 
 

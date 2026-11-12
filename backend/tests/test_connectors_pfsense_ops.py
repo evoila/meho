@@ -1062,12 +1062,13 @@ async def test_pfsense_dhcp_leases_response_schema_matches_handler_rows() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_pfsense_ops_has_twenty_four_entries() -> None:
+def test_pfsense_ops_has_twenty_six_entries() -> None:
     """canary + 7 reads + dhcp.leases (#2849) + 2 writes (#3090) + 2 deletes (#3232)
     + 3 teardown-inverse deletes (#3313) + mgmt_flow.summary
     + user.list / route.static.list (#3954) + filter.rule.add / .delete (#3850)
-    + user.disable / user.enable (#3937) + diag.ping (#3965) = 24."""
-    assert len(PFSENSE_OPS) == 24
+    + user.disable / user.enable (#3937) + diag.ping (#3965)
+    + openvpn.clients / openvpn.log (#4093) = 26."""
+    assert len(PFSENSE_OPS) == 26
 
 
 def test_pfsense_ops_about_is_first() -> None:
@@ -1101,6 +1102,10 @@ _USER_WRITE_OP_IDS = {"pfsense.user.disable", "pfsense.user.enable"}
 #: The approval-gated firewall rule add (#3850) -- ``dangerous``.
 _DANGEROUS_OP_IDS = {"pfsense.filter.rule.add"}
 
+# Reads whose parameter holds an address the firewall connects to: caution
+# with approval (the caller-address floor).
+_CALLER_ADDRESS_OP_IDS = {"pfsense.diag.ping"}
+
 
 def test_pfsense_read_ops_safe_write_ops_caution_delete_ops_destructive() -> None:
     for op in PFSENSE_OPS:
@@ -1110,10 +1115,8 @@ def test_pfsense_read_ops_safe_write_ops_caution_delete_ops_destructive() -> Non
             assert op.safety_level == "destructive", (
                 f"{op.op_id!r} delete op should be safety_level='destructive'"
             )
-        elif op.op_id in _WRITE_OP_IDS:
-            assert op.safety_level == "caution", (
-                f"{op.op_id!r} write op should be safety_level='caution'"
-            )
+        elif op.op_id in _WRITE_OP_IDS | _CALLER_ADDRESS_OP_IDS:
+            assert op.safety_level == "caution", f"{op.op_id!r} should be safety_level='caution'"
         elif op.op_id in _USER_WRITE_OP_IDS:
             assert op.safety_level == "dangerous", (
                 f"{op.op_id!r} user write should be safety_level='dangerous'"
@@ -1164,6 +1167,8 @@ def test_pfsense_ops_covers_expected_op_ids() -> None:
         "pfsense.user.disable",
         "pfsense.user.enable",
         "pfsense.diag.ping",
+        "pfsense.openvpn.clients",
+        "pfsense.openvpn.log",
     }
     assert op_ids == expected
 
@@ -1191,10 +1196,10 @@ def test_pfsense_ops_handler_attrs_exist_on_connector() -> None:
 
 
 def test_pfsense_ops_requires_approval_only_for_governed_ops() -> None:
-    """Only the governed deletes, the filter rule add (#3850) and the user
-    writes (#3937) require approval."""
+    """Only the governed deletes, the filter rule add, the user writes and
+    the reads of a caller address require approval."""
     for op in PFSENSE_OPS:
-        if op.op_id in _DANGEROUS_OP_IDS | _USER_WRITE_OP_IDS:
+        if op.op_id in _DANGEROUS_OP_IDS | _USER_WRITE_OP_IDS | _CALLER_ADDRESS_OP_IDS:
             assert op.requires_approval, f"{op.op_id!r} must require approval"
         elif op.op_id in _DELETE_OP_IDS:
             assert op.requires_approval, f"{op.op_id!r} destructive delete must require approval"
@@ -1503,6 +1508,70 @@ def test_classify_mgmt_flows_nat_translated_line_counted_unparsed_not_all_clear(
     assert unexpected_srcs == {"192.168.99.5"}
     # The NAT line's client is neither classified nor silently ignored.
     assert "198.51.100.7" not in unexpected_srcs
+
+
+_PAIR_STATES = (
+    "vmx6 tcp 10.11.16.9:443 <- 192.0.2.10:50001  ESTABLISHED:ESTABLISHED\n"
+    "vmx6 tcp 10.11.16.9:22 <- 192.0.2.10:50002  ESTABLISHED:ESTABLISHED\n"
+    "vmx6 tcp 10.11.16.10:443 <- 192.0.2.10:50003  ESTABLISHED:ESTABLISHED\n"
+)
+
+
+def _classify_pairs(baseline: list[Any]) -> dict[str, Any]:
+    return classify_mgmt_flows(
+        parse_pfctl_states(_PAIR_STATES),
+        sanctioned_src=_SANCTIONED,
+        mgmt_nets=_MGMT_NETS,
+        baseline_src=baseline,
+    )
+
+
+def test_baseline_pair_entry_hides_only_the_named_destination_and_port() -> None:
+    entry = {"src": "192.0.2.10/32", "dst": "10.11.16.9/32", "ports": [443]}
+    result = _classify_pairs(["203.0.113.0/24", entry])
+    rows = {(r["src"], tuple(r["ports"])) for r in result["unexpected_sources"]}
+    # 443 to .9 is known; 22 to .9 and 443 to .10 stay unexpected (one row, ports 22 and 443).
+    assert result["unexpected_source_count"] == 1
+    assert rows == {("192.0.2.10", (22, 443))}
+    assert result["unexpected_sources"][0]["states"] == 2
+    # The source stays non-sanctioned: all three states are counted.
+    assert result["non_sanctioned_state_count"] == 3
+    assert result["non_sanctioned_source_count"] == 1
+
+
+def test_baseline_pair_entry_without_ports_hides_every_port_on_dst() -> None:
+    result = _classify_pairs([{"src": "192.0.2.10", "dst": "10.11.16.9"}])
+    assert [r["ports"] for r in result["unexpected_sources"]] == [[443]]
+
+
+def test_baseline_pair_entry_hiding_everything_keeps_non_sanctioned_count() -> None:
+    baseline = [{"src": "192.0.2.10", "dst": "10.11.16.0/24"}]
+    result = _classify_pairs(baseline)
+    assert result["unexpected_source_count"] == 0
+    assert result["non_sanctioned_source_count"] == 1
+    assert result["non_sanctioned_state_count"] == 3
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"src": "192.0.2.10", "dst": "not-an-address", "ports": [443]},
+        {"src": "not-an-address", "dst": "10.11.16.9"},
+        {"src": "192.0.2.10", "dst": "10.11.16.9", "ports": ["443"]},
+        {"src": "192.0.2.10", "dst": "10.11.16.9", "ports": []},
+        {"src": "192.0.2.10"},
+    ],
+)
+def test_baseline_pair_entry_that_cannot_be_read_hides_nothing(entry: dict[str, Any]) -> None:
+    result = _classify_pairs([entry])
+    assert result["unexpected_source_count"] == 1
+    assert result["unexpected_sources"][0]["ports"] == [22, 443]
+    assert result["unexpected_sources"][0]["states"] == 3
+
+
+def test_baseline_strings_only_behave_as_before() -> None:
+    result = _classify_pairs(["192.0.2.0/24"])
+    assert result["unexpected_source_count"] == 0
 
 
 @pytest.mark.asyncio

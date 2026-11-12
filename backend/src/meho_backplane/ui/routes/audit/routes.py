@@ -110,6 +110,7 @@ from meho_backplane.audit_query import (
     query_audit,
     replay_session,
 )
+from meho_backplane.auth.client_identity import via_label
 from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session, get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, Tenant
@@ -119,6 +120,7 @@ from meho_backplane.ui.auth.middleware import (
     require_ui_operator,
     require_ui_session,
 )
+from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.references import resolve_audit_references
 from meho_backplane.ui.roles import is_ui_tenant_admin
@@ -167,6 +169,7 @@ _EVENT_CLASS_LABELS: Final[dict[str, str]] = {
     AuditEventClass.POLICY_DECISION.value: "Policy decision",
     AuditEventClass.APPROVAL_DECISION.value: "Approval decision",
     AuditEventClass.SECURITY_EVENT.value: "Security event",
+    AuditEventClass.CONFIG_CHANGE.value: "Config change",
     AuditEventClass.LEGACY_REQUEST.value: "Legacy row",
 }
 
@@ -495,6 +498,8 @@ async def _build_drawer_context(
         # ops are aggregate-only without a second hard-coded list.
         "gated_op_classes": sorted(AGGREGATE_ONLY_OP_CLASSES),
         "references": references,
+        # The login client and channel of the row (AUDIT_CLIENT_IDENTITY).
+        "via_label": via_label(row.payload),
     }
 
 
@@ -712,7 +717,7 @@ async def _build_results_context(
     except InvalidCursorError:
         # A tampered / expired cursor is "start over": re-run from page 1
         # with no cursor rather than surfacing a 400/500 to the operator.
-        log.info("ui_audit_invalid_cursor_reset", session_id=str(session.session_id))
+        log.info("ui_audit_invalid_cursor_reset", session_ref=session_ref(session.session_id))
         filters = _build_filters(
             target=target,
             principal=principal,

@@ -14,6 +14,7 @@
 * The same file again is "No change.": nothing waits.
 * When the stored policy changed after the plan, the approved import does
   not run.
+* After a failed run, the importer's own re-run writes nothing.
 
 Drives the production ``meho_backplane.main:app``. DB is the autouse
 per-test SQLite + ``alembic upgrade head``.
@@ -32,7 +33,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.connectors.policy import apply as policy_apply_module
 from meho_backplane.connectors.policy.apply import (
+    IMPORT_NEEDS_SECOND_ADMIN,
     POLICY_APPLY_OP_ID,
     SWITCH_OFF_IMPORT,
     register_policy_apply_operation,
@@ -45,6 +48,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.operations.approval_rerun import rerun_failed_request
 from meho_backplane.operations.grant_approval import is_rights_change_op
 from meho_backplane.operations.role_floors import role_floor_for
 from meho_backplane.operations.typed_register import register_typed_operation
@@ -325,3 +329,31 @@ async def test_an_import_planned_on_an_old_policy_does_not_run(
     assert POLICY_CHANGED in str(result.error) + str(result.extras)
     async with get_sessionmaker()() as session:
         assert len((await session.execute(select(PolicyRevision))).scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch")
+async def test_the_importer_cannot_rerun_a_failed_approved_import(
+    client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _setup(embedding)
+    key = make_rsa_keypair("kid-pol-rerun")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        body = _post(client, "import", _token(key), _FILE).json()
+    request_id = uuid.UUID(body["approval_request_id"])
+
+    async def _fails(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("The first run failed.")
+
+    with monkeypatch.context() as m:
+        m.setattr(policy_apply_module, "apply_policy", _fails)
+        first = await _approve(request_id, _admin("admin-b"))
+    assert first.status != "ok"
+
+    outcome = await rerun_failed_request(operator=_admin("admin-a"), request_id=request_id)
+    assert outcome.result.status != "ok"
+    assert IMPORT_NEEDS_SECOND_ADMIN in str(outcome.result.error) + str(outcome.result.extras)
+    assert await _stored() is None
+    async with get_sessionmaker()() as session:
+        assert (await session.execute(select(PolicyRevision))).scalars().all() == []

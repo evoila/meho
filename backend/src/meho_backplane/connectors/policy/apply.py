@@ -70,6 +70,11 @@ INSTALL_NEEDS_PLATFORM_ADMIN: Final[str] = (
     "The install's policy changes only when a platform admin approves it."
 )
 
+#: Why an import did not run: the login that asked for it ran it.
+IMPORT_NEEDS_SECOND_ADMIN: Final[str] = (
+    "A policy import runs only from a second admin's approval. Run the import again."
+)
+
 _SHA256 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
 
 PARAMETER_SCHEMA: Final[dict[str, Any]] = {
@@ -157,13 +162,19 @@ async def policy_apply(operator: Operator, target: Any, params: dict[str, Any]) 
 
     Op-id: ``policy.apply``. Targetless. Runs after the approval; the
     tenant comes from *operator*, never from *params*.
+
+    Only the admin who approved runs it. A run by the login that asked
+    (for example its re-run of a failed approved request) writes nothing,
+    so the history never names the importer as the approver.
     """
     if not classification_enabled():
         raise ValueError(SWITCH_OFF_IMPORT)
+    importer = approved_requester_sub()
+    if importer is None or importer == operator.sub:
+        raise ValueError(IMPORT_NEEDS_SECOND_ADMIN)
     scope = params["scope"]
     if scope == "install" and not operator.platform_admin:
         raise ValueError(INSTALL_NEEDS_PLATFORM_ADMIN)
-    importer = approved_requester_sub() or operator.sub
     async with get_sessionmaker()() as session, session.begin():
         return await apply_policy(
             session,

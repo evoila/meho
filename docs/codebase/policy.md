@@ -101,6 +101,10 @@ every tenant yet; that needs a decision first.
   the file and plans again. If the stored policy changed after the plan:
   "The policy changed after this import was planned. Run the preview
   again." Nothing is written then.
+- Only the admin who approved runs the import. A run by the login that
+  asked for it (for example its re-run of a failed request,
+  `POST /api/v1/approvals/{id}/rerun`) writes nothing and says: "A policy
+  import runs only from a second admin's approval. Run the import again."
 - The import **replaces the whole policy** of its scope in `tenant_policy`:
   an entry that is not in the file is removed. This also removes entries
   that `policy.classify` wrote. The category and labels on single

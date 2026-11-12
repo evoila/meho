@@ -40,11 +40,6 @@ from meho_backplane.connectors.bind9._atomic import (
     atomic_apply,
     read_file_locked,
 )
-from meho_backplane.connectors.bind9.ops_record import (
-    bind9_record_add,
-    bind9_record_delete,
-    bind9_record_remove,
-)
 
 _ZONE_TEXT = (
     "$ORIGIN example.test.\n"
@@ -481,7 +476,7 @@ def zone() -> Any:
 
 
 async def _add(name: str, ip: str) -> dict[str, Any]:
-    return await bind9_record_add(
+    return await ops_record_module.bind9_record_add(
         Bind9Connector(),
         object(),
         {"fqdn": f"{name}.example.test", "ip": ip, "type": "A", "zone": "example.test"},
@@ -505,7 +500,7 @@ class TestHandlersRedoOnConflict:
         zone.text = _ZONE_TEXT + "old IN A 192.0.2.30\n"
 
         async def _remove() -> dict[str, Any]:
-            return await bind9_record_remove(
+            return await ops_record_module.bind9_record_remove(
                 Bind9Connector(), object(), {"fqdn": "old.example.test", "zone": "example.test"}
             )
 
@@ -517,14 +512,14 @@ class TestHandlersRedoOnConflict:
         zone.text = _ZONE_TEXT + "gone IN A 192.0.2.40\n"
 
         async def _delete() -> dict[str, Any]:
-            return await bind9_record_delete(
+            return await ops_record_module.bind9_record_delete(
                 Bind9Connector(),
                 object(),
                 {"fqdn": "gone.example.test", "type": "A", "zone": "example.test"},
             )
 
         async def _remove() -> dict[str, Any]:
-            return await bind9_record_remove(
+            return await ops_record_module.bind9_record_remove(
                 Bind9Connector(), object(), {"fqdn": "gone.example.test", "zone": "example.test"}
             )
 

@@ -69,6 +69,15 @@ const (
 	ApprovalResultStateUncertain  ApprovalResultState = "uncertain"
 )
 
+// Defines values for ApprovalSignInStatusState.
+const (
+	ApprovalSignInStatusStateFlowDiffers ApprovalSignInStatusState = "flow_differs"
+	ApprovalSignInStatusStateFlowMissing ApprovalSignInStatusState = "flow_missing"
+	ApprovalSignInStatusStateNotBound    ApprovalSignInStatusState = "not_bound"
+	ApprovalSignInStatusStateNotChecked  ApprovalSignInStatusState = "not_checked"
+	ApprovalSignInStatusStateOk          ApprovalSignInStatusState = "ok"
+)
+
 // Defines values for AuditEventClass.
 const (
 	AuditEventClassApprovalDecision   AuditEventClass = "approval_decision"
@@ -144,6 +153,12 @@ const (
 	CapabilityKindConsolePanel   CapabilityKind = "console_panel"
 	CapabilityKindEventKind      CapabilityKind = "event_kind"
 	CapabilityKindMetaToolFamily CapabilityKind = "meta_tool_family"
+)
+
+// Defines values for CheckSourceKind.
+const (
+	CheckSourceKindDashboard CheckSourceKind = "dashboard"
+	CheckSourceKindSensor    CheckSourceKind = "sensor"
 )
 
 // Defines values for ConfirmVerifyResponseAnswer.
@@ -1978,6 +1993,17 @@ type ApprovalRevealResult_Result struct {
 	union json.RawMessage
 }
 
+// ApprovalSignInStatus The state of the approval sign-in flow and its binding (#6280).
+type ApprovalSignInStatus struct {
+	Client string                    `json:"client"`
+	Detail *string                   `json:"detail"`
+	Flow   *string                   `json:"flow,omitempty"`
+	State  ApprovalSignInStatusState `json:"state"`
+}
+
+// ApprovalSignInStatusState defines model for ApprovalSignInStatus.State.
+type ApprovalSignInStatusState string
+
 // ApprovalsStatus The approval settings in force (#4830).
 //
 // “custody“ is the state of the approval key: “configured“,
@@ -1987,11 +2013,16 @@ type ApprovalRevealResult_Result struct {
 // “delegated_decision_posture“ says whether a decision made on
 // someone else's instruction is allowed. The three values come from
 // :func:`meho_backplane.features.build_features_block`; they are state
-// words only, never a key value.
+// words only, never a key value. “sign_in“ is the state of the
+// approval client's own login flow in Keycloak (#6280,
+// :mod:`meho_backplane.auth.approval_sign_in_flow`).
 type ApprovalsStatus struct {
 	Custody                  string `json:"custody"`
 	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
 	EffectivePosture         string `json:"effective_posture"`
+
+	// SignIn The state of the approval sign-in flow and its binding (#6280).
+	SignIn *ApprovalSignInStatus `json:"sign_in,omitempty"`
 }
 
 // ApproveRequestBody POST body for “…/approve“.
@@ -2220,7 +2251,8 @@ type AuditEntry struct {
 //     rejected, or let an approval request expire, or its sender withdrew
 //     it (#5717). The operation did not run on any of these rows.
 //   - :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
-//     refresh-token replay or a broken satellite effect chain.
+//     refresh-token replay or a broken satellite effect chain. The
+//     “mcp.session_open“ row of a new MCP session has this class too.
 //   - :attr:`CONFIG_CHANGE` -- an operator changed the settings of
 //     operations, and none of them ran. Two writers: an edit of one
 //     operation with “meho_connector_edit_op“ (turned it on or off, or
@@ -2265,7 +2297,8 @@ type AuditQueryRequest struct {
 	//   rejected, or let an approval request expire, or its sender withdrew
 	//   it (#5717). The operation did not run on any of these rows.
 	// * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
-	//   refresh-token replay or a broken satellite effect chain.
+	//   refresh-token replay or a broken satellite effect chain. The
+	//   ``mcp.session_open`` row of a new MCP session has this class too.
 	// * :attr:`CONFIG_CHANGE` -- an operator changed the settings of
 	//   operations, and none of them ran. Two writers: an edit of one
 	//   operation with ``meho_connector_edit_op`` (turned it on or off, or
@@ -2808,6 +2841,7 @@ type BodyRunbooksRunAbortUiRunbooksRunsRunIdAbortPost struct {
 // BodyRunbooksRunNextUiRunbooksRunsRunIdNextPost defines model for Body_runbooks_run_next_ui_runbooks_runs__run_id__next_post.
 type BodyRunbooksRunNextUiRunbooksRunsRunIdNextPost struct {
 	Answer     *string `json:"answer,omitempty"`
+	Retry      *string `json:"retry,omitempty"`
 	VerifyType *string `json:"verify_type,omitempty"`
 }
 
@@ -3675,12 +3709,14 @@ type BodyUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost struct {
 // BodyUiSchedulerCreateSubmitUiSchedulerCreatePost defines model for Body_ui_scheduler_create_submit_ui_scheduler_create_post.
 type BodyUiSchedulerCreateSubmitUiSchedulerCreatePost struct {
 	AgentDefinitionId *string `json:"agent_definition_id,omitempty"`
+	CheckSourceRef    *string `json:"check_source_ref"`
 	CronExpr          *string `json:"cron_expr"`
 	EventFilter       *string `json:"event_filter"`
 	FireAt            *string `json:"fire_at"`
 	InFlightPolicy    *string `json:"in_flight_policy,omitempty"`
 	Inputs            *string `json:"inputs"`
 	Kind              *string `json:"kind,omitempty"`
+	OnlyWorsening     *bool   `json:"only_worsening,omitempty"`
 
 	// SessionCtx Per-request session identity exposed on ``request.state``.
 	//
@@ -3708,6 +3744,7 @@ type BodyUiSchedulerCreateSubmitUiSchedulerCreatePost struct {
 	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
 	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	StartOn    *string           `json:"start_on,omitempty"`
 	Timezone   *string           `json:"timezone,omitempty"`
 	WorkRef    *string           `json:"work_ref"`
 }
@@ -4179,6 +4216,21 @@ type CapabilityRead struct {
 type CatalogListResponse struct {
 	Catalog []ConnectorSpecEntry `json:"catalog"`
 }
+
+// CheckSource Pick a Sensor or a Dashboard as the source of an event trigger (#6182).
+//
+// MEHO turns it into the normal event filter at create. No *id* and no
+// *name* means "any Sensor" or "any Dashboard". *id* and *name* are not
+// allowed together: say which one you mean.
+type CheckSource struct {
+	Id            *openapi_types.UUID `json:"id"`
+	Kind          CheckSourceKind     `json:"kind"`
+	Name          *string             `json:"name"`
+	OnlyWorsening *bool               `json:"only_worsening,omitempty"`
+}
+
+// CheckSourceKind defines model for CheckSource.Kind.
+type CheckSourceKind string
 
 // ConfirmVerify Operator answers a yes/no prompt; only an affirmative advances.
 //
@@ -6601,7 +6653,9 @@ type HealthResponse struct {
 	// ``delegated_decision_posture`` says whether a decision made on
 	// someone else's instruction is allowed. The three values come from
 	// :func:`meho_backplane.features.build_features_block`; they are state
-	// words only, never a key value.
+	// words only, never a key value. ``sign_in`` is the state of the
+	// approval client's own login flow in Keycloak (#6280,
+	// :mod:`meho_backplane.auth.approval_sign_in_flow`).
 	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 
@@ -7811,8 +7865,14 @@ type NextStep struct {
 // “confirm“ step or the engine's captured result for an
 // “operation_call“ step. “None“ is valid only on the very first
 // “meho_runbook_next“ call (when no prior step exists to verify).
+//
+// :attr:`retry` “= True“ asks MEHO to run the check of a “failed“
+// current step again. Without it, a “failed“ step refuses to
+// advance, as before. On a step that is not “failed“ the flag has
+// no effect.
 type NextStepRequest struct {
 	LastVerified   bool                            `json:"last_verified"`
+	Retry          *bool                           `json:"retry,omitempty"`
 	VerifyResponse *NextStepRequest_VerifyResponse `json:"verify_response"`
 }
 
@@ -9680,9 +9740,16 @@ type SafetyOverlayEntrySafetyLevel string
 // the shared “work_ref_var“ ContextVar. Set-at-create-only: triggers
 // have no UPDATE path. Omit when the trigger carries no change ticket.
 type ScheduledTriggerCreate struct {
-	AgentDefinitionId openapi_types.UUID      `json:"agent_definition_id"`
-	CronExpr          *string                 `json:"cron_expr"`
-	EventFilter       *map[string]interface{} `json:"event_filter"`
+	AgentDefinitionId openapi_types.UUID `json:"agent_definition_id"`
+
+	// CheckSource Pick a Sensor or a Dashboard as the source of an event trigger (#6182).
+	//
+	// MEHO turns it into the normal event filter at create. No *id* and no
+	// *name* means "any Sensor" or "any Dashboard". *id* and *name* are not
+	// allowed together: say which one you mean.
+	CheckSource *CheckSource            `json:"check_source,omitempty"`
+	CronExpr    *string                 `json:"cron_expr"`
+	EventFilter *map[string]interface{} `json:"event_filter"`
 
 	// FireAt One-off fire time (UTC); required for kind=one_off and must be null for cron / event triggers. The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
 	FireAt      *time.Time `json:"fire_at"`
@@ -9899,6 +9966,9 @@ type ScheduledTriggerRead struct {
 
 	// NextFireAt Next instant the trigger is eligible to fire (UTC) -- the column the tick loop scans; null for event triggers (dispatched on event arrival, not the clock). The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
 	NextFireAt *time.Time `json:"next_fire_at"`
+
+	// Notice Set only on the create answer, when the trigger will not fire yet (a check_source trigger while CHECKS_AGENT_EVENTS is off).
+	Notice *string `json:"notice"`
 
 	// SkipCount Consecutive ticks skipped since the last successful fire (0 when healthy; reset to 0 on the next fire). The scheduler parks the trigger ('status'='paused') once this reaches its internal consecutive-skip cap, so a permanently-unresolvable trigger stops silently re-tripping every tick. (#2327)
 	SkipCount int `json:"skip_count"`

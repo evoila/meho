@@ -35,7 +35,9 @@
 # `python-unit-shard` (heavy pool), `python-integration-shard`,
 # `python-migration-tests` and the nightly coverage jobs. Every moved job
 # keeps its name, `if:` guard and triggers, so the required checks are
-# unchanged.
+# unchanged. Merge-queue runs are the exception (#6325): there these jobs
+# and the merge-queue watchdog use the internal `meho-runners-ci` pool, so
+# the queue never waits for GitHub-hosted runners.
 #
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
@@ -259,7 +261,8 @@ jobs:
     # Same fork-PR guard as the other jobs; the dependent jobs re-check
     # head.repo in their own `if:`.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     # actions: read lets the step `map` list and download the test map
     # artifact of the nightly run (#5642).
@@ -520,7 +523,7 @@ jobs:
     # python-unit-lane fan-in below. Whole-tree ruff + ruff format + mypy: none
     # of it is shardable by test file, none of it needs testcontainers / the
     # vendor spec-shelf / the embedding or spaCy models, and it is CPU-cheap
-    # (~1-2 min), so it runs ONCE here on a GitHub-hosted runner rather than N
+    # (~1-2 min), so it runs ONCE here on a small runner rather than N
     # times inside every pytest shard. Nothing in it needs the internal network
     # (#4626). Same fork-PR guard as every other job,
     # plus the #3252 docs-only skip: a proven docs-only PR skips this job (and
@@ -536,7 +539,8 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true' &&
        needs.changes.outputs.backend_python != 'false')
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # Twice the ~1-2 min observed cost, per the file's per-job cap convention.
     timeout-minutes: 10
     defaults:
@@ -634,7 +638,7 @@ jobs:
        needs.changes.outputs.backend_python != 'false')
     # The heavy runner pool (#761); its sizes live outside this repo. Only the
     # pytest sweep is CPU/memory-bound enough to want the extra cores;
-    # ruff/mypy run once in python-lint on a GitHub-hosted runner.
+    # ruff/mypy run once in python-lint on a small runner.
     # Two heavy runner sets share the same machines. Only merge-queue runs
     # use `meho-runners-ci-heavy-queue` (6 runners: one per shard of one
     # merge-queue run, so its size changes with the shard count). Every
@@ -999,7 +1003,27 @@ jobs:
         with:
           version: v3.16.4
 
+      - name: Name the PHP package cache
+        # The key holds the OS release and the CPU type, because the cached
+        # package files fit only that. Bump the -v1 at the end to drop a
+        # bad cache entry.
+        id: php-debs
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          . /etc/os-release
+          echo "key=php-cli-debs-${ID}-${VERSION_ID}-$(dpkg --print-architecture)-v1" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the PHP package files from the cache
+        id: php-debs-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-php-debs
+          key: ${{ steps.php-debs.outputs.key }}
+
       - name: Install PHP CLI
+        id: php-install
         # The pfSense user-write tests
         # (tests/test_connectors_pfsense_user_write_ops.py) run the
         # `pfSsh.php playback` fragment with the php command-line
@@ -1009,41 +1033,90 @@ jobs:
         # step below. Every shard needs it: the file split can put the
         # test file in any shard.
         #
-        # Own limit: the step stops after 6 minutes, and each try stops
-        # after 150 seconds with `timeout`. There are two tries, so a
-        # stalled download cannot use up the job's time.
+        # How php gets on the runner, in this order:
+        # 1. The runner image already has php: nothing to do.
+        # 2. The package files are in the cache (the step before restores
+        #    them): `dpkg -i` installs them. This needs no network, so a
+        #    package mirror that does not answer cannot fail the shard.
+        # 3. Else apt downloads php-cli into the cache folder and installs
+        #    it, and the step after saves the folder. A push to main fills
+        #    the cache, and pull request and merge-queue runs read it, so
+        #    the download happens about once per OS release.
+        # If the cached files do not install (the runner image changed),
+        # the step warns and falls back to 3. `--fix-broken` repairs what
+        # the failed `dpkg -i` left half done.
         #
-        # `apt-get update` exits 100 when any one package index fails to
-        # download, even one that php-cli does not need. The runner image
-        # carries the git-core PPA (it installs a newer git from there), and
-        # that mirror answered 503 in a merge-queue run (#4759), which
-        # dropped the pull request from the queue. apt had already retried
-        # the file three times in that run, so more retries alone do not
-        # help. So a failed update is a warning, not the end of the step:
-        # apt keeps the indexes it did download, and the install below
-        # fails on its own when the Ubuntu indexes are missing.
+        # Why downloads failed in merge-queue runs (#6312): the runner image
+        # carries the git-core PPA, and that mirror sometimes does not
+        # answer at all. apt waited 120 seconds for each try of the file,
+        # so `apt-get update` ran into the 150 second `timeout`, was killed
+        # before it stored any index, and the install then said "Unable to
+        # locate package php-cli". So the download in 3 gives apt a 10
+        # second wait and no retry for each file (`Acquire::*::Timeout`,
+        # `Acquire::Retries`): a dead mirror is skipped, and the update
+        # stores the Ubuntu indexes. `apt-get update` still exits 100 for
+        # the skipped mirror, so a failed update is only a warning.
+        #
+        # Own limit: the step stops after 6 minutes, and each apt or dpkg
+        # call stops after 150 seconds with `timeout`. There are two
+        # download tries. If the install still fails, the step prints
+        # "SETUP FAILURE" so a person and the fleet loop can tell it from a
+        # test failure. The pfSense tests still run with php in every shard
+        # (MEHO_REQUIRE_PHP below makes them fail, not skip, when php is
+        # missing).
         shell: bash
         timeout-minutes: 6
+        env:
+          PHP_DEBS_CACHE_HIT: ${{ steps.php-debs-cache.outputs.cache-hit }}
         run: |
           set -euo pipefail
           if command -v php >/dev/null 2>&1; then
             echo "php ready: $(php --version | head -1)"
             exit 0
           fi
+          debs="${HOME}/.cache/meho-ci-php-debs"
+          shopt -s nullglob
+          cached=("${debs}"/*.deb)
+          if [ "${#cached[@]}" -gt 0 ]; then
+            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive dpkg -i "${cached[@]}"; then
+              echo "php ready from the package cache: $(php --version | head -1)"
+              exit 0
+            fi
+            echo "::warning::the cached php-cli package files did not install; downloading php-cli"
+          fi
+          mkdir -p "${debs}/partial"
+          apt_opts=(-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=0)
           for attempt in 1 2; do
-            if ! timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y; then
+            if ! timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" update -y; then
               echo "::warning::apt-get update could not refresh every package index (try ${attempt} of 2); installing php-cli from the indexes that did download"
             fi
-            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli; then
+            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" \
+                -o Dir::Cache::archives="${debs}" -o APT::Keep-Downloaded-Packages=true \
+                install -y --fix-broken --no-install-recommends php-cli; then
               break
             fi
             if [ "${attempt}" = "2" ]; then
-              echo "::error::php-cli install failed after 2 tries"
+              echo "::error::SETUP FAILURE, not a test failure: php-cli install failed after 2 tries (package mirror problem on the runner)"
               exit 1
             fi
             echo "::warning::php-cli install failed or timed out; trying once more"
           done
+          # apt ran as root; the cache save runs as the runner user.
+          sudo -n chown -R "$(id -u):$(id -g)" "${debs}"
+          if [ "${PHP_DEBS_CACHE_HIT:-}" != "true" ]; then
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
           php --version | head -1
+
+      - name: Save the PHP package files to the cache
+        # Only after a download into an empty cache. A cache entry cannot
+        # be changed, so a bad one needs a new key (see "Name the PHP
+        # package cache").
+        if: steps.php-install.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-php-debs
+          key: ${{ steps.php-debs.outputs.key }}
 
       - name: Download the picked unit tests
         # Test map run (#5642): the list the `changes` job stored.
@@ -1363,14 +1436,16 @@ jobs:
     # Python jobs. It does not skip when backend_python is false: a pull
     # request that changes only the template must still test it.
     #
-    # GitHub-hosted runner: it needs public tools only (uv, the PyPI index for
-    # the wheel build backend).
+    # GitHub-hosted runner, and the internal pool in merge-queue runs (#6325):
+    # it needs public tools only (uv, the PyPI index for the wheel build
+    # backend).
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true')
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # About 3 minutes; the cap is a hang backstop.
     timeout-minutes: 20
     defaults:
@@ -1476,8 +1551,9 @@ jobs:
     # in-flight run as a SET and a fresh run supersedes it — there is no
     # partial-cancel path that could leave this gate green on stale shards.
     # GitHub-hosted runner (#4626): this job does no setup and runs one bash
-    # step, and it is the last job of every CI run — it must never wait for a
-    # slot on the internal pool.
+    # step, and it is the last job of every CI run. Merge-queue runs use the
+    # internal pool instead (#6325), so the queue never waits for
+    # GitHub-hosted runners.
     #  4. No-backend path (#5296). When `backend_python` is `false`, lint and
     #     the shards skip by their own `if:`, and `python-outside-backend`
     #     must pass instead. On every other path that job is skipped.
@@ -1486,7 +1562,8 @@ jobs:
       always() &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Assert lint + typecheck + every pytest shard passed
@@ -2577,14 +2654,16 @@ jobs:
     #  4. No-backend PRs (#5296): the shards skip the same way when
     #     `backend_python` is `false`, and this step accepts `skipped` then
     #     too. The merge queue runs the shards on the merged result.
-    # GitHub-hosted runner (#4626): one bash step, no setup; it must never
-    # wait for a slot on the internal pool.
+    # GitHub-hosted runner (#4626): one bash step, no setup. Merge-queue runs
+    # use the internal pool instead (#6325), so the queue never waits for
+    # GitHub-hosted runners.
     needs: [changes, python-integration-shard]
     if: >-
       always() &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Assert every integration shard passed
@@ -2698,10 +2777,11 @@ jobs:
   go-lint-test:
     name: Go (golangci-lint + go test)
     # Fork-PR guard mirrors the Python job — same rationale. Runs on a
-    # GitHub-hosted runner since #4626: it needs only the Go toolchain and
-    # public egress.
+    # GitHub-hosted runner since #4626 (the internal pool in merge-queue runs,
+    # #6325): it needs only the Go toolchain and public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -2714,20 +2794,17 @@ jobs:
         # the tree today.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          # Tracks `cli/go.mod`'s `go 1.26.10` directive. golangci-lint
+          # Tracks the `go` directive in `cli/go.mod`. golangci-lint
           # invokes `go/packages` which honors the go.mod-required Go
           # version; running an older Go than go.mod requires fails with
           # `go.mod requires go >= X` (CI run 25680051917).
           # Bumped from 1.25 → 1.26 because Go 1.25 gets no more
-          # security fixes: nine standard-library CVEs (net/http,
-          # crypto/tls, net/textproto) need go1.26.9 or newer, and
-          # GO-2026-6809 (crypto/x509) needs go1.26.10 or newer.
-          # '1.26' resolves the newest 1.26.x patch; go.mod's 1.26.10
-          # floor (with GOTOOLCHAIN=local, which setup-go sets) makes
-          # an older 1.26.x fail the build instead of shipping the CVEs.
-          # check-latest: the runner image can cache an older 1.26.x
-          # (it had 1.26.9 when go.mod moved to 1.26.10), and setup-go
-          # uses a cached match unless asked to check for a newer one.
+          # security fixes. The go.mod version is a floor (with
+          # GOTOOLCHAIN=local, which setup-go sets), so an older 1.26.x
+          # fails the build instead of shipping known CVEs.
+          # check-latest: the runner image can cache an older 1.26.x,
+          # and setup-go uses a cached match unless asked to check for
+          # a newer one.
           go-version: '1.26.11'
           check-latest: true
           cache-dependency-path: cli/go.sum
@@ -2823,8 +2900,8 @@ jobs:
         # then this step keeps PR CI green without expanding the
         # workflow's blast radius. On the GitHub-hosted runner this job
         # uses since #4626, gcc and libc6-dev are preinstalled, so the
-        # probe passes and apt never runs; the step stays so the job can
-        # move back to the internal pool without edits.
+        # probe passes and apt never runs. Merge-queue runs use the
+        # internal pool (#6325), where this step is needed.
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -2882,9 +2959,11 @@ jobs:
   cli-api-snapshot-freshness:
     name: CLI API snapshot freshness
     # Fork-PR guard mirrors the other jobs (kept unchanged by #4626). Runs on
-    # a GitHub-hosted runner: it needs only Go, uv and public egress.
+    # a GitHub-hosted runner (the internal pool in merge-queue runs, #6325):
+    # it needs only Go, uv and public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -2913,7 +2992,8 @@ jobs:
         # Same `sudo -n apt-get` pattern as the go-lint-test C-toolchain
         # step; baking make into the base image is the long-term fix.
         # The GitHub-hosted runner this job uses since #4626 ships make,
-        # so the step is a no-op there and stays for a possible move back.
+        # so the step is a no-op there. Merge-queue runs use the internal
+        # pool (#6325), where this step is needed.
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -2973,9 +3053,11 @@ jobs:
   helm-lint-template:
     name: Helm (lint + template + kubeconform)
     # Fork-PR guard mirrors the other jobs. Runs on a GitHub-hosted runner
-    # since #4626: helm + kubeconform need only public egress.
+    # since #4626 (the internal pool in merge-queue runs, #6325): helm +
+    # kubeconform need only public egress.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -3008,7 +3090,7 @@ jobs:
         # / CI run 25644668781). Appending to $GITHUB_PATH surfaces
         # the binary to subsequent steps without relying on the install
         # step's frozen PATH. $HOME/.local/bin works the same on the
-        # GitHub-hosted runner this job uses since #4626.
+        # GitHub-hosted runner and on the internal pool.
         run: |
           set -euo pipefail
           # shellcheck source=/dev/null
@@ -3125,8 +3207,10 @@ jobs:
   # call is checked; a failed or unreadable call only means "look again
   # next minute", and no branch check runs while the jobs' state is
   # unknown), it is not a required check, and
-  # it runs on a GitHub-hosted runner so it never takes a slot from the
-  # jobs it watches. The queue builds at most 4 groups at once, so at most
+  # it runs on the internal `meho-runners-ci` pool (#6325). It holds one
+  # slot there for the whole run; the test shards it watches run on the
+  # heavy pools, so it does not take their slots. The queue builds at most
+  # 4 groups at once, so at most
   # 4 watchdogs run at the same time: about 480 of the 1,000 API calls an
   # hour that the job token may make per repository, worst case.
   # ---------------------------------------------------------------------------
@@ -3135,7 +3219,8 @@ jobs:
     # Only merge-queue runs. A pull-request run must still show every failing
     # job, and a push to `main` has no queue group that can be dropped.
     if: github.event_name == 'merge_group'
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # Backstop only: the loop below stops itself, with success, after 170
     # minutes. A green merge-queue run took at most 78 minutes (#4732), and
     # the queue itself gives up on a group long before this cap.
@@ -3147,6 +3232,25 @@ jobs:
       contents: read
       actions: write
     steps:
+      - name: Install gh and jq
+        # The internal runner image ships without the `gh` CLI (#3171).
+        # Same `sudo -n apt-get` pattern as the go-lint-test C-toolchain
+        # step. continue-on-error keeps the watchdog from ever failing: if
+        # the install fails, every gh call below fails too, and the loop
+        # only looks again next minute.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          missing=()
+          command -v gh >/dev/null 2>&1 || missing+=(gh)
+          command -v jq >/dev/null 2>&1 || missing+=(jq)
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "gh and jq are already installed"
+            exit 0
+          fi
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+          gh --version
       - name: Cancel this run once the queue has dropped its group
         env:
           GH_TOKEN: ${{ github.token }}

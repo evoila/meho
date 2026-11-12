@@ -389,6 +389,7 @@ def test_happy_path_returns_full_federation_response(
         "approval_custody",
         "vault_tenant_scope",
         "mcp",
+        "policy",
     ]
     assert all({"name", "configured", "missing_env"} == set(entry) for entry in features)
     # #4830: the approval key comes from the test env (conftest), so pin the

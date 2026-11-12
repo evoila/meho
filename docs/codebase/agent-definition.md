@@ -47,10 +47,10 @@ the tenant-scoped list query.
 ### `AgentModelTier` (`agents/schemas.py`)
 
 A `StrEnum` of `standard` / `fast` / `deep`. The tier is *logical*.
-MEHO stores it but does not use it at run time yet: the invoker does
-not pass it to the per-tenant model resolver, because the resolver uses
-another set of tiers (`triage` / `investigate` / `summarize`). So every
-stored definition runs on the default model
+The invoker maps it to the resolver's tiers (`fast` to `triage`,
+`standard` to `summarize`, `deep` to `investigate`) and passes it to the
+model resolver. The resolver sends every tier to the one backend set in
+`AGENT_MODEL_BACKEND`, so every tier gets the same model
 (`AgentInvoker._to_agent_definition` in `agent/invocation.py`; see
 [agent-runtime.md](agent-runtime.md)). The bounded set is enforced as a Pydantic `Literal`-equivalent
 (a typed enum field), not a DB `CHECK`, so a future tier lands without a

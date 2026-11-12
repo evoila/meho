@@ -289,6 +289,6 @@ def test_with_short_text_runs_the_other_step_first_in_both_states(
     for short in (False, True):
         monkeypatch.setenv("MCP_SHORT_TOOL_TEXTS", "true" if short else "false")
         get_settings.cache_clear()
-        shown = for_settings(_tool())
+        shown = for_settings(_tool(), _operator())
         assert "name" not in shown.inputSchema["properties"]
         assert shown.description == ("Short." if short else "Long text.")

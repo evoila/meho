@@ -521,6 +521,22 @@
           "enum": ["true", "false"],
           "description": "Send a short text for the biggest tools on the default MCP tool list. The inputs they accept stay the same. Rendered into `MCP_SHORT_TOOL_TEXTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
         },
+        "mcpClientPerToolKind": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Claude Code and Claude Desktop sign in with their own login client (`meho-mcp-code`, `meho-mcp-desktop`). MEHO lists a client only when it finds it in Keycloak, through the admin client. Rendered into `MCP_CLIENT_PER_TOOL_KIND`. Default `\"false\"`: both tools keep the shared `meho-mcp` client. See `docs-site/install/keycloak-realm.md`."
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "classification": {
+              "type": "string",
+              "enum": ["true", "false"],
+              "description": "Let each connector, operation group and operation carry a category, labels and an \"always wait\" mark. Rendered into `POLICY_CLASSIFICATION`. Default `\"false\"`: MEHO reads none of it. See `docs/codebase/policy-classification.md`."
+            }
+          }
+        },
         "sessionStore": {
           "type": "object",
           "additionalProperties": false,

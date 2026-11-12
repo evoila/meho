@@ -45,12 +45,14 @@ __all__ = [
     "CATALOG_CONTEXT_KEY",
     "EVENT_KINDS",
     "OUTCOMES",
+    "TOOL_TEXTS",
     "TRANSPORTS",
     "UNMATCHED_ROUTE",
     "EventKind",
     "Outcome",
     "RequestUsageEventData",
     "RouteCatalog",
+    "ToolTexts",
     "Transport",
     "outcome_for_status",
 ]
@@ -58,10 +60,13 @@ __all__ = [
 EventKind = Literal["request_finished", "context_selected"]
 Transport = Literal["rest", "mcp"]
 Outcome = Literal["ok", "client_error", "denied", "not_found", "rate_limited", "server_error"]
+#: The MCP session asked for the short tool texts (``?texts=short``).
+ToolTexts = Literal["short"]
 
 EVENT_KINDS: Final[tuple[str, ...]] = get_args(EventKind)
 TRANSPORTS: Final[tuple[str, ...]] = get_args(Transport)
 OUTCOMES: Final[tuple[str, ...]] = get_args(Outcome)
+TOOL_TEXTS: Final[tuple[str, ...]] = get_args(ToolTexts)
 
 #: Route label for a request that matched no known route or tool. Used
 #: instead of the raw path so a concrete path (which can carry a target
@@ -153,6 +158,7 @@ class RequestUsageEventData(BaseModel):
     route: str = Field(min_length=1, max_length=512)
     outcome: Outcome | None = None
     duration_ms: float | None = Field(default=None, ge=0)
+    tool_texts: ToolTexts | None = None
 
     @field_validator("principal_sub")
     @classmethod

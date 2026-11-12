@@ -24,7 +24,9 @@ shows each case. In short (#3325):
   rule: a grant can let `caution` and `dangerous` changes run; without
   one they wait. A person can also approve the operation list of one
   automation run once ([run-approvals.md](run-approvals.md)).
-  `destructive` always waits for a person.
+  `destructive` always waits for a person. The one exception is a test
+  install in sandbox mode: there, a delete grant made in the web console
+  can cover a delete (see "Sandbox mode" below).
 
 A person approves or rejects a waiting request on **REST, the `meho`
 command line and the web interface** only. Approve and reject have no
@@ -961,6 +963,37 @@ request field, header or command-line flag can set it.
   [Approve needs a fresh approval sign-in](#rest-backendsrcmeho_backplaneapiv1approvalspy).
 - **Reject** needs no fresh sign-in, on every surface.
 
+**The approval sign-in flow is checked (#6280).** The client
+`meho-cli-approve` must sign in through its own Keycloak login flow
+`meho approval sign-in`: the password form, then the one-time code step
+when the person has a code app. No other step. The built-in realm has it
+from the realm file; the bootstrap Job makes it and binds the client on
+every upgrade, and stops when `meho-admin` lacks `manage-realm`
+(docs/codebase/core-bootstrap.md). On a customer's own Keycloak an admin
+sets it up by hand or with `keycloak.authflow.ensure_approval_flow`.
+`auth/approval_sign_in_flow.py:read_approval_sign_in` reads the realm with
+the backplane's Keycloak admin client and puts the state into
+`/api/v1/health` (and `meho_status`) as `approvals.sign_in`:
+
+| `state` | Meaning |
+|---|---|
+| `ok` | The flow has exactly the steps of the realm file, and the client's browser flow is this flow. |
+| `flow_missing` | The realm has no flow with that name. |
+| `flow_differs` | The flow has other steps; `detail` names the first difference. The realm stage and the operation never bind the client to it. |
+| `not_bound` | The flow is right, but the client is missing, has no own browser flow, or uses another flow (`detail`). |
+| `not_checked` | The read failed; `detail` is a reason word: `keycloak_admin_not_configured`, `no_right_to_read_login_flows`, `no_right_to_read_clients`, `keycloak_timeout` (5 seconds for the whole check), `keycloak_unexpected_answer` or `keycloak_unreachable`. |
+
+A failed read is never `ok`. The answer is kept for 60 seconds per
+admin URL and client (`_KEEP_S`), because `/api/v1/health` and
+`meho_status` are called often; a fix in Keycloak shows up within a
+minute. The expected steps are the ones of
+`keycloak.authflow.ensure_approval_flow` (`approval_flow_difference` in
+`connectors/keycloak/ops_authflow.py`), so the check, the operation and the
+realm file agree. `meho doctor` turns the state into its line `approval
+sign-in` (`cli/internal/cmd/doctor_approval.go`): `ok` passes, every other
+state is a warning with the fix. The check only reports; the approve path
+does not read it.
+
 Every approval records who approved (`reviewed_by`), whether it was a
 self-approval (`self_approved`), which rule allowed it (`approval_rule`)
 and how the person proved they were present (`approval_auth`: channel
@@ -1082,8 +1115,11 @@ decides: not the requester, a person in a chosen tenant, and an admin
 - The park step (`create_pending_request`) sets it for a group or role
   change in MEHO's own login realm (`grant_facts`, see above). A request
   outside the login realm keeps the usual rules.
+- An operation registered with `register_rights_change_op` is a rights
+  change on every request. `policy.classify` (a change of a category,
+  labels or the "always wait" mark, see
+  [policy-classification.md](policy-classification.md)) is one.
 - Any other caller passes `rights_change=True` to `create_pending_request`.
-  The category and label edits and the policy file import use this.
 
 A request parked before the column existed has no stored mark. It counts
 through the same `is_rights_change` check, so an upgrade weakens nothing.
@@ -2502,7 +2538,8 @@ description, made stricter by operator overrides
 overrides of risk level and approval"). `lookup_descriptor` applies the
 overrides, so the approval gate, the preview and the parked request all
 use the same values. A destructive operation always waits for approval,
-whatever the overrides say.
+whatever the overrides say. The one exception is a test install in
+sandbox mode (see "Sandbox mode" below).
 
 Turning approval off for an operation is the one loosening edit. It
 needs `platform_admin`, a written reason, and a person. This holds for

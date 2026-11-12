@@ -682,13 +682,13 @@ register_mcp_tool(
 _call_operation_short_text = with_short_text(CALL_OPERATION_SHORT, then=recall_schema_for_settings)
 
 
-def _call_operation_for_settings(definition: ToolDefinition) -> ToolDefinition:
+def _call_operation_for_settings(definition: ToolDefinition, operator: Operator) -> ToolDefinition:
     """``call_operation`` as shown under the current settings.
 
     The fetch text of ``MCP_REVEAL_FETCH`` is added last, so the short text
     of ``MCP_SHORT_TOOL_TEXTS`` does not replace it.
     """
-    return reveal_fetch_for_settings(_call_operation_short_text(definition))
+    return reveal_fetch_for_settings(_call_operation_short_text(definition, operator))
 
 
 register_mcp_tool(

@@ -116,12 +116,18 @@ from meho_backplane.mcp.session_limit import (
     check_mcp_session_cap,
     resolve_mcp_session_cap,
 )
+from meho_backplane.mcp.short_texts import (
+    SHORT_TEXTS_VALUE,
+    UnknownToolTextsError,
+    parse_tool_texts,
+)
 from meho_backplane.mcp.tenant_gate import allowed_without_tenant
 from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operations.caller_gone import watch_caller
 from meho_backplane.request_usage.collector import (
     note_request_fallback_status,
     note_request_route,
+    note_request_tool_texts,
 )
 from meho_backplane.settings import Settings, get_settings
 from meho_backplane.untrusted_text import VENDOR_TEXT_BAND
@@ -1383,6 +1389,29 @@ async def mcp_dispatch(
     return response
 
 
+def _apply_url_options(request: Request, operator: Operator) -> Operator | JSONResponse:
+    """Return *operator* with the session's choices from the MCP URL, or a 400 error.
+
+    Tool profile (#4172): ``?profile=<name>``. Short tool texts for this
+    session only (#6293): ``?texts=short``. An unknown value is a bad URL,
+    refused before the body is read, so a typo is never quietly ignored.
+    The usage event of the request names the short texts choice, so it is
+    on record also when no audit row is written.
+    """
+    try:
+        profile = parse_tool_profile(request.query_params.getlist("profile"))
+        short_texts = parse_tool_texts(request.query_params.getlist("texts"))
+    except (UnknownToolProfileError, UnknownToolTextsError) as exc:
+        return _error_response(None, INVALID_REQUEST, str(exc), status_code=400)
+    update: dict[str, Any] = {}
+    if profile is not None:
+        update["mcp_tool_profile"] = profile
+    if short_texts:
+        update["mcp_short_tool_texts"] = True
+        note_request_tool_texts(SHORT_TEXTS_VALUE)
+    return operator.model_copy(update=update) if update else operator
+
+
 async def _dispatch_mcp_request(request: Request, operator: Operator) -> Response:
     """Run the dispatch pipeline described on :func:`mcp_dispatch`."""
     # ``operator`` flows through to handlers — T3 registry handlers
@@ -1390,15 +1419,10 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
     # and for the call-time role re-check on tools/call / resources/read.
     # Built-in lifecycle handlers (initialize, ping, notifications/
     # initialized) accept the parameter but don't read it.
-    # Tool profile (#4172): ``?profile=<name>`` on the MCP URL. An unknown
-    # name is a bad URL, refused before the body is read, so a typo never
-    # quietly gives the full tool list.
-    try:
-        profile = parse_tool_profile(request.query_params.getlist("profile"))
-    except UnknownToolProfileError as exc:
-        return _error_response(None, INVALID_REQUEST, str(exc), status_code=400)
-    if profile is not None:
-        operator = operator.model_copy(update={"mcp_tool_profile": profile})
+    session_operator = _apply_url_options(request, operator)
+    if isinstance(session_operator, JSONResponse):
+        return session_operator
+    operator = session_operator
     raw_body = await _read_body_capped(request)
     if isinstance(raw_body, JSONResponse):
         return raw_body

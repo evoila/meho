@@ -49,6 +49,7 @@ from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
 from meho_backplane.operations.deny_reasons import (
     AGENT_NO_GRANT,
+    AGENT_STEPS_NOT_DECLARED,
     READ_SCOPE_DENIED,
     deny_reason_code,
     is_agent_no_grant,
@@ -724,7 +725,9 @@ def result_denied(
     or :data:`READ_SCOPE_DENIED_CODE` when the reason starts with that
     code (the gate's stable marker for a read-scope refusal), or
     ``agent_no_grant`` when an agent has no grant and the
-    ``AGENT_GRANT_REQUIRED`` switch is on (#6189).
+    ``AGENT_GRANT_REQUIRED`` switch is on (#6189), or
+    ``agent_steps_not_declared`` when an agent calls a multi-step operation
+    whose steps are not declared and the switch is on (#6298).
 
     ``reason_code`` says which rule refused the call
     (:mod:`~meho_backplane.operations.deny_reasons`). When the caller does
@@ -737,6 +740,8 @@ def result_denied(
         error_code = READ_SCOPE_DENIED_CODE
     elif is_agent_no_grant(reason):
         error_code = AGENT_NO_GRANT
+    elif reason.startswith(f"{AGENT_STEPS_NOT_DECLARED}:"):
+        error_code = AGENT_STEPS_NOT_DECLARED
     return OperationResult(
         status="denied",
         op_id=op_id,

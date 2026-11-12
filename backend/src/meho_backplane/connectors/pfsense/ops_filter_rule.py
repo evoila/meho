@@ -106,6 +106,7 @@ from meho_backplane.connectors.pfsense.ops_write import (
     assert_only_own_object_changed,
     serialized_config_write,
 )
+from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -198,7 +199,7 @@ _EXTRA_DEFAULTS = {"statetype": "keep state", "icmptype": "any"}
 _BUILTIN_RULE_INTERFACES = frozenset({"openvpn", "enc0", "l2tp", "pppoe"})
 
 
-class PfSenseFilterRuleRefusedError(RuntimeError):
+class PfSenseFilterRuleRefusedError(PfSenseRefusedError):
     """A filter-rule add or delete was refused and changed nothing (#5136).
 
     Raised, not returned, so the call, its audit record and its approval
@@ -210,11 +211,6 @@ class PfSenseFilterRuleRefusedError(RuntimeError):
     The "safe to run twice" answers are not refusals and stay results:
     ``already_present`` on add and ``not_found`` on delete.
     """
-
-    def __init__(self, op_id: str, code: str, guidance: str) -> None:
-        super().__init__(f"{op_id} refused ({code}): {guidance}")
-        self.code = code
-        self.guidance = guidance
 
 
 # ---------------------------------------------------------------------------

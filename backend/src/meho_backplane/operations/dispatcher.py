@@ -283,7 +283,6 @@ import hvac.exceptions
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
 
-from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
@@ -397,7 +396,8 @@ from meho_backplane.operations._preview import (
     build_proposed_effect,
     describe_preview_provenance,
 )
-from meho_backplane.operations._preview_steps import agent_no_grant_step_reason
+from meho_backplane.operations._preview_steps import agent_acts as _agent_acts
+from meho_backplane.operations._preview_steps import agent_step_refusal
 from meho_backplane.operations._request_preview import (
     compute_preview_hash,
     preview_dispatch,
@@ -1127,20 +1127,20 @@ def _secret_view(*, makes_new_secret: bool, reveal_secret: bool) -> SecretView |
     return "revealed" if reveal_secret else "hidden"
 
 
-def _agent_acts(operator: Operator) -> bool:
-    """True when an agent makes this call: an agent principal, or a hosted agent run."""
-    return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
-
-
-async def _agent_no_grant_step_refusal(
-    *, operator: Operator, op_id: str, connector_id: str, target: Any
+async def _agent_step_refusal(
+    *, operator: Operator, descriptor: EndpointDescriptor, connector_id: str, target: Any
 ) -> str | None:
-    """Refuse a multi-step call up front when a write step has no grant (#6189).
+    """Refuse a multi-step call up front when the agent may not run a write step.
+
+    A write step with no grant (#6189), or with a ``deny`` grant (#6285),
+    or a multi-step operation that changes something and declares no
+    steps (#6298). Run before the call waits for approval, and again when
+    an approved call resumes (#6298).
 
     Only for an agent with ``AGENT_GRANT_REQUIRED`` not ``off`` and only at
     the top level: the steps of the call are checked here, with the same
     list the preview checks, so the call never stops half-way at a step the
-    switch refuses. With ``observe`` the check only writes the
+    agent's grants refuse. With ``observe`` the check only writes the
     ``agent_no_grant_would_deny`` line of each uncovered step and returns
     ``None``, so the verdict stays as it was.
     """
@@ -1150,8 +1150,8 @@ async def _agent_no_grant_step_refusal(
         or composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
     ):
         return None
-    return await agent_no_grant_step_reason(
-        operator=operator, op_id=op_id, connector_id=connector_id, target=target
+    return await agent_step_refusal(
+        operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
     )
 
 
@@ -4008,8 +4008,11 @@ async def _dispatch_now(
                 _log.info("reveal_secret_waits_for_approval", op_id=op_id)
                 verdict = PermissionVerdict.NEEDS_APPROVAL
             if verdict is not PermissionVerdict.DENY:
-                step_refusal = await _agent_no_grant_step_refusal(
-                    operator=operator, op_id=op_id, connector_id=connector_id, target=target
+                step_refusal = await _agent_step_refusal(
+                    operator=operator,
+                    descriptor=descriptor,
+                    connector_id=connector_id,
+                    target=target,
                 )
                 if step_refusal is not None:
                     verdict, gate_reason = PermissionVerdict.DENY, step_refusal
@@ -4142,6 +4145,28 @@ async def _dispatch_now(
                     error_extras=_error_extras_for_audit(denied),
                 )
                 return with_audit_receipt(denied, receipt)
+            # #6298: an agent's grants may have changed while the call
+            # waited. Check its steps again before the first one runs, so
+            # the resumed call does not stop half-way. The approval
+            # request then ends as a failed run with this reason.
+            step_refusal = await _agent_step_refusal(
+                operator=operator,
+                descriptor=descriptor,
+                connector_id=connector_id,
+                target=target,
+            )
+            if step_refusal is not None:
+                policy_decision_var.set(PermissionVerdict.DENY.value)
+                duration_ms = _elapsed_ms(started)
+                return await _audit_denied_and_return(
+                    result_denied(op_id, step_refusal, duration_ms),
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
+                    duration_ms=duration_ms,
+                )
 
         # --- Step 5: connector resolution ---------------------------------
         connector_instance: Connector | None

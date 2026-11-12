@@ -58,7 +58,16 @@ the tests set it, as `install.sh` does.
    `govc vm.upgrade` sets hardware version 20 (the image ships `vmx-10`,
    and the in-guest trim of the clean step reaches the thin disk only from
    virtual hardware 13 on), and the VM starts. The build waits until SSH answers.
-2. **The form-2 install.** The download goes to the VM with `scp`, and
+2. **The package updates and the form-2 install.** First every package
+   update of the build day (`update_os`, #5778): `apt-get update
+   --error-on=any`, then `apt-get upgrade --with-new-pkgs` with the same
+   options as step 1 of `cis/harden.sh`. Then the VM restarts, and the
+   build waits until SSH answers from the new boot (a new
+   `/proc/sys/kernel/random/boot_id`). So the install, the hardening and
+   its scan run on the newest kernel. Only this step may restart the VM:
+   from step 3 on, a restart would run first start, and after the
+   hardening SSH no longer lets the build user in. Then the download goes
+   to the VM with `scp`, and
    `sudo ./install.sh --hostname <placeholder>` runs. No `--admin-network`,
    so the host firewall lets in SSH only from the build's own address,
    which the clean step removes. Every build also proves the form-2
@@ -272,7 +281,7 @@ test (#4816).
   `sha512sum`, GNU `base64`. No `ovftool`: `govc export.ovf` plus our own
   manifest and `tar` make the OVA.
 - The CIS content of ComplianceAsCode 0.1.82, pinned with its sha512 in
-  `build.sh`; and in step 3 the Ubuntu archive, reached from the build VM
+  `build.sh`; and in steps 2 and 3 the Ubuntu archive, reached from the build VM
   ([appliance-cis.md](appliance-cis.md)).
 
 ## Known issues

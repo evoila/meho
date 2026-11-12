@@ -833,10 +833,9 @@ jobs:
     #      tripped Docker Hub's rate-limit on this repo's other CI
     #      lanes -- pre-loading sidesteps it.
     #
-    # Runs on ``ubuntu-latest`` for pull requests (they may come from a
-    # fork, and kind needs Docker). In the merge queue it runs on
-    # ``meho-runners-ci-heavy-queue``: that pool has a Docker-in-Docker
-    # sidecar and a hosted runner may not be free (#6325).
+    # Runs on ``ubuntu-latest`` for every event, the merge queue too.
+    # kind installs need more CPU than the own heavy-queue pool has today;
+    # back to an own pool when the second runner pool exists (#6026).
     #
     # #4099 -- ``helm install`` and ``helm test`` run as a namespace
     # admin (``--kube-as-user``), not as kind's cluster admin, so a chart
@@ -851,7 +850,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.chart == 'true')
-    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     # 30 minutes: the update and rollback proofs of #5024 start the
     # backplane pod three more times.
     timeout-minutes: 30
@@ -1627,7 +1626,7 @@ jobs:
     # jobs run at the same time, so neither job needs more time.
     #
     # Same conditions as `helm-test`: the `changes` filter and the fork guard
-    # in the `if:` below, `ubuntu-latest` for kind (own heavy queue pool in the merge queue), and `helm install` and
+    # in the `if:` below, `ubuntu-latest` for kind, and `helm install` and
     # `helm test` as the namespace admin of #4099. The `if:` skips this job
     # on a PR that does not touch the chart, and a skipped job reports
     # Success. The required `helm-test-gate` needs this job too, so a broken
@@ -1640,7 +1639,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.chart == 'true')
-    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout

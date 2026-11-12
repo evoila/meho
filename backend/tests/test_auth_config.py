@@ -18,11 +18,14 @@ breaks. The shape assertion below would catch that.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
 
+from meho_backplane.auth import tool_clients
+from meho_backplane.auth.tool_clients import MCP_TOOL_CLIENTS, ToolClientCheck
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
@@ -191,9 +194,15 @@ def test_auth_config_lists_a_client_per_tool_kind_with_the_switch_on(
     monkeypatch: pytest.MonkeyPatch,
     value: str,
 ) -> None:
-    """``MCP_CLIENT_PER_TOOL_KIND`` on: each AI tool kind gets its own client."""
+    """``MCP_CLIENT_PER_TOOL_KIND`` on: each AI tool kind gets its own client.
+
+    Keycloak has both clients here; ``test_mcp_tool_clients_check.py``
+    covers a missing client and a failed check.
+    """
     monkeypatch.setenv("MCP_CLIENT_PER_TOOL_KIND", value)
     get_settings.cache_clear()
+    found = ToolClientCheck(present=dict(MCP_TOOL_CLIENTS), checked_at=time.monotonic())
+    monkeypatch.setattr(tool_clients, "_last", found)
     with TestClient(app) as client:
         response = client.get("/api/v1/auth-config")
 

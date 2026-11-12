@@ -439,7 +439,8 @@ class AuditEventClass(StrEnum):
       rejected, or let an approval request expire, or its sender withdrew
       it (#5717). The operation did not run on any of these rows.
     * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
-      refresh-token replay or a broken satellite effect chain.
+      refresh-token replay or a broken satellite effect chain. The
+      ``mcp.session_open`` row of a new MCP session has this class too.
     * :attr:`CONFIG_CHANGE` -- an operator changed the settings of
       operations, and none of them ran. Two writers: an edit of one
       operation with ``meho_connector_edit_op`` (turned it on or off, or
@@ -8868,6 +8869,14 @@ class RunbookRunStepState(Base):
         default=None,
     )
     verify_response: Mapped[object] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    # Every check attempt of the step, oldest first: ``{"at", "passed",
+    # "verify_response"}``. ``verify_response`` above holds the latest one.
+    # A retry of a failed step adds an entry; no entry is ever replaced.
+    attempts: Mapped[object] = mapped_column(
         _PORTABLE_JSON,
         nullable=True,
         default=None,

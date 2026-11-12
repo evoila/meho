@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -149,7 +150,12 @@ func newDoctorCmd() *cobra.Command {
 
 // runDoctor runs the layers and returns the report. The server layer
 // comes last, after the doctor's own checks.
+//
+// The doctor always checks the default profile, also under --profile
+// or MEHO_PROFILE: its offline credential check reads the default
+// slot, so the online checks must use the same login.
 func runDoctor(cmd *cobra.Command, opts doctorOptions, deps doctorDeps) *doctorReport {
+	ctx := auth.WithProfile(cmd.Context(), auth.DefaultProfile)
 	report := &doctorReport{}
 	backplaneURL := runOfflineChecks(report, opts, deps)
 	switch {
@@ -160,9 +166,9 @@ func runDoctor(cmd *cobra.Command, opts doctorOptions, deps doctorDeps) *doctorR
 		report.add(doctorCheck{Layer: layerAuthed, Name: "authenticated layer", Status: doctorSkip,
 			Detail: "skipped: no usable backplane URL", Hint: "run `meho login <url>` or pass --backplane <url>"})
 	default:
-		runAuthenticatedChecks(cmd.Context(), report, backplaneURL, deps)
+		runAuthenticatedChecks(ctx, report, backplaneURL, deps)
 	}
-	runServerChecks(cmd.Context(), report, opts, deps)
+	runServerChecks(ctx, report, opts, deps)
 	return report
 }
 

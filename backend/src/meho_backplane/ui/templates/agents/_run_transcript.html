@@ -7,13 +7,22 @@
   into ``#agent-run-transcript``. Opens the cookie-authed SSE bridge and
   renders the run's frames live.
 
+  ``stream_url`` is the stream to follow: the bridge
+  (``/ui/agents/{name}/run/stream?token=...``, which starts the run) after
+  the run POST, or ``/ui/agents/runs/{run_id}/events`` when the console
+  page opens with ``?run=<id>``. Both stream the run's saved events, so a
+  reload shows the events so far and then the live ones. With
+  ``remember_run`` the controller puts ``?run=<id>`` in the address once
+  the run id is known, so a reload follows the same run. The last frame
+  is ``end``: the run's end status and whether it ``ended`` or stopped
+  ``unfinished``.
+
   Live-streaming model (mirrors broadcast/_feed.html)
   ---------------------------------------------------
-  The HTMX ``sse`` extension owns the ``EventSource`` pointed at the
-  bridge URL (``/ui/agents/{name}/run/stream?token=...``). The bridge
-  proxies ``invoker.stream_events``, emitting one frame per event under a
+  The HTMX ``sse`` extension owns the ``EventSource`` pointed at
+  ``stream_url``. The stream emits one frame per saved event under a
   named ``event:`` (``turn`` / ``tool_call`` / ``tool_result`` / ``final``
-  / ``error``). One ``sse-swap`` per kind subscribes to each; the
+  / ``error``), then ``end``. One ``sse-swap`` per kind subscribes to each; the
   ``agentRunConsole`` Alpine controller hooks ``htmx:sse-before-message``,
   ``preventDefault()``s the raw swap (so a frame field containing markup
   is never parsed into live DOM -- the same injection class the broadcast
@@ -24,9 +33,9 @@
   so frames flush per-event and the transcript paints turn-by-turn rather
   than only at completion.
 
-  No Stop affordance: closing the page / navigating away closes the
-  EventSource (the controller does not cancel the run). T9 #1833 adds the
-  Stop button over the T8 #1828 cancel backend.
+  Closing the page / navigating away closes the EventSource; the run goes
+  on. The Stop button cancels it (over the operator run-cancel
+  backend).
 
   XSS hardening: ``x-data`` is SINGLE-quoted and every interpolated value
   rides through ``| tojson`` (which escapes ``'`` to ``'`` and never
@@ -47,7 +56,8 @@
   id="agent-run-transcript-live"
   class="card bg-base-100 border-base-300 border shadow-sm"
   x-data='agentRunConsole({
-    streamUrl: {{ ("/ui/agents/" ~ (agent_name | urlencode) ~ "/run/stream?token=" ~ (run_token | urlencode)) | tojson }},
+    streamUrl: {{ stream_url | tojson }},
+    rememberRun: {{ (remember_run | default(false)) | tojson }},
     agentName: {{ agent_name | tojson }},
     csrfToken: {{ csrf_token | tojson }},
     cancelUrlTemplate: {{ ("/ui/agents/" ~ (agent_name | urlencode) ~ "/run/__RUN_ID__/cancel") | tojson }}
@@ -59,8 +69,8 @@
      ``onFrame`` after cancelling the raw swap. -#}
   <div
     hx-ext="sse"
-    sse-connect="{{ "/ui/agents/" ~ (agent_name | urlencode) ~ "/run/stream?token=" ~ (run_token | urlencode) }}"
-    sse-swap="turn,tool_call,tool_result,final,error"
+    sse-connect="{{ stream_url }}"
+    sse-swap="turn,tool_call,tool_result,final,error,end"
     class="hidden"
     aria-hidden="true"
     x-on:htmx:sse-before-message="onFrame($event)"

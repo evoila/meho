@@ -1541,6 +1541,14 @@ class Settings(BaseModel):
         none of it and every operation keeps today's risk level and
         approval. Env ``POLICY_CLASSIFICATION``; Helm
         ``config.policy.classification``.
+    policy_engine_shadow:
+        Off by default. When on, the policy evaluator
+        (:mod:`meho_backplane.policy.evaluate`) works out its own answer
+        for every call and every approval, next to today's checks. It
+        logs ``policy_shadow_mismatch`` and counts a metric when the two
+        answers differ. Today's checks still decide. When off, the
+        evaluator does not run. Env ``POLICY_ENGINE_SHADOW``; Helm
+        ``config.policy.engineShadow``.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -2448,6 +2456,7 @@ class Settings(BaseModel):
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    policy_engine_shadow: bool = False
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
     #: forwarded operator JWT. Empty ("") means the add-on is not
@@ -3534,6 +3543,9 @@ def get_settings() -> Settings:
         ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),
+        ),
+        policy_engine_shadow=parse_bool_env(
+            os.environ.get("POLICY_ENGINE_SHADOW"),
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),

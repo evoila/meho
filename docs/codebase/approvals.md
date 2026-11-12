@@ -1183,6 +1183,16 @@ interface only show it.
   shows the refusal text and the hint. Each step's approval checks
   again.
 
+### Shadow mode of "may approve"
+
+With the `POLICY_ENGINE_SHADOW` switch on (off by default), every "may I
+approve this?" answer (`approve_right`) and every approve also run the
+policy evaluator's `may_approve` (`policy/approve.py`). When the two
+answers differ, MEHO logs `policy_shadow_mismatch` with `kind=approval`
+and counts the metric `policy_shadow_mismatch_total`. Today's answer still
+decides. Run approvals are not compared. See
+[policy-evaluator.md](policy-evaluator.md).
+
 ## Delegated decisions: the reason-line convention (#3692)
 
 Sometimes an approver decides because **another person told them to, in

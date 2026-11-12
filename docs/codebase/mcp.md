@@ -1325,7 +1325,7 @@ session (on top of the Role + Extra-gate columns).
 | `meho_runbook_publish_template` | tenant_admin | — | Publish a draft template. |
 | `meho_runbook_reassign` | tenant_admin | — | Reassign an in-progress run to another operator. |
 | `meho_scheduler_cancel` | tenant_admin | — | Cancel a scheduled trigger by id. |
-| `meho_scheduler_create` | tenant_admin | — | Create a scheduled trigger (cron / one-off / event). |
+| `meho_scheduler_create` | tenant_admin | — | Create a scheduled trigger (cron / one-off / event). While `CHECKS_AGENT_EVENTS` is on, an event trigger can take `check_source` (a Sensor or a Dashboard, optionally only when it gets worse) instead of `event_filter`; while it is off, the tool shows and accepts no `check_source`. |
 | `meho_scheduler_list` | operator | — | List scheduled triggers. |
 | `meho_sensor_create` | tenant_admin | — | Create a sensor (op + assertion + cadence + severity). |
 | `meho_sensor_delete` | tenant_admin | — | Hard-delete a sensor by id. |

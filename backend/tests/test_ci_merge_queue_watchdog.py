@@ -37,6 +37,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 _WATCHDOG_JOB = "merge-queue-watchdog"
 _OPTIONAL_JOB = "cli-api-snapshot-freshness"
+_WATCHDOG_STEP = "Cancel this run once the queue has dropped its group"
+_INSTALL_STEP = "Install gh and jq"
 
 # A response the stubbed jobs API answers with an error instead of a body.
 _API_FAILURE = "__FAIL__"
@@ -53,9 +55,13 @@ def _workflow() -> dict[str, Any]:
     return cast("dict[str, Any]", yaml.safe_load(_CI_WORKFLOW.read_text()))
 
 
+def _watchdog_steps() -> list[dict[str, Any]]:
+    return cast("list[dict[str, Any]]", _workflow()["jobs"][_WATCHDOG_JOB]["steps"])
+
+
 def _watchdog_step() -> dict[str, Any]:
-    (step,) = _workflow()["jobs"][_WATCHDOG_JOB]["steps"]
-    return cast("dict[str, Any]", step)
+    (step,) = [s for s in _watchdog_steps() if s.get("name") == _WATCHDOG_STEP]
+    return step
 
 
 def _job(
@@ -152,6 +158,12 @@ def test_step_names_match_the_jobs_they_point_at() -> None:
     env = _watchdog_step()["env"]
     assert env["SELF_NAME"] == jobs[_WATCHDOG_JOB]["name"]
     assert env["HARMLESS_JOB"] == jobs[_OPTIONAL_JOB]["name"]
+
+
+def test_gh_is_installed_before_the_watchdog_step() -> None:
+    """Our own runner image has no gh (#6325); the install step must run first."""
+    names = [step.get("name") for step in _watchdog_steps()]
+    assert names.index(_INSTALL_STEP) < names.index(_WATCHDOG_STEP)
 
 
 def test_merged_run_with_optional_job_still_running_is_not_cancelled(tmp_path: Path) -> None:

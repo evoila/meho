@@ -4473,6 +4473,11 @@ meho scheduler create [flags]
 - `--inputs` — optional inputs JSON object forwarded as the agent run's input (inline JSON, @<path>, or @-)
 - `--json` — emit raw Trigger JSON instead of the human summary
 - `--kind` — trigger kind: cron | one_off | event
+- `--on-any-dashboard` — start on any Dashboard; needs --kind=event, not with --event-filter
+- `--on-any-sensor` — start on any Sensor; needs --kind=event, not with --event-filter
+- `--on-dashboard` — start on this Dashboard (name or id); needs --kind=event, not with --event-filter
+- `--on-sensor` — start on this Sensor (name or id); needs --kind=event, not with --event-filter
+- `--only-worse` — with an --on-* flag: start only when the state gets worse
 - `--tenant` — target tenant UUID (tenant_admin cross-tenant create)
 - `--timezone` — IANA timezone name for cron evaluation (default 'UTC')
 - `--work-ref` — external change-ticket reference inherited by every dispatched run

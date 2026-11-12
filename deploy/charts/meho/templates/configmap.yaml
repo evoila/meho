@@ -233,6 +233,8 @@ data:
   TEAM_KNOWLEDGE_RECALL: {{ .Values.config.teamKnowledgeRecall | quote }}
   KB_SIMILAR_CHECK: {{ .Values.config.kbSimilarCheck | quote }}
   MCP_SHORT_TOOL_TEXTS: {{ .Values.config.mcpShortToolTexts | quote }}
+  # Claude Code and Claude Desktop sign in with their own login client.
+  MCP_CLIENT_PER_TOOL_KIND: {{ .Values.config.mcpClientPerToolKind | quote }}
   # Category, labels and "always wait" on connectors, groups and
   # operations. Off by default.
   POLICY_CLASSIFICATION: {{ .Values.config.policy.classification | quote }}

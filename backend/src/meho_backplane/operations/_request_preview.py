@@ -506,6 +506,7 @@ async def _park_check_envelope(
         descriptor=descriptor,
         target=target,
         connector_id=connector_id,
+        params=params,
         decide_only=True,
     )
     if verdict is not PermissionVerdict.NEEDS_APPROVAL:
@@ -532,6 +533,7 @@ async def _governance_fields(
     descriptor: EndpointDescriptor,
     target: Any,
     connector_id: str,
+    params: dict[str, Any],
 ) -> dict[str, Any]:
     """The risk level and the policy verdict for this caller and target (#4923).
 
@@ -540,8 +542,9 @@ async def _governance_fields(
     ``auto-execute``, ``needs-approval`` or ``deny`` — from the same
     :func:`~meho_backplane.operations._validate.policy_gate` the dispatcher
     runs (Step 4), called with ``decide_only=True`` so it writes nothing: no
-    audit row, no approval request, no standing-grant use. ``policy_reason``
-    is the gate's reason string, or ``None`` when the gate gives none (a
+    audit row, no approval request, no standing-grant use. The gate gets the
+    call's *params*, so the op's requester check gives the call's answer.
+    ``policy_reason`` is the gate's reason string, or ``None`` when the gate gives none (a
     person's call that runs at once). A call that would run at once is
     also checked step by step (:func:`preview_step_verdict`, #5492): a
     multi-step operation reads as covered only when its write steps are
@@ -558,6 +561,7 @@ async def _governance_fields(
         descriptor=descriptor,
         target=target,
         connector_id=connector_id,
+        params=params,
         decide_only=True,
     )
     step_refusal = None
@@ -856,6 +860,7 @@ async def preview_dispatch(
             descriptor=descriptor,
             target=target,
             connector_id=connector_id,
+            params=params,
         )
     return {**envelope, **governance}
 

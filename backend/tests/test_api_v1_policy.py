@@ -19,6 +19,7 @@
   dispatch route, the CLI) refuses an agent, a hosted agent run, and an
   install-wide import from someone who is not a platform admin: no request
   waits and no plan is built. The run checks the recorded requester again.
+  The preview gives the same ``deny``.
 
 Drives the production ``meho_backplane.main:app``. DB is the autouse
 per-test SQLite + ``alembic upgrade head``.
@@ -50,6 +51,7 @@ from meho_backplane.connectors.policy.apply import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, PolicyRevision, TenantPolicy
 from meho_backplane.main import app
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.approval_queue import (
     RightsChangeApprovalError,
     approve_request,
@@ -443,13 +445,17 @@ async def test_the_same_rules_in_another_order_do_not_wait(
 # ---------------------------------------------------------------------------
 
 
+def _apply_params(scope: str) -> dict[str, Any]:
+    return {"scope": scope, "file": _FILE, "file_sha256": "0" * 64, "based_on": "0" * 64}
+
+
 async def _dispatch_apply(operator: Operator, scope: str = "tenant") -> Any:
     return await dispatch(
         operator=operator,
         connector_id="policy-registry-1.x",
         op_id=POLICY_APPLY_OP_ID,
         target=None,
-        params={"scope": scope, "file": _FILE, "file_sha256": "0" * 64, "based_on": "0" * 64},
+        params=_apply_params(scope),
     )
 
 
@@ -537,3 +543,23 @@ async def test_the_run_checks_the_recorded_requester_again(
     assert result.status != "ok"
     assert IMPORT_NEEDS_PERSON in str(result.error) + str(result.extras)
     assert await _stored() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch", "no_plan")
+async def test_the_preview_denies_what_dispatch_denies(embedding: AsyncMock) -> None:
+    await _setup(embedding)
+    operator = _admin("caller")
+    preview = await preview_dispatch(
+        operator=operator,
+        connector_id="policy-registry-1.x",
+        op_id=POLICY_APPLY_OP_ID,
+        target=None,
+        params=_apply_params("install"),
+    )
+    assert preview["policy_verdict"] == "deny", preview
+    assert INSTALL_ASK_NEEDS_PLATFORM_ADMIN in str(preview["policy_reason"])
+    result = await _dispatch_apply(operator, "install")
+    assert result.status == "denied", result
+    assert INSTALL_ASK_NEEDS_PLATFORM_ADMIN in str(result.error)
+    assert await _requests() == []

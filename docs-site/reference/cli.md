@@ -16,6 +16,7 @@ Every command accepts the global flags below.
 ## Global flags
 
 - `--config` — path to the meho config file (default: `$XDG_CONFIG_HOME/meho/config.json`).
+- `--profile` — named login to use (default: `$MEHO_PROFILE`, else `default`). Each profile keeps its own login, so one person can hold several identities side by side. `meho login <url> --profile <name>` stores the login under that name. The flag wins over `$MEHO_PROFILE`.
 - `--verbose`, `-v` — enable verbose output.
 - `--work-ref` — external change-ticket reference (`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Five commands have their own `--work-ref` flag that tags the run with the reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the header. List commands filter by reference with `--filter-work-ref`.
 

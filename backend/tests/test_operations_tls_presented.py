@@ -104,3 +104,42 @@ async def test_probe_returns_none_when_the_host_is_not_tls() -> None:
     finally:
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_probe_does_not_dial_a_refused_destination(
+    tls_server: tuple[int, x509.Certificate],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    port, _cert = tls_server
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    dialed: list[object] = []
+
+    async def _spy(*args: object, **kwargs: object) -> None:
+        dialed.append(args)
+        raise AssertionError("must not dial")
+
+    monkeypatch.setattr("asyncio.open_connection", _spy)
+
+    assert await probe_presented_leaf("127.0.0.1", port, "host.example.test") is None
+    assert dialed == []
+
+
+@pytest.mark.asyncio
+async def test_probe_dials_the_screened_address_with_the_sni_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    async def _fake(host: str, port: int, **kwargs: object) -> None:
+        seen["host"] = host
+        seen["server_hostname"] = kwargs["server_hostname"]
+        raise OSError("stop")
+
+    monkeypatch.setattr(
+        "meho_backplane.operations._tls_presented.screen_and_resolve", lambda h: ["192.0.2.7"]
+    )
+    monkeypatch.setattr("asyncio.open_connection", _fake)
+
+    assert await probe_presented_leaf("host.example.test", 8443, None) is None
+    assert seen == {"host": "192.0.2.7", "server_hostname": "host.example.test"}

@@ -9,6 +9,11 @@ short handshake to the target's own host and port and reads the leaf
 certificate. It sends no request and trusts nothing: the handshake does
 not verify, because its only job is to show the certificate.
 
+The destination goes through the same target address check as the
+connector path first. The probe dials the screened address and offers
+the target name as the TLS server name. A refused destination is not
+dialed.
+
 It never raises. Any failure returns ``None`` and the error message then
 says the certificate could not be read.
 """
@@ -21,6 +26,8 @@ from typing import Any
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
+
+from meho_backplane.targets.ssrf_guard import _dialed_host, screen_and_resolve
 
 #: Seconds for the connect and the handshake together.
 PROBE_TIMEOUT_S: float = 3.0
@@ -52,9 +59,13 @@ async def probe_presented_leaf(
     ctx.verify_mode = ssl.CERT_NONE
     writer: asyncio.StreamWriter | None = None
     try:
+        # Same check as the connector path. Refused targets raise here
+        # and are not dialed. Dial the screened address, not the name.
+        addrs = screen_and_resolve(host)
+        dial_host = addrs[0] if addrs else _dialed_host(host)
         _reader, opened = await asyncio.wait_for(
             asyncio.open_connection(
-                host,
+                dial_host,
                 port or _DEFAULT_PORT,
                 ssl=ctx,
                 server_hostname=server_name or host,

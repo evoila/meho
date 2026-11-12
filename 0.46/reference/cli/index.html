@@ -20723,6 +20723,11 @@
 <li><code>--inputs</code> — optional inputs JSON object forwarded as the agent run's input (inline JSON, @<path>, or @-)</li>
 <li><code>--json</code> — emit raw Trigger JSON instead of the human summary</li>
 <li><code>--kind</code> — trigger kind: cron | one_off | event</li>
+<li><code>--on-any-dashboard</code> — start on any Dashboard; needs --kind=event, not with --event-filter</li>
+<li><code>--on-any-sensor</code> — start on any Sensor; needs --kind=event, not with --event-filter</li>
+<li><code>--on-dashboard</code> — start on this Dashboard (name or id); needs --kind=event, not with --event-filter</li>
+<li><code>--on-sensor</code> — start on this Sensor (name or id); needs --kind=event, not with --event-filter</li>
+<li><code>--only-worse</code> — with an --on-* flag: start only when the state gets worse</li>
 <li><code>--tenant</code> — target tenant UUID (tenant_admin cross-tenant create)</li>
 <li><code>--timezone</code> — IANA timezone name for cron evaluation (default 'UTC')</li>
 <li><code>--work-ref</code> — external change-ticket reference inherited by every dispatched run</li>

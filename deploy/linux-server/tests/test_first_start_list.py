@@ -46,8 +46,9 @@ class ConsoleCaTests(InstallTestCase):
         self.assertIn(CA_TEMPLATE_CALL, calls)
         self.assertNotIn("tls.key", calls)
 
-    def assert_no_ca_file(self, secret: str, rc: str) -> None:
-        self.machine.answer("kube_secret_tls", secret)
+    def assert_no_ca_file(self, ca_output: str, rc: str) -> None:
+        """ca_output is what kubectl prints for the CA of the TLS Secret."""
+        self.machine.answer("kube_secret_tls", ca_output)
         self.machine.answer("kube_secret_tls_rc", rc)
 
         result = self.machine.run()

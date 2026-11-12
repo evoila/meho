@@ -903,18 +903,21 @@ async def list_overrides(
 async def _scope_policy(session: AsyncSession, row: OperationPolicyOverride) -> EffectivePolicy:
     """Return the effective policy of *row*'s operation in *row*'s scope.
 
-    Like dispatch, the two floors run last, so the report never
-    lists approval as off for an operation that still waits for it. With no
-    descriptor (the operation is gone) the lowest values apply, so only the
-    overrides count.
+    The same steps as dispatch (:func:`effective_policy_map`): the
+    overrides, then the classification (with the ``POLICY_CLASSIFICATION``
+    switch on), then the floors. So the report never lists approval as off
+    for an operation that a classification entry or a floor still makes
+    wait, and ``rule_ref`` says which entry decided it. With no descriptor
+    (the operation is gone) the lowest values apply, so only the overrides
+    count.
     """
     key = OpKey(row.product, row.version, row.impl_id, row.op_id)
     descriptor = await _scope_descriptor(session, key, row.tenant_id)
-    overrides = (await load_overrides(session, tenant_id=row.tenant_id, keys=[key])).get(key, [])
     if descriptor is None:
-        return effective_policy("safe", False, overrides)
-    policy = effective_policy(descriptor.safety_level, descriptor.requires_approval, overrides)
-    return _with_floors(descriptor, policy)
+        overrides = await load_overrides(session, tenant_id=row.tenant_id, keys=[key])
+        return effective_policy("safe", False, overrides.get(key, []))
+    policies = await effective_policy_map(session, tenant_id=row.tenant_id, rows=[descriptor])
+    return policies[key]
 
 
 async def _classification(

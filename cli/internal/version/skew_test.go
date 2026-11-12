@@ -31,6 +31,8 @@ func TestSkewWarning(t *testing.T) {
 		{"dev cli", "dev", strPtr("0.35.12"), ""},
 		{"no chart version", "v0.12.0", nil, ""},
 		{"main branch backplane", "v0.12.0", strPtr("0.1.20260917-abc1234"), ""},
+		{"main branch backplane with sha form", "v0.41.0", strPtr("0.1.0-main-0123456789ab"), ""},
+		{"backplane release candidate", "v0.41.0", strPtr("0.45.0-rc.1"), ""},
 		{"unknown backplane", "v0.12.0", strPtr("unknown"), ""},
 	}
 	for _, tc := range cases {

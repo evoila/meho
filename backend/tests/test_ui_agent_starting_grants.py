@@ -16,7 +16,12 @@ imported by name so pytest applies them here too).
 from __future__ import annotations
 
 import asyncio
+import html
+import json
+import os
 import re
+import shutil
+import subprocess
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -186,6 +191,55 @@ def test_pick_is_required_while_the_switch_is_not_off(
     assert len(radios) == 3
     assert all("required" in r for r in radios)
     assert not any("checked" in r for r in radios)
+
+
+def _help_texts(body: str) -> dict[str, str]:
+    """Return each choice's help text, keyed on the choice value."""
+    texts: dict[str, str] = {}
+    for value in ("none", "read-everything", "read-targets"):
+        match = re.search(
+            rf'value="{value}".*?<span class="text-xs opacity-60">([^<]+)</span>', body, re.S
+        )
+        assert match is not None, value
+        texts[value] = html.unescape(" ".join(match.group(1).split()))
+    return texts
+
+
+@pytest.mark.parametrize("path", [_REGISTER, _CREATE])
+@pytest.mark.parametrize("mode", ["off", "observe"])
+def test_help_says_the_limits_need_the_switch_on(
+    monkeypatch: pytest.MonkeyPatch, path: str, mode: str
+) -> None:
+    """With the switch off or observe, the text does not promise limits MEHO does not apply."""
+    _switch(monkeypatch, mode)
+    client, mock, _csrf = _admin_client(with_csrf=False)
+    try:
+        texts = _help_texts(client.get(path).text)
+    finally:
+        mock.stop()
+    assert "runs nothing until" not in texts["none"]
+    assert f"AGENT_GRANT_REQUIRED is {mode}" in texts["none"]
+    assert "can still run safe operations" in texts["none"]
+    assert "only when AGENT_GRANT_REQUIRED is on" in texts["none"]
+    assert "only on the targets" not in texts["read-targets"]
+    assert f"AGENT_GRANT_REQUIRED is {mode}" in texts["read-targets"]
+    assert "also run on other targets" in texts["read-targets"]
+    assert texts["read-everything"].startswith("Safe operations run at once on every target.")
+
+
+@pytest.mark.parametrize("path", [_REGISTER, _CREATE])
+def test_help_states_the_limits_with_the_switch_on(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    _switch(monkeypatch, "on")
+    client, mock, _csrf = _admin_client(with_csrf=False)
+    try:
+        texts = _help_texts(client.get(path).text)
+    finally:
+        mock.stop()
+    assert texts["none"] == "The agent runs nothing until an admin adds a grant."
+    assert texts["read-targets"] == "The same, but only on the targets you pick below."
+    assert "AGENT_GRANT_REQUIRED" not in texts["read-everything"]
 
 
 def test_pick_lists_only_the_tenants_live_targets() -> None:
@@ -510,3 +564,106 @@ def test_create_wrong_pick_keeps_the_typed_values() -> None:
     assert 'value="triage"' in response.text
     assert re.search(r'value="read-targets"[^>]*checked', response.text)
     assert _definition_names() == []
+
+
+# ---------------------------------------------------------------------------
+# The browser shows the register errors
+# ---------------------------------------------------------------------------
+
+requires_node = pytest.mark.skipif(
+    shutil.which("node") is None and os.environ.get("MEHO_REQUIRE_NODE") != "1",
+    reason="node not on PATH (set MEHO_REQUIRE_NODE=1 to force)",
+)
+
+# Runs the container's ``hx-on::before-swap`` code the way htmx 2.0.9 does
+# (``event`` in scope, fired on the swap target) for each case, then does
+# the swap htmx would do: the body goes into the container only when
+# ``shouldSwap`` is on. Prints what the container holds after each case.
+_SWAP_DRIVER = r"""
+"use strict";
+const [code, casesJson] = process.argv.slice(1);
+const handler = new Function("event", code);
+const out = {};
+for (const c of JSON.parse(casesJson)) {
+  const detail = {
+    xhr: { status: c.status },
+    requestConfig: { verb: c.verb },
+    shouldSwap: c.status < 400,
+    isError: c.status >= 400,
+  };
+  handler({ detail });
+  out[c.name] = { swapped: detail.shouldSwap && !detail.isError,
+                  container: detail.shouldSwap ? c.body : "" };
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _swap_hook(client: Any) -> str:
+    page = client.get("/ui/agents/principals")
+    assert page.status_code == 200, page.text
+    container = re.search(r'<div\s+id="principals-modal-container"[^>]*>', page.text)
+    assert container is not None, page.text
+    hook = re.search(r'hx-on::before-swap="([^"]*)"', container.group(0))
+    assert hook is not None, container.group(0)
+    return html.unescape(hook.group(1))
+
+
+@requires_node
+def test_read_targets_without_a_target_shows_the_error_in_the_modal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 422 answer replaces the modal, so the error is visible next to the pick.
+
+    htmx skips an error answer unless the swap target's before-swap hook
+    turns the swap on. This runs the hook from the real list page against
+    the real 422 answer and checks what the container shows after it.
+    """
+    captured = _capture_register(monkeypatch)
+    client, mock, csrf = _admin_client()
+    try:
+        hook = _swap_hook(client)
+        response = client.post(
+            _REGISTER,
+            data={"name": "deploy-bot", "starting_grants": "read-targets"},
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 422, response.text
+    assert captured == {}
+
+    cases = [
+        {"name": "register422", "status": 422, "verb": "post", "body": response.text},
+        {"name": "conflict409", "status": 409, "verb": "post", "body": "<dialog>409</dialog>"},
+        {"name": "banner503", "status": 503, "verb": "post", "body": "<dialog>503</dialog>"},
+        {"name": "ok200", "status": 200, "verb": "get", "body": "<dialog>ok</dialog>"},
+        {"name": "get404", "status": 404, "verb": "get", "body": "not found"},
+        {"name": "post500", "status": 500, "verb": "post", "body": "boom"},
+    ]
+    proc = subprocess.run(
+        ["node", "-e", _SWAP_DRIVER, hook, json.dumps(cases)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+
+    shown = result["register422"]
+    assert shown["swapped"] is True
+    error = re.search(
+        r'<span class="text-xs text-error" role="alert" data-error-for="starting_grants">'
+        r"\s*([^<]+)<",
+        shown["container"],
+    )
+    assert error is not None, shown["container"]
+    assert "needs at least one target" in error.group(1)
+    assert 'value="deploy-bot"' in shown["container"]
+    assert result["conflict409"]["swapped"] is True
+    assert result["banner503"]["swapped"] is True
+    assert result["ok200"]["swapped"] is True
+    # A failed GET and an unexpected 500 keep htmx's default: no swap.
+    assert result["get404"]["swapped"] is False
+    assert result["post500"]["swapped"] is False

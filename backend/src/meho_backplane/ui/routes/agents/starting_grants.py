@@ -6,7 +6,9 @@
 The register form (``principals_forms.py``) and the agent definition
 create form (``forms.py``) both ask the person for the agent's first
 grants. The three choices come from
-:class:`~meho_backplane.agents.grant_sets.StartingGrantSet`. No choice is
+:class:`~meho_backplane.agents.grant_sets.StartingGrantSet`. Their help
+text follows ``AGENT_GRANT_REQUIRED``: only ``on`` makes "None" and "Read
+some targets" limit safe operations. No choice is
 selected at first. While ``AGENT_GRANT_REQUIRED`` is not ``off`` the
 choice is required in the form; the service checks it again and its
 error text shows next to the field.
@@ -54,34 +56,57 @@ TARGETS_FIELD: Final[str] = "starting_grant_targets"
 #: Form-body cap for the set value (the longest value is 15 characters).
 GRANT_SET_MAX: Final[int] = 32
 
-_CHOICES: Final[tuple[dict[str, str], ...]] = (
-    {
-        "value": StartingGrantSet.NONE.value,
-        "label": "None",
-        "help": "The agent runs nothing until an admin adds a grant.",
-    },
-    {
-        "value": StartingGrantSet.READ_EVERYTHING.value,
-        "label": "Read everything",
-        "help": (
-            "Safe operations run at once on every target. "
-            "Everything else waits for a person's approval."
-        ),
-    },
-    {
-        "value": StartingGrantSet.READ_TARGETS.value,
-        "label": "Read some targets",
-        "help": "The same, but only on the targets you pick below.",
-    },
+_READ_EVERYTHING_HELP: Final[str] = (
+    "Safe operations run at once on every target. Everything else waits for a person's approval."
 )
+
+
+def _choices(mode: str) -> tuple[dict[str, str], ...]:
+    """Return the three choices, with help text that is true for *mode*.
+
+    *mode* is the value of ``AGENT_GRANT_REQUIRED``. Only ``on`` stops an
+    agent from running a safe operation that no grant covers. With ``off``
+    or ``observe``, "None" and "Read some targets" do not limit safe
+    operations, so the text says so and names the current value.
+    """
+    if mode == "on":
+        none_help = "The agent runs nothing until an admin adds a grant."
+        targets_help = "The same, but only on the targets you pick below."
+    else:
+        none_help = (
+            "MEHO writes no grant. AGENT_GRANT_REQUIRED is "
+            f"{mode}, so the agent can still run safe operations at once. "
+            "Everything else waits for a person's approval. "
+            "The agent runs nothing only when AGENT_GRANT_REQUIRED is on."
+        )
+        targets_help = (
+            "Safe operations run at once on the targets you pick below. "
+            f"AGENT_GRANT_REQUIRED is {mode}, so safe operations also run on "
+            "other targets. The agent is limited to these targets only when "
+            "AGENT_GRANT_REQUIRED is on."
+        )
+    return (
+        {"value": StartingGrantSet.NONE.value, "label": "None", "help": none_help},
+        {
+            "value": StartingGrantSet.READ_EVERYTHING.value,
+            "label": "Read everything",
+            "help": _READ_EVERYTHING_HELP,
+        },
+        {
+            "value": StartingGrantSet.READ_TARGETS.value,
+            "label": "Read some targets",
+            "help": targets_help,
+        },
+    )
 
 
 async def pick_context(tenant_id: uuid.UUID) -> dict[str, object]:
     """Return the template values the pick field needs, for *tenant_id*."""
+    mode = get_settings().agent_grant_required
     return {
-        "grant_set_choices": _CHOICES,
+        "grant_set_choices": _choices(mode),
         "grant_target_names": await _target_names(tenant_id),
-        "grants_required": get_settings().agent_grant_required != "off",
+        "grants_required": mode != "off",
     }
 
 

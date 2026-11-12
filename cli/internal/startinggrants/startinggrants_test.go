@@ -107,6 +107,30 @@ func TestRequestErrorPrintsTheChoicesWhenPickIsMissing(t *testing.T) {
 	}
 }
 
+// The limits of none and read-targets hold only with AGENT_GRANT_REQUIRED=on.
+// The CLI cannot see the server's setting, so both texts say so.
+func TestTextsSayTheLimitsNeedTheSwitchOn(t *testing.T) {
+	cmd := &cobra.Command{Use: "x"}
+	AddFlags(cmd, &Flags{})
+	texts := map[string]string{"choices": Choices, "--grants help": cmd.Flags().Lookup("grants").Usage}
+	for name, text := range texts {
+		for _, want := range []string{
+			"with AGENT_GRANT_REQUIRED=on the agent runs nothing until an admin adds a grant",
+			"with AGENT_GRANT_REQUIRED=on, only there",
+			"with AGENT_GRANT_REQUIRED off (the default) or observe, the agent can also run safe operations that no grant covers",
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s %q does not contain %q", name, text, want)
+			}
+		}
+		for _, promise := range []string{"none: the agent runs nothing", "none                      the agent runs nothing", "the same, only on the targets"} {
+			if strings.Contains(text, promise) {
+				t.Errorf("%s still promises %q without the switch", name, promise)
+			}
+		}
+	}
+}
+
 func TestRequestErrorShowsOtherPickErrors(t *testing.T) {
 	body := []byte(`{"detail":"starting_grants_target_unknown: no target named 'x' in this tenant. Nothing was created."}`)
 	got := RequestError(http.StatusUnprocessableEntity, body)

@@ -5,10 +5,15 @@
 // `meho agent-principal register` and `meho agent create` share. With
 // them a person picks an agent's first grants when they create it:
 //
-//   - none: the agent runs nothing until an admin adds a grant.
+//   - none: no grant is written.
 //   - read-everything: safe operations run at once on every target;
 //     everything else waits for a person's approval.
 //   - read-targets: the same, only on the targets named with --target.
+//
+// "none" and "read-targets" limit the agent only while the server has
+// AGENT_GRANT_REQUIRED=on. With off (the default) or observe, an agent
+// can still run safe operations that no grant covers. The CLI cannot see
+// the server's setting, so its text says this for every case.
 //
 // The CLI never picks for the person. When MEHO needs a pick and the
 // flag is missing, the backend answers 422 starting_grants_required and
@@ -38,15 +43,22 @@ const (
 
 // Choices is the text the CLI prints when a pick is missing or wrong.
 const Choices = "pick the agent's first grants with --grants:\n" +
-	"  --grants none                      the agent runs nothing until an admin adds a grant\n" +
+	"  --grants none                      no grant; with AGENT_GRANT_REQUIRED=on the agent runs nothing until an admin adds a grant\n" +
 	"  --grants read-everything           safe operations run at once on every target; everything else waits for a person's approval\n" +
 	"  --grants read-targets --target <name> [--target <name> ...]\n" +
-	"                                     the same, only on the targets you name"
+	"                                     safe operations run at once on the targets you name; with AGENT_GRANT_REQUIRED=on, only there\n" +
+	limitsNote
+
+// limitsNote says that the limits of none and read-targets need the
+// server setting AGENT_GRANT_REQUIRED=on.
+const limitsNote = "with AGENT_GRANT_REQUIRED off (the default) or observe, " +
+	"the agent can also run safe operations that no grant covers, on any target"
 
 const grantsFlagHelp = "the agent's first grants: none, read-everything or read-targets. " +
-	"none: the agent runs nothing until an admin adds a grant. " +
+	"none: no grant; with AGENT_GRANT_REQUIRED=on the agent runs nothing until an admin adds a grant. " +
 	"read-everything: safe operations run at once on every target; everything else waits for a person's approval. " +
-	"read-targets: the same, only on the targets you name with --target"
+	"read-targets: safe operations run at once on the targets you name with --target; with AGENT_GRANT_REQUIRED=on, only there. " +
+	"Note: " + limitsNote
 
 const targetFlagHelp = "a target name for --grants read-targets; repeat the flag for more targets"
 

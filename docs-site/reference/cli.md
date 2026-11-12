@@ -190,7 +190,7 @@ meho agent create <name> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--disabled` — create the definition parked (enabled=false; default is enabled)
-- `--grants` — the agent's first grants: none, read-everything or read-targets. none: the agent runs nothing until an admin adds a grant. read-everything: safe operations run at once on every target; everything else waits for a person's approval. read-targets: the same, only on the targets you name with --target
+- `--grants` — the agent's first grants: none, read-everything or read-targets. none: no grant; with AGENT_GRANT_REQUIRED=on the agent runs nothing until an admin adds a grant. read-everything: safe operations run at once on every target; everything else waits for a person's approval. read-targets: safe operations run at once on the targets you name with --target; with AGENT_GRANT_REQUIRED=on, only there. Note: with AGENT_GRANT_REQUIRED off (the default) or observe, the agent can also run safe operations that no grant covers, on any target
 - `--identity-ref` — reference to the agent principal whose permissions bound the toolset
 - `--json` — emit raw AgentDefinitionRead JSON instead of the human summary
 - `--model-tier` — logical model tier: standard | fast | deep
@@ -427,7 +427,7 @@ meho agent-principal register <name> [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
-- `--grants` — the agent's first grants: none, read-everything or read-targets. none: the agent runs nothing until an admin adds a grant. read-everything: safe operations run at once on every target; everything else waits for a person's approval. read-targets: the same, only on the targets you name with --target
+- `--grants` — the agent's first grants: none, read-everything or read-targets. none: no grant; with AGENT_GRANT_REQUIRED=on the agent runs nothing until an admin adds a grant. read-everything: safe operations run at once on every target; everything else waits for a person's approval. read-targets: safe operations run at once on the targets you name with --target; with AGENT_GRANT_REQUIRED=on, only there. Note: with AGENT_GRANT_REQUIRED off (the default) or observe, the agent can also run safe operations that no grant covers, on any target
 - `--json` — emit raw AgentPrincipalRead JSON instead of the human summary
 - `--owner-sub` — OIDC sub of the kill-switch owner (defaults to the caller's sub)
 - `--target` — a target name for --grants read-targets; repeat the flag for more targets

@@ -1231,45 +1231,6 @@
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="The Linux server install">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#what-works-today" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        What works today
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#what-is-still-in-testing" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        What is still in testing
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#how-to-try-it" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        How to try it
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
 </li>
       
         <li class="md-nav__item">
@@ -3075,45 +3036,6 @@
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="The Linux server install">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#what-works-today" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        What works today
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#what-is-still-in-testing" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        What is still in testing
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#how-to-try-it" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        How to try it
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
 </li>
       
         <li class="md-nav__item">
@@ -3191,65 +3113,24 @@ before you use it in production. For the appliance, talk to evoila.</p>
 <h2 id="the-linux-server-install">The Linux server install<a class="headerlink" href="#the-linux-server-install" title="Permanent link">&para;</a></h2>
 <p>The Linux server install is available and still in testing. Use it
 for tests and pilots. Talk to evoila before you run it in production.</p>
-<h3 id="what-works-today">What works today<a class="headerlink" href="#what-works-today" title="Permanent link">&para;</a></h3>
 <ul>
 <li>Each <a href="https://github.com/evoila/meho/releases">GitHub release</a> has
-  the download <code>meho-linux-&lt;version&gt;-amd64.tar</code>, with the checksum file
-  <code>SHA256SUMS-linux</code> and its signature <code>SHA256SUMS-linux.cosign.bundle</code>.</li>
-<li>The download holds everything the install needs: the install script,
-  RKE2, the MEHO chart, every container image, <code>helm</code> and the <code>meho</code>
-  command. The server needs no internet.</li>
+  one download for it. The download holds everything the install needs:
+  the install script, RKE2, the MEHO chart, every container image,
+  <code>helm</code> and the <code>meho</code> command. The server needs no internet.</li>
 <li>One script, <code>install.sh</code>, checks the machine, sets the host firewall,
   installs RKE2 and installs MEHO with its database, login server and
-  password safe. At the end it prints the address of the console and
-  the two files with the first-login passwords and the unseal key.</li>
+  password safe.</li>
 <li>To update, run <code>install.sh</code> from the download of the newer version on
-  the same machine. The update keeps your answers, the data, the
-  passwords and the keys.</li>
-<li><code>sudo meho doctor</code> checks the server: the node, the pods, the disk
-  and the certificates (see <a href="../../clients/troubleshooting/">Troubleshooting</a>).</li>
+  the same machine.</li>
+<li>Ubuntu 24.04 on x86-64 is tested. Another Linux with systemd gets a
+  "not tested" warning, and the install goes on. Joining more servers
+  into one cluster is not tested yet.</li>
 </ul>
-<h3 id="what-is-still-in-testing">What is still in testing<a class="headerlink" href="#what-is-still-in-testing" title="Permanent link">&para;</a></h3>
-<ul>
-<li>Tests on more Linux versions. Ubuntu 24.04 on x86-64 is tested.
-  Another Linux with systemd gets a "not tested" warning, and the
-  install goes on.</li>
-<li>A full guide in this documentation.</li>
-<li>Joining more servers into one cluster.</li>
-</ul>
-<h3 id="how-to-try-it">How to try it<a class="headerlink" href="#how-to-try-it" title="Permanent link">&para;</a></h3>
-<p>You need a server with:</p>
-<ul>
-<li>x86-64 and systemd (Ubuntu 24.04 is tested),</li>
-<li>at least 4 processors, 8 GB of memory, and 80 GB free under
-  <code>/var/lib</code>,</li>
-<li>a full DNS name that your DNS server resolves to the server.</li>
-</ul>
-<p>Then, on the server:</p>
-<ol>
-<li>Download the three files of the release from the
-   <a href="https://github.com/evoila/meho/releases">releases page</a>.</li>
-<li>Check the signature of the checksum file first, then the download.
-   You need <a href="https://docs.sigstore.dev/cosign/system_config/installation/">cosign</a>:</li>
-</ol>
-<div class="highlight"><pre><span></span><code><span class="nv">TAG</span><span class="o">=</span>v&lt;version&gt;
-cosign<span class="w"> </span>verify-blob<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--certificate-identity<span class="w"> </span><span class="s2">"https://github.com/evoila/meho/.github/workflows/linux-download.yml@refs/tags/</span><span class="nv">$TAG</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--certificate-oidc-issuer<span class="w"> </span>https://token.actions.githubusercontent.com<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--bundle<span class="w"> </span>SHA256SUMS-linux.cosign.bundle<span class="w"> </span>SHA256SUMS-linux
-sha256sum<span class="w"> </span>-c<span class="w"> </span>SHA256SUMS-linux
-</code></pre></div>
-<p>Both commands must succeed. <code>sha256sum</code> prints <code>OK</code> for the download.
-3. Unpack the download and run the install script as root:</p>
-<div class="highlight"><pre><span></span><code>tar<span class="w"> </span>-xf<span class="w"> </span>meho-linux-&lt;version&gt;-amd64.tar
-<span class="nb">cd</span><span class="w"> </span>meho-linux-&lt;version&gt;-amd64
-sudo<span class="w"> </span>./install.sh<span class="w"> </span>--hostname<span class="w"> </span>&lt;meho.example.com&gt;<span class="w"> </span>--admin-network<span class="w"> </span>&lt;admin-range&gt;
-</code></pre></div>
-<p><code>--admin-network</code> is the address range that may use SSH, for
-   example <code>192.0.2.0/24</code>. From every other address, only ports 80 and
-   443 answer. <code>sudo ./install.sh --help</code> lists every option.</p>
-<p>Each check prints <code>[ok]</code> or <code>[WARN]</code>. When something is wrong, the
-script stops with one <code>[FAIL]</code> line that says what to fix.</p>
+<p>The steps are in the chapter
+<a href="../form-2-linux-server/">Form 2: the Linux server</a>: what the machine
+needs, how to check the download, the install, the first login, updates
+and the daily work.</p>
 <h2 id="backup-and-the-settings">Backup and the settings<a class="headerlink" href="#backup-and-the-settings" title="Permanent link">&para;</a></h2>
 <p>Take a VM snapshot or a backup before each update of a Linux server.
 The install script asks for it.</p>

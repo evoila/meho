@@ -1365,8 +1365,14 @@ _READ_OP_IDS: frozenset[str] = frozenset(
         "linux.journal.tail",
         "linux.fs.usage",
         "linux.dir.list",
+        "linux.tool.which",
+        "linux.identity.show",
     }
 )
+
+#: ``linux.http.head`` takes an address the host connects to, so MEHO's address
+#: floor makes it caution + approval (tested in test_connectors_linux_diagnose.py).
+_HTTP_HEAD_OP_ID = "linux.http.head"
 
 #: The T2 governed write verbs.
 _WRITE_OP_IDS: frozenset[str] = frozenset(
@@ -1380,11 +1386,11 @@ _WRITE_OP_IDS: frozenset[str] = frozenset(
     }
 )
 
-_EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS
+_EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS | {_HTTP_HEAD_OP_ID}
 
 
 def test_linux_ops_count_matches_expected() -> None:
-    # about + ten read verbs + six write verbs = seventeen.
+    # about + twelve read verbs + http.head + six write verbs = twenty.
     assert len(LINUX_OPS) == len(_EXPECTED_OP_IDS)
 
 

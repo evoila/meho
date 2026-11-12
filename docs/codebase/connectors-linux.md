@@ -155,6 +155,9 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 | `linux.journal.tail` | `log` | `unit?`, `since?`, `until?`, `priority?`, `lines?` | `{rows, total, truncated}` (+ `warning?`); row = `{ts, unit, priority, message, message_truncated}` |
 | `linux.fs.usage` | `storage` | `path` | `{path, filesystem, fstype, size_bytes, used_bytes, avail_bytes, inodes_total, inodes_used}` |
 | `linux.dir.list` | `file` | `path`, `depth?`, `include_hidden?` | `{rows, total, path, exists, truncated, incomplete}`; row = `{name, type, size_bytes, mtime, mode, owner}` |
+| `linux.tool.which` | `system` | `names` (1 to 20 program names) | `{tools: [{name, found, path}]}` |
+| `linux.identity.show` | `system` | — | `{user, uid, gid, groups, is_root, sudo_installed, sudo_passwordless, sudo_exit_code}` |
+| `linux.http.head` | `network` | `url` | `{url, reachable, status_code, status_line, headers, curl_exit_code, error}` — `caution` + approval (see below) |
 
 `linux.about` is the identity canary (its handler wraps `fingerprint`).
 `linux.firewall.show` reads the rules as root. When the login is not root,
@@ -257,6 +260,48 @@ and cannot show that a host's resolver is broken.
   `{"type": "bool", "expect": true}` — and alert when the host's resolver
   stops answering. `resolvectl query` (which DNS server answered) is not
   part of this op.
+
+### Host-readiness checks (`ops_diagnose.py`)
+
+Use these before `linux.script.run` for a routine readiness check. A script
+waits for a person once per run, and the person must read a shell script.
+These ops are fixed commands with checked inputs, so there is nothing to
+read but the few values.
+
+| Question | Op |
+|---|---|
+| Is a program installed? | `linux.tool.which` |
+| Which user is the login, and does `sudo` work without a password? | `linux.identity.show` |
+| Is there free space on the filesystem of a path? | `linux.fs.usage` |
+| Can the host reach a URL? | `linux.http.head` |
+| Can the host resolve a name? | `linux.dns.lookup` |
+| Is the expected export mounted? | `linux.mount.list` |
+
+- **`linux.tool.which`.** `names` is a list of 1 to 20 distinct program
+  names, each checked against `^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$` (no path,
+  no option, no shell character) before any command is built. The command
+  is a `command -v` loop. A name with no answer in the output raises an
+  error, so a loop that stopped early is never read as "not installed".
+  `path` is `null` for a shell builtin.
+- **`linux.identity.show`.** No parameters. It runs `id` and one constant
+  `sudo -n true`. `sudo_passwordless` is true only when that exits 0.
+  `sudo_installed` is false when the host has no `sudo`. An unreadable
+  user or uid raises an error.
+- **`linux.http.head`.** `url` must be a plain `http` or `https` URL (host
+  name or bracketed IPv6, optional port, path and query). No user name or
+  password, no `&`, no `#`, no quote, no space. `curl` sends one HEAD
+  request (`curl -sS -I -g --proto '=http,https'`), follows no redirect and
+  stops after 15 seconds. Any HTTP status gives `reachable: true`. A network
+  failure (no DNS answer, refused, timeout, TLS) gives `reachable: false`
+  with `curl_exit_code` and `error`. A missing `curl` or a request `curl`
+  cannot make (exit 1 to 4) raises an error. `Set-Cookie` headers are
+  removed, at most 64 headers are returned, and each value is cut at 512
+  characters.
+- **Approval for `linux.http.head`.** The URL is an address the host
+  connects to. MEHO's address floor
+  (`operations/caller_address.py`) therefore makes the op `caution` with
+  approval, so a person approves each probe. The other two ops are `safe`.
+  Disk usage is the existing `linux.fs.usage`.
 
 ### Path confinement
 
@@ -683,6 +728,7 @@ it in its own body, where the approver reads it.
   confinement primitives.
 - Per-domain op modules: `ops_file.py` (file.read / log.tail),
   `ops_host.py` (service.status / sysctl.read / dns.lookup),
+  `ops_diagnose.py` (tool.which / identity.show / http.head),
   `ops_firewall.py` (firewall.show), `ops_storage.py` (mount.list) — each
   ships its handler, command builder, output parser, and `LinuxOp` rows.
 - `ops_firewall_rollback.py` — the timed load of `firewall.load` and the

@@ -36,6 +36,7 @@ goes back to the code's value.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
@@ -54,6 +55,7 @@ __all__ = [
     "check_no_conflict",
     "classify",
     "entries_from_document",
+    "label_text_ok",
     "taxonomy_from_documents",
 ]
 
@@ -65,6 +67,7 @@ RISK_LEVELS: Final[tuple[str, ...]] = ("safe", "caution", "dangerous", "destruct
 _LEVEL_RANK: Final[dict[str, int]] = {"connector": 1, "group": 2, "op": 3}
 _SCOPE_RANK: Final[dict[str, int]] = {"install": 0, "tenant": 1}
 _GLOB_METACHARS: Final[frozenset[str]] = frozenset("*?[")
+_LABEL_KEY_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._/-]+")
 
 #: The rule reference of an operation that no entry matches.
 DEFAULT_RULE_REF: Final[str] = "taxonomy.default"
@@ -83,6 +86,15 @@ DEFAULT_TAXONOMY: Final[Taxonomy] = Taxonomy(
     categories=("network", "storage", "compute", "identity", "secrets", "other"),
     default="other",
 )
+
+
+def label_text_ok(key: str, value: str) -> bool:
+    """Whether a label may be stored and shown: label text can reach the agent.
+
+    A key has only letters, digits and ``. _ / -``. A value has only
+    printable characters, so no line breaks and no control characters.
+    """
+    return bool(_LABEL_KEY_RE.fullmatch(key)) and value.isprintable()
 
 
 @dataclass(frozen=True)
@@ -285,7 +297,7 @@ def _entry_from_raw(raw: Mapping[str, Any], *, ref: str, scope: Scope) -> Classi
         category=_text(raw.get("category")),
         risk=risk,
         always_wait=always_wait,
-        labels=dict(labels),
+        labels={k: v for k, v in labels.items() if label_text_ok(k, v)},
     )
 
 

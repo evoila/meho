@@ -15,6 +15,15 @@ All of this is behind the switch `POLICY_CLASSIFICATION` (Helm
 MEHO reads none of it: every operation keeps the risk level and the
 approval it has today, and `category`, `labels` and `rule_ref` stay empty.
 `/ready` shows the switch under `features.policy.classification`.
+The switch changes what the agent sees (the category and labels in search
+results and in the call contract), so `GET /version` lists it too.
+
+Label text can reach the agent, so it has a character rule
+(`label_text_ok` in `policy/classification.py`). A key uses only letters,
+digits and `. _ / -`. A value uses only printable characters: no line
+breaks and no control characters. A write that breaks the rule is
+refused. A stored label that breaks it (for example one written before the
+rule) is not shown.
 
 ## Where the values come from
 

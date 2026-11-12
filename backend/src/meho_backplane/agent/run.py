@@ -91,7 +91,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -153,6 +153,7 @@ __all__ = [
     "AgentRunResult",
     "AgentRunStatus",
     "BudgetExceededError",
+    "EventSink",
     "ModelChoice",
     "ModelFactory",
     "PydanticAgentRun",
@@ -784,6 +785,10 @@ class AgentRunEvent:
     request_usages: tuple[TokenUsage, ...] = ()
 
 
+#: Where a run sends its events while it runs (:meth:`AgentRun.start`).
+EventSink = Callable[[AgentRunEvent], Awaitable[None]]
+
+
 @dataclass(slots=True)
 class AgentRunHandle:
     """A reference to one in-flight or finished run.
@@ -855,6 +860,7 @@ class AgentRun(Protocol):
         *,
         run_id: UUID | None = None,
         model: Model | None = None,
+        on_event: EventSink | None = None,
     ) -> AgentRunHandle:
         """Begin a bounded run; return immediately with a live handle.
 
@@ -862,6 +868,8 @@ class AgentRun(Protocol):
         ``agent_run`` row id). The handle and every error then use it, so the
         caller can match them. ``None`` makes a fresh id. *model* is the
         model from :meth:`choose_model`; ``None`` builds it here.
+        *on_event* gets each ``turn``, ``tool_call``, ``tool_result`` and the
+        ``final`` event while the run runs; ``None`` sends none.
         """
         ...
 
@@ -1091,6 +1099,18 @@ def _node_events(
     for ret in new_returns[emitted_tool_returns:]:
         events.append(AgentRunEvent(kind=AgentRunEventKind.TOOL_RESULT, data=ret))
     return events, len(new_returns)
+
+
+async def _send_node_events(
+    on_event: EventSink | None, node: Any, run: Any, emitted_tool_returns: int
+) -> int:
+    """Send the events of one node to *on_event*; return the new tool-return cursor."""
+    if on_event is None:
+        return emitted_tool_returns
+    events, emitted_tool_returns = _node_events(node, run, emitted_tool_returns)
+    for event in events:
+        await on_event(event)
+    return emitted_tool_returns
 
 
 @dataclass
@@ -1342,8 +1362,11 @@ class PydanticAgentRun:
         run_id: UUID,
         receipts: list[HostedContextReceipt] | None = None,
         request_usages: list[TokenUsage] | None = None,
+        on_event: EventSink | None = None,
     ) -> AgentRunResult:
         """Drive one bounded loop and return its result.
+
+        *on_event* gets each node's events and then the ``final`` event.
 
         The coroutine's return value / raised exception *is* the run's
         terminal state — the :class:`asyncio.Task` wrapping it is the single
@@ -1358,9 +1381,11 @@ class PydanticAgentRun:
         token = _run_request_usages_var.set(child_usages)
         try:
             async with agent.iter(inputs, deps=operator, usage_limits=limits) as run:
+                emitted = 0
                 try:
-                    async for _node in run:
+                    async for node in run:
                         request_usages[:] = _usages_so_far(run, child_usages)
+                        emitted = await _send_node_events(on_event, node, run, emitted)
                 finally:
                     # Also when the loop fails or is cancelled: the requests
                     # it finished spent tokens.
@@ -1384,6 +1409,9 @@ class PydanticAgentRun:
             _run_request_usages_var.reset(token)
         if run_result is None:  # pragma: no cover - iter always sets a result
             raise AgentRunError(f"agent run {run_id} produced no result")
+        if on_event is not None:
+            final = {"output": _coerce_output(run_result.output)}
+            await on_event(AgentRunEvent(kind=AgentRunEventKind.FINAL, data=final))
         usage = run_result.usage
         totals = TokenUsage.from_run_usage(usage)
         result = AgentRunResult(
@@ -1485,11 +1513,14 @@ class PydanticAgentRun:
         *,
         run_id: UUID | None = None,
         model: Model | None = None,
+        on_event: EventSink | None = None,
     ) -> AgentRunHandle:
         """Begin a bounded run; return immediately with a live handle.
 
         *model* is the model from :meth:`choose_model`; ``None`` builds it
-        here. *run_id* is the caller's run id (the durable ``agent_run`` row id).
+        here. *on_event* gets the run's events, as :meth:`stream_events`
+        yields them, except an ``error`` event: the caller knows the error
+        from :meth:`result`. *run_id* is the caller's run id (the durable ``agent_run`` row id).
         The handle, the logs, and a failure message all use it, so they match
         what ``meho agent run`` and ``run-status`` show (#4232). ``None``
         makes a fresh id for callers with no durable row.
@@ -1515,7 +1546,9 @@ class PydanticAgentRun:
         agent = self._build_agent(definition, operator, run_id, receipts, model)
         request_usages: list[TokenUsage] = []
         task = asyncio.create_task(
-            self._run_loop(agent, definition, operator, inputs, run_id, receipts, request_usages),
+            self._run_loop(
+                agent, definition, operator, inputs, run_id, receipts, request_usages, on_event
+            ),
             name=f"agent-run-{run_id}",
         )
         _log.info(

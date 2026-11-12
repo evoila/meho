@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Agent run console -- the live SSE bridge over ``invoker.stream_events``.
+"""Agent run console -- start a run, then follow its saved events live.
 
 Initiative #1824 (G10.8 Agents console), Task #1829 (T2). The highest-
 value surface in G10.8: invoke an agent and watch it reason live, frame
@@ -17,20 +17,26 @@ the ``Authorization: Bearer <jwt>`` header. The browser's ``EventSource``
 (the only browser primitive that speaks Server-Sent Events) issues a
 **GET** with **no custom headers**: it cannot send a JWT header and it
 cannot POST a body. So the console needs a cookie-authed GET bridge under
-``/ui/agents`` that proxies the same
-:meth:`~meho_backplane.agent.invocation.AgentInvoker.stream_events`
-generator -- exactly the shape
-:mod:`meho_backplane.ui.routes.broadcast.stream` established for the
-activity feed (see its docstring for the ``EventSource``-header
-limitation in full).
+``/ui/agents`` -- the shape :mod:`meho_backplane.ui.routes.broadcast.stream`
+established for the activity feed (see its docstring for the
+``EventSource``-header limitation in full).
+
+The bridge starts the run in the background
+(:meth:`~meho_backplane.agent.invocation.AgentInvoker.run` with
+``async_mode=True``) and then streams the run's saved events from the
+session store (:func:`~meho_backplane.ui.routes.agents.runs.events.tail_frames`).
+So the run goes on when the page closes. The console puts the run id in
+its address (``?run=<id>``); a reload then follows the same run through
+``GET /ui/agents/runs/{handle}/events``: first the events so far, then
+the live ones.
 
 Tenant isolation
 ================
 
 The broadcast bridge keys its Valkey stream by the session's tenant
 (``meho:feed:{tenant_id}``); a run stream has no Valkey stream -- it
-drives a *fresh* run inline. The tenant-isolation lever here is the
-**lifted operator**: :func:`stream_events` is tenant-scoped through the
+starts a *fresh* run. The tenant-isolation lever here is the
+**lifted operator**: the invoker's ``run`` is tenant-scoped through the
 :class:`~meho_backplane.auth.operator.Operator` (it loads only the
 operator's own tenant's definition and records the run under that
 tenant), identical to the REST surface. The operator is lifted from the
@@ -59,9 +65,10 @@ can only GET):
   bridge. It verifies the token against the cookie session (so a forged /
   cross-session token streams nothing), records the token's first use
   (a second GET with the same token gets ``204`` and starts no run), lifts
-  the operator, and proxies ``stream_events`` with ``X-Accel-Buffering: no`` so each
-  frame flushes immediately (SSE buffering #1389 is fixed, so the console
-  paints turn-by-turn rather than only at completion).
+  the operator, starts the run and streams its saved events with
+  ``X-Accel-Buffering: no`` so each frame flushes immediately (SSE
+  buffering #1389 is fixed, so the console paints turn-by-turn rather
+  than only at completion).
 
 Stop button
 ===========
@@ -100,12 +107,12 @@ output, errors), the same vocabulary the REST SSE route emits.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
 from typing import Final
+from urllib.parse import quote
 
 import structlog
 from fastapi import HTTPException, Request, Response, status
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 from redis.exceptions import RedisError
 
@@ -116,7 +123,7 @@ from meho_backplane.agent.invocation import (
     BudgetExceededError,
     get_agent_invoker,
 )
-from meho_backplane.api.v1.agent_runs import AgentRunRequest, _events_generator
+from meho_backplane.api.v1.agent_runs import AgentRunRequest, _bound_work_ref
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.agent_run import (
     IllegalTransitionError,
@@ -128,6 +135,11 @@ from meho_backplane.ui.routes.agents.run_token import (
     claim_run_token,
     mint_run_token,
     verify_run_token,
+)
+from meho_backplane.ui.routes.agents.runs.events import (
+    events_response,
+    first_read,
+    tail_frames,
 )
 from meho_backplane.ui.routes.agents.views import (
     _fetch_agent_or_404,
@@ -176,9 +188,14 @@ def _console_context(
     agent_name: str,
     turn_budget: int,
     enabled: bool,
+    run_id: uuid.UUID | None,
 ) -> dict[str, object]:
-    """Build the run-console template context."""
-    return {
+    """Build the run-console template context.
+
+    With a *run_id*, the console follows that run's saved events
+    (``GET /ui/agents/runs/{handle}/events``) instead of waiting for a new run.
+    """
+    context: dict[str, object] = {
         "page_title": "Agents",
         "active_surface": "agents",
         "operator_sub": session_ctx.operator_sub,
@@ -187,6 +204,10 @@ def _console_context(
         "turn_budget": turn_budget,
         "enabled": enabled,
     }
+    if run_id is not None:
+        context["stream_url"] = f"/ui/agents/runs/{run_id}/events"
+        context["remember_run"] = False
+    return context
 
 
 async def render_run_console(
@@ -194,6 +215,7 @@ async def render_run_console(
     session_ctx: UISessionContext,
     *,
     name: str,
+    run_id: uuid.UUID | None = None,
 ) -> HTMLResponse:
     """Render the run console page for one agent (operator-or-above).
 
@@ -202,6 +224,11 @@ async def render_run_console(
     holds). The page carries the agent's ``turn_budget`` so the operator
     sees the cost ceiling before pressing Run, and disables the Run
     control for a disabled definition (a run would 409 anyway).
+
+    *run_id* (the ``?run=`` query the console sets once a run starts)
+    shows that run's transcript: its saved events, then the live ones. The
+    events stream checks the run's tenant, so a run id of another tenant
+    shows nothing.
     """
     agent = await _fetch_agent_or_404(session_ctx, name)
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
@@ -211,6 +238,7 @@ async def render_run_console(
         agent_name=agent.name,
         turn_budget=agent.turn_budget,
         enabled=agent.enabled,
+        run_id=run_id,
     )
     template = (
         "agents/_run_console_body.html" if is_htmx_request(request) else "agents/run_console.html"
@@ -340,33 +368,47 @@ async def submit_run(
         "active_surface": "agents",
         "csrf_token": csrf_token,
         "agent_name": name,
-        "run_token": token,
+        "stream_url": f"/ui/agents/{quote(name, safe='')}/run/stream?token={quote(token, safe='')}",
+        "remember_run": True,
     }
     response = get_templates().TemplateResponse(request, "agents/_run_transcript.html", context)
     _set_csrf_cookie(response, csrf_token)
     return response
 
 
-async def _bridge_generator(
-    operator: Operator,
-    *,
-    name: str,
-    input_: str,
-    work_ref: str | None,
-) -> AsyncIterator[str]:
-    """Proxy ``invoker.stream_events`` for the cookie-authed GET bridge.
+async def _start_run(
+    operator: Operator, *, name: str, input_: str, work_ref: str | None
+) -> uuid.UUID:
+    """Start the run in the background and return its id.
 
-    Delegates to the REST surface's
-    :func:`~meho_backplane.api.v1.agent_runs._events_generator` so the
-    UI bridge and the REST SSE route emit byte-identical frames
-    (``event: <kind>`` / ``data: {run_id, ...}``) and bind the
-    ``Meho-Work-Ref`` the same way. A client disconnect propagates as
-    :class:`asyncio.CancelledError` into the pending iteration; the
-    underlying loop's cleanup cancels the in-flight run and re-raises per
-    asyncio's contract.
+    Re-checks that the agent is runnable: the POST already ran the check,
+    but the definition could have been disabled or deleted in the window
+    between authorising the run and the EventSource connecting. A refusal
+    is a clean HTTP status, not a torn text/event-stream the EventSource
+    would reconnect into a hot loop -- the same posture the REST route
+    holds.
     """
-    async for frame in _events_generator(operator, name, input_, work_ref):
-        yield frame
+    invoker = get_agent_invoker()
+    try:
+        await invoker.ensure_runnable(operator, name)
+        with _bound_work_ref(work_ref):
+            outcome = await invoker.run(operator, name, input_, async_mode=True)
+    except AgentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="agent_not_found",
+        ) from exc
+    except AgentDisabledError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="agent_disabled",
+        ) from exc
+    except BudgetExceededError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"error": "budget_exceeded", "reason": exc.reason},
+        ) from exc
+    return outcome.run_id
 
 
 async def stream_run_events(
@@ -382,15 +424,20 @@ async def stream_run_events(
     Verifies the run token against the cookie session (a forged / expired
     / cross-session token is 403 -- never an opened stream that runs an
     agent), confirms the token's bound agent name matches the path
-    segment, then proxies ``stream_events`` for the lifted operator. The
-    run prompt comes from the *token* (authorised by the CSRF-gated POST),
-    not the query string, so a tampered query cannot change what runs.
+    segment, then starts the run in the background for the lifted
+    operator and streams its saved events. The run prompt comes from the
+    *token* (authorised by the CSRF-gated POST), not the query string, so
+    a tampered query cannot change what runs.
 
     One token starts one run. The first accepted GET records the token's
     id (:func:`claim_run_token`). Every later GET with the same token gets
     ``204 No Content`` and starts no run; ``204`` also tells the browser's
     ``EventSource`` to stop reconnecting. When Valkey cannot record the
     use, the bridge answers ``503`` and starts no run.
+
+    The run does not stop when the stream closes. Following it again is
+    ``GET /ui/agents/runs/{handle}/events``. Opening this stream writes one
+    audit row for the read of the run's events.
 
     Sets ``X-Accel-Buffering: no`` so the per-frame flush is not held by
     an intermediary (nginx) buffer -- the live console paints turn-by-turn
@@ -419,44 +466,9 @@ async def stream_run_events(
         audit_op_class="write",
         audit_agent_name=name,
     )
-    # Belt-and-suspenders runnable pre-check: the POST already ran it, but
-    # the definition could have been disabled / deleted in the window
-    # between authorising the run and the EventSource connecting. Resolve
-    # it before opening the stream so the failure is a clean HTTP status,
-    # not a torn text/event-stream the EventSource would auto-reconnect
-    # into a hot loop -- the same posture the REST route holds.
-    invoker = get_agent_invoker()
-    try:
-        await invoker.ensure_runnable(operator, name)
-    except AgentNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="agent_not_found",
-        ) from exc
-    except AgentDisabledError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="agent_disabled",
-        ) from exc
-    except BudgetExceededError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={"error": "budget_exceeded", "reason": exc.reason},
-        ) from exc
-    del request  # tenant + identity come from the session, not the request.
-    return StreamingResponse(
-        _bridge_generator(
-            operator,
-            name=name,
-            input_=decoded.input,
-            work_ref=decoded.work_ref,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    run_id = await _start_run(operator, name=name, input_=decoded.input, work_ref=decoded.work_ref)
+    first = await first_read(operator, run_id, after=0, path=request.url.path)
+    return events_response(tail_frames(operator, first))
 
 
 async def cancel_run(

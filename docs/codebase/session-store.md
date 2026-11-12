@@ -20,12 +20,15 @@ What is true with this feature:
 - A cleanup job removes sessions older than the tenant's retention period,
   with their files.
 - Every upload, read and delete writes an audit row.
+- A hosted agent run (a run that MEHO starts itself) gets one session too.
+  It saves each of its events while it runs. See "Hosted agent runs"
+  below.
 
 S3-compatible object storage is a file store with the Amazon S3 interface,
 for example MinIO. The customer brings its own.
 
-Not in this part: the laptop uploader (`meho sessions push`), hosted agent
-runs, the link from audit rows to a session, and a review page.
+Not in this part: the laptop uploader (`meho sessions push`), the link
+from audit rows to a session, and a review page.
 
 The code is in `backend/src/meho_backplane/session_store/` and
 `backend/src/meho_backplane/api/v1/sessions.py`. The CLI is in
@@ -98,8 +101,10 @@ is two separate sessions.
 | `UploadPlan` | `plan.py` | The new tail of each file, or the conflicts |
 | `CheckedPart` | `secret_check.py` | The checked bytes of one file part, and whether the check was sure |
 | `PreparedUpload` | `prepare.py` | What the worker process returns: the new file states, the conflicts, and the archive of the checked tails |
+| `AgentSessionEvent` | `models.py` | One saved event of a hosted agent run: kind, checked data, quarantine flag, `seq` |
+| `RunEventLog` | `hosted_runs.py` | Saves the events of one hosted run, in order, when they happen |
 
-The tables come from migration `0152`.
+The tables come from migrations `0152` and `0161` (`agent_session_event`).
 
 ## Control flow
 
@@ -143,6 +148,9 @@ Other uploads that run or wait at the same time go on as normal.
      after them are the new tail;
    - anything else: the stored part changed. `409 session_conflict` with
      the paths. Nothing is overwritten.
+
+   The session of a hosted agent run is never changed by an upload: `409
+   session_is_a_hosted_run`.
 
    MEHO stores whole lines only. While the session is `open`, a tail ends
    at the last newline of the file: the last line may still be in
@@ -237,6 +245,64 @@ When the store fails, the rows stay and the next run tries again. One run
 removes at most 500 sessions. The job does nothing while the store is not
 configured.
 
+## Hosted agent runs
+
+A hosted run is an agent run that MEHO starts itself: from the run console,
+`meho agent run`, the REST and MCP run calls, a schedule or an event. The
+code is in `session_store/hosted_runs.py` (write) and `agent/run_events.py`
+(read).
+
+- **One session per run.** The transaction that creates the run also adds
+  its `agent_session_record` row. The row's `id` and `session_id` are the
+  run id, `project` is the agent name, `app` is `meho-agent-run`, and
+  `uploaded_by_sub` is the person (or, for a scheduled run, the agent) the
+  run acts for. So the run shows in `meho sessions list`. A child run (one
+  agent starts another) gets no session of its own; its answer is in the
+  parent's tool result.
+- **Each event is saved when it happens.** The run saves each `turn`,
+  `tool_call`, `tool_result` and its `final` answer (or `error`) as one
+  `agent_session_event` row, in order (`seq` 1, 2, 3, ...). Each row
+  commits on its own, so a reader sees it at once and a crash keeps every
+  event saved before it. The background run gets the events from the
+  agent loop (`PydanticAgentRun.start(on_event=...)`); the inline stream
+  saves each event before it sends it.
+- **The same secret check as an upload.** The data of an event is written
+  as one JSON line and passes `secret_check.check_part`. Known secrets are
+  replaced with `[REDACTED:<pattern>]`. When the check is not sure, the
+  event is marked `quarantined`: it is saved with the known secrets
+  replaced, and only a tenant admin can read its data.
+- **The end.** A saved `final` or `error` event sets the state to `ended`.
+  When the run reaches its end status (`succeeded`, `failed` or
+  `cancelled`), `end_run_session` writes the outcome and the end time in
+  the same transaction (`operations/agent_run.py`, also for the reaper).
+  A session that is still `open` then becomes `unfinished`: the run
+  stopped without a final event (a crash, a restart, a lost lease or a
+  cancel). MEHO never adds an ending that the run did not make.
+- **A failed save.** When one save fails, MEHO logs
+  `hosted_run_event_not_saved` and saves no more events for that run. So
+  the saved events never have a gap. The run goes on, and its session
+  ends `unfinished` unless a final event was saved.
+
+The events are in the database, not in the object storage. So a run saves
+its events also when no object storage is set up, and the run console can
+follow a live run in order.
+
+**Reading.** `agent/run_events.read_run_events` reads the events after a
+`seq`. It reads the run status before the events, so a view that says the
+run is done holds every event. Rules:
+
+- Only the caller's tenant. Another tenant's run is "not found".
+- The data of an event follows the rule for the run's output
+  (`run_output_visible_to`): only the person who started a direct run
+  reads its event data. Others see the kind and order (`withheld`).
+- A quarantined event shows its data only to a tenant admin.
+- A read with an audit path writes one `sessions.run_events.read` audit
+  row and commits it before the answer goes out.
+
+The run detail page (`/ui/agents/runs/{handle}`) lists the events. The run
+console follows them live through `GET /ui/agents/runs/{handle}/events`
+(`docs/codebase/ui-agent-run-console.md`).
+
 ## Dependencies
 
 - `boto3` / `botocore` for the object storage. Path-style addressing and
@@ -254,6 +320,9 @@ configured.
   open it.
 - A changed JSON line is stored as compact JSON, so its bytes differ from
   the upload. The hashes in the index are of the uploaded bytes.
+- The cleanup job and `DELETE /api/v1/sessions/{session_id}` need the
+  object storage to be set up. Without it, the sessions of hosted runs and
+  their events stay.
 
 ## References
 
@@ -261,6 +330,7 @@ configured.
   `backend/src/meho_backplane/api/v1/sessions.py`,
   `cli/internal/cmd/sessions/`.
 - Tests: `backend/tests/test_session_store_api.py`,
+  `backend/tests/test_hosted_run_events.py`,
   `backend/tests/test_session_store_units.py`,
   `backend/tests/test_session_store_worker.py`,
   `backend/tests/migrations/test_migration_0152_create_agent_session_store.py`.

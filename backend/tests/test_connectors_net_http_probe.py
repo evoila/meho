@@ -526,6 +526,22 @@ async def test_timeout_maps_to_reason_timeout(
     )
     assert result["reachable"] is False
     assert result["reason"] == "timeout"
+    assert "no route from the backplane is a possible cause" in result["hint"].lower()
+
+
+async def test_refused_probe_has_no_timeout_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a timeout carries the hint: a refusal proves there is a route."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "203.0.113.9")
+
+    async def _refuse(*_a: object, **_kw: object) -> object:
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(net_http_probe_mod.httpx.AsyncClient, "send", _refuse)
+    result = await net_http_probe(_make_operator(), None, {"url": "http://203.0.113.9/x"})
+    assert result["reachable"] is False
+    assert "hint" not in result
 
 
 # ---------------------------------------------------------------------------

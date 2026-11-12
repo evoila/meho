@@ -208,7 +208,8 @@ aliases) in the tenant bound. Do this in
 `netdiag.probeAllowlistTenants`. The allow list check itself is
 unchanged.
 
-A `timeout` result from `net.tcp_check` or `net.dns_lookup` carries a
+A `timeout` result from `net.tcp_check`, `net.dns_lookup` or
+`net.http_probe` carries a
 `hint` field. It says that no route from the backplane is a possible
 cause, so a timeout is not read as an outage of the probed service.
 Other results have no `hint`.

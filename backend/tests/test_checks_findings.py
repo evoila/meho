@@ -566,6 +566,67 @@ async def test_long_group_key_with_a_hashed_run_key_is_stored(
     assert len(mails) == 1
 
 
+async def _publish_unrelated_events(count: int) -> None:
+    """Add *count* newer Dashboard events of other groups, all handled already."""
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as session:
+        session.add_all(
+            EventOutbox(
+                tenant_id=_TENANT,
+                event_kind="check.dashboard.changed",
+                payload={
+                    "event": "check.dashboard.changed",
+                    "coalesce_key": f"dashboard:{uuid4()}:other-{index}",
+                    "worsening": True,
+                    "known_noise": False,
+                },
+                processed_at=now,
+            )
+            for index in range(count)
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", [_GROUP, "target-" + "b" * 160 + "-1a2b3c4d"])
+async def test_many_newer_events_do_not_hide_the_cause(
+    group: str, mails: list[dict[str, Any]]
+) -> None:
+    """Other Dashboard events that arrive before the run ends never hide its cause."""
+    dashboard_id = await _seed_dashboard()
+    run_id, work_ref = await _finding_run(dashboard_id=dashboard_id, group=group)
+    await _publish_unrelated_events(600)
+
+    assert await findings_mod.record_finding_for_event(_payload(run_id, work_ref)) is True
+    await notify._await_pending_notifications()
+
+    assert (await _noise_entry(group)).metadata["run_id"] == str(run_id)
+    assert len(mails) == 1
+
+
+@pytest.mark.asyncio
+async def test_replay_after_a_newer_run_stored_its_finding_writes_nothing(
+    mails: list[dict[str, Any]],
+) -> None:
+    """Run A stores, run B stores for the same group, then A's event comes again."""
+    dashboard_id = await _seed_dashboard()
+    run_a, work_ref_a = await _finding_run(dashboard_id=dashboard_id)
+    newer = findings_mod.ChecksFinding(
+        verdict="actionable", re_escalate=True, summary="Disk is full.", evidence=[]
+    )
+    run_b, work_ref_b = await _finding_run(finding=newer, dashboard_id=dashboard_id)
+
+    assert await findings_mod.record_finding_for_event(_payload(run_a, work_ref_a)) is True
+    assert await findings_mod.record_finding_for_event(_payload(run_b, work_ref_b)) is True
+    assert await findings_mod.record_finding_for_event(_payload(run_a, work_ref_a)) is False
+    await notify._await_pending_notifications()
+
+    entry = await _noise_entry()
+    assert entry.metadata["run_id"] == str(run_b)
+    assert entry.metadata["re_escalate"] is True
+    assert len(mails) == 2
+
+
 @pytest.mark.asyncio
 async def test_switch_off_writes_nothing(
     monkeypatch: pytest.MonkeyPatch, mails: list[dict[str, Any]]

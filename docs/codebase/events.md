@@ -273,7 +273,8 @@ ends. So with the switch on, `_dispatch_event` calls
 event. It does something only for a succeeded run that an event trigger of
 the run's agent started for a real `check.dashboard.changed` event, and whose
 answer is a finding. It reads the Dashboard and the group key from that event,
-not from the run key. It stores and mails a run's finding only once. Then it
+not from the run key. It stores and mails a run's finding only once, and never
+over the finding of a run that ended later. Then it
 writes the memory entry `checks-noise-<group key>` and
 schedules the finding mail. It never raises into the drain loop. Details:
 `docs/codebase/checks-investigator.md`, "Two paths".

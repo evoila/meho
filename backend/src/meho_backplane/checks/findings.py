@@ -27,11 +27,12 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import cast
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -80,14 +81,15 @@ _INVESTIGATOR_SUB = "__checks_investigator__"
 #: A Dashboard event's key is ``dashboard:<dashboard id>:<group key>``
 #: (``checks.events.publish_dashboard_changed``), but a key over 200 characters
 #: is stored as a hash. So the Dashboard and the group come from the event.
-_EVENT_RUN_KEY = re.compile(r"^event:(?P<trigger>[0-9a-f-]{36}):c:.+$")
+_EVENT_RUN_KEY = re.compile(r"^event:(?P<trigger>[0-9a-f-]{36}):c:(?P<key>.+)$")
+
+#: A coalesce key that the matcher stored as a hash: the first 32 characters
+#: of a SHA-256 hex digest (``events.matcher._coalesce_work_ref``).
+_HASHED_KEY = re.compile(r"^[0-9a-f]{32}$")
 
 #: Run sources of a run that a trigger started. A direct run, or a run that
 #: another agent started, never counts as a Dashboard event run.
 _TRIGGER_RUN_SOURCES = frozenset({AgentRunTrigger.SCHEDULED.value, AgentRunTrigger.EVENT.value})
-
-#: How many of the tenant's newest Dashboard events to search for a run's cause.
-_CAUSE_EVENT_SEARCH_LIMIT = 500
 
 
 def _log() -> structlog.typing.FilteringBoundLogger:
@@ -270,6 +272,7 @@ class _DashboardRun:
     """A succeeded run that an event trigger started for a Dashboard event."""
 
     output: dict[str, object] | None
+    order: tuple[datetime, uuid.UUID]
     dashboard_id: uuid.UUID
     dashboard_name: str
     recipient: str | None
@@ -330,6 +333,7 @@ async def _load_dashboard_run(run_id: uuid.UUID, tenant_id: uuid.UUID) -> _Dashb
             return None
         return _DashboardRun(
             output=run.output,
+            order=_run_order(run),
             dashboard_id=dashboard_id,
             dashboard_name=dashboard.name,
             recipient=dashboard.notify_email,
@@ -377,20 +381,35 @@ async def _cause_event(
 ) -> tuple[uuid.UUID, str] | None:
     """Find the Dashboard event that gave *work_ref*: ``(dashboard id, group key)``.
 
-    Searches the tenant's newest ``check.dashboard.changed`` events. The run
-    key is made the way the event matcher makes it, so a hashed key matches too.
+    The search keeps only the tenant's ``check.dashboard.changed`` events with
+    the run key's coalesce key, so other events never push the cause out of
+    it. A hashed key cannot be searched for, so then every event with a key
+    over 200 characters is checked. The run key is made the way the event
+    matcher makes it, so the check is the same in both cases.
     """
     # Imported here: the matcher pulls in the agent runtime.
-    from meho_backplane.events.matcher import _coalesce_work_ref, _payload_contains
+    from meho_backplane.events.matcher import (
+        _COALESCE_KEY_MAX_LEN,
+        _coalesce_work_ref,
+        _payload_contains,
+    )
 
+    match = _EVENT_RUN_KEY.match(work_ref)
+    if match is None:
+        return None
+    key = match.group("key")
+    event_key = func.trim(EventOutbox.payload["coalesce_key"].as_string())
+    same_key = event_key == key
+    if _HASHED_KEY.match(key):
+        same_key = or_(same_key, func.length(event_key) > _COALESCE_KEY_MAX_LEN)
     events = await session.execute(
         select(EventOutbox)
         .where(
             EventOutbox.tenant_id == trigger.tenant_id,
             EventOutbox.event_kind == CHECK_DASHBOARD_CHANGED,
+            same_key,
         )
         .order_by(EventOutbox.event_id.desc())
-        .limit(_CAUSE_EVENT_SEARCH_LIMIT)
     )
     for event in events.scalars():
         if _coalesce_work_ref(trigger, event) != work_ref:
@@ -416,18 +435,35 @@ def _dashboard_and_group(payload: dict[str, object]) -> tuple[uuid.UUID, str] | 
         return None
 
 
-async def _already_recorded(
-    memory: MemoryService, operator: Operator, group_key: str, run_id: uuid.UUID
+def _run_order(run: AgentRun) -> tuple[datetime, uuid.UUID]:
+    """Order runs by when they ended; the run id breaks a tie."""
+    return run.ended_at or run.created_at, run.id
+
+
+async def _same_or_newer_finding_stored(
+    memory: MemoryService, operator: Operator, group_key: str, loaded: _DashboardRun
 ) -> bool:
-    """``True`` when the group's stored finding came from this run.
+    """``True`` when the group's stored finding is from this run or a later one.
 
     The drain marks an event processed only after this step, so a restart or
-    a failed commit delivers the same ``agent_run.completed`` event again.
-    The stored entry keeps the run id, so a second delivery stores and mails
-    nothing.
+    a failed commit delivers the same ``agent_run.completed`` event again,
+    maybe after another run stored a finding for the group. The stored entry
+    keeps its run id. When that run ended at the same time as this run or
+    later, this run's finding is already sent or is older. So a second
+    delivery stores and mails nothing, and never replaces a newer finding.
     """
     entry = await memory.recall(operator, MemoryScope.TENANT, f"{NOISE_SLUG_PREFIX}{group_key}")
-    return entry is not None and entry.metadata.get("run_id") == str(run_id)
+    if entry is None:
+        return False
+    try:
+        stored_run_id = uuid.UUID(str(entry.metadata.get("run_id")))
+    except ValueError:
+        return False
+    async with get_sessionmaker()() as session:
+        stored_run = await session.get(AgentRun, stored_run_id)
+        if stored_run is None:
+            return False
+        return _run_order(stored_run) >= loaded.order
 
 
 async def _record_finding_for_event(payload: dict[str, object]) -> bool:
@@ -445,7 +481,7 @@ async def _record_finding_for_event(payload: dict[str, object]) -> bool:
         return False
     memory = MemoryService()
     operator = investigator_operator(tenant_id)
-    if await _already_recorded(memory, operator, loaded.group_key, run_id):
+    if await _same_or_newer_finding_stored(memory, operator, loaded.group_key, loaded):
         _log().info("checks_event_finding_already_recorded", run_id=str(run_id))
         return False
     await persist_finding(memory, operator, loaded.group_key, finding, run_id=run_id)

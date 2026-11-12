@@ -242,7 +242,9 @@ needs no memory or mail rights, because MEHO stores and mails the finding:
     key for that trigger (made the way the event matcher makes it) and passes
     the trigger's filter. The Dashboard and the group key come from this event.
     So a long key that the run key holds only as a hash still works. The
-    step searches the tenant's 500 newest Dashboard events.
+    step searches only the tenant's Dashboard events with the run key's
+    coalesce key (for a hashed key: every event with a key over 200
+    characters), so other events never hide the cause.
 
   The Dashboard must be in the run's tenant. The run's answer is parsed with
   `parse_finding`. Any other answer shape writes nothing.
@@ -250,7 +252,9 @@ needs no memory or mail rights, because MEHO stores and mails the finding:
   entry the old path writes) and mailed to the Dashboard's `notify_email`.
 - The drain marks the `agent_run.completed` event processed only after this
   step, so a restart can deliver it again. The memory entry keeps the run id.
-  When it already holds this run's finding, the step stores and mails nothing.
+  When it holds the finding of this run, or of a run that ended at the same
+  time or later, the step stores and mails nothing. So a second delivery never
+  sends a second mail and never replaces a newer finding.
 - It never raises into the drain loop.
 
 **No double runs.** When an *active* `kind=event` trigger exists in the tenant

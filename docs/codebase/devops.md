@@ -1858,8 +1858,12 @@ into `GITHUB_STEP_SUMMARY` on every successful publish.
 ## PR-level CI (`.github/workflows/ci.yml`)
 
 `ci.yml` is the central per-PR test harness. Every PR targeting `main`
-runs the toolchain jobs in parallel and every push to `main` re-runs the
-same matrix as a regression catch. Branch protection consumes the
+runs the toolchain jobs in parallel, and so does every merge-queue run.
+A push to `main` starts no `ci.yml` run (#6387): the queue run already ran
+the full matrix on exactly that code, and a push run only repeated it,
+took heavy runners and was cancelled by the next merge. The nightly run on
+`main` keeps the caches on `main` warm.
+`backend/tests/test_ci_main_push.py` pins this. Branch protection consumes the
 required jobs' status per
 `branches/main/protection.required_status_checks.contexts` —
 re-verified after the 2026-05-20 #698 promotion of the integration
@@ -2026,16 +2030,13 @@ repo, #761). The set depends on the event:
 
 - `merge_group` only: `meho-runners-ci-heavy-queue` (6 runners, enough
   for the six shards of one merge-queue run).
-- Every other event (pull requests, `push` to `main` and the nightly
-  run): `meho-runners-ci-heavy`.
+- Every other event (pull requests and the nightly run):
+  `meho-runners-ci-heavy`.
 
 Why two sets: GitHub gives queued jobs to runners in queue order, with
 no priority for the merge queue. When many pull requests ran at once,
 their shards filled the heavy runners and the merge queue's shards
-waited behind them. Pushes to `main` stay on `meho-runners-ci-heavy`:
-otherwise every merged commit would run its shards on the 6 queue
-runners twice (merge-queue run, then push run), and the queue would
-merge only about half as fast. The nightly `python-coverage` shards
+waited behind them. The nightly `python-coverage` shards
 stay on `meho-runners-ci-heavy`. The four
 `python-integration-shard` legs, `python-migration-tests` and the
 nightly `python-coverage-combine` run on the dense `meho-runners-ci` pool

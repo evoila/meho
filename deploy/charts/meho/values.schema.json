@@ -539,6 +539,11 @@
               "type": "string",
               "enum": ["true", "false"],
               "description": "Let each connector, operation group and operation carry a category, labels and an \"always wait\" mark. Rendered into `POLICY_CLASSIFICATION`. Default `\"false\"`: MEHO reads none of it. See `docs/codebase/policy-classification.md`."
+            },
+            "engineShadow": {
+              "type": "string",
+              "enum": ["true", "false"],
+              "description": "Run the policy evaluator next to today's checks and log every difference. It decides nothing. Rendered into `POLICY_ENGINE_SHADOW`. Default `\"false\"`: the evaluator does not run. See `docs/codebase/policy-evaluator.md`."
             }
           }
         },

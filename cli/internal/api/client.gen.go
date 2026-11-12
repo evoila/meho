@@ -7081,6 +7081,17 @@ type HealthResponse struct {
 	// true when the probe secret read succeeded. ``detail`` carries a short
 	// structured string for the CLI to render on failure paths — a class name
 	// or error code, never an unbounded exception message or a secret value.
+	//
+	// ``checked`` is false when MEHO ran no check at all. The check logs in
+	// to the credential backend as the caller and reads a secret, so it
+	// runs only for a caller with at least the ``operator`` role, the same
+	// rule ``GET /api/v1/health`` applies. A ``read_only`` caller of the
+	// ``meho_status`` MCP tool gets ``checked=false`` with
+	// ``detail="not checked: needs the operator role"``. A login that chose
+	// no tenant gets ``checked=false`` with ``detail="tenant_not_chosen"``.
+	// With ``checked=false``, ``reachable`` and ``read_ok`` are false and say
+	// nothing about the backend. The ``True`` default keeps older response
+	// decoders working.
 	Vault VaultStatus `json:"vault"`
 }
 
@@ -12344,7 +12355,19 @@ type ValidationError_Loc_Item struct {
 // true when the probe secret read succeeded. “detail“ carries a short
 // structured string for the CLI to render on failure paths — a class name
 // or error code, never an unbounded exception message or a secret value.
+//
+// “checked“ is false when MEHO ran no check at all. The check logs in
+// to the credential backend as the caller and reads a secret, so it
+// runs only for a caller with at least the “operator“ role, the same
+// rule “GET /api/v1/health“ applies. A “read_only“ caller of the
+// “meho_status“ MCP tool gets “checked=false“ with
+// “detail="not checked: needs the operator role"“. A login that chose
+// no tenant gets “checked=false“ with “detail="tenant_not_chosen"“.
+// With “checked=false“, “reachable“ and “read_ok“ are false and say
+// nothing about the backend. The “True“ default keeps older response
+// decoders working.
 type VaultStatus struct {
+	Checked   *bool   `json:"checked,omitempty"`
 	Detail    *string `json:"detail"`
 	Reachable bool    `json:"reachable"`
 	ReadOk    bool    `json:"read_ok"`

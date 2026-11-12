@@ -20,6 +20,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/netdiag"
+	"github.com/evoila/meho/cli/internal/output"
 	"github.com/evoila/meho/cli/internal/version"
 )
 
@@ -388,11 +389,15 @@ func callMehoStatus(ctx context.Context, s *mcpSession) (*api.HealthResponse, er
 	return &health, nil
 }
 
+// describeStatus summarises the meho_status answer. The backplane runs
+// the Vault check only for the operator role and up; for a lower role
+// the vault part says "not checked (needs the operator role)".
 func describeStatus(h *api.HealthResponse) string {
-	parts := []string{
-		"operator " + h.Operator.Sub,
-		fmt.Sprintf("vault reachable=%t read_ok=%t", h.Vault.Reachable, h.Vault.ReadOk),
+	vault := fmt.Sprintf("vault reachable=%t read_ok=%t", h.Vault.Reachable, h.Vault.ReadOk)
+	if line, ok := output.VaultNotChecked(h.Vault); ok {
+		vault = "vault " + line
 	}
+	parts := []string{"operator " + h.Operator.Sub, vault}
 	if h.Db.Migrated != nil {
 		parts = append(parts, fmt.Sprintf("db migrated=%t", *h.Db.Migrated))
 	}

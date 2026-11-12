@@ -607,8 +607,10 @@ async def test_direct_run_is_refused_when_the_agent_has_no_grant(
     monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
 ) -> None:
     """The person may run the op; the run's agent has no grant, so the call is refused."""
-    _switch(monkeypatch, "on")
+    # Saved before the switch is on: with it on, a new definition needs a
+    # starting grant pick (#6191).
     await _seed_definition()
+    _switch(monkeypatch, "on")
     await _seed_echo_op(stub_embedding_service)
 
     row = _refusal(await _run_call())

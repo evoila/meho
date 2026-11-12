@@ -55,6 +55,12 @@ from typing import Any, Final
 import structlog
 from pydantic import ValidationError
 
+from meho_backplane.agents.grant_sets import (
+    PERSON_ONLY_REMEDIATION,
+    StartingGrantsError,
+    audit_fields,
+    writes_rows,
+)
 from meho_backplane.agents.schemas import (
     AgentDefinitionCreate,
     AgentDefinitionRead,
@@ -66,8 +72,10 @@ from meho_backplane.agents.service import (
     AgentIdentityRefInvalidError,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.mcp.human_only import ensure_human_mcp_caller
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.tools._starting_grants import with_starting_grants
 
 _log = structlog.get_logger(__name__)
 
@@ -211,7 +219,12 @@ async def _create_handler(
         audit_op_id=_AGENT_OP_IDS["create"],
         audit_op_class="write",
         audit_agent_name=payload.name,
+        **audit_fields(payload.starting_grants),
     )
+    if writes_rows(payload.starting_grants):
+        ensure_human_mcp_caller(
+            operator, "meho_agents_create with starting_grants", PERSON_ONLY_REMEDIATION
+        )
     service = AgentDefinitionService()
     try:
         entry = await service.create(
@@ -223,6 +236,8 @@ async def _create_handler(
         raise McpInvalidParamsError("agent_already_exists") from exc
     except AgentIdentityRefInvalidError as exc:
         raise McpInvalidParamsError("identity_ref_unknown") from exc
+    except StartingGrantsError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
     return {"name": entry.name, "agent": _row_to_dict(entry)}
 
 
@@ -300,6 +315,10 @@ register_mcp_tool(
         },
         required_role=TenantRole.TENANT_ADMIN,
         op_class="write",
+        for_settings=with_starting_grants(
+            "starting_grants picks the first grants of that agent; it is "
+            "required while the agent has no grant yet."
+        ),
     ),
     handler=_create_handler,
 )

@@ -3993,7 +3993,9 @@ metadata:
     # successful one is removed, a failed one stays for `kubectl logs`.
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
-  ttlSecondsAfterFinished: 600
+  # No `ttlSecondsAfterFinished` (#6336): a failed Job and its log stay until
+  # the next install or upgrade replaces them. Helm's own error says only
+  # "Job failed"; the log names the reason (docs-site/install/upgrades.md).
   backoffLimit: 3
   template:
     metadata:
@@ -4092,6 +4094,86 @@ spec:
         - name: realm
           configMap:
             name: golden-keycloak-realm
+---
+# Source: meho-chart/templates/core-keycloak-role-check.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: golden-check-manage-realm
+  labels:
+    helm.sh/chart: meho-chart-0.2.0
+    app.kubernetes.io/name: meho
+    app.kubernetes.io/instance: golden
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: core-keycloak-role-check
+  annotations:
+    # After the secrets Job (-30) and before the database Jobs (-25, -10),
+    # so a stop here leaves the old version as it was.
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-28"
+    # A failed Job stays, with its log, until the next upgrade.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  # No `ttlSecondsAfterFinished`: the log of a failed check must stay.
+  # No retry: a second run gives the same answer.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        # The labels of the bootstrap Job's pod: the Keycloak NetworkPolicy
+        # admits them. Not `meho.selectorLabels`.
+        app.kubernetes.io/instance: golden
+        app.kubernetes.io/component: core-bootstrap
+    spec:
+      restartPolicy: Never
+      serviceAccountName: golden-core-bootstrap
+      # The check talks to Keycloak only, never to the Kubernetes API.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: role-check
+          # The backplane image, with the same digest pin as the Deployment.
+          image: "ghcr.io/evoila/meho:test"
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "meho_backplane.core.bootstrap", "keycloak-role-check"]
+          terminationMessagePolicy: FallbackToLogsOnError
+          env:
+            - name: MEHO_CORE_KEYCLOAK_PLAN
+              value: "{\"admin_username\":\"admin\",\"approver_username\":\"approver\",\"ci\":{\"enabled\":false,\"secret_name\":\"golden-core-ci-login\",\"tenant_id\":\"\"},\"console_admin_secret\":\"golden-core-console-admin\",\"console_admin_username\":\"console-admin\",\"first_login_secret\":\"golden-core-first-login\",\"keycloak_url\":\"http://golden-keycloak:8080/auth\",\"realm_file\":\"/opt/meho/realm/meho-realm.json\",\"tenants\":[]}"
+            # The secrets Job (-30) makes it. Optional, so a missing Secret
+            # means "cannot tell" and not a pod that never starts.
+            - name: MEHO_REALM_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: golden-core-keycloak-admin
+                  key: client_secret
+                  optional: true
+          resources:
+            limits:
+              cpu: 500m
+              ephemeral-storage: 256Mi
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              ephemeral-storage: 64Mi
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ---
 # Source: meho-chart/templates/core-secrets-job.yaml
 apiVersion: batch/v1

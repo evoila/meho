@@ -28,9 +28,9 @@ from meho_backplane.connectors.policy.classify import (
     register_policy_classify_operation,
 )
 from meho_backplane.op_classes import declare_per_call_approval
-from meho_backplane.operations.op_policy import register_policy_repair_op
 from meho_backplane.operations._preview import register_preview_builder
 from meho_backplane.operations.grant_approval import register_rights_change_op
+from meho_backplane.operations.op_policy import register_policy_repair_op
 from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 

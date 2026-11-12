@@ -47,7 +47,7 @@ and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
 `keycloak.user.sessions`, show one user's state after a logout or a password
 reset. In total the connector registers 43
 operations: 17 `safe` reads and 26 writes that wait for
-approval (8 `caution`, 14 `dangerous`, 4 `destructive`).
+approval (7 `caution`, 15 `dangerous`, 4 `destructive`).
 `keycloak.user.required_actions.update` makes a user set up a one-time code
 (OTP) at the next login, and `keycloak.user.otp_status` shows who has one
 (see "One-time code set-up").
@@ -381,7 +381,7 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.user.logout` | caution | `POST .../users/{user-id}/logout` |
 | `keycloak.user.disable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: false`) |
 | `keycloak.user.enable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: true`) |
-| `keycloak.client_scope.protocol_mapper.update` | caution | `GET` then `PUT .../client-scopes/{client-scope-id}/protocol-mappers/models/{id}` |
+| `keycloak.client_scope.protocol_mapper.update` | dangerous | `GET` then `PUT .../client-scopes/{client-scope-id}/protocol-mappers/models/{id}` |
 | `keycloak.realm.delete` | destructive | `DELETE /admin/realms/{realm}` |
 | `keycloak.authflow.ensure_passkey_code_skip` | caution | `POST .../authentication/flows/browser/copy`, then `PUT .../realms/{realm}` |
 | `keycloak.authflow.ensure_approval_flow` | caution | `.../authentication/flows` and the client `PUT` (see "Approval sign-in flow and identity providers") |
@@ -389,7 +389,7 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.user.check_login` | caution | `POST /realms/{realm}/protocol/openid-connect/token` (see "Login test") |
 | `keycloak.user.required_actions.update` | dangerous | `PUT .../users/{user-id}` (see "One-time code set-up") |
 
-Six more writes are `dangerous` because they can change who gets which
+Seven more writes are `dangerous` because they can change who gets which
 tenant rights, or how strong a sign-in is. MEHO reads the rights from the
 login token, and these writes change what goes into it, who can sign in as
 whom, or what a sign-in asks for:
@@ -399,6 +399,8 @@ whom, or what a sign-in asks for:
   scopes that fill the token.
 - `protocol_mapper.create`: a mapper decides the claims, also `tenant_id`
   and `tenant_role`.
+- `client_scope.protocol_mapper.update`: the same, for a mapper on a client
+  scope.
 - `user.reset_password`: it sets the password of any user of the realm.
 - `user.required_actions.update`: taking a required action away (for
   example the one-time code set-up) makes a user's sign-in weaker.
@@ -407,7 +409,7 @@ At `dangerous`, only a MEHO-SA-Operator or a tenant admin may approve
 another person's request. The single-operator self-approval switch
 (`APPROVAL_ALLOW_SELF_APPROVAL`) does not cover them. The test
 `backend/tests/test_keycloak_identity_write_approvers.py` checks both rules
-against the registered levels of the first five. The test of the one-time
+against the registered levels of the first six. The test of the one-time
 code set-up checks that `user.required_actions.update` is `dangerous`.
 
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
@@ -674,7 +676,10 @@ the existing mapper is changed.
 - Safe to run twice. The result names the scope and the mapper and lists the
   changed field names (`changed_fields`, `unrequested_changes`), never values.
   Check the new value with `keycloak.client_scope.list`.
-- Risk level `caution`, approval required, group `protocol_mapper_write`.
+- Risk level `dangerous`, approval required, group `protocol_mapper_write`.
+  A mapper decides what goes into the login token, so only a
+  MEHO-SA-Operator or a tenant admin may approve, and the self-approval
+  switch does not cover it (see the list of `dangerous` writes above).
   The approval card shows the generic params echo, which names the scope and
   the mapper. The audit row holds the same params.
 - Not offered: adding a mapper to a client scope, and changing or deleting a

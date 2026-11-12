@@ -7,7 +7,9 @@ The handler is in
 :mod:`~meho_backplane.connectors.keycloak.ops_write_scope_mapper`.
 :mod:`~meho_backplane.connectors.keycloak.ops_write_schemas` folds
 :data:`SCOPE_MAPPER_OPS` into the connector's ``WRITE_OPS``. The row is
-``caution`` with ``requires_approval=True``: a second person must approve.
+``dangerous`` with ``requires_approval=True``: a mapper decides what goes
+into the login token, so only a MEHO-SA-Operator or a tenant admin may
+approve, and the self-approval switch does not cover it.
 """
 
 from __future__ import annotations
@@ -110,7 +112,7 @@ SCOPE_MAPPER_OPS: tuple[KeycloakOp, ...] = (
         response_schema=_RESULT,
         group_key="protocol_mapper_write",
         tags=("write", "protocol-mapper", "client-scope", "keycloak"),
-        safety_level="caution",
+        safety_level="dangerous",
         requires_approval=True,
         llm_instructions={
             "when_to_use": (

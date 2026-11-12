@@ -8,7 +8,7 @@ Keycloak Admin REST API. No running Keycloak and no Vault.
 
 What is proven:
 
-* the op registers on the ``caution`` risk level, needs approval and sits in
+* the op registers on the ``dangerous`` risk level, needs approval and sits in
   the ``protocol_mapper_write`` group;
 * the mapper is read, the requested fields are changed, and every other
   field (also the other ``config`` keys) is written back as it was;
@@ -193,12 +193,12 @@ def _mount_token(mock: respx.MockRouter) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_op_registers_caution_and_approval_gated(kc: KeycloakConnector) -> None:
+async def test_op_registers_dangerous_and_approval_gated(kc: KeycloakConnector) -> None:
     async with get_sessionmaker()() as session:
         row = (
             await session.execute(select(EndpointDescriptor).where(EndpointDescriptor.op_id == _OP))
         ).scalar_one()
-    assert row.safety_level == "caution"
+    assert row.safety_level == "dangerous"
     assert row.requires_approval is True
     (op,) = [op for op in WRITE_OPS if op.op_id == _OP]
     assert op.group_key == "protocol_mapper_write"

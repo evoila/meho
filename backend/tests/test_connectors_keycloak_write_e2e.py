@@ -131,7 +131,7 @@ EXPECTED_SAFETY: dict[str, str] = {
     "keycloak.realm.delete": "destructive",
     "keycloak.user.disable": "dangerous",
     "keycloak.user.enable": "dangerous",
-    "keycloak.client_scope.protocol_mapper.update": "caution",
+    "keycloak.client_scope.protocol_mapper.update": "dangerous",
 }
 
 

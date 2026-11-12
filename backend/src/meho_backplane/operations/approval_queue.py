@@ -3762,6 +3762,13 @@ def _check_approver_role_floor(operator: Operator, request: ApprovalRequest) -> 
         )
 
 
+def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:
+    """Compare the policy evaluator with today's answer, when ``POLICY_ENGINE_SHADOW`` is on."""
+    from meho_backplane.policy.shadow import shadow_approval
+
+    shadow_approval(operator, request, today=today)
+
+
 async def _load_pending_for_approval(
     session: AsyncSession,
     request_id: uuid.UUID,
@@ -3795,8 +3802,13 @@ async def _load_pending_for_approval(
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
     if _deadline_has_passed(request, _now(), _resolve_default_ttl()):
         raise ApprovalRequestExpiredError(request_id)
-    rule = _check_approver_group(operator, request)
-    _check_approver_role_floor(operator, request)
+    try:
+        rule = _check_approver_group(operator, request)
+        _check_approver_role_floor(operator, request)
+    except (UnauthorizedApprovalError, SelfApprovalForbiddenError):
+        _shadow_approval(operator, request, today=False)
+        raise
+    _shadow_approval(operator, request, today=True)
     if params is not None and not params_hash_matches(params, request.params_hash):
         raise ParamsMismatchError(request_id)
     _check_destructive_preview_binding(request)

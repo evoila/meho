@@ -2025,7 +2025,7 @@ class EndpointDescriptor(Base):
     #: ``apply_step_classification`` returned. ``None``, empty and ``None``
     #: otherwise. Search, the call contract and the approval request show them.
     policy_category = cast("str | None", None)
-    policy_labels = cast("Mapping[str, str]", MappingProxyType({}))
+    policy_labels = cast(Mapping[str, str], MappingProxyType({}))
     policy_rule_ref = cast("str | None", None)
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),

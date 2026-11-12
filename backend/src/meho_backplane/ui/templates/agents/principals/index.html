@@ -80,8 +80,10 @@
 
   {# Mount point for HTMX-loaded modals (register / revoke). The empty
      wrapper persists across HTMX swaps so the modal markup always has a
-     stable target. #}
-  <div id="principals-modal-container"></div>
+     stable target. htmx does not swap an error answer by default, so the
+     before-swap hook turns the swap on for the statuses the register and
+     revoke submits answer with their modal (field error or banner). #}
+  <div id="principals-modal-container" hx-on::before-swap="if (event.detail.requestConfig && event.detail.requestConfig.verb === 'post' && [404, 409, 422, 502, 503].includes(event.detail.xhr.status)) { event.detail.shouldSwap = true; event.detail.isError = false; }"></div>
 
   {# Table -- the HTMX swap target for re-renders / toggle. #}
   {% include "agents/principals/_table.html" %}

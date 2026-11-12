@@ -1176,7 +1176,8 @@ is not set.
 - `meho_status` (and `GET /api/v1/health`) then answers with
   `operator.tenant_id` and `operator.tenant_role` set to `null`,
   `operator.tenants` (each tenant's `tenant_id`, `name`, `tenant_role`,
-  `current`), `vault.detail = "tenant_not_chosen"`, the database
+  `current`), `vault.checked = false` with
+  `vault.detail = "tenant_not_chosen"`, the database
   state and `server_time` (#5504). It runs no tenant work (no credential check, no add-on
   pairings, no tool comparison). With a current tenant, `meho_status`
   answers as before and also lists `operator.tenants`, with `current`
@@ -1277,6 +1278,18 @@ add-on-family gate.
 | `search_memory` | operator | — | Search the operator's accessible memories. |
 | `search_operations` | operator | — | Hybrid BM25 + cosine search over a connector's operations. With `op_id` (exact-op mode) it returns that one operation's call contract instead: the stored `parameter_schema`, small examples, the target-by-name rule, the result shape and retry rules (#3668). |
 
+**`meho_status` and the Vault check.** The tool is open to every role,
+but its Vault check runs only for a caller with the `operator` role or
+higher. That is the rule of `GET /api/v1/health`
+(`_federation_status_for` in `api/v1/health.py`). The check logs in to
+Vault as the caller and reads a secret. A `read_only` caller gets every
+other part of the answer, and `vault.checked = false` with
+`vault.detail = "not checked: needs the operator role"`. MEHO makes no
+Vault login and no secret read for that caller. `meho status` prints
+`Vault: not checked (needs the operator role)`, and `meho doctor`
+(which reads the `meho_status` answer) prints
+`vault not checked (needs the operator role)`.
+
 ### Operator surface (`mcp:admin` elevation required)
 
 Every tool below is listed / callable **only** on an `mcp:admin`-elevated
@@ -1310,8 +1323,8 @@ session (on top of the Role + Extra-gate columns).
 | `meho_broadcast_overrides_set` | tenant_admin | — | Create a broadcast-detail override rule. |
 | `meho_connector_delete` | tenant_admin | — | Delete a connector's ingested rows / auto-registered shim. |
 | `meho_connector_disable` | tenant_admin | — | Disable every group of a connector (regression roll-back). |
-| `meho_connector_edit_group` | tenant_admin | — | Edit an operation group's `when_to_use` prose or name. |
-| `meho_connector_edit_op` | tenant_admin | — | Edit one operation's per-op overrides. |
+| `meho_connector_edit_group` | tenant_admin | — | Edit an operation group's `when_to_use` prose or name; with `POLICY_CLASSIFICATION` on, ask for its category or labels. |
+| `meho_connector_edit_op` | tenant_admin | — | Edit one operation's per-op overrides; with `POLICY_CLASSIFICATION` on, ask for its category or labels. |
 | `meho_connector_enable` | tenant_admin | — | Enable every group of a connector. |
 | `meho_connector_enable_reads` | tenant_admin | — | Bulk-enable a connector's read-class operations. |
 | `meho_connector_ingest` | tenant_admin | — | Ingest one or more OpenAPI specs into a connector. |

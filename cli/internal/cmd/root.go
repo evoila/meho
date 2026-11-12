@@ -44,6 +44,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/nsx"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/pfsense"
+	"github.com/evoila/meho/cli/internal/cmd/policy"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
 	"github.com/evoila/meho/cli/internal/cmd/runbook"
 	runnerprincipal "github.com/evoila/meho/cli/internal/cmd/runner-principal"
@@ -349,6 +350,11 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// --tenant to act cross-tenant. Registered before registerDynamicSubcommands
 	// so the backplane manifest cannot shadow the built-in `dashboard` parent.
 	root.AddCommand(dashboard.NewRootCmd())
+
+	// The policy file (policy: v1): validate / diff / import / export /
+	// history on /api/v1/policy. tenant_admin or platform_admin; an import
+	// waits until a second admin approves it.
+	root.AddCommand(policy.NewRootCmd())
 
 	// G3.1-T7 (#511) -- vmware-rest-9.0 operator alias verbs for
 	// Initiative #227. The verb tree pre-bakes connector_id=

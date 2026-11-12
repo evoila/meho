@@ -993,8 +993,8 @@ short error does not hold approvals back for a minute. The expected steps are th
 `connectors/keycloak/ops_authflow.py`), so the check, the operation and the
 realm file agree. `meho doctor` turns the state into its line `approval
 sign-in` (`cli/internal/cmd/doctor_approval.go`): `ok` passes, every other
-state is a warning with the fix. The check only reports; the approve path
-does not read it.
+state is a warning with the fix. Under `auto`, the approve path reads this
+check to decide whether it requires the approval level (see below).
 
 **The approval level (#6281).** With no level names in the realm,
 Keycloak gives `acr` `"1"` to every sign-in that asked for credentials,

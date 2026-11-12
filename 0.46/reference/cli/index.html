@@ -17708,6 +17708,7 @@
 <h2 id="global-flags">Global flags<a class="headerlink" href="#global-flags" title="Permanent link">&para;</a></h2>
 <ul>
 <li><code>--config</code> — path to the meho config file (default: <code>$XDG_CONFIG_HOME/meho/config.json</code>).</li>
+<li><code>--profile</code> — named login to use (default: <code>$MEHO_PROFILE</code>, else <code>default</code>). Each profile keeps its own login, so one person can hold several identities side by side. <code>meho login &lt;url&gt; --profile &lt;name&gt;</code> stores the login under that name. The flag wins over <code>$MEHO_PROFILE</code>.</li>
 <li><code>--verbose</code>, <code>-v</code> — enable verbose output.</li>
 <li><code>--work-ref</code> — external change-ticket reference (<code>gh:&lt;owner&gt;/&lt;repo&gt;#&lt;n&gt;</code>, default: <code>$MEHO_WORK_REF</code>). The CLI sends it as the <code>Meho-Work-Ref</code> header on every backplane request, so the audit rows carry it. Five commands have their own <code>--work-ref</code> flag that tags the run with the reference: <code>operation call</code>, <code>scheduler create</code>, <code>runbook start</code>, <code>agent run</code>, and <code>broadcast announce</code>. On those commands only <code>$MEHO_WORK_REF</code> is sent as the header. List commands filter by reference with <code>--filter-work-ref</code>.</li>
 </ul>

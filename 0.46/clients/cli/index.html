@@ -1848,6 +1848,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#several-logins-at-once-profiles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Several logins at once (profiles)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#how-long-the-login-lasts" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3207,6 +3218,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#several-logins-at-once-profiles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Several logins at once (profiles)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#how-long-the-login-lasts" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3422,6 +3444,21 @@ not need the URL re-typed. That file holds <strong>only</strong> the backplane U
 no secret; the token lives in the keyring, or in a <code>0600</code>-mode
 <code>credentials.json</code> sibling on headless hosts where no keyring is
 available.</p>
+<h3 id="several-logins-at-once-profiles">Several logins at once (profiles)<a class="headerlink" href="#several-logins-at-once-profiles" title="Permanent link">&para;</a></h3>
+<p>One person sometimes needs two identities, for example one that starts
+a write and one that approves it. Give each identity a profile name:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>login<span class="w"> </span>https://meho.example.com<span class="w"> </span>--profile<span class="w"> </span>initiator
+meho<span class="w"> </span>login<span class="w"> </span>https://meho.example.com<span class="w"> </span>--profile<span class="w"> </span>approver
+meho<span class="w"> </span>--profile<span class="w"> </span>approver<span class="w"> </span>status<span class="w">      </span><span class="c1"># or: export MEHO_PROFILE=approver</span>
+</code></pre></div>
+<p>Each profile keeps its own login, so switching needs no new login.
+<code>--profile</code> beats <code>MEHO_PROFILE</code>. Without either, the CLI uses the
+default login. This replaces using one <code>XDG_CONFIG_HOME</code> for each
+identity. All profiles share the saved backplane URL, so a login with
+another URL changes it for every profile (the login prints one line
+when it does). The browser sign-in of <code>meho approvals approve</code> decides
+who approves; the profile only picks the login for <code>approvals list</code>
+and <code>approvals show</code>.</p>
 <h3 id="how-long-the-login-lasts">How long the login lasts<a class="headerlink" href="#how-long-the-login-lasts" title="Permanent link">&para;</a></h3>
 <p><code>meho login</code> asks for a long login by default (the OIDC scope
 <code>offline_access</code>). The CLI renews it by itself, so you log in once. On

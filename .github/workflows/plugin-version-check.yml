@@ -22,9 +22,10 @@ name: Plugin Version Check
 on:
   pull_request:
     branches: [main]
-  # No `merge_group` trigger: the check reads only the pull request's own
-  # files, and it is not a required check. A merge-queue run adds nothing,
-  # so it does not start (#6350).
+  # Bare `merge_group:`: the event does not support `paths:` filtering.
+  # The check stays in the queue: two pull requests can raise the same
+  # version, and only the queue run sees the one in front (#6350).
+  merge_group:
 
 concurrency:
   # Same shape as readme-version-check.yml: never cancel a merge-queue run,
@@ -38,11 +39,12 @@ permissions:
 jobs:
   plugin-version:
     name: Plugin Version Check
-    # Own pool, except a fork pull request (hosted runner). Merge-queue
-    # runs never use a hosted runner (#6325). The job runs a repo
-    # script over PR content and needs nothing internal. See
+    # Own pool, except a fork pull request and a merge-queue run (hosted
+    # runner). The queue run is short and is on the allowlist in
+    # test_ci_fork_runner_isolation.py, with its reason (#6350). The job
+    # runs a repo script over PR content and needs nothing internal. See
     # docs/codebase/devops.md.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 5
     steps:
       - name: Checkout

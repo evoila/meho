@@ -72,9 +72,11 @@ on:
       - 'scripts/ci/check_tested_live_claims.py'
       - 'backend/scripts/validate_live_tests.py'
       - '.github/workflows/docs-site.yml'
-  # No `merge_group` trigger: the strict build reads only the pull
-  # request's own docs files, and it is not a required check. A merge-queue
-  # run adds nothing, so it does not start (#6350).
+  # Bare `merge_group:`: the event does not support `paths:` filtering.
+  # The strict build stays in the queue: two pull requests can each pass
+  # alone and break the build together (one moves a page, the other links
+  # to it). The build runs on a hosted runner (#6350).
+  merge_group:
   push:
     # A tag publishes a new docs version, like the image / chart / CLI
     # artefacts. Pre-release tags (v1.0.0-rc.1) publish too, but never

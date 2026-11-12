@@ -2852,12 +2852,12 @@ their isolation posture:
 | `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **hosted runner** for every event, also the merge queue (#6350); the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |
 | `dependency-license-check.yml` | yes (`pip install -e ./backend` runs the build backend) | **route**, all 3 jobs (#6325); the jobs are skipped in the merge queue (#6350) |
 | `readme-version-check.yml` | yes (inline shell over PR content) | **route** (#6325); no merge-queue trigger (#6350) |
-| `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **route** (#6325); no merge-queue trigger (#6350) |
+| `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **route** (#6325) for pull requests; the merge-queue run uses a hosted runner (#6350) |
 | `linux-server-test.yml` | yes (shellcheck, and the unit tests run `deploy/linux-server/install.sh` against stub commands) | **route**: fork PR → disposable GitHub-hosted runner |
 | `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for pull requests; both scanner jobs are skipped in the merge queue (#6350) |
 | `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` for pull requests, is skipped in the merge queue (#6350), and only reads `backend/uv.lock` |
 | `security-weekly.yml` | no (`schedule` and `workflow_dispatch` only; trivy reads the lock files of `main`) | GitHub-hosted `ubuntu-latest`; built-in token is `contents: read`; the findings go to a private repo with a separate token (repository secrets `SECURITY_FINDINGS_REPO` and `SECURITY_FINDINGS_TOKEN`, so the log masks the repo name), so a finding is never public before its fix. all severities are reported. `scripts/ci/security_weekly_issue.py` opens one issue or comments only the new findings |
-| `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted); `docs-site.yml` has no merge-queue trigger (#6350) |
+| `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted); `docs-site.yml` `build` stays in the merge queue on a hosted runner (#6350) |
 
 ### Two in-repo isolation patterns
 
@@ -2917,20 +2917,24 @@ for a pool that is full. Three rules:
    passed, so the required name still comes and no runner starts. A check
    that is not required loses its `merge_group` trigger. This holds for
    the licence checks, TruffleHog, Gitleaks, the Python dependency scan,
-   the docs site, and the plugin and readme version checks (#6350).
+   and the readme version check (#6350).
 2. **A job that can break only when two pull requests meet stays, on an
    own pool.** These are the Python and Go test gates, the migration
    checks, the compatibility checks and the chart jobs. Semgrep stays
-   too, because a fork pull request skips it. A queue run starts about
+   too, because a fork pull request skips it. The plugin version check
+   and the strict docs build stay as well (on a hosted runner, rule 3):
+   two pull requests can raise the same plugin version, or break the
+   docs build together. A queue run starts about
    12 jobs on `meho-runners-ci`, 6 on `meho-runners-ci-heavy-queue`
-   (the unit shards) and 9 hosted jobs (rule 3).
+   (the unit shards) and 11 hosted jobs (rule 3).
 3. **A short job that must stay and does not need a pool may use a
    hosted runner.** It goes on `_HOSTED_ON_MERGE_GROUP_ALLOWED` in
    `backend/tests/test_ci_fork_runner_isolation.py`, with its reason.
-   Today these are: `docs-site.yml` `deploy`, `ci.yml` `changes`,
+   Today these are: `docs-site.yml` `deploy` and `build`,
+   `plugin-version-check.yml` `plugin-version`, `ci.yml` `changes`,
    `python-unit-lane`, `python-integration` and `helm-lint-template`,
    `chart.yml` `changes` and `helm-test-gate`, and `migration-heads.yml`
-   `check`. Each runs for seconds to 40 seconds, so it does not fill the
+   `check`. Each runs for seconds to about a minute, so it does not fill the
    hosted limit. The two kind installs of `chart.yml` (`helm-test` and
    `helm-test-byo`) are hosted too, for a different reason: they need
    more CPU than the heavy queue pool has today (#6347).

@@ -263,6 +263,14 @@ _HOSTED_ON_MERGE_GROUP_ALLOWED: dict[tuple[str, str], str] = {
         "deploy",
     ): "runs only for tag pushes and main pushes; a merge-queue branch is neither",
     (
+        "docs-site.yml",
+        "build",
+    ): "about 30 seconds; two pull requests can break the strict build together, so it stays",
+    (
+        "plugin-version-check.yml",
+        "plugin-version",
+    ): "about a minute; two pull requests can raise the same plugin version, so it stays",
+    (
         "ci.yml",
         "changes",
     ): "about 13 seconds of git diff; the other jobs need its answer",

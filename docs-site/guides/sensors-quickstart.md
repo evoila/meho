@@ -508,6 +508,10 @@ It is off until you opt in, and it has real prerequisites:
 The investigator never executes a change: any write op its agent
 attempts parks in the approval queue like everyone else's.
 
+**Next: start an agent.** A Sensor or a Dashboard can also start an agent when
+it changes state, for example to find the cause. See
+[Start an agent when a Sensor or Dashboard changes](scheduler.md#start-an-agent-when-a-sensor-or-dashboard-changes).
+
 ## Going further
 
 The quickstart above is the core loop. A few surfaces extend it:

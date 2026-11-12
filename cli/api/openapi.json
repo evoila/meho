@@ -1991,6 +1991,292 @@
         }
       }
     },
+    "/api/v1/policy/validate": {
+      "post": {
+        "tags": [
+          "policy"
+        ],
+        "summary": "Validate",
+        "description": "Check the file: its shape, its categories and levels, and the floors. Writes nothing.",
+        "operationId": "validate_api_v1_policy_validate_post",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "tenant",
+                "install"
+              ],
+              "type": "string",
+              "default": "tenant",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyValidateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "The policy file (policy: v1), as sent (YAML; JSON is valid YAML).",
+          "content": {
+            "application/yaml": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/policy/import": {
+      "post": {
+        "tags": [
+          "policy"
+        ],
+        "summary": "Import Policy",
+        "description": "Show what the file would change (``?preview=true``), or ask to import it.\n\nThe import replaces the whole policy of *scope*: an entry that is not in\nthe file is removed. It waits until a second admin approves it.",
+        "operationId": "import_policy_api_v1_policy_import_post",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "tenant",
+                "install"
+              ],
+              "type": "string",
+              "default": "tenant",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "preview",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Preview"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyImportResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyImportResponse"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "The policy file (policy: v1), as sent (YAML; JSON is valid YAML).",
+          "content": {
+            "application/yaml": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/policy/export": {
+      "get": {
+        "tags": [
+          "policy"
+        ],
+        "summary": "Export",
+        "description": "The stored policy of *scope* as a ``policy: v1`` file.",
+        "operationId": "export_api_v1_policy_export_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "tenant",
+                "install"
+              ],
+              "type": "string",
+              "default": "tenant",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/yaml": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/policy/history": {
+      "get": {
+        "tags": [
+          "policy"
+        ],
+        "summary": "History",
+        "description": "The imported policy files of *scope*, newest first (MEHO keeps the last 20).",
+        "operationId": "history_api_v1_policy_history_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "tenant",
+                "install"
+              ],
+              "type": "string",
+              "default": "tenant",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 20,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PolicyRevisionView"
+                  },
+                  "title": "Response History Api V1 Policy History Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/event-sources": {
       "get": {
         "tags": [
@@ -38366,6 +38652,178 @@
         "title": "PermissionVerdict",
         "description": "Three-state verdict returned by the permission resolver.\n\n:attr:`AUTO_EXECUTE` \u2014 the op proceeds without human review.\n:attr:`NEEDS_APPROVAL` \u2014 the op is parked pending an operator\ndecision; the approval queue (G11.2-T4) handles the resume path.\n:attr:`DENY` \u2014 the op is refused immediately with a structured,\nagent-reasonable error.\n\nThe vocabulary is intentionally closed: a fourth verdict would\nrequire a code + migration change, which is the cheapest way to\nprevent drift between the DB layer and the policy engine."
       },
+      "PolicyImportResponse": {
+        "properties": {
+          "preview": {
+            "type": "boolean",
+            "title": "Preview"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "tenant",
+              "install"
+            ],
+            "title": "Scope"
+          },
+          "mistakes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Mistakes"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          },
+          "diff": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Diff"
+          },
+          "no_change": {
+            "type": "boolean",
+            "title": "No Change"
+          },
+          "file_sha256": {
+            "type": "string",
+            "title": "File Sha256"
+          },
+          "based_on": {
+            "type": "string",
+            "title": "Based On"
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "title": "Message"
+          },
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Approval Request Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "preview",
+          "ok",
+          "scope",
+          "mistakes",
+          "warnings",
+          "diff",
+          "no_change",
+          "file_sha256",
+          "based_on"
+        ],
+        "title": "PolicyImportResponse",
+        "description": "The preview and the import answer.\n\n``diff`` has the sections ``description``, ``taxonomy`` and\n``classifications``, each with ``added``, ``changed`` (``before`` and\n``after``) and ``removed``. Each classification entry also says how many\noperations it ``matches`` and how many of those it ``changes``.\n``operations_changed`` counts the operations whose values change. ``diff``\nis ``null`` when the file has mistakes. ``based_on`` is the SHA-256 of\nthe stored policy the plan was made against. On an import that waits,\n``approval_request_id`` names the request."
+      },
+      "PolicyRevisionView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ts"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "tenant",
+              "install"
+            ],
+            "title": "Scope"
+          },
+          "imported_by_sub": {
+            "type": "string",
+            "title": "Imported By Sub"
+          },
+          "approved_by_sub": {
+            "type": "string",
+            "title": "Approved By Sub"
+          },
+          "file_sha256": {
+            "type": "string",
+            "title": "File Sha256"
+          },
+          "file": {
+            "type": "string",
+            "title": "File"
+          },
+          "diff": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Diff"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "ts",
+          "scope",
+          "imported_by_sub",
+          "approved_by_sub",
+          "file_sha256",
+          "file",
+          "diff"
+        ],
+        "title": "PolicyRevisionView",
+        "description": "One imported policy file."
+      },
+      "PolicyValidateResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "tenant",
+              "install"
+            ],
+            "title": "Scope"
+          },
+          "mistakes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Mistakes"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "scope",
+          "mistakes",
+          "warnings"
+        ],
+        "title": "PolicyValidateResponse",
+        "description": "The mistakes and warnings of a file. ``ok`` is true when it has no mistake."
+      },
       "PreambleInclusion": {
         "properties": {
           "included": {
@@ -44651,6 +45109,11 @@
             "type": "string",
             "nullable": true,
             "title": "Detail"
+          },
+          "checked": {
+            "type": "boolean",
+            "title": "Checked",
+            "default": true
           }
         },
         "type": "object",
@@ -44659,7 +45122,7 @@
           "read_ok"
         ],
         "title": "VaultStatus",
-        "description": "Federation-chain status for the deployment's credential backend.\n\nThe field is named ``vault`` on :class:`HealthResponse` for wire\ncompatibility (it predates the credential-backend seam), but the value\nreflects whichever backend ``config.credentialBackend`` selects: the\nVault OIDC-login + KV read on a Vault install, or the configured\nbackend's probe-secret read (``gsm:<project>/<probe-secret>`` on a GSM\ninstall) through the credential-backend seam.\n\n``reachable`` is true when the backend was reached \u2014 on Vault, the OIDC\nlogin succeeded (TCP + TLS + JWT forward); on a seam backend, the store\nwas addressable (config resolved, backend registered). ``read_ok`` is\ntrue when the probe secret read succeeded. ``detail`` carries a short\nstructured string for the CLI to render on failure paths \u2014 a class name\nor error code, never an unbounded exception message or a secret value."
+        "description": "Federation-chain status for the deployment's credential backend.\n\nThe field is named ``vault`` on :class:`HealthResponse` for wire\ncompatibility (it predates the credential-backend seam), but the value\nreflects whichever backend ``config.credentialBackend`` selects: the\nVault OIDC-login + KV read on a Vault install, or the configured\nbackend's probe-secret read (``gsm:<project>/<probe-secret>`` on a GSM\ninstall) through the credential-backend seam.\n\n``reachable`` is true when the backend was reached \u2014 on Vault, the OIDC\nlogin succeeded (TCP + TLS + JWT forward); on a seam backend, the store\nwas addressable (config resolved, backend registered). ``read_ok`` is\ntrue when the probe secret read succeeded. ``detail`` carries a short\nstructured string for the CLI to render on failure paths \u2014 a class name\nor error code, never an unbounded exception message or a secret value.\n\n``checked`` is false when MEHO ran no check at all. The check logs in\nto the credential backend as the caller and reads a secret, so it\nruns only for a caller with at least the ``operator`` role, the same\nrule ``GET /api/v1/health`` applies. A ``read_only`` caller of the\n``meho_status`` MCP tool gets ``checked=false`` with\n``detail=\"not checked: needs the operator role\"``. A login that chose\nno tenant gets ``checked=false`` with ``detail=\"tenant_not_chosen\"``.\nWith ``checked=false``, ``reachable`` and ``read_ok`` are false and say\nnothing about the backend. The ``True`` default keeps older response\ndecoders working."
       },
       "VersionResponse": {
         "properties": {

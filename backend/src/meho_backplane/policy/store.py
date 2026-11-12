@@ -57,6 +57,7 @@ __all__ = [
     "SWITCH_OFF_REFUSAL",
     "ClassificationEdit",
     "EditPlan",
+    "InvalidStoredPolicyError",
     "classification_enabled",
     "classify_rows",
     "classify_step",
@@ -69,6 +70,10 @@ __all__ = [
 _MAX_LABELS = 32
 _MAX_LABEL_KEY = 63
 _MAX_LABEL_VALUE = 255
+
+
+class InvalidStoredPolicyError(ValueError):
+    """A stored policy document is not valid, so no operation can be classified."""
 
 
 #: What every surface says while the switch is off.
@@ -136,10 +141,23 @@ async def load_classification(
     install_doc = install.document if install is not None else None
     tenant_doc = tenant.document if tenant is not None else None
     entries = [
-        *entries_from_document(install_doc, scope="install"),
-        *entries_from_document(tenant_doc, scope="tenant"),
+        *_stored_entries(install_doc, "install", "The install's stored policy"),
+        *_stored_entries(tenant_doc, "tenant", f"The stored policy of tenant {tenant_id}"),
     ]
     return taxonomy_from_documents(install_doc, tenant_doc), entries
+
+
+def _stored_entries(
+    document: Mapping[str, Any] | None, scope: Scope, name: str
+) -> list[ClassificationEntry]:
+    """The entries of a stored document; a bad one names the document and the entry."""
+    try:
+        return entries_from_document(document, scope=scope)
+    except ValueError as exc:
+        raise InvalidStoredPolicyError(
+            f"{name} is not valid, so MEHO cannot classify operations: {exc} "
+            "Import a fixed policy file."
+        ) from exc
 
 
 async def _group_keys(

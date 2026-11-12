@@ -2909,7 +2909,9 @@ allows only a few hosted jobs at once, for all its repos together, so a
 busy evening of pull requests can fill that limit and stop the queue.
 `test_no_merge_group_job_uses_a_hosted_label` in
 `backend/tests/test_ci_fork_runner_isolation.py` fails when a job that can
-run on `merge_group` resolves to a hosted label. One job is allowed to
+run on `merge_group` resolves to a hosted label. It reads only the
+`runs-on` routes it knows. Any other expression fails the test, also when
+it names an own pool. One job is allowed to
 stay hosted, with its reason in the test: `docs-site.yml` `deploy` (tag
 and main pushes only).
 

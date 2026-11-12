@@ -265,14 +265,23 @@ _HOSTED_ON_MERGE_GROUP_ALLOWED: dict[tuple[str, str], str] = {
 }
 
 
+# The merge-queue route whose other side is an own pool too.
+_MERGE_QUEUE_OWN_ROUTE = re.compile(
+    r"\$\{\{ github\.event_name == 'merge_group' && '(?P<pool>[^']+)' \|\| "
+    r"'meho-runners-[^']+' \}\}"
+)
+
+
 def _merge_group_label(runs_on: str) -> str:
-    """The runner label a job gets when the event is merge_group."""
-    route = _MERGE_QUEUE_ROUTE.fullmatch(runs_on)
-    if route is not None:
-        return route.group("pool")
-    fork_route = _FORK_ROUTE.fullmatch(runs_on)
-    if fork_route is not None:
-        return fork_route.group("pool")
+    """The runner label a job gets when the event is merge_group.
+
+    Only the routes listed here are read. Any other expression is returned
+    as it is, so the caller reports it instead of guessing.
+    """
+    for route in (_MERGE_QUEUE_ROUTE, _MERGE_QUEUE_OWN_ROUTE, _FORK_ROUTE):
+        match = route.fullmatch(runs_on)
+        if match is not None:
+            return match.group("pool")
     return runs_on
 
 
@@ -287,7 +296,7 @@ def _merge_group_hosted_jobs(path: Path, wf: dict[Any, Any]) -> list[str]:
         if "uses" in job and "runs-on" not in job:
             continue
         label = _merge_group_label(_runs_on_str(job))
-        if _INTERNAL_POOL_MARKER in label or (path.name, name) in _HOSTED_ON_MERGE_GROUP_ALLOWED:
+        if label in _KNOWN_POOLS or (path.name, name) in _HOSTED_ON_MERGE_GROUP_ALLOWED:
             continue
         found.append(f"{path.name}:{name} -> {label!r}")
     return found
@@ -315,6 +324,48 @@ def test_merge_group_hosted_check_flags_a_hosted_job() -> None:
         },
     }
     assert _merge_group_hosted_jobs(Path("x.yml"), wf) == ["x.yml:hosted -> 'ubuntu-latest'"]
+
+
+@pytest.mark.parametrize(
+    "runs_on",
+    [
+        # Hosted on merge_group, own pool otherwise: the pool name must not
+        # make the check pass.
+        "${{ github.event_name == 'merge_group' && 'ubuntu-latest' || 'meho-runners-ci-heavy' }}",
+        "${{ github.event_name != 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}",
+        "${{ matrix.runner }}",
+        "meho-runners-unknown",
+    ],
+    ids=["hosted-on-merge-group", "negated-event", "matrix", "unknown-pool"],
+)
+def test_merge_group_hosted_check_rejects_unknown_routes(runs_on: str) -> None:
+    wf = {"on": {"merge_group": {}}, "jobs": {"job": {"runs-on": runs_on}}}
+    found = _merge_group_hosted_jobs(Path("x.yml"), wf)
+    assert len(found) == 1
+    assert found[0].startswith("x.yml:job -> ")
+
+
+@pytest.mark.parametrize(
+    ("runs_on", "pool"),
+    [
+        (_MQ_ROUTE, "meho-runners-ci"),
+        (
+            "${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue'"
+            " || 'meho-runners-ci-heavy' }}",
+            "meho-runners-ci-heavy-queue",
+        ),
+        (
+            "${{ (github.event_name == 'pull_request' && "
+            "github.event.pull_request.head.repo.full_name != github.repository) && "
+            "'ubuntu-latest' || 'meho-runners-ci' }}",
+            "meho-runners-ci",
+        ),
+        ("meho-runners-ci-heavy", "meho-runners-ci-heavy"),
+    ],
+    ids=["merge-queue-route", "merge-queue-own-route", "fork-route", "plain-label"],
+)
+def test_merge_group_label_reads_the_known_routes(runs_on: str, pool: str) -> None:
+    assert _merge_group_label(runs_on) == pool
 
 
 def test_merge_group_hosted_check_ignores_workflows_without_merge_group() -> None:

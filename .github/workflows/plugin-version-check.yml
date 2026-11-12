@@ -37,10 +37,11 @@ permissions:
 jobs:
   plugin-version:
     name: Plugin Version Check
-    # Runs on a GitHub-hosted runner for every event: the job runs a repo
+    # Own pool, except a fork pull request (hosted runner). Merge-queue
+    # runs never use a hosted runner (#6325). The job runs a repo
     # script over PR content and needs nothing internal. See
     # docs/codebase/devops.md.
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 5
     steps:
       - name: Checkout

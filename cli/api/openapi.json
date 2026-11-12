@@ -4434,7 +4434,7 @@
           "operations"
         ],
         "summary": "Post Call",
-        "description": "Invoke :func:`~meho_backplane.operations.dispatch` for an op id.\n\nDelegates to :func:`call_operation`. The dispatcher contract is\n\"always return a structured result\"; errors land in the result\nenvelope (``status='error'`` + ``extras.error_code``) rather than\nHTTP 4xx. The route returns 200 on a structured-error envelope so\ncallers see the dispatcher's error_code in ``extras``.\n\nAsync governed dispatch (#3079): when the body carries ``async: true``\nthe route does **not** dispatch inline. It creates a durable\n``operation_run`` row, launches the governed dispatch on a background\ntask, and returns HTTP 202 + the run handle immediately \u2014\n``{\"run_id\", \"status\": \"pending\", \"async\": true}``. The caller polls /\ncancels via ``/api/v1/operations/runs/{handle}``; the completed\n``OperationResult`` envelope is persisted on the run, so a dropped\nresponse never loses the outcome (the motivating incident: an 83s\nvendor call whose 200 was lost in transit). Default (``async`` absent /\nfalse) is byte-identical to the pre-#3079 synchronous path below.\n\nTarget-failure contract (#136, completed by #2110 Option A): **every**\ntarget-failure mode returns HTTP 200 + the dispatcher envelope \u2014 a\nmissing / empty / ``name``-less target is\n``extras.error_code=\"target_required\"``, a ``target`` of a wrong JSON\ntype (e.g. ``target: 12345``) is\n``extras.error_code=\"target_invalid_type\"`` (carrying\n``extras.received_type``), a supplied name that resolves to no live\ntarget is ``extras.error_code=\"no_target\"``, and a name matching more\nthan one target (alias collision) is\n``extras.error_code=\"ambiguous_target\"`` \u2014 the resolution codes carry\nthe candidate ``matches``. No target-failure mode returns a 4xx: a\nconsumer's error handling is a single switch on ``extras.error_code``.\n\nCaller gone (#3696): on the synchronous path a client that disconnects\ndoes not stop the operation. It runs to the end, and its audit row\ncarries ``payload.caller_gone_at``. Use ``async: true`` for long work.",
+        "description": "Invoke :func:`~meho_backplane.operations.dispatch` for an op id.\n\nDelegates to :func:`call_operation`. The dispatcher contract is\n\"always return a structured result\"; errors land in the result\nenvelope (``status='error'`` + ``extras.error_code``) rather than\nHTTP 4xx. The route returns 200 on a structured-error envelope so\ncallers see the dispatcher's error_code in ``extras``.\n\nAsync governed dispatch (#3079): when the body carries ``async: true``\nthe route does **not** dispatch inline. It creates a durable\n``operation_run`` row, launches the governed dispatch on a background\ntask, and returns HTTP 202 + the run handle immediately \u2014\n``{\"run_id\", \"status\": \"pending\", \"async\": true}``. The caller polls /\ncancels via ``/api/v1/operations/runs/{handle}``; the completed\n``OperationResult`` envelope is persisted on the run, so a dropped\nresponse never loses the outcome (the motivating incident: an 83s\nvendor call whose 200 was lost in transit). Default (``async`` absent /\nfalse) is byte-identical to the pre-#3079 synchronous path below.\n\nTarget-failure contract (#136, completed by #2110 Option A): **every**\ntarget-failure mode returns HTTP 200 + the dispatcher envelope \u2014 a\nmissing / empty / ``name``-less target is\n``extras.error_code=\"target_required\"``, a ``target`` of a wrong JSON\ntype (e.g. ``target: 12345``) is\n``extras.error_code=\"target_invalid_type\"`` (carrying\n``extras.received_type``), a supplied name that resolves to no live\ntarget is ``extras.error_code=\"no_target\"``, and a name matching more\nthan one target (alias collision) is\n``extras.error_code=\"ambiguous_target\"`` \u2014 the resolution codes carry\nthe candidate ``matches``. No target-failure mode returns a 4xx: a\nconsumer's error handling is a single switch on ``extras.error_code``.\n\nCaller gone (#3696): on the synchronous path a client that disconnects\ndoes not stop the operation. It runs to the end, and its audit row\ncarries ``payload.caller_gone_at``. Use ``async: true`` for long work.\n\nRevealed values (#6273): when the answer carries values a person asked\nto see (``reveal_secret: true``), it says ``Cache-Control: no-store``\nand ``Pragma: no-cache`` (:mod:`meho_backplane.no_store`). Other\nanswers keep their usual headers. A reveal call cannot run in the\nbackground: ``reveal_secret: true`` with ``async: true`` is refused as\nbad input (``error_code=\"reveal_secret_with_async\"``). It runs at once,\nor through an approval.",
         "operationId": "post_call_api_v1_operations_call_post",
         "parameters": [
           {
@@ -9128,7 +9128,7 @@
           "agents"
         ],
         "summary": "Create Agent",
-        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name is.",
+        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name and the starting grant pick are. A missing pick\n(while the switch is not ``off`` and the agent has no grant) or an\nunknown target name returns 422 and writes nothing. A pick that adds\ngrants is for a person only, the same rule as the grant routes: an\nagent, service or runner login gets 403 ``human_principal_required``.",
         "operationId": "create_agent_api_v1_agents_post",
         "parameters": [
           {
@@ -9418,7 +9418,7 @@
           "agent-principals"
         ],
         "summary": "Register Agent Principal",
-        "description": "Register a new agent principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. Returns 409 on duplicate ``(tenant, name)``.\nReturns 503 when Keycloak admin is not configured.",
+        "description": "Register a new agent principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. Returns 409 on duplicate ``(tenant, name)``.\nReturns 503 when Keycloak admin is not configured. Returns 422 when\nthe starting grant pick is missing (``starting_grants_required``) or\nnames a target that does not resolve; nothing is created then.",
         "operationId": "register_agent_principal_api_v1_agent_principals_post",
         "parameters": [
           {
@@ -25782,6 +25782,10 @@
             "type": "boolean",
             "title": "Enabled",
             "default": true
+          },
+          "starting_grants": {
+            "$ref": "#/components/schemas/StartingGrants",
+            "nullable": true
           }
         },
         "additionalProperties": false,
@@ -26169,6 +26173,10 @@
             "type": "string",
             "nullable": true,
             "title": "Owner Sub"
+          },
+          "starting_grants": {
+            "$ref": "#/components/schemas/StartingGrants",
+            "nullable": true
           }
         },
         "additionalProperties": false,
@@ -41592,6 +41600,40 @@
         ],
         "title": "StartRunRequest",
         "description": "Request body for ``meho_runbook_start`` -- begin a new run on a template.\n\n:attr:`template_slug` references a *published* runbook template; the\nservice layer (G12.3-T3) resolves it to a pinned ``(slug, version)``\nat start time so later template edits cannot alter this run's step\nlist (per Initiative #1198 deprecation interplay rules).\n:attr:`target` is the run's subject (the host, the cluster, the\ncert thumbprint); :attr:`params` is the substitution context for\n``${run.params.X}`` and may be empty.\n\n:attr:`work_ref` is the optional opaque external change-ticket\nreference (a GitHub issue ``\"gh:evoila/meho#9\"``, a Jira key, a CR\nid) the run executes under. It is pinned on the run row at start and\nbound onto the shared ``work_ref_var`` ContextVar around each step's\ndispatch so every ``operation_call`` step's audit row inherits it\n(work_ref I3-T1 #1661). ``None`` when the run is started without a\nchange ticket."
+      },
+      "StartingGrantSet": {
+        "type": "string",
+        "enum": [
+          "none",
+          "read-everything",
+          "read-targets"
+        ],
+        "title": "StartingGrantSet",
+        "description": "The three starting grant sets a person can pick."
+      },
+      "StartingGrants": {
+        "properties": {
+          "set": {
+            "$ref": "#/components/schemas/StartingGrantSet",
+            "description": "'none': the agent runs nothing until an admin adds a grant. 'read-everything': safe operations run at once on every target; everything else waits for a person's approval. 'read-targets': the same, but only on the targets in 'targets'."
+          },
+          "targets": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Targets",
+            "description": "Target names. Only for 'read-targets', and required there."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "set"
+        ],
+        "title": "StartingGrants",
+        "description": "The first grants of a new agent, picked when it is registered or defined."
       },
       "StatusFilterValue": {
         "type": "string",

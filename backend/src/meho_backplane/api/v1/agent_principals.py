@@ -52,6 +52,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.agents.grant_sets import audit_fields
 from meho_backplane.auth.agent_principals import (
     NAME_MAX_LENGTH,
     AgentPrincipalCreate,
@@ -191,12 +192,15 @@ async def register_agent_principal(
     """Register a new agent principal (creates Keycloak client + DB row).
 
     ``tenant_admin`` only. Returns 409 on duplicate ``(tenant, name)``.
-    Returns 503 when Keycloak admin is not configured.
+    Returns 503 when Keycloak admin is not configured. Returns 422 when
+    the starting grant pick is missing (``starting_grants_required``) or
+    names a target that does not resolve; nothing is created then.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_IDS["register"],
         audit_op_class="write",
         audit_agent_principal_name=body.name,
+        **audit_fields(body.starting_grants),
     )
     service = AgentPrincipalService()
     try:

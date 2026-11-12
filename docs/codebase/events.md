@@ -268,6 +268,18 @@ webhook or `agent_run.completed` event. An input-less event trigger on a
 the Sensor names (`events/normalizers/checks_events.py`), inside the
 untrusted-text wrapper. The old investigator call is unchanged by this switch.
 
+A run that an event trigger started for a Dashboard event has no step after it
+ends. So with the switch on, `_dispatch_event` calls
+`checks/findings.py` `record_finding_for_event` for each `agent_run.completed`
+event. It does something only for a succeeded run that an event trigger of
+the run's agent started for a real `check.dashboard.changed` event, and whose
+answer is a finding. It reads the Dashboard and the group key from that event,
+not from the run key. It stores and mails a run's finding only once, and never
+over the finding of a run that ended later. Then it
+writes the memory entry `checks-noise-<group key>` and
+schedules the finding mail. It never raises into the drain loop. Details:
+`docs/codebase/checks-investigator.md`, "Two paths".
+
 ## The subscription matcher
 
 `backend/src/meho_backplane/events/matcher.py` is the junction between a
@@ -365,8 +377,9 @@ event:{trigger_id}:c:{coalesce_key}
 Spaces at the start and end of the key are removed first, because MEHO
 stores the run key without them. A key longer than 200 characters is replaced by the first 32 characters
 of its SHA-256 hex digest, so the run key stays short and stable. Keep
-this format exactly: the Dashboard follow-up work reads the Dashboard id
-and the cause group back from this run key.
+this format exactly: the Dashboard finding step
+(`checks/findings.py`) makes the same key again to find the Dashboard event
+that started a run.
 
 Before it fires with such a key, the matcher asks
 `agent.in_flight.has_in_flight_run(tenant_id, work_ref)`: is there an

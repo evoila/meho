@@ -3692,12 +3692,13 @@ and answers with a short finding. MEHO stores the finding and mails it to the
 Dashboard's mail address. You can run it from a normal event trigger.</p>
 <p>The folder
 <a href="https://github.com/evoila/meho/tree/main/examples/checks-investigator"><code>examples/checks-investigator/</code></a>
-has everything: the agent (<code>agent.json</code>), its grants (<code>permissions.json</code>) and
-the trigger (<code>trigger.json</code>). Its README lists the commands. In short:</p>
+has everything: the agent (<code>agent.json</code>) and the trigger (<code>trigger.json</code>).
+Its README lists the commands. In short:</p>
 <ol>
 <li>Turn on <code>CHECKS_AGENT_EVENTS</code>.</li>
-<li>Register the login <code>agent:checks-investigator</code>, then create the agent and
-   its grants from the files.</li>
+<li>Register the login <code>agent:checks-investigator</code> with
+   <code>--grants read-everything</code>, then create the agent from the file. The agent
+   only reads; anything else it tries waits for a person's approval.</li>
 <li>Create the trigger with the filter from <code>trigger.json</code>. It matches
    <code>check.dashboard.changed</code> events that are worse and are not known noise.</li>
 </ol>

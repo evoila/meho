@@ -2643,6 +2643,28 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#starting-grants-pick-them-when-you-create-the-agent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Starting grants: pick them when you create the agent
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#example-an-agent-that-reads-two-systems" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example: an agent that reads two systems
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#who-the-grants-apply-to" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3400,6 +3422,28 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#starting-grants-pick-them-when-you-create-the-agent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Starting grants: pick them when you create the agent
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#example-an-agent-that-reads-two-systems" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example: an agent that reads two systems
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#who-the-grants-apply-to" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3607,8 +3651,13 @@ from start to end, with commands you can copy.</p>
 Kubernetes target called <code>cluster-a</code>, through the connector <code>k8s-1.x</code>.
 Use your own names.</p>
 <h2 id="step-1-register-the-agents-identity">Step 1 — Register the agent's identity<a class="headerlink" href="#step-1-register-the-agents-identity" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>pod-reader
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>pod-reader<span class="w"> </span>--grants<span class="w"> </span>none
 </code></pre></div>
+<p><code>--grants</code> picks the agent's first grants. <code>none</code> writes no grant: this
+guide adds the grants by hand in Step 5. The other choices are in
+<a href="#starting-grants-pick-them-when-you-create-the-agent">Starting grants</a>.
+When your MEHO needs a pick and you leave <code>--grants</code> out, the CLI creates
+nothing and prints the three choices.</p>
 <p>The output looks like this:</p>
 <div class="highlight"><pre><span></span><code>registered agent principal "pod-reader"
   id:                  3f2b7c1e-...
@@ -3616,6 +3665,7 @@ Use your own names.</p>
   owner_sub:           &lt;your sub&gt;
   revoked:             false
   created_at:          2026-10-18T09:00:00Z
+grants of agent:pod-reader: none
 </code></pre></div>
 <p>Two values matter:</p>
 <ul>
@@ -3895,7 +3945,8 @@ the full set, run <code>meho agent edit &lt;name&gt; --toolset '{}'</code>.</p>
 <span class="w">  </span>--model-tier<span class="w"> </span>standard<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--turn-budget<span class="w"> </span><span class="m">20</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--system-prompt<span class="w"> </span><span class="s2">"You are pod-reader. You only read. You never change anything. Use the connector k8s-1.x and the target cluster-a. Find the operation with search_operations, then run it with call_operation. Answer in short plain sentences. Say which operation you used."</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--toolset<span class="w"> </span>@pod-reader-toolset.json
+<span class="w">  </span>--toolset<span class="w"> </span>@pod-reader-toolset.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--grants<span class="w"> </span>none
 </code></pre></div>
 <p>The flags:</p>
 <table>
@@ -3942,6 +3993,11 @@ the full set, run <code>meho agent edit &lt;name&gt; --toolset '{}'</code>.</p>
 <td>no</td>
 <td>Create the definition switched off. Nobody can run it until you switch it on.</td>
 </tr>
+<tr>
+<td><code>--grants</code></td>
+<td>only when MEHO asks</td>
+<td>The agent's first grants, as in Step 1. MEHO asks only when the switch <code>AGENT_GRANT_REQUIRED</code> is <code>observe</code> or <code>on</code> and the agent has no grant yet. <code>pod-reader</code> still has none, so this guide passes <code>--grants none</code> again.</td>
+</tr>
 </tbody>
 </table>
 <p>Check the result:</p>
@@ -3960,6 +4016,33 @@ or <code>destructive</code>. You see it as <code>safety_level</code> in the
 <code>search_operations</code> results. The safety level sets what happens when
 no grant matches.</p>
 <h3 id="what-the-agent-may-do-with-no-grants">What the agent may do with no grants<a class="headerlink" href="#what-the-agent-may-do-with-no-grants" title="Permanent link">&para;</a></h3>
+<p>The server setting <code>AGENT_GRANT_REQUIRED</code> decides what an agent may do
+when none of its grants matches a call. An admin of the MEHO install sets
+it (on Kubernetes with <code>extraEnv</code> in the chart values). It has three
+states:</p>
+<table>
+<thead>
+<tr>
+<th><code>AGENT_GRANT_REQUIRED</code></th>
+<th>An agent with no matching grant</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>off</code> (the default)</td>
+<td>Gets the safety-level default in the table below.</td>
+</tr>
+<tr>
+<td><code>on</code></td>
+<td>Runs nothing. Every call is refused, also a <code>safe</code> one. The error code is <code>agent_no_grant</code>. The error names the agent and the operation, and says how an admin adds a grant.</td>
+</tr>
+<tr>
+<td><code>observe</code></td>
+<td>The same as <code>off</code>. MEHO also writes one log line <code>agent_no_grant_would_deny</code> for each call that <code>on</code> would refuse. Use it to find agents that still need a grant before you turn the switch <code>on</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>With the switch <code>off</code> or <code>observe</code>:</p>
 <table>
 <thead>
 <tr>
@@ -3986,9 +4069,124 @@ no grant matches.</p>
 </tr>
 </tbody>
 </table>
-<p>So a new agent can already run <strong>every <code>safe</code> operation</strong> on every
-connector and target, with no grant at all. To make it truly read-only
-on one thing, you add grants. See the recipe below.</p>
+<p>So with the switch <code>off</code>, a new agent can already run <strong>every <code>safe</code>
+operation</strong> on every connector and target, with no grant at all. With
+the switch <code>on</code>, it can run nothing until it has a grant.</p>
+<p>The switch changes only agents. People (in the web interface or with a
+token), service accounts and runners keep their rules in every state.
+The discovery tools stay open for an agent in every state (see
+<a href="#how-a-grant-works">How a grant works</a>), so a new agent can look around
+and see what it could ask for.</p>
+<h3 id="starting-grants-pick-them-when-you-create-the-agent">Starting grants: pick them when you create the agent<a class="headerlink" href="#starting-grants-pick-them-when-you-create-the-agent" title="Permanent link">&para;</a></h3>
+<p>When you register an agent (<code>meho agent-principal register</code>) or create a
+definition (<code>meho agent create</code>), you pick its first grants with
+<code>--grants</code>. The console forms show the same three choices.</p>
+<table>
+<thead>
+<tr>
+<th><code>--grants</code></th>
+<th>What MEHO writes</th>
+<th>What the agent can do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>none</code></td>
+<td>No grant.</td>
+<td>With the switch <code>on</code>: nothing, until an admin adds a grant.</td>
+</tr>
+<tr>
+<td><code>read-everything</code></td>
+<td>One grant: every operation, every target, <code>auto-execute</code>.</td>
+<td><code>safe</code> operations run at once on every target in this tenant, also on targets added later. Everything else waits for a person's approval.</td>
+</tr>
+<tr>
+<td><code>read-targets</code></td>
+<td>One grant for each target you name with <code>--target &lt;name&gt;</code>: every operation, that target, <code>auto-execute</code>.</td>
+<td>The same, but only on the targets you named. With the switch <code>on</code>, the agent can run nothing on other targets.</td>
+</tr>
+</tbody>
+</table>
+<p>Good to know:</p>
+<ul>
+<li><strong>When MEHO asks.</strong> With the switch <code>observe</code> or <code>on</code>, <code>register</code>
+  needs a pick. A definition needs a pick only when its agent has no
+  grant yet. With the switch <code>off</code>, you may leave <code>--grants</code> out.</li>
+<li><strong><code>none</code> and <code>read-targets</code> limit the agent only with the switch
+  <code>on</code>.</strong> With <code>off</code> or <code>observe</code>, the agent can still run every <code>safe</code>
+  operation on every target, as in the table above.</li>
+<li><strong>No grant lets a change run alone.</strong> <code>read-everything</code> and
+  <code>read-targets</code> give <code>auto-execute</code>, but the ceiling in
+  <a href="#how-a-grant-works">How a grant works</a> still makes every <code>caution</code>,
+  <code>dangerous</code> and <code>destructive</code> call wait for a person.</li>
+<li><strong>The grants are normal grants.</strong> They show in
+  <code>meho agent grant list</code>, and you remove them with
+  <code>meho agent grant revoke</code> like any other grant. The audit row of the
+  creation names the set you picked.</li>
+<li><strong>Agents that existed before the upgrade</strong> got one "read everything"
+  grant, marked <code>meho:upgrade-read-everything</code> in the <code>CREATED_BY</code>
+  column. So they keep working when the switch goes <code>on</code>. Remove it to
+  narrow such an agent. See
+  <a href="../../install/upgrades/#version-specific-notes">Upgrades</a>.</li>
+</ul>
+<h3 id="example-an-agent-that-reads-two-systems">Example: an agent that reads two systems<a class="headerlink" href="#example-an-agent-that-reads-two-systems" title="Permanent link">&para;</a></h3>
+<p>Goal: <code>report-reader</code> reads <code>cluster-a</code> and <code>cluster-b</code>, and nothing
+else. This example assumes the switch is <code>on</code>.</p>
+<ol>
+<li>
+<p>Register the agent, and pick read access to the two targets:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>report-reader<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--grants<span class="w"> </span>read-targets<span class="w"> </span>--target<span class="w"> </span>cluster-a<span class="w"> </span>--target<span class="w"> </span>cluster-b
+</code></pre></div>
+<p>The output ends with the grants MEHO wrote, one for each target:</p>
+<div class="highlight"><pre><span></span><code>grants of agent:report-reader:
+  &lt;grant-id-1&gt;  op=* target=&lt;cluster-a-uuid&gt; verdict=auto-execute
+  &lt;grant-id-2&gt;  op=* target=&lt;cluster-b-uuid&gt; verdict=auto-execute
+</code></pre></div>
+<p>A name that matches no target, or more than one, stops the command,
+and MEHO creates nothing.</p>
+</li>
+<li>
+<p>Check the grants at any time:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>list<span class="w"> </span>--principal<span class="w"> </span>agent:report-reader<span class="w"> </span>--json<span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>jq<span class="w"> </span><span class="s1">'.grants[] | {op_pattern, target_scope, verdict}'</span>
+</code></pre></div>
+</li>
+<li>
+<p>Create the definition as in <a href="#step-4-create-the-definition">Step 4</a>,
+   with <code>--identity-ref agent:report-reader</code>. It needs no <code>--grants</code>:
+   the agent already has grants.</p>
+</li>
+<li>
+<p>What happens when the agent calls operations:</p>
+<table>
+<thead>
+<tr>
+<th>The agent calls</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>k8s.pod.list</code> (<code>safe</code>) on <code>cluster-a</code></td>
+<td>Runs at once.</td>
+</tr>
+<tr>
+<td><code>k8s.pod.list</code> (<code>safe</code>) on <code>cluster-c</code></td>
+<td>Refused with <code>agent_no_grant</code>. No grant covers <code>cluster-c</code>.</td>
+</tr>
+<tr>
+<td><code>k8s.scale</code> (<code>caution</code>) on <code>cluster-b</code></td>
+<td>Waits until a person approves. A grant never lets a change run alone.</td>
+</tr>
+</tbody>
+</table>
+</li>
+</ol>
+<p>To give the agent a third target later, add one more grant:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:report-reader<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--op<span class="w"> </span><span class="s1">'*'</span><span class="w"> </span>--target<span class="w"> </span>&lt;cluster-c-uuid&gt;<span class="w"> </span>--verdict<span class="w"> </span>auto-execute
+</code></pre></div>
 <h3 id="who-the-grants-apply-to">Who the grants apply to<a class="headerlink" href="#who-the-grants-apply-to" title="Permanent link">&para;</a></h3>
 <p>Grants belong to the agent principal (<code>agent:pod-reader</code>). They apply
 to every run of the agent:</p>
@@ -4004,7 +4202,9 @@ to every run of the agent:</p>
 </ul>
 <p>The safety-level table above applies to both kinds of run. With no
 grant, a <code>caution</code>, <code>dangerous</code> or <code>destructive</code> operation waits until a
-person approves, even when you may run it yourself.
+person approves, even when you may run it yourself. With the switch
+<code>AGENT_GRANT_REQUIRED</code> <code>on</code>, a call with no grant is refused in both
+kinds of run, also when you may run it yourself.
 See <a href="../approvals-and-break-glass/">Approvals and break-glass</a> for which
 calls wait for a second person.</p>
 <p>So the read-only recipe below works for both ways to start a run.
@@ -4047,7 +4247,8 @@ Step 6 shows both ways.</p>
 <li>If two matching grants are equally specific, the stricter verdict
    wins.</li>
 <li>If no grant matches, the safety-level default from the table above
-   applies.</li>
+   applies. With the switch <code>AGENT_GRANT_REQUIRED</code> <code>on</code>, the call is
+   refused instead (<code>agent_no_grant</code>).</li>
 <li>Last, MEHO applies a <strong>ceiling</strong>. A grant can never make an operation
    more open than this:</li>
 </ol>
@@ -4084,8 +4285,9 @@ these always wait for a person's approval. An agent never approves.</p>
 discovery tools (<code>meho_connector_list</code>, <code>list_operation_groups</code>,
 <code>search_operations</code>, <code>list_targets</code>) are not affected by grants.</p>
 <h3 id="recipe-a-read-only-agent-for-one-operation-on-one-target">Recipe: a read-only agent for one operation on one target<a class="headerlink" href="#recipe-a-read-only-agent-for-one-operation-on-one-target" title="Permanent link">&para;</a></h3>
-<p>Goal: <code>pod-reader</code> may run <code>k8s.pod.list</code> on <code>cluster-a</code>, without
-approval. Everything else is denied.</p>
+<p>Use this recipe to allow one operation only. Goal: <code>pod-reader</code> may run
+<code>k8s.pod.list</code> on <code>cluster-a</code>, without approval. Everything else is
+denied.</p>
 <p>First, find the target's UUID. It is the <code>id:</code> line:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>describe<span class="w"> </span>cluster-a
 </code></pre></div>
@@ -4107,6 +4309,9 @@ meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> <
 <li>Every other operation matches only <code>*</code>. The verdict is <code>deny</code>, even
   for <code>safe</code> reads.</li>
 </ul>
+<p>With the switch <code>on</code>, the second grant alone would be enough: no grant
+already means "refused". Keep the <code>deny</code> grant anyway. It keeps the agent
+read-only on one thing in every switch state.</p>
 <p>Check the grants:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>list<span class="w"> </span>--principal<span class="w"> </span>agent:pod-reader
 </code></pre></div>
@@ -4211,8 +4416,10 @@ agent's prompt when the trigger fires. Creating a trigger needs
   <a href="../scheduler/">scheduler guide</a> explains where to store it. Without
   it, the scheduler skips the fire and shows
   <code>last_skip_reason=credentials_unresolved</code>.</li>
-<li>The grants from Step 5 must exist. Otherwise the agent runs with the
-  safety-level defaults, which allow every <code>safe</code> operation.</li>
+<li>The grants from Step 5 must exist. Otherwise, with the switch <code>off</code>,
+  the agent runs with the safety-level defaults, which allow every <code>safe</code>
+  operation. With the switch <code>on</code>, every call is refused with
+  <code>agent_no_grant</code>.</li>
 </ul>
 <p>After the time passes, find the run and check it:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>scheduler<span class="w"> </span>list
@@ -4329,6 +4536,21 @@ window starts, or when you raise or clear the cap.</p>
 <td>A call is <code>denied</code></td>
 <td>A grant or the safety level denies it.</td>
 <td>Check <code>meho agent grant list --principal agent:&lt;name&gt;</code> and the operation's <code>safety_level</code>.</td>
+</tr>
+<tr>
+<td>A call is refused with <code>agent_no_grant</code></td>
+<td>The switch <code>AGENT_GRANT_REQUIRED</code> is <code>on</code>, and no grant of the agent covers this operation on this target.</td>
+<td>Add a grant with <code>meho agent grant create --principal agent:&lt;name&gt;</code>.</td>
+</tr>
+<tr>
+<td><code>agent-principal register</code> or <code>agent create</code> prints the three <code>--grants</code> choices and creates nothing</td>
+<td>The switch is <code>observe</code> or <code>on</code>, and you did not pick the agent's first grants.</td>
+<td>Run the command again with <code>--grants none</code>, <code>--grants read-everything</code>, or <code>--grants read-targets --target &lt;name&gt;</code>.</td>
+</tr>
+<tr>
+<td>An agent's multi-step call that waited for approval is refused when a person runs it</td>
+<td>The call started to wait while the switch was <code>off</code>, and the switch is <code>on</code> now. MEHO checks each step of such a call again before it runs, and it cannot check a call that started to wait while the switch was <code>off</code>.</td>
+<td>The agent asks again. Its new request is checked against its grants.</td>
 </tr>
 <tr>
 <td>A run you started by hand is denied an operation that you may run</td>

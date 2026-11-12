@@ -3879,8 +3879,9 @@ evidence, recommended action — into tenant memory
 <ul>
 <li>An <strong>enabled agent definition named <code>checks-investigator</code></strong> in your
   tenant (the name is configurable deploy-side). The
-  <a href="https://github.com/evoila/meho/tree/main/examples/r1-tiered-triage">tiered-triage example</a>
-  is the mould — read-only toolset, writes need approval.</li>
+  <a href="https://github.com/evoila/meho/tree/main/examples/checks-investigator">checks investigator example</a>
+  shows it: a read-only toolset, and an agent login registered with
+  <code>--grants read-everything</code>, so writes wait for approval.</li>
 <li>The agent runtime, which is <strong>experimental</strong> maturity — check the
   <a href="../../reference/maturity/">feature-maturity index</a> before leaning
   on it.</li>

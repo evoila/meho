@@ -260,15 +260,15 @@ func TestPrintEntrySummaryShowsActor(t *testing.T) {
 }
 
 // TestPrintEntrySummaryShowsVia — the summary names the login client
-// and the channel from the payload's "client" block, and shows "-" for
-// a row without one.
+// and the channel from the payload's "client" block, and prints no
+// "via:" line for a row without one.
 func TestPrintEntrySummaryShowsVia(t *testing.T) {
 	cases := []struct {
 		name    string
 		payload map[string]any
 		want    string
 	}{
-		{"no block", map[string]any{}, "via:               -"},
+		{"no block", map[string]any{}, ""},
 		{
 			"token",
 			map[string]any{"client": map[string]any{"azp": "meho-cli", "channel": "token"}},
@@ -284,7 +284,7 @@ func TestPrintEntrySummaryShowsVia(t *testing.T) {
 			map[string]any{"client": map[string]any{"azp": nil, "channel": "token"}},
 			"via:               unknown client (token)",
 		},
-		{"not an object", map[string]any{"client": "meho-cli"}, "via:               -"},
+		{"not an object", map[string]any{"client": "meho-cli"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -297,6 +297,12 @@ func TestPrintEntrySummaryShowsVia(t *testing.T) {
 				ResultStatus: "ok",
 				Payload:      tc.payload,
 			})
+			if tc.want == "" {
+				if strings.Contains(buf.String(), "via:") {
+					t.Errorf("summary has a via line for a row without a client block:\n%s", buf.String())
+				}
+				return
+			}
 			if !strings.Contains(buf.String(), tc.want+"\n") {
 				t.Errorf("summary missing %q in %s", tc.want, buf.String())
 			}

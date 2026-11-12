@@ -124,6 +124,7 @@ from meho_backplane.db.models import AgentPermission, PermissionVerdict
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "agent_grant_name",
     "agent_no_grant_log_scope",
     "resolve_verdict",
 ]
@@ -396,7 +397,7 @@ def _log_would_deny(
     )
 
 
-def _agent_name(operator: Operator) -> str:
+def agent_grant_name(operator: Operator) -> str:
     """The name a grant for *operator* is keyed on: ``agent:<name>`` when known."""
     if operator.client_id and operator.client_id.startswith("agent:"):
         return operator.client_id
@@ -424,7 +425,7 @@ def _no_grant_refusal(
     mode = get_settings().agent_grant_required
     if mode == "off":
         return None
-    agent = _agent_name(operator)
+    agent = agent_grant_name(operator)
     if mode == "observe":
         _log_would_deny(
             operator=operator,

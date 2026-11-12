@@ -136,7 +136,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       chart: ${{ steps.detect.outputs.chart }}
@@ -163,7 +163,8 @@ jobs:
   validate:
     name: Lint + template + kubeconform (PR build gate)
     # Fork-PR guard: fork PRs are skipped entirely (mirrors image.yml).
-    # The job runs on a GitHub-hosted runner: helm and kubeconform come from
+    # The job runs on a GitHub-hosted runner (own pool in the merge queue):
+    # helm and kubeconform come from
     # public releases. push events (main, v*) short-circuit the OR. The trailing `needs.changes.outputs.chart` clause skips this job
     # (→ reported Success) on PRs that don't touch the chart.
     needs: changes
@@ -171,7 +172,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.chart == 'true')
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -832,10 +833,10 @@ jobs:
     #      tripped Docker Hub's rate-limit on this repo's other CI
     #      lanes -- pre-loading sidesteps it.
     #
-    # Runs on ``ubuntu-latest`` (NOT ``meho-runners-ci``) because kind
-    # needs Docker-in-Docker support that the self-hosted runner
-    # pool isn't configured for; the GitHub-hosted runners ship
-    # Docker pre-installed and helm/kind-action works out of the box.
+    # Runs on ``ubuntu-latest`` for pull requests (they may come from a
+    # fork, and kind needs Docker). In the merge queue it runs on
+    # ``meho-runners-ci-heavy-queue``: that pool has a Docker-in-Docker
+    # sidecar and a hosted runner may not be free (#6325).
     #
     # #4099 -- ``helm install`` and ``helm test`` run as a namespace
     # admin (``--kube-as-user``), not as kind's cluster admin, so a chart
@@ -850,7 +851,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.chart == 'true')
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue' || 'ubuntu-latest' }}
     # 30 minutes: the update and rollback proofs of #5024 start the
     # backplane pod three more times.
     timeout-minutes: 30
@@ -1626,7 +1627,7 @@ jobs:
     # jobs run at the same time, so neither job needs more time.
     #
     # Same conditions as `helm-test`: the `changes` filter and the fork guard
-    # in the `if:` below, `ubuntu-latest` for kind, and `helm install` and
+    # in the `if:` below, `ubuntu-latest` for kind (own heavy queue pool in the merge queue), and `helm install` and
     # `helm test` as the namespace admin of #4099. The `if:` skips this job
     # on a PR that does not touch the chart, and a skipped job reports
     # Success. The required `helm-test-gate` needs this job too, so a broken
@@ -1639,7 +1640,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.chart == 'true')
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -2651,7 +2652,7 @@ jobs:
     # there. The gate skips too, so it does not fail on the skipped `changes`.
     if: always() && github.event_name != 'workflow_dispatch'
     needs: [changes, validate, helm-test, helm-test-byo, upgrade-from-release]
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Evaluate gate

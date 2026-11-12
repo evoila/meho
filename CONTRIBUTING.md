@@ -65,7 +65,7 @@ index.
 | --- | --- | --- |
 | Backplane | Python 3.14 + FastAPI | [`backend/README.md`](./backend/README.md) — `uv sync`, pytest layout |
 | Helm chart | YAML + Helm 3 | [`deploy/charts/meho/`](./deploy/charts/meho/) — `helm template`, `helm lint`; [`deploy/values-examples/README.md`](./deploy/values-examples/README.md) covers the install flow |
-| Operator CLI | Go 1.26.10+ | [`cli/README.md`](./cli/README.md) — `go build`, oapi-codegen wiring, `meho version` smoke |
+| Operator CLI | Go (version in `cli/go.mod`) | [`cli/README.md`](./cli/README.md) — `go build`, oapi-codegen wiring, `meho version` smoke |
 
 To exercise the full deploy contract on your laptop, follow the
 **Deploy → Local (kind, ~5 min)** section in [`README.md`](./README.md).

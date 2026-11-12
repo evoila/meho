@@ -1264,7 +1264,7 @@ add-on-family gate.
 | `meho_runbook_abort` | operator | — | Abort an in-progress runbook run. |
 | `meho_runbook_list_runs` | operator | — | List runbook runs (operators see only their own). |
 | `meho_runbook_list_templates` | operator | — | List runbook templates in the tenant. |
-| `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). |
+| `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). Optional `retry` runs a failed step's check again. |
 | `meho_runbook_show_template` | operator | — | Read a runbook template's full body. |
 | `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
 | `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). Since #5239 also the person's tenants with the role in each (`operator.tenants`); it is the one tool a session without a current tenant may call. Since #5504 also the server's time now in UTC (`server_time`, ISO 8601 to the second, for example `2026-10-31T14:34:28Z`), so an agent with no shell can write down a correct time. |
@@ -1325,7 +1325,7 @@ session (on top of the Role + Extra-gate columns).
 | `meho_runbook_publish_template` | tenant_admin | — | Publish a draft template. |
 | `meho_runbook_reassign` | tenant_admin | — | Reassign an in-progress run to another operator. |
 | `meho_scheduler_cancel` | tenant_admin | — | Cancel a scheduled trigger by id. |
-| `meho_scheduler_create` | tenant_admin | — | Create a scheduled trigger (cron / one-off / event). |
+| `meho_scheduler_create` | tenant_admin | — | Create a scheduled trigger (cron / one-off / event). While `CHECKS_AGENT_EVENTS` is on, an event trigger can take `check_source` (a Sensor or a Dashboard, optionally only when it gets worse) instead of `event_filter`; while it is off, the tool shows and accepts no `check_source`. |
 | `meho_scheduler_list` | operator | — | List scheduled triggers. |
 | `meho_sensor_create` | tenant_admin | — | Create a sensor (op + assertion + cadence + severity). |
 | `meho_sensor_delete` | tenant_admin | — | Hard-delete a sensor by id. |
@@ -1689,6 +1689,51 @@ Two switches take text away while they are off:
 A third switch works the other way: `MCP_SHORT_TOOL_TEXTS` (off by
 default) gives the biggest tools a short text while it is on. One session
 can also ask for these texts. See "Short tool texts" below.
+
+A fourth switch adds an input while it is on: `MCP_REVEAL_FETCH` (off by
+default). With it on, `call_operation` has the input
+`approval_request_id` and a paragraph about it, added after the short
+text, so both switches can be on. With it off, the tool is the registered
+one and a call that sends the input is refused with `-32602`. See "Getting
+an approved secret value on MCP" below.
+
+## Getting an approved secret value on MCP (`MCP_REVEAL_FETCH`, off by default)
+
+A call with `reveal_secret: true` on a secret read waits for a second
+person's approval, and the approval runs nothing. The person who asked
+then fetches the value once, within 15 minutes of the approval
+([approvals.md](approvals.md#an-approved-secret-reveal-runs-when-the-person-who-asked-fetches-it)).
+On MCP that person calls:
+
+```
+call_operation(connector_id, op_id, approval_request_id)
+```
+
+- The code is in `mcp/tools/_call_operation_reveal.py`. The
+  `call_operation` handler hands the call over when it has
+  `approval_request_id`; it writes no call record.
+- Only `connector_id`, `op_id` and `approval_request_id` may be sent.
+  Any other input is refused with `-32602` (`reveal_fetch_extra_inputs`):
+  what runs is the stored request, never new params.
+- `connector_id` and `op_id` must be the ones of the request
+  (`reveal_wrong_operation`). An agent is refused
+  (`reveal_agent_refused`). These checks run before the fetch, so a
+  refused call does not use up the one-time permission.
+- The rest is `fetch_approved_reveal`: the same person and tenant
+  (`not_request_owner`, `approval_request_not_found`), once
+  (`reveal_already_used`), within the time limit (`reveal_window_passed`).
+- A refused fetch answers `status: "denied"` (`isError: true`) with
+  `extras.error_code` and `extras.approval_request_id`. Nothing ran.
+- When the answer holds the value, it is marked
+  (`no_store.mark_answer_holds_secret`; also for an operation that makes
+  a new credential), and the `/mcp` route sends it
+  with `Cache-Control: no-store` and `Pragma: no-cache`
+  (`no_store.answer_scope`). A run that was refused or ended with an
+  error holds no value and keeps the usual headers.
+- With the switch off, a person who works through MCP gets the value on
+  the command line (`meho secret read --approval <id> --field <name>`), in
+  the console ("Show value") or with `POST /api/v1/approvals/{id}/reveal`.
+- Tests: `tests/test_mcp_reveal_fetch.py`.
 
 ## Short tool texts (`MCP_SHORT_TOOL_TEXTS`, off by default)
 

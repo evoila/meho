@@ -103,6 +103,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.operations.governed_subops import governed_subops_for
 from meho_backplane.settings import get_settings
 
 _log = structlog.get_logger(__name__)
@@ -544,17 +545,20 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
     return False
 
 
-def _covered_by_approved_run(*, safety_level: str, requires_approval: bool) -> bool:
+def _covered_by_approved_run(
+    *, safety_level: str, requires_approval: bool, always_wait: bool = False
+) -> bool:
     """True when a person's approval of this run covers this waiting step (#3980).
 
     The run is approved when the dispatcher runs it with ``_approved=True``
     (:data:`approved_run_var`) or when it is the re-entry of an approved step
     (:data:`composite_resume_scope_var`). Such an approval covers every other
-    internal step, except a ``destructive`` step and a step marked
-    ``requires_approval``: those keep their own approval, or end with
+    internal step, except a ``destructive`` step, a step marked
+    ``requires_approval`` and a step a classification entry makes always
+    wait: those keep their own approval, or end with
     ``composite_resume_multi_gate_unsupported`` during a resume.
     """
-    if safety_level == "destructive" or requires_approval:
+    if safety_level == "destructive" or requires_approval or always_wait:
         return False
     return approved_run_var.get() or composite_resume_scope_var.get() is not None
 
@@ -596,6 +600,28 @@ def _resume_parent_for_current_composite(
 # (#3351) and the #294 proposed_effect stamping + destructive-tier refusal,
 # alongside the earlier `connector_id=connector_id` grant pass-through, and
 # the #4217 resume-state checks.
+def _warn_if_step_not_declared(step_op_id: str) -> None:
+    """Log one warning when a composite checks a step its list does not have (#6298).
+
+    The up-front step check of an agent call reads that list
+    (:mod:`~meho_backplane.operations.governed_subops`), so a step that is
+    not on it is not checked before the call starts. The step gate below
+    still checks it; this only makes the gap visible.
+    """
+    composite_ctx = composite_dispatch_var.get()
+    if composite_ctx is None:
+        return
+    composite_op_id = composite_ctx[0]
+    surface = governed_subops_for(composite_op_id)
+    if surface is not None and step_op_id in surface.sub_op_ids:
+        return
+    _log.warning(
+        "composite_step_not_declared",
+        composite_op_id=composite_op_id,
+        step_op_id=step_op_id,
+    )
+
+
 async def enforce_subop_policy(
     *,
     operator: Operator,
@@ -706,8 +732,10 @@ async def enforce_subop_policy(
         _destructive_binding_refusal,
         _preflight_denied_refusal,
     )
+    from meho_backplane.operations.op_policy import apply_step_classification
 
     started = time.monotonic()
+    _warn_if_step_not_declared(op_id)
     product, version, impl_id = parse_connector_id(connector_id)
     # The hash this step's audit rows carry (secret-named values left out).
     # A parked step stores the full approval hash instead (below).
@@ -766,6 +794,10 @@ async def enforce_subop_policy(
         requires_approval=requires_approval,
         parameter_schema={},
     )
+    # A classification entry can raise the step's level or make it always
+    # wait, the same as for a called operation. Only the step's group key is
+    # read from a stored row; the step runs without one.
+    await apply_step_classification(tenant_id=operator.tenant_id, step=descriptor)
 
     # #4622: the step's params reach the gate so a delete grant (sandbox
     # mode) can store the step's proposed effect on its grant-use row. No
@@ -782,7 +814,9 @@ async def enforce_subop_policy(
     # #3980: a person approved this run, so a step that would only wait goes
     # ahead. A ``deny`` stays a deny.
     if verdict is PermissionVerdict.NEEDS_APPROVAL and _covered_by_approved_run(
-        safety_level=safety_level, requires_approval=requires_approval
+        safety_level=descriptor.safety_level,
+        requires_approval=descriptor.requires_approval,
+        always_wait=descriptor.policy_always_wait,
     ):
         _log.info("composite_subop_covered_by_approved_run", op_id=op_id)
         return None

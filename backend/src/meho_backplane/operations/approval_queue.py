@@ -1430,7 +1430,14 @@ class ResumeRequester(NamedTuple):
     #: The requester's ``client`` block from the stored effect
     #: (AUDIT_CLIENT_IDENTITY). ``None`` when the request has none.
     client: dict[str, Any] | None = None
+    #: The requester record on the card (``permission_preflight["requester"]``),
+    #: so a re-park keeps it (#6314). ``None`` when the card has none.
+    subject: dict[str, Any] | None = None
 
+
+#: Where the card keeps the requester record (#3898, #6314).
+_PERMISSION_PREFLIGHT_KEY = "permission_preflight"
+_REQUESTER_KEY = "requester"
 
 #: The requester of the approval request whose composite is being re-run
 #: (#4217). Bound by :func:`composite_resume_binding` on both resume paths
@@ -1592,6 +1599,7 @@ async def create_pending_request(
         client = build_client_block(operator) if requester is None else requester.client
         if client is not None:
             proposed_effect = {**proposed_effect, CLIENT_PAYLOAD_KEY: client}
+    proposed_effect = _with_requester_record(proposed_effect, operator, requester)
 
     # RFC 8693 ``act`` (#1481): the agent principal acting on the human
     # subject's behalf on a delegated run, read from the same
@@ -2933,15 +2941,42 @@ async def _refuse_resume_params_unavailable(
 
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:
-    """The requester saved on *request* (#4217), with the requester's ``client`` block."""
-    client = (request.proposed_effect or {}).get(CLIENT_PAYLOAD_KEY)
+    """The requester saved on *request* (#4217), with its ``client`` block and record."""
+    effect = request.proposed_effect or {}
+    client = effect.get(CLIENT_PAYLOAD_KEY)
+    preflight = effect.get(_PERMISSION_PREFLIGHT_KEY)
+    subject = preflight.get(_REQUESTER_KEY) if isinstance(preflight, dict) else None
     return ResumeRequester(
         request.principal_sub,
         request.principal_act,
         request.principal_name,
         request.principal_kind,
         client if isinstance(client, dict) else None,
+        subject if isinstance(subject, dict) else None,
     )
+
+
+def _with_requester_record(
+    proposed_effect: dict[str, Any], operator: Operator, requester: ResumeRequester | None
+) -> dict[str, Any]:
+    """Put the agent requester's record on the card (#6314), when there is one.
+
+    An approvals surface runs the approved call as the person who approved
+    it. It rebuilds the agent from this record to check the agent's grants
+    for the steps again
+    (:func:`~meho_backplane.operations.approved_step_check.approved_step_refusal`).
+    A re-park on behalf of an earlier requester keeps that requester's
+    record. A record the operation's own preflight stored stays.
+    """
+    from meho_backplane.operations.approved_step_check import requester_record
+
+    record = requester_record(operator) if requester is None else requester.subject
+    if record is None:
+        return proposed_effect
+    preflight = proposed_effect.get(_PERMISSION_PREFLIGHT_KEY)
+    preflight = dict(preflight) if isinstance(preflight, dict) else {}
+    preflight.setdefault(_REQUESTER_KEY, record)
+    return {**proposed_effect, _PERMISSION_PREFLIGHT_KEY: preflight}
 
 
 @contextmanager
@@ -3727,6 +3762,13 @@ def _check_approver_role_floor(operator: Operator, request: ApprovalRequest) -> 
         )
 
 
+def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:
+    """Compare the policy evaluator with today's answer, when ``POLICY_ENGINE_SHADOW`` is on."""
+    from meho_backplane.policy.shadow import shadow_approval
+
+    shadow_approval(operator, request, today=today)
+
+
 async def _load_pending_for_approval(
     session: AsyncSession,
     request_id: uuid.UUID,
@@ -3760,8 +3802,13 @@ async def _load_pending_for_approval(
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
     if _deadline_has_passed(request, _now(), _resolve_default_ttl()):
         raise ApprovalRequestExpiredError(request_id)
-    rule = _check_approver_group(operator, request)
-    _check_approver_role_floor(operator, request)
+    try:
+        rule = _check_approver_group(operator, request)
+        _check_approver_role_floor(operator, request)
+    except (UnauthorizedApprovalError, SelfApprovalForbiddenError):
+        _shadow_approval(operator, request, today=False)
+        raise
+    _shadow_approval(operator, request, today=True)
     if params is not None and not params_hash_matches(params, request.params_hash):
         raise ParamsMismatchError(request_id)
     _check_destructive_preview_binding(request)

@@ -190,11 +190,13 @@ meho agent create <name> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--disabled` — create the definition parked (enabled=false; default is enabled)
+- `--grants` — the agent's first grants: none, read-everything or read-targets. none: the agent runs nothing until an admin adds a grant. read-everything: safe operations run at once on every target; everything else waits for a person's approval. read-targets: the same, only on the targets you name with --target
 - `--identity-ref` — reference to the agent principal whose permissions bound the toolset
 - `--json` — emit raw AgentDefinitionRead JSON instead of the human summary
 - `--model-tier` — logical model tier: standard | fast | deep
 - `--output-schema` — optional structured-output JSON Schema as a JSON object: inline JSON, @<path>, or @-
 - `--system-prompt` — the agent's standing rules, the same for every run; the task for one run goes in the --input flag of meho agent run (guide: https://evoila.github.io/meho/latest/guides/hosted-agents/)
+- `--target` — a target name for --grants read-targets; repeat the flag for more targets
 - `--toolset` — allowed-tools spec as a JSON object: inline JSON, @<path>, or @- (default {}); fields and tool names: https://evoila.github.io/meho/latest/guides/hosted-agents/
 - `--turn-budget` — max model turns the runtime allows (1..1000)
 
@@ -425,8 +427,10 @@ meho agent-principal register <name> [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--grants` — the agent's first grants: none, read-everything or read-targets. none: the agent runs nothing until an admin adds a grant. read-everything: safe operations run at once on every target; everything else waits for a person's approval. read-targets: the same, only on the targets you name with --target
 - `--json` — emit raw AgentPrincipalRead JSON instead of the human summary
 - `--owner-sub` — OIDC sub of the kill-switch owner (defaults to the caller's sub)
+- `--target` — a target name for --grants read-targets; repeat the flag for more targets
 
 ### `meho agent-principal revoke`
 

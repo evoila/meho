@@ -184,10 +184,30 @@ Rules:
   `not-chosen` when no set was picked) and, for `read-targets`,
   `starting_grant_targets` (the names as sent).
 
-Surfaces: `POST /api/v1/agent-principals`, `POST /api/v1/agents`, and
-the admin MCP tools `meho_agent_principals_register` and
-`meho_agents_create`. The CLI flags and the console pick come later
-(#6192).
+Surfaces: `POST /api/v1/agent-principals`, `POST /api/v1/agents`, the
+admin MCP tools `meho_agent_principals_register` and
+`meho_agents_create`, the CLI and the console.
+
+CLI (`cli/internal/startinggrants/`, #6192): `meho agent-principal
+register` and `meho agent create` take `--grants
+none|read-everything|read-targets` and `--target <name>` (repeat it for
+more targets). The CLI refuses `--target` without `--grants
+read-targets`, and `read-targets` without a `--target`. Without
+`--grants` it sends no pick; when MEHO then answers 422
+`starting_grants_required`, the CLI prints the three choices and stops.
+With `--grants`, it reads the agent's grants after the create (every
+page of `GET /api/v1/agents/grants?principal_sub=`) and shows them;
+`--json` adds them as `grants`. If that read fails, `grants` is `null`
+and `grants_error` says why.
+
+Console (`ui/routes/agents/starting_grants.py`, #6192): the register
+form and the create-agent form show the three choices as radio buttons,
+none selected at first, and the tenant's targets as checkboxes for
+`read-targets`. While the switch is not `off` the choice is required in
+the form. A missing or wrong pick, or a target name that does not
+resolve, shows the service's text next to the field. After a pick that
+writes grants, the console opens `/ui/agents/grants?principal_sub=<the
+agent>`.
 
 The two MCP tools show the `starting_grants` input and the sentence about
 it only while `AGENT_GRANT_REQUIRED` is `observe` or `on`

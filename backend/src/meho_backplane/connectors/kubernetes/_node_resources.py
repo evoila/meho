@@ -117,11 +117,12 @@ def _parse(text: Any) -> Decimal:
         raise ValueError("unreadable quantity") from exc
 
 
-def _request(container: Any, resource: str) -> Decimal:
-    resources = getattr(container, "resources", None)
+def _request(owner: Any, resource: str) -> Decimal | None:
+    """The request of a container or a pod spec; ``None`` when it sets none."""
+    resources = getattr(owner, "resources", None)
     requests = (getattr(resources, "requests", None) if resources else None) or {}
     value = requests.get(resource)
-    return _parse(value) if value is not None else Decimal(0)
+    return _parse(value) if value is not None else None
 
 
 def _is_sidecar(container: Any) -> bool:
@@ -129,25 +130,35 @@ def _is_sidecar(container: Any) -> bool:
 
 
 def _pod_request(pod: Any, resource: str) -> Decimal:
-    """What the scheduler reserves for one pod: containers, sidecars, init peak, overhead."""
+    """What the scheduler reserves for one pod, plus the pod overhead.
+
+    A pod-level request (``spec.resources.requests``) replaces the sum of the
+    containers for that resource. Else it is the containers and sidecars, or
+    the init peak when that is higher.
+    """
     spec = pod.spec
+    pod_level = _request(spec, resource)
+    total = pod_level if pod_level is not None else _containers_request(spec, resource)
+    overhead = getattr(spec, "overhead", None) or {}
+    if overhead.get(resource) is not None:
+        total += _parse(overhead[resource])
+    return total
+
+
+def _containers_request(spec: Any, resource: str) -> Decimal:
     containers = spec.containers or []
     inits = spec.init_containers or []
-    running = sum((_request(c, resource) for c in containers), Decimal(0))
+    running = sum((_request(c, resource) or Decimal(0) for c in containers), Decimal(0))
     sidecars = Decimal(0)
     init_peak = Decimal(0)
     for init in inits:
-        value = _request(init, resource)
+        value = _request(init, resource) or Decimal(0)
         if _is_sidecar(init):
             sidecars += value
             running += value
         else:
             init_peak = max(init_peak, sidecars + value)
-    total = max(running, init_peak)
-    overhead = getattr(spec, "overhead", None) or {}
-    if overhead.get(resource) is not None:
-        total += _parse(overhead[resource])
-    return total
+    return max(running, init_peak)
 
 
 def pod_requests_by_node(pods: list[Any]) -> dict[str, dict[str, int] | None]:

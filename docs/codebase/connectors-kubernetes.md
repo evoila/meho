@@ -1709,7 +1709,10 @@ How `requested` is built (`_node_resources.py`):
    scheduler does.
 3. Each pod counts as the scheduler counts it: the sum of its containers
    and sidecars (init containers with `restartPolicy: Always`), or the peak
-   of the init containers when that is higher, plus the pod overhead.
+   of the init containers when that is higher, plus the pod overhead. A
+   pod-level request (`spec.resources.requests` of the pod, for cpu or
+   memory) takes the place of that container sum for its resource; the
+   overhead is still added.
 4. A container without a request counts as zero. CPU is rounded up to whole
    millicores.
 

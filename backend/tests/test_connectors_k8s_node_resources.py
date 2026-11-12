@@ -46,11 +46,16 @@ def _pod(
     phase: str = "Running",
     inits: list[V1Container] | None = None,
     overhead: dict[str, str] | None = None,
+    pod_requests: dict[str, str] | None = None,
 ) -> V1Pod:
     return V1Pod(
         metadata=V1ObjectMeta(name="p"),
         spec=V1PodSpec(
-            node_name=node, containers=containers, init_containers=inits, overhead=overhead
+            node_name=node,
+            containers=containers,
+            init_containers=inits,
+            overhead=overhead,
+            resources=V1ResourceRequirements(requests=pod_requests) if pod_requests else None,
         ),
         status=V1PodStatus(phase=phase),
     )
@@ -125,6 +130,36 @@ def test_requests_init_peak_sidecar_and_overhead() -> None:
         "memory_bytes": (100 + 1024) * 2**20 + 10 * 2**20,
         "pods": 1,
     }
+
+
+def test_pod_level_requests_with_no_container_requests() -> None:
+    pod = _pod("n1", [_container(None, None)], pod_requests={"cpu": "2", "memory": "1Gi"})
+    assert pod_requests_by_node([pod])["n1"] == {
+        "cpu_millicores": 2000,
+        "memory_bytes": 2**30,
+        "pods": 1,
+    }
+
+
+def test_pod_level_request_replaces_the_container_sum_per_resource() -> None:
+    # Pod-level cpu is smaller than the containers and still wins. Memory is not
+    # set at pod level, so it stays the container sum. Overhead is added after.
+    pod = _pod(
+        "n1",
+        [_container("3", "512Mi"), _container("1", "512Mi")],
+        pod_requests={"cpu": "1500m"},
+        overhead={"cpu": "10m", "memory": "1Mi"},
+    )
+    assert pod_requests_by_node([pod])["n1"] == {
+        "cpu_millicores": 1500 + 10,
+        "memory_bytes": 1024 * 2**20 + 2**20,
+        "pods": 1,
+    }
+
+
+def test_unreadable_pod_level_request_makes_the_node_unknown() -> None:
+    pod = _pod("n1", [_container("1", "1Gi")], pod_requests={"memory": "much"})
+    assert pod_requests_by_node([pod]) == {"n1": None}
 
 
 def test_unreadable_quantity_makes_the_node_unknown_not_zero() -> None:

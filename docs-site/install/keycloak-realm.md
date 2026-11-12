@@ -279,7 +279,11 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_flow \
   and the account. Give the account the role, then run it again.
 - The account lacks `manage-clients`: the call still waits for approval.
   A Keycloak permission to manage only `meho-cli-approve` gives the same
-  right, and MEHO cannot see it. The approval card says so.
+  right, and MEHO cannot see it. The approval card says so. When Keycloak
+  then refuses to change the client, the error names the flow MEHO made.
+  The flow stays; run the operation again after the fix.
+- To find the client, the account needs one of the roles `query-clients`,
+  `view-clients` or `manage-clients`. The approval card lists them.
 
 MEHO reads the client back after the change. `browser_flow_id` in the
 result is the flow the client now uses. Its other settings stay as they

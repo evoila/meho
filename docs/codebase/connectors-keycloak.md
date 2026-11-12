@@ -835,12 +835,19 @@ fails with HTTP 403 at its first write, after a person approved it. So each
 | `keycloak.authflow.ensure_approval_flow` | `manage-realm` (the flow), `manage-clients` (the client binding) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `manage-realm` (the flow copy and the realm's browser flow) |
 
+`ensure_approval_flow` also finds the client first. Keycloak lets any one
+of `query-clients`, `view-clients` or `manage-clients` do that. The card
+lists them as `client_lookup_needs_one_of`.
+
 The admin client is `realm-management` when the account signs in to the
-managed realm, and `<realm>-realm` when it signs in to `master`. Keycloak
-decides an Admin REST API call from the roles in the caller's access token.
-So the check reads `resource_access.<admin client>.roles` of the connector's
-own admin token. It needs no extra request and no extra right. The token is
-never shown or stored.
+managed realm, and `<realm>-realm` when it signs in to `master`. The admin
+roles of the account are in the connector's own admin token, and Keycloak
+checks an Admin REST API call mainly with these roles. So the check reads
+`resource_access.<admin client>.roles` of that token. It needs no extra
+request and no extra right. The token is never shown or stored. When the
+token has `resource_access` but no entry for the admin client, the roles
+count as not checked, not as "no roles". The card and the check of one
+request share one read, so a wrong password makes one failed sign-in.
 
 - **`manage-realm` is missing:** the permission preflight sets `will_be_denied`.
   MEHO refuses the call before an approval request exists
@@ -853,16 +860,29 @@ never shown or stored.
   (`register_rights_check(..., per_object=...)`). The card says the
   account lacks the role and MEHO could not check that permission.
 - **The roles cannot be read** (the token is not a JWT, it has no
-  `resource_access` claim, as with a lightweight access token, or the
-  account signs in to a third realm): the call still waits for approval.
-  The card says "MEHO could not check the rights of the target's account".
+  `resource_access` claim or no entry for the admin client, as with a
+  lightweight access token, or the account signs in to a third realm): the
+  call still waits for approval. The card says "MEHO could not check the
+  rights of the target's account".
 - **A 403 at the run:** the op stops with `KeycloakMissingRightsError`
   (`http_status` 403). `extras.remediation` names the roles the op needs,
   the admin client and the account, and the missing roles when they could
   be read.
+- **A 403 when `ensure_approval_flow` binds the client** (the account has
+  `manage-realm` but may not change the client): the run stops half-way.
+  The error says what the run changed: the flow alias, its id and
+  `flow_created`. The flow stays in the realm; a second run after the fix
+  finds it and only binds it.
+
+After a refusal (before the wait, or a 403 at the run), MEHO drops the
+admin token it keeps, so the next call signs in again. The next step also
+says that Keycloak can keep the old roles in MEHO's sign-in token for a few
+minutes.
 
 The approval card of both ops lists the roles (`roles_needed`) and the
-result of the check (`rights_check`).
+result of the check (`rights_check`). A preview (`preview_operation`) does
+not talk to Keycloak; its card says "MEHO checks the rights of the target's
+account when the call is made."
 
 ### Login setup reads (`ops_flow_reads.py`)
 
@@ -969,7 +989,7 @@ use:
 | `keycloak.client.delete` | `{blast_radius}` — client id, enabled or not, public or confidential; its service-account user as a child; never the secret |
 | `keycloak.realm.delete` | `{blast_radius}` — realm, enabled or not, user / client / group counts; never the realm body |
 | `keycloak.user.check_login` | `{resource, username, realm, client_id, password_source, password_secret_ref[, password_secret_mount, password_secret_key]}` (registered in `ops_login_check.py`) |
-| `keycloak.authflow.ensure_approval_flow` | `{resource, realm, flow, client_id, roles_needed, rights_check}` (registered in `ops_authflow.py`) |
+| `keycloak.authflow.ensure_approval_flow` | `{resource, realm, flow, client_id, client_lookup_needs_one_of, roles_needed, rights_check}` (registered in `ops_authflow.py`) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back, roles_needed, rights_check}` (registered in `ops_authflow_passkey.py`) |
 | `keycloak.realm.update` | `{resource, realm, representation[, smtp_password_source, smtp_password_secret_ref]}` (registered in `ops_write_realm_smtp.py`) |
 

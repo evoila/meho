@@ -18,7 +18,10 @@ What is proven, for each op:
   roles;
 * an account with the roles waits for approval as before; the card lists
   the roles;
-* the admin token never reaches the card or the result.
+* the admin token never reaches the card or the result;
+* the card and the check of one request share one read of the roles;
+* after a refusal, MEHO drops the admin token it keeps;
+* a preview that does not talk to Keycloak says the check runs at the call.
 """
 
 from __future__ import annotations
@@ -37,10 +40,12 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_authflow_rights import (
     NO_RIGHTS_CHECK,
+    RIGHTS_CHECKED_AT_CALL,
     AccountRights,
     _admin_client,
     _claims,
     _client_roles,
+    read_account_rights,
     rights_text,
 )
 from meho_backplane.connectors.keycloak.session import (
@@ -53,6 +58,7 @@ from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
@@ -228,6 +234,9 @@ async def test_account_without_manage_realm_is_refused_before_any_approval_reque
     assert await _approval_count() == 0
     assert admin.call_count == 0
     assert token not in json.dumps(result)
+    assert "try again after that" in result["error"]
+    # The kept admin token is dropped, so the next call signs in again.
+    assert kc._admin_tokens == {}
 
 
 async def test_flow_op_without_manage_clients_still_waits(kc: KeycloakConnector) -> None:
@@ -308,6 +317,8 @@ async def test_403_at_the_run_names_the_roles(kc: KeycloakConnector, op_id: str)
         assert role in extras["remediation"]
     assert op_id in extras["remediation"]
     assert _ADMIN_CLIENT in extras["remediation"]
+    assert "try again after that" in extras["remediation"]
+    assert kc._admin_tokens == {}
 
 
 async def test_403_at_the_run_names_the_missing_role_and_account(
@@ -365,6 +376,62 @@ async def test_flow_op_card_names_the_client(kc: KeycloakConnector) -> None:
     card = (await _effect(result))["preview"]
     assert card["client_id"] == "meho-cli-approve"
     assert card["flow"] == "meho approval sign-in"
+    assert card["client_lookup_needs_one_of"] == [
+        "query-clients",
+        "view-clients",
+        "manage-clients",
+    ]
+
+
+async def test_wrong_password_makes_one_failed_sign_in(kc: KeycloakConnector) -> None:
+    # The card and the check share one read, so one sign-in, not two.
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        sign_in = mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
+            401, json={"error": "invalid_client"}
+        )
+        result = await _dispatch(_FLOW_OP)
+    assert result["status"] == "awaiting_approval", result
+    assert sign_in.call_count == 1
+    assert (await _effect(result))["preview"]["rights_check"] == NO_RIGHTS_CHECK
+
+
+@pytest.mark.parametrize("op_id", _OPS)
+async def test_preview_says_the_check_runs_at_the_call(kc: KeycloakConnector, op_id: str) -> None:
+    async with get_sessionmaker()() as session:
+        target = await resolve_target(session, _TENANT_ID, _TARGET_NAME)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        sign_in = mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
+            200, json={"access_token": _token_with([]), "expires_in": 300}
+        )
+        preview = await preview_dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=op_id,
+            target=target,
+            params={},
+        )
+    assert preview["status"] == "ok", preview
+    card = preview["proposed_effect"]["preview"]
+    assert card["rights_check"] == RIGHTS_CHECKED_AT_CALL
+    assert card["roles_needed"] == _ROLES[op_id]
+    assert sign_in.call_count == 0
+
+
+async def test_read_account_rights_never_raises(
+    kc: KeycloakConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(_target: Any) -> Any:
+        raise RuntimeError("bad realm settings")
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors.keycloak.ops_authflow_rights.resolve_realm_config", broken
+    )
+    async with get_sessionmaker()() as session:
+        target = await resolve_target(session, _TENANT_ID, _TARGET_NAME)
+    rights = await read_account_rights(kc, _operator(), target)
+    assert rights == AccountRights(account=None, admin_realm=None, client=None, roles=None)
+    text = rights_text(_PASSKEY_OP, ("manage-realm",), rights)
+    assert "needs the role(s) manage-realm for this realm on the account of the target." in text
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +454,9 @@ def test_admin_client(admin_realm: str, managed_realm: str, client: str | None) 
 
 def test_client_roles_edge_cases() -> None:
     assert _client_roles({}, "realm-management") is None
-    assert _client_roles({"resource_access": {}}, "realm-management") == frozenset()
+    # No entry for the admin client: not checked, not "no roles".
+    assert _client_roles({"resource_access": {}}, "realm-management") is None
+    assert _client_roles({"resource_access": {"account": {}}}, "realm-management") is None
     assert _client_roles({"resource_access": {"realm-management": {}}}, "realm-management") is None
     assert _client_roles(
         {"resource_access": {"realm-management": {"roles": ["manage-realm", 7]}}},

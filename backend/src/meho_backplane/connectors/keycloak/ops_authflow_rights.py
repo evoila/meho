@@ -18,14 +18,21 @@ with HTTP 403 at its first write. So each of these ops registers, with
 * :func:`names_missing_rights` on the handler: a 403 at the run still stops
   with the same text.
 
-Where the roles come from. Keycloak decides the rights of an Admin REST API
-call from the roles in the caller's access token (``MgmtPermissions`` builds
-a ``KeycloakIdentity`` from the token; ``hasOneAdminRole`` reads the client
-roles of the admin client). The admin client is ``realm-management`` when
-the account signs in to the managed realm itself, and ``<realm>-realm`` when
-it signs in to ``master``. So the check reads ``resource_access.<admin
-client>.roles`` of the connector's own admin token: no extra request and no
-extra right. The token is only read here; it is never shown or stored.
+Where the roles come from. The admin roles of the account are in the
+connector's own admin token, as ``resource_access.<admin client>.roles``.
+The admin client is ``realm-management`` when the account signs in to the
+managed realm itself, and ``<realm>-realm`` when it signs in to ``master``.
+Keycloak checks the rights of an Admin REST API call mainly with these
+roles, so the check reads them: no extra request and no extra right. The
+token is only read here; it is never shown or stored. When the token has
+``resource_access`` but no entry for the admin client, MEHO does not take
+that as "no roles": the roles count as not checked. The card and the check
+of one request share one read, so a wrong password makes one failed
+sign-in, not two.
+
+After a refusal (before the wait, or a 403 at the run), MEHO drops the
+admin token it keeps, so the next call signs in again and gets the roles
+as they are then.
 
 A role in *per_object* (``manage-clients`` for the client binding) does
 not prove a denial when it is missing: a Keycloak permission on the one
@@ -42,8 +49,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import functools
 import json
+import weakref
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
@@ -67,8 +76,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "NO_RIGHTS_CHECK",
+    "RIGHTS_CHECKED_AT_CALL",
     "AccountRights",
     "KeycloakMissingRightsError",
+    "missing_rights_error",
     "names_missing_rights",
     "read_account_rights",
     "register_rights_check",
@@ -77,6 +88,15 @@ __all__ = [
 
 #: The card line when MEHO could not read the roles of the target's account.
 NO_RIGHTS_CHECK: Final[str] = "MEHO could not check the rights of the target's account."
+#: The card line of a preview that does not talk to Keycloak.
+RIGHTS_CHECKED_AT_CALL: Final[str] = (
+    "MEHO checks the rights of the target's account when the call is made."
+)
+#: Added to each next step: a changed role can take a few minutes to show in the token.
+_TOKEN_DELAY: Final[str] = (
+    "Keycloak can keep the old roles in MEHO's sign-in token for a few minutes; "
+    "try again after that."
+)
 
 _MASTER_REALM: Final[str] = "master"
 _REALM_MANAGEMENT: Final[str] = "realm-management"
@@ -102,11 +122,12 @@ class AccountRights:
 
     ``roles`` is ``None`` when they could not be read. ``client`` and
     ``admin_realm`` say where the roles live; ``client`` is ``None`` when
-    the account signs in to a realm that cannot manage the managed realm.
+    the account signs in to a realm that cannot manage the managed realm,
+    and ``admin_realm`` is ``None`` when MEHO could not read the target's realms.
     """
 
     account: str | None
-    admin_realm: str
+    admin_realm: str | None
     client: str | None
     roles: frozenset[str] | None
 
@@ -134,13 +155,11 @@ def _claims(token: str) -> dict[str, Any] | None:
 
 
 def _client_roles(claims: dict[str, Any], client: str) -> frozenset[str] | None:
-    """The roles of *client* in ``resource_access``; ``None`` when the claim is missing."""
+    """The roles of *client* in ``resource_access``; ``None`` when they are not there."""
     access = claims.get("resource_access")
     if not isinstance(access, dict):
         return None
     entry = access.get(client)
-    if entry is None:
-        return frozenset()
     roles = entry.get("roles") if isinstance(entry, dict) else None
     if not isinstance(roles, list):
         return None
@@ -154,7 +173,10 @@ async def read_account_rights(
 
     Never raises: any failure gives ``roles=None`` (could not check).
     """
-    realms = resolve_realm_config(target)
+    try:
+        realms = resolve_realm_config(target)
+    except Exception:
+        return AccountRights(None, None, None, None)
     client = _admin_client(realms.admin_realm, realms.managed_realm)
     unknown = AccountRights(None, realms.admin_realm, client, None)
     try:
@@ -168,6 +190,27 @@ async def read_account_rights(
     account = name if isinstance(name, str) and name else None
     roles = _client_roles(claims, client) if client is not None else None
     return AccountRights(account, realms.admin_realm, client, roles)
+
+
+#: One read per request: the card and the check get the same context.
+_READS: dict[int, AccountRights] = {}
+
+
+async def _shared_read(ctx: PreviewContext, connector: KeycloakConnector) -> AccountRights:
+    """Read the rights once for *ctx*; the entry goes away with *ctx*."""
+    key = id(ctx)
+    rights = _READS.get(key)
+    if rights is None:
+        rights = await read_account_rights(connector, ctx.operator, ctx.target)
+        _READS[key] = rights
+        weakref.finalize(ctx, _READS.pop, key, None)
+    return rights
+
+
+async def _forget_token(connector: KeycloakConnector, target: KeycloakTargetLike) -> None:
+    """Drop the kept admin token, so the next call gets the roles as they are then."""
+    with contextlib.suppress(Exception):
+        await connector.invalidate_credentials(target)
 
 
 def _missing(roles: tuple[str, ...], rights: AccountRights) -> list[str]:
@@ -198,16 +241,20 @@ def _lacks_text(denying: list[str], rights: AccountRights) -> str:
 def rights_text(op_id: str, roles: tuple[str, ...], rights: AccountRights) -> str:
     """Name the roles *op_id* needs, where they live, and the ones the account lacks."""
     account = _account(rights)
-    where = (
-        f"of the client {rights.client!r} in the realm {rights.admin_realm!r}"
-        if rights.client
-        else f"for this realm (the account signs in to the realm {rights.admin_realm!r})"
-    )
+    if rights.client:
+        where = f"of the client {rights.client!r} in the realm {rights.admin_realm!r}"
+    elif rights.admin_realm:
+        where = f"for this realm (the account signs in to the realm {rights.admin_realm!r})"
+    else:
+        where = "for this realm"
     text = f"{op_id} needs the role(s) {', '.join(roles)} {where} on the account {account}."
     missing = _missing(roles, rights)
     if missing:
         text += f" The account lacks: {', '.join(missing)}."
-    return text + " Give the account the role(s) in Keycloak, then run the operation again."
+    return (
+        f"{text} Give the account the role(s) in Keycloak, then run the operation again. "
+        + _TOKEN_DELAY
+    )
 
 
 def _live_connector(ctx: PreviewContext) -> KeycloakConnector | None:
@@ -227,7 +274,7 @@ def _preflight(
         connector = _live_connector(ctx)
         if connector is None:
             return None
-        rights = await read_account_rights(connector, ctx.operator, ctx.target)
+        rights = await _shared_read(ctx, connector)
         if rights.roles is None:
             return None
         denying = _denying(roles, per_object, rights)
@@ -243,9 +290,11 @@ def _preflight(
         if denied:
             result["reason"] = _lacks_text(denying, rights)
             result["remediation"] = (
-                f"Give the account the role(s) in Keycloak, then call {op_id} again."
+                f"Give the account the role(s) in Keycloak, then call {op_id} again. "
+                + _TOKEN_DELAY
             )
             result["doc_ref"] = _DOC_REF
+            await _forget_token(connector, ctx.target)
         return result
 
     return check
@@ -268,13 +317,11 @@ def _card(
     async def build(ctx: PreviewContext) -> dict[str, Any] | None:
         preview = dict(await builder(ctx) or {})
         connector = _live_connector(ctx)
-        rights = (
-            await read_account_rights(connector, ctx.operator, ctx.target)
-            if connector is not None
-            else None
-        )
+        rights = await _shared_read(ctx, connector) if connector is not None else None
         preview["roles_needed"] = list(roles)
-        if rights is None or rights.roles is None:
+        if rights is None:
+            preview["rights_check"] = RIGHTS_CHECKED_AT_CALL
+        elif rights.roles is None:
             preview["rights_check"] = NO_RIGHTS_CHECK
         elif _denying(roles, per_object, rights):
             preview["rights_check"] = rights_text(ctx.descriptor.op_id, roles, rights)
@@ -307,6 +354,32 @@ def register_rights_check(
     register_preview_builder(op_id, _card(roles, per_object, builder))
 
 
+async def missing_rights_error(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    exc: httpx.HTTPStatusError,
+    *,
+    op_id: str,
+    roles: tuple[str, ...],
+    message: str,
+    done: str = "",
+) -> KeycloakMissingRightsError:
+    """The error for a 403 at the run; also drops the kept admin token.
+
+    *done* says what the run changed before the 403; it goes first in the
+    remediation, which keeps a longer text than *message*.
+    """
+    rights = await read_account_rights(connector, operator, target)
+    await _forget_token(connector, target)
+    remediation = rights_text(op_id, roles, rights)
+    return KeycloakMissingRightsError(
+        message,
+        upstream_message=exc.response.text or None,
+        remediation=f"{done} {remediation}" if done else remediation,
+    )
+
+
 def names_missing_rights(op_id: str, roles: tuple[str, ...]) -> Callable[[Handler], Handler]:
     """Turn a 403 of the handler into :class:`KeycloakMissingRightsError` naming the roles."""
 
@@ -323,12 +396,17 @@ def names_missing_rights(op_id: str, roles: tuple[str, ...]) -> Callable[[Handle
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code != 403:
                     raise
-                rights = await read_account_rights(connector, operator, target)
-                raise KeycloakMissingRightsError(
-                    f"{op_id} stopped: Keycloak refused a request with HTTP 403. "
-                    "The target's account lacks a right; see extras.remediation.",
-                    upstream_message=exc.response.text or None,
-                    remediation=rights_text(op_id, roles, rights),
+                raise await missing_rights_error(
+                    connector,
+                    operator,
+                    target,
+                    exc,
+                    op_id=op_id,
+                    roles=roles,
+                    message=(
+                        f"{op_id} stopped: Keycloak refused a request with HTTP 403. "
+                        "The target's account lacks a right; see extras.remediation."
+                    ),
                 ) from exc
 
         return run

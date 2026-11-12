@@ -90,6 +90,7 @@ import asyncio
 import ipaddress
 import os
 import socket
+import urllib.parse
 from typing import Final, NamedTuple
 
 import httpx
@@ -297,11 +298,19 @@ def _effective_port(candidate: str, port: int | None) -> int | None:
     A port embedded in the stored value wins, because httpx parses it out of
     ``https://{candidate}`` and dials it. Otherwise the caller's *port* is
     used. An unparseable value has no known port (the screen refuses it).
+
+    httpx drops an explicit ``:443`` from ``https://host:443`` (it is the
+    scheme default), so the embedded port is read from the raw value too.
     """
     try:
         embedded = _dialed_url(candidate).port
     except TargetDestinationBlockedError:
         return port
+    if embedded is None:
+        try:
+            embedded = urllib.parse.urlsplit(f"https://{candidate}").port
+        except ValueError:
+            embedded = None
     return embedded if embedded is not None else port
 
 

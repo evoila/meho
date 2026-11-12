@@ -60,8 +60,10 @@ import httpx
 
 __all__ = [
     "PinnedResolver",
+    "PortPinnedResolver",
     "build_pinned_async_transport",
     "build_pinned_sync_transport",
+    "build_port_pinned_async_transport",
 ]
 
 #: A destination screen for the pinning backend. Given the host httpcore
@@ -73,6 +75,10 @@ __all__ = [
 #: verbatim, or a name the policy fails open on and lets the stock
 #: resolver handle). An empty sequence is treated as passthrough.
 PinnedResolver = Callable[[str], Sequence[str] | None]
+
+#: A :data:`PinnedResolver` that also gets the port the socket dials, for a
+#: policy whose verdict depends on the port (a ``host:port`` allowlist entry).
+PortPinnedResolver = Callable[[str, int], Sequence[str] | None]
 
 
 class _PinnedAsyncBackend(httpcore.AsyncNetworkBackend):
@@ -90,6 +96,10 @@ class _PinnedAsyncBackend(httpcore.AsyncNetworkBackend):
         self._resolver = resolver
         self._inner = inner
 
+    def _screen(self, host: str, port: int) -> Sequence[str] | None:
+        del port
+        return self._resolver(host)
+
     async def connect_tcp(
         self,
         host: str,
@@ -98,7 +108,7 @@ class _PinnedAsyncBackend(httpcore.AsyncNetworkBackend):
         local_address: str | None = None,
         socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
     ) -> httpcore.AsyncNetworkStream:
-        addresses = await asyncio.to_thread(self._resolver, host)
+        addresses = await asyncio.to_thread(self._screen, host, port)
         if not addresses:
             # Passthrough: an allowlisted hostname literal or a name the
             # policy fails open on — dial by name via the stock backend.
@@ -140,6 +150,17 @@ class _PinnedAsyncBackend(httpcore.AsyncNetworkBackend):
 
     async def sleep(self, seconds: float) -> None:
         await self._inner.sleep(seconds)
+
+
+class _PortPinnedAsyncBackend(_PinnedAsyncBackend):
+    """:class:`_PinnedAsyncBackend` whose resolver also gets the dialed port."""
+
+    def __init__(self, resolver: PortPinnedResolver, inner: httpcore.AsyncNetworkBackend) -> None:
+        self._port_resolver = resolver
+        self._inner = inner
+
+    def _screen(self, host: str, port: int) -> Sequence[str] | None:
+        return self._port_resolver(host, port)
 
 
 class _PinnedSyncBackend(httpcore.NetworkBackend):
@@ -216,6 +237,22 @@ def build_pinned_async_transport(
     transport = httpx.AsyncHTTPTransport(verify=verify)
     pool = transport._pool
     pool._network_backend = _PinnedAsyncBackend(resolver, pool._network_backend)
+    return transport
+
+
+def build_port_pinned_async_transport(
+    resolver: PortPinnedResolver,
+    *,
+    verify: ssl.SSLContext | str | bool = True,
+) -> httpx.AsyncHTTPTransport:
+    """Like :func:`build_pinned_async_transport`, for a resolver that gets the port.
+
+    The resolver gets the port the socket really dials, so a check that
+    depends on the port uses the same port as the connection.
+    """
+    transport = httpx.AsyncHTTPTransport(verify=verify)
+    pool = transport._pool
+    pool._network_backend = _PortPinnedAsyncBackend(resolver, pool._network_backend)
     return transport
 
 

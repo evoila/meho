@@ -225,5 +225,5 @@ async def connect_client(
         return client
 
     return await connect_checked(
-        target.host, _open, port=target.port, retry_on=(ConnectionFailure,)
+        target.host, _open, port=connect_kwargs["port"], retry_on=(ConnectionFailure,)
     )

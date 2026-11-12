@@ -1723,21 +1723,32 @@ async def _drop_kept_logins_on_connection_change(
         _drop_again_after_commit(session, t)
 
 
-def _screen_sent_destination(updates: dict[str, Any], t: TargetORM) -> None:
-    """Run the SSRF guard on a sent ``host`` / ``fqdn`` with the effective port.
+def screen_destination_change(updates: dict[str, Any], t: TargetORM) -> None:
+    """Run the SSRF guard on the destination a PATCH leaves, when it changes.
 
-    The effective port is the one in the PATCH, else the stored one. The
-    schema already screened a body that carries its own port; this covers
-    the body without a port, where only the stored row knows it.
+    *updates* holds only the sent fields (``exclude_unset``). The new
+    destination is each sent ``host`` / ``fqdn`` / ``port``, else the stored
+    one. A sent host or fqdn is screened with the new port. A sent port
+    (also ``null``, which clears it) screens the stored host and fqdn
+    again, because a ``host:port`` allowlist entry admits one port only.
+    Raises :class:`TargetDestinationBlockedError`.
     """
-    if updates.get("port") is not None:
-        return
+    port_sent = "port" in updates
+    port = updates["port"] if port_sent else t.port
     for key in ("host", "fqdn"):
-        if updates.get(key) is not None:
-            try:
-                assert_public_destination(updates[key], t.port)
-            except TargetDestinationBlockedError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if key not in updates and not port_sent:
+            continue
+        value = updates[key] if key in updates else getattr(t, key)
+        if value is not None:
+            assert_public_destination(value, port)
+
+
+def _screen_sent_destination(updates: dict[str, Any], t: TargetORM) -> None:
+    """:func:`screen_destination_change` with the route's 422 answer."""
+    try:
+        screen_destination_change(updates, t)
+    except TargetDestinationBlockedError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _validate_update_body_fields(

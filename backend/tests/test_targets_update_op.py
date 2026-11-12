@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -125,7 +126,7 @@ def _args(target_id: uuid.UUID | str, **fields: Any) -> dict[str, Any]:
 async def _seed(name: str, *, tenant_id: uuid.UUID = _TENANT_ID, **kwargs: Any) -> TargetORM:
     fields: dict[str, Any] = {
         "product": "ssh",
-        "host": "203.0.113.5",
+        "host": "93.184.216.34",
         "secret_ref": _OLD_REF,
         "notes": "old note",
         **kwargs,
@@ -211,14 +212,14 @@ async def test_an_approved_call_changes_only_the_sent_fields() -> None:
         "name": "fix-ref",
         "product": "ssh",
         "version": None,
-        "host": "203.0.113.5",
+        "host": "93.184.216.34",
         "updated_fields": ["port", "secret_ref"],
     }
     stored = await _row(row.id)
     assert stored.secret_ref == _NEW_REF
     assert stored.port == 8443
     assert stored.notes == "old note"
-    assert stored.host == "203.0.113.5"
+    assert stored.host == "93.184.216.34"
 
 
 async def test_an_explicit_null_clears_a_nullable_field() -> None:
@@ -336,6 +337,27 @@ async def test_a_refused_change_is_an_error_and_changes_nothing(
     assert after.host == before.host
     assert after.product == before.product
     assert after.updated_at == before.updated_at
+
+
+async def test_a_port_change_is_checked_against_a_port_allowlist_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", "svc.lab.internal:8443")
+    monkeypatch.setattr(
+        "meho_backplane.targets.ssrf_guard._resolve_addrs",
+        lambda host: [ipaddress.ip_address("10.20.30.40")],
+    )
+    row = await _seed("port-only", host="svc.lab.internal", port=8443)
+
+    refused = await _run(_admin(), row.id, port=9443)
+    cleared = await _run(_admin(), row.id, port=None)
+
+    for result in (refused, cleared):
+        assert result.status in {"error", "invalid_params"}, result
+        assert "invalid target parameters" in str(
+            result.extras.get("exception_message") or result.error
+        )
+    assert (await _row(row.id)).port == 8443
 
 
 async def test_a_bad_target_id_is_an_error() -> None:

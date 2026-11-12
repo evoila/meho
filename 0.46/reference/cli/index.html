@@ -2366,6 +2366,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guides/policy-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The policy file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guides/flight-recorder/" class="md-nav__link">
         
   
@@ -7354,6 +7382,78 @@
     <span class="md-ellipsis">
       
         meho pfsense version
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#meho-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-policy-diff" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy diff
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-policy-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy export
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-policy-history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy history
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-policy-import" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy import
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-policy-validate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy validate
       
     </span>
   </a>
@@ -14709,6 +14809,78 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#meho-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-policy-diff" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy diff
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-policy-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy export
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-policy-history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy history
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-policy-import" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy import
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-policy-validate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy validate
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#meho-promote" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -20530,6 +20702,57 @@
 <li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
 <li><code>--json</code> — emit the full OperationResult envelope as JSON instead of the human render</li>
 <li><code>--target</code> — target slug to dispatch against (required)</li>
+</ul>
+<h2 id="meho-policy"><code>meho policy</code><a class="headerlink" href="#meho-policy" title="Permanent link">&para;</a></h2>
+<p>Manage the policy file (validate / diff / import / export / history)</p>
+<div class="highlight"><pre><span></span><code>meho policy
+</code></pre></div>
+<h3 id="meho-policy-diff"><code>meho policy diff</code><a class="headerlink" href="#meho-policy-diff" title="Permanent link">&para;</a></h3>
+<p>Show what importing a policy file would change (dry run)</p>
+<div class="highlight"><pre><span></span><code>meho policy diff FILE [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL to call (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--json</code> — print the server's answer as JSON</li>
+<li><code>--scope</code> — tenant (your tenant's policy) or install (the whole install; platform admins only)</li>
+</ul>
+<h3 id="meho-policy-export"><code>meho policy export</code><a class="headerlink" href="#meho-policy-export" title="Permanent link">&para;</a></h3>
+<p>Write the stored policy as a policy file</p>
+<div class="highlight"><pre><span></span><code>meho policy export [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL to call (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--json</code> — print the server's answer as JSON</li>
+<li><code>--output</code>, <code>-o</code> — write the file here instead of stdout</li>
+<li><code>--scope</code> — tenant (your tenant's policy) or install (the whole install; platform admins only)</li>
+</ul>
+<h3 id="meho-policy-history"><code>meho policy history</code><a class="headerlink" href="#meho-policy-history" title="Permanent link">&para;</a></h3>
+<p>List the imported policy files, newest first</p>
+<div class="highlight"><pre><span></span><code>meho policy history [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL to call (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--json</code> — print the server's answer as JSON</li>
+<li><code>--limit</code> — how many entries to show (1 to 20)</li>
+<li><code>--scope</code> — tenant (your tenant's policy) or install (the whole install; platform admins only)</li>
+</ul>
+<h3 id="meho-policy-import"><code>meho policy import</code><a class="headerlink" href="#meho-policy-import" title="Permanent link">&para;</a></h3>
+<p>Ask to import a policy file; a second admin must approve it</p>
+<div class="highlight"><pre><span></span><code>meho policy import FILE [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL to call (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--json</code> — print the server's answer as JSON</li>
+<li><code>--scope</code> — tenant (your tenant's policy) or install (the whole install; platform admins only)</li>
+</ul>
+<h3 id="meho-policy-validate"><code>meho policy validate</code><a class="headerlink" href="#meho-policy-validate" title="Permanent link">&para;</a></h3>
+<p>Check a policy file and list every mistake</p>
+<div class="highlight"><pre><span></span><code>meho policy validate FILE [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL to call (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--json</code> — print the server's answer as JSON</li>
+<li><code>--scope</code> — tenant (your tenant's policy) or install (the whole install; platform admins only)</li>
 </ul>
 <h2 id="meho-promote"><code>meho promote</code><a class="headerlink" href="#meho-promote" title="Permanent link">&para;</a></h2>
 <p>Promote one memory to a strictly broader scope (POST /api/v1/memory/{scope}/{slug}/promote)</p>

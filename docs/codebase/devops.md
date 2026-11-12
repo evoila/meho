@@ -2028,7 +2028,8 @@ repo, #761). The set depends on the event:
 - `merge_group` only: `meho-runners-ci-heavy-queue` (6 runners, enough
   for the six shards of one merge-queue run).
 - Every other event (pull requests, `push` to `main` and the nightly
-  run): `meho-runners-ci-heavy`.
+  run): `meho-runners-ci-heavy`. Shards 4-6 can use a second pool
+  instead, see [Second runner pool](#second-runner-pool).
 
 Why two sets: GitHub gives queued jobs to runners in queue order, with
 no priority for the merge queue. When many pull requests ran at once,
@@ -2094,6 +2095,89 @@ slowest job's elapsed time because the jobs never block each other.
 Until #5384 the serial integration job (60-minute cap, about 28 minutes
 of pytest) was the slowest job of every merge-queue run; see
 [Sharded integration lane (#5384)](#sharded-integration-lane-5384).
+
+### Second runner pool
+
+CI can send unit test shards 4-6 to a second pool of self-hosted runners,
+`meho-runners-ci-heavy-extra`, when that pool is healthy. The pool is
+switched off by default. While it is off, every job runs exactly as before
+(#6026).
+
+**How CI decides** (`scripts/ci/pick_extra_runner_pool.sh`, in the `changes`
+job). Shards 4-6 use the pool only when all of these are true:
+
+- The repository variable `MEHO_CI_EXTRA_POOL` is `on`.
+- The run is not a merge-queue run, not a pull request from a fork and not
+  a Dependabot run.
+- The six shards really run, not a shorter run.
+- A smoke check passed on the pool in the last 45 minutes.
+
+Every doubt means today's pool, `meho-runners-ci-heavy`. The merge queue
+keeps `meho-runners-ci-heavy-queue`.
+
+**How CI knows the pool is online.** The job token cannot list self-hosted
+runners: GitHub answers 403. So the `changes` job reads the run history of
+the smoke workflow, with the `actions: read` permission it already has. This
+needs no new secret. A pass proves that a runner of the pool really took a
+job. A list of runners would not prove that: it holds only the runners that
+exist right now, a healthy pool that has scaled down has none, and these
+runners report no labels.
+
+**The smoke check** (`.github/workflows/extra-runner-smoke.yml`,
+`scripts/ci/extra_runner_smoke.sh`) runs on the pool by hand, and every 30
+minutes while the pool is on. It fails unless the runner:
+
+- has `MEHO_CI_SITE=extra`,
+- reaches github.com and the other hosts a unit test shard cannot work
+  without (the list is in the workflow),
+- gets a timeout from every address in the private pod env
+  `MEHO_CI_DENY_PROBE_HOSTS`, which must not be empty.
+
+Only a curl timeout (exit code 28) counts as "cannot reach". A success, a
+refused connection or a certificate error means the packets got through, and
+every other error means the check proved nothing, so the check fails. A
+name lookup that times out also ends with 28, but no connection was tried
+then, so it fails too. The network of the pool must drop these packets, not
+reject them, and
+each entry must be an address the check can try: an IP address, or a name
+the pod can resolve.
+
+The check masks each address with `::add-mask::` before it uses it, and
+prints only the position and the exit code, because the logs of this
+repository are public. On a dead pool the job waits for a runner and the
+next scheduled run replaces it, so at most one run waits. The last pass then
+grows old and CI goes back to today's pool.
+
+**If the pool dies after a good smoke check.** The job
+`extra-pool-watchdog` (`scripts/ci/extra_pool_watchdog.sh`) stops the run
+when one of shards 4-6 still waits for a runner after 30 minutes. It reads
+the jobs again right before it stops the run, and it does not stop the run
+when that read fails. The required check then goes red instead of hanging.
+Without this, GitHub waits
+up to 24 hours for a runner. A re-run always uses today's pool. A very full
+pool looks the same as a dead one, and the shards then also move to today's
+pool on the re-run.
+
+**Test images.** The second pool cannot reach the private image mirror. On
+a runner with `MEHO_CI_SITE=extra`, the step
+`scripts/ci/use_public_test_images.sh` writes the public `docker.io/` name
+of each `MEHO_TEST_*_IMAGE` to `$GITHUB_ENV`. The same step makes the Docker
+Hub login step skip, because that login goes straight to Docker Hub and the
+pool pulls through its own cache. The step runs in `python-unit-shard`, the
+only job that can run on this pool, and it changes nothing on other pools.
+If another job moves to this pool, add the same step to it: a job with a
+Keycloak or k3s image line then gets the public name with no other change.
+
+**To switch the pool on:**
+
+1. Create the pool. Its pods need `MEHO_CI_SITE=extra` and
+   `MEHO_CI_DENY_PROBE_HOSTS`. Give it no access to private networks, and
+   let only this repository use it.
+2. Start `Second runner pool smoke` by hand and check that it passes.
+3. Set the repository variable `MEHO_CI_EXTRA_POOL` to `on`.
+
+To switch it off, set the variable to any other value. The next run uses
+today's pool.
 
 ### Sharded unit lane (#3251)
 

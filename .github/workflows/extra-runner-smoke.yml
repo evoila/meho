@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Smoke check of the second runner pool. Start it by hand, or let the
+# schedule run it every 30 minutes once the pool is switched on.
+#
+# A pass does two things. It proves the pool is set up safely: it reaches
+# what a unit test shard needs, and every address in the private pod env
+# MEHO_CI_DENY_PROBE_HOSTS ends in a timeout. And it tells CI the pool is
+# online: the `changes` job of ci.yml reads this workflow's run history and
+# sends unit test shards 4-6 to the pool only after a pass in the last 45
+# minutes. So no pass means today's pool.
+#
+# On a dead pool the job just waits for a runner. `cancel-in-progress` keeps
+# that to one waiting run: the next scheduled run replaces it.
+#
+# No `pull_request` trigger: fork code must never run on this pool.
+#
+# Do not copy MEHO_CI_DENY_PROBE_HOSTS into an `env:` block here: the runner
+# prints a step's `env:` block in the log, and the logs of this repository
+# are public.
+
+name: Second runner pool smoke
+
+on:
+  workflow_dispatch:
+  # Minutes 7 and 37: GitHub delays scheduled runs at the start of an hour.
+  schedule:
+    - cron: '7,37 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extra-runner-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Smoke check of the second runner pool
+    # The schedule runs only when a person has switched the pool on, so no
+    # run waits for a pool that does not exist. A run started by hand is
+    # how a person tests the pool before switching it on. A skipped run
+    # counts as `skipped`, not as a pass.
+    if: github.event_name != 'schedule' || vars.MEHO_CI_EXTRA_POOL == 'on'
+    runs-on: meho-runners-ci-heavy-extra
+    # Starts when a runner takes the job, so it does not limit the wait.
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check what this runner can and cannot reach
+        # github.com, and the other hosts a unit test shard stops without:
+        # Python packages (uv sync), Helm (setup-helm), the embedding model
+        # (on a cache miss) and Ubuntu packages (PHP for the pfSense tests).
+        # If a pool gets these through a mirror, change this list.
+        run: >-
+          bash scripts/ci/extra_runner_smoke.sh
+          https://github.com
+          https://pypi.org
+          https://files.pythonhosted.org
+          https://get.helm.sh
+          https://huggingface.co
+          http://archive.ubuntu.com

@@ -298,6 +298,10 @@ _HOSTED_ON_MERGE_GROUP_ALLOWED: dict[tuple[str, str], str] = {
         "migration-heads.yml",
         "check",
     ): "about 40 seconds; it can break only when two pull requests meet, so it stays in the queue",
+    ("ci.yml", "extra-pool-watchdog"): (
+        "never starts on merge_group: `changes` names the second pool only outside the "
+        "merge queue (#6026), and the job must not need that pool"
+    ),
     ("chart.yml", "helm-test"): (
         "kind installs need more CPU than the own heavy-queue pool has today; "
         "back to an own pool when the second runner pool exists (#6026)"
@@ -316,13 +320,22 @@ _MERGE_QUEUE_OWN_ROUTE = re.compile(
 )
 
 
+# The heavy unit route with the second runner pool for shards 4-6 (#6026).
+# On merge_group the first part already gives the queue pool.
+_EXTRA_POOL_ROUTE = re.compile(
+    r"\$\{\{ github\.event_name == 'merge_group' && '(?P<pool>[^']+)' \|\| "
+    r"\(github\.run_attempt == '1' && matrix\.shard >= 4 && "
+    r"needs\.changes\.outputs\.unit_extra_runner\) \|\| 'meho-runners-[^']+' \}\}"
+)
+
+
 def _merge_group_label(runs_on: str) -> str:
     """The runner label a job gets when the event is merge_group.
 
     Only the routes listed here are read. Any other expression is returned
     as it is, so the caller reports it instead of guessing.
     """
-    for route in (_MERGE_QUEUE_ROUTE, _MERGE_QUEUE_OWN_ROUTE, _FORK_ROUTE):
+    for route in (_MERGE_QUEUE_ROUTE, _MERGE_QUEUE_OWN_ROUTE, _EXTRA_POOL_ROUTE, _FORK_ROUTE):
         match = route.fullmatch(runs_on)
         if match is not None:
             return match.group("pool")
@@ -404,9 +417,21 @@ def test_merge_group_hosted_check_rejects_unknown_routes(runs_on: str) -> None:
             "'ubuntu-latest' || 'meho-runners-ci' }}",
             "meho-runners-ci",
         ),
+        (
+            "${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue' || "
+            "(github.run_attempt == '1' && matrix.shard >= 4 && "
+            "needs.changes.outputs.unit_extra_runner) || 'meho-runners-ci-heavy' }}",
+            "meho-runners-ci-heavy-queue",
+        ),
         ("meho-runners-ci-heavy", "meho-runners-ci-heavy"),
     ],
-    ids=["merge-queue-route", "merge-queue-own-route", "fork-route", "plain-label"],
+    ids=[
+        "merge-queue-route",
+        "merge-queue-own-route",
+        "fork-route",
+        "extra-pool-route",
+        "plain-label",
+    ],
 )
 def test_merge_group_label_reads_the_known_routes(runs_on: str, pool: str) -> None:
     assert _merge_group_label(runs_on) == pool

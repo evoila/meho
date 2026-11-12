@@ -9,6 +9,7 @@
 # pool). Drop `meho-runners` here when #611 retires that pool.
 # The two heavy sets: `meho-runners-ci-heavy-queue` (merge-queue runs only)
 # and `meho-runners-ci-heavy` (every other event).
+# `meho-runners-ci-heavy-extra` is the second pool (unit shards 4-6, #6026).
 #
 # Reference: https://github.com/rhysd/actionlint/blob/main/docs/config.md
 self-hosted-runner:
@@ -17,3 +18,4 @@ self-hosted-runner:
     - meho-runners-ci
     - meho-runners-ci-heavy
     - meho-runners-ci-heavy-queue
+    - meho-runners-ci-heavy-extra

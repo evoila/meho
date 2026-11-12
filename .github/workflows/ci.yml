@@ -41,6 +41,11 @@
 # four short jobs `changes`, `python-unit-lane`, `python-integration` and
 # `helm-lint-template` stay hosted, to keep the main pool free.
 #
+# Second runner pool (#6026): unit test shards 4-6 can run on a second pool
+# when a person has switched it on and its smoke check passed in the last 45
+# minutes. Every doubt means today's pool. See `docs/codebase/devops.md`,
+# "Second runner pool".
+#
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
 # `.md`). On such a PR the heavy Python lanes — `python-lint`, the six
@@ -260,6 +265,11 @@ jobs:
     #                tests, any error, and every merge_group / push run give
     #                `false` (the full run).
     #
+    #   unit_extra_runner — the name of the second runner pool when unit
+    #                test shards 4-6 may use it, else empty (#6026). Empty
+    #                means today's pool, and every doubt gives empty. The
+    #                step `pool` decides.
+    #
     # Same fork-PR guard as the other jobs; the dependent jobs re-check
     # head.repo in their own `if:`.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -279,6 +289,7 @@ jobs:
       single_connector: ${{ steps.detect.outputs.single_connector }}
       # `true` only when the picked tests were also stored.
       test_map: ${{ steps.map.outputs.test_map == 'true' && steps.upload-selection.outcome == 'success' && 'true' || 'false' }}
+      unit_extra_runner: ${{ steps.pool.outputs.runner }}
     steps:
       - name: Checkout
         # On a PR, HEAD is the test merge: the PR on top of the newest
@@ -493,6 +504,25 @@ jobs:
           path: ${{ runner.temp }}/unit-test-map/selection.txt
           retention-days: 1
           if-no-files-found: error
+      - name: Pick the runner pool for unit shards 4-6
+        # #6026. Only when the six shards really run. The merge queue keeps
+        # its own runners. A failure here leaves the output empty, which
+        # means today's pool, so this step can never fail or hold up the job.
+        id: pool
+        if: >-
+          github.event_name != 'merge_group' &&
+          steps.detect.outputs.docs_only == 'false' &&
+          steps.detect.outputs.backend_python == 'true' &&
+          steps.detect.outputs.single_connector == '' &&
+          steps.map.outputs.test_map != 'true'
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          MEHO_CI_EXTRA_POOL: ${{ vars.MEHO_CI_EXTRA_POOL }}
+        run: bash scripts/ci/pick_extra_runner_pool.sh
 
   # ---------------------------------------------------------------------------
   # Required unit lane, sharded (#3251). The pre-#3251 monolithic
@@ -652,7 +682,13 @@ jobs:
     # Pushes to `main` stay off the queue set: otherwise every merged commit
     # would run its shards there twice (queue run, then push run), and the
     # queue would merge only about half as fast.
-    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue' || 'meho-runners-ci-heavy' }}
+    # Shards 4-6 can also run on a second pool (#6026). The `changes` job
+    # names it in `unit_extra_runner` only when the pool is switched on and
+    # its smoke check passed in the last 45 minutes. An empty output means
+    # the line below works as it always did. A re-run (run_attempt above 1)
+    # always uses today's pool, so one click gets a run off a dead pool,
+    # also with "re-run failed jobs", which keeps the old `changes` output.
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue' || (github.run_attempt == '1' && matrix.shard >= 4 && needs.changes.outputs.unit_extra_runner) || 'meho-runners-ci-heavy' }}
     strategy:
       # 6 shards (#3251 started with 3; #4655 raised it to 4 after the
       # slowest shard reached the 660 s budget; #5433 raised it to 5 when all
@@ -732,6 +768,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Use public test images on the second runner pool
+        # Changes nothing on every other pool. See the script.
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/ci/use_public_test_images.sh
 
       - name: Start memory sampling
         # Feeds the "Print peak memory" step at the end of this job. A small
@@ -3374,3 +3415,41 @@ jobs:
           done
           echo "stopped watching after $((stop_after / 60)) minutes; the run goes on without a watchdog"
           exit 0
+
+  # ---------------------------------------------------------------------------
+  # Second runner pool watchdog (#6026). The pool can die after its last good
+  # smoke check, and unit shards 4-6 would then wait for a runner. A job that
+  # has no runner is not stopped by `timeout-minutes`, and GitHub gives up on
+  # it only after 24 hours, so the required check would hang with it. This job
+  # stops the run after 30 minutes, so the check goes red instead.
+  #
+  # Not a required check. It runs only when `changes` picked the pool, on a
+  # GitHub-hosted runner so it does not need that pool, and not on a re-run,
+  # because a re-run uses today's pool.
+  # ---------------------------------------------------------------------------
+  extra-pool-watchdog:
+    name: Second runner pool watchdog
+    needs: changes
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      needs.changes.outputs.unit_extra_runner != '' &&
+      github.run_attempt == '1'
+    runs-on: ubuntu-latest
+    # Backstop only: the script stops itself after 30 minutes.
+    timeout-minutes: 40
+    # `actions: write` is what cancelling a run needs. Only this job and
+    # `merge-queue-watchdog` get it. `contents: read` is listed again because
+    # a job-level block replaces the workflow-wide one.
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Stop this run if unit shards cannot get a runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/extra_pool_watchdog.sh

@@ -31,17 +31,19 @@ under ``/var`` (for example ``/var/www``) is allowed. For a path outside the
 write roots, MEHO then reads the owner's home from the host (``getent passwd``)
 with a short script that carries no secret, and refuses a path outside that
 home before the secret is sent. The root script that writes the file checks
-again: it resolves the real path (symbolic links included) and refuses it
-unless it is still under a write root or that home.
+the path again, as the caller wrote it, without resolving links.
 
-Root never writes in a folder that another user can change. For a path inside
-the owner's home, the folders, the temp file and the rename are all made **as
-the owner** (``runuser -u <owner>``). Under a write root, root writes only when
-every folder from the write root down belongs to root and is not writable by
-group or others. When the parent folder belongs to the owner, or root has just
-made it for the owner, the write runs as the owner. Any other folder is
-refused. So a link that someone places in a folder can only affect what that
-person can already change.
+Root never follows a link that the owner of the file could have made:
+
+- A path inside the owner's home is written by the owner
+  (``runuser -u <owner>``). The folders, the temp file and the rename are all
+  made as the owner. Root does not resolve or follow links there.
+- A path under a write root is refused (reason ``link``) when it has a
+  symbolic link anywhere in it.
+- Under a write root, root writes only when every folder from the write root
+  down belongs to root and is not writable by group or others. When the parent
+  folder belongs to the owner, or root has just made it for the owner, the
+  write runs as the owner. Any other folder is refused.
 
 How the value travels
 =====================
@@ -305,7 +307,8 @@ def build_secret_sink_script(
     *path* and *owner* are already checked by :func:`parse_linux_secret_ref`;
     both are ``shlex.quote``d anyway. The value is base64-carried. The script
     stops with a marker and a non-zero exit when the owner is unknown, when the
-    resolved path is outside the allowed places, or when a step fails. It prints
+    path is outside the allowed places, when a path under a write root has a
+    symbolic link in it, or when a step fails. It prints
     :data:`_SINK_OK` at the end. *roots* is the list of write roots; tests set
     it to a temporary folder.
     """
@@ -322,29 +325,26 @@ def build_secret_sink_script(
         f"owner={q_owner}",
         f'grp="$(id -gn -- "$owner" 2>/dev/null)" || {{ echo "{err}owner===" >&2; exit 5; }}',
         'home="$(getent passwd "$owner" | cut -d: -f6)"',
-        # Resolve links in the existing part of the path, then check the result.
-        f'real="$(realpath -m -- "$path")" || {{ echo "{err}path===" >&2; exit 6; }}',
-        "ok=0",
-        f"for r in {q_roots}; do",
-        '  case "$real" in "$r"/*) ok=1;; esac',
-        "done",
+        # Decide on the path as the caller gave it. Root never resolves or
+        # follows a link for a path inside the owner's home: the owner could
+        # have made that link.
         'realhome=""',
         'if [ -n "$home" ] && [ "$home" != / ]; then',
         '  realhome="$(realpath -m -- "$home")"',
-        '  case "$real" in "$realhome"/*) ok=1;; esac',
-        "fi",
-        f'[ "$ok" = 1 ] || {{ echo "{err}place===" >&2; exit 6; }}',
-        'dir="$(dirname -- "$real")"',
-        # Inside the owner's home the owner controls the folders. Root must not
-        # touch them: every step runs as the owner, so a link planted there can
-        # only hurt the owner.
-        'if [ -n "$realhome" ]; then',
-        '  case "$real" in "$realhome"/*)',
-        f'    printf %s {q_b64} | runuser -u "$owner" -- bash -c {q_inner} meho-sink "$real" '
+        '  case "$path" in "$home"/*|"$realhome"/*)',
+        f'    printf %s {q_b64} | runuser -u "$owner" -- bash -c {q_inner} meho-sink "$path" '
         f'|| {{ echo "{err}write===" >&2; exit 4; }}',
         f'    echo "{_SINK_OK}"; exit 0;;',
         "  esac",
         "fi",
+        "ok=0",
+        f"for r in {q_roots}; do",
+        '  case "$path" in "$r"/*) ok=1;; esac',
+        "done",
+        f'[ "$ok" = 1 ] || {{ echo "{err}place===" >&2; exit 6; }}',
+        # Under a write root a link anywhere in the path is refused.
+        f'[ "$(realpath -m -- "$path")" = "$path" ] || {{ echo "{err}link===" >&2; exit 6; }}',
+        'dir="$(dirname -- "$path")"',
         # Under a write root. Root writes only in folders that no one else can
         # change: each folder from the write root down to "$dir" belongs to the
         # user that runs this script (root) and is not writable by group or
@@ -355,12 +355,12 @@ def build_secret_sink_script(
         _FOLDER_CHECKS,
         'root=""',
         f"for r in {q_roots}; do",
-        '  case "$real" in "$r"/*) root=$r;; esac',
+        '  case "$path" in "$r"/*) root=$r;; esac',
         "done",
         f'[ -d "$root" ] || {{ echo "{err}mkdir===" >&2; exit 4; }}',
         _CHOOSE_WRITER,
         'if [ "$as_owner" = 1 ]; then',
-        f'  printf %s {q_b64} | runuser -u "$owner" -- bash -c {q_inner} meho-sink "$real" '
+        f'  printf %s {q_b64} | runuser -u "$owner" -- bash -c {q_inner} meho-sink "$path" '
         f'|| {{ echo "{err}write===" >&2; exit 4; }}',
         f'  echo "{_SINK_OK}"; exit 0',
         "fi",
@@ -370,7 +370,7 @@ def build_secret_sink_script(
         f'rm -f "$tmp"; echo "{err}decode===" >&2; exit 4; fi',
         'if ! chmod 0600 "$tmp" || ! chown "$owner:$grp" "$tmp"; then '
         f'rm -f "$tmp"; echo "{err}owner-mode===" >&2; exit 4; fi',
-        f'if ! mv -f -T -- "$tmp" "$real"; then rm -f "$tmp"; echo "{err}mv===" >&2; exit 4; fi',
+        f'if ! mv -f -T -- "$tmp" "$path"; then rm -f "$tmp"; echo "{err}mv===" >&2; exit 4; fi',
         f'echo "{_SINK_OK}"',
     ]
     return "\n".join(lines) + "\n"

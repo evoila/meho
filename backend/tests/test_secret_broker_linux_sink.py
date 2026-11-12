@@ -304,17 +304,18 @@ def test_script_refuses_a_place_outside_the_home(tmp_path: Path) -> None:
 
 
 @_NEEDS_LINUX
-def test_script_refuses_a_link_that_leads_out_of_the_home(tmp_path: Path) -> None:
+def test_script_follows_a_link_in_the_home_only_as_the_owner(tmp_path: Path) -> None:
     home = tmp_path / "home" / "seat"
     home.mkdir(parents=True)
     outside = tmp_path / "outside"
     outside.mkdir()
     (home / "link").symlink_to(outside)
-    proc = _run_script(
-        build_secret_sink_script(str(home / "link" / "key"), getpass.getuser(), b"v"), home=home
-    )
-    assert proc.returncode == 6
-    assert not (outside / "key").exists()
+    owner = getpass.getuser()
+    proc = _run_script(build_secret_sink_script(str(home / "link" / "key"), owner, b"v"), home=home)
+    # Root does not decide on the link. The owner does the write, so the link
+    # can only reach what the owner can already change.
+    assert proc.returncode == 0, proc.stderr
+    assert _runuser_log(home) == [owner]
 
 
 @_NEEDS_LINUX
@@ -332,12 +333,14 @@ def test_script_writes_inside_the_home_as_the_owner(tmp_path: Path) -> None:
 @_NEEDS_LINUX
 def test_script_has_no_root_step_for_a_home_path() -> None:
     script = build_secret_sink_script("/home/seat/key", "seat", b"v")
-    before_roots = script.split('if [ -n "$realhome" ]')[1].split("Write roots")[0]
-    assert "runuser -u" in before_roots
-    # Root-only steps come after the owner branch has exited.
     owner_branch, _, root_part = script.partition("exit 0;;")
-    assert "mkdir -m" not in owner_branch.split('if [ -n "$realhome" ]')[1]
-    assert "chown" not in owner_branch.split('if [ -n "$realhome" ]')[1]
+    home_part = owner_branch.split('realhome=""')[1]
+    assert "runuser -u" in home_part
+    # The caller's path is used as given: no link is resolved for the home path.
+    assert 'meho-sink "$path"' in home_part
+    assert "mkdir -m" not in home_part
+    assert "chown" not in home_part
+    # Root-only steps come after the owner branch has exited.
     assert "mkdir -m 0700" in root_part
 
 
@@ -380,6 +383,58 @@ def _write_root(tmp_path: Path) -> tuple[Path, Path]:
 def _runuser_log(home: Path) -> list[str]:
     log = home.parent / f"{home.name}-bin" / "runuser.log"
     return log.read_text().split() if log.exists() else []
+
+
+@_NEEDS_LINUX
+def test_write_root_refuses_a_link_into_a_root_only_folder(tmp_path: Path) -> None:
+    root, home = _write_root(tmp_path)
+    secret = root / "secret"
+    secret.mkdir(mode=0o700)
+    app = root / "app"
+    app.mkdir(mode=0o700)
+    (app / "link").symlink_to(secret)
+    script = build_secret_sink_script(
+        str(app / "link" / "key"), getpass.getuser(), b"v", roots=(str(root),)
+    )
+    proc = _run_script(script, home=home, owner_dirs=(app,))
+    assert proc.returncode == 6
+    assert "===MEHO_SINK_ERR:link===" in proc.stderr
+    assert list(secret.iterdir()) == []
+    assert _runuser_log(home) == []
+
+
+@_NEEDS_LINUX
+def test_write_root_refuses_a_link_in_the_final_name(tmp_path: Path) -> None:
+    root, home = _write_root(tmp_path)
+    victim = root / "victim"
+    victim.write_text("keep")
+    (root / "key").symlink_to(victim)
+    script = build_secret_sink_script(
+        str(root / "key"), getpass.getuser(), b"v", roots=(str(root),)
+    )
+    proc = _run_script(script, home=home)
+    assert proc.returncode == 6
+    assert "===MEHO_SINK_ERR:link===" in proc.stderr
+    assert victim.read_text() == "keep"
+
+
+@_NEEDS_LINUX
+@pytest.mark.skipif(os.getuid() == 0, reason="a root test user can write anywhere")
+def test_a_link_from_the_home_into_a_root_only_folder_writes_nothing_as_root(
+    tmp_path: Path,
+) -> None:
+    root, home = _write_root(tmp_path)
+    secret = root / "secret"
+    secret.mkdir(mode=0o500)
+    (home / "link").symlink_to(secret)
+    owner = getpass.getuser()
+    script = build_secret_sink_script(str(home / "link" / "key"), owner, b"v", roots=(str(root),))
+    proc = _run_script(script, home=home)
+    # Only the owner step ran. It could not write there, so nothing was written.
+    assert proc.returncode == 4
+    assert _runuser_log(home) == [owner]
+    assert list(secret.iterdir()) == []
+    secret.chmod(0o700)
 
 
 @_NEEDS_LINUX

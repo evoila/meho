@@ -283,7 +283,10 @@ in order.
 target. Use this `representation`. Replace the three placeholders: the
 client id, the tenant id, and the MEHO audience (the audience your MEHO
 checks, `KEYCLOAK_AUDIENCE`). `tenant_role` is the tenant role the seat
-gets (`operator` is the usual choice).
+gets. Keep it `operator`. Never use `tenant_admin`.
+
+Step 1 creates a new login with tenant rights. A second admin should approve
+it before it runs.
 
 <!-- recipe:keycloak-client-representation -->
 ```json
@@ -372,8 +375,9 @@ meho secret move \
   --reason 'place the seat login secret for the agent'
 ```
 
-The file gets mode 0600 and the owner you name. See "The `linux:` store"
-below.
+The file gets mode 0600 and the owner you name. A file that already exists
+at the path is replaced. If the owner is `root`, the file is written as
+root. See "The `linux:` store" below.
 
 The audit rows and the approval previews of the three calls show only the
 client id, the target names, and the paths.
@@ -417,11 +421,16 @@ What MEHO does on the host:
   owner's home (`getent passwd`). This short script carries no secret. When
   the path is not inside that home, MEHO stops before it sends the secret. So
   a home in any place works, for example `/srv/app` or `/data/app`.
-- The script that writes the file checks again: it resolves symbolic links and
-  refuses a path that ends up outside a write root or the owner's home.
+- The script that writes the file checks the path again, as the caller wrote
+  it. The rule: root never follows a link that the owner of the file could
+  have made.
 - Root never writes in a folder that another user can change:
-  - Inside the owner's home, the folders, the temp file and the rename are
-    all done as the owner (`runuser -u <owner>`), not as root.
+  - A path inside the owner's home is written by the owner. The folders, the
+    temp file and the rename are all done as the owner
+    (`runuser -u <owner>`), not as root. Root does not resolve or follow
+    links there.
+  - A path under a write root with a symbolic link anywhere in it is refused
+    with the reason `link`.
   - Under a write root, root writes only when every folder from the write
     root down belongs to root and is not writable by group or others.
   - When the parent folder belongs to the owner, the write runs as the owner.

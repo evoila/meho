@@ -3000,7 +3000,9 @@ type BodyUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPost struct {
 	// has not picked one; the middleware then lets the request reach only
 	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
 	// a switch.
-	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	SessionCtx           *UISessionContext `json:"session_ctx,omitempty"`
+	StartingGrantTargets *[]string         `json:"starting_grant_targets,omitempty"`
+	StartingGrants       *string           `json:"starting_grants,omitempty"`
 }
 
 // BodyUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePost defines model for Body_ui_agent_principals_revoke_submit_ui_agents_principals__name__revoke_post.
@@ -3067,9 +3069,11 @@ type BodyUiAgentsCreateSubmitUiAgentsCreatePost struct {
 	// has not picked one; the middleware then lets the request reach only
 	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
 	// a switch.
-	SessionCtx   *UISessionContext `json:"session_ctx,omitempty"`
-	SystemPrompt *string           `json:"system_prompt,omitempty"`
-	TurnBudget   *string           `json:"turn_budget"`
+	SessionCtx           *UISessionContext `json:"session_ctx,omitempty"`
+	StartingGrantTargets *[]string         `json:"starting_grant_targets,omitempty"`
+	StartingGrants       *string           `json:"starting_grants,omitempty"`
+	SystemPrompt         *string           `json:"system_prompt,omitempty"`
+	TurnBudget           *string           `json:"turn_budget"`
 }
 
 // BodyUiAgentsEditSubmitUiAgentsNamePatch defines model for Body_ui_agents_edit_submit_ui_agents__name__patch.

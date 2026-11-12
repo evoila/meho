@@ -21,7 +21,6 @@ import structlog
 from fastapi.testclient import TestClient
 
 import meho_backplane.api.v1.health as health_module
-from meho_backplane.api.v1.health import VaultStatus
 from meho_backplane.auth.operator import Operator, TenantRole
 from tests.mcp_test_fixtures import (
     build_operator,
@@ -37,7 +36,7 @@ _NOT_CHECKED_DETAIL = "not checked: needs the operator role"
 class _Recorder:
     """Stands in for a Vault step and records each call."""
 
-    def __init__(self, result: VaultStatus | None = None) -> None:
+    def __init__(self, result: health_module.VaultStatus | None = None) -> None:
         self.calls: list[tuple[Any, ...]] = []
         self._result = result
 
@@ -49,7 +48,7 @@ class _Recorder:
 
 
 def _patch_vault_steps(
-    monkeypatch: pytest.MonkeyPatch, result: VaultStatus | None = None
+    monkeypatch: pytest.MonkeyPatch, result: health_module.VaultStatus | None = None
 ) -> dict[str, _Recorder]:
     recorders = {
         "_probe_vault_federation": _Recorder(result),
@@ -114,7 +113,7 @@ def test_operator_caller_gets_vault_check(
 ) -> None:
     client, op = client_with_operator
     recorders = _patch_vault_steps(
-        monkeypatch, VaultStatus(reachable=True, read_ok=True, detail="version=3")
+        monkeypatch, health_module.VaultStatus(reachable=True, read_ok=True, detail="version=3")
     )
 
     payload = _call_meho_status(client)
@@ -144,7 +143,9 @@ async def test_role_rule_holds_on_a_non_vault_backend(
     checked: bool,
 ) -> None:
     """The rule holds for every credential backend, not only Vault."""
-    recorders = _patch_vault_steps(monkeypatch, VaultStatus(reachable=True, read_ok=True))
+    recorders = _patch_vault_steps(
+        monkeypatch, health_module.VaultStatus(reachable=True, read_ok=True)
+    )
     monkeypatch.setattr(
         health_module,
         "get_settings",
@@ -163,6 +164,6 @@ async def test_role_rule_holds_on_a_non_vault_backend(
 
 def test_vault_status_defaults_to_checked() -> None:
     """An answer without the field (an older server) reads as checked."""
-    status = VaultStatus.model_validate({"reachable": True, "read_ok": True})
+    status = health_module.VaultStatus.model_validate({"reachable": True, "read_ok": True})
 
     assert status.checked is True

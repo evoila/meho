@@ -31,6 +31,7 @@
   "tests/integration/test_connectors_vrli_profile_parity.py": 0.21,
   "tests/integration/test_core_bootstrap_keycloak.py": 42.54,
   "tests/integration/test_core_keycloak_realm_import.py": 55.57,
+  "tests/integration/test_core_keycloak_touch_flow.py": 45.0,
   "tests/integration/test_event_matcher_pg.py": 2.94,
   "tests/integration/test_events_ingest_pg.py": 2.78,
   "tests/integration/test_examples_kb_writeback.py": 3.19,

@@ -822,6 +822,42 @@ Both ops read lists with `get_admin_list_strict`: a body that is not a JSON
 array raises `KeycloakUnexpectedResponseError`, so a failed read never looks
 like an empty list.
 
+### Rights of the login flow ops
+
+Keycloak lets an account change login flows only with the role
+`manage-realm` of the realm's admin client. Without the right role, a run
+fails with HTTP 403 at its first write, after a person approved it. So each
+`keycloak.authflow.ensure_*` op checks the account first
+(`ops_authflow_rights.py`):
+
+| op_id | roles the run needs |
+|---|---|
+| `keycloak.authflow.ensure_approval_flow` | `manage-realm` (the flow), `manage-clients` (the client binding) |
+| `keycloak.authflow.ensure_passkey_code_skip` | `manage-realm` (the flow copy and the realm's browser flow) |
+
+The admin client is `realm-management` when the account signs in to the
+managed realm, and `<realm>-realm` when it signs in to `master`. Keycloak
+decides an Admin REST API call from the roles in the caller's access token.
+So the check reads `resource_access.<admin client>.roles` of the connector's
+own admin token. It needs no extra request and no extra right. The token is
+never shown or stored.
+
+- **A role is missing:** the permission preflight sets `will_be_denied`.
+  MEHO refuses the call before an approval request exists
+  (`write_capability_denied`). `reason` names the account and the missing
+  role; `doc_ref` points here.
+- **The roles cannot be read** (the token is not a JWT, it has no
+  `resource_access` claim, as with a lightweight access token, or the
+  account signs in to a third realm): the call still waits for approval.
+  The card says "MEHO could not check the rights of the target's account".
+- **A 403 at the run:** the op stops with `KeycloakMissingRightsError`
+  (`http_status` 403). `extras.remediation` names the roles the op needs,
+  the admin client and the account, and the missing roles when they could
+  be read.
+
+The approval card of both ops lists the roles (`roles_needed`) and the
+result of the check (`rights_check`).
+
 ### Login setup reads (`ops_flow_reads.py`)
 
 Three `safe` reads, group `login_setup`, for the checks before one-time codes
@@ -904,10 +940,10 @@ as a plain `write` in `connectors/keycloak/op_classes.py`.
 
 ### Park-time approval preview (#1857)
 
-Fifteen of the write ops register bespoke `proposed_effect` preview builders
+Sixteen of the write ops register bespoke `proposed_effect` preview builders
 (twelve in `connectors/keycloak/ops_write_preview.py`, one in
-`ops_login_check.py`, one in `ops_authflow_passkey.py`, one in
-`ops_write_realm_smtp.py`), wired onto the per-op hook
+`ops_login_check.py`, one in `ops_authflow.py`, one in
+`ops_authflow_passkey.py`, one in `ops_write_realm_smtp.py`), wired onto the per-op hook
 (`operations/_preview.py`, #1437) by an import side-effect in the package
 `__init__`. They give the approval reviewer a resource-centric view at park
 time — secrets scrubbed via the same `redact_secret_fields` the read ops
@@ -927,7 +963,8 @@ use:
 | `keycloak.client.delete` | `{blast_radius}` — client id, enabled or not, public or confidential; its service-account user as a child; never the secret |
 | `keycloak.realm.delete` | `{blast_radius}` — realm, enabled or not, user / client / group counts; never the realm body |
 | `keycloak.user.check_login` | `{resource, username, realm, client_id, password_source, password_secret_ref[, password_secret_mount, password_secret_key]}` (registered in `ops_login_check.py`) |
-| `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back}` (registered in `ops_authflow_passkey.py`) |
+| `keycloak.authflow.ensure_approval_flow` | `{resource, realm, flow, client_id, roles_needed, rights_check}` (registered in `ops_authflow.py`) |
+| `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back, roles_needed, rights_check}` (registered in `ops_authflow_passkey.py`) |
 | `keycloak.realm.update` | `{resource, realm, representation[, smtp_password_source, smtp_password_secret_ref]}` (registered in `ops_write_realm_smtp.py`) |
 
 The group builders surface `attribute_keys` (which attributes change,
@@ -947,7 +984,7 @@ bespoke builders are at least as strict as the generic echo they bypass: a
 anywhere in an `additionalProperties` representation) is scrubbed too, so no
 cleartext secret reaches the durable `proposed_effect` row. A Vault-sourced
 password (`password_secret_ref`) is a path, not a secret, so it is surfaced
-as `password_source: "vault"` + the ref. The other seven write ops fall
+as `password_source: "vault"` + the ref. The other write ops fall
 through to the generic params-echo
 default. Most builders are pure (no connector I/O) and so fail-soft by
 construction. The four delete builders are not: they read the object live

@@ -60,6 +60,10 @@ from meho_backplane.connectors.keycloak.ops_authflow import get_admin_list_stric
 from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import (
     ENSURE_PASSKEY_CODE_SKIP_OP_ID,
 )
+from meho_backplane.connectors.keycloak.ops_authflow_rights import (
+    names_missing_rights,
+    register_rights_check,
+)
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
@@ -69,7 +73,7 @@ from meho_backplane.connectors.keycloak.ops_write_merge import (
 )
 from meho_backplane.connectors.keycloak.ops_write_preview import _managed_realm
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
-from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+from meho_backplane.operations._preview import PreviewContext
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -94,6 +98,8 @@ _CONDITION_CONFIG = {"credentials": _PASSKEY_CREDENTIAL, "included": "false"}
 _CONDITION_CONFIG_ALIAS = f"{PASSKEY_FLOW_ALIAS} - skip code after passkey"
 #: Keycloak joins several credential types in one config value with ``##``.
 _CONFIG_DELIMITER = "##"
+#: The realm-management role the run needs: it copies a flow and changes the realm.
+_ROLES = ("manage-realm",)
 #: A flow step row and its settings (``None`` when it has none).
 _Step = tuple[dict[str, Any], dict[str, Any] | None]
 
@@ -481,6 +487,7 @@ async def _bind(
     return unrequested_changes(before, after, requested)
 
 
+@names_missing_rights(ENSURE_PASSKEY_CODE_SKIP_OP_ID, _ROLES)
 async def keycloak_authflow_ensure_passkey_code_skip(
     self: KeycloakConnector,
     operator: Operator,
@@ -581,4 +588,4 @@ async def _passkey_code_skip_preview(ctx: PreviewContext) -> dict[str, Any] | No
     }
 
 
-register_preview_builder(ENSURE_PASSKEY_CODE_SKIP_OP_ID, _passkey_code_skip_preview)
+register_rights_check(ENSURE_PASSKEY_CODE_SKIP_OP_ID, _ROLES, _passkey_code_skip_preview)

@@ -47,12 +47,17 @@ from meho_backplane.connectors.keycloak._paths import (
     _CLIENT_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.ops_authflow_rights import (
+    names_missing_rights,
+    register_rights_check,
+)
 from meho_backplane.connectors.keycloak.ops_read import KeycloakOp
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import merge_representation
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.operations._preview import PreviewContext
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -79,6 +84,8 @@ _FLOW_DESCRIPTION = (
     "the one-time code when the person has set one up."
 )
 _CODE_FLOW_DESCRIPTION = "Asks for the one-time code when the person has set one up."
+#: The realm-management roles the run needs: the flow, then the client binding.
+_ROLES = ("manage-realm", "manage-clients")
 
 
 @dataclass(frozen=True)
@@ -313,6 +320,7 @@ async def _bind(
     }
 
 
+@names_missing_rights(ENSURE_APPROVAL_FLOW_OP_ID, _ROLES)
 async def keycloak_authflow_ensure_approval_flow(
     self: KeycloakConnector,
     operator: Operator,
@@ -508,3 +516,20 @@ APPROVAL_FLOW_OPS: tuple[KeycloakOp, ...] = (
         },
     ),
 )
+
+
+async def _approval_flow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Card for the op: the realm, the flow and the client it binds."""
+    try:
+        realm: str | None = resolve_realm_config(ctx.target).managed_realm
+    except Exception:
+        realm = None
+    return {
+        "resource": "client_browser_flow",
+        "realm": realm,
+        "flow": APPROVAL_FLOW_ALIAS,
+        "client_id": str(ctx.params.get("client_id") or _DEFAULT_CLIENT_ID).strip(),
+    }
+
+
+register_rights_check(ENSURE_APPROVAL_FLOW_OP_ID, _ROLES, _approval_flow_preview)

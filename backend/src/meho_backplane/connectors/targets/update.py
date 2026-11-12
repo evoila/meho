@@ -58,6 +58,10 @@ from meho_backplane.connectors.targets.ops import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.role_floors import register_role_floor
+from meho_backplane.targets.ssrf_guard import (
+    TargetDestinationBlockedError,
+    assert_public_destination,
+)
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.targets.resolver import resolve_target_by_id
 from meho_backplane.targets.schemas import TargetUpdate
@@ -263,6 +267,23 @@ def _update_fields(params: dict[str, Any]) -> dict[str, Any]:
     return fields
 
 
+def _screen_sent_destination(body: TargetUpdate, stored_port: int | None) -> None:
+    """Refuse a sent host or fqdn that is not public, with the effective port.
+
+    The model screens a body that carries its own port. A body without one
+    uses the stored port, which is known only here. The error keeps the
+    usual "invalid target parameters" shape.
+    """
+    if body.port is not None:
+        return
+    for value in (body.host, body.fqdn):
+        if value is not None:
+            try:
+                assert_public_destination(value, stored_port)
+            except TargetDestinationBlockedError as exc:
+                raise ValueError(f"invalid target parameters: {exc}") from exc
+
+
 async def targets_update(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Change the sent fields of one target of the operator's tenant.
 
@@ -290,6 +311,7 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
                     f"no live target with id {target_id} in your tenant; nothing was changed"
                 )
             structlog.contextvars.bind_contextvars(target_id=str(row.id), target_name=row.name)
+            _screen_sent_destination(body, row.port)
             updated = await apply_target_update(row, body, operator, session)
     except HTTPException as exc:
         raise ValueError(_http_exception_message(exc)) from exc

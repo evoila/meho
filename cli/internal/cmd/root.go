@@ -137,6 +137,13 @@ func newRootCmdFor(args []string) *cobra.Command {
 		"external change-ticket reference sent on every backplane request, so the audit rows carry it "+
 			"(e.g. gh:evoila/meho#13; default: $"+api.WorkRefEnv+")",
 	)
+	root.PersistentFlags().String(
+		"profile",
+		"",
+		"named login to use, so one person can hold several identities side by side "+
+			"(default: $"+auth.ProfileEnv+", else \"default\"). `meho login --profile <name>` "+
+			"stores the login under that name",
+	)
 	root.PersistentPreRunE = applyRequestContext
 
 	root.AddCommand(newVersionCmd())

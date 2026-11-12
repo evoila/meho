@@ -399,6 +399,7 @@ install_os_packages() {
 print_update_result() {
     printf '\ninstall.sh: MEHO %s is installed on %s. Before this run: MEHO %s.\n' "$MEHO_VERSION" "$1" "$2"
     printf '  Console:               https://%s/ui/\n' "$1"
+    print_console_ca_line
     printf '  Kept as they were:     the firewall, the data, the passwords and the keys\n'
-    printf '  First-start list:      not in this version yet. Open the console address to check that MEHO answers.\n'
+    print_first_start_list "$1"
 }

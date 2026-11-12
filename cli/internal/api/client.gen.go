@@ -577,6 +577,24 @@ const (
 	PermissionVerdictNeedsApproval PermissionVerdict = "needs-approval"
 )
 
+// Defines values for PolicyImportResponseScope.
+const (
+	PolicyImportResponseScopeInstall PolicyImportResponseScope = "install"
+	PolicyImportResponseScopeTenant  PolicyImportResponseScope = "tenant"
+)
+
+// Defines values for PolicyRevisionViewScope.
+const (
+	PolicyRevisionViewScopeInstall PolicyRevisionViewScope = "install"
+	PolicyRevisionViewScopeTenant  PolicyRevisionViewScope = "tenant"
+)
+
+// Defines values for PolicyValidateResponseScope.
+const (
+	PolicyValidateResponseScopeInstall PolicyValidateResponseScope = "install"
+	PolicyValidateResponseScopeTenant  PolicyValidateResponseScope = "tenant"
+)
+
 // Defines values for PreviewOperationResponseStatus.
 const (
 	PreviewOperationResponseStatusError       PreviewOperationResponseStatus = "error"
@@ -986,6 +1004,30 @@ const (
 const (
 	ListKbApiV1KbGetParamsOrderNewest ListKbApiV1KbGetParamsOrder = "newest"
 	ListKbApiV1KbGetParamsOrderSlug   ListKbApiV1KbGetParamsOrder = "slug"
+)
+
+// Defines values for ExportApiV1PolicyExportGetParamsScope.
+const (
+	ExportApiV1PolicyExportGetParamsScopeInstall ExportApiV1PolicyExportGetParamsScope = "install"
+	ExportApiV1PolicyExportGetParamsScopeTenant  ExportApiV1PolicyExportGetParamsScope = "tenant"
+)
+
+// Defines values for HistoryApiV1PolicyHistoryGetParamsScope.
+const (
+	HistoryApiV1PolicyHistoryGetParamsScopeInstall HistoryApiV1PolicyHistoryGetParamsScope = "install"
+	HistoryApiV1PolicyHistoryGetParamsScopeTenant  HistoryApiV1PolicyHistoryGetParamsScope = "tenant"
+)
+
+// Defines values for ImportPolicyApiV1PolicyImportPostParamsScope.
+const (
+	ImportPolicyApiV1PolicyImportPostParamsScopeInstall ImportPolicyApiV1PolicyImportPostParamsScope = "install"
+	ImportPolicyApiV1PolicyImportPostParamsScopeTenant  ImportPolicyApiV1PolicyImportPostParamsScope = "tenant"
+)
+
+// Defines values for ValidateApiV1PolicyValidatePostParamsScope.
+const (
+	ValidateApiV1PolicyValidatePostParamsScopeInstall ValidateApiV1PolicyValidatePostParamsScope = "install"
+	ValidateApiV1PolicyValidatePostParamsScopeTenant  ValidateApiV1PolicyValidatePostParamsScope = "tenant"
 )
 
 // Defines values for UsageEndpointApiV1RetrieveUsageGetParamsSurface.
@@ -8643,6 +8685,59 @@ type PairingHealth struct {
 // prevent drift between the DB layer and the policy engine.
 type PermissionVerdict string
 
+// PolicyImportResponse The preview and the import answer.
+//
+// “diff“ has the sections “description“, “taxonomy“ and
+// “classifications“, each with “added“, “changed“ (“before“ and
+// “after“) and “removed“. Each classification entry also says how many
+// operations it “matches“ and how many of those it “changes“.
+// “operations_changed“ counts the operations whose values change. “diff“
+// is “null“ when the file has mistakes. “based_on“ is the SHA-256 of
+// the stored policy the plan was made against. On an import that waits,
+// “approval_request_id“ names the request.
+type PolicyImportResponse struct {
+	ApprovalRequestId *openapi_types.UUID       `json:"approval_request_id"`
+	BasedOn           string                    `json:"based_on"`
+	Diff              *map[string]interface{}   `json:"diff"`
+	FileSha256        string                    `json:"file_sha256"`
+	Message           *string                   `json:"message"`
+	Mistakes          []string                  `json:"mistakes"`
+	NoChange          bool                      `json:"no_change"`
+	Ok                bool                      `json:"ok"`
+	Preview           bool                      `json:"preview"`
+	Scope             PolicyImportResponseScope `json:"scope"`
+	Warnings          []string                  `json:"warnings"`
+}
+
+// PolicyImportResponseScope defines model for PolicyImportResponse.Scope.
+type PolicyImportResponseScope string
+
+// PolicyRevisionView One imported policy file.
+type PolicyRevisionView struct {
+	ApprovedBySub string                  `json:"approved_by_sub"`
+	Diff          map[string]interface{}  `json:"diff"`
+	File          string                  `json:"file"`
+	FileSha256    string                  `json:"file_sha256"`
+	Id            openapi_types.UUID      `json:"id"`
+	ImportedBySub string                  `json:"imported_by_sub"`
+	Scope         PolicyRevisionViewScope `json:"scope"`
+	Ts            time.Time               `json:"ts"`
+}
+
+// PolicyRevisionViewScope defines model for PolicyRevisionView.Scope.
+type PolicyRevisionViewScope string
+
+// PolicyValidateResponse The mistakes and warnings of a file. “ok“ is true when it has no mistake.
+type PolicyValidateResponse struct {
+	Mistakes []string                    `json:"mistakes"`
+	Ok       bool                        `json:"ok"`
+	Scope    PolicyValidateResponseScope `json:"scope"`
+	Warnings []string                    `json:"warnings"`
+}
+
+// PolicyValidateResponseScope defines model for PolicyValidateResponse.Scope.
+type PolicyValidateResponseScope string
+
 // PreambleInclusion Whether a just-written convention reaches the session preamble.
 //
 // G0.14-T8 (#1149, signal 18) -- the post-write feedback shape
@@ -13324,6 +13419,44 @@ type PreviewClassificationApiV1PolicyClassificationPreviewPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ExportApiV1PolicyExportGetParams defines parameters for ExportApiV1PolicyExportGet.
+type ExportApiV1PolicyExportGetParams struct {
+	Scope         *ExportApiV1PolicyExportGetParamsScope `form:"scope,omitempty" json:"scope,omitempty"`
+	Authorization *string                                `json:"authorization,omitempty"`
+}
+
+// ExportApiV1PolicyExportGetParamsScope defines parameters for ExportApiV1PolicyExportGet.
+type ExportApiV1PolicyExportGetParamsScope string
+
+// HistoryApiV1PolicyHistoryGetParams defines parameters for HistoryApiV1PolicyHistoryGet.
+type HistoryApiV1PolicyHistoryGetParams struct {
+	Scope         *HistoryApiV1PolicyHistoryGetParamsScope `form:"scope,omitempty" json:"scope,omitempty"`
+	Limit         *int                                     `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string                                  `json:"authorization,omitempty"`
+}
+
+// HistoryApiV1PolicyHistoryGetParamsScope defines parameters for HistoryApiV1PolicyHistoryGet.
+type HistoryApiV1PolicyHistoryGetParamsScope string
+
+// ImportPolicyApiV1PolicyImportPostParams defines parameters for ImportPolicyApiV1PolicyImportPost.
+type ImportPolicyApiV1PolicyImportPostParams struct {
+	Scope         *ImportPolicyApiV1PolicyImportPostParamsScope `form:"scope,omitempty" json:"scope,omitempty"`
+	Preview       *bool                                         `form:"preview,omitempty" json:"preview,omitempty"`
+	Authorization *string                                       `json:"authorization,omitempty"`
+}
+
+// ImportPolicyApiV1PolicyImportPostParamsScope defines parameters for ImportPolicyApiV1PolicyImportPost.
+type ImportPolicyApiV1PolicyImportPostParamsScope string
+
+// ValidateApiV1PolicyValidatePostParams defines parameters for ValidateApiV1PolicyValidatePost.
+type ValidateApiV1PolicyValidatePostParams struct {
+	Scope         *ValidateApiV1PolicyValidatePostParamsScope `form:"scope,omitempty" json:"scope,omitempty"`
+	Authorization *string                                     `json:"authorization,omitempty"`
+}
+
+// ValidateApiV1PolicyValidatePostParamsScope defines parameters for ValidateApiV1PolicyValidatePost.
+type ValidateApiV1PolicyValidatePostParamsScope string
+
 // ReadDocsEndpointApiV1ReadDocsPostParams defines parameters for ReadDocsEndpointApiV1ReadDocsPost.
 type ReadDocsEndpointApiV1ReadDocsPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -13891,6 +14024,11 @@ type UiAgentPrincipalsListUiAgentsPrincipalsGetParams struct {
 type UiAgentsRunsListUiAgentsRunsGetParams struct {
 	Status  *AgentRunStatus `form:"status,omitempty" json:"status,omitempty"`
 	WorkRef *string         `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+}
+
+// UiAgentsRunConsoleUiAgentsNameRunGetParams defines parameters for UiAgentsRunConsoleUiAgentsNameRunGet.
+type UiAgentsRunConsoleUiAgentsNameRunGetParams struct {
+	Run *openapi_types.UUID `form:"run,omitempty" json:"run,omitempty"`
 }
 
 // UiAgentsRunStreamUiAgentsNameRunStreamGetParams defines parameters for UiAgentsRunStreamUiAgentsNameRunStreamGet.
@@ -17244,6 +17382,18 @@ type ClientInterface interface {
 
 	PreviewClassificationApiV1PolicyClassificationPreviewPost(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, body PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ExportApiV1PolicyExportGet request
+	ExportApiV1PolicyExportGet(ctx context.Context, params *ExportApiV1PolicyExportGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// HistoryApiV1PolicyHistoryGet request
+	HistoryApiV1PolicyHistoryGet(ctx context.Context, params *HistoryApiV1PolicyHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ImportPolicyApiV1PolicyImportPostWithBody request with any body
+	ImportPolicyApiV1PolicyImportPostWithBody(ctx context.Context, params *ImportPolicyApiV1PolicyImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ValidateApiV1PolicyValidatePostWithBody request with any body
+	ValidateApiV1PolicyValidatePostWithBody(ctx context.Context, params *ValidateApiV1PolicyValidatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ReadDocsEndpointApiV1ReadDocsPostWithBody request with any body
 	ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -17685,6 +17835,9 @@ type ClientInterface interface {
 	// RunDetailUiAgentsRunsHandleGet request
 	RunDetailUiAgentsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// RunEventsStreamUiAgentsRunsHandleEventsGet request
+	RunEventsStreamUiAgentsRunsHandleEventsGet(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiAgentsDetailUiAgentsNameGetWithBody request with any body
 	UiAgentsDetailUiAgentsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -17711,9 +17864,9 @@ type ClientInterface interface {
 	UiAgentsEditModalUiAgentsNameEditGet(ctx context.Context, name string, body UiAgentsEditModalUiAgentsNameEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAgentsRunConsoleUiAgentsNameRunGetWithBody request with any body
-	UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	UiAgentsRunConsoleUiAgentsNameRunGet(ctx context.Context, name string, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	UiAgentsRunConsoleUiAgentsNameRunGet(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAgentsRunSubmitUiAgentsNameRunPostWithBody request with any body
 	UiAgentsRunSubmitUiAgentsNameRunPostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -20762,6 +20915,54 @@ func (c *Client) PreviewClassificationApiV1PolicyClassificationPreviewPost(ctx c
 	return c.Client.Do(req)
 }
 
+func (c *Client) ExportApiV1PolicyExportGet(ctx context.Context, params *ExportApiV1PolicyExportGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExportApiV1PolicyExportGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) HistoryApiV1PolicyHistoryGet(ctx context.Context, params *HistoryApiV1PolicyHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewHistoryApiV1PolicyHistoryGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ImportPolicyApiV1PolicyImportPostWithBody(ctx context.Context, params *ImportPolicyApiV1PolicyImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportPolicyApiV1PolicyImportPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ValidateApiV1PolicyValidatePostWithBody(ctx context.Context, params *ValidateApiV1PolicyValidatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewValidateApiV1PolicyValidatePostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewReadDocsEndpointApiV1ReadDocsPostRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
@@ -22730,6 +22931,18 @@ func (c *Client) RunDetailUiAgentsRunsHandleGet(ctx context.Context, handle open
 	return c.Client.Do(req)
 }
 
+func (c *Client) RunEventsStreamUiAgentsRunsHandleEventsGet(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunEventsStreamUiAgentsRunsHandleEventsGetRequest(c.Server, handle)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) UiAgentsDetailUiAgentsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAgentsDetailUiAgentsNameGetRequestWithBody(c.Server, name, contentType, body)
 	if err != nil {
@@ -22850,8 +23063,8 @@ func (c *Client) UiAgentsEditModalUiAgentsNameEditGet(ctx context.Context, name 
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(c.Server, name, contentType, body)
+func (c *Client) UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(c.Server, name, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -22862,8 +23075,8 @@ func (c *Client) UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx context.Contex
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiAgentsRunConsoleUiAgentsNameRunGet(ctx context.Context, name string, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiAgentsRunConsoleUiAgentsNameRunGetRequest(c.Server, name, body)
+func (c *Client) UiAgentsRunConsoleUiAgentsNameRunGet(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentsRunConsoleUiAgentsNameRunGetRequest(c.Server, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -35414,6 +35627,298 @@ func NewPreviewClassificationApiV1PolicyClassificationPreviewPostRequestWithBody
 	return req, nil
 }
 
+// NewExportApiV1PolicyExportGetRequest generates requests for ExportApiV1PolicyExportGet
+func NewExportApiV1PolicyExportGetRequest(server string, params *ExportApiV1PolicyExportGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/policy/export")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Scope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "scope", runtime.ParamLocationQuery, *params.Scope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewHistoryApiV1PolicyHistoryGetRequest generates requests for HistoryApiV1PolicyHistoryGet
+func NewHistoryApiV1PolicyHistoryGetRequest(server string, params *HistoryApiV1PolicyHistoryGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/policy/history")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Scope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "scope", runtime.ParamLocationQuery, *params.Scope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewImportPolicyApiV1PolicyImportPostRequestWithBody generates requests for ImportPolicyApiV1PolicyImportPost with any type of body
+func NewImportPolicyApiV1PolicyImportPostRequestWithBody(server string, params *ImportPolicyApiV1PolicyImportPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/policy/import")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Scope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "scope", runtime.ParamLocationQuery, *params.Scope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Preview != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "preview", runtime.ParamLocationQuery, *params.Preview); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewValidateApiV1PolicyValidatePostRequestWithBody generates requests for ValidateApiV1PolicyValidatePost with any type of body
+func NewValidateApiV1PolicyValidatePostRequestWithBody(server string, params *ValidateApiV1PolicyValidatePostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/policy/validate")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Scope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "scope", runtime.ParamLocationQuery, *params.Scope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewReadDocsEndpointApiV1ReadDocsPostRequest calls the generic ReadDocsEndpointApiV1ReadDocsPost builder with application/json body
 func NewReadDocsEndpointApiV1ReadDocsPostRequest(server string, params *ReadDocsEndpointApiV1ReadDocsPostParams, body ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -42493,6 +42998,40 @@ func NewRunDetailUiAgentsRunsHandleGetRequest(server string, handle openapi_type
 	return req, nil
 }
 
+// NewRunEventsStreamUiAgentsRunsHandleEventsGetRequest generates requests for RunEventsStreamUiAgentsRunsHandleEventsGet
+func NewRunEventsStreamUiAgentsRunsHandleEventsGetRequest(server string, handle openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "handle", runtime.ParamLocationPath, handle)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/runs/%s/events", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiAgentsDetailUiAgentsNameGetRequest calls the generic UiAgentsDetailUiAgentsNameGet builder with application/json body
 func NewUiAgentsDetailUiAgentsNameGetRequest(server string, name string, body UiAgentsDetailUiAgentsNameGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -42729,18 +43268,18 @@ func NewUiAgentsEditModalUiAgentsNameEditGetRequestWithBody(server string, name 
 }
 
 // NewUiAgentsRunConsoleUiAgentsNameRunGetRequest calls the generic UiAgentsRunConsoleUiAgentsNameRunGet builder with application/json body
-func NewUiAgentsRunConsoleUiAgentsNameRunGetRequest(server string, name string, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody) (*http.Request, error) {
+func NewUiAgentsRunConsoleUiAgentsNameRunGetRequest(server string, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(server, name, "application/json", bodyReader)
+	return NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(server, name, params, "application/json", bodyReader)
 }
 
 // NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody generates requests for UiAgentsRunConsoleUiAgentsNameRunGet with any type of body
-func NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+func NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(server string, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -42763,6 +43302,28 @@ func NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(server string, name 
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Run != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "run", runtime.ParamLocationQuery, *params.Run); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), body)
@@ -53444,6 +54005,18 @@ type ClientWithResponsesInterface interface {
 
 	PreviewClassificationApiV1PolicyClassificationPreviewPostWithResponse(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, body PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PreviewClassificationApiV1PolicyClassificationPreviewPostResponse, error)
 
+	// ExportApiV1PolicyExportGetWithResponse request
+	ExportApiV1PolicyExportGetWithResponse(ctx context.Context, params *ExportApiV1PolicyExportGetParams, reqEditors ...RequestEditorFn) (*ExportApiV1PolicyExportGetResponse, error)
+
+	// HistoryApiV1PolicyHistoryGetWithResponse request
+	HistoryApiV1PolicyHistoryGetWithResponse(ctx context.Context, params *HistoryApiV1PolicyHistoryGetParams, reqEditors ...RequestEditorFn) (*HistoryApiV1PolicyHistoryGetResponse, error)
+
+	// ImportPolicyApiV1PolicyImportPostWithBodyWithResponse request with any body
+	ImportPolicyApiV1PolicyImportPostWithBodyWithResponse(ctx context.Context, params *ImportPolicyApiV1PolicyImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportPolicyApiV1PolicyImportPostResponse, error)
+
+	// ValidateApiV1PolicyValidatePostWithBodyWithResponse request with any body
+	ValidateApiV1PolicyValidatePostWithBodyWithResponse(ctx context.Context, params *ValidateApiV1PolicyValidatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ValidateApiV1PolicyValidatePostResponse, error)
+
 	// ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse request with any body
 	ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error)
 
@@ -53885,6 +54458,9 @@ type ClientWithResponsesInterface interface {
 	// RunDetailUiAgentsRunsHandleGetWithResponse request
 	RunDetailUiAgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*RunDetailUiAgentsRunsHandleGetResponse, error)
 
+	// RunEventsStreamUiAgentsRunsHandleEventsGetWithResponse request
+	RunEventsStreamUiAgentsRunsHandleEventsGetWithResponse(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*RunEventsStreamUiAgentsRunsHandleEventsGetResponse, error)
+
 	// UiAgentsDetailUiAgentsNameGetWithBodyWithResponse request with any body
 	UiAgentsDetailUiAgentsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsDetailUiAgentsNameGetResponse, error)
 
@@ -53911,9 +54487,9 @@ type ClientWithResponsesInterface interface {
 	UiAgentsEditModalUiAgentsNameEditGetWithResponse(ctx context.Context, name string, body UiAgentsEditModalUiAgentsNameEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsEditModalUiAgentsNameEditGetResponse, error)
 
 	// UiAgentsRunConsoleUiAgentsNameRunGetWithBodyWithResponse request with any body
-	UiAgentsRunConsoleUiAgentsNameRunGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error)
+	UiAgentsRunConsoleUiAgentsNameRunGetWithBodyWithResponse(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error)
 
-	UiAgentsRunConsoleUiAgentsNameRunGetWithResponse(ctx context.Context, name string, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error)
+	UiAgentsRunConsoleUiAgentsNameRunGetWithResponse(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error)
 
 	// UiAgentsRunSubmitUiAgentsNameRunPostWithBodyWithResponse request with any body
 	UiAgentsRunSubmitUiAgentsNameRunPostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsRunSubmitUiAgentsNameRunPostResponse, error)
@@ -57846,6 +58422,98 @@ func (r PreviewClassificationApiV1PolicyClassificationPreviewPostResponse) Statu
 	return 0
 }
 
+type ExportApiV1PolicyExportGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ExportApiV1PolicyExportGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExportApiV1PolicyExportGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type HistoryApiV1PolicyHistoryGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *[]PolicyRevisionView
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r HistoryApiV1PolicyHistoryGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r HistoryApiV1PolicyHistoryGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ImportPolicyApiV1PolicyImportPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *PolicyImportResponse
+	JSON202      *PolicyImportResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ImportPolicyApiV1PolicyImportPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ImportPolicyApiV1PolicyImportPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ValidateApiV1PolicyValidatePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *PolicyValidateResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ValidateApiV1PolicyValidatePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ValidateApiV1PolicyValidatePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ReadDocsEndpointApiV1ReadDocsPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -60501,6 +61169,29 @@ func (r RunDetailUiAgentsRunsHandleGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RunDetailUiAgentsRunsHandleGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunEventsStreamUiAgentsRunsHandleEventsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunEventsStreamUiAgentsRunsHandleEventsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunEventsStreamUiAgentsRunsHandleEventsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -66643,6 +67334,42 @@ func (c *ClientWithResponses) PreviewClassificationApiV1PolicyClassificationPrev
 	return ParsePreviewClassificationApiV1PolicyClassificationPreviewPostResponse(rsp)
 }
 
+// ExportApiV1PolicyExportGetWithResponse request returning *ExportApiV1PolicyExportGetResponse
+func (c *ClientWithResponses) ExportApiV1PolicyExportGetWithResponse(ctx context.Context, params *ExportApiV1PolicyExportGetParams, reqEditors ...RequestEditorFn) (*ExportApiV1PolicyExportGetResponse, error) {
+	rsp, err := c.ExportApiV1PolicyExportGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExportApiV1PolicyExportGetResponse(rsp)
+}
+
+// HistoryApiV1PolicyHistoryGetWithResponse request returning *HistoryApiV1PolicyHistoryGetResponse
+func (c *ClientWithResponses) HistoryApiV1PolicyHistoryGetWithResponse(ctx context.Context, params *HistoryApiV1PolicyHistoryGetParams, reqEditors ...RequestEditorFn) (*HistoryApiV1PolicyHistoryGetResponse, error) {
+	rsp, err := c.HistoryApiV1PolicyHistoryGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseHistoryApiV1PolicyHistoryGetResponse(rsp)
+}
+
+// ImportPolicyApiV1PolicyImportPostWithBodyWithResponse request with arbitrary body returning *ImportPolicyApiV1PolicyImportPostResponse
+func (c *ClientWithResponses) ImportPolicyApiV1PolicyImportPostWithBodyWithResponse(ctx context.Context, params *ImportPolicyApiV1PolicyImportPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportPolicyApiV1PolicyImportPostResponse, error) {
+	rsp, err := c.ImportPolicyApiV1PolicyImportPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportPolicyApiV1PolicyImportPostResponse(rsp)
+}
+
+// ValidateApiV1PolicyValidatePostWithBodyWithResponse request with arbitrary body returning *ValidateApiV1PolicyValidatePostResponse
+func (c *ClientWithResponses) ValidateApiV1PolicyValidatePostWithBodyWithResponse(ctx context.Context, params *ValidateApiV1PolicyValidatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ValidateApiV1PolicyValidatePostResponse, error) {
+	rsp, err := c.ValidateApiV1PolicyValidatePostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseValidateApiV1PolicyValidatePostResponse(rsp)
+}
+
 // ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse request with arbitrary body returning *ReadDocsEndpointApiV1ReadDocsPostResponse
 func (c *ClientWithResponses) ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error) {
 	rsp, err := c.ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx, params, contentType, body, reqEditors...)
@@ -68068,6 +68795,15 @@ func (c *ClientWithResponses) RunDetailUiAgentsRunsHandleGetWithResponse(ctx con
 	return ParseRunDetailUiAgentsRunsHandleGetResponse(rsp)
 }
 
+// RunEventsStreamUiAgentsRunsHandleEventsGetWithResponse request returning *RunEventsStreamUiAgentsRunsHandleEventsGetResponse
+func (c *ClientWithResponses) RunEventsStreamUiAgentsRunsHandleEventsGetWithResponse(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*RunEventsStreamUiAgentsRunsHandleEventsGetResponse, error) {
+	rsp, err := c.RunEventsStreamUiAgentsRunsHandleEventsGet(ctx, handle, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunEventsStreamUiAgentsRunsHandleEventsGetResponse(rsp)
+}
+
 // UiAgentsDetailUiAgentsNameGetWithBodyWithResponse request with arbitrary body returning *UiAgentsDetailUiAgentsNameGetResponse
 func (c *ClientWithResponses) UiAgentsDetailUiAgentsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsDetailUiAgentsNameGetResponse, error) {
 	rsp, err := c.UiAgentsDetailUiAgentsNameGetWithBody(ctx, name, contentType, body, reqEditors...)
@@ -68154,16 +68890,16 @@ func (c *ClientWithResponses) UiAgentsEditModalUiAgentsNameEditGetWithResponse(c
 }
 
 // UiAgentsRunConsoleUiAgentsNameRunGetWithBodyWithResponse request with arbitrary body returning *UiAgentsRunConsoleUiAgentsNameRunGetResponse
-func (c *ClientWithResponses) UiAgentsRunConsoleUiAgentsNameRunGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error) {
-	rsp, err := c.UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx, name, contentType, body, reqEditors...)
+func (c *ClientWithResponses) UiAgentsRunConsoleUiAgentsNameRunGetWithBodyWithResponse(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error) {
+	rsp, err := c.UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx, name, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseUiAgentsRunConsoleUiAgentsNameRunGetResponse(rsp)
 }
 
-func (c *ClientWithResponses) UiAgentsRunConsoleUiAgentsNameRunGetWithResponse(ctx context.Context, name string, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error) {
-	rsp, err := c.UiAgentsRunConsoleUiAgentsNameRunGet(ctx, name, body, reqEditors...)
+func (c *ClientWithResponses) UiAgentsRunConsoleUiAgentsNameRunGetWithResponse(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error) {
+	rsp, err := c.UiAgentsRunConsoleUiAgentsNameRunGet(ctx, name, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -75206,6 +75942,138 @@ func ParsePreviewClassificationApiV1PolicyClassificationPreviewPostResponse(rsp 
 	return response, nil
 }
 
+// ParseExportApiV1PolicyExportGetResponse parses an HTTP response from a ExportApiV1PolicyExportGetWithResponse call
+func ParseExportApiV1PolicyExportGetResponse(rsp *http.Response) (*ExportApiV1PolicyExportGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExportApiV1PolicyExportGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseHistoryApiV1PolicyHistoryGetResponse parses an HTTP response from a HistoryApiV1PolicyHistoryGetWithResponse call
+func ParseHistoryApiV1PolicyHistoryGetResponse(rsp *http.Response) (*HistoryApiV1PolicyHistoryGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &HistoryApiV1PolicyHistoryGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []PolicyRevisionView
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseImportPolicyApiV1PolicyImportPostResponse parses an HTTP response from a ImportPolicyApiV1PolicyImportPostWithResponse call
+func ParseImportPolicyApiV1PolicyImportPostResponse(rsp *http.Response) (*ImportPolicyApiV1PolicyImportPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ImportPolicyApiV1PolicyImportPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PolicyImportResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest PolicyImportResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseValidateApiV1PolicyValidatePostResponse parses an HTTP response from a ValidateApiV1PolicyValidatePostWithResponse call
+func ParseValidateApiV1PolicyValidatePostResponse(rsp *http.Response) (*ValidateApiV1PolicyValidatePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ValidateApiV1PolicyValidatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PolicyValidateResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseReadDocsEndpointApiV1ReadDocsPostResponse parses an HTTP response from a ReadDocsEndpointApiV1ReadDocsPostWithResponse call
 func ParseReadDocsEndpointApiV1ReadDocsPostResponse(rsp *http.Response) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -78742,6 +79610,39 @@ func ParseRunDetailUiAgentsRunsHandleGetResponse(rsp *http.Response) (*RunDetail
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunEventsStreamUiAgentsRunsHandleEventsGetResponse parses an HTTP response from a RunEventsStreamUiAgentsRunsHandleEventsGetWithResponse call
+func ParseRunEventsStreamUiAgentsRunsHandleEventsGetResponse(rsp *http.Response) (*RunEventsStreamUiAgentsRunsHandleEventsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunEventsStreamUiAgentsRunsHandleEventsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

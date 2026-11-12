@@ -134,11 +134,15 @@ async def _run_console_handler(
     name: str,
     session_ctx: UISessionContext = _require_operator_dep,
     role_probe: OperatorRoleProbe = _role_probe_dep,
+    run: uuid.UUID | None = None,
 ) -> HTMLResponse:
-    """``GET /ui/agents/{name}/run`` -- the run console page (operator read)."""
+    """``GET /ui/agents/{name}/run`` -- the run console page (operator read).
+
+    ``?run=<id>`` shows that run: its saved events, then the live ones.
+    """
     del role_probe  # the operator role floor is checked by the session dependency.
     validate_name(name)
-    return await render_run_console(request, session_ctx, name=name)
+    return await render_run_console(request, session_ctx, name=name, run_id=run)
 
 
 async def _run_submit_handler(

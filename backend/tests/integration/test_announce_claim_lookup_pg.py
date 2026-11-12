@@ -96,14 +96,18 @@ async def _seed_busy_tenant() -> None:
 
 
 async def _lookup_select() -> tuple[str, Any]:
-    """Run the lookup once; return the ``SELECT`` it sent and its parameters."""
+    """Run the lookup once; return its claim scan and the scan's parameters.
+
+    The lookup also asks for the completions of the claims it read, by
+    claim id. That second read has its own index and no ``ORDER BY``.
+    """
     sync_engine = get_engine().sync_engine
     sent: list[tuple[str, Any]] = []
 
     def _capture(
         conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, executemany: bool
     ) -> None:
-        if "FROM agent_announcement" in statement:
+        if "FROM agent_announcement" in statement and "ORDER BY" in statement:
             sent.append((statement, parameters))
 
     event.listen(sync_engine, "before_cursor_execute", _capture)

@@ -2682,7 +2682,9 @@ modal shows the category as a badge next to the risk level, and the
 labels and rule below it (`data-testid="approval-classification"`).
 `meho approvals show` prints `Category:`, `Labels:` and `Rule:` lines
 after `Operation:`. With the switch off, none of the three keys is on
-the request, and both surfaces show nothing new.
+the request, and both surfaces show nothing new. The values are stored when
+the request is made, so a later edit of the classification does not
+change the card of an older request.
 
 ## Destructive tier: preview-hash binding + mandatory blast-radius (#3197)
 

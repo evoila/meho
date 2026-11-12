@@ -2429,10 +2429,11 @@ def test_modal_names_a_classification_conflict() -> None:
             "safety_level": "caution",
             "category": None,
             "labels": {},
-            "classification_rule": None,
+            "classification_rule": "tenant:classifications[0]",
         }
     )
     assert "two classification rules disagree" in conflict
+    assert "tenant:classifications[0]" in conflict
 
 
 def test_modal_shows_no_classification_without_one() -> None:

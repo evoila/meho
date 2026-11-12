@@ -36,9 +36,10 @@ func TestPrintClassificationNamesAConflict(t *testing.T) {
 	printClassification(&out, map[string]interface{}{
 		"category":            nil,
 		"labels":              map[string]interface{}{},
-		"classification_rule": nil,
+		"classification_rule": "tenant:classifications[0]",
 	})
-	want := "Category:     none (two classification rules disagree)\n"
+	want := "Category:     none (two classification rules disagree)\n" +
+		"Rule:         tenant:classifications[0]\n"
 	if out.String() != want {
 		t.Errorf("got %q, want %q", out.String(), want)
 	}

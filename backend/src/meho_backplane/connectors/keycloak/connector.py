@@ -1144,6 +1144,26 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_logout(self, operator, target, params)
 
+    async def user_required_actions_update(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.required_actions.update``."""
+        from meho_backplane.connectors.keycloak.ops_user_required_actions import (
+            keycloak_user_required_actions_update,
+        )
+
+        return await keycloak_user_required_actions_update(self, operator, target, params)
+
+    async def user_otp_status(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.otp_status``."""
+        from meho_backplane.connectors.keycloak.ops_user_required_actions import (
+            keycloak_user_otp_status,
+        )
+
+        return await keycloak_user_otp_status(self, operator, target, params)
+
     async def user_get(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1320,6 +1340,9 @@ class KeycloakConnector(HttpConnector):
             READ_OPS,
             WHEN_TO_USE_BY_GROUP,
         )
+        from meho_backplane.connectors.keycloak.ops_user_required_actions import (
+            USER_REQUIRED_ACTION_OPS,
+        )
         from meho_backplane.connectors.keycloak.ops_user_state import USER_STATE_OPS
         from meho_backplane.connectors.keycloak.ops_write import (
             WHEN_TO_USE_WRITE_BY_GROUP,
@@ -1348,6 +1371,7 @@ class KeycloakConnector(HttpConnector):
             *PASSKEY_CODE_SKIP_OPS,
             *TOUCH_OPS,
             *IDENTITY_PROVIDER_OPS,
+            *USER_REQUIRED_ACTION_OPS,
             *USER_STATE_OPS,
             *FLOW_READ_OPS,
         ):

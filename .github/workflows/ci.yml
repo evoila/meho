@@ -35,9 +35,11 @@
 # `python-unit-shard` (heavy pool), `python-integration-shard`,
 # `python-migration-tests` and the nightly coverage jobs. Every moved job
 # keeps its name, `if:` guard and triggers, so the required checks are
-# unchanged. Merge-queue runs are the exception (#6325): there these jobs
-# and the merge-queue watchdog use the internal `meho-runners-ci` pool, so
-# the queue never waits for GitHub-hosted runners.
+# unchanged. Merge-queue runs are the exception (#6325, #6350): there
+# `python-lint`, `go-lint-test`, `cli-api-snapshot-freshness` and the
+# merge-queue watchdog use the internal `meho-runners-ci` pool. The
+# four short jobs `changes`, `python-unit-lane`, `python-integration` and
+# `helm-lint-template` stay hosted, to keep the main pool free.
 #
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
@@ -258,12 +260,12 @@ jobs:
     #                tests, any error, and every merge_group / push run give
     #                `false` (the full run).
     #
-    # No fork-PR guard (#4835): this job runs on GitHub-hosted runners on a
-    # pull request, with a read-only token and no secret, so a fork pull
-    # request may run it. The jobs on our own pool re-check head.repo in
-    # their own `if:`.
-    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
-    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
+    # No fork-PR guard (#4835): this job runs on a GitHub-hosted runner, with
+    # a read-only token and no secret, so a fork pull request may run it. The
+    # jobs on our own pool re-check head.repo in their own `if:`.
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     # actions: read lets the step `map` list and download the test map
     # artifact of the nightly run (#5642).
@@ -1560,8 +1562,9 @@ jobs:
     #     must pass instead. On every other path that job is skipped.
     needs: [changes, python-lint, python-unit-shard, python-outside-backend]
     if: always()
-    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
-    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Assert lint + typecheck + every pytest shard passed
@@ -2605,8 +2608,10 @@ jobs:
     # checks them. This job is NOT a required check and has
     # continue-on-error, so a red result shows a slowdown but never blocks
     # a merge.
+    # Not started in the merge queue (#6350): it is not required and shows
+    # only a slowdown, so a queue run does not need it.
     if: >-
-      github.event_name != 'pull_request' ||
+      (github.event_name != 'pull_request' && github.event_name != 'merge_group') ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true' &&
        needs.changes.outputs.backend_python != 'false')
@@ -2685,8 +2690,9 @@ jobs:
       always() &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
-    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Assert every integration shard passed
@@ -3074,10 +3080,11 @@ jobs:
   helm-lint-template:
     name: Helm (lint + template + kubeconform)
     # No fork-PR guard (#4835): it runs on a GitHub-hosted runner since #4626
-    # (the internal pool in merge-queue runs, #6325) and helm + kubeconform
-    # need only public egress, so a fork pull request may run it.
-    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
-    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
+    # and helm + kubeconform need only public egress, so a fork pull request
+    # may run it.
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout

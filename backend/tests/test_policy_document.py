@@ -157,6 +157,28 @@ def test_each_mistake_is_one_sentence_with_the_path(text: str, sentence: str) ->
     assert any(m.startswith(sentence) for m in mistakes), mistakes
 
 
+@pytest.mark.parametrize(
+    ("labels", "sentence"),
+    [
+        ("{team: " + "x" * 256 + "}", "The value of label 'team' must have 1 to 255 characters."),
+        ("{" + "k" * 64 + ": ops}", "must have 1 to 63 characters."),
+        (
+            "{" + ", ".join(f"k{i}: v" for i in range(33)) + "}",
+            "At most 32 labels are allowed.",
+        ),
+    ],
+)
+def test_labels_are_checked_like_the_single_edit(labels: str, sentence: str) -> None:
+    mistakes = _parse(
+        "policy: v1\nclassifications:\n"
+        "  - {match: {op: x}, category: network}\n"
+        f"  - {{match: {{op: y}}, labels: {labels}}}\n"
+    )
+    assert len(mistakes) == 1, mistakes
+    assert mistakes[0].startswith("`classifications[1].labels`"), mistakes
+    assert sentence in mistakes[0], mistakes
+
+
 def test_an_entry_that_is_not_a_map_is_refused() -> None:
     mistakes = _parse("policy: v1\nclassifications:\n  - just text\n")
     assert mistakes == ["`classifications[0]` must be a mapping of named keys."]

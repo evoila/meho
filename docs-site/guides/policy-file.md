@@ -44,6 +44,8 @@ classifications:
   operation, or a mix. `*` is any text, `?` is one character.
 - An entry sets one or more of: `category`, `labels`, `risk`
   (`safe`, `caution`, `dangerous`, `destructive`) and `always_wait`.
+- `labels` follow the same rules as a single label change: at most 32
+  labels, a key of 1 to 63 characters, a value of 1 to 255 characters.
 
 ## Rules that no file can loosen
 

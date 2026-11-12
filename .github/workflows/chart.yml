@@ -136,7 +136,9 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       chart: ${{ steps.detect.outputs.chart }}
@@ -2651,7 +2653,9 @@ jobs:
     # there. The gate skips too, so it does not fail on the skipped `changes`.
     if: always() && github.event_name != 'workflow_dispatch'
     needs: [changes, validate, helm-test, helm-test-byo, upgrade-from-release]
-    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Evaluate gate

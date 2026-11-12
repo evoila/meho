@@ -961,7 +961,9 @@ time; level 2 is kept for the approval sign-in, `meho-approve`). On the target's
    26.0 to 26.2, 26.3 and newer, with or without the passkey condition,
    WebAuthn, recovery codes and the organization step. The company
    login default on the redirect step is allowed; it is MEHO's own
-   setting. Otherwise it
+   setting. The shapes with the organization step count only while the
+   realm's `organizationsEnabled` is false or missing: level 1 has no
+   organization step. Otherwise it
    makes the flow, does not bind it, and returns `bound: false` with
    `not_bound_reason`. With `replace_custom_login: true` it binds anyway;
    `previous_browser_flow_id` names the flow it replaced. A client bound

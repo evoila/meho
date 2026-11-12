@@ -22,7 +22,9 @@ step (26.6.1):
 * 26.4 and newer, with the passkeys feature on: a ``conditional-credential``
   step skips the code after a passkey.
 * With the organization feature on (not in realm ``master``): an
-  ``Organization`` sub-flow after the company login step.
+  ``Organization`` sub-flow after the company login step. Level 1 of the
+  touch flow has no such step, so these shapes count only while the
+  realm's ``organizationsEnabled`` is false or missing.
 
 Allowed settings: the company login step may have a default company login
 (``defaultProvider``; MEHO's company login setup sets it, and the touch flow
@@ -50,12 +52,17 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_LOGIN_FLOW",
+    "ORGANIZATIONS_ON_REASON",
     "default_login_difference",
     "default_login_shapes",
+    "organizations_difference",
     "read_default_login_difference",
 ]
 
 DEFAULT_LOGIN_FLOW = "browser"
+ORGANIZATIONS_ON_REASON = (
+    "the realm has organizations turned on; level 1 of the touch flow has no organization step"
+)
 _REDIRECTOR = "identity-provider-redirector"
 _CONDITION = "conditional-credential"
 _PASSKEY = "webauthn-passwordless"
@@ -170,13 +177,29 @@ def default_login_difference(steps: list[_Step]) -> str | None:
     return best[1]
 
 
+def organizations_difference(steps: list[_Step], organizations: bool) -> str | None:
+    """:data:`ORGANIZATIONS_ON_REASON` when *organizations* is on and *steps*
+    have the ``Organization`` sub-flow, else ``None``."""
+    if organizations and any(
+        row.get("level") == 0 and _name(row) == _ORGANIZATION[0][1] for row, _ in steps
+    ):
+        return ORGANIZATIONS_ON_REASON
+    return None
+
+
 async def read_default_login_difference(
     connector: KeycloakConnector,
     operator: Operator,
     target: KeycloakTargetLike,
     realm: str,
+    *,
+    organizations: bool,
 ) -> str | None:
-    """Read flow ``browser`` and its settings, then :func:`default_login_difference`."""
+    """Read flow ``browser`` and its settings, then :func:`default_login_difference`
+    and :func:`organizations_difference`.
+
+    *organizations* is the realm's ``organizationsEnabled``.
+    """
     path = fill_path(
         _AUTH_FLOW_EXECUTIONS_PATH,
         {"realm": realm, "flowAlias": quote_segment(DEFAULT_LOGIN_FLOW)},
@@ -195,4 +218,4 @@ async def read_default_login_difference(
             raw = body.get("config")
             config = raw if isinstance(raw, dict) else {}
         steps.append((row, config))
-    return default_login_difference(steps)
+    return default_login_difference(steps) or organizations_difference(steps, organizations)

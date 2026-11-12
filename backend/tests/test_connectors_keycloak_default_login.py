@@ -16,7 +16,9 @@ from typing import Any
 import pytest
 
 from meho_backplane.connectors.keycloak.ops_authflow_default_login import (
+    ORGANIZATIONS_ON_REASON,
     default_login_difference,
+    organizations_difference,
 )
 
 _PASSKEY_CONDITION = {"credentials": "webauthn-passwordless"}
@@ -139,3 +141,13 @@ def test_passkey_condition_without_settings_is_a_difference() -> None:
     rows = list(_KEYCLOAK_26_8)
     rows[11] = rows[11][:3]
     assert default_login_difference(_steps(*rows)) is not None
+
+
+def test_organization_step_with_organizations_on_is_named() -> None:
+    """Level 1 of the touch flow has no organization step."""
+    assert organizations_difference(_steps(*_KEYCLOAK_26_8), True) == ORGANIZATIONS_ON_REASON
+    assert organizations_difference(_steps(*_KEYCLOAK_26_8), False) is None
+
+
+def test_organizations_on_without_the_organization_step_matches() -> None:
+    assert organizations_difference(_steps(*_KEYCLOAK_26_3), True) is None

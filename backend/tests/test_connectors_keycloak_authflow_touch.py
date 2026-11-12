@@ -50,6 +50,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.keycloak import KeycloakConnector
+from meho_backplane.connectors.keycloak.ops_authflow_default_login import ORGANIZATIONS_ON_REASON
 from meho_backplane.connectors.keycloak.ops_authflow_touch import wanted_steps
 from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import (
     AMR_MAPPER,
@@ -824,6 +825,26 @@ async def test_passkey_copy_of_a_changed_browser_flow_is_not_bound(
     assert result["status"] == "ok", result
     assert result["result"]["bound"] is False
     assert "'browser' is not Keycloak's default login" in result["result"]["not_bound_reason"]
+
+
+@pytest.mark.parametrize("organizations", [True, False])
+async def test_default_browser_flow_is_bound_only_with_organizations_off(
+    kc: KeycloakConnector, organizations: bool
+) -> None:
+    """The default ``browser`` has the organization step; level 1 of the touch flow has none."""
+    fake = FakeKeycloak(client=_client())
+    fake.realm["organizationsEnabled"] = organizations
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run({})
+    assert result["status"] == "ok", result
+    out = result["result"]
+    assert out["bound"] is not organizations
+    if organizations:
+        assert out["not_bound_reason"] == ORGANIZATIONS_ON_REASON
+        assert ("PUT", f"{_ADMIN}/clients/{_CLIENT_UUID}") not in [
+            (m, p) for m, p, _ in fake.writes
+        ]
 
 
 async def test_unchanged_browser_flow_with_company_login_default_is_bound(

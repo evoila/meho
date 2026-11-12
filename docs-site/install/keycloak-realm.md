@@ -324,6 +324,8 @@ What the realm has:
     requirements and their settings. When something differs (for
     example the one-time code is required for everyone), they make the
     flow but do not bind it, and they name the difference.
+    Level 1 has no organization step. So when the realm has
+    organizations turned on, they also do not bind the flow.
   - Level 3 asks for a passkey with user verification (**WebAuthn
     Passwordless Authenticator**). Its condition has **Max Age** 0, so a
     touch counts for one login only. Every request for the touch asks

@@ -75,6 +75,7 @@ from meho_backplane.connectors.keycloak._paths import (
 from meho_backplane.connectors.keycloak.ops_authflow import get_admin_list_strict
 from meho_backplane.connectors.keycloak.ops_authflow_default_login import (
     DEFAULT_LOGIN_FLOW,
+    ORGANIZATIONS_ON_REASON,
     read_default_login_difference,
 )
 from meho_backplane.connectors.keycloak.ops_authflow_passkey import (
@@ -547,6 +548,8 @@ async def _custom_login(
     realm: str,
     browser: str,
     previous: str | None,
+    *,
+    organizations: bool,
 ) -> str | None:
     """Why binding would change the normal login, or ``None`` when it would not.
 
@@ -560,7 +563,11 @@ async def _custom_login(
             f"the realm's login flow is {browser!r}, not the built-in one; binding "
             "would drop its steps from the console login"
         )
-    difference = await read_default_login_difference(connector, operator, target, realm)
+    difference = await read_default_login_difference(
+        connector, operator, target, realm, organizations=organizations
+    )
+    if difference == ORGANIZATIONS_ON_REASON:
+        return difference
     if difference is not None:
         return (
             f"the realm's flow {DEFAULT_LOGIN_FLOW!r} is not Keycloak's default login: "
@@ -608,7 +615,15 @@ async def _bind(
     previous = previous or None
     reason = None
     if previous != flow_id and not replace_custom_login:
-        reason = await _custom_login(connector, operator, target, realm, browser, previous)
+        reason = await _custom_login(
+            connector,
+            operator,
+            target,
+            realm,
+            browser,
+            previous,
+            organizations=realm_rep.get("organizationsEnabled") is True,
+        )
     if reason is not None:
         return {
             "bound": False,

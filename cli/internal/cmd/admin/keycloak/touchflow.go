@@ -136,7 +136,8 @@ func reconcileTouch(ctx context.Context, c *adminClient, webClientID string) ([]
 		return events, err
 	}
 	browser, _ := realm["browserFlow"].(string)
-	bindEvents, err := bindTouchFlow(ctx, c, webClientID, flowID, browser)
+	organizations, _ := realm["organizationsEnabled"].(bool)
+	bindEvents, err := bindTouchFlow(ctx, c, webClientID, flowID, browser, organizations)
 	return append(events, bindEvents...), err
 }
 
@@ -411,15 +412,19 @@ func reconcileTouchLevel(ctx context.Context, c *adminClient) ([]string, bool, e
 // for more checks, and binding would drop them. "browser" and "browser
 // with passkeys" can be edited, so their steps and settings are checked
 // (defaultlogin.go), not only their names.
-func customLogin(ctx context.Context, c *adminClient, realmBrowser, clientBrowser string) (string, error) {
+// organizations is the realm's organizationsEnabled.
+func customLogin(ctx context.Context, c *adminClient, realmBrowser, clientBrowser string, organizations bool) (string, error) {
 	if realmBrowser == "" {
 		realmBrowser = "browser"
 	}
 	switch realmBrowser {
 	case defaultLoginFlow, passkeyFlowAlias:
-		diff, err := readDefaultLoginDifference(ctx, c)
+		diff, err := readDefaultLoginDifference(ctx, c, organizations)
 		if err != nil {
 			return "", err
+		}
+		if diff == organizationsOnReason {
+			return diff, nil
 		}
 		if diff != "" {
 			return fmt.Sprintf("the realm's flow %q is not Keycloak's default login (%s)", defaultLoginFlow, diff), nil
@@ -531,7 +536,7 @@ func stepSettings(ctx context.Context, c *adminClient, step map[string]any) (map
 // bootstrap does not make the console client. A client bound to the flow
 // stays bound. A realm or a client with its own login flow is not bound
 // (customLogin).
-func bindTouchFlow(ctx context.Context, c *adminClient, clientID, flowID, realmBrowser string) ([]string, error) {
+func bindTouchFlow(ctx context.Context, c *adminClient, clientID, flowID, realmBrowser string, organizations bool) ([]string, error) {
 	client, err := c.findClient(ctx, clientID)
 	if err != nil {
 		return nil, err
@@ -553,7 +558,7 @@ func bindTouchFlow(ctx context.Context, c *adminClient, clientID, flowID, realmB
 	if current == flowID {
 		return append(events, fmt.Sprintf("[skip] client %q uses login flow %q", clientID, touchFlowAlias)), nil
 	}
-	reason, err := customLogin(ctx, c, realmBrowser, current)
+	reason, err := customLogin(ctx, c, realmBrowser, current, organizations)
 	if err != nil {
 		return events, err
 	}

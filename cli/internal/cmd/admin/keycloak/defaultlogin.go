@@ -23,6 +23,10 @@ import (
 
 const defaultLoginFlow = "browser"
 
+// organizationsOnReason is why the console is not bound when the realm
+// has organizations turned on and "browser" has the Organization step.
+const organizationsOnReason = "the realm has organizations turned on; level 1 of the touch flow has no organization step"
+
 // loginRow is one step of a login flow as Keycloak lists it.
 type loginRow struct {
 	Level       int
@@ -171,9 +175,26 @@ func defaultLoginDifference(steps []map[string]any, settings []map[string]any) s
 	return reason
 }
 
+// organizationsDifference returns organizationsOnReason when the realm
+// has organizations turned on and steps have the Organization sub-flow,
+// else "". The default shapes with that sub-flow match only when the
+// realm's organizations are off.
+func organizationsDifference(steps []map[string]any, organizations bool) string {
+	if !organizations {
+		return ""
+	}
+	for _, step := range steps {
+		if level, _ := step["level"].(float64); level == 0 && stepName(step) == defaultLoginOrganization[0].Name {
+			return organizationsOnReason
+		}
+	}
+	return ""
+}
+
 // readDefaultLoginDifference reads the realm's "browser" flow and the
 // settings of its steps, then compares them (defaultLoginDifference).
-func readDefaultLoginDifference(ctx context.Context, c *adminClient) (string, error) {
+// organizations is the realm's organizationsEnabled.
+func readDefaultLoginDifference(ctx context.Context, c *adminClient, organizations bool) (string, error) {
 	steps, err := readFlowSteps(ctx, c, defaultLoginFlow)
 	if err != nil {
 		return "", err
@@ -184,5 +205,8 @@ func readDefaultLoginDifference(ctx context.Context, c *adminClient) (string, er
 			return "", err
 		}
 	}
-	return defaultLoginDifference(steps, settings), nil
+	if diff := defaultLoginDifference(steps, settings); diff != "" {
+		return diff, nil
+	}
+	return organizationsDifference(steps, organizations), nil
 }

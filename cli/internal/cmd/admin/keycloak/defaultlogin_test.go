@@ -4,6 +4,7 @@
 package keycloak
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -166,5 +167,48 @@ func TestBootstrap_TouchFlowNotBoundOverAChangedBrowserFlow(t *testing.T) {
 				t.Errorf("events miss the not-bound line: %v", res.MapperEventsLog)
 			}
 		})
+	}
+}
+
+// The default "browser" flow has the Organization step. Level 1 of the
+// touch flow has none, so a realm with organizations turned on keeps its
+// console login; with organizations off the console is bound.
+func TestBootstrap_TouchFlowNotBoundWithOrganizationsOn(t *testing.T) {
+	for _, organizations := range []bool{true, false} {
+		t.Run(fmt.Sprintf("organizations %v", organizations), func(t *testing.T) {
+			fake := newFakeKeycloak()
+			fake.realm["organizationsEnabled"] = organizations
+			console := seedConsoleClient(fake)
+
+			res, _, err := runBootstrapOnce(t, fake, fullOpts())
+			if err != nil {
+				t.Fatalf("Bootstrap: %v", err)
+			}
+			got := fake.clients[console.ID].AuthenticationFlowBindingOverrides["browser"]
+			if bound := got == fake.flows[touchFlowAlias].ID; bound == organizations {
+				t.Errorf("console bound to %q with organizations %v", got, organizations)
+			}
+			skipped := slices.ContainsFunc(res.MapperEventsLog, func(e string) bool {
+				return strings.HasPrefix(e, `[skip] client "meho-web" not bound`) &&
+					strings.Contains(e, organizationsOnReason)
+			})
+			if skipped != organizations {
+				t.Errorf("organizations %v: events = %v", organizations, res.MapperEventsLog)
+			}
+		})
+	}
+}
+
+// Without the Organization step, organizations being on changes nothing.
+func TestDefaultLogin_OrganizationsOnWithoutTheStepMatches(t *testing.T) {
+	fake := newFakeKeycloak()
+	steps, _ := listedSteps(fake, "browser")
+	if diff := organizationsDifference(steps, true); diff != organizationsOnReason {
+		t.Errorf("with the step: difference = %q", diff)
+	}
+	seedLoginSteps(fake, "browser", "")
+	steps, _ = listedSteps(fake, "browser")
+	if diff := organizationsDifference(steps, true); diff != "" {
+		t.Errorf("without the step: difference = %q, want none", diff)
 	}
 }

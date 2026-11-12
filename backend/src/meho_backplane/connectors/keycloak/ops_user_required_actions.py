@@ -35,6 +35,15 @@ does not look the username up again, so a name that moved to another
 account while the request waited cannot redirect the write. A card with no
 user id is refused.
 
+A request that gives both ``id`` and ``username`` must name one user: the
+username stored in Keycloak for that id must match. Otherwise the request
+is refused before it waits for approval, and again when the approved
+request runs. Nothing is written. The card and the result show the
+username stored in Keycloak whenever the user could be read.
+
+When the realm is the one MEHO's own sign-in uses and an added action sets
+up a passkey, the card says that the next sign-in can add a new passkey.
+
 Why a new read, not ``keycloak.user.list``
 ==========================================
 
@@ -67,8 +76,10 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.ops_write_preview import _managed_realm, _opt_str
+from meho_backplane.connectors.keycloak.ops_write_realm_delete import _backplane_login_realms
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
     PreviewContext,
     approved_preview,
@@ -95,6 +106,13 @@ OTP_STATUS_OP_ID = "keycloak.user.otp_status"
 _OTP_REQUIRED_ACTION = "CONFIGURE_TOTP"
 #: Credential type Keycloak uses for a one-time code.
 _OTP_CREDENTIAL_TYPE = "otp"
+#: Required actions that let the next sign-in add a passkey.
+_PASSKEY_REQUIRED_ACTIONS = frozenset({"webauthn-register", "webauthn-register-passwordless"})
+_PASSKEY_WARNING = "this lets the next sign-in to this account add a new passkey"
+_OTHER_USER_REASON = (
+    f"{REQUIRED_ACTIONS_UPDATE_OP_ID}: 'id' and 'username' belong to different users. "
+    "Nothing was changed. Send the request with one user."
+)
 
 _DEFAULT_MAX_USERS = 100
 _MAX_USERS = 500
@@ -108,7 +126,10 @@ _UPDATE_SCHEMA: dict[str, Any] = {
         "id": {"type": "string", "pattern": _UUID_PATTERN, "description": "User internal UUID."},
         "username": {
             "type": "string",
-            "description": "Username (resolved to the UUID if id is absent).",
+            "description": (
+                "Username (resolved to the UUID if id is absent). With id, it must be "
+                "the username of that user."
+            ),
         },
         "add": {
             "type": "array",
@@ -210,8 +231,12 @@ _OTP_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "description": "True when more users exist than max. Narrow with username.",
         },
+        "skipped_no_id": {
+            "type": "integer",
+            "description": "User rows left out because Keycloak gave them no id.",
+        },
     },
-    "required": ["rows", "total", "unknown", "truncated"],
+    "required": ["rows", "total", "unknown", "truncated", "skipped_no_id"],
 }
 
 _WHEN_TO_USE_UPDATE = (
@@ -250,7 +275,10 @@ USER_REQUIRED_ACTION_OPS: tuple[KeycloakOp, ...] = (
             ),
             "parameter_hints": {
                 "id": "User internal UUID (from keycloak.user.list).",
-                "username": "Username; resolved to the UUID when id is absent.",
+                "username": (
+                    "Username; resolved to the UUID when id is absent. With id, it must "
+                    "name the same user, else the request is refused."
+                ),
                 "add": "Names such as ['CONFIGURE_TOTP'] (upper case, as Keycloak spells them).",
                 "remove": "Names to take off the user.",
             },
@@ -294,7 +322,7 @@ USER_REQUIRED_ACTION_OPS: tuple[KeycloakOp, ...] = (
             },
             "output_shape": (
                 "``{rows: [{id, username, enabled, required_actions, has_otp, "
-                "otp_setup_pending}], total, unknown, truncated}``."
+                "otp_setup_pending}], total, unknown, truncated, skipped_no_id}``."
             ),
             "next_step": (
                 "When truncated is true, narrow with username. A null has_otp means "
@@ -379,6 +407,15 @@ def _approved_user_id() -> str | None:
     return uuid
 
 
+def _same_user(params: dict[str, Any], user: dict[str, Any]) -> bool:
+    """Whether the request's ``username`` (if any) is the username stored for *user*."""
+    asked = _opt_str(params.get("username"))
+    if asked is None:
+        return True
+    stored = _opt_str(user.get("username"))
+    return stored is not None and stored.casefold() == asked.casefold()
+
+
 async def _read_user(
     self: KeycloakConnector,
     operator: Operator,
@@ -387,7 +424,8 @@ async def _read_user(
 ) -> tuple[str, str, dict[str, Any]]:
     """Resolve the user of the request. Returns ``(uuid, path, user representation)``.
 
-    Raises :exc:`KeycloakUserNotFoundError` for a user that does not exist.
+    Raises :exc:`KeycloakUserNotFoundError` for a user that does not exist,
+    and :exc:`ValueError` when the request's username is not this user's.
     """
     realm = resolve_realm_config(target).managed_realm
     uuid = _approved_user_id()
@@ -409,6 +447,8 @@ async def _read_user(
         raise KeycloakUserNotFoundError(
             f"{REQUIRED_ACTIONS_UPDATE_OP_ID}: no user with id={uuid!r} in realm {realm!r}"
         )
+    if not _same_user(params, user):
+        raise ValueError(_OTHER_USER_REASON)
     return uuid, path, user
 
 
@@ -456,7 +496,7 @@ async def keycloak_user_required_actions_update(
     resulting = _apply(current, add, remove)
     result: dict[str, Any] = {
         "id": uuid,
-        "username": _opt_str(params.get("username")) or _opt_str(user.get("username")),
+        "username": _opt_str(user.get("username")) or _opt_str(params.get("username")),
         "realm": realm,
         "changed": resulting != current,
         "added": [name for name in add if name not in current],
@@ -522,9 +562,10 @@ async def keycloak_user_otp_status(
     """Show each user's required actions and whether a one-time code is set up.
 
     Op-id: ``keycloak.user.otp_status``. Returns
-    ``{rows, total, unknown, truncated}``. A row's ``has_otp`` is ``null``
-    when that user's credentials could not be read. No credential value is
-    ever returned.
+    ``{rows, total, unknown, truncated, skipped_no_id}``. A row's
+    ``has_otp`` is ``null`` when that user's credentials could not be read.
+    ``skipped_no_id`` counts user rows left out because they had no id. No
+    credential value is ever returned.
     """
     realm = resolve_realm_config(target).managed_realm
     asked = params.get("max")
@@ -547,6 +588,7 @@ async def keycloak_user_otp_status(
         for user in users[:limit]
         if isinstance(user, dict) and isinstance(user.get("id"), str) and user["id"]
     ]
+    skipped = len(users[:limit]) - len(kept)
     gate = asyncio.Semaphore(_CREDENTIAL_READ_CONCURRENCY)
     flags = await asyncio.gather(
         *(
@@ -560,15 +602,17 @@ async def keycloak_user_otp_status(
         "total": len(rows),
         "unknown": sum(1 for row in rows if row["has_otp"] is None),
         "truncated": truncated,
+        "skipped_no_id": skipped,
     }
 
 
 async def _required_actions_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Card: the user, the realm, and what is added or removed (with before and after).
 
-    The before and after come from one live read of the user. When the user
-    cannot be read (no live connector, an unknown name, a fault), the card
-    still shows the request and says ``current_available: false``.
+    The before and after come from one live read of the user, and the card
+    then shows the username stored in Keycloak. When the user cannot be read
+    (no live connector, an unknown name, a fault), the card still shows the
+    request and says ``current_available: false``.
     """
     add = _names(ctx.params.get("add"))
     remove = _names(ctx.params.get("remove"))
@@ -581,6 +625,8 @@ async def _required_actions_update_preview(ctx: PreviewContext) -> dict[str, Any
         "remove": remove,
         "current_available": False,
     }
+    if _adds_passkey_on_login_realm(preview["realm"], add):
+        preview["warning"] = _PASSKEY_WARNING
     connector = ctx.connector_instance
     target = ctx.target
     if connector is None or target is None:
@@ -610,11 +656,45 @@ async def _required_actions_update_preview(ctx: PreviewContext) -> dict[str, Any
     if user is None or current is None:
         return preview
     preview["id"] = uuid
-    preview["username"] = preview["username"] or _opt_str(user.get("username"))
+    preview["username"] = _opt_str(user.get("username")) or preview["username"]
     preview["current_available"] = True
     preview["current_required_actions"] = current
     preview["resulting_required_actions"] = _apply(current, add, remove)
     return preview
 
 
+def _adds_passkey_on_login_realm(realm: str | None, add: list[str]) -> bool:
+    """Whether *add* sets up a passkey in the realm MEHO's own sign-in uses."""
+    if realm is None or not _PASSKEY_REQUIRED_ACTIONS.intersection(add):
+        return False
+    return realm.casefold() in {name.casefold() for name in _backplane_login_realms()}
+
+
+async def _refuse_id_of_another_user(ctx: PreviewContext) -> str | None:
+    """Refuse a request whose ``id`` and ``username`` name different users.
+
+    Runs before the request waits for approval. A user id that does not
+    exist is let through: the run then fails with "not found". MEHO cannot
+    check without a live Keycloak connector, so it refuses then.
+    """
+    uuid = _opt_str(ctx.params.get("id"))
+    if uuid is None or _opt_str(ctx.params.get("username")) is None:
+        return None
+    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+
+    connector = ctx.connector_instance
+    if not isinstance(connector, KeycloakConnector) or ctx.target is None:
+        return (
+            f"{REQUIRED_ACTIONS_UPDATE_OP_ID}: MEHO could not check that 'id' and "
+            "'username' name the same user. Send only one of them."
+        )
+    realm = resolve_realm_config(ctx.target).managed_realm
+    path = fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(uuid)})
+    user = await get_or_none(connector, ctx.target, path, ctx.operator)
+    if user is None or _same_user(ctx.params, user):
+        return None
+    return _OTHER_USER_REASON
+
+
+register_park_check(REQUIRED_ACTIONS_UPDATE_OP_ID, _refuse_id_of_another_user)
 register_preview_builder(REQUIRED_ACTIONS_UPDATE_OP_ID, _required_actions_update_preview)

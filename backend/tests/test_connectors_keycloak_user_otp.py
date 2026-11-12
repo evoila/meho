@@ -15,10 +15,14 @@ What is proven:
 * an unknown or disabled name is refused, the error lists the allowed names,
   and nothing is written;
 * the write waits for approval, and the approval card shows the user, the
-  realm and the change;
+  realm and the change, with the username stored in Keycloak;
+* a request whose ``id`` and ``username`` name different users is refused
+  before it waits for approval and when it runs, and nothing is written;
+* a passkey set-up in MEHO's own sign-in realm gets one line on the card;
 * the read shows each user's required actions and whether a one-time code
   is set up, shows "unknown" (null) when credentials cannot be read, says
-  when the list was cut, and never returns a credential value.
+  when the list was cut, counts rows without an id, and never returns a
+  credential value.
 """
 
 from __future__ import annotations
@@ -522,6 +526,82 @@ async def test_approved_run_is_refused_when_the_card_has_no_user_id(
     assert not put.called
 
 
+async def test_id_and_username_of_different_users_is_refused_before_approval(
+    kc: KeycloakConnector,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _, put = _mount(mock, [])
+        call = await call_operation(
+            _operator("kc-otp-requester"),
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": _OP_ID,
+                "target": _TARGET_NAME,
+                "params": {"id": _USER_UUID, "username": "someone-else", "add": ["CONFIGURE_TOTP"]},
+            },
+        )
+    assert call["status"] == "denied", call
+    assert call["extras"]["error_code"] == "refused_before_approval"
+    assert "belong to different users" in call["error"]
+    assert not put.called
+    async with get_sessionmaker()() as session:
+        stored = (await session.execute(select(ApprovalRequest))).scalars().all()
+    assert stored == []
+
+
+async def test_id_and_username_of_different_users_is_refused_when_it_runs(
+    kc: KeycloakConnector,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _, put = _mount(mock, [])
+        result = await _run(
+            _OP_ID, {"id": _USER_UUID, "username": "someone-else", "add": ["CONFIGURE_TOTP"]}
+        )
+    assert result["status"] != "ok"
+    assert "belong to different users" in str(result)
+    assert not put.called
+
+
+async def test_id_and_username_of_the_same_user_waits_for_approval(
+    kc: KeycloakConnector,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _, put = _mount(mock, [], after=["CONFIGURE_TOTP"])
+        request_id = await _park(
+            {"id": _USER_UUID, "username": "Event-Guest", "add": ["CONFIGURE_TOTP"]}
+        )
+        async with get_sessionmaker()() as session:
+            pending = await session.get(ApprovalRequest, request_id)
+            assert pending is not None
+            preview = pending.proposed_effect["preview"]
+        resumed = await _approve_and_resume(request_id)
+    # The card and the result show the username stored in Keycloak.
+    assert preview["username"] == "event-guest"
+    assert "warning" not in preview
+    assert resumed.status == "ok", resumed
+    assert resumed.result["username"] == "event-guest"
+    assert put.call_count == 1
+
+
+async def test_card_says_a_passkey_can_be_added_in_the_sign_in_realm(
+    kc: KeycloakConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    params = {"username": "event-guest", "add": ["webauthn-register-passwordless"]}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount(mock, [])
+        login_realm = await _park(params)
+        monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/other")
+        get_settings.cache_clear()
+        other_realm = await _park(params)
+        async with get_sessionmaker()() as session:
+            cards = [
+                (await session.get(ApprovalRequest, request_id)).proposed_effect["preview"]  # type: ignore[union-attr]
+                for request_id in (login_realm, other_realm)
+            ]
+    assert cards[0]["warning"] == "this lets the next sign-in to this account add a new passkey"
+    assert "warning" not in cards[1]
+
+
 async def test_card_still_shows_the_request_when_the_user_cannot_be_read(
     kc: KeycloakConnector,
 ) -> None:
@@ -659,11 +739,32 @@ async def test_status_empty_realm_and_missing_actions_field(kc: KeycloakConnecto
             200, json=_credentials("otp")
         )
         brief = await _run(_OTP_OP_ID, {})
-    assert empty["result"] == {"rows": [], "total": 0, "unknown": 0, "truncated": False}
+    assert empty["result"] == {
+        "rows": [],
+        "total": 0,
+        "unknown": 0,
+        "truncated": False,
+        "skipped_no_id": 0,
+    }
     row = brief["result"]["rows"][0]
     assert row["required_actions"] is None
     assert row["otp_setup_pending"] is None
     assert row["has_otp"] is True
+
+
+async def test_status_counts_user_rows_without_an_id(kc: KeycloakConnector) -> None:
+    users = _users(2)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(f"/admin/realms/{_REALM}/users").respond(
+            200, json=[users[0], {"username": "no-id"}, {**users[1], "id": ""}]
+        )
+        mock.get(_credential_path(users[0])).respond(200, json=[])
+        result = await _run(_OTP_OP_ID, {})
+    assert result["status"] == "ok", result
+    assert [row["username"] for row in result["result"]["rows"]] == ["user-0"]
+    assert result["result"]["total"] == 1
+    assert result["result"]["skipped_no_id"] == 2
 
 
 async def test_status_user_list_that_is_not_a_list_is_an_error(kc: KeycloakConnector) -> None:

@@ -1160,6 +1160,24 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_sessions(self, operator, target, params)
 
+    async def user_lock_status(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.lock_status``."""
+        from meho_backplane.connectors.keycloak.ops_lock_status import keycloak_user_lock_status
+
+        return await keycloak_user_lock_status(self, operator, target, params)
+
+    async def realm_lock_settings(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.realm.lock_settings``."""
+        from meho_backplane.connectors.keycloak.ops_lock_status import (
+            keycloak_realm_lock_settings,
+        )
+
+        return await keycloak_realm_lock_settings(self, operator, target, params)
+
     async def user_disable(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1301,6 +1319,7 @@ class KeycloakConnector(HttpConnector):
             IDENTITY_PROVIDER_OPS,
             WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP,
         )
+        from meho_backplane.connectors.keycloak.ops_lock_status import LOCK_STATUS_OPS
         from meho_backplane.connectors.keycloak.ops_login_check import (
             LOGIN_CHECK_OPS,
             WHEN_TO_USE_LOGIN_CHECK_BY_GROUP,
@@ -1337,6 +1356,7 @@ class KeycloakConnector(HttpConnector):
             *PASSKEY_CODE_SKIP_OPS,
             *IDENTITY_PROVIDER_OPS,
             *USER_STATE_OPS,
+            *LOCK_STATUS_OPS,
             *FLOW_READ_OPS,
         ):
             handler = getattr(cls, op.handler_attr, None)

@@ -43,8 +43,10 @@ changes the browser sign-in flow for passkeys. Three more safe reads show the
 login setup: `keycloak.auth_flow.step.list`, `keycloak.required_action.list`
 and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
 `keycloak.user.sessions`, show one user's state after a logout or a password
-reset (read surface **sixteen**). In total the connector registers 39
-operations: 16 `safe` reads and 23 writes that wait for
+reset. Two more, `keycloak.user.lock_status` and
+`keycloak.realm.lock_settings`, show whether a user is locked after failed
+sign-ins (read surface **eighteen**). In total the connector registers 41
+operations: 18 `safe` reads and 23 writes that wait for
 approval (6 `caution`, 13 `dangerous`, 4 `destructive`).
 
 Registry v2 triple: `(product="keycloak", version="26.x",
@@ -248,7 +250,7 @@ Ten `safety_level="safe"` / `requires_approval=False` read ops in this
 table (an eleventh, `keycloak.identity_provider.list`, is described with the
 approval sign-in flow; three more are in "Login setup reads" below, and two
 more, `keycloak.user.get` and `keycloak.user.sessions`, are described with the
-user reads below), all
+user reads below, and two lock reads in "Lock status reads"), all
 tagged `read-only`, all dispatching via the admin-auth path. The realm is
 the target's `managed_realm` (no per-op realm param):
 
@@ -261,6 +263,8 @@ the target's `managed_realm` (no per-op realm param):
 | `keycloak.user.list` | `GET .../users` (`?username=`/`?max=`) | `{rows, total}`, no credentials |
 | `keycloak.user.get` | `GET .../users/{user-id}` and `.../credentials` | one user's state, credential type and date only |
 | `keycloak.user.sessions` | `GET .../users/{user-id}/sessions` | `{count, sessions}`, no session id, no token |
+| `keycloak.user.lock_status` | `GET .../attack-detection/brute-force/users/{user-id}` | `{locked, numFailures, numTemporaryLockouts, lastFailure}`, no IP address |
+| `keycloak.realm.lock_settings` | `GET /admin/realms/{realm}` | the realm's lock rules only |
 | `keycloak.role_mapping.get` | `GET .../users/{id}/role-mappings` | realm + client role mappings |
 | `keycloak.role.list` | `GET .../roles` | `{rows, total}` — realm role catalogue |
 | `keycloak.role.users` | `GET .../roles/{role-name}/users` | `{rows, total}`, no credentials — role members |
@@ -342,6 +346,27 @@ other times in milliseconds; a `notBefore` of 0 (never set) is `null`. Use
 both after `keycloak.user.logout` or `keycloak.user.reset_password` to check
 the result. A failed read, or a body of the wrong shape, is an error, never
 an empty answer.
+
+## Lock status reads (`ops_lock_status.py`)
+
+Keycloak shows "Invalid username or password" for a wrong password and for an
+account locked after too many failed sign-ins. Two `safe` reads tell them
+apart:
+
+- `keycloak.user.lock_status` takes `id` or an exact `username`. It reads
+  `GET .../attack-detection/brute-force/users/{user-id}`. The result is
+  `{userId, locked, numFailures, numTemporaryLockouts, lastFailure}`. The IP
+  address of the last failure (`lastIPFailure`) is personal data and is never
+  returned. `lastFailure` is ISO 8601 UTC, or `null` when there was no
+  failure. An unknown user raises "user not found". An answer without the
+  `disabled` flag is an error, never "not locked".
+- `keycloak.realm.lock_settings` reads the realm and copies only the lock
+  rules: `bruteForceProtected`, `permanentLockout`, `failureFactor`,
+  `waitIncrementSeconds`, `maxFailureWaitSeconds`, `maxDeltaTimeSeconds` and
+  the quick-login fields.
+
+Keycloak does not say until when a temporary lock lasts. Not built here: an
+unlock operation.
 
 ## Write ops (G3.13-T4, extended by #3280)
 

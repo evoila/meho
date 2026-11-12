@@ -103,6 +103,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.operations.governed_subops import governed_subops_for
 from meho_backplane.settings import get_settings
 
 _log = structlog.get_logger(__name__)
@@ -599,6 +600,28 @@ def _resume_parent_for_current_composite(
 # (#3351) and the #294 proposed_effect stamping + destructive-tier refusal,
 # alongside the earlier `connector_id=connector_id` grant pass-through, and
 # the #4217 resume-state checks.
+def _warn_if_step_not_declared(step_op_id: str) -> None:
+    """Log one warning when a composite checks a step its list does not have (#6298).
+
+    The up-front step check of an agent call reads that list
+    (:mod:`~meho_backplane.operations.governed_subops`), so a step that is
+    not on it is not checked before the call starts. The step gate below
+    still checks it; this only makes the gap visible.
+    """
+    composite_ctx = composite_dispatch_var.get()
+    if composite_ctx is None:
+        return
+    composite_op_id = composite_ctx[0]
+    surface = governed_subops_for(composite_op_id)
+    if surface is not None and step_op_id in surface.sub_op_ids:
+        return
+    _log.warning(
+        "composite_step_not_declared",
+        composite_op_id=composite_op_id,
+        step_op_id=step_op_id,
+    )
+
+
 async def enforce_subop_policy(
     *,
     operator: Operator,
@@ -712,6 +735,7 @@ async def enforce_subop_policy(
     from meho_backplane.operations.op_policy import apply_step_classification
 
     started = time.monotonic()
+    _warn_if_step_not_declared(op_id)
     product, version, impl_id = parse_connector_id(connector_id)
     # The hash this step's audit rows carry (secret-named values left out).
     # A parked step stores the full approval hash instead (below).

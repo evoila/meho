@@ -8902,6 +8902,14 @@ class RunbookRunStepState(Base):
         nullable=True,
         default=None,
     )
+    # Every check attempt of the step, oldest first: ``{"at", "passed",
+    # "verify_response"}``. ``verify_response`` above holds the latest one.
+    # A retry of a failed step adds an entry; no entry is ever replaced.
+    attempts: Mapped[object] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         sa.CheckConstraint(

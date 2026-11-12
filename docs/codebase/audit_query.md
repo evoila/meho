@@ -42,6 +42,9 @@ A refused call's row says why (#5773). `payload["error"]` holds the
 `error_code` the caller got, a `reason_code`, and the `reason` text. The
 `reason_code` names the rule that refused the call
 (`operations/deny_reasons.py`): `agent_grant_denied` (the agent's grants),
+`agent_no_grant` (no grant covers the call), `agent_steps_not_declared`
+(a multi-step operation lists no steps, so the agent's grants cannot be
+checked for each step),
 `role_insufficient` (the role is below what the operation or tool needs),
 `read_scope_denied` (a service login's read scope), `connector_not_allowed`
 (the agent may not use the connector), `agent_reveal_refused` (an agent

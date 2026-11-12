@@ -276,6 +276,7 @@ async def _seed_sensor(
     severity: str = "critical",
     for_seconds: int = 0,
     state_since: datetime | None = None,
+    evaluated: bool = True,
 ) -> UUID:
     now = datetime.now(UTC)
     sensor_id = uuid4()
@@ -302,7 +303,7 @@ async def _seed_sensor(
                 last_state=last_state,
                 last_value=7,
                 last_evidence={"observed": 7, "bound": 10},
-                last_evaluated_at=now - timedelta(seconds=30),
+                last_evaluated_at=now - timedelta(seconds=30) if evaluated else None,
                 state_since=state_since or now - timedelta(hours=1),
                 identity_sub="__sensor__",
                 created_by_sub="op-admin",
@@ -1524,6 +1525,98 @@ async def test_links_from_before_the_memo_record_silently(
     await _evaluate(sid_c)
     assert len(fake.calls) == 1
     assert "new problem sensor-c ok -> critical" in fake.calls[0]["subject"]
+
+
+@pytest.mark.asyncio
+async def test_new_dashboard_waiting_for_members_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6008: the first fold of a new Dashboard is not an alert.
+
+    Sensor B has not run yet, so the Dashboard folds to ``degraded`` only
+    because of it. No mail, no investigation, no broadcast. When B then
+    reports ``ok`` the Dashboard stays green and still sends nothing: no
+    false "back to ok" mail either.
+    """
+    fake = _install_transport(monkeypatch)
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **kw: fired.append(kw))
+    published: list[Any] = []
+
+    async def _record_publish(*args: Any, **kwargs: Any) -> None:
+        published.append(args)
+
+    monkeypatch.setattr(inv, "_publish_dashboard_event", _record_publish)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    dash = await _seed_dashboard(
+        name="new-board", sensor_ids=[sid_a, sid_b], notify_min_state="degraded"
+    )
+
+    await _evaluate(sid_a)
+
+    assert fake.calls == []
+    assert fired == []
+    assert published == []
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await session.get(CheckDashboard, dash)
+        assert row is not None
+        assert row.last_rollup_state == "ok", "the first state is recorded"
+
+    await _set_sensor_state(sid_b, "ok")
+    await _evaluate(sid_b)
+    assert fake.calls == []
+
+
+@pytest.mark.asyncio
+async def test_new_dashboard_with_a_failing_member_still_mails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6008: a new Dashboard over a really failing member alerts at once.
+
+    The failing Sensor A is evaluated first while B is still unreported:
+    the first state is already red, so the alert goes out. Recovery later
+    still mails the all-clear.
+    """
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="critical")
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    await _seed_dashboard(name="new-board", sensor_ids=[sid_a, sid_b])
+
+    await _evaluate(sid_a)
+    assert len(fake.calls) == 1
+    assert "ok -> critical" in fake.calls[0]["subject"]
+
+    await _set_sensor_state(sid_a, "ok")
+    await _set_sensor_state(sid_b, "ok")
+    await _evaluate(sid_a)
+    assert len(fake.calls) == 2
+    assert "critical -> ok" in fake.calls[1]["subject"]
+
+
+@pytest.mark.asyncio
+async def test_new_dashboard_failure_after_a_silent_first_state_mails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6008: the silent first state must not hide the first real failure."""
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    await _seed_dashboard(name="new-board", sensor_ids=[sid_a, sid_b])
+
+    await _evaluate(sid_a)
+    assert fake.calls == []
+
+    await _set_sensor_state(sid_b, "critical")
+    await _evaluate(sid_b)
+    assert len(fake.calls) == 1
+    assert "ok -> critical" in fake.calls[0]["subject"]
 
 
 @pytest.mark.asyncio

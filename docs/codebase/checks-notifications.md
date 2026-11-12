@@ -21,6 +21,17 @@ member Sensor gets worse while the Dashboard's overall state stays the
 same (a Dashboard already `critical` because of one Sensor used to hide
 every later problem on it). See "The new problem mail" below.
 
+**A new Dashboard's first state (#6008).** A Dashboard starts with no
+recorded state. Members that have not reported yet count as `unknown`,
+and `unknown` rolls up to `degraded`. So the first check run of a new
+Dashboard can look `degraded` only because its other Sensors have not
+run. When the first state is `degraded` or `critical` and no member
+really reports `degraded` or `critical`, MEHO records `ok` as the first
+state and sends nothing: no mail, no investigation, no broadcast. The
+first real failure is then a normal change from `ok` and alerts. When a
+member already really fails on the first state, the alert goes out at
+once, as before.
+
 The notifier is the second, independent consumer of #2507's transition
 claim. The first is the diagnose-only investigator
 (`docs/codebase/checks-investigator.md`), which fires on a **worsening**
@@ -263,8 +274,9 @@ starts NULL, and the first claim after the upgrade records each member's
 current state **without mailing**. An upgrade therefore never sends a
 burst of "new problem" mails for problems that are already visible on the
 Dashboard. A brand-new Dashboard never hits this case: its first
-evaluation is always a Dashboard edge (`NULL → state`), which sends the
-Dashboard mail and records every member.
+evaluation is always a Dashboard edge (`NULL → state`), which records
+every member and sends the Dashboard mail, unless the first state is
+only "waiting for members" (see above).
 
 **Message shape.** Subject:
 `[MEHO] <dashboard>: new problem <sensor> <previous> -> <current> (dashboard still <state>)`.

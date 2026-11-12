@@ -538,12 +538,13 @@ async def _claim_dashboard_transition(
         ]
         claimed = False
         dashboard_edge = current != previous_memo
+        # #6008: a first fold that is red only for lack of reports records "ok", silently.
+        silent_first = _is_unconfirmed_first_state(previous_memo, current, evaluations)
         if dashboard_edge:
-            # Compare-and-swap: the memo tracks the freshly computed state so a
-            # still-non-green Dashboard fires exactly once (on the edge), and the
-            # rowcount is the atomic claim token that coalesces concurrent callers.
+            # Compare-and-swap: fires once per edge; rowcount is the atomic claim token.
+            new_memo = "ok" if silent_first else current
             claimed = await _claim_rollup_transition(
-                session, dashboard_id, expected=previous_memo, new=current
+                session, dashboard_id, expected=previous_memo, new=new_memo
             )
         changes: list[MemberChange] = []
         if claimed or not dashboard_edge:
@@ -558,7 +559,7 @@ async def _claim_dashboard_transition(
                     changes.append(returned)
         transition: _ClaimedTransition | None = None
         member_notices: list[DashboardNotice] = []
-        if claimed:
+        if claimed and not silent_first:
             transition = _ClaimedTransition(
                 dashboard=dashboard_snapshot,
                 non_green=non_green,
@@ -575,6 +576,26 @@ async def _claim_dashboard_transition(
         await session.commit()
 
     return _DashboardClaims(transition=transition, member_notices=member_notices)
+
+
+def _is_unconfirmed_first_state(
+    previous_memo: str | None,
+    current: str,
+    evaluations: list[_MemberRow],
+) -> bool:
+    """True for a new Dashboard whose first non-green fold has no failing member.
+
+    A Dashboard with no memo yet and a ``degraded`` / ``critical`` fold, where
+    no member actually reports ``degraded`` / ``critical`` (members that never
+    ran, or are overdue, count as ``unknown`` and fold to ``degraded``), is only
+    waiting for its first results. It must not mail or investigate.
+    """
+    if previous_memo is not None or current not in ("degraded", "critical"):
+        return False
+    return not any(
+        ev.raw_state in ("degraded", "critical") and ev.effective_state != "ok"
+        for _, _, ev in evaluations
+    )
 
 
 async def _claim_member_changes(

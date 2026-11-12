@@ -2922,8 +2922,8 @@ for a pool that is full. Three rules:
    own pool.** These are the Python and Go test gates, the migration
    checks, the compatibility checks and the chart jobs. Semgrep stays
    too, because a fork pull request skips it. A queue run starts about
-   12 jobs on `meho-runners-ci`, 8 on `meho-runners-ci-heavy-queue`
-   (six unit shards and two chart installs) and 7 hosted jobs (rule 3).
+   12 jobs on `meho-runners-ci`, 6 on `meho-runners-ci-heavy-queue`
+   (the unit shards) and 9 hosted jobs (rule 3).
 3. **A short job that must stay and does not need a pool may use a
    hosted runner.** It goes on `_HOSTED_ON_MERGE_GROUP_ALLOWED` in
    `backend/tests/test_ci_fork_runner_isolation.py`, with its reason.
@@ -2931,7 +2931,9 @@ for a pool that is full. Three rules:
    `python-unit-lane`, `python-integration` and `helm-lint-template`,
    `chart.yml` `changes` and `helm-test-gate`, and `migration-heads.yml`
    `check`. Each runs for seconds to 40 seconds, so it does not fill the
-   hosted limit.
+   hosted limit. The two kind installs of `chart.yml` (`helm-test` and
+   `helm-test-byo`) are hosted too, for a different reason: they need
+   more CPU than the heavy queue pool has today (#6347).
 
 `test_no_merge_group_job_uses_a_hosted_label` fails when a job that can
 run on `merge_group` resolves to a hosted label and is not on the

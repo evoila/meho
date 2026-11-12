@@ -290,6 +290,14 @@ _HOSTED_ON_MERGE_GROUP_ALLOWED: dict[tuple[str, str], str] = {
         "migration-heads.yml",
         "check",
     ): "about 40 seconds; it can break only when two pull requests meet, so it stays in the queue",
+    ("chart.yml", "helm-test"): (
+        "kind installs need more CPU than the own heavy-queue pool has today; "
+        "back to an own pool when the second runner pool exists (#6026)"
+    ),
+    ("chart.yml", "helm-test-byo"): (
+        "kind installs need more CPU than the own heavy-queue pool has today; "
+        "back to an own pool when the second runner pool exists (#6026)"
+    ),
 }
 
 

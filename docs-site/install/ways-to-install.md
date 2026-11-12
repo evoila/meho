@@ -22,72 +22,23 @@ before you use it in production. For the appliance, talk to evoila.
 The Linux server install is available and still in testing. Use it
 for tests and pilots. Talk to evoila before you run it in production.
 
-### What works today
-
 - Each [GitHub release](https://github.com/evoila/meho/releases) has
-  the download `meho-linux-<version>-amd64.tar`, with the checksum file
-  `SHA256SUMS-linux` and its signature `SHA256SUMS-linux.cosign.bundle`.
-- The download holds everything the install needs: the install script,
-  RKE2, the MEHO chart, every container image, `helm` and the `meho`
-  command. The server needs no internet.
+  one download for it. The download holds everything the install needs:
+  the install script, RKE2, the MEHO chart, every container image,
+  `helm` and the `meho` command. The server needs no internet.
 - One script, `install.sh`, checks the machine, sets the host firewall,
   installs RKE2 and installs MEHO with its database, login server and
-  password safe. At the end it prints the address of the console and
-  the two files with the first-login passwords and the unseal key.
+  password safe.
 - To update, run `install.sh` from the download of the newer version on
-  the same machine. The update keeps your answers, the data, the
-  passwords and the keys.
-- `sudo meho doctor` checks the server: the node, the pods, the disk
-  and the certificates (see [Troubleshooting](../clients/troubleshooting.md)).
+  the same machine.
+- Ubuntu 24.04 on x86-64 is tested. Another Linux with systemd gets a
+  "not tested" warning, and the install goes on. Joining more servers
+  into one cluster is not tested yet.
 
-### What is still in testing
-
-- Tests on more Linux versions. Ubuntu 24.04 on x86-64 is tested.
-  Another Linux with systemd gets a "not tested" warning, and the
-  install goes on.
-- A full guide in this documentation.
-- Joining more servers into one cluster.
-
-### How to try it
-
-You need a server with:
-
-- x86-64 and systemd (Ubuntu 24.04 is tested),
-- at least 4 processors, 8 GB of memory, and 80 GB free under
-  `/var/lib`,
-- a full DNS name that your DNS server resolves to the server.
-
-Then, on the server:
-
-1. Download the three files of the release from the
-   [releases page](https://github.com/evoila/meho/releases).
-2. Check the signature of the checksum file first, then the download.
-   You need [cosign](https://docs.sigstore.dev/cosign/system_config/installation/):
-
-   ```bash
-   TAG=v<version>
-   cosign verify-blob \
-     --certificate-identity "https://github.com/evoila/meho/.github/workflows/linux-download.yml@refs/tags/$TAG" \
-     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-     --bundle SHA256SUMS-linux.cosign.bundle SHA256SUMS-linux
-   sha256sum -c SHA256SUMS-linux
-   ```
-
-   Both commands must succeed. `sha256sum` prints `OK` for the download.
-3. Unpack the download and run the install script as root:
-
-   ```bash
-   tar -xf meho-linux-<version>-amd64.tar
-   cd meho-linux-<version>-amd64
-   sudo ./install.sh --hostname <meho.example.com> --admin-network <admin-range>
-   ```
-
-   `--admin-network` is the address range that may use SSH, for
-   example `192.0.2.0/24`. From every other address, only ports 80 and
-   443 answer. `sudo ./install.sh --help` lists every option.
-
-Each check prints `[ok]` or `[WARN]`. When something is wrong, the
-script stops with one `[FAIL]` line that says what to fix.
+The steps are in the chapter
+[Form 2: the Linux server](form-2-linux-server.md): what the machine
+needs, how to check the download, the install, the first login, updates
+and the daily work.
 
 ## Backup and the settings
 

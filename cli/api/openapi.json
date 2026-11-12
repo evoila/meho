@@ -7110,7 +7110,7 @@
           "runbooks"
         ],
         "summary": "Advance Run",
-        "description": "Advance the run one step, gated by the verify predicate.\n\nRole floor: ``operator``. The service enforces the single-assignee\ninvariant: a caller other than ``run.assigned_to`` -- including a\n``tenant_admin`` -- gets 403 :class:`NotRunAssigneeError`. The\nright way for a senior to take over a junior's run is\n:func:`reassign_run`, not a role-based bypass. The substrate is\nthe verify oracle; the caller's ``last_verified`` claim is\ninformational only and never trusted as a gate.\n\nTyped-error mapping:\n\n* :class:`RunNotFoundError` -> 404 (no run with that id in the\n  caller's tenant; cross-tenant probes collapse here).\n* :class:`NotRunAssigneeError` -> 403 (caller is not the\n  assignee; the right path is :func:`reassign_run`).\n* :class:`RunAlreadyTerminalError` -> 400 (run is already\n  ``completed`` / ``abandoned``).\n* :class:`PreviousStepFailedError` -> 400 (current step is in\n  ``failed`` state; the only forward path is :func:`abort_run`).\n* :class:`PreviousStepNotVerifiedError` -> 400 (engine-side gate:\n  previous step never transitioned to ``verified``).\n* :class:`VerifyResponseRequiredError` -> 422 (the step needs a\n  verify response and the request omitted it).\n* :class:`VerifyResponseMismatchError` -> 422 (the response's\n  shape did not match the step's verify type).\n\nReturns :data:`NextStepResponse` -- discriminated on ``kind``:\na :class:`CurrentStepResponse` carrying the next step's body, or\na :class:`RunCompletedResponse` marker when the previous step was\nthe last one.\n\nBinds ``audit_op_id=\"runbook.next_step\"`` + ``audit_op_class=\n\"write\"`` before the service call. When the step's verify is an\n``operation_call``, the service binds ``run_id_var`` +\n``step_id_var`` (G12.1-T2 #1294) around the dispatched call, so\nthe inner audit row carries the run/step correlation columns\npopulated -- one audit row for the route envelope, one for the\ndispatched verify call.",
+        "description": "Advance the run one step, gated by the verify predicate.\n\nRole floor: ``operator``. The service enforces the single-assignee\ninvariant: a caller other than ``run.assigned_to`` -- including a\n``tenant_admin`` -- gets 403 :class:`NotRunAssigneeError`. The\nright way for a senior to take over a junior's run is\n:func:`reassign_run`, not a role-based bypass. The substrate is\nthe verify oracle; the caller's ``last_verified`` claim is\ninformational only and never trusted as a gate.\n\nTyped-error mapping:\n\n* :class:`RunNotFoundError` -> 404 (no run with that id in the\n  caller's tenant; cross-tenant probes collapse here).\n* :class:`NotRunAssigneeError` -> 403 (caller is not the\n  assignee; the right path is :func:`reassign_run`).\n* :class:`RunAlreadyTerminalError` -> 400 (run is already\n  ``completed`` / ``abandoned``).\n* :class:`PreviousStepFailedError` -> 400 (current step is in\n  ``failed`` state and the request has no ``retry``; send\n  ``retry=true`` to run its check again, or use :func:`abort_run`).\n* :class:`PreviousStepNotVerifiedError` -> 400 (engine-side gate:\n  previous step never transitioned to ``verified``).\n* :class:`VerifyResponseRequiredError` -> 422 (the step needs a\n  verify response and the request omitted it).\n* :class:`VerifyResponseMismatchError` -> 422 (the response's\n  shape did not match the step's verify type).\n\nReturns :data:`NextStepResponse` -- discriminated on ``kind``:\na :class:`CurrentStepResponse` carrying the next step's body, or\na :class:`RunCompletedResponse` marker when the previous step was\nthe last one.\n\nBinds ``audit_op_id=\"runbook.next_step\"`` + ``audit_op_class=\n\"write\"`` before the service call. When the step's verify is an\n``operation_call``, the service binds ``run_id_var`` +\n``step_id_var`` (G12.1-T2 #1294) around the dispatched call, so\nthe inner audit row carries the run/step correlation columns\npopulated -- one audit row for the route envelope, one for the\ndispatched verify call.",
         "operationId": "advance_run_api_v1_runbooks_runs__run_id__next_post",
         "parameters": [
           {
@@ -9362,7 +9362,7 @@
           "agents"
         ],
         "summary": "Create Agent",
-        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name is.",
+        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name and the starting grant pick are. A missing pick\n(while the switch is not ``off`` and the agent has no grant) or an\nunknown target name returns 422 and writes nothing. A pick that adds\ngrants is for a person only, the same rule as the grant routes: an\nagent, service or runner login gets 403 ``human_principal_required``.",
         "operationId": "create_agent_api_v1_agents_post",
         "parameters": [
           {
@@ -9652,7 +9652,7 @@
           "agent-principals"
         ],
         "summary": "Register Agent Principal",
-        "description": "Register a new agent principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. Returns 409 on duplicate ``(tenant, name)``.\nReturns 503 when Keycloak admin is not configured.",
+        "description": "Register a new agent principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. Returns 409 on duplicate ``(tenant, name)``.\nReturns 503 when Keycloak admin is not configured. Returns 422 when\nthe starting grant pick is missing (``starting_grants_required``) or\nnames a target that does not resolve; nothing is created then.",
         "operationId": "register_agent_principal_api_v1_agent_principals_post",
         "parameters": [
           {
@@ -26176,6 +26176,10 @@
             "type": "boolean",
             "title": "Enabled",
             "default": true
+          },
+          "starting_grants": {
+            "$ref": "#/components/schemas/StartingGrants",
+            "nullable": true
           }
         },
         "additionalProperties": false,
@@ -26563,6 +26567,10 @@
             "type": "string",
             "nullable": true,
             "title": "Owner Sub"
+          },
+          "starting_grants": {
+            "$ref": "#/components/schemas/StartingGrants",
+            "nullable": true
           }
         },
         "additionalProperties": false,
@@ -29114,6 +29122,12 @@
             "type": "string",
             "maxLength": 16,
             "title": "Answer",
+            "default": ""
+          },
+          "retry": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Retry",
             "default": ""
           }
         },
@@ -37180,6 +37194,11 @@
             },
             "nullable": true,
             "title": "Verify Response"
+          },
+          "retry": {
+            "type": "boolean",
+            "title": "Retry",
+            "default": false
           }
         },
         "type": "object",
@@ -37187,7 +37206,7 @@
           "last_verified"
         ],
         "title": "NextStepRequest",
-        "description": "Request body for ``meho_runbook_next`` -- advance the run.\n\n:attr:`last_verified` is the caller's *claim* that the previous\nstep's verify gate was satisfied. It is **informational only**:\nthe substrate (engine, G12.3-T2) is the verify oracle, and a\nrequest from a caller whose previous-step state is not\n``verified`` returns 400 *regardless* of what\n:attr:`last_verified` says. The field exists so the wire log\ncaptures the caller's belief alongside the substrate's decision\n-- useful for diagnosing a client that thinks it advanced when\nthe substrate did not.\n\n:attr:`verify_response` carries the operator's answer for a\n``confirm`` step or the engine's captured result for an\n``operation_call`` step. ``None`` is valid only on the very first\n``meho_runbook_next`` call (when no prior step exists to verify)."
+        "description": "Request body for ``meho_runbook_next`` -- advance the run.\n\n:attr:`last_verified` is the caller's *claim* that the previous\nstep's verify gate was satisfied. It is **informational only**:\nthe substrate (engine, G12.3-T2) is the verify oracle, and a\nrequest from a caller whose previous-step state is not\n``verified`` returns 400 *regardless* of what\n:attr:`last_verified` says. The field exists so the wire log\ncaptures the caller's belief alongside the substrate's decision\n-- useful for diagnosing a client that thinks it advanced when\nthe substrate did not.\n\n:attr:`verify_response` carries the operator's answer for a\n``confirm`` step or the engine's captured result for an\n``operation_call`` step. ``None`` is valid only on the very first\n``meho_runbook_next`` call (when no prior step exists to verify).\n\n:attr:`retry` ``= True`` asks MEHO to run the check of a ``failed``\ncurrent step again. Without it, a ``failed`` step refuses to\nadvance, as before. On a step that is not ``failed`` the flag has\nno effect."
       },
       "OpAllowlistEntry": {
         "properties": {
@@ -42499,6 +42518,40 @@
         ],
         "title": "StartRunRequest",
         "description": "Request body for ``meho_runbook_start`` -- begin a new run on a template.\n\n:attr:`template_slug` references a *published* runbook template; the\nservice layer (G12.3-T3) resolves it to a pinned ``(slug, version)``\nat start time so later template edits cannot alter this run's step\nlist (per Initiative #1198 deprecation interplay rules).\n:attr:`target` is the run's subject (the host, the cluster, the\ncert thumbprint); :attr:`params` is the substitution context for\n``${run.params.X}`` and may be empty.\n\n:attr:`work_ref` is the optional opaque external change-ticket\nreference (a GitHub issue ``\"gh:evoila/meho#9\"``, a Jira key, a CR\nid) the run executes under. It is pinned on the run row at start and\nbound onto the shared ``work_ref_var`` ContextVar around each step's\ndispatch so every ``operation_call`` step's audit row inherits it\n(work_ref I3-T1 #1661). ``None`` when the run is started without a\nchange ticket."
+      },
+      "StartingGrantSet": {
+        "type": "string",
+        "enum": [
+          "none",
+          "read-everything",
+          "read-targets"
+        ],
+        "title": "StartingGrantSet",
+        "description": "The three starting grant sets a person can pick."
+      },
+      "StartingGrants": {
+        "properties": {
+          "set": {
+            "$ref": "#/components/schemas/StartingGrantSet",
+            "description": "'none': the agent runs nothing until an admin adds a grant. 'read-everything': safe operations run at once on every target; everything else waits for a person's approval. 'read-targets': the same, but only on the targets in 'targets'."
+          },
+          "targets": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Targets",
+            "description": "Target names. Only for 'read-targets', and required there."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "set"
+        ],
+        "title": "StartingGrants",
+        "description": "The first grants of a new agent, picked when it is registered or defined."
       },
       "StatusFilterValue": {
         "type": "string",

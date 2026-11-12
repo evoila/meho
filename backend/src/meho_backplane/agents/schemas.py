@@ -35,6 +35,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from meho_backplane.agents.grant_sets import StartingGrants
+
 __all__ = [
     "NAME_PATTERN",
     "AgentDefinitionCreate",
@@ -136,6 +138,10 @@ class AgentDefinitionCreate(BaseModel):
     turn_budget: int = Field(ge=1, le=_MAX_TURN_BUDGET)
     output_schema: dict[str, Any] | None = None
     enabled: bool = True
+    #: The first grants of the agent ``identity_ref`` names (#6191).
+    #: Required while ``AGENT_GRANT_REQUIRED`` is not ``off`` and that agent
+    #: has no live grant yet. Not stored on the definition row.
+    starting_grants: StartingGrants | None = None
 
 
 class AgentDefinitionUpdate(BaseModel):

@@ -388,7 +388,7 @@ of a target is no longer valid, every run starts a new login that fails.
 So the runner counts
 the runs in a row where the dispatcher answered `connector_auth_failed`
 (the run's evidence then carries `error_code`). The count is the column
-`sensor.auth_failure_count` (migration `0162`). It reaches
+`sensor.auth_failure_count` (migration `0163`). It reaches
 `SENSOR_AUTH_FAILURE_PARK_THRESHOLD` (default 3): the runner sets
 `status='paused'` with `status_reason='auth_failed:ConnectorAuthError'` and
 stops calling the target. Any other result sets the count to 0. The count,

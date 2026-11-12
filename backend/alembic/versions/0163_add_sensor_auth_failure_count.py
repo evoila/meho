@@ -3,8 +3,8 @@
 
 """Add ``sensor.auth_failure_count``.
 
-Revision ID: 0162
-Revises: 0161
+Revision ID: 0163
+Revises: 0162
 Create Date: 2026-11-12
 
 One column: how many evaluations in a row the target refused the login.
@@ -23,8 +23,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0162"
-down_revision: str | None = "0161"
+revision: str = "0163"
+down_revision: str | None = "0162"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

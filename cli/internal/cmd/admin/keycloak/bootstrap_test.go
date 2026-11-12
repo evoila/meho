@@ -49,6 +49,9 @@ type fakeKeycloak struct {
 	userGroups     map[string][]string            // user UUID -> group UUIDs
 	passwords      map[string]string              // user UUID -> last reset password
 	flows          map[string]*fakeFlow           // login flows, keyed by alias
+	stepConfigs    map[string]map[string]any      // step settings, keyed by config id
+	realm          map[string]any                 // the realm representation
+	noProviders    []string                       // steps this Keycloak does not have
 
 	// Counts requests per (method, path-template) so tests can assert
 	// idempotency: a re-run must not increment "POST /clients".
@@ -62,7 +65,7 @@ type fakeKeycloak struct {
 }
 
 func newFakeKeycloak() *fakeKeycloak {
-	return &fakeKeycloak{
+	fake := &fakeKeycloak{
 		clients:        map[string]*clientRep{},
 		mappers:        map[string][]protocolMapperRep{},
 		defaultScopes:  map[string][]string{},
@@ -79,13 +82,21 @@ func newFakeKeycloak() *fakeKeycloak {
 			// #912).
 			{ID: "scope-offline-access", Name: "offline_access"},
 		},
-		groups:     map[string]*groupRep{},
-		users:      map[string]*userRep{},
-		userGroups: map[string][]string{},
-		passwords:  map[string]string{},
-		flows:      map[string]*fakeFlow{},
-		calls:      map[string]int{},
+		groups:      map[string]*groupRep{},
+		users:       map[string]*userRep{},
+		userGroups:  map[string][]string{},
+		passwords:   map[string]string{},
+		flows:       map[string]*fakeFlow{},
+		stepConfigs: map[string]map[string]any{},
+		realm: map[string]any{
+			"realm": "r", "attributes": map[string]any{"frontendUrl": ""},
+			passkeyUVPolicy: "required",
+		},
+		calls: map[string]int{},
 	}
+	// Keycloak always has the built-in browser flow.
+	seedDefaultLogin(fake)
+	return fake
 }
 
 // fakeFlow is one login flow of the fake realm with its steps.
@@ -100,6 +111,7 @@ type fakeFlowStep struct {
 	Provider    string
 	Subflow     string
 	Requirement string
+	Config      string // id of the step's settings; "" when it has none
 }
 
 // flowSteps lists a flow's steps the way Keycloak does: the steps of a
@@ -115,12 +127,104 @@ func (f *fakeKeycloak) flowSteps(alias string, level int) []map[string]any {
 			out = append(out, f.flowSteps(s.Subflow, level+1)...)
 			continue
 		}
-		out = append(out, map[string]any{
+		row := map[string]any{
 			"id": s.ID, "displayName": "display of " + s.Provider, "providerId": s.Provider,
 			"authenticationFlow": false, "requirement": s.Requirement, "level": level,
-		})
+		}
+		if s.Config != "" {
+			row["authenticationConfig"] = s.Config
+		}
+		out = append(out, row)
 	}
 	return out
+}
+
+// handleStepConfigs serves the settings of flow steps; false when sub
+// is not such a path.
+func (f *fakeKeycloak) handleStepConfigs(w http.ResponseWriter, r *http.Request, sub string) bool {
+	if sub == "authentication/authenticator-providers" && r.Method == http.MethodGet {
+		var list []map[string]string
+		for _, s := range touchFlowSteps() {
+			if s.Provider != "" && !slices.Contains(f.noProviders, s.Provider) {
+				list = append(list, map[string]string{"id": s.Provider})
+			}
+		}
+		writeJSON(w, http.StatusOK, list)
+		return true
+	}
+	if id, ok := strings.CutPrefix(sub, "authentication/config/"); ok {
+		config, found := f.stepConfigs[id]
+		switch {
+		case !found:
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet:
+			writeJSON(w, http.StatusOK, config)
+		case r.Method == http.MethodPut:
+			f.calls["PUT /authentication/config/{id}"]++
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return true
+			}
+			f.stepConfigs[id] = body
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete:
+			f.calls["DELETE /authentication/config/{id}"]++
+			delete(f.stepConfigs, id)
+			for _, flow := range f.flows {
+				for _, s := range flow.Steps {
+					if s.Config == id {
+						s.Config = ""
+					}
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+		return true
+	}
+	rest, ok := strings.CutPrefix(sub, "authentication/executions/")
+	stepID, ok2 := strings.CutSuffix(rest, "/config")
+	if !ok || !ok2 || r.Method != http.MethodPost {
+		return false
+	}
+	f.calls["POST /authentication/executions/{id}/config"]++
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	for _, fl := range f.flows {
+		for _, s := range fl.Steps {
+			if s.ID == stepID {
+				id := f.mintID()
+				body["id"] = id
+				f.stepConfigs[id] = body
+				s.Config = id
+				w.WriteHeader(http.StatusCreated)
+				return true
+			}
+		}
+	}
+	http.Error(w, "Illegal execution", http.StatusNotFound)
+	return true
+}
+
+// handleRealm serves GET and PUT of the realm itself.
+func (f *fakeKeycloak) handleRealm(w http.ResponseWriter, r *http.Request) {
+	f.calls[r.Method+" /realm"]++
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, f.realm)
+	case http.MethodPut:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		f.realm = body
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 // handleFlows serves the login flow endpoints; false when sub is not one.
@@ -232,11 +336,11 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 		// rest is "<realm>/<sub>" — drop the realm segment.
 		slash := strings.IndexByte(rest, '/')
 		if slash < 0 {
-			http.NotFound(w, r)
+			f.handleRealm(w, r)
 			return
 		}
 		sub := rest[slash+1:]
-		if f.handleFlows(w, r, sub) {
+		if f.handleFlows(w, r, sub) || f.handleStepConfigs(w, r, sub) {
 			return
 		}
 
@@ -1968,6 +2072,7 @@ var wantApprovalFlowStepLines = []string{
 // approval client.
 func TestBootstrap_ReRunKeepsFlowAndBindsExistingClient(t *testing.T) {
 	fake := newFakeKeycloak()
+	seedTouchFlow(fake)
 	seedApprovalFlow(fake)
 	old := fullOpts().withDefaults().desiredCLIApproveClient()
 	old.ID = "uuid-existing-approve"
@@ -1996,17 +2101,22 @@ func TestBootstrap_ReRunKeepsFlowAndBindsExistingClient(t *testing.T) {
 // A run that stops at any call of the flow setup leaves a half-made
 // flow. The next run finishes it and binds the approval client to it.
 func TestBootstrap_FinishesAFlowSetupThatStoppedHalfWay(t *testing.T) {
+	// The touch flow is there already, so the last two flow API calls of
+	// a run only read it (the flow list and its steps). The loop stops at
+	// the calls that set up the approval flow.
 	clean := newFakeKeycloak()
+	seedTouchFlow(clean)
 	if _, _, err := runBootstrapOnce(t, clean, fullOpts()); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	setupCalls := clean.flowCalls
+	setupCalls := clean.flowCalls - 2
 	if setupCalls < 10 {
 		t.Fatalf("a clean run made %d flow API calls, want the whole setup", setupCalls)
 	}
 	for stopAt := 1; stopAt <= setupCalls; stopAt++ {
 		t.Run(fmt.Sprintf("stop at call %d", stopAt), func(t *testing.T) {
 			fake := newFakeKeycloak()
+			seedTouchFlow(fake)
 			fake.failFlowCallAt = stopAt
 			if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err == nil {
 				t.Fatal("the stopped run reported no error")
@@ -2048,6 +2158,7 @@ func TestBootstrap_FinishesAFlowSetupThatStoppedHalfWay(t *testing.T) {
 // the approval client is not bound to it.
 func TestBootstrap_DoesNotBindAFlowWithOtherSteps(t *testing.T) {
 	fake := newFakeKeycloak()
+	seedTouchFlow(fake)
 	flow := seedApprovalFlow(fake)
 	flow.Steps = append(flow.Steps, &fakeFlowStep{
 		ID: fake.mintID(), Provider: "auth-cookie", Requirement: "ALTERNATIVE"})

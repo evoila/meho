@@ -7,7 +7,8 @@ Kind ``"linux"`` is a **write-only** store for ``secret.move``. The ref is::
 
     <target>/<absolute path>#<owner>
 
-* ``<target>`` -- the name (or alias) of a ``linux-ssh`` target.
+* ``<target>`` -- the name (or alias) of a ``linux-ssh`` target. A target of
+  another kind is refused before MEHO reads any credential.
 * ``<absolute path>`` -- where the file goes. ``linux:seat-host/etc/app/key#app``
   and ``linux:seat-host//etc/app/key#app`` name the same path.
 * ``<owner>`` -- the Linux user who will own the file.
@@ -26,12 +27,16 @@ place inside the home directory of ``<owner>``.
 Before MEHO opens any SSH connection, it checks that the path is absolute,
 has no ``..`` and no control character, and is not in a system folder that can
 never hold a home directory (``/proc``, ``/sys``, ``/dev``, ``/boot``, ``/bin``,
-``/sbin``, ``/lib*``, ``/tmp``, and ``/usr`` outside the write roots). A home
+``/sbin``, ``/lib*``, ``/tmp``, and ``/usr`` outside the write roots). It also
+refuses a place the system runs or reads for logins and rights
+(:data:`_SYSTEM_RUNS`). A home
 under ``/var`` (for example ``/var/www``) is allowed. For a path outside the
 write roots, MEHO then reads the owner's home from the host (``getent passwd``)
 with a short script that carries no secret, and refuses a path outside that
 home before the secret is sent. The root script that writes the file checks
-the path again, as the caller wrote it, without resolving links.
+the path again, as the caller wrote it, without resolving links. Both scripts
+first check that ``realpath -m`` works on the host, and stop with the reason
+``realpath`` when it does not.
 
 Root never follows a link that the owner of the file could have made:
 
@@ -62,6 +67,7 @@ that names no value.
 from __future__ import annotations
 
 import base64
+import fnmatch
 import posixpath
 import re
 import shlex
@@ -128,6 +134,11 @@ _FOLDER_CHECKS = (
 
 _SINK_OK = "===MEHO_SINK_OK==="
 _SINK_ERR_PREFIX = "===MEHO_SINK_ERR:"
+#: Both scripts start with this check. Without a working ``realpath -m`` the
+#: home and link checks would compare against an empty string.
+_REALPATH_CHECK = (
+    f'realpath -m -- / >/dev/null 2>&1 || {{ echo "{_SINK_ERR_PREFIX}realpath===" >&2; exit 7; }}'
+)
 _ERR_MARKER = re.compile(r"===MEHO_SINK_ERR:([a-z-]+)===")
 _HOME_MARKER = re.compile(r"^===MEHO_SINK_HOME:(.*)===$", re.MULTILINE)
 
@@ -205,6 +216,55 @@ _NEVER_ROOTS: tuple[str, ...] = (
 )
 
 
+#: Places the system runs or reads for logins and rights. A secret written here
+#: could become a command that runs, a sudo rule, or a login key, and the
+#: approval card shows only the path, not the content. This is the one list:
+#: each entry is checked before any SSH connection.
+#:
+#: * ``etc`` -- shell patterns for the name directly under ``/etc``: scheduled
+#:   commands (``cron*``), sudo rules (``sudoers*``), services
+#:   (``systemd``), login shells (``profile*``), the loader (``ld.so*``), login
+#:   rules (``pam.d``), SSH (``ssh``) and the user and group files.
+#: * ``names`` -- file names refused in any folder: SSH login keys and the shell
+#:   start files of a home. The home is known only on the host, so the name is
+#:   refused everywhere.
+_SYSTEM_RUNS: dict[str, tuple[str, ...]] = {
+    "etc": (
+        "cron*",
+        "sudoers*",
+        "systemd",
+        "profile*",
+        "ld.so*",
+        "pam.d",
+        "ssh",
+        "passwd",
+        "shadow",
+        "group",
+    ),
+    "names": (
+        "authorized_keys",
+        "authorized_keys2",
+        ".bashrc",
+        ".bash_profile",
+        ".bash_login",
+        ".profile",
+        ".zshrc",
+    ),
+}
+
+
+def _system_runs(path: str) -> bool:
+    """``True`` when *path* (normalised, absolute) is in :data:`_SYSTEM_RUNS`."""
+    parts = path.split("/")
+    if parts[-1] in _SYSTEM_RUNS["names"]:
+        return True
+    return (
+        len(parts) > 2
+        and parts[1] == "etc"
+        and any(fnmatch.fnmatchcase(parts[2], pattern) for pattern in _SYSTEM_RUNS["etc"])
+    )
+
+
 def _under_write_root(path: str) -> bool:
     return any(_is_under(path, root) for root in LINUX_WRITE_ROOTS)
 
@@ -212,8 +272,9 @@ def _under_write_root(path: str) -> bool:
 def confine_secret_sink_path(requested: str) -> str:
     """Return the normalised *requested* path, or raise :class:`LinuxSecretRefError`.
 
-    Pure check, no SSH. Refuses a relative path, ``..``, a control character
-    and a system folder that can never hold a home directory. A path under a
+    Pure check, no SSH. Refuses a relative path, ``..``, a control character,
+    a place in :data:`_SYSTEM_RUNS` and a system folder that can never hold a
+    home directory. A path under a
     write root passes. Any other path passes only this check: before the secret
     is sent, :meth:`LinuxSecretSinkEndpoint.write_secret` reads the owner's home
     from the host and refuses a path outside it.
@@ -231,6 +292,11 @@ def confine_secret_sink_path(requested: str) -> str:
         path = "/" + path.lstrip("/")
     if path == "/":
         raise LinuxSecretRefError(f"linux secret path {requested!r} must name a file")
+    if _system_runs(path):
+        raise LinuxSecretRefError(
+            f"linux secret path {path!r} is a place the system runs or reads for "
+            "logins and rights; a secret is never written there"
+        )
     if _under_write_root(path):
         return path
     if any(_is_under(path, root) for root in _NEVER_ROOTS):
@@ -249,7 +315,7 @@ def build_home_lookup_script(owner: str) -> str:
     """
     err = _SINK_ERR_PREFIX
     return (
-        f"set -u\nowner={shlex.quote(owner)}\n"
+        f"set -u\n{_REALPATH_CHECK}\nowner={shlex.quote(owner)}\n"
         'home="$(getent passwd "$owner" | cut -d: -f6)"\n'
         f'[ -n "$home" ] || {{ echo "{err}owner===" >&2; exit 5; }}\n'
         'printf \'===MEHO_SINK_HOME:%s===\\n\' "$home" "$(realpath -m -- "$home")"\n'
@@ -321,6 +387,7 @@ def build_secret_sink_script(
     lines = [
         "set -u",
         "umask 077",
+        _REALPATH_CHECK,
         f"path={q_path}",
         f"owner={q_owner}",
         f'grp="$(id -gn -- "$owner" 2>/dev/null)" || {{ echo "{err}owner===" >&2; exit 5; }}',
@@ -328,14 +395,20 @@ def build_secret_sink_script(
         # Decide on the path as the caller gave it. Root never resolves or
         # follows a link for a path inside the owner's home: the owner could
         # have made that link.
-        'realhome=""',
+        "inhome=0",
         'if [ -n "$home" ] && [ "$home" != / ]; then',
-        '  realhome="$(realpath -m -- "$home")"',
-        '  case "$path" in "$home"/*|"$realhome"/*)',
-        f'    printf %s {q_b64} | runuser -u "$owner" -- bash -c {q_inner} meho-sink "$path" '
+        '  case "$path" in "$home"/*) inhome=1;; esac',
+        f'  realhome="$(realpath -m -- "$home")" || {{ echo "{err}realpath===" >&2; exit 7; }}',
+        # An empty "$realhome" would make the pattern "/*", which every
+        # absolute path matches.
+        '  if [ -n "$realhome" ] && [ "$realhome" != / ]; then',
+        '    case "$path" in "$realhome"/*) inhome=1;; esac',
+        "  fi",
+        "fi",
+        'if [ "$inhome" = 1 ]; then',
+        f'  printf %s {q_b64} | runuser -u "$owner" -- bash -c {q_inner} meho-sink "$path" '
         f'|| {{ echo "{err}write===" >&2; exit 4; }}',
-        f'    echo "{_SINK_OK}"; exit 0;;',
-        "  esac",
+        f'  echo "{_SINK_OK}"; exit 0',
         "fi",
         "ok=0",
         f"for r in {q_roots}; do",
@@ -404,6 +477,13 @@ class LinuxSecretSinkEndpoint:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             row = await resolve_target(session, operator.tenant_id, self._target_name)
+        # Only a Linux SSH target gets its credentials read and the script.
+        product = getattr(row, "product", None)
+        if product != LinuxSshConnector.product:
+            raise LinuxSecretRefError(
+                f"linux secret ref names target {self._target_name!r} of kind {product!r}; "
+                f"the linux store writes only to a {LinuxSshConnector.product!r} target"
+            )
         target = cast("Target", row)
 
         sudo_password = await _resolve_sudo_password(connector, target, operator)

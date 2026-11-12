@@ -51,11 +51,17 @@ if TYPE_CHECKING:
 __all__ = [
     "SECRET_MOVE_PARAMETER_SCHEMA",
     "SECRET_REF_PROPERTY",
+    "SecretMergeUnsupportedError",
     "register_secret_broker_operations",
     "secret_move",
 ]
 
 _log = structlog.get_logger(__name__)
+
+
+class SecretMergeUnsupportedError(ValueError):
+    """``merge: true`` was asked for a sink kind that cannot merge."""
+
 
 #: A ``<kind>:<ref>`` move endpoint reference. A non-empty string; the
 #: kind/ref split (and the per-kind ref grammar) is validated in the
@@ -72,8 +78,10 @@ SECRET_REF_PROPERTY: dict[str, Any] = {
         "A '<kind>:<ref>' secret reference. 'kind' selects the store "
         "adapter (e.g. 'vault'); 'ref' is the store-specific address "
         "(for vault: a KV-v2 path with a '#<field>' fragment, e.g. "
-        "'vault:secret/db/prod#password'). References only — never the "
-        "secret value."
+        "'vault:secret/db/prod#password'). Kind 'vault-target' names a "
+        "registered Vault target whose role does the read or write: "
+        "'vault-target:<target>/<path>#<field>'. References only — never "
+        "the secret value."
     ),
 }
 
@@ -86,6 +94,17 @@ SECRET_MOVE_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "from": SECRET_REF_PROPERTY,
         "to": SECRET_REF_PROPERTY,
+        "merge": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Sink option, default false. When true, the sink keeps the "
+                "other fields of the secret and changes only the named field, "
+                "with a check-and-set guard against a parallel change. "
+                "Supported by the 'vault' and 'vault-target' sinks. When "
+                "false, a Vault sink replaces the whole secret."
+            ),
+        },
         "reason": {
             "type": "string",
             "minLength": 1,
@@ -135,6 +154,10 @@ _SECRET_MOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
     "parameter_hints": {
         "from": "Required. Source '<kind>:<ref>' (e.g. 'vault:secret/db/prod#password').",
         "to": "Required. Sink '<kind>:<ref>'.",
+        "merge": (
+            "Optional, default false. true keeps the sink secret's other "
+            "fields (Vault sinks only, with check-and-set)."
+        ),
         "reason": "Optional. Human-readable justification for the approver/audit trail.",
     },
     "output_shape": (
@@ -180,11 +203,21 @@ async def secret_move(operator: Operator, target: Any, params: dict[str, Any]) -
     sink_ref = parse_secret_ref(str(params["to"]))
     source = resolve_secret_endpoint(source_ref)
     sink = resolve_secret_endpoint(sink_ref)
+    merge = params.get("merge") is True
+    merge_write = getattr(sink, "write_secret_merged", None) if merge else None
+    if merge and merge_write is None:
+        # Fail before the source is read: nothing has moved yet.
+        raise SecretMergeUnsupportedError(
+            f"the sink kind {sink_ref.kind!r} does not support merge: true"
+        )
 
     # Server-side read → write. The value lives only inside ``material``
     # for the duration of this call; it never crosses back to the caller.
     material = await source.read_secret(operator)
-    await sink.write_secret(operator, material)
+    if merge_write is not None:
+        await merge_write(operator, material)
+    else:
+        await sink.write_secret(operator, material)
 
     _log.info(
         "secret_broker.move",

@@ -130,6 +130,29 @@ boundary redaction:
   — the two steps that move a secret to another MEHO instance. See the
   next section.
 
+## Vault target refs and the merge option
+
+Kind `vault-target` (`vault_target_endpoint.py`) is the Vault kind that
+acts through a registered Vault target. Ref: `<target>/<path>#<field>`,
+for example `vault-target:vault-prod/secret/app/db#password`.
+
+- The adapter finds the target by name in the caller's tenant, and logs
+  in to Vault under that target's role (`extras["vault_role"]`). A target
+  that is not a Vault target is refused.
+- Source and sink each name their own target. They can use different
+  roles in one move. The plain `vault:` kind is unchanged and always uses
+  the operator's own Vault role.
+- `merge: true` on `secret.move` is a sink option, off by default. The sink
+  reads the secret, changes only the named field, and writes it back with
+  check-and-set on the version it read (`cas=0` when the secret does not
+  exist yet). If someone else changed the secret in between, Vault
+  refuses the write and the move fails. Without `merge`, a Vault sink
+  replaces the whole secret. A sink kind without merge support makes the
+  move fail before the source is read.
+- The approval preview names both targets and the merge flag. No value is
+  in the preview or in the audit row.
+- Not done here: a permission check of the resolved role at park time.
+
 ## Move a secret to another MEHO instance (handoff)
 
 `secret.move` works inside one MEHO: both sides use this instance's own

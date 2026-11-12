@@ -1365,6 +1365,7 @@ _READ_OP_IDS: frozenset[str] = frozenset(
         "linux.journal.tail",
         "linux.fs.usage",
         "linux.dir.list",
+        "linux.user.password_status",
     }
 )
 

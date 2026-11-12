@@ -406,3 +406,49 @@ def test_pull_request_workflows_cancel_old_runs_but_not_merge_group() -> None:
         elif cancel is True and "merge_group" in names:
             bad.append(f"{path.name}: cancels merge_group runs")
     assert not bad, "; ".join(bad)
+
+
+# --- fork pull requests get an honest CI signal (#4835) ---------------------
+
+_CI_FORK_GUARD = "head.repo.full_name == github.repository"
+_FORK_OPEN_JOBS = [
+    "changes",
+    "python-lint",
+    "python-unit-lane",
+    "go-lint-test",
+    "cli-api-snapshot-freshness",
+    "helm-lint-template",
+]
+
+
+def _ci_jobs() -> dict[str, Any]:
+    return cast("dict[str, Any]", _load_workflow(_WORKFLOWS_DIR / "ci.yml")["jobs"])
+
+
+@pytest.mark.parametrize("name", _FORK_OPEN_JOBS)
+def test_hosted_ci_jobs_run_on_a_fork_pull_request(name: str) -> None:
+    # These jobs use a hosted runner on a pull request and read no secret, so
+    # a fork pull request may run them.
+    assert _CI_FORK_GUARD not in str(_ci_jobs()[name].get("if", ""))
+
+
+def test_ci_jobs_on_the_own_pool_skip_a_fork_pull_request() -> None:
+    # Every other pull_request job that can use an own pool keeps the guard.
+    bad = []
+    for name, job in _ci_jobs().items():
+        if name in _FORK_OPEN_JOBS:
+            continue
+        runs_on = _runs_on_str(job)
+        on_own_pool = _INTERNAL_POOL_MARKER in runs_on and not _MERGE_QUEUE_ROUTE.fullmatch(runs_on)
+        if on_own_pool and _CI_FORK_GUARD not in str(job.get("if", "")):
+            bad.append(name)
+    assert not bad, bad
+
+
+def test_unit_lane_says_when_a_fork_pull_request_ran_no_unit_tests() -> None:
+    step = _ci_jobs()["python-unit-lane"]["steps"][0]
+    assert "head.repo.full_name != github.repository" in step["env"]["IS_FORK_PR"]
+    script = step["run"]
+    assert "the unit tests did not run" in script
+    assert "merge queue" in script
+    assert "Pull requests from forks" in script

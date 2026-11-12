@@ -117,6 +117,38 @@ approval rules or a security default also needs the project owner's
 approval. Authors cannot approve their own pull request: `main` needs
 one approval from someone else, given after the last push.
 
+### Pull requests from forks
+
+A pull request from a fork gets less CI than one from a branch in this
+repository. Our own runners must not run code from a fork, so the jobs
+on them skip.
+
+What runs on a fork pull request:
+
+- Change detection, lint and type check (ruff + mypy), Go lint and
+  tests, the CLI API snapshot check and the Helm checks. They run on
+  GitHub-hosted runners.
+- The required check "Python (ruff + mypy + pytest)" runs too. Its job
+  summary says that the unit tests did not run.
+
+What does not run:
+
+- The unit test shards, the integration tests, the migration tests and
+  the coverage jobs. They use our own runners and show as skipped. A
+  skipped job counts as green, so **green here does not mean the tests
+  passed**.
+
+The merge queue runs the full matrix on the exact code that will land on
+`main`. But a reviewer should see test results before that. What a
+maintainer does before merge:
+
+1. Push the head commit of the pull request to a branch in this
+   repository, for example `ci/pr-<number>`. The full matrix runs there.
+2. Link that CI run in the review.
+3. If you cannot push the branch, run ruff, mypy and the tests of the
+   changed code on your machine and write the result in the review.
+4. Delete the `ci/pr-<number>` branch when the review is done.
+
 ## Code style
 
 Each language has a fixed toolchain. CI runs the same tools — no

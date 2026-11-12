@@ -2844,7 +2844,7 @@ their isolation posture:
 
 | Workflow | Runs untrusted PR code? | Isolation mechanism |
 | --- | --- | --- |
-| `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
+| `ci.yml` | yes (build/test/lint) | fork guard on every job that can use an own pool (skip on fork PR). Six jobs run on a fork PR (#4835): `changes`, `python-lint`, `go-lint-test`, `cli-api-snapshot-freshness`, `helm-lint-template` and the fan-in `python-unit-lane`. They use hosted runners on a pull request and read no secret. The fan-in says in its step summary that the unit shards did not run. `CONTRIBUTING.md`, "Pull requests from forks", has the maintainer steps |
 | `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job, which runs on GitHub-hosted `ubuntu-latest` for pull requests and on `meho-runners-ci` only for `main` and tag pushes |
 | `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-latest`; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |

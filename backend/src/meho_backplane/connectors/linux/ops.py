@@ -441,6 +441,7 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
     from meho_backplane.connectors.linux.ops_host import HOST_OPS
     from meho_backplane.connectors.linux.ops_inspect_ops import INSPECT_OPS
     from meho_backplane.connectors.linux.ops_storage import STORAGE_OPS
+    from meho_backplane.connectors.linux.ops_user import USER_OPS
     from meho_backplane.connectors.linux.ops_write import WRITE_OPS
 
     return (
@@ -451,6 +452,7 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
         *STORAGE_OPS,
         *INSPECT_OPS,
         *DIAGNOSE_OPS,
+        *USER_OPS,
         *WRITE_OPS,
         *FIREWALL_ROLLBACK_OPS,
     )

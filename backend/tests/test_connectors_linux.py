@@ -1367,6 +1367,7 @@ _READ_OP_IDS: frozenset[str] = frozenset(
         "linux.dir.list",
         "linux.tool.which",
         "linux.identity.show",
+        "linux.user.password_status",
     }
 )
 

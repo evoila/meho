@@ -584,8 +584,9 @@ async def ready(request: Request) -> JSONResponse:
     ``{"status": "draining", "checks": []}`` and runs no probe, so no new
     traffic is sent to a pod that is stopping.
     """
-    # Imported here: the drain module needs the database layer, which
-    # imports this module.
+    # Imported here: the drain module needs the database layer, and the
+    # auth package needs the Vault client; both import this module.
+    from meho_backplane.auth.tool_clients import tool_clients_report
     from meho_backplane.operations.shutdown_drain import is_draining
 
     if is_draining():
@@ -608,5 +609,10 @@ async def ready(request: Request) -> JSONResponse:
         "sandbox_mode": sandbox_mode_label(),
     }
     if has_metrics_access(request):
-        payload["features"] = build_features_block(get_settings())
+        settings = get_settings()
+        features = build_features_block(settings)
+        tool_clients = tool_clients_report(settings)
+        if tool_clients is not None:
+            features["mcp"]["tool_clients"] = tool_clients
+        payload["features"] = features
     return JSONResponse(content=payload, status_code=200 if ready_ok else 503)

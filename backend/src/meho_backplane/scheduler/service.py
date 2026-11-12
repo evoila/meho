@@ -68,18 +68,25 @@ from meho_backplane.db.models import (
     ScheduledTriggerKind,
     ScheduledTriggerStatus,
 )
+from meho_backplane.scheduler.check_source import (
+    CheckSourceNotFoundError,
+    resolve_check_source_filter,
+)
 from meho_backplane.scheduler.repository import (
     create_cron_trigger,
     create_event_trigger,
     create_one_off_trigger,
 )
 from meho_backplane.scheduler.schemas import (
+    CHECK_EVENTS_OFF_NOTICE,
     ScheduledTriggerCreate,
     ScheduledTriggerRead,
 )
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "AgentDefinitionMissingError",
+    "CheckSourceNotFoundError",
     "SchedulerAdminService",
 ]
 
@@ -167,6 +174,19 @@ class SchedulerAdminService:
         if result.scalar_one_or_none() is None:
             raise AgentDefinitionMissingError(agent_definition_id)
 
+    @staticmethod
+    async def _event_filter_for(
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        payload: ScheduledTriggerCreate,
+    ) -> dict[str, object]:
+        """Return the stored filter: a ``check_source`` pick becomes the normal one (#6182)."""
+        if payload.check_source is not None:
+            return await resolve_check_source_filter(session, tenant_id, payload.check_source)
+        # The discriminated-union validator proved event_filter is non-null.
+        assert payload.event_filter is not None
+        return payload.event_filter
+
     async def create(
         self,
         tenant_id: uuid.UUID,
@@ -187,6 +207,10 @@ class SchedulerAdminService:
             When ``agent_definition_id`` does not name a definition in
             *tenant_id*. The boundary maps this to 422
             ``agent_definition_not_found``.
+        CheckSourceNotFoundError
+            When ``check_source`` names a Sensor or Dashboard that is not in
+            *tenant_id*. The boundary maps this to 422
+            ``check_source_not_found``.
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -233,12 +257,12 @@ class SchedulerAdminService:
                     # event_filter is non-null; assert to narrow for mypy. The
                     # event drain's subscription matcher dispatches these rows
                     # when a matching event lands (events/matcher.py).
-                    assert payload.event_filter is not None
+                    event_filter = await self._event_filter_for(session, tenant_id, payload)
                     row = await create_event_trigger(
                         session,
                         tenant_id=tenant_id,
                         agent_definition_id=payload.agent_definition_id,
-                        event_filter=payload.event_filter,
+                        event_filter=event_filter,
                         inputs=payload.inputs,
                         identity_sub=payload.identity_sub,
                         created_by_sub=created_by_sub,
@@ -254,7 +278,10 @@ class SchedulerAdminService:
                     payload.agent_definition_id,
                 ) from exc
             await session.refresh(row)
-            return _row_to_read(row)
+            created = _row_to_read(row)
+            if payload.check_source is not None and not get_settings().checks_agent_events:
+                created = created.model_copy(update={"notice": CHECK_EVENTS_OFF_NOTICE})
+            return created
 
     async def list_(
         self,

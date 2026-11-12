@@ -40,6 +40,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
@@ -1089,3 +1090,74 @@ def test_cancel_submit_cross_tenant_is_404() -> None:
         mock.stop()
     assert response.status_code == 404, response.text
     assert _load_trigger_status(_TENANT_B, other) == ScheduledTriggerStatus.ACTIVE.value
+
+
+def test_create_submit_event_with_dashboard_pick_stores_filter() -> None:
+    """The "Start on" pick makes the same stored filter as the API (#6182)."""
+    from meho_backplane.db.models import CheckDashboard, ScheduledTrigger
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    dashboard_id = uuid.uuid4()
+
+    async def _seed_dashboard() -> None:
+        async with get_sessionmaker()() as session:
+            session.add(
+                CheckDashboard(
+                    id=dashboard_id,
+                    tenant_id=_TENANT_A,
+                    name="web",
+                    description=None,
+                    notify_email=None,
+                    notify_min_state="critical",
+                    created_by_sub="op-admin",
+                )
+            )
+            await session.commit()
+
+    async def _filters() -> list[dict[str, object] | None]:
+        async with get_sessionmaker()() as session:
+            rows = await session.execute(select(ScheduledTrigger.event_filter))
+            return list(rows.scalars().all())
+
+    asyncio.run(_seed_dashboard())
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        form = client.get("/ui/scheduler/create")
+        assert "Only when it gets worse" in form.text
+        assert ">web</option>" in form.text
+        assert "will not fire until an admin turns them on" in form.text
+        response = client.post(
+            "/ui/scheduler/create",
+            data={
+                "kind": "event",
+                "agent_definition_id": str(_AGENT_ID),
+                "start_on": "dashboard",
+                "check_source_ref": str(dashboard_id),
+                "only_worsening": "true",
+                "timezone": "UTC",
+                "in_flight_policy": "fail_into_audit",
+            },
+            headers=_form_headers(csrf),
+        )
+        missing = client.post(
+            "/ui/scheduler/create",
+            data={
+                "kind": "event",
+                "agent_definition_id": str(_AGENT_ID),
+                "start_on": "dashboard",
+                "check_source_ref": str(uuid.uuid4()),
+                "timezone": "UTC",
+                "in_flight_policy": "fail_into_audit",
+            },
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 204, response.text
+    assert "does not exist in this tenant" in missing.text
+    assert asyncio.run(_filters()) == [
+        {"source": {"kind": "dashboard", "id": str(dashboard_id)}, "worsening": True}
+    ]

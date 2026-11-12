@@ -78,7 +78,7 @@ per-operator Vault tenant-scope exemption in
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -86,6 +86,10 @@ import structlog
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.auth.approval_sign_in_flow import (
+    ApprovalSignInStatus,
+    read_approval_sign_in,
+)
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.jwt import verify_jwt_allow_unchosen
 from meho_backplane.auth.operator import Operator, TenantMembership, TenantRole, group_grant
@@ -108,6 +112,7 @@ from meho_backplane.mcp.registry import (
     registered_tool_names,
     role_at_least,
     surface_visible,
+    tool_surface,
 )
 from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 from meho_backplane.mcp.server import mcp_session_id_capture_mode
@@ -256,6 +261,17 @@ class VaultStatus(BaseModel):
     true when the probe secret read succeeded. ``detail`` carries a short
     structured string for the CLI to render on failure paths — a class name
     or error code, never an unbounded exception message or a secret value.
+
+    ``checked`` is false when MEHO ran no check at all. The check logs in
+    to the credential backend as the caller and reads a secret, so it
+    runs only for a caller with at least the ``operator`` role, the same
+    rule ``GET /api/v1/health`` applies. A ``read_only`` caller of the
+    ``meho_status`` MCP tool gets ``checked=false`` with
+    ``detail="not checked: needs the operator role"``. A login that chose
+    no tenant gets ``checked=false`` with ``detail="tenant_not_chosen"``.
+    With ``checked=false``, ``reachable`` and ``read_ok`` are false and say
+    nothing about the backend. The ``True`` default keeps older response
+    decoders working.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -263,6 +279,7 @@ class VaultStatus(BaseModel):
     reachable: bool
     read_ok: bool
     detail: str | None = None
+    checked: bool = True
 
 
 class DbStatus(BaseModel):
@@ -336,7 +353,9 @@ class ApprovalsStatus(BaseModel):
     ``delegated_decision_posture`` says whether a decision made on
     someone else's instruction is allowed. The three values come from
     :func:`meho_backplane.features.build_features_block`; they are state
-    words only, never a key value.
+    words only, never a key value. ``sign_in`` is the state of the
+    approval client's own login flow in Keycloak (#6280,
+    :mod:`meho_backplane.auth.approval_sign_in_flow`).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -344,6 +363,7 @@ class ApprovalsStatus(BaseModel):
     custody: str
     effective_posture: str
     delegated_decision_posture: str
+    sign_in: ApprovalSignInStatus | None = None
 
 
 class FeatureStatus(BaseModel):
@@ -568,6 +588,12 @@ class HealthResponse(BaseModel):
     cost of runs on the default agent model (:class:`AgentModelSpend`).
     The ``None`` default keeps older response decoders working; the
     handler always fills it.
+
+    ``server_time`` (#5504) is the server's time now, in UTC, to the
+    second (ISO 8601 with a ``Z`` suffix). An agent with no shell has no
+    other clock, so it reads this when it must write down the time. Both
+    answers fill it, also the one for a login that chose no tenant. The
+    ``None`` default keeps older response decoders working.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -588,6 +614,7 @@ class HealthResponse(BaseModel):
     connector_packages: list[ConnectorPackage] = []
     operation_catalog: OperationCatalogStatus | None = None
     agent_model_spend: AgentModelSpend | None = None
+    server_time: datetime | None = None
 
 
 class LivenessResponse(BaseModel):
@@ -613,6 +640,11 @@ class LivenessResponse(BaseModel):
 
     ``db`` shares :class:`DbStatus` with the deep check, so it carries
     the migration revision too (#4830). It still never touches Vault.
+
+    ``server_time`` (#5504) is the same field as on the deep check: the
+    server's time now, in UTC, to the second. ``meho status`` falls back
+    to this route for a login with the ``read_only`` role, so that login
+    reads the time here. A clock read; no Vault, no connector.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -620,6 +652,7 @@ class LivenessResponse(BaseModel):
     operator: OperatorIdentity
     db: DbStatus
     sensor_runner: SensorRunnerStatus | None = None
+    server_time: datetime | None = None
 
 
 router = APIRouter(prefix="/api/v1", tags=["health"])
@@ -628,6 +661,19 @@ router = APIRouter(prefix="/api/v1", tags=["health"])
 #: what keeps ruff B008 happy): resolves the OPERATOR rank once at
 #: import time so a typo'd role fails at boot, not per-request.
 _operator_role_check = require_role(TenantRole.OPERATOR)
+
+#: The lowest role that runs the credential-backend check. It is the role
+#: :func:`authenticated_health` requires, so REST and the ``meho_status``
+#: MCP tool agree on who runs it.
+_FEDERATION_CHECK_ROLE: TenantRole = TenantRole.OPERATOR
+
+#: The ``vault`` answer for a caller below :data:`_FEDERATION_CHECK_ROLE`.
+_FEDERATION_NOT_CHECKED_FOR_ROLE = VaultStatus(
+    reachable=False,
+    read_ok=False,
+    checked=False,
+    detail="not checked: needs the operator role",
+)
 
 
 #: Vault exception class names that indicate a login-phase failure (the
@@ -837,6 +883,18 @@ async def _probe_federation(operator: Operator, log: Any) -> VaultStatus:
     return await _probe_backend_federation(operator, log, backend_kind)
 
 
+async def _federation_status_for(operator: Operator, log: Any) -> VaultStatus:
+    """Run the federation proof when *operator* holds the role for it.
+
+    A caller below :data:`_FEDERATION_CHECK_ROLE` gets
+    :data:`_FEDERATION_NOT_CHECKED_FOR_ROLE`: no login to the credential
+    backend and no secret read, whatever the backend is.
+    """
+    if not role_at_least(operator.tenant_role, _FEDERATION_CHECK_ROLE):
+        return _FEDERATION_NOT_CHECKED_FOR_ROLE
+    return await _probe_federation(operator, log)
+
+
 def _sensor_runner_status() -> SensorRunnerStatus | None:
     """Map the watchdog's liveness view onto the wire model.
 
@@ -900,12 +958,12 @@ async def _surface_summary(operator: Operator) -> SurfaceSummary:
     expected = sorted(
         name
         for name in registered_tool_names()
-        if (entry := get_tool(name)) is not None and entry[0].surface is ToolSurface.WORKING
+        if (entry := get_tool(name)) is not None and tool_surface(entry[0]) is ToolSurface.WORKING
     )
     listed = sorted(
         defn.name
         for defn in all_tools_for(operator, active_addon_families=active_families)
-        if defn.surface is ToolSurface.WORKING
+        if tool_surface(defn) is ToolSurface.WORKING
     )
     listed_set = set(listed)
     return SurfaceSummary(
@@ -966,13 +1024,20 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     tool handler at :mod:`meho_backplane.mcp.tools.meho_status` calls
     this directly with the :class:`Operator` the MCP dispatcher already
     resolved.
+
+    The credential-backend check runs only for a caller with at least the
+    ``operator`` role (:data:`_FEDERATION_CHECK_ROLE`). The REST route
+    refuses lower roles; the ``meho_status`` tool is open to every role,
+    so a lower caller gets every other part of the answer and a ``vault``
+    block with ``checked=false``.
     """
     if not operator.tenant_chosen:
         return await _tenant_not_chosen_response(operator)
     log = structlog.get_logger()
-    vault_status = await _probe_federation(operator, log)
+    vault_status = await _federation_status_for(operator, log)
     db_state = await db_migration_status()
     approvals, features = _approvals_and_features()
+    approvals = approvals.model_copy(update={"sign_in": await read_approval_sign_in()})
     return HealthResponse(
         operator=_operator_identity(operator),
         vault=vault_status,
@@ -990,7 +1055,13 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         connector_packages=list(installed_connector_packages()),
         operation_catalog=await _operation_catalog_status(),
         agent_model_spend=_agent_model_spend(),
+        server_time=_server_time(),
     )
+
+
+def _server_time() -> datetime:
+    """The time now in UTC, to the second (#5504)."""
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 def _agent_model_spend() -> AgentModelSpend:
@@ -1010,9 +1081,12 @@ async def _tenant_not_chosen_response(operator: Operator) -> HealthResponse:
     db_state = await db_migration_status()
     return HealthResponse(
         operator=_operator_identity(operator),
-        vault=VaultStatus(reachable=False, read_ok=False, detail="tenant_not_chosen"),
+        vault=VaultStatus(
+            reachable=False, read_ok=False, checked=False, detail="tenant_not_chosen"
+        ),
         db=_db_status(db_state),
         mcp_session_id_capture=mcp_session_id_capture_mode(),
+        server_time=_server_time(),
     )
 
 
@@ -1058,6 +1132,7 @@ async def liveness(
         operator=_operator_identity(operator),
         db=_db_status(db_state),
         sensor_runner=_sensor_runner_status(),
+        server_time=_server_time(),
     )
 
 

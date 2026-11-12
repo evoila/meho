@@ -42,12 +42,24 @@ from meho_backplane.redaction.flight_recorder import (
     SECRET_FAMILY_OMITTED_MARKER,
     redact_query,
 )
+from meho_backplane.settings import get_settings
 
 _TOKEN = "Bearer abc.def.ghi-secret-token-value"
 
 # A base64 Secret value that matches no named credential pattern, so a green
 # assertion proves the structural Secret masking fired, not the shape net.
 _OPAQUE_B64 = "cGxhaW4tYXBwLXRva2VuLXdpdGgtbm8tbGFiZWw="
+
+
+@pytest.fixture(autouse=True)
+def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the env vars the settings need; the Secret marker key comes from them."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def _op(

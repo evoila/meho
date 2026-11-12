@@ -10,6 +10,12 @@ Vault-federation + DB-migration bundle the chassis ``GET /api/v1/health``
 route returns, scoped to the operator the MCP dispatcher already
 authenticated.
 
+The tool is open to every role, but the Vault check inside it is not.
+The check logs in to Vault as the caller and reads a secret, so it runs
+only for a caller with at least the ``operator`` role, the same rule as
+``GET /api/v1/health``. A ``read_only`` caller gets every other part of
+the answer and a ``vault`` block with ``checked=false``.
+
 Why this is the *reference* tool
 ================================
 
@@ -73,19 +79,17 @@ register_mcp_tool(
         surface=ToolSurface.WORKING,
         description=(
             "Returns the operator's identity (sub, name, email, tenant_id, "
-            "tenant_role) plus the "
-            "MEHO backplane's dependency status: Vault federation chain "
-            "(reachable + KV read OK?), DB migration state with the "
-            "database's revision and the revision this build expects, the "
-            "readiness checks /ready reports (name, ok, detail), the "
-            "approval settings in force (approval key state, whether a "
-            "second person must approve), the gated features and the "
-            "setting names they still need, the OAuth "
-            "scopes this session holds, and which working-surface tools it "
-            "should see versus the ones it lists. Call at "
-            "MCP session start to verify the operator can reach all "
-            "subsystems before issuing product calls, or after an upgrade "
-            "to confirm the database reached the new revision. No arguments."
+            "tenant_role) and MEHO's dependency status: Vault (reachable + "
+            "KV read OK?), the database's revision and the one this build "
+            "expects, the /ready checks (name, ok, detail), the approval "
+            "settings (approval key state, whether a second person must "
+            "approve), the gated features and the settings they still need, "
+            "this session's OAuth scopes, the working-surface tools it should "
+            "see versus the ones it lists, and the server's time in UTC "
+            "(server_time; use it when you must write down the time). Call at "
+            "MCP session start to check that MEHO reaches all subsystems "
+            "before product calls, or after an upgrade to confirm the "
+            "database reached the new revision. No arguments."
         ),
         inputSchema={
             "type": "object",

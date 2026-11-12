@@ -82,21 +82,15 @@
 #     (not the default success() gate), they publish even when the scan FAILS,
 #     so a red run's CVE list is one click away instead of lost to the skip.
 #
-# Pull-request scan of the Python packages (`lock-scan` job):
-#   On a pull request the image is built but never pushed, so the image scan
-#   above cannot run there. Instead the `lock-scan` job runs trivy on
-#   `backend/uv.lock` alone (file-system mode) with the same rules as the
-#   image scan: same action commit, same `.trivyignore`, CRITICAL/HIGH only,
-#   only findings that have a fix, and `exit-code: '1'`. It runs on a
-#   GitHub-hosted runner, does not wait for the build, and prints the findings
-#   in the job log (nothing goes to the Security tab, so that tab keeps only
-#   the main/tag results). It is not a required check. A fix for a Python
-#   package finding, or a new `.trivyignore` exception, is proven on its own
-#   pull request instead of by the next run on main.
+# Scan of the Python packages in backend/uv.lock:
+#   The image scan above runs only on main and tags, because on a pull
+#   request the image is built but never pushed. The "Python dependency scan"
+#   job in security-scan.yml checks backend/uv.lock with trivy on every pull
+#   request, in the merge queue and on every push to main, with the same
+#   rules. It is not part of this workflow.
 #   What it does not see: the Debian packages of the base image and anything
-#   else in the image that is not in the lock file — only the image scan on
-#   main and tags checks those. It also checks the few Windows-only packages
-#   in the lock file that the image never installs.
+#   else in the image that is not in the lock file. Only the image scan on
+#   main and tags checks those.
 
 name: image
 
@@ -106,9 +100,6 @@ on:
     paths:
       - 'backend/**'
       - '.github/workflows/image.yml'
-      # A pull request that only adds or removes a scan exception must run
-      # the lock-scan job (and the build) too.
-      - '.trivyignore'
   push:
     # No `paths:` filter here. Path filtering applies to BOTH branch and tag
     # pushes when set, which would cause a v* tag annotating a docs-only
@@ -223,6 +214,11 @@ jobs:
           fi
           echo "OK: the image will be published as ${want}."
 
+      - name: Stage the Tailwind CLI for the image build
+        uses: ./.github/actions/stage-tailwind
+        with:
+          archs: amd64 arm64
+
       - name: Build image to quarantine digest (no release tag)
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
@@ -314,8 +310,9 @@ jobs:
         #     success() guard, so a red scan skips them and the scanned digest
         #     is never tagged as a release, signed, or attested. It is NOT a
         #     PR merge gate — the `if:` below skips it on pull_request, which
-        #     never pushes an image to scan; the `lock-scan` job below checks
-        #     the Python packages in backend/uv.lock on pull requests instead.
+        #     never pushes an image to scan; the "Python dependency scan" job in
+        #     security-scan.yml checks the Python packages in backend/uv.lock
+        #     on pull requests instead.
         #     A red run means "the base image drifted; bump the digest
         #     (Dependabot docker PR) and re-run", and the failed build ships
         #     nothing.
@@ -496,51 +493,3 @@ jobs:
             --predicate sbom.spdx.json \
             --type spdxjson \
             "ghcr.io/evoila/meho@${DIGEST}"
-
-  lock-scan:
-    name: Scan backend/uv.lock with trivy (pull requests only)
-    # Pull requests only. On main and tags the image scan in the build job
-    # already checks these packages (and the OS packages the lock file does
-    # not list), so running this job there would only repeat part of it.
-    if: github.event_name == 'pull_request'
-    # A GitHub-hosted runner: a fresh machine per job, no slot on our own CI
-    # pool, and safe for fork pull requests without a fork guard — trivy
-    # only reads the lock file and runs no code from the pull request.
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # Least privilege: the job only checks out the repository. It does not
-    # need the packages / id-token / security-events writes the build job
-    # gets from the workflow-level block.
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      - name: Scan backend/uv.lock (trivy — fails on fixable CRITICAL/HIGH)
-        # Same action commit, severity filter, ignore-unfixed rule and
-        # exception file as the image scan in the build job, so both scans
-        # use the same trivy version and the same rules. Differences:
-        #   - `scan-type: fs` + `scan-ref: backend/uv.lock` read only the
-        #     lock file, so only the Python packages are checked. trivy skips
-        #     the dev, docs and build groups, like the image build
-        #     (`uv sync --locked --no-dev`).
-        #   - `scanners: vuln` looks only for known security bugs (no secret
-        #     or misconfiguration scan).
-        #   - `format: table` prints the findings in the job log. Nothing is
-        #     uploaded to the Security tab, which keeps only the main/tag
-        #     image results.
-        # A finding here means: fix the package in backend/uv.lock, or add a
-        # dated exception to .trivyignore, on this pull request — and see the
-        # result before merge. The same finding fails the image scan on main
-        # after merge if it is not fixed.
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: backend/uv.lock
-          scanners: vuln
-          format: table
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          trivyignores: .trivyignore
-          exit-code: '1'

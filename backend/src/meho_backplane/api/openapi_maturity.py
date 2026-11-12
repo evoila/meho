@@ -63,6 +63,7 @@ TAG_FEATURE: Final[dict[str, str]] = {
     # Paired-surface activation (#3029): the automation surface is part of the
     # add-on pairing contract (Initiative #2900) and shares its maturity.
     "automation": "addon_pairing",
+    "agent-budgets": "agent_runtime",
     "agent-grants": "agent_runtime",
     "agent-principals": "agent_runtime",
     "agents": "agent_runtime",
@@ -89,6 +90,11 @@ TAG_FEATURE: Final[dict[str, str]] = {
     "knowledge": "memory_knowledge",
     "memory": "memory_knowledge",
     "operations": "typed_connector_reads",
+    # Classification of operations (#6038) and the policy file (policy: v1:
+    # validate / preview / import / export / history): new and behind the
+    # POLICY_CLASSIFICATION switch, so they ride the beta ``write_surfaces``
+    # tier, like the settings file.
+    "policy": "write_surfaces",
     "retrieval": "memory_knowledge",
     "runbooks": "write_surfaces",
     "runner-principals": "satellite_gateway",
@@ -104,6 +110,9 @@ TAG_FEATURE: Final[dict[str, str]] = {
     # Run approvals (#4126): a person approves the operation list of one
     # automation run once, on the same operator plane as the grants.
     "service-principal-run-approvals": "approvals",
+    # The agent session store (#4901): new and not yet proven in the field,
+    # so it rides the beta ``write_surfaces`` tier, like the settings file.
+    "sessions": "write_surfaces",
     # The settings file (core.md §5): export / import / history over the
     # tenant policies, conventions and targets. New and not yet proven in the
     # field, and its import is a bulk write, so it rides the beta
@@ -132,6 +141,7 @@ PATH_FEATURE_OVERRIDES: Final[dict[str, str]] = {
     "/api/v1/connectors/{connector_id}/operations/{op_id}": "connector_ingest",
     "/api/v1/connectors/operation-overrides": "connector_ingest",
     "/api/v1/connectors/{connector_id}/operation-overrides/{op_id}": "connector_ingest",
+    "/api/v1/connectors/{connector_id}/classification": "write_surfaces",
 }
 
 

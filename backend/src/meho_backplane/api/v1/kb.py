@@ -115,10 +115,8 @@ Schema constraints
 * ``tarball_url`` is accepted by the request shape for forward-compat
   with the task body's schema, but :class:`KbService` (T1 #415) only
   exposes ``ingest_directory``. A request with ``tarball_url`` set
-  returns **501 Not Implemented**, matching the posture
-  :mod:`meho_backplane.api.v1.retrieve_eval` uses for its
-  ``baseline`` field (honest about the unimplemented branch instead
-  of silently dropping). Tarball-URL support is filed as v0.2.next
+  returns **501 Not Implemented** (honest about the unimplemented
+  branch instead of silently dropping). Tarball-URL support is filed as v0.2.next
   follow-up against Initiative #331.
 
 Out of scope
@@ -660,9 +658,7 @@ async def ingest_kb(
     The request shape accepts both ``directory`` and ``tarball_url``
     fields (the task body's contract), but only the ``directory``
     branch is implemented in v0.2; a ``tarball_url`` request returns
-    **501 Not Implemented**, mirroring
-    :mod:`meho_backplane.api.v1.retrieve_eval`'s posture toward its
-    unimplemented baseline field.
+    **501 Not Implemented**.
 
     Walks the supplied directory via
     :meth:`KbService.ingest_directory` and returns the five-bucket
@@ -690,9 +686,8 @@ async def ingest_kb(
     if body.tarball_url:
         # Forward-compat: the request schema accepts the field, but
         # the substrate does not yet implement tarball ingest. Return
-        # 501 so the API surface is honest about its limits; same
-        # pattern :mod:`retrieve_eval` uses for its server-side
-        # baseline field. v0.2.next can wire up
+        # 501 so the API surface is honest about its limits.
+        # v0.2.next can wire up
         # ``KbService.ingest_tarball`` and flip this branch.
         #
         # Truthiness check (not ``is not None``) matches
@@ -820,7 +815,7 @@ def _require_exporter(operator: Operator = Depends(verify_jwt_and_bind)) -> Oper
 
 @router.post("/export", response_model=KbExportResult)
 async def export_kb_pages(operator: Operator = Depends(_require_exporter)) -> KbExportResult:
-    """Return the caller's confirmed, generic entries as Markdown pages (#5730).
+    """Return the caller's confirmed and candidate generic entries as Markdown pages (#5730).
 
     The team wiki's CI job calls this with the ``kb_export_only`` login,
     writes the pages into the wiki and opens a merge request there. An

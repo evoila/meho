@@ -68,12 +68,27 @@ Changes of sudo rules, access rules and password policies:
 - `freeipa.pwpolicy.set`: change a group's password policy, or the global
   one.
 
+Changes of users, groups and roles:
+
+- `freeipa.user.create`: make a user. The user has no password yet. No
+  operation sets, changes or returns a password.
+- `freeipa.user.password_expiry.set`: set the date when a user's password
+  runs out. A password that an administrator sets runs out at once, so a
+  service account needs this date. It must be in the future.
+- `freeipa.user.disable`: stop a user from logging in.
+- `freeipa.group.create` and `freeipa.group.member.add`: make a user group
+  and add existing users or user groups to it.
+- `freeipa.role.member.add`: add existing users, user groups, hosts or host
+  groups to a role. They get the rights of the role, so this change is
+  marked `dangerous`.
+- `freeipa.user.delete` and `freeipa.role.delete`: delete for good. Both are
+  marked `dangerous`.
+
 When FreeIPA does not make all of a change (for example a host to add does
 not exist), the call fails and names what FreeIPA did not do. A sudo rule is
 the one exception: a user or host name that FreeIPA does not know is kept as
 an external name, and the answer lists it in `external`. MEHO cannot yet
-change users, groups or roles. Those writes come in a later Task of
-Initiative #4772.
+set a password. That comes in a later Task of Initiative #4772.
 
 ### What the approver sees
 
@@ -81,6 +96,10 @@ Initiative #4772.
   on every host. The approval lists the other enabled access rules: after the
   change, only they let users in. When the list is empty, the approval says
   that no IPA user can log in to any host that uses IPA.
+- **A user delete.** The approval lists the groups and roles the user
+  leaves.
+- **A role delete, or new role members.** The approval lists the privileges
+  of the role. For a delete it also lists the members who lose them.
 - **The global password policy.** A change without a group, or for the
   group name `global_policy`, is for the global policy. The approval says
   so: it applies to every user whose groups have no password policy of

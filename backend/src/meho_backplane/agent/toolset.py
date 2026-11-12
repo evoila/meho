@@ -120,6 +120,16 @@ and the hosted-only ``read_context_resource``
 ``meta_tools`` list names them. An omitted ``meta_tools`` does not add them,
 so existing definitions keep their surface; such a tool is reported
 ``not_in_allow_list``.
+
+Child runs (``invoke_agent``)
+=============================
+
+``invoke_agent`` is not in the catalog: :mod:`meho_backplane.agent.run`
+adds it when the runtime can start child runs and the spec's
+``meta_tools`` list names it (:func:`toolset_admits_invoke_agent`). An
+omitted or empty list does not add it. A child run gets at most what both
+specs allow: :func:`narrow_child_toolset` limits the child's spec by the
+parent's, and a grandchild is limited by that result in turn.
 """
 
 from __future__ import annotations
@@ -152,6 +162,7 @@ from meho_backplane.agent.toolset_discovery import (
     build_write_meta_tools,
     keep_allowed_connectors,
 )
+from meho_backplane.agent.toolset_operations import build_operation_meta_tools, check_arguments
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import capability_satisfied, role_at_least
 from meho_backplane.mcp.tools.connector_admin import reduce_connector_list
@@ -165,6 +176,7 @@ from meho_backplane.operations.meta_tools import (
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "INVOKE_AGENT",
     "META_TOOL_NAMES",
     "OPT_IN_META_TOOL_NAMES",
     "RUNBOOK_EXECUTION_META_TOOL_NAMES",
@@ -172,8 +184,10 @@ __all__ = [
     "MetaToolSpec",
     "ToolsetResolution",
     "capability_versions",
+    "narrow_child_toolset",
     "resolve_agent_tools",
     "resolve_agent_toolset",
+    "toolset_admits_invoke_agent",
     "toolset_admits_runbook_execution",
 ]
 
@@ -192,15 +206,43 @@ _CONNECTOR_ID_ARG = "connector_id"
 _CONNECTOR_SCOPED_TOOLS: frozenset[str] = frozenset({"call_operation", "preview_operation"})
 
 
+def _with_argument_check(*specs: MetaToolSpec) -> tuple[MetaToolSpec, ...]:
+    """Return *specs* with each handler behind a check of its own schema.
+
+    ``pydantic_ai.Tool.from_schema`` does not check the arguments against the
+    schema, so :func:`check_arguments` does it before the handler runs. A
+    bad argument, or a field the schema does not name, goes back to the model
+    as a retry (#4754).
+    """
+    return tuple(
+        MetaToolSpec(
+            name=spec.name,
+            handler=check_arguments(spec.name, spec.parameter_schema, spec.handler),
+            description=spec.description,
+            parameter_schema=spec.parameter_schema,
+            required_role=spec.required_role,
+            required_capability=spec.required_capability,
+        )
+        for spec in specs
+    )
+
+
 #: The connector-execution meta-tools. These three form the agent's working
 #: surface over the G0.6 substrate (CLAUDE.md "the load-bearing pattern":
-#: pick connector → list operation groups → search operations → call). The
-#: parameter schemas mirror the canonical MCP ``inputSchema`` fragments in
-#: :mod:`meho_backplane.mcp.tools.operations`; the descriptions are the
-#: model's prompt for when to reach for each tool. The full
-#: :data:`_META_TOOL_CATALOG` appends the broadcast coordination tools built
-#: by :func:`_build_broadcast_meta_tools`.
-_OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = (
+#: pick connector → list operation groups → search operations → call). These
+#: are the older hand-written copies. They differ from the MCP tools in
+#: :mod:`meho_backplane.mcp.tools.operations` (no exact-op mode, no
+#: ``preview_hash``). With the ``agent_operation_tools_from_mcp`` setting on,
+#: :func:`_active_catalog` uses :data:`_MCP_OPERATIONS_META_TOOLS` in their
+#: place (#4754). The full :data:`_META_TOOL_CATALOG` appends the discovery,
+#: broadcast and context tools.
+#:
+#: Each handler first checks the arguments against the tool's own
+#: ``parameter_schema`` (:func:`_with_argument_check`), the same check the
+#: tools built from the MCP tools run. Each schema has
+#: ``additionalProperties: false``, so a field it does not name goes back to
+#: the model as a retry and never reaches the handler.
+_OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = _with_argument_check(
     MetaToolSpec(
         name="list_operation_groups",
         handler=list_operation_groups,
@@ -310,6 +352,26 @@ _META_TOOL_CATALOG: tuple[MetaToolSpec, ...] = (
     *build_docs_meta_tools(),
 )
 
+#: The operation tools built from the MCP tools (#4754), by name. They take
+#: the place of the hand-written copies when the
+#: ``agent_operation_tools_from_mcp`` setting is on.
+_MCP_OPERATIONS_META_TOOLS: dict[str, MetaToolSpec] = {
+    spec.name: spec for spec in build_operation_meta_tools()
+}
+
+
+def _active_catalog() -> tuple[MetaToolSpec, ...]:
+    """Return the catalog for a run, with the operation tools the setting picks.
+
+    Off (the default): :data:`_META_TOOL_CATALOG` as it is. On: the same
+    catalog, with the three operation tools built from the MCP tools in the
+    place of the hand-written copies. Tool names and order do not change.
+    """
+    if not get_settings().agent_operation_tools_from_mcp:
+        return _META_TOOL_CATALOG
+    return tuple(_MCP_OPERATIONS_META_TOOLS.get(m.name, m) for m in _META_TOOL_CATALOG)
+
+
 #: Catalog tools a spec must name in ``meta_tools`` to get (#3759, #5852).
 #: They return stored tenant text or vendor docs, or write Memory and
 #: knowledge entries, so an omitted allow-list does not add them.
@@ -377,6 +439,79 @@ def toolset_admits_runbook_execution(toolset: dict[str, Any] | None) -> bool:
         # catalog's runbook-execution tool is on the surface.
         return True
     return bool(frozenset(requested) & RUNBOOK_EXECUTION_META_TOOL_NAMES)
+
+
+#: The name of the child-run tool. It is not in the catalog: the run adds it
+#: only when the spec's ``meta_tools`` list names it.
+INVOKE_AGENT = "invoke_agent"
+
+
+def toolset_admits_invoke_agent(toolset: dict[str, Any] | None) -> bool:
+    """Return ``True`` when *toolset*'s ``meta_tools`` list names ``invoke_agent``.
+
+    ``invoke_agent`` is opt-in like the tools in
+    :data:`OPT_IN_META_TOOL_NAMES`: no spec, an omitted list, or a list
+    without the name gives no child-run tool. A mis-shaped spec answers
+    ``False``; :func:`resolve_agent_tools` raises for it when the run builds
+    its agent.
+    """
+    if toolset is None:
+        return False
+    try:
+        requested = _extract_str_list(toolset, "meta_tools")
+    except ValueError:
+        return False
+    return requested is not None and INVOKE_AGENT in requested
+
+
+def _default_tool_names() -> frozenset[str]:
+    """The names an omitted ``meta_tools`` list stands for."""
+    return META_TOOL_NAMES - OPT_IN_META_TOOL_NAMES
+
+
+def _narrow_list(parent: list[str] | None, child: list[str] | None) -> list[str] | None:
+    """Return the connector ids both lists allow; ``None`` means no limit."""
+    if parent is None:
+        return child
+    if child is None:
+        return list(parent)
+    return [item for item in child if item in parent]
+
+
+def narrow_child_toolset(
+    parent: dict[str, Any] | None,
+    child: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return *child*'s toolset spec limited to what *parent*'s spec allows.
+
+    A child run gets at most what both specs allow:
+
+    * ``meta_tools`` -- the tools on both lists. An omitted list stands for
+      the default set (every catalog tool except the opt-in ones), and
+      ``invoke_agent`` stays only when both lists name it.
+    * ``connectors`` -- the connector ids on both lists. An omitted list
+      means no limit, so the other list counts.
+
+    Other keys of *child* stay as they are. The result is a spec, so the
+    child always resolves through :func:`resolve_agent_toolset`.
+
+    Raises:
+        ValueError: when a ``meta_tools`` or ``connectors`` field is present
+            but not a list of strings.
+    """
+    parent_spec = parent or {}
+    child_spec = dict(child or {})
+    parent_tools = _extract_str_list(parent_spec, "meta_tools")
+    child_tools = _extract_str_list(child_spec, "meta_tools")
+    if parent_tools is not None or child_tools is not None:
+        allowed = frozenset(parent_tools) if parent_tools is not None else _default_tool_names()
+        wanted = child_tools if child_tools is not None else sorted(_default_tool_names())
+        child_spec["meta_tools"] = [name for name in wanted if name in allowed]
+    child_spec["connectors"] = _narrow_list(
+        _extract_str_list(parent_spec, "connectors"),
+        _extract_str_list(child_spec, "connectors"),
+    )
+    return child_spec
 
 
 def _extract_str_list(spec: dict[str, Any], key: str) -> list[str] | None:
@@ -617,7 +752,9 @@ def resolve_agent_toolset(
     # log it once so a definition author sees the typo / version gap.
     missing: tuple[str, ...] = ()
     if requested_names is not None:
-        missing = tuple(name for name in requested_names if name not in META_TOOL_NAMES)
+        missing = tuple(
+            name for name in requested_names if name not in META_TOOL_NAMES and name != INVOKE_AGENT
+        )
         for name in missing:
             _log.warning(
                 "agent_toolset_unknown_meta_tool",
@@ -627,7 +764,7 @@ def resolve_agent_toolset(
 
     tools: list[Tool[Operator]] = []
     disabled: dict[str, DisabledReason] = {}
-    for meta in _META_TOOL_CATALOG:
+    for meta in _active_catalog():
         # Side 1 — toolset spec: omitted allow-list means "all"; a present
         # list must contain the name.
         # Opt-in tools additionally need an explicit allow-list entry.

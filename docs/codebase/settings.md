@@ -13,6 +13,9 @@ The design is the internal note `core.md` §5. The code is in
 MEHO 0.45.0 ships the REST endpoints below. The command line and the
 console do not have the settings file yet.
 
+The policy file (categories and classifications) is a separate file with
+its own import that waits for a second admin: see [policy.md](policy.md).
+
 Do not confuse this with `backend/src/meho_backplane/settings.py`: those are
 the environment variables, read once at start. They are never in the file.
 
@@ -40,6 +43,7 @@ spec:
         flight_recorder: { enabled: true, retention_days: 14, agent_readable: null }
         mail_recipient_allowlist: "@example.com"
         run_approval_target_kinds: false
+        knowledge_wiki_collection: null
       conventions:
         - slug: change-window
           title: Change window
@@ -84,8 +88,11 @@ spec:
   `announce_gate_enabled`, `flight_recorder.{enabled, retention_days,
   agent_readable}`, `mail_recipient_allowlist`,
   `run_approval_target_kinds` (a run approval may list a target kind; see
-  [run-approvals.md](run-approvals.md)). `null` means "use the
-  instance default" (`false` for the switches, inherit for the others).
+  [run-approvals.md](run-approvals.md)), `knowledge_wiki_collection`
+  (the docs collection of the tenant's own wiki, at most 128 characters;
+  an empty value is `null`; see [kb.md](kb.md#wiki-search-5976)).
+  `null` means "use the instance default" (`false` for the switches,
+  inherit or none for the others).
   `policies: null` resets all of them.
 - `conventions[]` — keyed by `slug`. `title` and `kind` are needed when the
   convention is new. `kind` cannot change on import, the same as on
@@ -118,7 +125,7 @@ spec:
 The schema refuses unknown keys, so none of these can be added by hand; the
 secret check and the CI check (below) catch secret-shaped values anywhere.
 
-- The 17 settings that carry secrets: `DATABASE_URL`,
+- The 18 settings that carry secrets: `DATABASE_URL`,
   `BROADCAST_REDIS_PASSWORD`, `RESULT_CACHE_REDIS_PASSWORD`,
   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `KEYCLOAK_ADMIN_CLIENT_SECRET`, `UI_KEYCLOAK_CLIENT_SECRET`,
@@ -126,7 +133,8 @@ secret check and the CI check (below) catch secret-shaped values anywhere.
   `PARAMS_HASH_KEY`,
   `CHECK_RUNNER_CLIENT_SECRET`, `VAULT_SCHEDULER_TOKEN`,
   `SATELLITE_WRITE_SIGNING_KEY`, `VCF_PAIF_OIDC_CLIENT_SECRET`,
-  `MAIL_SMTP_PASSWORD`, `METRICS_AUTH_TOKEN`, `CORPUS_SERVICE_TOKEN`.
+  `MAIL_SMTP_PASSWORD`, `METRICS_AUTH_TOKEN`, `CORPUS_SERVICE_TOKEN`,
+  `WEB_PUSH_VAPID_PRIVATE_KEY`.
 - Every generated `<release>-core-*` Kubernetes Secret (#4041, #4043, #4044).
 - The OpenBao unseal key and root token.
 - The TLS private key and the certificate chain. The certificate is a
@@ -183,6 +191,12 @@ them at once.
   The anchor name is never shown back.
 - The file is parsed and checked in a worker thread, not on the event loop,
   so a large file does not hold up other requests.
+- The secret check reads each string a fixed number of times, so its time
+  grows in step with the file size. A string or key longer than 64,000
+  characters (the longest field, a convention body) is refused with its
+  path before the secret check runs. A long key is named by the path of its
+  mapping, never by itself, also when it appears twice. Nothing else is
+  checked, as with a secret.
 - `!!binary`, `!!pairs`, `!!omap` and `!!set` values are refused and never
   built: each would hide its contents from the secret check and reach JSON
   as readable text. Nothing else is checked, as with a secret.
@@ -232,7 +246,10 @@ Builds the file from the live state (`application/yaml`, sent as
 on it: stored data that would be refused on import (a JWT in a target's
 `notes`, `extras.password`, a private key in a convention body) stops the
 export with 409 `settings_export_refused` and a `mistakes` list naming each
-path, never the value. Move the secret into OpenBao and export again. Tenants are sorted by id, conventions by slug, targets
+path, never the value. Move the secret into OpenBao and export again. A
+stored string or key longer than 64,000 characters (for example a long
+target `notes`) stops the export the same way, since the import refuses it;
+shorten it and export again. Tenants are sorted by id, conventions by slug, targets
 by name, and keys come in a fixed order, so the same state always gives the
 same `spec`. The export writes each value out each time it appears
 and never writes a YAML anchor or alias, so an exported file always imports

@@ -15,7 +15,9 @@
       version anchored at the bottom. On desktop there is NO top bar —
       content owns the full column. On <lg a slim ``navbar`` appears
       with the hamburger + wordmark + theme toggle (the ``navbar``
-      class is a test-pinned contract).
+      class is a test-pinned contract). On <lg the sidebar starts
+      closed on every page load (#6000), so a phone shows the page, not
+      the menu; the saved open/closed choice is read only from lg up.
     * The page canvas is transparent: the aurora glow painted on
       <html> (styles.css) shows through; cards stay opaque.
 
@@ -27,6 +29,7 @@
       the fragment template).
 -#}
 {% from "_icons.html" import icon %}
+{% from "_tenant_label.html" import tenant_label %}
 {#- ``active_surface`` highlights the matching sidebar link. Routes
     that render a surface pass it (e.g. ``"broadcast"``); the dashboard
     doesn't, so default to ``""`` here so the ``StrictUndefined``
@@ -119,6 +122,9 @@
        from a microtask at the end of its own script task, so a later
        script would register too late (#1692). -#}
     <script src="/ui/static/src/app/approvals-bell.js" defer></script>
+    {#- "The run has ended" notice (#5110): watches the background runs a
+       page started and asks on the bell's timer. On every console page. -#}
+    <script src="/ui/static/src/app/run-notices.js" defer></script>
     {#- App-shell native-<dialog> modal controller (G0.26-T3 #1803).
        Loaded OUTSIDE ``component_scripts`` so it ships on EVERY console
        page: it opens HTMX-injected ``<dialog class="modal">`` fragments
@@ -161,6 +167,7 @@
         sidebarOpen: true,
         userMenuOpen: false,
         init() {
+          if (!window.matchMedia('(min-width: 64rem)').matches) { this.sidebarOpen = false; return; }
           try {
             this.sidebarOpen = (localStorage.getItem('meho.sidebar') ?? 'open') === 'open';
           } catch (_) { this.sidebarOpen = true; }
@@ -301,7 +308,7 @@
                   title="Switch tenant"
                   data-testid="tenant-switch"
                 >
-                  <span class="truncate">{{ session_tenant.name or session_tenant.slug or session_tenant.id }}</span>
+                  <span class="truncate">{{ tenant_label(session_tenant) }}</span>
                   <span class="shrink-0 font-sans text-[0.7rem] text-primary">Switch</span>
                 </a>
                 {% else %}
@@ -310,7 +317,7 @@
                   {% if session_tenant is not none %}aria-label="Active tenant"{% endif %}
                   title="{% if session_tenant is not none %}Active tenant{% else %}Sign in to choose a tenant{% endif %}"
                 >
-                  {% if session_tenant is not none %}{{ session_tenant.name or session_tenant.slug or session_tenant.id }}{% else %}(sign in to choose){% endif %}
+                  {% if session_tenant is not none %}{{ tenant_label(session_tenant) }}{% else %}(sign in to choose){% endif %}
                 </div>
                 {% endif %}
               </div>
@@ -437,6 +444,9 @@
          dismiss it (#1803). #}
       <div id="meho-approvals-modal-container"></div>
     </div>
+
+    {# "The run has ended" notices (#5110), added by ``run-notices.js``. #}
+    <div id="meho-run-notices" class="toast toast-end toast-bottom z-50" aria-live="polite"></div>
 
     {# Per-surface deferred JS that does NOT register Alpine
        components -- plain-JS page scripts (topology) and heavy vendor

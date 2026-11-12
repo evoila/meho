@@ -192,6 +192,12 @@ async def test_approvals_default_posture_and_missing_key() -> None:
         "custody": "missing",
         "effective_posture": "four_eyes_enforced",
         "delegated_decision_posture": "production_own_hand_only",
+        "sign_in": {
+            "state": "not_checked",
+            "flow": "meho approval sign-in",
+            "client": "meho-cli-approve",
+            "detail": "keycloak_admin_not_configured",
+        },
     }
     by_name = {entry.name: entry for entry in response.features}
     assert set(by_name) == {
@@ -202,6 +208,7 @@ async def test_approvals_default_posture_and_missing_key() -> None:
         "approval_custody",
         "mcp",
         "vault_tenant_scope",
+        "policy",
     }
     assert by_name["approval_custody"].configured is False
     assert by_name["approval_custody"].missing_env == ["APPROVAL_HANDOFF_ENCRYPTION_KEY"]
@@ -223,6 +230,12 @@ async def test_approvals_follow_the_settings_and_never_carry_the_key(
         "custody": "configured",
         "effective_posture": "single_operator_break_glass",
         "delegated_decision_posture": "lab_class_delegation_allowed",
+        "sign_in": {
+            "state": "not_checked",
+            "flow": "meho approval sign-in",
+            "client": "meho-cli-approve",
+            "detail": "keycloak_admin_not_configured",
+        },
     }
     by_name = {entry.name: entry for entry in response.features}
     assert by_name["approval_custody"].configured is True

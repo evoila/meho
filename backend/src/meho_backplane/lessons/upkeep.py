@@ -25,8 +25,10 @@ Too many old or doubled entries make the agent worse. Once per interval
 4. **Lists used candidates for a reviewer.** The job never confirms a
    candidate. A used candidate is listed with the number of different
    sessions and different targets that used it: copies of one story are
-   not independent proof. A reviewer of the tenant (a person who may
-   decide approvals) or a tenant admin sets ``status: confirmed``.
+   not independent proof. It also gives how many sessions used it after
+   a search, and how many after MEHO showed it before an operation. A
+   reviewer of the tenant (a person who may decide approvals) or a tenant
+   admin sets ``status: confirmed``.
 5. **Measures.** The report carries the four learning numbers
    (:mod:`meho_backplane.lessons.metrics`) for the interval.
 
@@ -62,7 +64,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 import structlog
 from pydantic import BaseModel, ConfigDict
@@ -82,7 +84,19 @@ from meho_backplane.kb.revisions import update_head_metadata
 from meho_backplane.kb.schemas import KB_SOURCE
 from meho_backplane.lesson_header import header_expires_at
 from meho_backplane.lessons.metrics import LearningMetrics, compute_learning_metrics
-from meho_backplane.lessons.retrievals import aware, fetch_retrievals, find_uses
+from meho_backplane.lessons.retrievals import (
+    RECALL_CHANNEL,
+    SEARCH_CHANNEL,
+    aware,
+    fetch_retrievals,
+    find_uses,
+)
+from meho_backplane.lessons.upkeep_report import (
+    MergedEntry,
+    RefreshedEntry,
+    ReviewCandidate,
+    UpkeepReport,
+)
 from meho_backplane.loop_schedule import wait_until_first_run
 from meho_backplane.memory._internal import slug_from_source_id
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
@@ -115,55 +129,6 @@ REPORT_LIST_LIMIT: Final[int] = 100
 
 _ADVISORY_LOCK_KEY: Final[int] = 0x4D45_484F_4B55_504B  # "MEHOKUPK"
 _CLOSED: Final[frozenset[str]] = frozenset({"replaced", "retired"})
-
-
-class MergedEntry(BaseModel):
-    """A knowledge entry marked ``replaced`` because *into* has the same body."""
-
-    model_config = ConfigDict(frozen=True)
-
-    slug: str
-    into: str
-
-
-class RefreshedEntry(BaseModel):
-    """A confirmed entry whose ``confirmed_at`` the job set again."""
-
-    model_config = ConfigDict(frozen=True)
-
-    store: str
-    slug: str
-    confirmed_at: datetime
-
-
-class ReviewCandidate(BaseModel):
-    """A used candidate, for a reviewer to confirm or not."""
-
-    model_config = ConfigDict(frozen=True)
-
-    store: str
-    slug: str
-    sessions: int
-    targets: int
-
-
-class UpkeepReport(BaseModel):
-    """What one run did in one tenant, and the tenant's learning numbers."""
-
-    model_config = ConfigDict(frozen=True)
-
-    tenant_id: uuid.UUID
-    since: datetime
-    until: datetime
-    merged_count: int = 0
-    retired_count: int = 0
-    refreshed_count: int = 0
-    for_review_count: int = 0
-    merged: list[MergedEntry] = []
-    retired: list[str] = []
-    refreshed: list[RefreshedEntry] = []
-    for_review: list[ReviewCandidate] = []
-    numbers: LearningMetrics | None = None
 
 
 class _Changes:
@@ -321,6 +286,20 @@ def _retire(metadata: dict[str, Any], now: datetime) -> dict[str, Any] | None:
     return {**metadata, "status": "retired"}
 
 
+class _EntryUse(NamedTuple):
+    """One retrieval of an entry that its session then used."""
+
+    session_id: uuid.UUID
+    target_id: uuid.UUID | None
+    at: datetime
+    channel: str
+
+
+def _sessions(entry_uses: list[_EntryUse], channel: str) -> int:
+    """Return how many different sessions used the entry after a retrieval of *channel*."""
+    return len({use.session_id for use in entry_uses if use.channel == channel})
+
+
 async def _plan_refreshes_and_list_candidates(
     plan: _Plan, changes: _Changes, *, since: datetime, now: datetime
 ) -> None:
@@ -328,12 +307,14 @@ async def _plan_refreshes_and_list_candidates(
     async with get_sessionmaker()() as session:
         retrievals = await fetch_retrievals(session, since=since, until=now, tenant_id=None)
         uses = await find_uses(session, retrievals, until=now)
-    by_entry: dict[uuid.UUID, list[tuple[uuid.UUID, Any, datetime]]] = defaultdict(list)
+    by_entry: dict[uuid.UUID, list[_EntryUse]] = defaultdict(list)
     for retrieval in retrievals:
         use = uses.get(retrieval.id)
         if use is not None:
             by_entry[retrieval.entry_id].append(
-                (retrieval.agent_session_id, use.target_id, use.occurred_at)
+                _EntryUse(
+                    retrieval.agent_session_id, use.target_id, use.occurred_at, retrieval.channel
+                )
             )
     if not by_entry:
         return
@@ -354,12 +335,14 @@ async def _plan_refreshes_and_list_candidates(
                 ReviewCandidate(
                     store=doc.source,
                     slug=_slug(doc.source, doc.source_id),
-                    sessions=len({sid for sid, _, _ in entry_uses}),
-                    targets=len({target for _, target, _ in entry_uses if target is not None}),
+                    sessions=len({use.session_id for use in entry_uses}),
+                    targets=len({use.target_id for use in entry_uses if use.target_id is not None}),
+                    search_sessions=_sessions(entry_uses, SEARCH_CHANNEL),
+                    recall_sessions=_sessions(entry_uses, RECALL_CHANNEL),
                 )
             )
         elif status == "confirmed":
-            plan.refreshes[doc.tenant_id].append((doc, max(at for _, _, at in entry_uses)))
+            plan.refreshes[doc.tenant_id].append((doc, max(use.at for use in entry_uses)))
 
 
 def _parse_date(value: object) -> datetime | None:

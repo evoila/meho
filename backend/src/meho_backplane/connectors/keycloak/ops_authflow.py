@@ -65,6 +65,7 @@ __all__ = [
     "ENSURE_APPROVAL_FLOW_OP_ID",
     "WHEN_TO_USE_AUTHFLOW_BY_GROUP",
     "KeycloakApprovalFlowError",
+    "approval_flow_difference",
     "get_admin_list_strict",
     "keycloak_authflow_ensure_approval_flow",
 ]
@@ -176,6 +177,16 @@ def _difference(steps: list[dict[str, Any]]) -> str | None:
     if len(steps) > len(_STEPS):
         return f"the flow has {len(steps)} steps; wanted {len(_STEPS)}"
     return None
+
+
+def approval_flow_difference(rows: list[Any]) -> str | None:
+    """The first difference of the listed steps *rows* to the approval flow.
+
+    *rows* is the answer of ``GET .../authentication/flows/<alias>/executions``.
+    ``None`` when the steps are the ones of the realm file. The health check
+    uses it too (``meho_backplane.auth.approval_sign_in_flow``).
+    """
+    return _difference(_listed_steps(rows))
 
 
 async def _read_steps(
@@ -377,8 +388,9 @@ _WHEN_TO_USE_AUTHFLOW_GROUP = (
     "sign-in flow of 'meho-cli-approve'. "
     "``keycloak.authflow.ensure_passkey_code_skip`` gives a realm made before "
     "Keycloak 26.4 the step that skips the one-time code after a passkey "
-    "login. Both are safe to run twice and stop without a change on a flow "
-    "with another shape."
+    "login. ``keycloak.authflow.ensure_approval_touch`` gives the console "
+    "client the login flow with the passkey touch level. All are safe to run "
+    "twice and stop without a change on a flow with another shape."
 )
 
 #: Group text for the login flow ops' group, merged into the connector's map.

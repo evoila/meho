@@ -24,8 +24,7 @@ import (
 // Result is left as json.RawMessage because the backend types it as
 // a oneOf(dict, list) union — pretty-printing the raw bytes is the
 // cleanest renderer until callers grow a need for per-shape
-// specialisation. Same approach `retrieval.EvalResult` takes for
-// `Thresholds`.
+// specialisation.
 //
 // Kept hand-written rather than generator-backed because the FastAPI
 // surface types this route's response as `dict[str, Any]` and the
@@ -60,9 +59,8 @@ type CallResult struct {
 //	  [--json]                                 # machine-readable output
 //	  [--backplane <url>]                      # override the backplane URL
 //
-// Exit codes (mirrors `meho retrieval eval`'s gate-failed semantic
-// for the structured-failure case — dispatcher errors come back in
-// the `error` / `extras` envelope, not as transport failures):
+// Exit codes (dispatcher errors come back in the `error` / `extras`
+// envelope, not as transport failures):
 //   - 0   operation invoked + status == "ok"
 //   - 1   operation invoked but status == "error", "denied", "rate_limited" or "not_found"
 //   - 2   auth_expired
@@ -273,8 +271,7 @@ func printRunStarted(w io.Writer, run *runAccepted, jsonOut bool) error {
 // a structured-failure result (status == "error", "denied",
 // "rate_limited" or "not_found"). main translates non-nil RunE errors into a non-zero
 // exit; cobra's SilenceErrors is true on the command so the error
-// string isn't double-printed. Same shape as retrieval/eval.go's
-// errEvalGate.
+// string isn't double-printed.
 var errOpError = errors.New("operation status not ok")
 
 // postCall constructs the typed CallOperationBody, picks the bare-

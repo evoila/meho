@@ -102,7 +102,7 @@ rollup (no LLM), and the *deep tier* is the scheduled agent run.
    tenant memory entry; suppress iff its metadata `re_escalate` is falsey. A
    missing entry (novel red) or `re_escalate=true` (still actionable) does not
    suppress. Decided on metadata only — no LLM call to decide.
-4. **In-flight dedupe** (`_has_in_flight_run`). A non-terminal `agent_run`
+4. **In-flight dedupe** (`has_in_flight_run` in `agent/in_flight.py`, shared with the event matcher). A non-terminal `agent_run`
    with the same `(tenant_id, work_ref)` suppresses a duplicate fire (rides
    `agent_run_tenant_work_ref_idx`).
 5. **Invoke** (`_fire_investigation`). Resolve `(client_id, secret)` from the
@@ -203,6 +203,81 @@ must answer in. Containment beyond the fence is unchanged: the investigator
 has no mail tool and any change op it attempts parks for operator approval and
 is never executed.
 
+## Changes as events (#6180)
+
+With `CHECKS_AGENT_EVENTS` on, a Dashboard change also becomes an event that
+event triggers can match. `_investigate_group` publishes one
+`check.dashboard.changed` event per cause group right after the known-noise
+check (the event is sent also when the group is known noise). Every other
+claimed edge publishes one event in `_process_transition`. The investigator
+call itself is unchanged. Payloads: `docs/codebase/events.md`, "Check events".
+
+## Two paths: the old path and the event trigger (#6183)
+
+With `CHECKS_AGENT_EVENTS` on, the investigator can run on one of two paths.
+With the switch off, only the old path exists and nothing below applies.
+
+**The old path** is the code in this module. `_investigate_group` finds the
+agent by the name in `CHECKS_INVESTIGATOR_AGENT`, starts it, waits for the
+answer and then stores and mails the finding.
+
+**The trigger path** uses no special code. A person makes an ordinary event
+trigger (kind `event`) for any agent, with a filter on the
+`check.dashboard.changed` event. See `examples/checks-investigator/` for the
+agent, its grants and the trigger. The event drain starts the agent. The agent
+needs no memory or mail rights, because MEHO stores and mails the finding:
+
+- `events/drain.py` `_dispatch_event`: after the triggers fire, when the event
+  is `agent_run.completed`, the drain calls
+  `checks/findings.py` `record_finding_for_event`.
+- That function acts only for a run that a Dashboard event trigger really
+  started. It reads the stored run, not the event payload, and checks:
+  - the run **succeeded**, is in the tenant, and a trigger started it. A direct
+    run, or a run that another agent started, never counts, even with the
+    same run key;
+  - the run key `event:<trigger id>:c:<key>` names an event trigger of the same
+    tenant and agent, and no cron or one-off trigger of the tenant carries that
+    run key;
+  - a `check.dashboard.changed` event with a cause group gives exactly this run
+    key for that trigger (made the way the event matcher makes it) and passes
+    the trigger's filter. The Dashboard and the group key come from this event.
+    So a long key that the run key holds only as a hash still works. The
+    step searches only the tenant's Dashboard events with the run key's
+    coalesce key (for a hashed key: every event with a key over 200
+    characters), so other events never hide the cause.
+
+  The Dashboard must be in the run's tenant. The run's answer is parsed with
+  `parse_finding`. Any other answer shape writes nothing.
+- A finding is written to the memory entry `checks-noise-<group key>` (the same
+  entry the old path writes) and mailed to the Dashboard's `notify_email`.
+- The drain marks the `agent_run.completed` event processed only after this
+  step, so a restart can deliver it again. The memory entry keeps the run id.
+  When it holds the finding of this run, or of a run that ended at the same
+  time or later, the step stores and mails nothing. So a second delivery never
+  sends a second mail and never replaces a newer finding.
+- It never raises into the drain loop.
+
+**No double runs.** When an *active* `kind=event` trigger exists in the tenant
+for the agent named in `CHECKS_INVESTIGATOR_AGENT`, `_investigate_group` skips
+its own start and logs `checks_investigation_skipped_trigger_owns`. The event
+is still published, and the trigger path does the work. A trigger for another
+agent does not stop the old path.
+
+**Known noise** works on both paths. The finding step writes the same memory
+entry, so the next event for that group has `known_noise: true`. The example
+trigger filters on `known_noise: false`, so it does not start.
+
+**Move from the old path to the trigger:**
+
+1. Create the agent, its grants and the trigger from `examples/checks-investigator/`.
+   Use the agent name from `CHECKS_INVESTIGATOR_AGENT`, or set the setting to
+   your agent name.
+2. From then on the old path steps aside. To go back, pause or cancel the
+   trigger.
+
+The code for the finding (`ChecksFinding`, `parse_finding`, `persist_finding`,
+`finding_notice`) is in `checks/findings.py`, so both paths use one copy.
+
 ## Agent-name convention (opt-in per tenant)
 
 The wiring is **off** until a tenant creates an *enabled* agent definition
@@ -213,7 +288,7 @@ on/off switch.
 
 Example create payload (derived from
 `examples/r1-tiered-triage/agent.deep-tier-investigator.json`; the read-only
-toolset + no write grants is the diagnose-only posture):
+toolset is the diagnose-only posture):
 
 ```json
 {
@@ -229,8 +304,14 @@ toolset + no write grants is the diagnose-only posture):
 }
 ```
 
-Grant this principal `*.read` / `*.list` auto-execute and any `*.write`
-**needs-approval** (the `examples/r1-tiered-triage/permissions.json` mould).
+Create its agent principal with the starting grant set `read-everything`
+(`meho agent-principal register checks-investigator --grants read-everything`,
+see `agent-permission-grants.md`, "Starting grant sets"). The agent only reads.
+The set gives `auto-execute` on every operation and target, and the risk-level
+ceiling makes anything above `safe` that it tries wait for a person. So it keeps
+working with `AGENT_GRANT_REQUIRED=on`, where an agent with no grant runs
+nothing. The definition then needs no `starting_grants`: its agent already has
+a grant.
 
 ## Diagnose-only contract (the CRUX)
 
@@ -251,8 +332,9 @@ This wiring never executes a change op:
 - `recommended_action` is persisted as memory text only.
 - Any write op the **agent** attempts is not executed by this wiring: the
   policy gate parks it as a durable `ApprovalRequest`
-  (`operations/approval_queue.py`, #817) because the agent principal holds
-  `*.write` grants as needs-approval. Approval + execution is a separate,
+  (`operations/approval_queue.py`, #817), because no agent grant lets an
+  operation above `safe` run at once (the risk-level ceiling in
+  `auth/permissions.py`). Approval + execution is a separate,
   operator-driven step (R2 territory), not this hook.
 
 The topology reads and memory read/write run under a synthetic per-tenant
@@ -298,7 +380,7 @@ principal, so no execution path inherits the role.
   transition is claimed under a transaction-scoped per-`(tenant, dashboard)`
   advisory lock, and the memo transition is an atomic compare-and-swap whose
   `rowcount` is the claim token, so exactly one caller fires even across
-  replicas (#2575). The in-flight `work_ref` dedupe (`_has_in_flight_run`) and
+  replicas (#2575). The in-flight `work_ref` dedupe (`has_in_flight_run` (`agent/in_flight.py`, shared with the event matcher)) and
   the noise-suppression memory layer remain as the cross-edge / cross-tick
   backstops. The residual timing gap is intrinsic to the persist-hook seam: a
   member that has not yet committed when the winning claim reads the membership
@@ -363,7 +445,8 @@ principal, so no execution path inherits the role.
   applies to inbound event bodies.
 - Mould: `examples/r1-tiered-triage/workflow.py` (harness-persists rationale,
   briefing builder, render/persist shape), `agent.deep-tier-investigator.json`
-  (definition payload), `permissions.json` (`*.write` needs-approval).
+  (definition payload). Grants: the starting grant set `read-everything`
+  (`agents/grant_sets.py`).
 - Seams: `agent/invocation.py` (`run_scheduled`), `scheduler/loop.py`
   (step 4 caller), `scheduler/credentials.py`, `operations/budget_enforcement.py`,
   `operations/approval_queue.py` (#817), `topology/query.py`.

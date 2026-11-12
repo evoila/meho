@@ -87,6 +87,7 @@ from pydantic import BaseModel, ValidationError
 
 from meho_backplane.auth.current_tenant import tenant_not_chosen_detail
 from meho_backplane.auth.operator import Operator
+from meho_backplane.mcp.audit import write_mcp_session_open_row
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.maturity import FEATURE_MATURITY_BAND
 from meho_backplane.mcp.profiles import (
@@ -115,11 +116,18 @@ from meho_backplane.mcp.session_limit import (
     check_mcp_session_cap,
     resolve_mcp_session_cap,
 )
+from meho_backplane.mcp.short_texts import (
+    SHORT_TEXTS_VALUE,
+    UnknownToolTextsError,
+    parse_tool_texts,
+)
 from meho_backplane.mcp.tenant_gate import allowed_without_tenant
+from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operations.caller_gone import watch_caller
 from meho_backplane.request_usage.collector import (
     note_request_fallback_status,
     note_request_route,
+    note_request_tool_texts,
 )
 from meho_backplane.settings import Settings, get_settings
 from meho_backplane.untrusted_text import VENDOR_TEXT_BAND
@@ -428,6 +436,7 @@ async def _session_preamble(operator: Operator) -> PreambleAssembly:
     (#4113). Without a profile nothing changes.
     """
     # Imported here to break the import cycle (see _session_instructions).
+    from meho_backplane.auth.agent_admission import is_agent_caller
     from meho_backplane.conventions.preamble import assemble_preamble_detailed
 
     profile = operator.mcp_tool_profile
@@ -436,6 +445,7 @@ async def _session_preamble(operator: Operator) -> PreambleAssembly:
         operator.sub,
         capabilities=operator.capabilities if profile_admits(profile, DOCS_SEARCH_TOOL) else None,
         include_broadcast=_session_can_announce(operator),
+        broadcast_can_post=is_agent_caller(operator),
         include_runbook_priming=profile_admits(profile, RUNBOOK_NEXT_TOOL),
     )
 
@@ -479,7 +489,11 @@ async def _session_instructions(operator: Operator) -> str | None:
     :func:`_session_can_announce`). A ``read_only`` session cannot call
     the broadcast tools, so its instructions do not name them.
 
-    #5729: the caller's newest Memory notes follow the preamble
+    #5770: a session that is not an agent gets the reader form of that band
+    (read the feed, do not post), because MEHO refuses its announcements.
+
+    #5729: with the ``TEAM_KNOWLEDGE_RECALL`` setting on (off by default),
+    the caller's newest Memory notes follow the preamble
     (:func:`meho_backplane.recall.memory_band`).
 
     #4172: the bands follow the session's tool profile; see
@@ -1173,6 +1187,22 @@ def _build_success_response(
     return JSONResponse(content=_serialize_response(response))
 
 
+async def _dispatch_no_store(
+    jrpc: JsonRpcRequest,
+    is_notification: bool,
+    operator: Operator,
+) -> Response:
+    """Run :func:`_dispatch_to_handler`; a revealed secret value is never cached.
+
+    A tool whose answer carries a revealed secret value marks it inside
+    :func:`~meho_backplane.no_store.answer_scope`; that answer then says
+    ``Cache-Control: no-store`` (:mod:`meho_backplane.no_store`).
+    """
+    with answer_scope() as mark:
+        response = await _dispatch_to_handler(jrpc, is_notification, operator)
+    return set_no_store(response) if mark.holds_secret else response
+
+
 async def _dispatch_to_handler(
     jrpc: JsonRpcRequest,
     is_notification: bool,
@@ -1359,6 +1389,29 @@ async def mcp_dispatch(
     return response
 
 
+def _apply_url_options(request: Request, operator: Operator) -> Operator | JSONResponse:
+    """Return *operator* with the session's choices from the MCP URL, or a 400 error.
+
+    Tool profile (#4172): ``?profile=<name>``. Short tool texts for this
+    session only (#6293): ``?texts=short``. An unknown value is a bad URL,
+    refused before the body is read, so a typo is never quietly ignored.
+    The usage event of the request names the short texts choice, so it is
+    on record also when no audit row is written.
+    """
+    try:
+        profile = parse_tool_profile(request.query_params.getlist("profile"))
+        short_texts = parse_tool_texts(request.query_params.getlist("texts"))
+    except (UnknownToolProfileError, UnknownToolTextsError) as exc:
+        return _error_response(None, INVALID_REQUEST, str(exc), status_code=400)
+    update: dict[str, Any] = {}
+    if profile is not None:
+        update["mcp_tool_profile"] = profile
+    if short_texts:
+        update["mcp_short_tool_texts"] = True
+        note_request_tool_texts(SHORT_TEXTS_VALUE)
+    return operator.model_copy(update=update) if update else operator
+
+
 async def _dispatch_mcp_request(request: Request, operator: Operator) -> Response:
     """Run the dispatch pipeline described on :func:`mcp_dispatch`."""
     # ``operator`` flows through to handlers — T3 registry handlers
@@ -1366,15 +1419,10 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
     # and for the call-time role re-check on tools/call / resources/read.
     # Built-in lifecycle handlers (initialize, ping, notifications/
     # initialized) accept the parameter but don't read it.
-    # Tool profile (#4172): ``?profile=<name>`` on the MCP URL. An unknown
-    # name is a bad URL, refused before the body is read, so a typo never
-    # quietly gives the full tool list.
-    try:
-        profile = parse_tool_profile(request.query_params.getlist("profile"))
-    except UnknownToolProfileError as exc:
-        return _error_response(None, INVALID_REQUEST, str(exc), status_code=400)
-    if profile is not None:
-        operator = operator.model_copy(update={"mcp_tool_profile": profile})
+    session_operator = _apply_url_options(request, operator)
+    if isinstance(session_operator, JSONResponse):
+        return session_operator
+    operator = session_operator
     raw_body = await _read_body_capped(request)
     if isinstance(raw_body, JSONResponse):
         return raw_body
@@ -1429,8 +1477,43 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
     # #3696: the body is fully read here, so the watcher can notice a
     # caller that disconnects while a long tool call runs.
     async with watch_caller(request.receive):
-        response = await _dispatch_to_handler(jrpc, is_notification, operator)
-    _maybe_issue_initialize_session_id(request, jrpc.method, is_notification, response)
+        response = await _dispatch_no_store(jrpc, is_notification, operator)
+    issued = _maybe_issue_initialize_session_id(request, jrpc.method, is_notification, response)
+    return await _audit_session_open(request, jrpc, operator, response, issued=issued)
+
+
+async def _audit_session_open(
+    request: Request,
+    jrpc: JsonRpcRequest,
+    operator: Operator,
+    response: Response,
+    *,
+    issued: uuid.UUID | None,
+) -> Response:
+    """Write the ``mcp.session_open`` row of a new session, or fail the ``initialize``.
+
+    Runs only with ``AUDIT_CLIENT_IDENTITY`` on and only when this
+    ``initialize`` got a new session id (*issued*, #6209); otherwise
+    *response* is returned as it is. The row commits before the response
+    returns. If the write fails, the client gets a JSON-RPC internal error
+    with no session id, as for every other MCP audit write.
+
+    A session with no current tenant (#5239) writes no row: its tenant
+    fields hold only a placeholder, and no audit row may name it.
+    """
+    if issued is None or not operator.tenant_chosen or not get_settings().audit_client_identity:
+        return response
+    client_info = (jrpc.params or {}).get("clientInfo")
+    try:
+        await write_mcp_session_open_row(
+            operator=operator,
+            client_info=client_info if isinstance(client_info, dict) else {},
+            user_agent=request.headers.get("user-agent"),
+        )
+    except Exception as exc:
+        _log.exception("mcp_session_open_audit_failed")
+        structlog.contextvars.unbind_contextvars("mcp_session_id")
+        return _error_response(jrpc.id, INTERNAL_ERROR, f"internal error: {type(exc).__name__}")
     return response
 
 
@@ -1439,7 +1522,7 @@ def _maybe_issue_initialize_session_id(
     method: str,
     is_notification: bool,
     response: Response,
-) -> None:
+) -> uuid.UUID | None:
     """Stamp an ``Mcp-Session-Id`` response header on a successful initialize.
 
     G0.15-T4 (#1213): closes the regression on the v0.7.0 release-body's
@@ -1466,19 +1549,22 @@ def _maybe_issue_initialize_session_id(
     (e.g. the ``request_completed`` log from
     :class:`~meho_backplane.middleware.RequestContextMiddleware`)
     carries the same correlation key the client will echo on the next
-    request. The initialize call itself writes no audit row (chassis
-    ``AuditMiddleware`` skips ``/mcp`` and the MCP-side audit path only
-    fires for ``tools/call`` / ``resources/read``), so this binding is
-    purely log-side. See :func:`_issue_mcp_session_id` for the
-    issuance contract.
+    request. With ``AUDIT_CLIENT_IDENTITY`` on, the caller also writes
+    one ``mcp.session_open`` audit row for the issued id
+    (:func:`_audit_session_open`, #6209); otherwise ``initialize`` writes
+    no audit row. See :func:`_issue_mcp_session_id` for the issuance
+    contract.
+
+    Returns the issued id, or ``None`` when no id was issued.
     """
     if method != "initialize" or is_notification:
-        return
+        return None
     if not (200 <= response.status_code < 300):
-        return
+        return None
     if _response_is_jsonrpc_error(response):
-        return
+        return None
     if request.headers.get(_MCP_SESSION_HEADER) not in (None, ""):
-        return
+        return None
     issued = _issue_mcp_session_id(response)
     structlog.contextvars.bind_contextvars(mcp_session_id=str(issued))
+    return issued

@@ -64,6 +64,14 @@ def fake_admission(operator: Operator) -> AgentAdmission:
     )
 
 
+#: The cheap who-calls check the MCP dispatcher runs before the input
+#: check (#5770). Patched with the full check, same reason as above.
+_CALLER_CHECK_TARGETS = (
+    "meho_backplane.auth.agent_admission.require_agent_caller",
+    "meho_backplane.mcp.tools.broadcast.require_agent_caller",
+)
+
+
 def patch_agent_admission(monkeypatch: pytest.MonkeyPatch) -> None:
     """Admit every caller as an agent principal on the MCP and REST paths."""
 
@@ -72,6 +80,8 @@ def patch_agent_admission(monkeypatch: pytest.MonkeyPatch) -> None:
 
     for target in _ADMISSION_TARGETS:
         monkeypatch.setattr(target, AsyncMock(side_effect=_admit))
+    for target in _CALLER_CHECK_TARGETS:
+        monkeypatch.setattr(target, lambda _operator: None)
 
 
 def trusted_event(

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/evoila/meho/cli/internal/api"
 )
@@ -260,7 +261,7 @@ func InsufficientBudget(detail string) *StructuredError {
 // also sets SilenceErrors=true: cobra sees a non-nil error and
 // flips to a non-zero return without re-emitting any text.
 func RenderError(stderrW io.Writer, err *StructuredError, jsonOut bool) error {
-	err = withTenantNotChosenHint(err)
+	err = withLoginProfile(withTenantNotChosenHint(err))
 	if jsonOut {
 		// JSON path: serialise the envelope to stderr ourselves.
 		body := jsonError{
@@ -348,6 +349,7 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 	if tenantNotChosen(resp.Operator) {
 		fmt.Fprintln(stdoutW, "  No tenant chosen. Choose one with `meho tenants use <name>`.")
 		fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
+		fmt.Fprint(stdoutW, formatServerTime(resp.ServerTime))
 		return nil
 	}
 
@@ -356,6 +358,10 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 
 	// DB subsystem. migrated is a tri-state (true, false, nil/unknown).
 	fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
+
+	// The server's time in UTC (#5504). An older backplane sends no
+	// field; the line is skipped then.
+	fmt.Fprint(stdoutW, formatServerTime(resp.ServerTime))
 
 	// Readiness checks, approval settings and gated features (#4830).
 	// An older backplane sends none of these; the lines are skipped
@@ -412,6 +418,15 @@ func formatAgentModelSpend(s *api.AgentModelSpend) string {
 		"  Agent model: %s has no price in MEHO, so spend limits do not count its runs",
 		s.Model,
 	)
+}
+
+// formatServerTime renders the server's time line in UTC, to the
+// second. Empty when the backplane sends no time.
+func formatServerTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return fmt.Sprintf("  Server time: %s\n", t.UTC().Format(time.RFC3339))
 }
 
 // tenantNotChosen reports a status answer for a login with several
@@ -493,7 +508,16 @@ func formatOperatorIdentity(op api.OperatorIdentity) string {
 // formatVault renders a VaultStatus as "reachable, read ok",
 // "reachable, read failed (<detail>)", or "unreachable (<detail>)".
 // The exact phrasing matches the issue body's example output.
+//
+// When the backplane ran no check (checked=false), it prints
+// "not checked (<reason>)", for example "not checked (needs the
+// operator role)" for a caller below the operator role. An older
+// backplane sends no checked field; the line then shows the reachable
+// and read state.
 func formatVault(v api.VaultStatus) string {
+	if line, ok := VaultNotChecked(v); ok {
+		return line
+	}
 	if !v.Reachable {
 		return joinDetail("unreachable", v.Detail)
 	}
@@ -501,6 +525,19 @@ func formatVault(v api.VaultStatus) string {
 		return joinDetail("reachable, read failed", v.Detail)
 	}
 	return joinDetail("reachable, read OK", v.Detail)
+}
+
+// VaultNotChecked returns "not checked (<reason>)" and true when the
+// backplane ran no Vault check (checked=false), for example "not
+// checked (needs the operator role)". It returns false when the check
+// ran, or when an older backplane sends no checked field.
+func VaultNotChecked(v api.VaultStatus) (string, bool) {
+	if v.Checked == nil || *v.Checked {
+		return "", false
+	}
+	reason := strings.TrimPrefix(strings.TrimSpace(derefString(v.Detail)), "not checked:")
+	reason = strings.TrimSpace(reason)
+	return joinDetail("not checked", &reason), true
 }
 
 // formatDB renders a DbStatus. Migrated == nil ("unknown") happens

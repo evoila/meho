@@ -16,14 +16,18 @@ is 200.
    on the same target already failed in another, earlier session (looked
    back up to :data:`REPEAT_LOOKBACK_DAYS` days). A lesson should stop a
    mistake from happening twice.
-2. **Hit rate** -- of the entries searches gave to sessions in the window,
-   the share that were used: the session ran an operation that succeeded
+2. **Hit rate** -- of the entries given to sessions in the window, the
+   share that were used: the session ran an operation that succeeded
    after it (:func:`~meho_backplane.lessons.retrievals.find_uses`).
 3. **Precision** -- of the retrieved entries that still exist, the share
    that were right. An entry was wrong when its ``status`` was or is now
    ``disputed``. It was stale when it had expired, or its ``status`` was
-   ``replaced`` or ``retired``, at the moment of the search. Everything
+   ``replaced`` or ``retired``, at the moment it was given. Everything
    else counts as right. A deleted entry cannot be judged and is left out.
+
+   The hit rate and the precision are given three times: over all
+   retrievals, over search hits only (``search``), and over the entries
+   MEHO showed before an operation only (``recall``).
 4. **Time to the first correct action on a known system** -- for each
    session in the window whose first successful operation ran on a known
    target, the seconds from the session's start to that operation. A
@@ -48,8 +52,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.db.models import AuditLog, Document, RequestUsageEvent
 from meho_backplane.lessons.retrievals import (
     DISPATCH_METHOD,
+    RECALL_CHANNEL,
+    SEARCH_CHANNEL,
     SUCCESS_STATUS,
     Retrieval,
+    Use,
     aware,
     fetch_retrievals,
     find_uses,
@@ -58,6 +65,7 @@ from meho_backplane.lessons.retrievals import (
 __all__ = [
     "REPEAT_LOOKBACK_DAYS",
     "LearningMetrics",
+    "RetrievalNumbers",
     "compute_learning_metrics",
 ]
 
@@ -72,12 +80,32 @@ _RATE_LIMITED: Final[int] = 429
 _SessionKey = tuple[uuid.UUID, uuid.UUID | None]
 
 
+class RetrievalNumbers(BaseModel):
+    """The hit rate and the precision over the retrievals of one channel.
+
+    Each ratio comes with its count and its base, and is ``null`` when the
+    base is 0.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    hit_rate_pct: float | None
+    hit_rate_retrievals: int
+    hit_rate_used: int
+
+    precision_pct: float | None
+    precision_judged: int
+    precision_right: int
+
+
 class LearningMetrics(BaseModel):
     """The four numbers that show whether stored lessons help.
 
     For one tenant and window. Each ratio comes with its count and its
     base, and is ``null`` when the base is 0. The median time is in
-    seconds.
+    seconds. The flat hit rate and precision count every retrieval;
+    ``search`` counts search hits only, and ``recall`` only the entries
+    MEHO showed before an operation.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -96,6 +124,9 @@ class LearningMetrics(BaseModel):
 
     first_correct_action_median_seconds: float | None
     first_correct_action_sessions: int
+
+    search: RetrievalNumbers
+    recall: RetrievalNumbers
 
 
 def _pct(numerator: int, denominator: int) -> float | None:
@@ -116,7 +147,8 @@ async def compute_learning_metrics(
     """Compute the four numbers; ``tenant_id=None`` means every tenant. Read-only."""
     retrievals = await fetch_retrievals(session, since=since, until=until, tenant_id=tenant_id)
     uses = await find_uses(session, retrievals, until=until)
-    judged, right = await _precision(session, retrievals)
+    current = await _current_metadata(session, retrievals)
+    everything = _retrieval_numbers(retrievals, uses, current)
     failures, repeats = await _repeat_mistakes(
         session, since=since, until=until, tenant_id=tenant_id
     )
@@ -127,33 +159,52 @@ async def compute_learning_metrics(
         repeat_mistake_pct=_pct(repeats, failures),
         repeat_mistake_failures=failures,
         repeat_mistake_repeats=repeats,
-        hit_rate_pct=_pct(len(uses), len(retrievals)),
-        hit_rate_retrievals=len(retrievals),
-        hit_rate_used=len(uses),
-        precision_pct=_pct(right, judged),
-        precision_judged=judged,
-        precision_right=right,
+        **everything.model_dump(),
         first_correct_action_median_seconds=(
             round(statistics.median(samples), 2) if samples else None
         ),
         first_correct_action_sessions=len(samples),
+        search=_retrieval_numbers(
+            [r for r in retrievals if r.channel == SEARCH_CHANNEL], uses, current
+        ),
+        recall=_retrieval_numbers(
+            [r for r in retrievals if r.channel == RECALL_CHANNEL], uses, current
+        ),
     )
 
 
-async def _precision(session: AsyncSession, retrievals: list[Retrieval]) -> tuple[int, int]:
-    """Return ``(judged, right)`` over *retrievals* whose entry still exists."""
+def _retrieval_numbers(
+    retrievals: list[Retrieval], uses: dict[uuid.UUID, Use], current: dict[uuid.UUID, Any]
+) -> RetrievalNumbers:
+    """Return the hit rate and the precision over *retrievals*."""
+    used = sum(1 for retrieval in retrievals if retrieval.id in uses)
+    judged, right = _precision(retrievals, current)
+    return RetrievalNumbers(
+        hit_rate_pct=_pct(used, len(retrievals)),
+        hit_rate_retrievals=len(retrievals),
+        hit_rate_used=used,
+        precision_pct=_pct(right, judged),
+        precision_judged=judged,
+        precision_right=right,
+    )
+
+
+async def _current_metadata(
+    session: AsyncSession, retrievals: list[Retrieval]
+) -> dict[uuid.UUID, Any]:
+    """Return ``entry id -> metadata now`` for the retrieved entries that still exist."""
     if not retrievals:
-        return 0, 0
-    current: dict[uuid.UUID, Any] = {
-        row.id: row.doc_metadata
-        for row in (
-            await session.execute(
-                select(Document.id, Document.doc_metadata).where(
-                    Document.id.in_({r.entry_id for r in retrievals})
-                )
-            )
-        ).all()
-    }
+        return {}
+    rows = await session.execute(
+        select(Document.id, Document.doc_metadata).where(
+            Document.id.in_({r.entry_id for r in retrievals})
+        )
+    )
+    return {row.id: row.doc_metadata for row in rows.all()}
+
+
+def _precision(retrievals: list[Retrieval], current: dict[uuid.UUID, Any]) -> tuple[int, int]:
+    """Return ``(judged, right)`` over *retrievals* whose entry still exists."""
     judged = right = 0
     for retrieval in retrievals:
         if retrieval.entry_id not in current:

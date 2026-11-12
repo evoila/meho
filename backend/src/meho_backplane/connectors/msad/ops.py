@@ -40,8 +40,8 @@ satellite table — reads ``safe``, recoverable writes ``caution``, destructive
 * ``msad.group.get``              [safe]      Get-ADGroup -Identity.
 * ``msad.group.members``          [safe]      Get-ADGroupMember (list).
 * ``msad.group.create``           [caution+approval]  New-ADGroup (safe to run twice).
-* ``msad.group.add-member``       [caution]   Add-ADGroupMember.
-* ``msad.group.remove-member``    [caution]   Remove-ADGroupMember.
+* ``msad.group.add-member``       [caution+approval]  Add-ADGroupMember.
+* ``msad.group.remove-member``    [caution+approval]  Remove-ADGroupMember.
 * ``msad.group.delete``           [dangerous+approval]  Remove-ADGroup.
 * ``msad.computer.list``          [safe]      Get-ADComputer -Filter * (list).
 * ``msad.computer.get``           [safe]      Get-ADComputer -Identity.
@@ -129,9 +129,9 @@ MSAD_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Use to inventory and manage AD groups and their membership: list / "
         "get / members (read-only, ``safe``); create a group (``caution``, "
         "waits for a person to approve it); add-member / remove-member "
-        "(``caution`` — recoverable); delete the group (``dangerous`` + "
-        "``requires_approval``). The right group to grant a service account "
-        "into a role group (e.g. add ``svc-sql`` to a SQL admins group)."
+        "(``caution`` — recoverable, waits for a person to approve it); delete "
+        "the group (``dangerous`` + ``requires_approval``). The right group to "
+        "grant a service account into a role group (e.g. add ``svc-sql`` to a SQL admins group)."
     ),
     "computers": (
         "Use to inventory and manage AD computer accounts: list / get "

@@ -91,8 +91,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.approval_sign_in import ApprovalAuth, approval_sign_in_max_age
+from meho_backplane.auth.client_identity import (
+    CLIENT_PAYLOAD_KEY,
+    apply_client_block,
+    build_client_block,
+    channel_of,
+    clean_client_text,
+    client_identity_enabled,
+)
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import (
@@ -116,10 +125,10 @@ from meho_backplane.operations._audit import (
 )
 from meho_backplane.operations._errors import (
     result_already_resumed,
-    result_denied,
     result_object_changed_since_approval,
     result_preview_changed_since_approval,
     result_release_changed_while_waiting,
+    result_resume_params_unavailable,
     result_target_changed_since_approval,
     result_target_gone_since_approval,
 )
@@ -147,6 +156,19 @@ from meho_backplane.operations.approval_resume_checks import (
     park_time_target_hash,
     preview_changed_since_request,
     target_changed_since_request,
+)
+from meho_backplane.operations.approved_reveal import (
+    is_secret_reveal,
+    result_waiting_for_requester,
+    without_secret_values,
+)
+from meho_backplane.operations.grant_approval import (
+    RIGHTS_CHANGE_REFUSAL,
+    check_grant_approval,
+    check_rights_change_approval,
+    grant_audit_fields,
+    grant_changed_since_request,
+    is_rights_change,
 )
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
@@ -179,6 +201,7 @@ __all__ = [
     "ParamsMismatchError",
     "PreviewBindingMissingError",
     "ResultAccessForbiddenError",
+    "RightsChangeApprovalError",
     "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
     "WithdrawForbiddenError",
@@ -211,6 +234,7 @@ __all__ = [
     "request_waits_only_for_token_call",
     "result_state_of_envelope",
     "resume_dispatch_after_approval",
+    "take_approval_lock",
     "withdraw_request",
 ]
 
@@ -609,6 +633,23 @@ class ApprovalRoleFloorError(UnauthorizedApprovalError):
                 f"operator {operator_sub!r} may not approve approval_request {request_id}: {denial}"
             ),
         )
+
+
+class RightsChangeApprovalError(ApprovalRoleFloorError):
+    """The person may not approve this change of rights.
+
+    Raised by :func:`approve_request` when the request carries the
+    rights-change mark and the person is the requester or not an admin
+    (:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`).
+    Subclasses :class:`ApprovalRoleFloorError`, so every approve route
+    answers 403 with its text.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str) -> None:
+        super().__init__(
+            request_id, operator_sub=operator_sub, role=role, denial=RIGHTS_CHANGE_REFUSAL
+        )
+        self.reason_text = RIGHTS_CHANGE_REFUSAL
 
 
 class ResultAccessForbiddenError(ApprovalError):
@@ -1295,12 +1336,18 @@ async def _write_audit_row(
     # and the DISPATCH run rows (#4029) carry.
     # ``operator`` is the requester on a "request" row / the reviewer on a
     # "decision" row, so the name always pairs with ``operator_sub``. Omitted
-    # when the token had no name (resolver fails open to the raw sub); display
-    # name only, email is never widened onto this surface.
-    if operator.name:
-        payload["principal_name"] = operator.name
+    # when there is no name (resolver fails open to the raw sub); display
+    # name only, email is never widened onto this surface. An agent token
+    # has no ``name`` claim: its registered name or client id is used (#3885).
+    principal_name = await principal_display_name(session, operator)
+    if principal_name:
+        payload["principal_name"] = principal_name
     # #5239: the role of a platform admin without a group in this tenant.
     payload.update(tenant_role_source_payload(operator))
+    # The login client of the person who acted on this row (the requester on
+    # a "request" row, the reviewer on a "decision" row), when
+    # AUDIT_CLIENT_IDENTITY is on.
+    apply_client_block(payload, operator)
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
@@ -1377,7 +1424,20 @@ class ResumeRequester(NamedTuple):
     sub: str
     act: str | None
     name: str | None
+    #: The requester's ``principal_kind`` (#3885). ``None`` on a row parked
+    #: before migration 0149.
+    kind: str | None = None
+    #: The requester's ``client`` block from the stored effect
+    #: (AUDIT_CLIENT_IDENTITY). ``None`` when the request has none.
+    client: dict[str, Any] | None = None
+    #: The requester record on the card (``permission_preflight["requester"]``),
+    #: so a re-park keeps it (#6314). ``None`` when the card has none.
+    subject: dict[str, Any] | None = None
 
+
+#: Where the card keeps the requester record (#3898, #6314).
+_PERMISSION_PREFLIGHT_KEY = "permission_preflight"
+_REQUESTER_KEY = "requester"
 
 #: The requester of the approval request whose composite is being re-run
 #: (#4217). Bound by :func:`composite_resume_binding` on both resume paths
@@ -1411,6 +1471,7 @@ async def create_pending_request(
     idempotency_key: str | None = None,
     requester: ResumeRequester | None = None,
     reveal_secret: bool = False,
+    rights_change: bool = False,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -1530,6 +1591,15 @@ async def create_pending_request(
         }
         if target_id is not None:
             proposed_effect["target_id"] = str(target_id)
+    # The requester's login client and channel (AUDIT_CLIENT_IDENTITY), so
+    # every approval surface can say through which tool the change was asked
+    # for. A re-park on behalf of an earlier requester keeps that requester's
+    # block: *operator* is then the reviewer, not the requester.
+    if client_identity_enabled():
+        client = build_client_block(operator) if requester is None else requester.client
+        if client is not None:
+            proposed_effect = {**proposed_effect, CLIENT_PAYLOAD_KEY: client}
+    proposed_effect = _with_requester_record(proposed_effect, operator, requester)
 
     # RFC 8693 ``act`` (#1481): the agent principal acting on the human
     # subject's behalf on a delegated run, read from the same
@@ -1540,10 +1610,15 @@ async def create_pending_request(
     # ``None``. The prior ``getattr(operator, "identity_act", None)`` was
     # dead code — ``Operator`` has no such field, so it was always ``None``.
     principal_act: str | None = resolve_actor_sub()
-    principal_sub = operator.sub
-    principal_name = operator.name
     if requester is not None:
-        principal_sub, principal_act, principal_name = requester
+        principal_sub = requester.sub
+        principal_act = requester.act
+        principal_name = requester.name
+        principal_kind = requester.kind
+    else:
+        principal_sub = operator.sub
+        principal_name = await principal_display_name(session, operator)
+        principal_kind = operator.principal_kind.value
 
     # External change-ticket ref (work_ref I2-T1 #1659): read from the
     # same request-time ContextVar the audit writers read (bound at the
@@ -1580,11 +1655,13 @@ async def create_pending_request(
         run_id=run_id,
         principal_sub=principal_sub,
         principal_act=principal_act,
-        # Requester display name hoisted from the JWT ``name`` claim at park
-        # time (#3300) so every approvals surface renders a name alongside
-        # ``principal_sub``. ``None`` when the token carried no name --
+        # Requester display name hoisted at park time (#3300) so every
+        # approvals surface renders a name alongside ``principal_sub``: the
+        # JWT ``name`` claim, else for a machine token the registered agent
+        # name or the client id (#3885). ``None`` when there is none --
         # fail-open to the raw sub. Same pattern as audit_log.principal_name.
         principal_name=principal_name,
+        principal_kind=principal_kind,
         op_id=op_id,
         connector_id=connector_id,
         target_id=target_id,
@@ -1606,6 +1683,8 @@ async def create_pending_request(
         ),
         reveal_secret=reveal_secret,
     )
+    if rights_change or is_rights_change(request):
+        request.rights_change = True
     if idempotency_key is None:
         session.add(request)
         await session.flush()
@@ -1649,16 +1728,32 @@ async def create_pending_request(
     return request
 
 
-def _sign_in_lock_key(sign_in_key: str) -> int:
-    """Map a sign-in key to a stable, non-negative 63-bit advisory-lock key.
+def _approval_lock_key(scope: str, key: str) -> int:
+    """Map *key* under *scope* to a stable, non-negative 63-bit advisory-lock key.
 
     A blake2b digest under its own prefix, masked to 63 bits so it fits the
     ``bigint`` that ``pg_advisory_xact_lock`` takes. The same shape as the
     other advisory-lock keys in the code base.
     """
-    label = f"meho:approval-sign-in\0{sign_in_key}"
+    label = f"meho:{scope}\0{key}"
     digest = hashlib.blake2b(label.encode(), digest_size=8).digest()
     return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+async def take_approval_lock(session: AsyncSession, scope: str, key: str) -> None:
+    """Take the transaction-level advisory lock of an approval step.
+
+    Two approves that use the same proof (one sign-in, or one passkey touch)
+    can run at the same moment, on two replicas. Each takes this lock first,
+    so the second waits until the first commits or rolls back. PostgreSQL
+    releases the lock with the transaction. On other databases (the
+    single-writer SQLite test path) there is no lock.
+    """
+    conn = await session.connection()
+    if conn.dialect.name == "postgresql":
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"), {"k": _approval_lock_key(scope, key)}
+        )
 
 
 def _is_destructive(request: ApprovalRequest) -> bool:
@@ -1714,11 +1809,7 @@ async def _check_sign_in_use(
             max_age_seconds=max_age,
         )
         raise ApprovalSignInTooOldError(request.id, max_age_seconds=max_age)
-    conn = await session.connection()
-    if conn.dialect.name == "postgresql":
-        await session.execute(
-            text("SELECT pg_advisory_xact_lock(:k)"), {"k": _sign_in_lock_key(key)}
-        )
+    await take_approval_lock(session, "approval-sign-in", key)
     since = datetime.fromtimestamp(approval_auth.auth_time - CLOCK_SKEW_SECONDS - 1, UTC)
     rows = await session.execute(
         select(AuditLog.payload).where(
@@ -1742,6 +1833,31 @@ async def _check_sign_in_use(
     return destructive
 
 
+#: The longest ``User-Agent`` value stored on a decision row.
+_USER_AGENT_MAX_LENGTH: Final[int] = 256
+
+
+def _approver_client_fields(operator: Operator, user_agent: str | None) -> dict[str, Any]:
+    """Name the approver's login client on the decision row (AUDIT_CLIENT_IDENTITY).
+
+    ``approver_azp`` and ``approver_channel`` come from the checked login.
+    ``approver_user_agent`` is the ``User-Agent`` header of a REST approve,
+    cleaned like every client text and cut to 256 characters. The tool sends
+    it about itself and MEHO cannot check it, so it is marked
+    ``"self_declared": true``. Empty when the switch is off.
+    """
+    if not client_identity_enabled():
+        return {}
+    fields: dict[str, Any] = {
+        "approver_azp": operator.azp,
+        "approver_channel": channel_of(operator),
+    }
+    cleaned = clean_client_text(user_agent, _USER_AGENT_MAX_LENGTH)
+    if cleaned:
+        fields["approver_user_agent"] = {"value": cleaned, "self_declared": True}
+    return fields
+
+
 # code-quality-allow: 101 lines but ~70 are the Args/Raises docstring documenting
 # the four preconditions + the params/reason contract; the executable body is ~15
 # lines. Splitting it would scatter one linear approve flow for a line-count win.
@@ -1753,6 +1869,7 @@ async def approve_request(
     params: dict[str, Any] | None = None,
     reason: str = "",
     approval_auth: ApprovalAuth | None = None,
+    user_agent: str | None = None,
 ) -> ApprovalRequest:
     """Approve a pending request.
 
@@ -1822,6 +1939,9 @@ async def approve_request(
             Inside the approval window one sign-in may approve several
             requests; a ``destructive`` request needs a sign-in of its own
             (#5515). Every production approve path passes it.
+        user_agent: The ``User-Agent`` header of a REST approve. With
+            ``AUDIT_CLIENT_IDENTITY`` on it is stored on the decision row,
+            marked as what the tool says about itself. ``None`` elsewhere.
 
     Returns:
         The updated, flushed :class:`ApprovalRequest`.
@@ -1881,11 +2001,13 @@ async def approve_request(
         "reviewed_by": operator.sub,
         "self_approved": self_approved,
         "approval_rule": rule.value,
+        **grant_audit_fields(request, operator),
     }
     if reason:
         extra["reason"] = reason
     if approval_auth is not None:
         extra["approval_auth"] = approval_auth.audit_payload(operator.sub, single_use=single_use)
+    extra.update(_approver_client_fields(operator, user_agent))
     _record_delegation(extra, delegation, request=request, operator=operator, decision="approved")
 
     approve_audit_id = uuid.uuid4()
@@ -2299,6 +2421,7 @@ async def resume_dispatch_after_approval(
     operator: Operator,
     request: ApprovalRequest,
     params: dict[str, Any] | None = None,
+    requester_fetch: bool = False,
 ) -> Any:
     """Re-hydrate the stored target and re-dispatch an approved op (#1503, G11.7-T1).
 
@@ -2319,12 +2442,13 @@ async def resume_dispatch_after_approval(
       hash-verified against ``params_hash`` by :func:`approve_request`).
     * ``/decide`` and the MCP by-id approve hold only the request id, so
       they pass ``params=None`` and this helper falls back to the params
-      stored on the row at park time (``request.params``, #1503). A row
-      written before migration 0036 has ``params IS NULL`` and no
-      caller-supplied params — there is nothing to re-dispatch, so the
-      helper **fails closed** with a structured ``denied`` result naming
-      the gap (the op must be resumed via REST ``/approve`` + params, the
-      pre-0036 path).
+      stored on the row at park time (``request.params``, #1503). When
+      the row holds no params MEHO can run with (``_stored_call``), there
+      is nothing to re-dispatch: the run is refused like the release and
+      target refusals (:func:`_refuse_resume`, error code
+      ``approval_resume_params_unavailable``), so the request ends as a
+      failed run with a reason, and the requester can re-run it with the
+      params (#6064).
 
     Target re-hydration (G11.7-T1 #1401): the row persists only
     ``target_id``, not the full target. A write op whose handler reads
@@ -2364,17 +2488,25 @@ async def resume_dispatch_after_approval(
     hash must still build the same preview
     (:func:`refuse_resume_if_preview_changed`). Either change refuses the
     run, and the requester asks again.
+
+    A secret reveal (``reveal_secret`` on the row) does not run here on an
+    approve: the answer is :func:`result_waiting_for_requester`, and nothing
+    is claimed. Only the fetch of the person who asked runs it
+    (*requester_fetch*,
+    :func:`~meho_backplane.operations.approved_reveal.fetch_approved_reveal`).
     """
     # #5024: a stopping pod starts no new run. The claim stays free, so
     # nothing is used up and nothing was sent.
     if is_draining():
         return shutting_down_result(request.op_id)
+    if is_secret_reveal(request) and not requester_fetch:
+        return result_waiting_for_requester(request)
     # The requester's reveal choice is on the request row, outside the
     # params and the hash (``create_pending_request``). It goes on the
     # params of the run only.
     effective_params, reveal_secret = _stored_call(request, params)
     if effective_params is None and request.execution_handle is None:
-        return _resume_pre0036_denied(operator, request)
+        return await _refuse_resume_params_unavailable(operator, request)
 
     release_refusal = await refuse_resume_if_release_changed(operator, request)
     if release_refusal is not None:
@@ -2385,10 +2517,9 @@ async def resume_dispatch_after_approval(
         return target_refusal
 
     # Exactly-one-resumer claim (#2293): win the atomic conditional UPDATE
-    # right before executing -- after the pre-0036 params check above, so
-    # that gap never burns the claim and leaves the op un-executable. A
-    # refusal above (release or target) takes the claim itself: such a
-    # request never runs later. A lost claim means another
+    # right before executing. A refusal above (no params to run with,
+    # release or target) takes the claim itself and stores the refusal as
+    # the run result: such a request never runs later. A lost claim means another
     # resumer already executed the approved op (the in-process agent waiter
     # that read the same approved row, or a racing operator
     # surface), so no-op with a benign already_resumed result rather than
@@ -2458,16 +2589,36 @@ def _stored_call(
     (``request.reveal_secret``). So the choice also survives for a
     credential write, whose params are not on the row and come from the
     caller on a re-run. The params are ``None`` when the row stores none and
-    none were sent. Stored params whose secret-named values were replaced
-    by a marker (after the first run, :func:`claim_resume`) count as none:
-    they can no longer run the call.
+    none were sent, or when the stored params can no longer run the call
+    (:func:`_stored_params_can_run`).
     """
     if params is not None:
         params, _ = split_reveal_secret(params)
     effective: dict[str, Any] | None = params
-    if effective is None and not holds_hidden_param_values(request.params):
+    if effective is None and _stored_params_can_run(request):
         effective = cast(dict[str, Any] | None, request.params)
     return effective, bool(request.reveal_secret)
+
+
+def _stored_params_can_run(request: ApprovalRequest) -> bool:
+    """True when the params stored on *request* are still the ones the requester sent.
+
+    Stored params without a marker (``[REDACTED:param_name]``) can run.
+    With a marker, there are two cases (#6064):
+
+    * MEHO wrote it (:func:`claim_resume` or :func:`end_run_input`): the
+      real secret value is gone, so the params no longer match the
+      request's ``params_hash``. They cannot run the call.
+    * The requester sent it as a value, for example an object read from
+      MEHO and passed back unchanged. The hash covers it, so the params
+      still match ``params_hash``. They run as sent.
+    """
+    stored = cast(dict[str, Any] | None, request.params)
+    if stored is None:
+        return False
+    if not holds_hidden_param_values(stored):
+        return True
+    return params_hash_matches(stored, request.params_hash)
 
 
 async def refuse_resume_if_release_changed(
@@ -2608,10 +2759,13 @@ async def refuse_resume_if_preview_changed(
     object the approval card named must still be the object the live
     system has under the call's name
     (:func:`~meho_backplane.operations.approval_object_check.object_changed_since_request`).
-    Returns ``None`` when both hold, or when the request stored no preview
-    hash. Else the operation does not run: the refusal is stored as the
-    request's run result, so every read surface shows the run as failed
-    with the ``preview_changed_since_approval`` or
+    A third check runs for every change of rights, with or without a
+    preview hash: the login and the group it is for must still have the
+    ids the approver saw
+    (:func:`~meho_backplane.operations.grant_approval.grant_changed_since_request`).
+    Returns ``None`` when all hold. Else the operation does not run: the
+    refusal is stored as the request's run result, so every read surface
+    shows the run as failed with the ``preview_changed_since_approval`` or
     ``object_changed_since_approval`` error code. The caller has already
     won the one-resumer claim, so the request cannot run later.
 
@@ -2633,6 +2787,8 @@ async def refuse_resume_if_preview_changed(
         )
     else:
         reason = await object_changed_since_request(operator, request, target, params)
+        if reason is None:
+            reason = await grant_changed_since_request(operator, request, target, params)
         if reason is None:
             return None
         refusal = result_object_changed_since_approval(
@@ -2761,14 +2917,17 @@ async def persist_resume_result(request_id: uuid.UUID, result: Any, *, parked_op
         )
 
 
-def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
-    """Fail-closed result for a pre-0036 row with no stored params to re-dispatch.
+async def _refuse_resume_params_unavailable(
+    operator: Operator, request: ApprovalRequest
+) -> OperationResult:
+    """Refuse an approved run that has no params MEHO can run with (#6064).
 
-    A row parked before migration 0036 has ``params IS NULL`` and is
-    approved via a surface that carries no params (/decide, MCP by-id), so
-    there is nothing to re-dispatch — refuse rather than dispatch an empty
-    call. Reached before the claim, so it never burns it. Extracted to keep
-    :func:`resume_dispatch_after_approval` under the function-size budget.
+    The surface sent no params, and :func:`_stored_call` found none on the
+    row. The run is recorded like the other refusals (:func:`_refuse_resume`):
+    the claim is taken, one audit row is written, and the refusal is stored
+    as the run result. So the request ends as a failed run with a reason on
+    every surface, instead of staying approved and not run, and the
+    requester can re-run it with the params.
     """
     _log().warning(
         "approval_resume_params_unavailable",
@@ -2777,20 +2936,47 @@ def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
         connector_id=request.connector_id,
         operator_sub=operator.sub,
     )
-    return result_denied(
-        request.op_id,
-        (
-            f"approval request {request.id} has no stored params "
-            "(parked before migration 0036); re-dispatch refused — "
-            "approve via REST /approve with the original params instead"
-        ),
-        0.0,
-    )
+    refusal = result_resume_params_unavailable(request.op_id, approval_request_id=request.id)
+    return await _refuse_resume(operator, request, refusal, audit_payload={})
 
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:
-    """The requester saved on *request* (#4217)."""
-    return ResumeRequester(request.principal_sub, request.principal_act, request.principal_name)
+    """The requester saved on *request* (#4217), with its ``client`` block and record."""
+    effect = request.proposed_effect or {}
+    client = effect.get(CLIENT_PAYLOAD_KEY)
+    preflight = effect.get(_PERMISSION_PREFLIGHT_KEY)
+    subject = preflight.get(_REQUESTER_KEY) if isinstance(preflight, dict) else None
+    return ResumeRequester(
+        request.principal_sub,
+        request.principal_act,
+        request.principal_name,
+        request.principal_kind,
+        client if isinstance(client, dict) else None,
+        subject if isinstance(subject, dict) else None,
+    )
+
+
+def _with_requester_record(
+    proposed_effect: dict[str, Any], operator: Operator, requester: ResumeRequester | None
+) -> dict[str, Any]:
+    """Put the agent requester's record on the card (#6314), when there is one.
+
+    An approvals surface runs the approved call as the person who approved
+    it. It rebuilds the agent from this record to check the agent's grants
+    for the steps again
+    (:func:`~meho_backplane.operations.approved_step_check.approved_step_refusal`).
+    A re-park on behalf of an earlier requester keeps that requester's
+    record. A record the operation's own preflight stored stays.
+    """
+    from meho_backplane.operations.approved_step_check import requester_record
+
+    record = requester_record(operator) if requester is None else requester.subject
+    if record is None:
+        return proposed_effect
+    preflight = proposed_effect.get(_PERMISSION_PREFLIGHT_KEY)
+    preflight = dict(preflight) if isinstance(preflight, dict) else {}
+    preflight.setdefault(_REQUESTER_KEY, record)
+    return {**proposed_effect, _PERMISSION_PREFLIGHT_KEY: preflight}
 
 
 @contextmanager
@@ -3034,7 +3220,9 @@ async def _dispatch_resume_with_bound_context(
     # instead of a second submit (#3209). Reached only by the exactly-one-resumer
     # winner, so the capture runs at most once; fail-soft, never breaks the
     # approve path.
-    await persist_resume_result(request.id, result, parked_op_id=request.op_id)
+    # A reveal keeps its values only in the answer to the person who asked.
+    stored = without_secret_values(result) if reveal_secret else result
+    await persist_resume_result(request.id, stored, parked_op_id=request.op_id)
     return result
 
 
@@ -3518,6 +3706,11 @@ def _check_approver_group(
     the risk level of the change; there are no per-system, per-connector
     or time-limited exceptions.
 
+    * A change of rights: only another admin
+      (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
+      No self-approval rule below can allow it.
+    * A change of a login's or group's rights:
+      :func:`~meho_backplane.operations.grant_approval.check_grant_approval`.
     * Own change: :func:`_check_self_approval`.
     * Another person's ``dangerous`` or ``destructive`` change: only a
       MEHO-SA-Operator or a tenant admin may approve it, as the decision
@@ -3530,6 +3723,8 @@ def _check_approver_group(
     A request without a stamped level is treated as lower-risk, the same
     as the break-glass check and :func:`_check_destructive_preview_binding`.
     """
+    check_rights_change_approval(operator, request)
+    check_grant_approval(operator, request)
     self_rule = _check_self_approval(operator, request, log_break_glass=log_break_glass)
     if self_rule is not None:
         return self_rule
@@ -3567,6 +3762,13 @@ def _check_approver_role_floor(operator: Operator, request: ApprovalRequest) -> 
         )
 
 
+def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:
+    """Compare the policy evaluator with today's answer, when ``POLICY_ENGINE_SHADOW`` is on."""
+    from meho_backplane.policy.shadow import shadow_approval
+
+    shadow_approval(operator, request, today=today)
+
+
 async def _load_pending_for_approval(
     session: AsyncSession,
     request_id: uuid.UUID,
@@ -3600,8 +3802,13 @@ async def _load_pending_for_approval(
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
     if _deadline_has_passed(request, _now(), _resolve_default_ttl()):
         raise ApprovalRequestExpiredError(request_id)
-    rule = _check_approver_group(operator, request)
-    _check_approver_role_floor(operator, request)
+    try:
+        rule = _check_approver_group(operator, request)
+        _check_approver_role_floor(operator, request)
+    except (UnauthorizedApprovalError, SelfApprovalForbiddenError):
+        _shadow_approval(operator, request, today=False)
+        raise
+    _shadow_approval(operator, request, today=True)
     if params is not None and not params_hash_matches(params, request.params_hash):
         raise ParamsMismatchError(request_id)
     _check_destructive_preview_binding(request)
@@ -3674,6 +3881,7 @@ async def list_pending(
     limit: int = 50,
     offset: int = 0,
     order: ApprovalListOrder = "newest",
+    after: ApprovalRequest | None = None,
 ) -> list[ApprovalRequest]:
     """Page through approval requests in *tenant_id*.
 
@@ -3689,17 +3897,45 @@ async def list_pending(
     newest request first; ``"oldest"`` lists the oldest first, which is the
     order a chain of requests under one change ticket was sent in. The
     oldest-first order breaks ties on ``id`` so it matches the step numbers
-    :func:`pending_chain_positions` gives.
+    :func:`pending_chain_positions` gives. Both orders break ties on ``id``,
+    so pages read one after another (``offset``) never skip or repeat a row.
+
+    ``after`` starts the list right after that row in *order*, instead of
+    counting rows with ``offset``. A reader that walks the whole list in
+    batches passes the last row of the batch before. Then a request that is
+    decided between two batches does not move the rest of the list, so no
+    row is skipped.
     """
     stmt = select(ApprovalRequest).where(ApprovalRequest.tenant_id == tenant_id)
     if status is not None:
         stmt = stmt.where(ApprovalRequest.status == status)
     if work_ref is not None:
         stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+    if after is not None:
+        if order == "oldest":
+            stmt = stmt.where(
+                or_(
+                    ApprovalRequest.created_at > after.created_at,
+                    and_(
+                        ApprovalRequest.created_at == after.created_at,
+                        ApprovalRequest.id > after.id,
+                    ),
+                )
+            )
+        else:
+            stmt = stmt.where(
+                or_(
+                    ApprovalRequest.created_at < after.created_at,
+                    and_(
+                        ApprovalRequest.created_at == after.created_at,
+                        ApprovalRequest.id < after.id,
+                    ),
+                )
+            )
     if order == "oldest":
         stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
     else:
-        stmt = stmt.order_by(ApprovalRequest.created_at.desc())
+        stmt = stmt.order_by(ApprovalRequest.created_at.desc(), ApprovalRequest.id.desc())
     stmt = stmt.limit(limit).offset(offset)
     result = await session.execute(stmt)
     return list(result.scalars().all())
@@ -3890,6 +4126,11 @@ async def record_approval_step_event(
     No Broadcast event is published (#3758). The stored approval row is
     what waiters, the approvals bell and the console read.
 
+    It also starts the push messages to the browsers of the people who may
+    approve the request (:func:`~meho_backplane.web_push.send.notify_approval_step`).
+    Every caller runs this after its commit, so a message never goes out
+    for a request whose audit row did not commit.
+
     An ``approved`` event also carries ``reviewed_by`` (who approved),
     ``self_approved`` and, when :func:`approve_request` set it,
     ``approval_rule`` (#3328) -- the same fields as the
@@ -3900,7 +4141,12 @@ async def record_approval_step_event(
     (#3596): "this is step k of N waiting under this change ticket".
     """
     from meho_backplane.operations.addon_step_events import AddonStepEventService
+    from meho_backplane.web_push.send import notify_approval_step
 
+    # Push messages to the people who may approve (web_push/send.py). It
+    # only starts a background task, so it never slows the caller, and
+    # never raises.
+    notify_approval_step(tenant_id=tenant_id, request=request, decision=decision)
     payload: dict[str, object] = {
         "approval_request_id": str(request.id),
         "decision": decision,

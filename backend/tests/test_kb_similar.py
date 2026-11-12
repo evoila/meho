@@ -7,6 +7,9 @@ The search itself (``retrieve``) needs PostgreSQL, so it is mocked here
 with hits that carry a cosine score. Everything around it runs for real
 on the SQLite test database: the stored entries, their revision ids, the
 existing-slug test, and the MCP and REST surfaces.
+
+The check runs only with the ``KB_SIMILAR_CHECK`` setting on, so these
+tests turn it on. One test turns it off and shows that nothing changes.
 """
 
 from __future__ import annotations
@@ -66,6 +69,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[N
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     monkeypatch.setenv("KB_INGEST_ROOT", str(tmp_path))
     monkeypatch.delenv("KB_SIMILAR_MIN_SCORE", raising=False)
+    monkeypatch.setenv("KB_SIMILAR_CHECK", "true")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -129,6 +133,36 @@ async def _seed(
 def test_default_min_score_is_pinned() -> None:
     """The threshold is a setting; its default is 0.85."""
     assert get_settings().kb_similar_min_score == 0.85
+
+
+def test_check_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KB_SIMILAR_CHECK")
+    get_settings.cache_clear()
+    assert get_settings().kb_similar_check is False
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_with_the_check_off_a_create_is_written_as_before(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``KB_SIMILAR_CHECK`` off, MEHO does not search and writes the new entry."""
+    monkeypatch.delenv("KB_SIMILAR_CHECK")
+    get_settings.cache_clear()
+    client, op = client_with_operator
+    await _seed(op.tenant_id, "snapshot-revert")
+    mock, _ = _fake_retrieve(op.tenant_id, close={"snapshot-revert": 0.99})
+    with patch("meho_backplane.kb.similar.retrieve", mock):
+        dry = _add(
+            client, {"slug": "snapshot-revert-2", "body": "Power the VM off.", "dry_run": True}
+        )
+        created = _add(client, {"slug": "snapshot-revert-2", "body": "Power the VM off."})
+    mock.assert_not_awaited()
+    assert dry["similar"] == []
+    assert dry["would_write"] is True
+    assert created["slug"] == "snapshot-revert-2"
+    assert "written" not in created
+    assert await KbService().get_entry(op.tenant_id, "snapshot-revert-2") is not None
 
 
 def test_min_score_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:

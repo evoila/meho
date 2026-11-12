@@ -892,15 +892,15 @@ def test_alert_ghost_outline_badges_have_readable_contrast() -> None:
 
 @pytest.mark.parametrize(
     "partial",
-    ["_retire_results.html", "_usage_results.html"],
+    ["_usage_results.html"],
 )
 def test_retrieval_honesty_gap_badges_sit_inside_alert(partial: str) -> None:
     """The honesty-gap ``mcp:*`` badges sit inside ``.alert`` so #2460's rule targets them.
 
-    Both retrieval partials render the counted-surface labels as
+    The retrieval usage partial renders the counted-surface labels as
     ``badge badge-ghost badge-outline`` spans inside the ``.alert.alert-info``
     honesty-gap banner. The contrast fix lives in styles.css and is scoped to
-    ``.alert``; guard that these partials keep the combo inside the alert so
+    ``.alert``; guard that the partial keeps the combo inside the alert so
     the rule keeps matching (a move onto a plain card would silently escape it).
     """
     source = (templates_dir() / "retrieval" / partial).read_text(encoding="utf-8")

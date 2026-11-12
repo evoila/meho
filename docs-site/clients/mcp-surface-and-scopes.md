@@ -86,13 +86,20 @@ Example URL: `https://<meho-host>/mcp?profile=investigate`.
   still runs under the person's role, and changes still wait for
   approval when the rules say so.
 
+A small model also gains from shorter tool texts. Add `texts=short` to
+the URL, for example `https://<meho-host>/mcp?texts=short`, or together
+with a profile: `https://<meho-host>/mcp?profile=investigate&texts=short`.
+The biggest tools then show a short description. They accept the same
+inputs as before. Other sessions keep the full texts. A value other than
+`short` is refused with HTTP 400.
+
 ## The operator planes (behind `mcp:admin`)
 
 The governance and lifecycle tools — connector lifecycle and ingest,
 agents / principals / grants, scheduler, sensors, broadcast overrides,
 runbook **template authoring**, topology **mutations**, target
-registration, doc-collection create/delete, memory promotion, approvals
-**read**, and audit query — form a second tier of **54 operator-plane
+registration and change, doc-collection create/delete, memory promotion, approvals
+**read**, and audit query — form a second tier of **55 operator-plane
 tools**. They are absent from a default session's tool list and refused
 at call time, and they appear **only** for a session that explicitly
 requested the `mcp:admin` OAuth scope.

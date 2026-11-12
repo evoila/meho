@@ -13,6 +13,10 @@ its input schema as compact JSON, taken from
 :meth:`~meho_backplane.mcp.registry.ToolDefinition.to_wire` (what
 ``tools/list`` sends). Output schemas are not counted.
 
+With the ``MCP_SHORT_TOOL_TEXTS`` switch on, the biggest tools send a
+short text (:mod:`meho_backplane.mcp.short_texts`), and the whole list
+must stay under the lower limit :data:`MAX_CHARS_TOTAL_SHORT`.
+
 If a test here fails, shorten the text: keep what the tool is for, when to
 call it, its arguments and the rules that stop wrong calls. Move the rest
 to the error text the tool returns, or to ``docs/codebase/mcp.md``. Raise
@@ -27,6 +31,7 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, all_tools_for
+from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -41,6 +46,14 @@ MAX_CHARS_PER_TOOL = 6_000
 #: tokens at 4 characters per token). The list used 66,092 when this limit
 #: was set, down from 96,804.
 MAX_CHARS_TOTAL = 70_000
+
+#: Most characters the whole default tool list may use with the
+#: ``MCP_SHORT_TOOL_TEXTS`` switch on. The list used 46,067 when this limit
+#: was set, against 67,865 with the switch off (32% less).
+MAX_CHARS_TOTAL_SHORT = 47_000
+
+#: With the switch on, the list must be at least this much smaller.
+MIN_SHORT_SAVING = 0.30
 
 
 def tool_text_size(definition: ToolDefinition) -> int:
@@ -93,6 +106,24 @@ def test_whole_default_list_stays_under_the_limit() -> None:
         f"default tool list uses {total} characters, limit {MAX_CHARS_TOTAL}. "
         "Shorten the largest tools; see this file's docstring."
     )
+
+
+def test_short_texts_make_the_default_list_at_least_30_percent_smaller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCP_SHORT_TOOL_TEXTS", "false")
+    get_settings.cache_clear()
+    full = sum(tool_text_size(d) for d in _default_session_tools())
+    monkeypatch.setenv("MCP_SHORT_TOOL_TEXTS", "true")
+    get_settings.cache_clear()
+    short_tools = _default_session_tools()
+    short = sum(tool_text_size(d) for d in short_tools)
+    assert short <= MAX_CHARS_TOTAL_SHORT, (
+        f"default tool list with short texts uses {short} characters, "
+        f"limit {MAX_CHARS_TOTAL_SHORT}. Shorten the largest tools."
+    )
+    assert short <= full * (1 - MIN_SHORT_SAVING), (full, short)
+    assert not tools_over_limit(short_tools, MAX_CHARS_PER_TOOL)
 
 
 @pytest.mark.parametrize("extra", [1, 500])

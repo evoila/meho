@@ -132,6 +132,7 @@ from meho_backplane.db.models import (
     GraphEdgeKind,
     GraphNode,
 )
+from meho_backplane.operations.deny_reasons import READ_SCOPE_DENIED
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.topology.annotate import (
     AutoEdgeDeletionError,
@@ -162,6 +163,7 @@ from meho_backplane.topology.query import (
     query_timeline,
 )
 from meho_backplane.topology.refresh import RefreshResult, refresh_target_topology
+from meho_backplane.topology.refresh_read_scope import RefreshReadScopeDeniedError
 from meho_backplane.topology.resolvers import NodeNotFoundError
 from meho_backplane.topology.schemas import (
     TopologyDiffResult,
@@ -676,6 +678,10 @@ async def refresh(
     that do refresh meaningfully (#2093) — distinguishing the
     coverage-gap no-op from a populator run that reconciled zero
     changes (both fields null).
+
+    A service login with a read scope refreshes only targets inside that
+    scope. For any other target it gets 403 ``read_scope_denied``, and
+    MEHO does not call the connector.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_REFRESH,
@@ -688,6 +694,11 @@ async def refresh(
         raise _no_matching_connector_http(target.product, exc) from exc
     except AmbiguousConnectorResolution as exc:
         raise _ambiguous_connector_http(target.product, exc) from exc
+    except RefreshReadScopeDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": READ_SCOPE_DENIED, "message": exc.reason},
+        ) from exc
     _log.info(
         "topology_refresh_route_completed",
         target_id=str(result.target_id),

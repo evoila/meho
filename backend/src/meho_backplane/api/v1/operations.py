@@ -53,11 +53,13 @@ from meho_backplane.api.v1._freetext_filter import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operation_picks.recorder import (
     recorded_background_call,
     recorded_call,
     recorded_search,
 )
+from meho_backplane.operations._secret_values import REVEAL_NOT_IN_BACKGROUND, asks_reveal
 from meho_backplane.operations.caller_gone import watch_caller
 from meho_backplane.operations.governed_subops import GovernedSubopsResponse
 from meho_backplane.operations.meta_tools import (
@@ -378,12 +380,25 @@ async def post_call(
     Caller gone (#3696): on the synchronous path a client that disconnects
     does not stop the operation. It runs to the end, and its audit row
     carries ``payload.caller_gone_at``. Use ``async: true`` for long work.
+
+    Revealed values (#6273): when the answer carries values a person asked
+    to see (``reveal_secret: true``), it says ``Cache-Control: no-store``
+    and ``Pragma: no-cache`` (:mod:`meho_backplane.no_store`). Other
+    answers keep their usual headers. A reveal call cannot run in the
+    background: ``reveal_secret: true`` with ``async: true`` is refused as
+    bad input (``error_code="reveal_secret_with_async"``). It runs at once,
+    or through an approval.
     """
     # Drop the transport-only ``async_`` control before it reaches the
     # dispatch arguments (``call_operation`` reads connector_id / op_id /
     # target / params / work_ref; ``async`` is a MEHO submit control, not
     # an op param).
     arguments = body.model_dump(exclude={"async_"})
+    if body.async_ and asks_reveal(body.params):
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"message": REVEAL_NOT_IN_BACKGROUND, "error_code": "reveal_secret_with_async"},
+        )
     if body.async_:
 
         async def _submit(wrap: DispatchWrapper | None) -> dict[str, Any]:
@@ -395,13 +410,19 @@ async def post_call(
         )
         response.status_code = http_status.HTTP_202_ACCEPTED
         return answer
-    async with watch_caller(request.receive):
-        return await recorded_call(
-            operator,
-            arguments,
-            transport="rest",
-            run=lambda: call_operation(operator, arguments),
-        )
+    # #6273: a person's ``reveal_secret: true`` answer carries the values,
+    # so no browser or proxy may keep it.
+    with answer_scope() as mark:
+        async with watch_caller(request.receive):
+            answer = await recorded_call(
+                operator,
+                arguments,
+                transport="rest",
+                run=lambda: call_operation(operator, arguments),
+            )
+    if mark.holds_secret:
+        set_no_store(response)
+    return answer
 
 
 class ResultQueryBody(BaseModel):

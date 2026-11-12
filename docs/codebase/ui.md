@@ -55,6 +55,7 @@ own page:
 | `/ui/runners` | [`satellite-runner.md`](satellite-runner.md) |
 | `/ui/automation`, `/ui/pairing` | [`addon-pairing.md`](addon-pairing.md) |
 | `/ui/connectors/overrides` | [`spec-ingestion.md`](spec-ingestion.md) |
+| `/ui/policy/classify` | [`policy-classification.md`](policy-classification.md) |
 | `/ui/keycloak` | [`ui-keycloak-console.md`](ui-keycloak-console.md) |
 | `/ui/agents/{name}/run` | [`ui-agent-run-console.md`](ui-agent-run-console.md) |
 | `/ui/sensors` | the `meho_backplane.ui.routes` row of "Key types" below, and [`sensor.md`](sensor.md) |
@@ -107,7 +108,7 @@ Sanctioned exceptions:
 | `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware; G0.25 (#1694) wires the rotation primitive into the request path (`refresh` + `errors` modules). |
 | `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `load_session_for_update` (side-effect-free `SELECT ... FOR UPDATE` variant for the refresh path, G0.25 #1694), `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. `rotate_refresh` optionally extends `expires_at` by a refreshed token's lifetime (`new_lifetime=`), monotonic and clamped to `created_at + ui_session_absolute_lifetime_seconds`, and accepts a caller-supplied clock (`now=`, default wall clock) so a caller that pre-checks `expires_at` (the inline refresh path) shares one reading with the internal replay gate -- two independent clock reads would leave a microsecond gap where the gate's "expired" branch self-deadlocks on the caller's own row lock. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. `list_active_sessions(operator_sub)` returns the person's live sessions in every tenant (own `operator_sub`, `revoked_at IS NULL`, `expires_at > now()`, ordered `last_seen_at DESC`) as token-free `ActiveSessionRow` projections (the Fernet ciphertext columns are never read for a metadata listing) and `revoke_other_sessions(operator_sub, keep_session_id)` soft-deletes every active session of the person, in every tenant, except the current one -- both back the Account surface (G10.11-T1 #1892) and take `operator_sub` from the validated session context, never a form field. |
 | `meho_backplane.ui.auth.flow` | OAuth 2.1 + PKCE client primitives layered on authlib's `AsyncOAuth2Client`. `build_authorization_request` mints the Keycloak redirect URL (S256 PKCE + RFC 8707 `resource` parameter; with `fresh_sign_in=True` also `prompt=login` and `max_age=0`, so Keycloak asks for the credentials again also in a remembered browser), mints a second per-flow `browser_binding` secret (login-CSRF defence, F10 #272), and registers the verifier + binding + `return_to` in a server-side `PKCEVerifierStore`; it returns `(url, state, browser_binding)`. `exchange_code_for_tokens` pops the pending flow, **rejects it (`browser_binding_mismatch`) when the callback's replayed binding is missing or does not match — before the token exchange** (constant-time `hmac.compare_digest`), then exchanges code+verifier at the token endpoint. `resolve_oidc_endpoints` caches the discovery doc on the same TTL the JWKS cache uses. |
-| `meho_backplane.ui.auth.routes` | FastAPI `APIRouter` for `/ui/auth/{login,callback,logout}`. `build_router()` returns the router for T5 to mount. Login sets the short-lived `browser_binding` cookie (`login_binding_cookie_name(state)` = `meho_ob_<sha256(state)[:32]>`; `HttpOnly; Secure; SameSite=Lax; Path=/ui/auth; Max-Age=<flow TTL>`) — `Lax`, not `Strict`, so it survives the cross-site top-level callback navigation from a separately hosted Keycloak; the per-`state` name lets concurrent logins from one browser bind independently. Callback reads that cookie, passes it to `exchange_code_for_tokens` for the binding check, verifies the access token through the chassis JWT chain (`verify_jwt_for_audience`) so the BFF inherits issuer / audience / sub / tenant_id / tenant_role checks, sets `meho_session` (`HttpOnly; Secure; SameSite=Strict; Path=/`), and clears the single-use binding cookie on success. Logout revokes the session, clears the cookie, and 302s to Keycloak's `end_session_endpoint` (best-effort -- a missing endpoint falls back to a local `/ui/auth/login` redirect). |
+| `meho_backplane.ui.auth.routes` | FastAPI `APIRouter` for `/ui/auth/{login,callback,logout}`. `build_router()` returns the router for T5 to mount. Login sets the short-lived `browser_binding` cookie (`login_binding_cookie_name(state)` = `meho_ob_<sha256(state)[:32]>`; `HttpOnly; Secure; SameSite=Lax; Path=/ui/auth; Max-Age=<flow TTL>`) — `Lax`, not `Strict`, so it survives the cross-site top-level callback navigation from a separately hosted Keycloak; the per-`state` name lets concurrent logins from one browser bind independently. Callback reads that cookie, passes it to `exchange_code_for_tokens` for the binding check, verifies the access token through the chassis JWT chain (`verify_jwt_for_audience`) so the BFF inherits issuer / audience / sub / tenant_id / tenant_role checks, sets `__Host-meho_session` (`HttpOnly; Secure; SameSite=Strict; Path=/`, no `Domain`), and clears the single-use binding cookie on success. Logout revokes the session, clears the cookie, and 302s to Keycloak's `end_session_endpoint` (best-effort -- a missing endpoint falls back to a local `/ui/auth/login` redirect). |
 | `meho_backplane.ui.auth.middleware` | Pure-ASGI `UISessionMiddleware` for `/ui/*`. Loads operator identity from the session cookie on every request; 302s to login on missing/expired session (an htmx request gets `204` + `HX-Redirect` instead, with `return_to` taken from `HX-Current-URL`, the page and not the fragment; when the browser still sent a session cookie the login URL also carries `reason=session_ended`, #5518). Skips `/ui/static/*` (chassis assets) and `/ui/auth/*` (the BFF surfaces themselves). Per-request `UISessionContext` (frozen dataclass: `session_id`, `operator_sub`, `tenant_id`, plus `tenant_slug` + `tenant_name` populated from a same-transaction `tenant` PK lookup added by G0.15-T9 #1217) lands on `request.state.ui_session`; route handlers read it via `Depends(require_ui_session)`. Two role gates sit on top and share one load, verify and refresh chain (`_require_ui_role`): `require_ui_operator` (the `operator` floor; `read_only` gets `403 operator_required`) and `require_ui_admin` (the `tenant_admin` floor). Both load + verify the stored access token through `meho_backplane.ui.auth.refresh`, so expired tokens silently refresh instead of 401ing (G0.25 #1694). `require_ui_read_operator` (`ui/routes/operator_read.py`) runs `require_ui_operator` and then returns a reader `Operator`. Most console pages, reads included, need the `operator` role, like their REST twins; a `read_only` session can open only the dashboard, account, tenant, memory, automation and approvals pages. After every successful row load the middleware also runs the drift-gated read-path revalidation (`meho_backplane.ui.auth.revalidation.revalidate_read_session`): past `ui_session_read_revalidation_seconds` (default 300; `0` = every request) without a validation, the stored token is re-presented to the JWKS-cached JWT chain -- an in-memory check on a cache hit, moving on to one reactive refresh only once the token is past `exp` -- and a terminal failure collapses to the same redirect-to-login as a missing session. This bounds IdP revocation / role-demotion lag on read renders to ~(access-token TTL + threshold) instead of the 10 h absolute session lifetime; the anchor is a process-local last-validated map (not `last_seen_at`, which active sessions bump every request, so a gap-based gate would never fire for exactly the sessions that matter). |
 | `meho_backplane.ui.auth.refresh` | Inline token-refresh lifecycle (G0.25 #1694). `load_fresh_session` (proactive: refresh when the row is within 60 s of `expires_at`), `verify_access_token_with_refresh` (reactive: refresh once on the JWT chain's `token_expired`, re-verify), both funnelling into `refresh_session_tokens` -- the `SELECT ... FOR UPDATE`-serialised chokepoint that POSTs the RFC 6749 § 6 refresh grant (single attempt, 5 s timeout) and rotates the row via `rotate_refresh` (RFC 9700 § 4.14). Concurrent refreshes: first wins; the loser observes the rotated pair under the lock and skips its network call. Failures log `ui_auth_token_refresh_failed` (reason: `invalid_grant` / `network_error` / `timeout` / `malformed_response`) and raise `401 session_expired`; successes log `ui_auth_token_refresh_succeeded` (session_id, old/new expires_at, time_cost_ms). No token material in logs. The refresh performs zero `Set-Cookie` operations -- `meho_session` and `meho_csrf` stay byte-identical, so in-flight pages and their CSRF tokens survive a rotation (no #1706-class cookie desync). The seam serves **token-presenting** dependencies: `require_ui_admin` and `require_ui_operator` (both through `_require_ui_role`), the session middleware's drift-gated read-path revalidation (`meho_backplane.ui.auth.revalidation`), plus (G10.x #121) every per-route operator lift that re-verifies the stored access token to surface `tenant_role` / `sub` — `agents.operator`, `connectors.operator` (and the topology write gates that reuse its `lift_operator_from_session`), `memory.operator`, and the `kb` / `runbooks` / `operations` / `audit` / `keycloak` / `vault` route resolvers. Each calls `load_fresh_session` then `verify_access_token_with_refresh` (mirroring the `approvals` / `corpus` / `retrieval` precedent) rather than bare `load_session` + `verify_jwt_for_audience`, so no token-consuming `/ui/*` route 401s on an expired-but-refreshable token. The soft-fail role probes (`runbooks` / `audit` `_resolve_role`, the `agents` / `connectors` `resolve_role_probe`) keep their `try/except` → "no role" floor: a terminal `session_expired` from an unavailable refresh is absorbed there, never a 5xx. The dashboard tray is a recent-operations card that `recent-ops-refresh.js` reloads every 5 seconds. The broadcast stream `/ui/broadcast/stream` needs the `operator` role (`require_ui_operator`). |
 | `meho_backplane.ui.auth.errors` | App-level `HTTPException` handler registered in `main.py` for the whole app (G0.25 #1694). Intercepts three recoverable shapes, for htmx requests and HTML navigations (`Accept: text/html`): (1) `401 session_expired` on `/ui/*` (G0.25 #1694) -> `302 /ui/auth/login?return_to=<path>&reason=session_ended` + `meho_session` cookie clear; an htmx request (`HX-Request: true`) gets the middleware's htmx answer instead, `204` + `HX-Redirect` to the same login URL with `return_to` from `HX-Current-URL` (#5518); (2) `400 authorization_state_expired` on `/ui/auth/callback` (G0.29 #2089, Leg 1) -> `303 /ui/auth/login` (no cookie touched -- pre-session; no `return_to` -- it died with the expired verifier); (3) `409 tenant_removed` on `/ui/*` (the token does not allow the session's tenant any more) -> `303 /ui/tenant?notice=removed`, or `204` + `HX-Redirect` for htmx. Non-HTML callers on either shape keep the structured JSON body (the `session_expired` case also clears the dead cookie). Every other HTTPException -- including the callback's genuine IdP `authorization_failed` and its token-endpoint `502` -- delegates byte-for-byte to FastAPI's stock `http_exception_handler`, so `/api/*` 401 codes and the non-recoverable callback errors are untouched. |
@@ -246,7 +247,21 @@ The BFF login flow is OAuth 2.1 Authorization Code + PKCE against
 the `meho-web` confidential Keycloak client (see
 [`docs/cross-repo/keycloak-web-client.md`](../cross-repo/keycloak-web-client.md)).
 Tokens stay server-side; the browser holds only the opaque
-`meho_session` cookie.
+`__Host-meho_session` cookie.
+
+The session cookie (`meho_backplane.ui.auth.session_cookie`):
+
+- The name has the `__Host-` prefix. A browser keeps such a cookie only
+  when it is set with `Secure`, with `Path=/` and with no `Domain`. So
+  only the MEHO host can set it, and no other host under the same parent
+  domain.
+- `read_session_cookie(scope)` is the one reader. The session
+  middleware, the CSRF middleware and logout all use it. A request that
+  carries the cookie more than once counts as a request with no session:
+  the middleware sends it to the login, the CSRF check answers `403
+  no_session`, and logout revokes no row.
+- A browser that sends only a cookie named `meho_session` has no
+  session and signs in once.
 
 Round-trip shape:
 
@@ -279,7 +294,7 @@ Round-trip shape:
    access token through the chassis JWT chain (`verify_jwt_for_audience`)
    so the BFF inherits issuer / audience / sub / tenant_id / tenant_role
    defences; on success it calls `create_session` to write the encrypted
-   row, sets the `meho_session` cookie, and clears the now-consumed
+   row, sets the `__Host-meho_session` cookie, and clears the now-consumed
    binding cookie.
 5. **302 to the original `return_to`.** Operator lands on the page
    they were originally bounced from.
@@ -307,7 +322,7 @@ Per-flow state custody:
 | `code_verifier` | Server-side `PKCEVerifierStore` keyed on `state` | One authorization round-trip (≤10 min) |
 | `state` (CSRF) | On the IdP's authorization URL + echoed in callback | Same one round-trip |
 | `browser_binding` (login-CSRF) | Server-side `PKCEVerifierStore` **and** a per-`state` browser cookie (`meho_ob_<hash>`, `HttpOnly` + `Secure` + `SameSite=Lax` + `Path=/ui/auth`) | Same one round-trip; cookie `Max-Age` = flow TTL; cleared on callback success |
-| `meho_session` cookie | Browser, `HttpOnly` + `Secure` + `SameSite=Strict` | Session lifetime (seeded at login from access-token expiry minus 60s margin; extended by the sliding window #869 and by every successful token refresh #1694, both capped at `created_at + ui_session_absolute_lifetime_seconds`) |
+| `__Host-meho_session` cookie | Browser, `HttpOnly` + `Secure` + `SameSite=Strict` | Session lifetime (seeded at login from access-token expiry minus 60s margin; extended by the sliding window and by every successful token refresh, both capped at `created_at + ui_session_absolute_lifetime_seconds`) |
 | Access + refresh tokens | `web_session` row, Fernet-encrypted | Rotated in place on every silent refresh (#1694); the row -- and therefore the cookie value -- survives rotation unchanged |
 
 The `code_verifier` deliberately does NOT live in a cookie -- a
@@ -365,7 +380,7 @@ maps to a `302 /ui/auth/login?return_to=<path>&reason=session_ended`
 login URL, `return_to` = the page from `HX-Current-URL`) for htmx
 requests (#5518). JSON callers keep the structured body -- never raw
 JSON at a browser. The refresh path performs zero `Set-Cookie`
-operations: `meho_session` (the row id) and `meho_csrf` (HMAC-keyed
+operations: `__Host-meho_session` (the row id) and `meho_csrf` (HMAC-keyed
 on that id) are byte-identical before and after a rotation, so
 already-rendered pages and their forms keep working -- the
 cookie-rotation desync class #1706 diagnosed cannot occur here.
@@ -377,7 +392,7 @@ ended. Please sign in again.") and a "Sign in" button to
 `/ui/auth/login?return_to=<same page>`. The button starts the normal
 login, which lands the person back on the page they were on. The
 reason is set by the refresh-failure handler above and by the session
-middleware when the browser still sent a `meho_session` cookie but the
+middleware when the browser still sent a `__Host-meho_session` cookie but the
 session is gone (1 hour without use, the 10-hour limit, revoked, or a
 failed read-path revalidation). A first visit has no cookie and goes
 straight to the login. Any other `reason` value is ignored.
@@ -535,6 +550,22 @@ conditionally on `session_tenant is not none` and falls through
 session still produces a readable chip (the `web_session.tenant_id`
 FK is intentionally soft; the chassis logs
 `ui_session_tenant_row_missing` and serves the page).
+
+That `name → slug → id` fall-through is a macro,
+[`_tenant_label.html`](../../backend/src/meho_backplane/ui/templates/_tenant_label.html),
+not a spelling each template repeats (#810). The dashboard header and
+the broadcast feed subtitle printed the bare `tenant_id` until then —
+a UUID says nothing about which tenant an operator is in, which is the
+one thing on screen that matters when someone holds several tenants
+and is about to run a write. Both now call the macro; the id stays in
+`title=` so a support thread can still quote it.
+
+The id also stays in the attributes that address the DOM —
+`data-meho-tenant` on `<body>`, the per-tenant SSE bridge URL, the
+`hx-*` targets. Those are read by the client JS and by routing, so
+"show the name" applies to text only. `tests/test_ui_tenant_chip.py`
+pins both halves: the name reaches the rendered text, and
+`data-meho-tenant` still carries the UUID.
 
 The processor also exposes `session_operator_sub` (the signed-in
 operator's Keycloak `sub`, or `None` outside a session). The sidebar
@@ -826,6 +857,163 @@ cache semantics, the processor injection + fail-safe, and the end-to-end
 pill state on a non-dashboard surface (`/ui/memory`) — including that
 both a hung **async** probe and a blocking **sync** probe render
 "starting" promptly rather than blocking the render.
+
+## Installable app
+
+A person can install the console as an app from the browser, on a phone
+or on a Mac or Windows laptop. The app opens on the approvals page in its
+own window. The pages stay server-built; there is no build step.
+
+The pieces, all plain static files under `ui/static/src/`:
+
+| File | What it does |
+|---|---|
+| `pwa/manifest.webmanifest` | The web app manifest: name, icons, start page `/ui/approvals`, scope `/ui/`, `display: standalone`, brand colours. Served as `application/manifest+json`. |
+| `brand/icon-192.png`, `brand/icon-512.png`, `brand/icon-maskable-512.png`, `brand/apple-touch-icon.png` | App icons, drawn from `brand/favicon.svg`. The maskable icon keeps the mark inside the safe area Android may crop to; the 180 px touch icon is for iPhone and iPad. |
+| `app/service-worker.js` | The service worker (a script the browser runs in the background). |
+| `app/pwa-register.js` | Registers the worker with scope `/ui/`. |
+| `pwa/offline.html` | Shown when MEHO cannot be reached: "Connect to the VPN and try again." |
+
+`_head_assets.html` links the manifest and the touch icon and loads
+`pwa-register.js`, so every console page and the wall page carry them.
+The account page has a short "Install MEHO as an app" card with the steps
+for each browser.
+
+Rules of the service worker:
+
+- It caches **only** the app shell: the fixed `SHELL_URLS` list (icons,
+  CSS, fonts, the theme script, the manifest, the offline page). That list
+  is the whole allow-list. It never writes a console page (approvals,
+  broadcast or any other), an `/api` answer, or a URL with a query to the
+  cache.
+- A page always comes from MEHO. When MEHO cannot be reached, the worker
+  answers with the offline page, so the app never shows an old approval
+  list.
+- Shell files come from MEHO first (so a release shows at once); the
+  cached copy is used only when MEHO cannot be reached.
+- Every other request is left to the browser.
+
+Why the worker file sits under `/ui/static/`: that path is the one the
+session check lets through, and the browser fetches the worker without a
+session. A worker may only control pages under its own folder, so the
+static mount (`static_files.py`) sends `Service-Worker-Allowed: /ui/` with
+this one file.
+
+Change a file in `SHELL_URLS`? Nothing to do: shell files are loaded from
+MEHO first. Change the list itself or the caching rules? Raise the
+version in `CACHE_NAME`; the next activate deletes the old cache.
+
+Tests: `tests/test_ui_pwa.py` checks the served types, the manifest and
+icons, the offline page, and runs the worker in `node` against fake
+browser objects to prove approvals, broadcast and `/api` are never
+cached (skipped where `node` is missing).
+
+Installing needs HTTPS (or `localhost`). Opening the app needs the same
+network access as the console, for example the VPN.
+
+## Approval notifications
+
+A person can switch on "Notify me about approvals in this browser" on the
+account page. MEHO then stores that browser's push subscription, and sends
+a message to it when a request waits for the person's approval. How the
+messages are sent: [approvals.md, "Notifications"](approvals.md#notifications).
+
+**Off by default.** The admin turns the feature on for the whole site with
+the setting `WEB_PUSH_ENABLED` (chart value `webPush.enabled`). While it is
+off:
+
+- the account page shows no switch and loads no push script;
+- every route under `/ui/account/push/` answers 404;
+- the push key is not read.
+
+The same holds while the setting is on but the push key is missing or not
+valid. MEHO then logs `web_push_key_missing` or `web_push_key_unusable`
+(never the key).
+
+**The push key (VAPID).** A P-256 key pair that proves to the push services
+that a message comes from this MEHO. The install makes the private key
+once, in the Secret `<release>-core-web-push` (key `vapid_private_key`), in
+the same way as the other server keys
+([core-secrets.md](core-secrets.md)), and keeps it on every upgrade. The
+chart passes it as `WEB_PUSH_VAPID_PRIVATE_KEY`. Without a built-in core
+part, put your own key in a Secret and set `webPush.secretName`; the format
+is the base64url form of the raw 32-byte private value. Make one with:
+
+```bash
+cd backend && uv run python -c "from meho_backplane.web_push.keys import new_private_key; print(new_private_key())"
+```
+
+The private key is never logged, never in an answer, and not in the repr of
+the settings. The public key is public by design: each browser needs it to
+subscribe, so the account page puts it in `data-vapid-public-key`.
+
+**What happens when a person switches it on.** `app/push-subscribe.js`
+asks the browser for permission, subscribes with the public key, and posts
+the subscription (the push endpoint and its two keys `p256dh` and `auth`)
+to `POST /ui/account/push/subscribe`. MEHO checks it
+(`web_push/endpoints.py`):
+
+- The endpoint is `https://` on port 443, without a user name, on a push
+  service of a browser maker: `fcm.googleapis.com` (Google),
+  `updates.push.services.mozilla.com` (Mozilla), a host under
+  `.push.apple.com` (Apple) or under `.notify.windows.com` (Microsoft, for
+  Edge on Windows). Anything else gets 422 with one sentence that does not
+  quote the endpoint.
+- `p256dh` is a P-256 public key (65 bytes) and `auth` is 16 bytes, both
+  base64url.
+
+MEHO stores the row in `push_subscription` (migration `0151`) for the
+signed-in person and the current tenant, with the time, and with the
+person's login facts there (migration `0161`: `tenant_role`, `approver`,
+`self_approver`, `platform_admin` and `facts_read_at`, read from their
+login). The person and the
+tenant come from the session, never from the form. The endpoint names one
+browser, so it is unique: switching on again replaces the row, and when
+another person switches on the same browser, the browser moves to them. A
+person keeps at most ten browsers; the oldest go first.
+
+The save is one `INSERT ... ON CONFLICT (endpoint) DO UPDATE`, so two saves
+of the same browser at the same time both succeed. When the database
+refuses a write, the route answers 503 with one plain sentence. The store
+raises `PushStoreError` without the database error attached, because that
+error quotes the endpoint and the keys.
+
+**What the switch shows.** The switch shows "on" only when MEHO has this
+browser saved for the signed-in person, not only when the browser holds a
+subscription. The script asks `POST /ui/account/push/status` (form field
+`endpoint`; answer `{"on": true|false}`) when the page opens and again each
+time the list below reloads. So the switch shows "off" after a "Remove" in
+the list, and for a person who signs in on a browser that another person
+switched on. When the answer is "on", MEHO also reads the login facts again
+from the person's login, for their rows of the current tenant. MEHO does the
+same at each console sign-in and tenant pick. So a changed login group
+counts from the next sign-in or account page open. When MEHO cannot read the
+login at that moment, it keeps the stored facts.
+
+Switching off drops the subscription in the browser and posts
+`POST /ui/account/push/unsubscribe`, which deletes the person's own row for
+that endpoint.
+
+**See and remove.** Below the switch, `GET /ui/account/push/subscriptions`
+lists the person's browsers (the push service and the time, never the
+endpoint or the keys). A `tenant_admin` also sees every subscription made
+in the current tenant. `POST /ui/account/push/remove` (form field
+`subscription_id`) deletes one row of the person, or, for a
+`tenant_admin`, any row of the current tenant. Every other id is 404.
+
+Every route is a console route: it needs the session and the CSRF token.
+Logs name the person, the tenant, the row id and the push service, never
+the endpoint or the keys.
+
+Code: `web_push/` (`keys.py`, `endpoints.py`, `models.py`, `store.py`,
+`recipients.py`, `encryption.py`, `send.py`), `ui/routes/account_push.py`,
+`templates/account/_push.html` and `_push_subscriptions.html`, and the
+`push` and `notificationclick` handlers in `app/service-worker.js`. Tests:
+`tests/test_ui_account_push.py`, `tests/test_web_push_checks.py`,
+`tests/test_web_push_send.py`, `tests/test_web_push_service_worker.py`.
+
+On iPhone and iPad, web push works only in the installed app (iOS 16.4 and
+newer), so the switch says to install MEHO first.
 
 ## Dependencies
 
@@ -1542,6 +1730,40 @@ pins the dropdown + drawer tenant scoping; the
 pins the history pane's per-tenant archive read + the wall layout + the
 sliding-session extension.
 
+### The broadcast page on a phone (#6000)
+
+The page works on a phone screen (about 390 px wide) and still looks the
+same on a laptop:
+
+* **Rows.** Below the `sm` width `broadcast/_event_row.html` uses a
+  6-column grid: time and person on line one, the operation (or the
+  announcement text) on line two, status and target on line three. The
+  class and payload cells and the column header show from `sm` up. Newest
+  events stay on top, as before.
+* **Filters.** Below `md` the four filters fold away behind a "Filters"
+  button (Alpine `filtersOpen` on the form), so the newest events sit at
+  the top of the screen. Without JavaScript the fields stay visible.
+* **Announcements.** An agent announcement has no audit row, so it has
+  no detail drawer. On a phone a tap on it (or on the small button in
+  its status cell, which carries `aria-expanded`) folds out a details
+  block under the row: the phase, the full text without cutting, the
+  targets and the claim metadata (`detailsOpen`, local to the row). From
+  `sm` up the columns show these, and the block stays hidden.
+* **Details.** A tap on an operation row opens the detail drawer as before. Below
+  `lg` the drawer sits under the feed, so `openDrawer` scrolls it into
+  view once it is swapped in. It swaps with `settle:0ms`: htmx keeps the
+  old element's classes until the settle step, and the empty placeholder
+  is `hidden` below `lg` (it shows from `lg` up only).
+* **Sidebar.** `base.html` starts the sidebar closed on every page load
+  below `lg`, so a phone shows the page and not the menu. Before, the
+  saved open/closed choice (`meho.sidebar`, default open) opened the menu
+  over the page on every load. From `lg` up the sidebar always shows
+  (`lg:drawer-open`), so nothing changes there. This holds for every
+  console page.
+
+`test_ui_broadcast_phone_layout.py` pins the markup and script; the look
+was checked in a real browser at 390 px and 1366 px wide.
+
 ### Known limits
 
 * **op_id filtering is client-side only** — it narrows the in-DOM
@@ -1633,6 +1855,9 @@ layer; the BFF mirrors this two ways. The drawer (`_drawer.html`)
 fail-soft); every write route additionally **hard-403s** a non-admin via
 `_require_topology_admin` (mirrors `connectors.operator.resolve_operator_or_403`,
 reusing the promoted `lift_operator_from_session` JWT-revalidation helper).
+After the role check the gate asks for a person (`ensure_ui_human`): a
+console session of a service or runner login gets 403
+`human_principal_required`, the same as on the REST graph writes.
 The same template serving both roles is the regression trap — the
 soft-hidden button is UX only; a forged POST still 403s.
 
@@ -2456,7 +2681,11 @@ Memory UI), Task [#879](https://github.com/evoila/meho/issues/879)
 
 The route resolves IDs to entries via a tenant-scoped + `source='memory'`
 filter so an operator can't smuggle a knowledge-base or audit-row UUID
-through the form. Per row, `MemoryRbacResolver.can_write` is re-checked
+through the form. Each row then passes `MemoryService.readable_entry`,
+the owner rule of `read_by_id` (expired rows pass, so a recently
+expired note can be extended). Another person's user-scoped note
+counts as `missing` and is never acted on, also for a `tenant_admin`.
+Per row, `MemoryRbacResolver.can_write` is re-checked
 before dispatch; the service's own `can_write` re-check still runs
 inside `forget` / `remember`. The route-side check exists so the
 result counts (`succeeded` / `denied` / `missing`) are honest in the
@@ -2591,9 +2820,12 @@ always an acceptable product (no dropdown / validator drift, no
 surprise 422 on a product the operator could pick).
 
 **RBAC posture.** All six routes in `forms_router.py` (create, edit and
-delete, modal and submit) depend on `resolve_operator_or_403`
-(the same rigorous tenant_admin write-gate T1's probe uses): a
-non-admin GET (modal) or POST/PATCH (submit) hits 403 server-side. The
+delete, modal and submit) depend on `resolve_human_admin_or_403`: the
+tenant_admin write-gate T1's probe uses (`resolve_operator_or_403`), then a
+person check (`ensure_ui_human`). A non-admin GET (modal) or POST/PATCH
+(submit) hits 403 server-side, and a console session of a service or
+runner login gets 403 `human_principal_required`, the same as on the REST
+target routes. The import routes in `import_router.py` use the same gate. The
 list / detail templates additionally hide the "Create target" / "Edit"
 buttons from non-admins (UX); the hide is not the security boundary.
 Because the in-process REST handler's own `Depends(require_role(...))`
@@ -2739,7 +2971,9 @@ preview and confirm is correctly PATCHed rather than re-CREATEd into a
 409.
 
 **RBAC + CSRF + isolation.** All three routes depend on
-`resolve_operator_or_403` (tenant_admin only; operators 403 server-side).
+`resolve_human_admin_or_403` (tenant_admin only; operators 403 server-side;
+a console session of a service or runner login gets 403
+`human_principal_required`).
 CSRF is enforced by the chassis `CSRFMiddleware` on the two `POST`
 routes. Cross-tenant isolation is two-layer: the existing-name lookup
 filters on `session_ctx.tenant_id`, and the in-process `create_target` /
@@ -3337,9 +3571,10 @@ It is the operator-console face of the in-process hybrid retriever
 route fronts: diagnosing "is retrieval returning what I expect?" previously
 meant a Python REPL inside the cluster or a `curl` against the REST endpoint.
 
-The page has four client-side tabs: **Diagnostics** (the default),
-**Usage Analytics**, **Eval Quality** and **Retire Checklist**. Each tab
-posts to its own HTMX fragment route.
+The page has two client-side tabs: **Diagnostics** (the default) and
+**Usage Analytics**. Each tab posts to its own HTMX fragment route.
+Retrieval quality is checked in CI (`scripts/ci/run_eval_gate.py`), not
+on this page.
 
 ### Routes
 
@@ -3358,15 +3593,6 @@ posts to its own HTMX fragment route.
 * `POST /ui/retrieval/usage` — runs `retrieval.usage.compute_usage` for the
   own tenant over a `since` window and swaps `retrieval/_usage_results.html`.
   A bad `since` renders an inline 400 card.
-* `POST /ui/retrieval/eval` — runs `retrieval.eval.eval_all` for the own
-  tenant and the caller's `sub` (no baseline) and swaps
-  `retrieval/_eval_results.html`.
-* `POST /ui/retrieval/retire-checklist` — runs
-  `retrieval.retire.compute_retire_checklist` with the caller's `sub` and
-  swaps `retrieval/_retire_results.html`. Read-only: there is no purge
-  button. A platform admin may pick another tenant with the
-  `tenant_filter` field; `authorize_tenant_scope` decides, and a refusal
-  renders an inline error card.
 
 ### Mirroring the docs-corpus console
 
@@ -3411,10 +3637,9 @@ ephemeral.
 `operator` role minimum (the whole surface sits behind `require_ui_operator`,
 **not** `require_ui_admin`, matching the OPERATOR floor the REST route carries;
 a `read_only` session gets `403 operator_required`).
-Diagnostics is **own-tenant only**: tenant identity is derived from the
+Both tabs are **own-tenant only**: tenant identity is derived from the
 reconstructed operator's `tenant_id` and the per-principal isolation predicate
-is bound from `operator.sub` (`principal_sub=`) — there is no `tenant_filter`
-(that is the sibling T3 concern). When Memory rows can be candidates (Source
+is bound from `operator.sub` (`principal_sub=`) — there is no `tenant_filter`. When Memory rows can be candidates (Source
 is `memory` or empty) the handler also passes the Memory eligibility built by
 `MemoryRbacResolver.eligibility()` (#3741), so the candidate SQL drops
 memories the operator may not see, and expired ones, before ranking — the
@@ -3429,8 +3654,8 @@ surface is read-only, so no confirm gates.
   future stub cannot shadow a real route.
 * Inside `build_retrieval_router`, the literal `POST /ui/retrieval/diagnostics`
   is registered ahead of any `{param}` route (a NOTE comment pins the invariant
-  mirroring `corpus/routes.py`). The Usage, Eval and Retire tabs post to their
-  own literal routes (`/usage`, `/eval`, `/retire-checklist`). No `{param}`
+  mirroring `corpus/routes.py`). The Usage tab posts to its own literal
+  route (`/usage`). No `{param}`
   route exists today, but the ordering is pinned for when one lands.
 
 ### Tests
@@ -3444,14 +3669,13 @@ surface is read-only, so no confirm gates.
   absent from every bound payload), CSRF (403 on missing header, live-cookie
   reuse without rotation, 401 propagation on a dead session), and the route
   ordering (retrieval include before stubs; literal diagnostics before any param
-  route) + dashboard tile, plus the Usage, Eval and Retire tabs.
-  `tests/test_ui_operator_read_floor.py` checks the `read_only` 403, and
-  `tests/test_retrieval_eval_principal.py` checks that the eval and retire
-  runs pass the caller's `sub`.
+  route) + dashboard tile, plus the Usage tab and a check that only the
+  Diagnostics and Usage tabs render.
+  `tests/test_ui_operator_read_floor.py` checks the `read_only` 403.
 
 ### Honesty-gap badge contrast (#2460)
 
-The T2 Usage + T3 Retire fragments render the counted `/mcp` search-surface
+The Usage fragment renders the counted `/mcp` search-surface
 labels (`mcp:search_knowledge` / `_memory` / `_operations`) as
 `badge badge-ghost badge-outline` spans **inside** the `.alert.alert-info`
 honesty-gap banner. In the DaisyUI 5 bundle `.badge-outline` and `.badge-ghost`

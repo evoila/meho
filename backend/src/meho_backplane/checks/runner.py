@@ -145,7 +145,8 @@ from meho_backplane.auth.runner_identity import (
 )
 from meho_backplane.checks.assertions import AssertionOutcome, AssertionSpec
 from meho_backplane.checks.evaluate import evaluate_assertion
-from meho_backplane.checks.investigate import investigate_on_transition
+from meho_backplane.checks.events import publish_sensor_changed
+from meho_backplane.checks.investigate import investigate_on_transition, is_worsening
 from meho_backplane.checks.repository import (
     accelerate_sensor_next_fire,
     advance_sensor_next_fire,
@@ -161,6 +162,7 @@ from meho_backplane.db.models import Sensor
 from meho_backplane.metrics import note_loop_tick
 from meho_backplane.op_classes import is_safe_write
 from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
+from meho_backplane.operations._secret_values import split_reveal_secret
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.meta_tools import _resolve_target_or_error
 from meho_backplane.operations.reducer import FullResultCapture, full_result_capture_var
@@ -460,13 +462,17 @@ async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
             # the shortened result, so the rule runs over every row.
             capture = FullResultCapture()
             token = full_result_capture_var.set(capture)
+            # A Sensor always reads the default view, with secret values
+            # hidden. The create, edit and import checks refuse
+            # ``reveal_secret``; a stored row that has it runs without it.
+            params, _ = split_reveal_secret(dict(snap.params))
             try:
                 result = await dispatch(
                     operator=operator,
                     connector_id=snap.connector_id,
                     op_id=snap.op_id,
                     target=resolved_target,
-                    params=snap.params,
+                    params=params,
                 )
             finally:
                 full_result_capture_var.reset(token)
@@ -575,9 +581,15 @@ async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> 
     # disables the feature (no history rows -- the pre-#2756 latest-only
     # behaviour); the append rides ``record_sensor_result``'s own transaction
     # so it commits or rolls back atomically with the projection update.
-    record_history = get_settings().checks_evidence_retention_days > 0
+    settings = get_settings()
+    record_history = settings.checks_evidence_retention_days > 0
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
+        previous_state: str | None = None
+        if settings.checks_agent_events:
+            # #6180: remember the committed state before the persist moves it.
+            before = await session.get(Sensor, snap.id)
+            previous_state = before.last_state if before is not None else None
         recorded = await record_sensor_result(
             session,
             sensor_id=snap.id,
@@ -596,6 +608,23 @@ async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> 
                 session,
                 snap.id,
                 not_later_than=evaluated_at + timedelta(seconds=row.retry_backoff_seconds),
+            )
+        if settings.checks_agent_events and recorded.changed and row is not None:
+            # #6180: the event shares this transaction with ``last_state``, so
+            # both commit, or neither does.
+            await publish_sensor_changed(
+                session,
+                tenant_id=snap.tenant_id,
+                sensor_id=row.id,
+                sensor_name=row.name,
+                previous_state=previous_state or "unknown",
+                state=row.last_state,
+                severity=row.severity,
+                worsening=is_worsening(previous_state or "unknown", row.last_state),
+                target=row.target,
+                connector_id=row.connector_id,
+                op_id=row.op_id,
+                evaluated_at=evaluated_at,
             )
         await session.commit()
     await investigate_on_transition(

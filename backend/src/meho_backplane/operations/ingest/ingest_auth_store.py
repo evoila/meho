@@ -17,7 +17,9 @@ class again from it:
 * :func:`save_ingest_auth_profile` runs on every real ingest with a login
   type. It stores the scheme name and the secret field **names** only, the
   same closed selection the ingest request accepts. No secret values, no
-  free-form login config.
+  free-form login config. It returns the old login type of the row,
+  so the ingest compares against the saved choice and writes the audit
+  row in the same transaction.
 * :func:`restore_ingested_profiled_connectors` runs at start (after the
   shipped catalog is stamped) and again, scoped to the target's product,
   before every call to an ingested operation resolves its connector. So a
@@ -26,11 +28,14 @@ class again from it:
   connector for the same product and the target prefers the new one.
 
 Restoring goes through the same
-:meth:`~meho_backplane.operations.ingest.service.ReviewService.record_profile_stamp`
+:meth:`~meho_backplane.operations.ingest.service.ReviewService.record_login_setup`
 step the ingest uses, so it registers a class and never enables an
-operation, lowers a risk level, or removes an approval. A connector key
-that already has a class (a hand-written connector, a shipped profile, or
-an earlier restore) is left alone.
+operation, lowers a risk level, or removes an approval. Each row goes into
+the table of its own scope: a tenant's row applies only to that tenant's
+calls. A scope that already holds the same login type is left alone. A
+scope that holds another login type (the row was replaced on another
+replica) gets the saved one, with an audit row. A key served by a
+hand-written connector or a shipped login setup keeps that class.
 """
 
 from __future__ import annotations
@@ -41,18 +46,20 @@ from uuid import UUID
 
 import structlog
 from pydantic import ValidationError
-from sqlalchemy import ColumnElement, select
+from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.base import shim_kind
 from meho_backplane.connectors.profile import NAMED_AUTH_SCHEMES, ExecutionProfile
-from meho_backplane.connectors.registry import all_connectors_v2
+from meho_backplane.connectors.registry import get_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import IngestedAuthProfile
+from meho_backplane.operations.ingest._internals import LoginType
 from meho_backplane.operations.ingest._llm_grouping_internals import build_connector_id
 from meho_backplane.operations.ingest.connector_registration import synthesise_profiled_class
 from meho_backplane.operations.ingest.ingest_profile import build_ingest_execution_profile
-from meho_backplane.operations.ingest.service import ReviewService
+from meho_backplane.operations.ingest.login_setup import LOGIN_SETUP_APPLIED, current_login_setup
 
 __all__ = [
     "RESTORE_OPERATOR_SUB",
@@ -75,7 +82,7 @@ def _scope_filter(tenant_id: UUID | None) -> ColumnElement[bool]:
 
 
 async def save_ingest_auth_profile(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
     *,
     tenant_id: UUID | None,
     product: str,
@@ -83,34 +90,45 @@ async def save_ingest_auth_profile(
     impl_id: str,
     profile: ExecutionProfile,
     operator_sub: str,
-) -> None:
+) -> LoginType | None:
     """Insert or replace the saved login type for one connector scope.
 
     Keyed on ``(tenant_id, product, version, impl_id)``. A re-ingest with a
     login type replaces the scheme and field names, so the row always holds
-    the latest choice. Commits in its own session.
+    the latest choice. Returns the old login type of the row, or
+    ``None`` when the scope had no row. The row is locked until the
+    caller's transaction ends, so two ingests of one scope see each
+    other's change. Does not commit: the caller commits the row together
+    with its audit row.
     """
-    async with sessionmaker() as session:
-        stmt = select(IngestedAuthProfile).where(
+    stmt = (
+        select(IngestedAuthProfile)
+        .where(
             IngestedAuthProfile.product == product,
             IngestedAuthProfile.version == version,
             IngestedAuthProfile.impl_id == impl_id,
             _scope_filter(tenant_id),
         )
-        row = (await session.execute(stmt)).scalar_one_or_none()
-        if row is None:
-            row = IngestedAuthProfile(
-                tenant_id=tenant_id,
-                product=product,
-                version=version,
-                impl_id=impl_id,
-            )
-            session.add(row)
-        row.auth_scheme = profile.auth.scheme
-        row.secret_fields = list(profile.auth.secret_fields)
-        row.operator_sub = operator_sub
-        row.updated_at = datetime.now(UTC)
-        await session.commit()
+        .with_for_update()
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    previous: LoginType | None = None
+    if row is None:
+        row = IngestedAuthProfile(
+            tenant_id=tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+        )
+        session.add(row)
+    else:
+        previous = (row.auth_scheme, tuple(row.secret_fields))
+    row.auth_scheme = profile.auth.scheme
+    row.secret_fields = list(profile.auth.secret_fields)
+    row.operator_sub = operator_sub
+    row.updated_at = datetime.now(UTC)
+    await session.flush()
+    return previous
 
 
 def _restore_operator(tenant_id: UUID | None) -> Operator:
@@ -130,13 +148,35 @@ def _restore_operator(tenant_id: UUID | None) -> Operator:
     )
 
 
+def _nothing_to_restore(row: IngestedAuthProfile) -> bool:
+    """Return whether the row would change nothing in memory.
+
+    True when the row's scope already holds the row's login type, or when
+    a class that serves every tenant holds the key (hand-written code, or
+    a built-in login setup for a tenant's row). A cheap check before
+    building anything, so the read before every call costs little.
+    """
+    shared = get_connector_v2(row.product, row.version, row.impl_id)
+    if shared is not None:
+        kind = shim_kind(shared)
+        if kind == "none" or (kind == "profiled" and row.tenant_id is not None):
+            return True
+    current = current_login_setup(row.tenant_id, row.product, row.version, row.impl_id)
+    profile = getattr(current, "profile", None)
+    if profile is None:
+        return False
+    return profile.auth.scheme == row.auth_scheme and list(profile.auth.secret_fields) == list(
+        row.secret_fields
+    )
+
+
 async def _restore_row(row: IngestedAuthProfile) -> bool:
     """Build and stamp the connector class for one saved row.
 
-    Returns ``True`` when a new class was registered. A row that no longer
-    builds a valid profile (a scheme removed from the closed list, bad
-    field names) is logged and skipped, so one bad row cannot stop the
-    backplane from starting.
+    Returns ``True`` when the row's scope now uses a new class (registered
+    or replaced). A row that does not build a valid profile (a scheme
+    outside the closed list, bad field names) is logged and skipped, so
+    one bad row cannot stop the backplane from starting.
     """
     connector_id = build_connector_id(row.product, row.version, row.impl_id)
     if row.auth_scheme not in NAMED_AUTH_SCHEMES:
@@ -161,36 +201,42 @@ async def _restore_row(row: IngestedAuthProfile) -> bool:
             reason="invalid_profile",
         )
         return False
+    # Imported here: the service imports this module to save a login type.
+    from meho_backplane.operations.ingest.service import ReviewService
+
     connector_class = synthesise_profiled_class(
         product=row.product, version=row.version, impl_id=row.impl_id, profile=profile
     )
-    registered = await ReviewService(_restore_operator(row.tenant_id)).record_profile_stamp(
+    outcome = await ReviewService(_restore_operator(row.tenant_id)).record_login_setup(
         connector_id, tenant_id=row.tenant_id, connector_class=connector_class
     )
-    if registered:
+    if outcome in LOGIN_SETUP_APPLIED:
         _log.info(
             "ingested_profile_restored",
             connector_id=connector_id,
+            tenant_scope=str(row.tenant_id) if row.tenant_id is not None else None,
             auth_scheme=row.auth_scheme,
             connector_class=connector_class.__name__,
+            outcome=outcome,
         )
-    return registered
+    return outcome in LOGIN_SETUP_APPLIED
 
 
 async def restore_ingested_profiled_connectors(
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
     *,
     product: str | None = None,
+    tenant_id: UUID | None = None,
 ) -> int:
     """Register a profiled connector class for every saved login type.
 
-    Skips rows whose ``(product, version, impl_id)`` already has a class,
-    so it is safe to run twice. Rows are read oldest first, so when two
-    tenants saved the same key the older choice wins, the same as the
-    in-memory table before a restart. With *product* set, only the rows of
-    that product are read; the dispatcher uses this before a call, since
-    the resolver only looks at connectors of the target's product. Returns
-    how many classes it registered.
+    Each row goes into the table of its own scope. A scope that already
+    holds the row's login type is skipped, so it is safe to run twice.
+    With *product* set, only the rows of that product are read; with
+    *tenant_id* set, only the built-in rows and that tenant's rows. The
+    dispatcher sets both before a call: the resolver looks only at
+    connectors of the target's product, as the target's tenant sees them.
+    Returns how many scopes now use a new class.
     """
     maker = sessionmaker if sessionmaker is not None else get_sessionmaker()
     async with maker() as session:
@@ -199,11 +245,18 @@ async def restore_ingested_profiled_connectors(
         )
         if product is not None:
             stmt = stmt.where(IngestedAuthProfile.product == product)
+        if tenant_id is not None:
+            stmt = stmt.where(
+                or_(
+                    IngestedAuthProfile.tenant_id.is_(None),
+                    IngestedAuthProfile.tenant_id == tenant_id,
+                )
+            )
         rows = list((await session.execute(stmt)).scalars().all())
 
     restored = 0
     for row in rows:
-        if (row.product, row.version, row.impl_id) in all_connectors_v2():
+        if _nothing_to_restore(row):
             continue
         if await _restore_row(row):
             restored += 1

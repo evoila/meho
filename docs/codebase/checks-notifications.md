@@ -21,6 +21,25 @@ member Sensor gets worse while the Dashboard's overall state stays the
 same (a Dashboard already `critical` because of one Sensor used to hide
 every later problem on it). See "The new problem mail" below.
 
+**A new Dashboard's first state (#6008).** A Dashboard starts with no
+recorded state. Members that have not reported yet count as `unknown`,
+and `unknown` rolls up to `degraded`. So the first check run of a new
+Dashboard can look `degraded` only because its other Sensors have not
+run, or because their results are not confirmed yet (a Sensor with
+`retry_times` keeps its old state until enough equal results came in).
+While the state is `degraded` or `critical` and every failing member is
+only waiting for its first confirmed result, MEHO records no state for
+the Dashboard and sends nothing: no mail, no investigation, no broadcast
+event. A member waits when it never ran, or when its results still wait
+for confirmation. A member that ran and reports `unknown` (a timeout or
+a run error, with no result waiting for confirmation) is a real failure,
+not a wait. This holds
+for every check run in the wait, not only the first one. The first `ok`
+state is then recorded, also without a mail or event. The first real
+failure after that is a normal change from `ok` and alerts. When a
+member already really fails while the Dashboard has no state yet, the
+alert goes out at once, as before.
+
 The notifier is the second, independent consumer of #2507's transition
 claim. The first is the diagnose-only investigator
 (`docs/codebase/checks-investigator.md`), which fires on a **worsening**
@@ -263,8 +282,9 @@ starts NULL, and the first claim after the upgrade records each member's
 current state **without mailing**. An upgrade therefore never sends a
 burst of "new problem" mails for problems that are already visible on the
 Dashboard. A brand-new Dashboard never hits this case: its first
-evaluation is always a Dashboard edge (`NULL → state`), which sends the
-Dashboard mail and records every member.
+evaluation is always a Dashboard edge (`NULL → state`), which records
+every member and sends the Dashboard mail, unless the first state is
+only "waiting for members" (see above).
 
 **Message shape.** Subject:
 `[MEHO] <dashboard>: new problem <sensor> <previous> -> <current> (dashboard still <state>)`.
@@ -459,14 +479,35 @@ A failed alert mail is not only a log line. Check these, in order:
    `not sent (<reason>)`. The console page of the Dashboard shows the same
    line (`Last alert mail`). No line means the Dashboard never tried to
    send a mail.
-2. **The metric `checks_alert_mail_total{result=...}`** on `/metrics`. It
+2. **The audit log** keeps one row for every attempt, sent or failed, so
+   you can look back over a night. For example:
+
+   ```bash
+   meho audit query --op-id checks.alert_mail --since 12h
+   meho audit query --op-id checks.alert_mail --result-status error
+   ```
+
+   Each row has the time, and in its payload: `dashboard_id`,
+   `dashboard_name`, the Dashboard's `previous_state` and `current_state`,
+   `sent` and `result` (`sent`, or the reason below), `to` (the
+   recipients the mail went to, as plain addresses, the same way a
+   `mail.send` record shows them), `refused` (the recipients the allowlist
+   dropped) and `subject`. A "new problem" or "acknowledgement ended" mail
+   also has `sensor`: the Sensor's id, name and its own old and new state.
+   The mail body is never stored. The row's principal is
+   `system:checks-notify`. A sent mail has status `200` (result `ok`), a
+   failed one `502` (result `error`).
+3. **The metric `checks_alert_mail_total{result=...}`** on `/metrics`. It
    counts every attempt: `result="sent"`, or the reason of the failure.
    Alert on a rising count of any other result.
-3. **The log line `checks_notify_failed`**, which carries the same reason
+4. **The log line `checks_notify_failed`**, which carries the same reason
    and the Dashboard id.
 
-The stored result is the last attempt only. A later success replaces a
-failure. The code is `checks/mail_result.py`; the columns are
+The Dashboard keeps the last attempt only: a later success replaces a
+failure there. The audit log keeps every attempt. Both are written in one
+transaction. When that write fails, MEHO logs
+`checks_mail_result_record_failed`; the metric still counts the attempt.
+The code is `checks/mail_result.py`; the columns are
 `check_dashboards.last_mail_at`, `last_mail_sent` and `last_mail_reason`.
 
 Reasons you can see:
@@ -486,8 +527,9 @@ Reasons you can see:
 
 Only the Dashboard mail (including the "new problem" mail) is recorded.
 Mails that are skipped on purpose (no recipient, below the threshold, held
-back by the flap window) are not attempts. The finding mail is not recorded
-yet; its failure is still only a log line (`checks_finding_email_failed`).
+back by the flap window, acknowledged) are not attempts and leave no row.
+The finding mail is not recorded yet; its failure is still only a log line
+(`checks_finding_email_failed`).
 
 Delivery and the claim are independent: the memo advances whether or not
 the mail lands. That is deliberate — re-deriving "did anyone get told"
@@ -538,12 +580,13 @@ from the memo would mean re-mailing every unchanged evaluation.
   warn-logged (`checks_notify_recipient_refused`) while the allowlisted
   recipients still receive the mail, and a Dashboard whose every
   recipient is refused logs `checks_notify_no_allowed_recipients`.
-- **No delivery record.** Nothing durable says a mail was sent; the
-  structlog event is the whole trace (`checks_notify_sent` /
-  `checks_finding_email_sent`). The Dashboard's
-  `check_dashboards.last_rollup_state` memo holds only the current
-  state, not the edge history; the `agent_run` row is the durable record
-  of the finding.
+- **Delivery record for the Dashboard mail only.** Each Dashboard mail
+  attempt leaves an audit row (see "When alert mails fail: where to
+  look"). The finding mail leaves only the log line
+  (`checks_finding_email_sent` / `checks_finding_email_failed`); the
+  `agent_run` row is the durable record of the finding itself. The
+  Dashboard's `check_dashboards.last_rollup_state` memo holds only the
+  current state, not the edge history.
 - **Two mails per incident when both are configured.** A Dashboard with a
   `notify_email` and an enabled investigator mails the transition
   immediately and the finding minutes later, when the run terminates.

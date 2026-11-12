@@ -81,9 +81,11 @@ from meho_backplane.ui.auth.session_store import (
 )
 from meho_backplane.ui.auth.tenant import TenantChangedError, TenantRemovedError
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.routes.account_push import build_account_push_router
 from meho_backplane.ui.routes.connectors.operator import _lift_operator
 from meho_backplane.ui.routes.tenant import TenantChoice, tenant_choices
 from meho_backplane.ui.templating import get_templates
+from meho_backplane.web_push.keys import push_public_key
 
 __all__ = ["build_account_router"]
 
@@ -216,6 +218,8 @@ async def _render_page(
         "sessions": session_views,
         "now_utc": datetime.now(UTC),
         "csrf_token": csrf_token,
+        # None while the admin setting is off: no notification switch.
+        "push_public_key": push_public_key(),
     }
     response = get_templates().TemplateResponse(request, "account/index.html", context)
     _set_csrf_cookie(response, csrf_token)
@@ -398,4 +402,6 @@ def build_account_router() -> APIRouter:
             },
         },
     )
+    # "Notify me about approvals" (account_push.py); 404 while the setting is off.
+    router.include_router(build_account_push_router())
     return router

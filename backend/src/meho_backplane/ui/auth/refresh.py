@@ -53,7 +53,7 @@ Cookie stability (CSRF-desync guard)
 
 A refresh mutates **only** the encrypted token columns and
 ``expires_at`` inside the existing ``web_session`` row. The
-``meho_session`` cookie value (the row id) and the ``meho_csrf``
+``__Host-meho_session`` cookie value (the row id) and the ``meho_csrf``
 token (HMAC-keyed on that same session id,
 :func:`meho_backplane.ui.csrf.mint_csrf_token`) are untouched -- the
 refresh path performs zero ``Set-Cookie`` operations. Pages rendered
@@ -103,6 +103,7 @@ from authlib.integrations.base_client.errors import OAuthError
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.client_identity import bind_request_client
 from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
@@ -503,7 +504,9 @@ async def _verify_session_token(
     # #3980: this is the one place where a call counts as a person in the
     # web interface. Every other way in (REST, MCP, in-process callers)
     # leaves the field off, so the call follows the token rule.
-    return Operator(**operator.model_dump(exclude={"web_session"}), web_session=True)
+    web_operator = Operator(**operator.model_dump(exclude={"web_session"}), web_session=True)
+    bind_request_client(web_operator)
+    return web_operator
 
 
 async def verify_access_token_with_refresh(

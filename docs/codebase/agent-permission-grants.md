@@ -4,7 +4,13 @@ G11.2-T6 (#819) under Initiative #803 (the P3 agent identity + RBAC + approval g
 
 ## Overview
 
-A newly-registered agent starts with **no** `agent_permission` rows. Without an explicit grant, the agent operates under `safety_level`-based defaults: safe ops auto-execute; caution, dangerous and destructive ops wait for a person's approval (#3980). Agents never approve, not their own requests and not anyone else's. Admin-class ops are never auto-granted.
+A newly-registered agent starts with the rows of the starting grant set a person picked (see "Starting grant sets" below), or with **no** `agent_permission` rows. What an agent may do without a matching grant depends on the switch `AGENT_GRANT_REQUIRED` (#6189):
+
+- `off` (the default): the `safety_level` defaults. Safe ops auto-execute; caution, dangerous and destructive ops wait for a person's approval (#3980).
+- `on`: the call is refused on every level, also `safe`, with the code `agent_no_grant`. The agent runs nothing until it has a grant.
+- `observe`: the same as `off`, and MEHO logs `agent_no_grant_would_deny` for each call that `on` would refuse.
+
+The full table is in [agent-permission-model.md](agent-permission-model.md#safety-levels-at-a-glance). The switch changes only agent logins; people, service accounts and runners do not use this table. Agents never approve, not their own requests and not anyone else's. Admin-class ops are never auto-granted.
 
 Operators (`tenant_admin`) issue grants to extend agent access for a specific op-pattern on an optional target scope. Grants are permanent by default; supply `expires_at` to create a **time-bounded elevation** (change window) that reverts automatically: the permission resolver (T3 `auth/permissions.py`) ignores rows past their `expires_at` **immediately at expiry**, and the expiry sweeper deletes them on its periodic tick (the sweep is the durable cleanup; the resolver filter makes the revert exact).
 
@@ -116,10 +122,119 @@ For time-bounded elevations: same path, plus `expires_at` set on the row. The gr
 
 | Agent state | Writes | Admin-class ops |
 |---|---|---|
-| No grants (new agent) | Safety-level default: `caution`, `dangerous` and `destructive` wait for a person's approval | Deny |
+| No grants, switch `off` or `observe` | Safety-level default: `safe` runs at once; `caution`, `dangerous` and `destructive` wait for a person's approval | Deny |
+| No grants, switch `on` | Refused on every level, also `safe` (`agent_no_grant`) | Deny |
 | Permanent grant on `*` | Verdict from grant row | Only if explicit auto-execute grant (`caution`, `dangerous` and `destructive` still capped at waiting for approval) |
 | Elevation active | As granted until expiry | Only if explicit grant (same cap) |
 | Elevation expired | Reverts to baseline | Denied |
+
+### The upgrade row (migration `0155`)
+
+Migration `0155_agent_read_everything_at_upgrade` gives every agent that
+exists at upgrade one row: `op_pattern="*"`, `target_scope="*"`,
+`verdict="auto-execute"`, `created_by_sub="meho:upgrade-read-everything"`.
+It goes to the `keycloak_client_id` of every agent principal that is not
+revoked, and to every other `principal_sub` that already has a row (for
+example a person's agent login), per tenant. A sub that already has the
+`*`/`*` key is skipped, so the step is safe to run twice.
+
+The row gives the same answers as having no row: `safe` runs at once, and
+the risk-level ceiling makes every other level wait for approval. A more
+specific row still wins, and a `*` row on one target ties with it, so the
+stricter verdict wins. The row matters only when a later switch makes
+"no grant" mean "no access": then existing agents keep working. The
+marker shows in `meho agent grant list` (the `CREATED_BY` column), and an
+admin removes the row like any other grant. The downgrade deletes only
+rows with the marker.
+
+## Starting grant sets (`agents/grant_sets.py`, #6191)
+
+When a person registers an agent principal or creates an agent
+definition, they pick the agent's first grants in the field
+`starting_grants: {set, targets}`:
+
+| `set` | Rows written | What the agent can do |
+|---|---|---|
+| `none` | no row | Nothing runs until an admin adds a grant (with `AGENT_GRANT_REQUIRED=on`). Discovery tools still work. |
+| `read-everything` | one row: `op_pattern="*"`, `target_scope="*"`, `auto-execute` | `safe` operations run at once on every target in this tenant, also on targets added later. Everything above `safe` waits for a person (the risk-level ceiling). |
+| `read-targets` | one row per named target: `op_pattern="*"`, `target_scope=<target id>`, `auto-execute` | The same, but only on those targets (with `AGENT_GRANT_REQUIRED=on`). |
+
+The limits of `none` and `read-targets` hold only with
+`AGENT_GRANT_REQUIRED=on`. With `off` (the default) or `observe`, a call
+that no grant covers gets the risk-level default: `safe` operations still
+run at once, on any target. The CLI and the console texts say this (see
+below).
+
+Rules:
+
+- `targets` is a list of target names (or aliases), used only by
+  `read-targets`. They are resolved in the caller's tenant with
+  `targets/resolver.py::resolve_target`. A name that matches no target,
+  or more than one, gives 422 (`starting_grants_target_unknown` /
+  `starting_grants_target_ambiguous`) and writes nothing. The same target
+  named twice gives one row.
+- While `AGENT_GRANT_REQUIRED` is `observe` or `on`, register refuses a
+  request without the field: 422 `starting_grants_required`, with the
+  three choices in the text. With `off` the field may be left out.
+- For a definition the field is required only when the agent that
+  `identity_ref` names has no live (not expired) grant yet. The rows go
+  to that agent principal. A live row the agent already has is skipped,
+  and so is a `deny` row. An expired row with the same pattern and
+  target is renewed: it gets `auto-execute` and no end date.
+- Only a person may send a pick that adds rows (`read-everything` or
+  `read-targets`), the same rule as the grant routes. Register is
+  person-only anyway. On `POST /api/v1/agents` and `meho_agents_create`
+  a service, agent or runner login gets `human_principal_required` and
+  nothing is written; `set: none` still works for it.
+- Register resolves the names before it creates the Keycloak client, so
+  a bad pick creates nothing. The rows go in the same database
+  transaction as the principal row; if they fail, the principal row is
+  not written and the Keycloak client is deleted again.
+- Each row has `created_by_sub` = the person who created the agent. The
+  rows are ordinary grants: they show in `meho agent grant list`, and an
+  admin removes them like any other grant.
+- The audit row of the creation carries `starting_grants` (the set, or
+  `not-chosen` when no set was picked) and, for `read-targets`,
+  `starting_grant_targets` (the names as sent).
+
+Surfaces: `POST /api/v1/agent-principals`, `POST /api/v1/agents`, the
+admin MCP tools `meho_agent_principals_register` and
+`meho_agents_create`, the CLI and the console.
+
+CLI (`cli/internal/startinggrants/`, #6192): `meho agent-principal
+register` and `meho agent create` take `--grants
+none|read-everything|read-targets` and `--target <name>` (repeat it for
+more targets). The CLI refuses `--target` without `--grants
+read-targets`, and `read-targets` without a `--target`. Without
+`--grants` it sends no pick; when MEHO then answers 422
+`starting_grants_required`, the CLI prints the three choices and stops.
+With `--grants`, it reads the agent's grants after the create (every
+page of `GET /api/v1/agents/grants?principal_sub=`) and shows them;
+`--json` adds them as `grants`. If that read fails, `grants` is `null`
+and `grants_error` says why. The CLI cannot see the server's
+`AGENT_GRANT_REQUIRED`, so the `--grants` help and the printed choices
+say that `none` and `read-targets` limit the agent only with `on`.
+
+Console (`ui/routes/agents/starting_grants.py`, #6192): the register
+form and the create-agent form show the three choices as radio buttons,
+none selected at first, and the tenant's targets as checkboxes for
+`read-targets`. While the switch is not `off` the choice is required in
+the form. A missing or wrong pick, or a target name that does not
+resolve, shows the service's text next to the field. After a pick that
+writes grants, the console opens `/ui/agents/grants?principal_sub=<the
+agent>`. The help text of each choice follows the current
+`AGENT_GRANT_REQUIRED`: with `off` or `observe`, "None" and "Read some
+targets" say that safe operations still run, and name the value. The
+register modal's container on the principals page lets htmx swap the
+register and revoke error answers (404, 409, 422, 502, 503 to a POST), so
+the field error or banner shows in the open modal.
+
+The two MCP tools show the `starting_grants` input and the sentence about
+it only while `AGENT_GRANT_REQUIRED` is `observe` or `on`
+(`mcp/tools/_starting_grants.py`, through the tool's `for_settings`). With
+the switch `off` (the default), an AI client sees both tools exactly as
+before, and a call that sends `starting_grants` is refused by the input
+check. REST takes the field in every state.
 
 ## Elevation sweeper (`agents/grant_expiry.py`)
 

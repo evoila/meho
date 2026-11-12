@@ -779,6 +779,7 @@ async def _emit_db_backed_rows(
             version=version,
             enabled_operation_count=enabled_op_count,
             has_code_shipped_op=op_counts.get("code_shipped", 0) > 0,
+            tenant_id=tenant_uuid,
         )
         state: ConnectorState = "ingested"
         next_step = legacy_hint

@@ -45,7 +45,8 @@
 //     RFC 7591 Dynamic Client Registration (default Trusted Hosts policy →
 //     403 "Host not trusted"), so a bare `mcp-remote` cannot complete
 //     OAuth on a fresh install. The launcher presents the pre-registered
-//     public `meho-mcp` client via --static-oauth-client-info, overridable
+//     public `meho-mcp` client (or the client of item 6) via
+//     --static-oauth-client-info, overridable
 //     through the optional `client_id` user_config (delivered as
 //     MEHO_MCP_CLIENT_ID) without editing the installed bundle.
 //  3. One sign-in at a time (#3857). Claude Desktop can start the extension
@@ -63,6 +64,11 @@
 //  5. The current tenant (#5242). The optional `tenant` user_config
 //     (delivered as MEHO_TENANT) is sent as the Meho-Tenant header on every
 //     request, so the session works in that tenant.
+//  6. A login client of its own (#6210). When MEHO lists a client for the
+//     claude-desktop tool kind in GET /api/v1/auth-config (switch
+//     MCP_CLIENT_PER_TOOL_KIND), the launcher uses it and sends
+//     "Meho-Tool: claude-desktop", so Claude Desktop keeps a saved login
+//     apart from Claude Code (tool-client.mjs, staged from the plugin's lib/).
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -70,6 +76,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import tls from "node:tls";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { DEFAULT_CLIENT_ID, resolveToolClient } from "./tool-client.mjs";
 
 const rawUrl = process.argv[2];
 
@@ -134,13 +142,25 @@ if (caCertPath && typeof tls.setDefaultCACertificates === "function") {
 }
 
 // The pre-registered public OAuth client the shim presents to Keycloak.
-// Fall back to the default when the host substitutes an empty value for an
-// untouched optional field, so an operator who never opens the advanced
-// `client_id` field still authenticates. Scrubbed from process.env (which
-// mcp-remote inherits in-process) to keep the config seam out of its
-// environment.
-const clientId = (process.env.MEHO_MCP_CLIENT_ID ?? "").trim() || "meho-mcp";
+// The optional `client_id` user_config (delivered as MEHO_MCP_CLIENT_ID)
+// wins when set. Empty, whitespace, an unsubstituted `${user_config.client_id}`
+// placeholder, or `meho-mcp` count as not set: `meho-mcp` was the field's
+// default in older bundles, so an install may still hold it without anyone
+// having chosen it. Not set: the client MEHO lists for Claude Desktop, with
+// the Meho-Tool header, or else `meho-mcp` without the header
+// (tool-client.mjs). Scrubbed from process.env (which mcp-remote inherits
+// in-process) to keep the config seam out of its environment.
+const clientValue = (process.env.MEHO_MCP_CLIENT_ID ?? "").trim();
+const clientOverride =
+  /^\$\{[^}]*\}$/.test(clientValue) || clientValue === DEFAULT_CLIENT_ID ? "" : clientValue;
 delete process.env.MEHO_MCP_CLIENT_ID;
+const { clientId, header: toolHeader } = await resolveToolClient({
+  kind: "claude-desktop",
+  mcpUrl: url.href,
+  override: clientOverride,
+  say: (text) => process.stderr.write(`meho-claude-desktop: ${text}\n`),
+});
+const toolArgs = toolHeader ? ["--header", toolHeader] : [];
 
 // OAuth scopes requested at login. The default is the working surface plus
 // offline_access. offline_access makes the login last: Keycloak then issues
@@ -191,9 +211,10 @@ const loginGuard = fileURLToPath(new URL("./login-guard.mjs", import.meta.url));
 // reads process.argv.slice(2): the mcp-remote entry first, then the
 // arguments for mcp-remote. It sets process.argv to [node, entry, ...args]
 // before it imports mcp-remote, which reads process.argv.slice(2), so
-// mcp-remote gets the URL, the static-OAuth contract, and the Meho-Tenant
-// header when a tenant is set. Present the static
-// `meho-mcp` client via --static-oauth-client-info so the shim skips the
+// mcp-remote gets the URL, the static-OAuth contract, the Meho-Tenant
+// header when a tenant is set, and the Meho-Tool header when MEHO lists a
+// client for Claude Desktop. Present the static
+// client via --static-oauth-client-info so the shim skips the
 // DCR the realm blocks; the scope metadata matches what the backplane's
 // token audience mappers expect.
 process.argv = [
@@ -206,6 +227,7 @@ process.argv = [
   "--static-oauth-client-metadata",
   JSON.stringify({ scope: scopes }),
   ...tenantArgs,
+  ...toolArgs,
 ];
 
 // The guard's messages name this bundle and say how to reconnect in Claude

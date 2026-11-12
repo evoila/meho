@@ -13,7 +13,8 @@ reloading the firewall -- into governed, previewable, audited operations.
 Tier table:
 
 * ``linux.file.write`` -- ``dangerous`` + approval (group ``file``). Atomic
-  backup -> write (``umask 077`` temp + rename) -> optional
+  backup -> write (``umask 077`` temp + rename, keeping an existing file's
+  mode and owner) -> optional
   ``validate_command`` -> rollback-on-fail of a path-confined, allow-listed
   config file. Its ``content`` may carry secrets, so it is pinned
   ``credential_write`` in the broadcast clamp and previews only at park time
@@ -69,6 +70,7 @@ from typing import TYPE_CHECKING, Any
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
+    TargetSecretNotFoundError,
     check_param_secret_ref,
     strip_credential_value,
 )
@@ -195,17 +197,95 @@ _ENV_NAME_CHARSET: frozenset[str] = frozenset(
     "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
 )
 
+#: The same POSIX name rule as a JSON Schema ``pattern``: the charset above, not
+#: starting with a digit. ``linux.script.run``'s ``secret_env`` schema uses it in
+#: ``propertyNames``, so the dispatcher refuses a bad name before the call waits
+#: for approval. :func:`_validate_secret_env` still checks every name at run time.
+#: It ends with ``(?![\s\S])``, not ``$``: Python's ``$`` also matches before a
+#: final newline, so ``"NAME\n"`` would pass. The lookahead works in Python and
+#: in ECMA-262 regex.
+_ENV_NAME_PATTERN: str = r"^[A-Za-z_][A-Za-z0-9_]*(?![\s\S])"
+
 #: Upper bound on the number of ``secret_env`` entries one ``script.run`` may
 #: declare -- a bounded fan-out of per-call Vault reads, not an open-ended loop.
 _MAX_SECRET_ENV: int = 32
 
-#: env-var names ``secret_env`` must NOT bind: the ``script.run`` wrapper's own
-#: shell variables (:func:`build_script_run_wrapper` sets ``tmp`` and, when
-#: arguments are present, ``args``; the sudo primitive uses ``f``). Binding one
-#: from a resolved secret would clobber the wrapper's control state -- the temp
-#: path it executes and then removes -- so a collision is refused *before* any
-#: Vault read. ``env`` is left unchanged; this guard is ``secret_env``-only.
-_RESERVED_ENV_NAMES: frozenset[str] = frozenset({"tmp", "args", "f"})
+#: env-var names that ``env`` and ``secret_env`` must NOT bind. The approver
+#: sees the script and the env NAMES, not the env values, so a value must not
+#: change which code runs. Two groups:
+#:
+#: * the ``script.run`` wrapper's own shell variables
+#:   (:func:`build_script_run_wrapper` sets ``tmp`` and, when arguments are
+#:   present, ``args``; the sudo primitive uses ``f``);
+#: * names that control how a shell or an interpreter starts, how the wrapper
+#:   splits words, where commands are found, or which libraries are loaded;
+#: * bash variables whose assigned value bash evaluates as arithmetic. An
+#:   arithmetic value can run a command substitution, so the wrapper's own
+#:   ``export`` line would run it.
+#:
+#: Names that start with one of :data:`_RESERVED_ENV_PREFIXES` are refused too.
+#: A script that needs one of these can set it in its own body, where the
+#: approver reads it.
+_RESERVED_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        # The wrapper's own variables.
+        "tmp",
+        "args",
+        "f",
+        # Shell start and word splitting.
+        "ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS4",
+        "IFS",
+        "GLOBIGNORE",
+        "CDPATH",
+        "PROMPT_COMMAND",
+        "ZDOTDIR",
+        "HOME",
+        # Bash evaluates a value assigned to these as arithmetic.
+        "HISTCMD",
+        "OPTIND",
+        "RANDOM",
+        "SRANDOM",
+        # Where commands and libraries are found.
+        "PATH",
+        "GCONV_PATH",
+        # Interpreter start options.
+        "JAVA_TOOL_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "_JAVA_OPTIONS",
+    }
+)
+
+#: Name prefixes that ``env`` and ``secret_env`` must NOT bind: bash
+#: (``BASH_ENV``, ``BASH_XTRACEFD``, ...), the dynamic loader (``LD_PRELOAD``,
+#: ``LD_LIBRARY_PATH``, ...) and the start options of common interpreters
+#: (``PYTHONPATH``, ``PYTHONSTARTUP``, ``PERL5OPT``, ``RUBYOPT``,
+#: ``NODE_OPTIONS``, ...).
+_RESERVED_ENV_PREFIXES: tuple[str, ...] = ("BASH_", "LD_", "NODE_", "PERL", "PYTHON", "RUBY")
+
+#: The reserved names and prefixes as one JSON Schema. The ``env`` and
+#: ``secret_env`` schemas put it under ``propertyNames`` -> ``not``, so the
+#: dispatcher refuses a reserved name before the call waits for approval.
+_RESERVED_ENV_NAME_SCHEMA: dict[str, Any] = {
+    "anyOf": [
+        {"enum": sorted(_RESERVED_ENV_NAMES)},
+        {"pattern": "^(?:" + "|".join(_RESERVED_ENV_PREFIXES) + ")"},
+    ]
+}
+
+#: The ``propertyNames`` schema of ``env`` and ``secret_env``: a POSIX name
+#: that is not reserved.
+_ENV_PROPERTY_NAMES_SCHEMA: dict[str, Any] = {
+    "pattern": _ENV_NAME_PATTERN,
+    "not": _RESERVED_ENV_NAME_SCHEMA,
+    "description": (
+        "ENV_NAME: letters, digits and '_'; must not start with a digit. "
+        "Refused names: " + ", ".join(sorted(_RESERVED_ENV_NAMES)) + ", and every "
+        "name that starts with " + ", ".join(_RESERVED_ENV_PREFIXES) + "."
+    ),
+}
 
 #: Hard cap + default for ``linux.script.run``'s wall-clock timeout.
 _DEFAULT_TIMEOUT_S: int = 120
@@ -309,7 +389,11 @@ def build_file_write_script(
     """Render the root-owned atomic file-write bash script.
 
     Backup (optional) -> atomic write (``umask 077``, base64 -> same-dir temp ->
-    rename) -> optional ``validate_command`` -> rollback-on-fail. The content
+    rename) -> optional ``validate_command`` -> rollback-on-fail. When the file
+    already exists, the temp file takes its mode and owner before the rename, so
+    the write does not change who can read the file. If they cannot be copied,
+    the script stops before the rename and the original file stays as it was.
+    A new file is created ``0600`` and owned by root. The content
     and the validate command are base64-carried (never spliced raw); every path
     is ``shlex.quote``d. ``set -e`` is deliberately *not* used so a non-zero
     validate exit routes to the rollback branch rather than aborting the script
@@ -334,6 +418,11 @@ def build_file_write_script(
         'tmp="$(mktemp "$dir/.meho-write.XXXXXX")" || { echo "===MEHO_WRITE_ERR:mktemp===" >&2; exit 4; }',  # noqa: E501
         f'if ! printf %s {q_b64} | base64 -d > "$tmp"; then rm -f "$tmp"; echo "===MEHO_WRITE_ERR:decode===" >&2; exit 4; fi',  # noqa: E501
         'chmod 0600 "$tmp"',
+        # Keep the mode and owner of a file that is already there: the rename
+        # would otherwise leave it 0600 root:root and lock out a non-root daemon.
+        'if [ -f "$path" ]; then',
+        '  owner="$(stat -L -c %u:%g "$path")" && mode="$(stat -L -c %a "$path")" && chown "$owner" "$tmp" && chmod "$mode" "$tmp" || { rm -f "$tmp"; echo "===MEHO_WRITE_ERR:mode===" >&2; exit 4; }',  # noqa: E501
+        "fi",
         'if ! mv -f "$tmp" "$path"; then rm -f "$tmp"; echo "===MEHO_WRITE_ERR:mv===" >&2; exit 4; fi',  # noqa: E501
     ]
     if validate_command is not None:
@@ -504,19 +593,42 @@ def _validate_abspath(raw: Any, field: str) -> str:
     return raw
 
 
+def _is_reserved_env_name(name: str) -> bool:
+    """Return whether *name* is a reserved env-var name (exact or by prefix)."""
+    return name in _RESERVED_ENV_NAMES or name.startswith(_RESERVED_ENV_PREFIXES)
+
+
+def _check_env_name(name: Any, field: str) -> str:
+    """Return *name* when it is a valid, non-reserved env-var name.
+
+    Raises :class:`LinuxWriteSafetyError` naming *field* (``env`` or
+    ``secret_env``) otherwise.
+    """
+    if not isinstance(name, str) or not name or not set(name) <= _ENV_NAME_CHARSET:
+        raise LinuxWriteSafetyError(f"{field} var name {name!r} is not a valid POSIX name")
+    if name[0].isdigit():
+        raise LinuxWriteSafetyError(f"{field} var name {name!r} must not start with a digit")
+    if _is_reserved_env_name(name):
+        raise LinuxWriteSafetyError(
+            f"{field} var name {name!r} is reserved: it is a wrapper variable or it "
+            "controls how the interpreter starts"
+        )
+    return name
+
+
 def _validate_env(raw: Any) -> dict[str, str]:
-    """Return a validated ``{name: value}`` env map (names charset-checked)."""
+    """Return a validated ``{name: value}`` env map.
+
+    Each name must be a POSIX name and must not be reserved
+    (:data:`_RESERVED_ENV_NAMES`, :data:`_RESERVED_ENV_PREFIXES`).
+    """
     if raw is None:
         return {}
     if not isinstance(raw, dict):
         raise LinuxWriteSafetyError("env must be an object of name -> value")
     env: dict[str, str] = {}
     for name, value in raw.items():
-        if not isinstance(name, str) or not name or not set(name) <= _ENV_NAME_CHARSET:
-            raise LinuxWriteSafetyError(f"env var name {name!r} is not a valid POSIX name")
-        if name[0].isdigit():
-            raise LinuxWriteSafetyError(f"env var name {name!r} must not start with a digit")
-        env[name] = str(value)
+        env[_check_env_name(name, "env")] = str(value)
     return env
 
 
@@ -552,8 +664,8 @@ def _validate_secret_env(raw: Any, *, env_names: set[str]) -> dict[str, tuple[st
     """Validate the ``secret_env`` mapping into ``{ENV_NAME: (vault_path, field)}``.
 
     Each key is a POSIX env-var name (the ``env`` charset, not starting with a
-    digit) that must not collide with a reserved wrapper variable
-    (:data:`_RESERVED_ENV_NAMES`) or with a name already declared in ``env`` --
+    digit) that must not be reserved (:data:`_RESERVED_ENV_NAMES`,
+    :data:`_RESERVED_ENV_PREFIXES`) or a name already declared in ``env`` --
     a name resolved from Vault and a name set literally must be unambiguous.
     Each value is a ``"<vault-path>#<field>"`` reference: exactly one ``#``, a
     non-empty logical KV-v2 path (same convention ``load_vault_secret_data``
@@ -576,14 +688,7 @@ def _validate_secret_env(raw: Any, *, env_names: set[str]) -> dict[str, tuple[st
         )
     refs: dict[str, tuple[str, str]] = {}
     for name, ref in raw.items():
-        if not isinstance(name, str) or not name or not set(name) <= _ENV_NAME_CHARSET:
-            raise LinuxWriteSafetyError(f"secret_env var name {name!r} is not a valid POSIX name")
-        if name[0].isdigit():
-            raise LinuxWriteSafetyError(f"secret_env var name {name!r} must not start with a digit")
-        if name in _RESERVED_ENV_NAMES:
-            raise LinuxWriteSafetyError(
-                f"secret_env var name {name!r} collides with a reserved wrapper variable"
-            )
+        _check_env_name(name, "secret_env")
         if name in env_names:
             raise LinuxWriteSafetyError(
                 f"secret_env var name {name!r} is also declared in env; a name must not "
@@ -644,6 +749,11 @@ async def _resolve_secret_env(
             check_param_secret_ref(operator, path, param="secret_env")
             try:
                 secret_data = await connector._resolve_secret(stub, operator)
+            except TargetSecretNotFoundError as exc:
+                raise LinuxWriteError(
+                    f"secret_env[{name!r}] could not resolve vault reference {path}#{field}: "
+                    "Vault has no secret at that path"
+                ) from exc
             except (VaultClientError, CredentialsReadError) as exc:
                 # The underlying errors name the target / field / secret_ref
                 # path, never a credential value; add the ENV for the operator.
@@ -922,12 +1032,25 @@ async def linux_firewall_load(
     Applies / replaces the host firewall ruleset atomically, **validating it
     before applying** (``nft -c -f`` / ``iptables-restore --test``): a ruleset
     that fails validation never touches the live firewall. Returns
-    ``{applied, backend, validated, rolled_back?}``.
+    ``{applied, backend, validated, rolled_back?}``. With
+    ``rollback_after_seconds`` it first starts a timer that puts the old rules
+    back (:mod:`~meho_backplane.connectors.linux.ops_firewall_rollback`) and
+    also returns ``rollback_id`` and ``rollback_due_at``.
     """
     ruleset = params["ruleset"]
     if not isinstance(ruleset, str) or not ruleset.strip():
         raise LinuxWriteSafetyError("ruleset must be a non-empty string")
     backend = bound_firewall_backend(params.get("backend"))
+    if params.get("rollback_after_seconds") is not None:
+        from meho_backplane.connectors.linux.ops_firewall_rollback import (
+            bound_rollback_seconds,
+            load_firewall_with_rollback,
+        )
+
+        seconds = bound_rollback_seconds(params["rollback_after_seconds"])
+        return await load_firewall_with_rollback(
+            connector, target, ruleset, backend, seconds, operator
+        )
 
     sudo_password = await _resolve_sudo_password(connector, target, operator)
     script = build_firewall_load_script(ruleset, backend)
@@ -959,9 +1082,11 @@ async def _linux_file_write_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     """Preview builder for ``linux.file.write`` -- path + byte size, never content.
 
     ``linux.file.write`` classifies ``credential_write`` (its ``content`` may
-    carry secrets), so ``preview_operation`` returns ``preview_unavailable`` for
-    it; this bespoke builder is the deliberate exception that runs *at park
-    time* (a bespoke builder owns its own field discipline). It echoes the
+    carry secrets). ``preview_operation`` returns ``preview_unavailable`` for
+    it, unless the ``PREVIEW_TYPED_WRITES`` switch is on: then its preview
+    shows only this builder's plan and never copies the params. The builder
+    also runs *at park time* (a bespoke builder owns its own field
+    discipline). It echoes the
     target, the path, the content byte size, the deterministic backup path, and
     the validate command (not a secret) -- never the ``content``. Declines
     (``None``) on malformed params.
@@ -984,8 +1109,10 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     """Preview builder for ``linux.script.run`` -- the script, never the values.
 
     ``linux.script.run`` classifies ``credential_write`` (its ``arguments`` /
-    ``env`` may carry secrets), so ``preview_operation`` returns
-    ``preview_unavailable`` for it; this bespoke builder runs *at park time*.
+    ``env`` may carry secrets). ``preview_operation`` returns
+    ``preview_unavailable`` for it, unless the ``PREVIEW_TYPED_WRITES``
+    switch is on: then its preview shows only this builder's plan and never
+    copies the params. The builder also runs *at park time*.
     The script body is the change the approver decides on, so the preview
     shows it with its SHA-256 and the optional check against a reviewed copy
     (:func:`~meho_backplane.connectors.linux.script_preview.script_preview_fields`).
@@ -1062,6 +1189,9 @@ _FILE_WRITE_OP = LinuxOp(
         "backup=false), write the new content atomically (umask 077, temp + "
         "rename) as root, then -- if validate_command is set -- run it and roll "
         "back to the backup when it fails, so a bad config never stays live. "
+        "An existing file keeps its mode and owner (for example 0644 root:root "
+        "stays 0644 root:root); a new file is created 0600, owned by root. "
+        "Root runs need sudo_password (or password) in the target's Vault secret. "
         "safety_level=dangerous, requires_approval=true: a dispatch parks for a "
         "human before anything changes. Returns {written, path, backup_path, "
         "validated, rolled_back}; the content is never echoed."
@@ -1120,7 +1250,12 @@ _FILE_WRITE_OP = LinuxOp(
             "missing config the first-boot run never wrote, a corrected "
             "directive -- with a backup and an optional validate/rollback gate. "
             "Approval-gated: it parks for a human. Do NOT put bare secrets in "
-            "content (it is stored verbatim for the approval re-dispatch). " + SSH_TRANSPORT_NOTE
+            "content (it is stored verbatim for the approval re-dispatch). "
+            "An existing file keeps its mode and owner. A new file is created "
+            "0600 and owned by root; if a non-root service must read it, "
+            "change the mode afterwards. The target's Vault secret needs a "
+            "sudo_password (or password) field: a key-only target fails after "
+            "approval with 'carries no sudo_password / password'. " + SSH_TRANSPORT_NOTE
         ),
         "parameter_hints": {
             "path": "Absolute path under an allowed write root.",
@@ -1263,14 +1398,25 @@ _SCRIPT_RUN_OP = LinuxOp(
             },
             "env": {
                 "type": "object",
+                # Checked by the dispatcher before the call waits for approval:
+                # the approver sees the names, not the values, so a name that
+                # changes how the script starts is refused at once.
+                "propertyNames": _ENV_PROPERTY_NAMES_SCHEMA,
                 "additionalProperties": {"type": "string"},
                 "description": (
                     "Optional env map. Do NOT put bare secrets in values -- use "
-                    "secret_env for credentials."
+                    "secret_env for credentials. Names that the wrapper uses or "
+                    "that control how the interpreter starts (for example PATH, "
+                    "BASH_ENV, LD_PRELOAD, PYTHONPATH) are refused; set them in "
+                    "the script instead."
                 ),
             },
             "secret_env": {
                 "type": "object",
+                # Checked by the dispatcher before the call waits for approval,
+                # so a bad name or too many entries fail at once (#3554).
+                "propertyNames": _ENV_PROPERTY_NAMES_SCHEMA,
+                "maxProperties": _MAX_SECRET_ENV,
                 "additionalProperties": {"type": "string"},
                 "description": (
                     "Optional map of ENV_NAME -> '<vault-path>#<field>'. Each "
@@ -1283,7 +1429,10 @@ _SCRIPT_RUN_OP = LinuxOp(
                     "params, the result, or a log -- only this ENV_NAME -> "
                     "reference mapping is persisted. Use this instead of putting a "
                     "bare secret in arguments/env. A name must not repeat an env "
-                    "name or a reserved wrapper variable."
+                    "name or be a reserved name (the same list as env). "
+                    "ENV_NAME uses letters, "
+                    "digits and '_' and does not start with a digit; at most 32 "
+                    "entries."
                 ),
             },
             "timeout_seconds": {
@@ -1333,7 +1482,10 @@ _SCRIPT_RUN_OP = LinuxOp(
             "expected_sha256": "Optional; SHA-256 hex of the reviewed script.",
             "interpreter": "Absolute path; defaults to /bin/bash.",
             "arguments": "Optional command line; word-split.",
-            "env": "Optional; no bare secrets in values.",
+            "env": (
+                "Optional; no bare secrets in values. PATH, BASH_*, LD_*, "
+                "PYTHON* and similar start-up names are refused."
+            ),
             "secret_env": (
                 "Optional; ENV_NAME -> '<vault-path>#<field>' resolved from Vault "
                 "at run time (never persisted). Use for credentials."
@@ -1428,7 +1580,8 @@ _FIREWALL_LOAD_OP = LinuxOp(
         "touches the live firewall. safety_level=dangerous, "
         "requires_approval=true: it parks for a human. Non-secret, so a human "
         "previews the ruleset via preview_operation before approving. Returns "
-        "{applied, backend, validated}."
+        "{applied, backend, validated}; with rollback_after_seconds also "
+        "{rollback_id, rollback_due_at}."
     ),
     parameter_schema={
         "type": "object",
@@ -1443,6 +1596,16 @@ _FIREWALL_LOAD_OP = LinuxOp(
                 "enum": list(FIREWALL_BACKENDS),
                 "description": "Firewall backend (default nft).",
             },
+            "rollback_after_seconds": {
+                "type": "integer",
+                "minimum": 60,
+                "maximum": 1800,
+                "description": (
+                    "Start a timer on the host first. When it ends without "
+                    "linux.firewall.confirm, the host loads the old rules again. "
+                    "Needs systemd."
+                ),
+            },
         },
         "required": ["ruleset"],
         "additionalProperties": False,
@@ -1453,6 +1616,8 @@ _FIREWALL_LOAD_OP = LinuxOp(
             "applied": {"type": "boolean"},
             "backend": {"type": "string"},
             "validated": {"type": "boolean"},
+            "rollback_id": {"type": "string"},
+            "rollback_due_at": {"type": "string", "format": "date-time"},
         },
         "required": ["applied", "backend", "validated"],
         "additionalProperties": True,
@@ -1466,15 +1631,25 @@ _FIREWALL_LOAD_OP = LinuxOp(
             "Call to load the default-deny firewall ruleset the first-boot "
             "script was meant to apply, or to replace a broken one -- validated "
             "before it goes live. Approval-gated: it parks for a human, who sees "
-            "the full ruleset in the preview. " + SSH_TRANSPORT_NOTE
+            "the full ruleset in the preview. For every change of a remote "
+            "host's rules, set rollback_after_seconds: a rule with good syntax "
+            "can still cut the SSH path, and the timer then puts the old rules "
+            "back. Run your checks over new connections, then call "
+            "linux.firewall.confirm before the timer ends. " + SSH_TRANSPORT_NOTE
         ),
         "parameter_hints": {
             "ruleset": "The full ruleset text.",
             "backend": "Optional; nft (default) or iptables.",
+            "rollback_after_seconds": (
+                "60 to 1800. Leave time for your checks and for a person to approve "
+                "linux.firewall.confirm. Only one timed change per host can wait for "
+                "its confirm at a time; a second load is refused until then."
+            ),
         },
         "output_shape": (
             "{applied, backend, validated}; validated=false with the live "
-            "firewall unchanged when the ruleset failed the pre-apply check."
+            "firewall unchanged when the ruleset failed the pre-apply check. "
+            "With the timer also rollback_id and rollback_due_at (UTC)."
         ),
     },
 )

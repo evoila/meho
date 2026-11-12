@@ -369,7 +369,7 @@ def test_keycloak_ui_scope_create_modal_renders_unmissable_confirm(
 def test_keycloak_ui_mapper_create_modal_renders_unmissable_confirm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The create-mapper modal surfaces caution + requires-approval."""
+    """The create-mapper modal surfaces dangerous + requires-approval."""
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_keycloak_target(tenant_id=_TENANT_A)
     _patch_write_call_operation(monkeypatch, {})
@@ -383,6 +383,7 @@ def test_keycloak_ui_mapper_create_modal_renders_unmissable_confirm(
     assert response.status_code == 200, response.text
     body = response.text
     assert 'data-write-gate="confirm"' in body
+    assert 'data-safety-level="dangerous"' in body
     assert "requires approval" in body
 
 

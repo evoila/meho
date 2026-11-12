@@ -198,6 +198,14 @@ companyLogin:
     configMapName: ""
     key: ca.crt
 
+# -- A private CA that Keycloak trusts for every outgoing TLS call, for
+# example an LDAPS directory (AD or LDAP) or the company login. Set it under
+# the parent's `coreKeycloak.trustedCaBundle` block. Empty `configMapName` =
+# off. With `companyLogin.caBundle` too, `KC_TRUSTSTORE_PATHS` lists both.
+trustedCaBundle:
+  configMapName: ""
+  key: ca.crt
+
 ingress:
   # -- The parent chart's Ingress routes only `/auth/realms/meho` and
   # `/auth/resources` on the MEHO host to Keycloak. Set true to also route

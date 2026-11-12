@@ -127,6 +127,8 @@ from meho_backplane.mcp.server import (
     McpInvalidParamsError,
     McpPermissionDeniedError,
 )
+from meho_backplane.mcp.short_texts import with_short_text
+from meho_backplane.mcp.tools._short_tool_texts import LIST_TARGETS_SHORT, QUERY_TOPOLOGY_SHORT
 from meho_backplane.mcp.tools._topology_answer import COMPLETENESS_SCHEMA, bounded_answer
 from meho_backplane.operations._lookup import connector_product_known, parse_connector_id
 from meho_backplane.operations.answer_ready import ANSWER_READY_OUTPUT_PROPERTIES
@@ -433,43 +435,28 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
 
 
 _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
-    "Read the topology graph: what depends on what. Scoped to your tenant.\n\n"
+    "Read the topology graph: what depends on what, in your tenant.\n\n"
     "WHEN TO CALL: call `kind=dependents` *before* recommending a destructive "
     "op (delete, shutdown, detach): `{kind: dependents, target: <name>}` "
-    "shows what would break. Also "
-    "for impact ('what does this VM run on?') and routes between two "
-    "resources.\n\n"
-    "KINDS (one tool; `kind` picks the shape):\n"
-    "- `dependents` / `dependencies`: what depends on `target` / what "
-    "`target` needs. Need `target`.\n"
-    "- `path`: shortest route from `from_name` to `to_name`. Needs both.\n"
-    "- `edges`: flat list of edges. Every filter is optional, e.g. "
-    "`source: curated`, or `conflicts: true` for annotations that "
-    "contradict discovered edges.\n"
-    "- `timeline`: graph changes in the tenant, in time order; bound "
-    "it with `since` / `until`. If `next_cursor` is not null, pass it as "
+    "shows what would break.\n\n"
+    "KINDS:\n"
+    "- `dependents` / `dependencies`: what needs `target` / what `target` "
+    "needs. Need `target`.\n"
+    "- `path`: route from `from_name` to `to_name`. Needs both.\n"
+    "- `edges`: flat list of edges; every filter is optional.\n"
+    "- `timeline`: graph changes in time order; pass `next_cursor` as "
     "`cursor` for the next page.\n"
-    "- `diff`: net change per resource between `ts1` (exclusive) and "
-    "`ts2` (inclusive). Needs both. If `truncated` is true, narrow the "
-    "window.\n"
-    "- `history`: every change of one node (`target`), with full before "
-    "and after snapshots; `include_edges: true` adds its edges.\n\n"
+    "- `diff`: net change between `ts1` and `ts2`. Needs both.\n"
+    "- `history`: every change of one node (`target`).\n\n"
     "RULES:\n"
-    "- If a name matches nodes of more than one kind, the call fails and "
-    "names the kinds; pass `node_kind` (and `to_node_kind` for `path`).\n"
+    "- A name that matches nodes of more than one kind fails; pass "
+    "`node_kind` (and `to_node_kind` for `path`).\n"
     '- `status: "node_untracked"` means MEHO has no graph data for that '
-    "name. It is NOT 'safe to delete': there is no impact answer.\n"
-    "- Closures follow every edge kind. `via_relation_class` on each row "
-    "says `containment`, `placement`, `dependency` or `unknown`; only "
-    "`dependency` is a service dependency. Pass `relation_class` to keep "
-    "one class.\n"
-    "- If `completeness.state` is not `complete`, the answer is cut short "
-    "or missing. Never read it as everything that is affected; "
-    "`completeness.guidance` says how to narrow.\n"
-    "- A large answer has a `handle` instead of rows; read every row with "
-    "`result_query`.\n"
-    "- Rows carry `freshness`; the `evidence` block explains each value "
-    "in your answer."
+    "name. It is NOT 'safe to delete'.\n"
+    "- If `completeness.state` is not `complete`, the answer is not the "
+    "full list of what is affected.\n"
+    "- A large answer has a `handle` instead of rows; read them with "
+    "`result_query`."
 )
 
 
@@ -1083,6 +1070,7 @@ register_mcp_tool(
         name=_QUERY_TOPOLOGY_NAME,
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
+        for_settings=with_short_text(QUERY_TOPOLOGY_SHORT),
         description=_QUERY_TOPOLOGY_DESCRIPTION,
         inputSchema=_QUERY_TOPOLOGY_INPUT_SCHEMA,
         outputSchema={
@@ -1727,6 +1715,7 @@ register_mcp_tool(
         name=_LIST_TARGETS_NAME,
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
+        for_settings=with_short_text(LIST_TARGETS_SHORT),
         description=_LIST_TARGETS_DESCRIPTION,
         inputSchema=_LIST_TARGETS_INPUT_SCHEMA,
         outputSchema={

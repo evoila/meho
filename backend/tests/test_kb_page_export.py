@@ -3,8 +3,9 @@
 
 """The page export of ``POST /api/v1/kb/export`` (#5730), against the test database.
 
-Covers the rules of :mod:`meho_backplane.kb.page_export`: only confirmed,
-generic entries that an operator wrote give a page; retired and replaced
+Covers the rules of :mod:`meho_backplane.kb.page_export`: only confirmed
+or candidate generic entries that an operator wrote give a page (a
+candidate keeps ``status: candidate``); retired and replaced
 entries give a page to remove; imported entries are left out; the page
 has the lesson header and a stable file name; an entry without the
 complete header is skipped; the secret check; the caller's tenant only;
@@ -92,7 +93,7 @@ def _pages(result: KbExportResult) -> dict[str, str]:
 
 
 @pytest.mark.asyncio
-async def test_only_confirmed_generic_entries_give_a_page() -> None:
+async def test_only_confirmed_or_candidate_generic_entries_give_a_page() -> None:
     await _add("snapshot-limits", product="vcenter", version="8.0")
     await _add("a-candidate", status="candidate")
     await _add("a-dispute", status="disputed")
@@ -100,9 +101,35 @@ async def test_only_confirmed_generic_entries_give_a_page() -> None:
     await _add("a-target", applies_to="target")
     await KbService().create_entry(TENANT, "no-header", "Text.", None)
     result = await export_pages(TENANT)
-    assert [page.path for page in result.pages] == ["snapshot-limits.md"]
-    assert result.pages[0].slug == "snapshot-limits"
-    assert (result.page_count, result.remove_count, result.skipped_count) == (1, 0, 0)
+    assert [page.path for page in result.pages] == ["a-candidate.md", "snapshot-limits.md"]
+    assert result.pages[1].slug == "snapshot-limits"
+    assert (result.page_count, result.remove_count, result.skipped_count) == (2, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_keeps_status_candidate_for_review() -> None:
+    """A lesson that is not confirmed yet reaches the wiki as a candidate (#5976)."""
+    await _add("new-lesson", status="candidate")
+    result = await export_pages(TENANT)
+    header, _body = parse_front_matter(result.pages[0].content, "new-lesson.md")
+    assert header["status"] == "candidate"
+    assert "expires_at" in header
+
+
+@pytest.mark.asyncio
+async def test_an_imported_candidate_is_not_exported() -> None:
+    await _add("from-wiki", status="candidate")
+    await _set_provenance(
+        "from-wiki",
+        stamp_provenance(
+            {},
+            source_kind="import",
+            relative_path="products/x/from-wiki.md",
+            ingested_at=datetime(2026, 11, 8, tzinfo=UTC),
+        )["provenance"],
+    )
+    result = await export_pages(TENANT)
+    assert (result.page_count, result.remove_count, result.skipped_count) == (0, 0, 0)
 
 
 @pytest.mark.asyncio

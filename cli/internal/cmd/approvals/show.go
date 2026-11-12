@@ -149,6 +149,9 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	if right := approveRightText(d.MayApprove, d.MayApproveReason); right != "" {
 		fmt.Fprintf(w, "May approve:  %s\n", output.SafeText(right))
 	}
+	if d.RightsChange != nil && *d.RightsChange {
+		fmt.Fprintln(w, "Rights change: another admin must approve")
+	}
 	fmt.Fprintf(w, "Connector:    %s\n", output.SafeText(d.ConnectorId))
 	fmt.Fprintf(w, "Operation:    %s\n", output.SafeText(d.OpId))
 	// Resolved subject of a path-variable op (#3353): the concrete entity
@@ -164,7 +167,7 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	if rc != nil && rc.ParentCompositeOpId != nil && *rc.ParentCompositeOpId != "" {
 		fmt.Fprintf(w, "Part of:      %s\n", output.SafeText(*rc.ParentCompositeOpId))
 	}
-	fmt.Fprintf(w, "Principal:    %s\n", principalLabel(d.PrincipalSub, d.PrincipalName))
+	fmt.Fprintf(w, "Principal:    %s\n", requesterLabel(d.PrincipalSub, d.PrincipalName, d.PrincipalKind))
 	if d.PrincipalAct != nil {
 		fmt.Fprintf(w, "Acting as:    %s\n", output.SafeText(*d.PrincipalAct))
 	}

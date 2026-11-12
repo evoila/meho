@@ -29,17 +29,28 @@ ends is then audited, and a second person must approve it. #3851 adds
 sessions of one user, so their refresh tokens stop working at once. #3886 adds a
 fourth destructive delete, `realm.delete` (write surface **eighteen**), so a
 short-lived realm (a test run, a demo, a failed set-up) is removed through
-MEHO too, not by a direct API call.
+MEHO too, not by a direct API call. #4940 adds `user.disable` and
+`user.enable` (write surface **twenty**): they turn an account off and on
+without deleting it.
 `user.check_login` tests one login with a password from Vault and answers
 only `accepted`, `refused` or `error`, so an operator can prove a password
 change worked (the new password is accepted, the old one refused) without a
 `curl` call outside MEHO.
 `keycloak.authflow.ensure_approval_flow` and the read
-`keycloak.identity_provider.list` (read surface **eleven**) set up the
-approval sign-in flow, and `keycloak.authflow.ensure_passkey_code_skip`
-changes the browser sign-in flow for passkeys. In total the connector
-registers 32 operations: 11 `safe` reads and 21 writes that wait for
-approval (11 `caution`, 6 `dangerous`, 4 `destructive`).
+`keycloak.identity_provider.list` set up the
+approval sign-in flow, `keycloak.authflow.ensure_passkey_code_skip`
+changes the browser sign-in flow for passkeys, and
+`keycloak.authflow.ensure_approval_touch` gives the console client the
+login flow with the passkey touch level. Three more safe reads show the
+login setup: `keycloak.auth_flow.step.list`, `keycloak.required_action.list`
+and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
+`keycloak.user.sessions`, show one user's state after a logout or a password
+reset. In total the connector registers 42
+operations: 17 `safe` reads and 25 writes that wait for
+approval (7 `caution`, 14 `dangerous`, 4 `destructive`).
+`keycloak.user.required_actions.update` makes a user set up a one-time code
+(OTP) at the next login, and `keycloak.user.otp_status` shows who has one
+(see "One-time code set-up").
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -53,14 +64,16 @@ fresh target with no asserted version still resolves.
   thin bound-method shim per read op (`realm_get`, `client_list`,
   `client_get`, `client_scope_list`, `user_list`, `role_mapping_get`,
   `role_list`, `role_users`, `group_list`, `group_member_list`,
-  `identity_provider_list`) and
+  `identity_provider_list`, `auth_flow_step_list`, `required_action_list`,
+  `events_config_get`) and
   per write op (`realm_create`/`realm_update`, `client_create`/
   `client_update`, `client_scope_create`, `protocol_mapper_create`,
   `user_create`/`user_reset_password`, `role_mapping_assign`,
   `group_create`, `group_update_attributes`, `group_member_add`,
   `group_member_remove`, `user_delete`, `group_delete`, `client_delete`,
-  `user_logout`, `realm_delete`, `user_check_login`,
-  `authflow_ensure_approval_flow`, `authflow_ensure_passkey_code_skip`),
+  `user_logout`, `user_disable`, `user_enable`, `realm_delete`, `user_check_login`,
+  `authflow_ensure_approval_flow`, `authflow_ensure_passkey_code_skip`,
+  `authflow_ensure_approval_touch`),
   the `_get_admin_json` / `_get_admin_list` GET
   helpers (object vs array responses), and the `_write_admin` mutating
   helper (POST/PUT/**DELETE**) plus the `_find_client_uuid` /
@@ -87,7 +100,9 @@ fresh target with no asserted version still resolves.
 - `WRITE_OPS` (`connectors/keycloak/ops_write_schemas.py`, re-exported by
   `ops_write.py`) + the write handlers (`connectors/keycloak/ops_write.py`) —
   the nine original approval-gated write ops plus `user.logout` (#3851),
-  with `GROUP_WRITE_OPS` and `DELETE_WRITE_OPS` spliced in,
+  with `GROUP_WRITE_OPS`, `DELETE_WRITE_OPS` and `USER_ENABLED_OPS`
+  (`ops_write_user_enabled_schemas.py`; handlers in
+  `ops_write_user_enabled.py`) spliced in,
   reusing the `KeycloakOp` dataclass.
   Every op is `requires_approval=True`; a create treats HTTP 409 as an
   idempotent success; `user.create`/`user.reset_password` source the
@@ -100,6 +115,9 @@ fresh target with no asserted version still resolves.
   (`connectors/keycloak/ops_login_check.py`) — the login test op, its
   group text (`WHEN_TO_USE_LOGIN_CHECK_BY_GROUP`) and its approval card.
   It reuses `_read_password_from_vault` from `ops_write.py`.
+- `USER_REQUIRED_ACTION_OPS` + `keycloak_user_required_actions_update` +
+  `keycloak_user_otp_status` (`connectors/keycloak/ops_user_required_actions.py`)
+  — the one-time code ops and the approval card of the write.
 - `KeycloakWriteResult` (`connectors/keycloak/connector.py`) — the
   status + `Location` + `conflict` outcome of a mutating request;
   `created_uuid()` parses the new object's UUID out of `Location`.
@@ -237,7 +255,9 @@ rejects a whitespace-only secret rather than setting an empty password.
 
 Ten `safety_level="safe"` / `requires_approval=False` read ops in this
 table (an eleventh, `keycloak.identity_provider.list`, is described with the
-approval sign-in flow), all
+approval sign-in flow; three more are in "Login setup reads" below, and two
+more, `keycloak.user.get` and `keycloak.user.sessions`, are described with the
+user reads below), all
 tagged `read-only`, all dispatching via the admin-auth path. The realm is
 the target's `managed_realm` (no per-op realm param):
 
@@ -248,6 +268,8 @@ the target's `managed_realm` (no per-op realm param):
 | `keycloak.client.get` | `GET .../clients/{id}` | one client (flows, redirect URIs, mappers) |
 | `keycloak.client_scope.list` | `GET .../client-scopes` | `{rows, total}` |
 | `keycloak.user.list` | `GET .../users` (`?username=`/`?max=`) | `{rows, total}`, no credentials |
+| `keycloak.user.get` | `GET .../users/{user-id}` and `.../credentials` | one user's state, credential type and date only |
+| `keycloak.user.sessions` | `GET .../users/{user-id}/sessions` | `{count, sessions}`, no session id, no token |
 | `keycloak.role_mapping.get` | `GET .../users/{id}/role-mappings` | realm + client role mappings |
 | `keycloak.role.list` | `GET .../roles` | `{rows, total}` — realm role catalogue |
 | `keycloak.role.users` | `GET .../roles/{role-name}/users` | `{rows, total}`, no credentials — role members |
@@ -305,6 +327,31 @@ and masks secret-named fields by name as well.
 `keycloak.client.get` with the recorder on and checks that a made-up client
 secret is in neither the stored trace nor the agent copy.
 
+## User state reads (`ops_user_state.py`)
+
+Two `safe` reads in the `user` group. Both take `id` (the user's UUID) or
+`username` (an exact match, not the "contains" search of `user.list`). A user
+that does not exist raises `KeycloakUserNotFoundError` ("user not found").
+
+- `keycloak.user.get` reads `GET .../users/{user-id}` and
+  `GET .../users/{user-id}/credentials`. The result is `{id, username,
+  enabled, emailVerified, requiredActions, notBefore, createdTimestamp,
+  credentialDates: [{type, createdDate}]}`. Only these fields are copied out
+  (an allow-list): never `secretData`, `credentialData` or `value`. The list
+  is named `credentialDates` because MEHO hides every answer field named
+  `credentials`. For a `password` credential, `createdDate` is when the
+  password was last set.
+- `keycloak.user.sessions` reads `GET .../users/{user-id}/sessions`. The
+  result is `{userId, count, sessions: [{started, lastAccess, ipAddress,
+  clients}]}`. No session id and no token. A user with no session gives
+  `count: 0`. Offline sessions are not read.
+
+All times are ISO 8601 in UTC. Keycloak gives `notBefore` in seconds and the
+other times in milliseconds; a `notBefore` of 0 (never set) is `null`. Use
+both after `keycloak.user.logout` or `keycloak.user.reset_password` to check
+the result. A failed read, or a body of the wrong shape, is an error, never
+an empty answer.
+
 ## Write ops (G3.13-T4, extended by #3280)
 
 Approval-gated write ops (`requires_approval=True`), all
@@ -314,12 +361,12 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 |---|---|---|
 | `keycloak.realm.create` | dangerous | `POST /admin/realms` |
 | `keycloak.realm.update` | caution | `PUT .../realms/{realm}` |
-| `keycloak.client.create` | caution | `POST .../realms/{realm}/clients` |
-| `keycloak.client.update` | caution | `PUT .../clients/{id}` |
+| `keycloak.client.create` | dangerous | `POST .../realms/{realm}/clients` |
+| `keycloak.client.update` | dangerous | `PUT .../clients/{id}` |
 | `keycloak.client_scope.create` | caution | `POST .../client-scopes` |
-| `keycloak.protocol_mapper.create` | caution | `POST .../clients/{id}/protocol-mappers/models` |
-| `keycloak.user.create` | caution | `POST .../realms/{realm}/users` |
-| `keycloak.user.reset_password` | caution | `PUT .../users/{id}/reset-password` |
+| `keycloak.protocol_mapper.create` | dangerous | `POST .../clients/{id}/protocol-mappers/models` |
+| `keycloak.user.create` | dangerous | `POST .../realms/{realm}/users` |
+| `keycloak.user.reset_password` | dangerous | `PUT .../users/{id}/reset-password` |
 | `keycloak.role_mapping.assign` | dangerous | `POST .../users/{id}/role-mappings/realm` |
 | `keycloak.group.create` | dangerous | `POST .../groups` (or `.../groups/{group-id}/children`) |
 | `keycloak.group.update_attributes` | dangerous | `PUT .../groups/{group-id}` |
@@ -329,10 +376,35 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.group.delete` | destructive | `DELETE .../groups/{group-id}` |
 | `keycloak.client.delete` | destructive | `DELETE .../clients/{client-uuid}` |
 | `keycloak.user.logout` | caution | `POST .../users/{user-id}/logout` |
+| `keycloak.user.disable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: false`) |
+| `keycloak.user.enable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: true`) |
 | `keycloak.realm.delete` | destructive | `DELETE /admin/realms/{realm}` |
 | `keycloak.authflow.ensure_passkey_code_skip` | caution | `POST .../authentication/flows/browser/copy`, then `PUT .../realms/{realm}` |
 | `keycloak.authflow.ensure_approval_flow` | caution | `.../authentication/flows` and the client `PUT` (see "Approval sign-in flow and identity providers") |
+| `keycloak.authflow.ensure_approval_touch` | caution | `.../authentication/flows`, step settings, the realm `PUT`, the client's mapper and `PUT` (see "Console touch flow") |
 | `keycloak.user.check_login` | caution | `POST /realms/{realm}/protocol/openid-connect/token` (see "Login test") |
+| `keycloak.user.required_actions.update` | dangerous | `PUT .../users/{user-id}` (see "One-time code set-up") |
+
+Six more writes are `dangerous` because they can change who gets which
+tenant rights, or how strong a sign-in is. MEHO reads the rights from the
+login token, and these writes change what goes into it, who can sign in as
+whom, or what a sign-in asks for:
+
+- `user.create`: the new user can carry a `groups` list and attributes.
+- `client.create` and `client.update`: a client carries the mappers and
+  scopes that fill the token.
+- `protocol_mapper.create`: a mapper decides the claims, also `tenant_id`
+  and `tenant_role`.
+- `user.reset_password`: it sets the password of any user of the realm.
+- `user.required_actions.update`: taking a required action away (for
+  example the one-time code set-up) makes a user's sign-in weaker.
+
+At `dangerous`, only a MEHO-SA-Operator or a tenant admin may approve
+another person's request. The single-operator self-approval switch
+(`APPROVAL_ALLOW_SELF_APPROVAL`) does not cover them. The test
+`backend/tests/test_keycloak_identity_write_approvers.py` checks both rules
+against the registered levels of the first five. The test of the one-time
+code set-up checks that `user.required_actions.update` is `dangerous`.
 
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
 + membership drive the backplane's tenant claims (`tenant_id` /
@@ -552,6 +624,85 @@ for example at the end of an event or when someone leaves.
   `broadcast/events.py::_WRITE_OPS`, because `.logout` is not a write suffix).
 - CLI: `meho keycloak user logout (--id|--username)`.
 
+### Turn a user off and on (#4940)
+
+`keycloak.user.disable` and `keycloak.user.enable` set `enabled` to false or
+true on one user. The account and its history stay. A disabled person can no
+longer sign in to any app that uses this realm.
+
+- Pass `id` (the user's UUID) or `username` (exact match, looked up with
+  `_find_user_uuid`).
+- The op reads the user, puts `enabled` on top and writes the whole user back
+  (`read_merge_write`), so no other field is reset. It reads the user again
+  and names any field that changed without being asked
+  (`unrequested_changes`, names only).
+- Safe to run twice: setting `enabled` to the value it already has succeeds.
+  A user that does not exist raises `KeycloakUserNotFoundError` and nothing
+  is written.
+- **Disabling does not end sessions that are already open.** To cut access at
+  once, run `keycloak.user.disable`, then `keycloak.user.logout`.
+- Risk level `dangerous`, approval required, group `user_write`. On the
+  broadcast feed both are a plain `write` (declared in `op_classes.py`,
+  because `.disable` and `.enable` are not write suffixes).
+- The result is `{id, username, enabled, unrequested_changes, read_back_checked}`
+  and carries no credential.
+
+### One-time code set-up
+
+Two ops in `ops_user_required_actions.py`. The usual use is to make users
+set up a one-time code (OTP) app: Keycloak then asks for a code at every
+login.
+
+- `keycloak.user.required_actions.update` (dangerous, approval required,
+  group `user_write`). Params: the user (`id` or `username`) and an `add`
+  and/or a `remove` list of required action names, for example
+  `{"username": "alice", "add": ["CONFIGURE_TOTP"]}`.
+  - Keycloak's `PUT .../users/{id}` replaces the whole `requiredActions`
+    list. So the op reads the user, builds the new list (other actions
+    stay), and writes that same read back with `read_merge_write`
+    (`before=` the read). There is no second read before the write, so
+    the written list and the rest of the user come from one read.
+  - After approval, the op uses the user id shown on the approval card.
+    It does not look the username up again. A card without a user id is
+    refused, and nothing is written.
+  - A request with both `id` and `username` must name one user: the
+    username stored in Keycloak for that id must match (case does not
+    count). If not, the request is refused before it waits for approval
+    (a park check), and again when the approved request runs. Nothing is
+    written.
+  - Each name in `add` must be an enabled required action of the realm
+    (`GET .../authentication/required-actions`). An unknown or disabled
+    name is refused before any write, and the error lists the allowed
+    names. A name in both lists is refused too.
+  - When the list would not change, nothing is written (`changed: false`).
+  - Answer: `{id, username, realm, changed, added, removed,
+    required_actions, unrequested_changes, read_back_checked}`.
+  - The approval card shows `{resource, username, id, realm, add, remove,
+    current_available[, current_required_actions,
+    resulting_required_actions][, warning]}`. When the user could be
+    read, the card and the answer show the username stored in Keycloak.
+    When the user cannot be read at park time, the card still shows the
+    request.
+  - When the realm is the one MEHO's own sign-in uses and `add` has a
+    passkey set-up (`webauthn-register` or
+    `webauthn-register-passwordless`), the card's `warning` says: "this
+    lets the next sign-in to this account add a new passkey".
+  - Two writers at the same time can overwrite each other: Keycloak has no
+    version check on a user.
+- `keycloak.user.otp_status` (safe read, group `user`). Params: `username`
+  (filter) and `max` (default 100, most 500). Keycloak's user list answers
+  a short form without `requiredActions` by default, so `keycloak.user.list`
+  cannot answer this. The op asks for the full form, then reads each
+  user's credentials (one request per user, eight at a time) and keeps
+  only whether a credential of type `otp` exists. Answer: `{rows: [{id,
+  username, enabled, required_actions, has_otp, otp_setup_pending}], total,
+  unknown, truncated, skipped_no_id}`. `has_otp` is `null` (unknown) when
+  the credentials of that user could not be read. `skipped_no_id` counts
+  the user rows left out because Keycloak gave them no id. `truncated` is `true` when more users
+  exist than `max`. A user list answer that is not a list is an error,
+  not an empty list. No credential value, label or other credential field
+  is ever returned.
+
 ### Login test
 
 `keycloak.user.check_login` tries one login for one user and answers only
@@ -742,6 +893,22 @@ Both ops read lists with `get_admin_list_strict`: a body that is not a JSON
 array raises `KeycloakUnexpectedResponseError`, so a failed read never looks
 like an empty list.
 
+### Login setup reads (`ops_flow_reads.py`)
+
+Three `safe` reads, group `login_setup`, for the checks before one-time codes
+or event saving are turned on. Each copies only a fixed list of fields (an
+allow-list). No step setting, no `config` map and no secret is returned.
+A failed read, or a body of the wrong shape, is an error, never an empty list.
+
+| op_id | Admin REST API | returns |
+|---|---|---|
+| `keycloak.auth_flow.step.list` | `GET .../authentication/flows/{flowAlias}/executions` | `{realm, flow, rows: [{level, index, displayName, requirement, providerId, authenticationFlow}], total}`. Param `flow` (alias); default: the realm's `browserFlow`. An unknown alias raises `KeycloakFlowNotFoundError` ("flow not found"). |
+| `keycloak.required_action.list` | `GET .../authentication/required-actions` | `{realm, rows: [{alias, name, enabled, defaultAction, priority}], total}`, sorted by `priority` (the order at login; no priority sorts last). |
+| `keycloak.events.config.get` | `GET .../events/config` | `{realm, eventsEnabled, eventsExpiration, eventsListeners, enabledEventTypes, adminEventsEnabled, adminEventsDetailsEnabled}`. Keycloak fills `enabledEventTypes` with its default list when the realm sets none; `keycloak.realm.get` shows `[]` then. |
+
+The first op is named `.step.list` and not `.executions`, because the event
+feed treats a name that ends in `.list` as a read.
+
 ### Skip the one-time code after a passkey (#5663)
 
 Keycloak 26.4 and newer puts the step `conditional-credential`
@@ -806,12 +973,86 @@ browser login of the realm will use it, and the way back:
 `keycloak.realm.update` with `{"browserFlow": "browser"}`. The op is pinned
 as a plain `write` in `connectors/keycloak/op_classes.py`.
 
+### Console touch flow (#6213)
+
+`keycloak.authflow.ensure_approval_touch` (`ops_authflow_touch.py`, the
+flow shape and metadata in `ops_authflow_touch_schemas.py`) — risk level
+`caution`, approval required, group `authflow_write`, params `client_id`
+(only `meho-web`; the schema refuses another client) and `replace_custom_login` (default `false`). It gives a running realm what the chart's realm
+file gives a new one: the login flow `meho approval touch` with level 1
+(the normal login) and level 3 (`acr_values=meho-touch`, a passkey every
+time; level 2 is kept for the approval sign-in, `meho-approve`). On the target's managed realm:
+
+1. Find the client. Missing: stop with `client_not_found`, nothing
+   written. The realm's passkey policy must ask for user verification
+   (`webAuthnPolicyPasswordlessUserVerificationRequirement` is
+   `required`); otherwise a touch could pass without a PIN or fingerprint,
+   so the op stops with `verification_not_required`, nothing written.
+2. Find the flow. Missing: check that the Keycloak has every step
+   (`GET .../authentication/authenticator-providers`; Keycloak 26.4 added
+   `conditional-credential`), else stop with `missing_step` before any
+   write. Then make it (`POST .../flows`), add each step and
+   sub-flow in order, read the steps back, set each requirement (a new
+   step starts `DISABLED`; steps are matched by place, because the level
+   condition is in the flow twice), and give the four steps with
+   settings their config (`POST .../executions/{id}/config`). Read it
+   again: steps, requirements and every setting must match
+   (`check_failed` otherwise). There with the same shape and settings:
+   nothing written. There with another shape: stop with `other_steps`.
+3. Map `meho-touch` to level 3 in the realm attribute `acr.loa.map`,
+   next to the names already there (full realm `PUT` with
+   `merge_representation`, read back). Mapped to another level: stop
+   with `loa_conflict` before the bind.
+4. Add the `amr` mapper (`oidc-amr-mapper`) to the client unless it has
+   one. A mapper there that leaves the claim out of the ID token, the
+   access token or the introspection gets those settings turned on (a
+   `PUT` of that mapper, read back; `check_failed` otherwise).
+5. When the realm's browser flow has a company login default on its
+   `identity-provider-redirector` step, give the touch flow's redirector
+   the same `defaultProvider` (new config alias
+   `meho-company-login-redirect-touch`, the name `core/company_login.py`
+   uses, or a `PUT` of the config that is there; read back). Without it
+   the console login stops going straight to the company login until the
+   next chart upgrade. When the realm's flow has no default, a default on
+   the touch flow is removed (`DELETE` of its config, read back), as
+   `core/company_login.py` does.
+6. Bind the flow as the client's browser flow (full client `PUT`, read
+   back). This is the last write. Level 1 is a copy of Keycloak's
+   default login, so the op binds only when the realm's browser flow is
+   `browser` with the default steps, requirements and settings, or
+   `browser with passkeys` with the steps and settings of that `browser`
+   plus the passkey step, and the client has no browser flow of its own.
+   Both flows can be edited, so the op reads them. The default shapes
+   are in `ops_authflow_default_login.py` (the Go helper has the same
+   list in `cli/internal/cmd/admin/keycloak/defaultlogin.go`): Keycloak
+   26.0 to 26.2, 26.3 and newer, with or without the passkey condition,
+   WebAuthn, recovery codes and the organization step. The company
+   login default on the redirect step is allowed; it is MEHO's own
+   setting. The shapes with the organization step count only while the
+   realm's `organizationsEnabled` is false or missing: level 1 has no
+   organization step. Otherwise it
+   makes the flow, does not bind it, and returns `bound: false` with
+   `not_bound_reason`. With `replace_custom_login: true` it binds anyway;
+   `previous_browser_flow_id` names the flow it replaced. A client bound
+   to the touch flow already stays bound and returns `bound: true`, also
+   on a later run without `replace_custom_login`.
+
+The result is `{realm, flow_alias, flow_id, flow_created, flow_steps,
+loa_map_changed, amr_mapper_added, amr_mapper_fixed, redirect_default_copied, client_id, client_uuid,
+bound, not_bound_reason, browser_flow_id, previous_browser_flow_id, binding_changed}`. Errors
+raise `KeycloakTouchFlowError` with a stable `code`. A test keeps the
+op's flow equal to the realm file's. The approval card names the realm,
+the client, the new flow, who is affected, and the way back:
+`keycloak.client.update` with `{"authenticationFlowBindingOverrides":
+{"browser": ""}}`. The op is pinned as a plain `write` in
+`connectors/keycloak/op_classes.py`.
+
 ### Park-time approval preview (#1857)
 
-Fifteen of the write ops register bespoke `proposed_effect` preview builders
+Sixteen of the write ops register bespoke `proposed_effect` preview builders
 (twelve in `connectors/keycloak/ops_write_preview.py`, one in
 `ops_login_check.py`, one in `ops_authflow_passkey.py`, one in
-`ops_write_realm_smtp.py`), wired onto the per-op hook
+`ops_authflow_touch.py`, one in `ops_write_realm_smtp.py`), wired onto the per-op hook
 (`operations/_preview.py`, #1437) by an import side-effect in the package
 `__init__`. They give the approval reviewer a resource-centric view at park
 time — secrets scrubbed via the same `redact_secret_fields` the read ops
@@ -830,8 +1071,10 @@ use:
 | `keycloak.group.delete` | `{blast_radius}` — name, path, member count (up to 1000), sub-group count; direct sub-groups as children |
 | `keycloak.client.delete` | `{blast_radius}` — client id, enabled or not, public or confidential; its service-account user as a child; never the secret |
 | `keycloak.realm.delete` | `{blast_radius}` — realm, enabled or not, user / client / group counts; never the realm body |
+| `keycloak.user.required_actions.update` | `{resource, username, id, realm, add, remove, current_available[, current_required_actions, resulting_required_actions]}` (registered in `ops_user_required_actions.py`) |
 | `keycloak.user.check_login` | `{resource, username, realm, client_id, password_source, password_secret_ref[, password_secret_mount, password_secret_key]}` (registered in `ops_login_check.py`) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back}` (registered in `ops_authflow_passkey.py`) |
+| `keycloak.authflow.ensure_approval_touch` | `{resource, realm, client_id, new_flow, affects, way_back}` (registered in `ops_authflow_touch.py`) |
 | `keycloak.realm.update` | `{resource, realm, representation[, smtp_password_source, smtp_password_secret_ref]}` (registered in `ops_write_realm_smtp.py`) |
 
 The group builders surface `attribute_keys` (which attributes change,
@@ -871,10 +1114,10 @@ Keycloak spec quirk). The lane
 [`backend/tests/test_connectors_keycloak_spec_reconcile.py`](../../backend/tests/test_connectors_keycloak_spec_reconcile.py)
 (the #2980 harness; parse-only, runs in the required unit sweep, uniform
 skip when the shelf is unconfigured) introspects those live constants and
-asserts all 48 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
+asserts all 49 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
 paths at #3280, +4 delete paths at #3944, +1 user logout path at #3851,
 +3 realm-delete paths at #3886, +8 login flow and identity provider
-paths at #5621, +3 passkey step paths) are served by the pinned
+paths at #5621, +3 passkey step paths, +1 user PUT path at #4940) are served by the pinned
 `keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
 Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
 `org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Three dispatched

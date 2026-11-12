@@ -45,6 +45,7 @@ import asyncio
 import io
 import json
 import logging
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -388,6 +389,7 @@ def test_happy_path_returns_full_federation_response(
         "approval_custody",
         "vault_tenant_scope",
         "mcp",
+        "policy",
     ]
     assert all({"name", "configured", "missing_env"} == set(entry) for entry in features)
     # #4830: the approval key comes from the test env (conftest), so pin the
@@ -416,6 +418,11 @@ def test_happy_path_returns_full_federation_response(
         "spend_counted": True,
     }
 
+    # #5504: the server's time now, in UTC, to the second. Its value moves,
+    # so pin the format here; tests/test_health_server_time.py pins the rest.
+    server_time = body.pop("server_time")
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", server_time)
+
     head = ScriptDirectory.from_config(alembic_config()).get_current_head()
     assert body == {
         # #2746: OperatorIdentity now carries tenant_id + tenant_role, so the
@@ -428,7 +435,7 @@ def test_happy_path_returns_full_federation_response(
             "tenant_role": "operator",
             "tenants": [],
         },
-        "vault": {"reachable": True, "read_ok": True, "detail": "version=11"},
+        "vault": {"reachable": True, "read_ok": True, "detail": "version=11", "checked": True},
         # #4830: the probe's revisions ride along so an upgrade can be
         # confirmed from ``meho status``.
         "db": {"migrated": True, "revision": head, "head": head, "detail": f"revision={head}"},

@@ -12,6 +12,9 @@ policies, the conventions and the targets. The settings file
 The file never holds a secret. Passwords and keys stay in your secret
 store.
 
+The categories and classifications of operations are in a separate file:
+see [The policy file](policy-file.md).
+
 !!! note "REST only"
 
     The command line and the web console do not have it yet. Today you
@@ -54,6 +57,7 @@ spec:
         flight_recorder: { enabled: true, retention_days: 14, agent_readable: null }
         mail_recipient_allowlist: "@example.com"
         run_approval_target_kinds: false
+        knowledge_wiki_collection: null
       conventions:
         - slug: change-window
           title: Change window
@@ -74,6 +78,9 @@ spec:
   parts:
     - `policies`: the tenant's switches, such as the flight recorder
       and the mail allow list. `null` means "use the default".
+      `knowledge_wiki_collection` names the docs collection of the
+      tenant's own wiki (see
+      [Lessons in your own wiki](memory-and-knowledge.md#lessons-in-your-own-wiki)).
     - `conventions`: the tenant's conventions, one per `slug`.
     - `targets`: the tenant's targets, one per `name`. A target has the
       same fields as when you register it (see

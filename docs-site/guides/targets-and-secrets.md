@@ -41,11 +41,11 @@ MEHO checks both against the approval rules.
 **Register targets on the operator surfaces above.** Registration is an
 operator-trust decision. For agents, the default MCP tools only read
 targets (`list_targets`). A session that asked for the `mcp:admin`
-scope also has `meho_targets_register` (tenant_admin only). Through
-`call_operation`, the connector `targets-registry-1.x` offers
-`targets.register`, `targets.remove` and `targets.probe`; an agent's
-register waits for a person's approval, and `targets.remove` always
-waits for one. MEHO has no MCP tool to stage a secret. This is also why
+scope also has `meho_targets_register` and `meho_targets_update`
+(tenant_admin only). Through `call_operation`, the connector
+`targets-registry-1.x` offers `targets.register`, `targets.update`,
+`targets.remove` and `targets.probe`; an agent's register and every update
+wait for a person's approval, and `targets.remove` always waits for one. MEHO has no MCP tool to stage a secret. This is also why
 the CLI is worth installing before your first agent session.
 
 ## Write a `targets.yaml`
@@ -326,6 +326,29 @@ meho targets list --product k8s     # everything registered, filterable
 meho targets discover k8s           # candidate systems a connector can see
                                     # from an already-registered seed target
 ```
+
+## Network ports and account rights: the VMware family
+
+Open these ports from MEHO to the target, and give the target login at
+least these rights. These are the vendor's own role names and standard
+ports.
+
+| Target system | Port MEHO opens | Rights for reads | Extra rights for changes |
+| --- | --- | --- | --- |
+| vCenter | HTTPS 443 | The built-in `Read-only` role, set on the top of the inventory with "propagate to children". | A role that holds the rights of each change, for example power operations or snapshots on virtual machines. Set it only on the folders or clusters MEHO may change. |
+| ESXi host | HTTPS 443 | The built-in `Read-only` role on the host. | A role with the rights of each change. |
+| NSX | HTTPS 443 to NSX Manager | The built-in `Auditor` role. | `Network Admin`, or `Enterprise Admin` for the whole estate. |
+| SDDC Manager | HTTPS 443 | The `VIEWER` role. | `OPERATOR`, or `ADMIN` for lifecycle tasks. |
+| VCF Operations | HTTPS 443 | The `ReadOnly` role. | A role that may edit the object a change touches. |
+| VCF Automation | HTTPS 443 | See the vendor guide of your version. | See the vendor guide of your version. |
+| Operations for logs | HTTPS 443 | See the vendor guide of your version. | See the vendor guide of your version. |
+
+Use a separate login for reads and for changes where you can. MEHO also
+asks a person to approve a risky change before it runs
+([Approvals and break-glass](approvals-and-break-glass.md)).
+
+When a right is missing, the call fails with the vendor's own error.
+MEHO passes that error on and changes nothing.
 
 ## What can go wrong here
 

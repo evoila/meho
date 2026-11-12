@@ -35,7 +35,10 @@ most restrictive across all three:
    before the first glob metacharacter ``*``/``?``/``[``) — more specific
    grants override broader defaults. On a specificity tie, fold to the
    most-restrictive verdict (fail-closed). When no row matches, use the
-   ``safety_level`` default.
+   ``safety_level`` default. With ``AGENT_GRANT_REQUIRED=on`` (#6189), an
+   agent login with no matching row gets ``deny`` on every level instead,
+   with a reason that starts with ``agent_no_grant:``; ``observe`` keeps
+   the default and logs ``agent_no_grant_would_deny``.
 
 3. **Op-requirement gate.** The op's ``safety_level`` drives the
    default verdict (used when no row matches) and a ceiling on how
@@ -105,7 +108,9 @@ References
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from typing import Any
@@ -116,8 +121,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.models import AgentPermission, PermissionVerdict
+from meho_backplane.settings import get_settings
 
 __all__ = [
+    "agent_grant_name",
+    "agent_no_grant_already_logged",
+    "agent_no_grant_log_scope",
+    "matched_grant",
     "resolve_verdict",
 ]
 
@@ -336,8 +346,180 @@ def _pick_raw_verdict(
 
 
 # ---------------------------------------------------------------------------
+# No grant at all (AGENT_GRANT_REQUIRED, #6189)
+# ---------------------------------------------------------------------------
+
+
+#: The ``agent_no_grant_would_deny`` lines already written in this call, as
+#: ``(agent, op_id, target_id)``. ``None`` outside a call: then each check logs.
+_no_grant_logged: ContextVar[set[tuple[str, str, str | None]] | None] = ContextVar(
+    "_no_grant_logged", default=None
+)
+
+
+@contextmanager
+def agent_no_grant_log_scope(*, new: bool = False) -> Iterator[None]:
+    """Log ``agent_no_grant_would_deny`` at most once per call inside this block.
+
+    One call can check the same grant more than once: a destructive call
+    builds its preview again to check the preview hash, and a preview with
+    a check before the wait for approval runs the policy gate twice. Inside
+    this block, a second check of the same agent, operation and target
+    writes no second line. ``new=True`` starts a fresh call (a top-level
+    ``dispatch``); otherwise an open block is reused, so a preview built
+    inside a call counts as part of that call.
+    """
+    if not new and _no_grant_logged.get() is not None:
+        yield
+        return
+    token = _no_grant_logged.set(set())
+    try:
+        yield
+    finally:
+        _no_grant_logged.reset(token)
+
+
+#: True inside :func:`agent_no_grant_already_logged`.
+_no_grant_log_muted: ContextVar[bool] = ContextVar("_no_grant_log_muted", default=False)
+
+
+@contextmanager
+def agent_no_grant_already_logged() -> Iterator[None]:
+    """Count the ``agent_no_grant_would_deny`` lines of this block as written.
+
+    A check inside this block writes no line, but it marks its agent,
+    operation and target as logged in the open call. An approved call
+    that resumes uses it: its lines were written when the call was made
+    (#6314), so a step check of the resumed call writes them no second time.
+    """
+    token = _no_grant_log_muted.set(True)
+    try:
+        yield
+    finally:
+        _no_grant_log_muted.reset(token)
+
+
+def _log_would_deny(
+    *, operator: Operator, agent: str, op_id: str, target_str: str | None, safety_level: str
+) -> None:
+    """Write ``agent_no_grant_would_deny`` unless this call already wrote it."""
+    logged = _no_grant_logged.get()
+    key = (agent, op_id, target_str)
+    if logged is not None:
+        if key in logged:
+            return
+        logged.add(key)
+    if _no_grant_log_muted.get():
+        return
+    _log.info(
+        "agent_no_grant_would_deny",
+        agent=agent,
+        tenant_id=str(operator.tenant_id),
+        op_id=op_id,
+        target_id=target_str,
+        safety_level=safety_level,
+    )
+
+
+def agent_grant_name(operator: Operator) -> str:
+    """The name a grant for *operator* is keyed on: ``agent:<name>`` when known."""
+    if operator.client_id and operator.client_id.startswith("agent:"):
+        return operator.client_id
+    return operator.sub
+
+
+def _no_grant_refusal(
+    *,
+    operator: Operator,
+    op_id: str,
+    safety_level: str,
+    target_str: str | None,
+) -> tuple[PermissionVerdict, str] | None:
+    """Apply ``AGENT_GRANT_REQUIRED`` to an agent call that no grant matches.
+
+    ``on`` returns a ``deny`` whose reason starts with ``agent_no_grant:``.
+    ``observe`` logs ``agent_no_grant_would_deny`` (once per call, see
+    :func:`agent_no_grant_log_scope`) and returns ``None``, so the
+    risk-level default applies as before. ``off`` returns ``None``.
+    Only agent logins are checked: people, service accounts and runners
+    never reach this table.
+    """
+    if operator.principal_kind is not PrincipalKind.AGENT:
+        return None
+    mode = get_settings().agent_grant_required
+    if mode == "off":
+        return None
+    agent = agent_grant_name(operator)
+    if mode == "observe":
+        _log_would_deny(
+            operator=operator,
+            agent=agent,
+            op_id=op_id,
+            target_str=target_str,
+            safety_level=safety_level,
+        )
+        return None
+    reason = (
+        f"agent_no_grant: agent {agent} has no grant that covers operation "
+        f"{op_id!r}, and MEHO requires a grant for every agent call. "
+        f"An admin adds a grant with `meho agent grant create --principal {agent} "
+        "--op <pattern> --verdict <verdict>`, or in the console under Agents."
+    )
+    return PermissionVerdict.DENY, reason
+
+
+# ---------------------------------------------------------------------------
 # Main resolver
 # ---------------------------------------------------------------------------
+
+
+def _target_str(target_id: Any | None) -> str | None:
+    """*target_id* (a UUID or an object with ``.id``) as a plain string, or ``None``."""
+    if target_id is None:
+        return None
+    return str(getattr(target_id, "id", target_id))
+
+
+async def _matching_rows(
+    session: AsyncSession, *, operator: Operator, op_id: str, target_str: str | None
+) -> tuple[list[AgentPermission], list[AgentPermission]]:
+    """Load the grant rows of *operator*; return ``(all rows, the rows that match)``.
+
+    Rows are matched on the token ``sub`` and, for an agent, its client
+    identity (``agent:<name>``), the name a grant is keyed on (#3795). A
+    row matches when its ``op_pattern`` matches *op_id* and its
+    ``target_scope`` is empty, ``"*"`` or *target_str*.
+    """
+    rows = await _load_rows(session, operator.tenant_id, _grant_principal_subs(operator))
+    matching = [
+        row
+        for row in rows
+        if fnmatch(op_id, row.op_pattern)
+        and (not row.target_scope or row.target_scope == "*" or target_str == row.target_scope)
+    ]
+    return rows, matching
+
+
+async def matched_grant(
+    *,
+    session: AsyncSession,
+    operator: Operator,
+    op_id: str,
+    target_id: Any | None,
+) -> tuple[PermissionVerdict, str] | None:
+    """The verdict of the agent grant that covers this call, before any ceiling.
+
+    Returns ``(verdict, source)`` of the most specific matching row (ties
+    fold to the strictest), or ``None`` when no row matches. It only reads:
+    no ceiling, no ``AGENT_GRANT_REQUIRED`` rule and no log line. The policy
+    evaluator (:mod:`meho_backplane.policy.evaluate`) applies those itself.
+    """
+    _, matching = await _matching_rows(
+        session, operator=operator, op_id=op_id, target_str=_target_str(target_id)
+    )
+    if not matching:
+        return None
+    return _pick_raw_verdict(matching, "safe")
 
 
 def _finalize_verdict(
@@ -413,38 +595,23 @@ async def resolve_verdict(
         reached.  Callers log + forward the reason to the structured
         error payload.
     """
-    # Normalise target_id to a plain string for comparison against
-    # target_scope column values.
-    target_str: str | None = None
-    if target_id is not None:
-        raw = getattr(target_id, "id", target_id)
-        target_str = str(raw)
+    target_str = _target_str(target_id)
 
     # --- Gate 1: user role ceiling ------------------------------------
     role_ceil = _role_ceiling(operator.tenant_role)
 
     # --- Gate 2: agent-permission rows --------------------------------
-    # Match on the token ``sub`` AND, for an agent principal, its client
-    # identity (``agent:<name>``) — the identifier a grant is keyed on
-    # (#3795). ``_grant_principal_subs`` encapsulates that fold.
-    principal_subs = _grant_principal_subs(operator)
-    rows = await _load_rows(session, operator.tenant_id, principal_subs)
-
-    # Filter rows to those whose op_pattern and target_scope match.
-    matching: list[AgentPermission] = []
-    for row in rows:
-        if not fnmatch(op_id, row.op_pattern):
-            continue
-        # target_scope: NULL or "*" = any target; else exact UUID match.
-        if (
-            row.target_scope
-            and row.target_scope != "*"
-            and (target_str is None or target_str != row.target_scope)
-        ):
-            continue
-        matching.append(row)
+    rows, matching = await _matching_rows(
+        session, operator=operator, op_id=op_id, target_str=target_str
+    )
 
     # --- Gate 3: pick verdict -----------------------------------------
+    if not matching:
+        refusal = _no_grant_refusal(
+            operator=operator, op_id=op_id, safety_level=safety_level, target_str=target_str
+        )
+        if refusal is not None:
+            return refusal
     raw_verdict, source = _pick_raw_verdict(matching, safety_level)
 
     # Apply the safety_level + role ceilings and build the reason string.

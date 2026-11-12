@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 // createdTargetJSON is a complete Target row as POST /api/v1/targets
@@ -24,7 +26,7 @@ import (
 const createdTargetJSON = `{
   "id": "11111111-1111-1111-1111-111111111111",
   "tenant_id": "22222222-2222-2222-2222-222222222222",
-  "name": "rdc-vault",
+  "name": "vault-lab",
   "aliases": [],
   "product": "vault",
   "host": "vault.evba.lab",
@@ -32,7 +34,7 @@ const createdTargetJSON = `{
   "fqdn": null,
   "auth_model": "shared_service_account",
   "vpn_required": false,
-  "secret_ref": "tenants/22222222-2222-2222-2222-222222222222/rdc-vault",
+  "secret_ref": "tenants/22222222-2222-2222-2222-222222222222/vault-lab",
   "preferred_impl_id": null,
   "fingerprint": null,
   "notes": null,
@@ -132,8 +134,8 @@ func TestAddMissingRequiredFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"missing product", []string{"rdc-vault", "--host", "vault.evba.lab"}, "product"},
-		{"missing host", []string{"rdc-vault", "--product", "vault"}, "host"},
+		{"missing product", []string{"vault-lab", "--host", "vault.evba.lab"}, "product"},
+		{"missing host", []string{"vault-lab", "--product", "vault"}, "host"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -180,13 +182,13 @@ func TestAddSuccessRendersTargetAndOmitsTenantID(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	stdout, stderr, err := runAddCmd(t, srv.URL,
-		"rdc-vault", "--product", "vault", "--host", "vault.evba.lab")
+		"vault-lab", "--product", "vault", "--host", "vault.evba.lab")
 	if err != nil {
 		t.Fatalf("add: %v\nstderr=%s", err, stderr.String())
 	}
 
 	// Required fields present, tenant_id absent.
-	if gotBody["name"] != "rdc-vault" || gotBody["product"] != "vault" || gotBody["host"] != "vault.evba.lab" {
+	if gotBody["name"] != "vault-lab" || gotBody["product"] != "vault" || gotBody["host"] != "vault.evba.lab" {
 		t.Errorf("request body missing required fields: %v", gotBody)
 	}
 	if _, leaked := gotBody["tenant_id"]; leaked {
@@ -203,10 +205,75 @@ func TestAddSuccessRendersTargetAndOmitsTenantID(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"rdc-vault", "vault", "vault.evba.lab", "shared_service_account"} {
+	for _, want := range []string{"vault-lab", "vault", "vault.evba.lab", "shared_service_account"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout should render created-target field %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestAddNewTargetNamesTheProbeCommand checks that the human output of a
+// new target without a fingerprint ends with the probe command, and that
+// --json output stays the plain Target row.
+func TestAddNewTargetNamesTheProbeCommand(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(strings.ReplaceAll(createdTargetJSON, "vault-lab", "new-target")))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	stdout, stderr, err := runAddCmd(t, srv.URL, "new-target", "--product", "vault", "--host", "vault.example.test")
+	if err != nil {
+		t.Fatalf("add: %v\nstderr=%s", err, stderr.String())
+	}
+	if want := "Not probed yet. Run `meho targets probe -- new-target`"; !strings.Contains(stdout.String(), want) {
+		t.Errorf("stdout should name the probe command %q:\n%s", want, stdout.String())
+	}
+
+	stdout, stderr, err = runAddCmd(t, srv.URL, "new-target", "--product", "vault", "--host", "vault.example.test", "--json")
+	if err != nil {
+		t.Fatalf("add --json: %v\nstderr=%s", err, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Not probed yet") {
+		t.Errorf("--json output must stay the plain Target row:\n%s", stdout.String())
+	}
+}
+
+// TestPrintProbeHintQuotesTheName checks that the probe command quotes
+// names with shell characters and puts "--" before the name.
+func TestPrintProbeHintQuotesTheName(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"db;id":      "meho targets probe -- 'db;id'",
+		"team's-db":  `meho targets probe -- 'team'"'"'s-db'`,
+		"-rf":        "meho targets probe -- -rf",
+		"$(whoami)":  "meho targets probe -- '$(whoami)'",
+		"a`b`":       "meho targets probe -- 'a`b`'",
+		"plain.name": "meho targets probe -- plain.name",
+	}
+	for name, want := range cases {
+		var buf bytes.Buffer
+		printProbeHint(&buf, &api.Target{Name: name})
+		if !strings.Contains(buf.String(), "`"+want+"`") {
+			t.Errorf("name %q: want %q in %q", name, want, buf.String())
+		}
+	}
+}
+
+// TestPrintProbeHintSkipsAProbedTarget checks that a target that already
+// has a fingerprint gets no probe hint.
+func TestPrintProbeHintSkipsAProbedTarget(t *testing.T) {
+	t.Parallel()
+	fp := map[string]interface{}{"vendor": "hashicorp", "product": "vault"}
+	var buf bytes.Buffer
+	printProbeHint(&buf, &api.Target{Name: "probed", Fingerprint: &fp})
+	if buf.Len() != 0 {
+		t.Errorf("a probed target needs no hint, got %q", buf.String())
 	}
 }
 
@@ -230,10 +297,10 @@ func TestAddSetOptionalsMapToSnakeCaseFields(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	_, stderr, err := runAddCmd(t, srv.URL,
-		"rdc-vault", "--product", "vault", "--host", "vault.evba.lab",
+		"vault-lab", "--product", "vault", "--host", "vault.evba.lab",
 		"--alias", "vault-a", "--alias", "vault-b",
 		"--version", "1.x", "--port", "8200", "--fqdn", "vault.corp",
-		"--secret-ref", "tenants/22222222-2222-2222-2222-222222222222/rdc-vault",
+		"--secret-ref", "tenants/22222222-2222-2222-2222-222222222222/vault-lab",
 		"--auth-model", "shared_service_account", "--verify-tls=false",
 		"--tls-server-name", "vault.san", "--preferred-impl", "vault-1.x",
 		"--note", "primary lab vault")
@@ -255,7 +322,7 @@ func TestAddSetOptionalsMapToSnakeCaseFields(t *testing.T) {
 	for k, want := range map[string]any{
 		"version":           "1.x",
 		"fqdn":              "vault.corp",
-		"secret_ref":        "tenants/22222222-2222-2222-2222-222222222222/rdc-vault",
+		"secret_ref":        "tenants/22222222-2222-2222-2222-222222222222/vault-lab",
 		"auth_model":        "shared_service_account",
 		"tls_server_name":   "vault.san",
 		"preferred_impl_id": "vault-1.x",
@@ -290,7 +357,7 @@ func TestAddServer422SurfacesBodyVerbatim(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	_, stderr, err := runAddCmd(t, srv.URL,
-		"rdc-vault", "--product", "nope", "--host", "vault.evba.lab")
+		"vault-lab", "--product", "nope", "--host", "vault.evba.lab")
 	if err == nil {
 		t.Fatalf("expected a non-nil error on 422")
 	}

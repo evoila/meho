@@ -77,7 +77,11 @@ load-bearing:
 Async submit (`POST /operations/call`, `async: true`):
 
 1. `post_call` strips the transport-only `async_` control and calls
-   `OperationRunService.submit_call(operator, arguments)`.
+   `OperationRunService.submit_call(operator, arguments)`. A call with
+   `reveal_secret: true` in its params is refused first (HTTP 422
+   `reveal_secret_with_async`; on MCP, bad input with the same reason):
+   a reveal call runs at once, or through an approval
+   ([approvals.md](approvals.md)).
 2. `submit_call` computes a `params_hash`, inserts a `pending` row, and
    claims a lease under this worker's `"<hostname>:<pid>"` owner (one
    committed transaction), then launches a background task and returns the
@@ -182,6 +186,27 @@ comes as soon as the run ends, or after N seconds with the run still
   run.
 - **Other replicas.** When another process runs the task, the wait reads
   the row again every `wait_recheck_seconds` (2 seconds).
+
+## Approvals that answer at once (#5110)
+
+Three approve paths use `submit_approval_resume`:
+
+- REST `POST /api/v1/approvals/{id}/approve` with `"async": true` (#3079):
+  202 + `{run_id, status, async}`.
+- REST `POST /api/v1/approvals/{id}/decide` with `"async": true`: 202 +
+  `DecideAcceptedBody` (the decision fields of `DecideResponseBody` plus
+  `run_id`, `status: "pending"`, `async: true`). A rejection ignores the
+  switch. Without it, both routes run the operation before they answer,
+  as before. `meho approvals approve` sends it (`--wait` waits by reading
+  the request every few seconds).
+- The console approve always starts the run in the background, waits at
+  most one second, and the page then follows the run
+  ([`approvals.md`](approvals.md), "Operator console").
+
+The run row carries `approval_request_id`; the console finds the latest
+run of a request through it (index `operation_run_approval_request_id_idx`).
+`identity_sub` is the approver, so the "the run has ended" notice goes to
+the approver.
 
 ## Synchronous path: caller gone (#3696)
 

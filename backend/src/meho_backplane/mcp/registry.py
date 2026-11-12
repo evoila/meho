@@ -77,6 +77,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.features import FEATURE_MATURITY
 from meho_backplane.mcp.profiles import profile_admits
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "MCP_ADMIN_SCOPE",
@@ -102,7 +103,9 @@ __all__ = [
     "registered_tool_names",
     "role_at_least",
     "surface_visible",
+    "tool_for_settings",
     "tool_role_gate_met",
+    "tool_surface",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -260,6 +263,25 @@ def surface_visible(operator: Operator, surface: ToolSurface) -> bool:
     if surface is ToolSurface.WORKING:
         return True
     return MCP_ADMIN_SCOPE in operator.scopes
+
+
+#: The one working-surface tool an operator can move off the default list,
+#: with ``MCP_TOPOLOGY_OFF_DEFAULT_LIST`` (:attr:`Settings.mcp_topology_off_default_list`).
+_TOPOLOGY_TOOL: Final[str] = "query_topology"
+
+
+def tool_surface(defn: ToolDefinition) -> ToolSurface:
+    """Return the surface *defn* is on in this deploy.
+
+    This is :attr:`ToolDefinition.surface`, except for ``query_topology``
+    when the operator turned on ``MCP_TOPOLOGY_OFF_DEFAULT_LIST``: then the
+    tool is on :attr:`ToolSurface.OPERATOR`, so only an ``mcp:admin``
+    session lists and calls it. The list filter and the call-time check
+    both use this function, so the two always agree.
+    """
+    if defn.name == _TOPOLOGY_TOOL and get_settings().mcp_topology_off_default_list:
+        return ToolSurface.OPERATOR
+    return defn.surface
 
 
 def addon_family_active(
@@ -436,6 +458,25 @@ class ToolDefinition(BaseModel):
     people are the tenant's reviewers. ``False`` by default.
     MEHO-internal: dropped from the wire shape like the RBAC fields.
 
+    ``caller_check`` (#5770) is an optional check of who calls. The
+    dispatcher runs it after the role, capability, surface and add-on gates
+    and before the input check, so a caller the tool always refuses gets
+    that refusal on the first try, not an input error. It raises
+    :class:`~meho_backplane.mcp.server.McpInvalidParamsError` to refuse.
+    ``None`` by default. MEHO-internal: dropped from the wire shape like the
+    RBAC fields.
+
+    ``for_settings`` is an optional function that gives the tool as it is
+    shown under the current settings, to the session of the given
+    :class:`Operator` (a session can ask for the short tool texts, see
+    :mod:`meho_backplane.mcp.short_texts`). A tool whose text or input talks about
+    a feature behind a switch uses it to leave that text out while the
+    switch is off, so an agent reads nothing about a feature that is off.
+    :func:`all_tools_for` and the ``tools/call`` handler apply it (through
+    :func:`tool_for_settings`), so ``tools/list`` and the ``tools/call``
+    input check use the same tool. ``None`` by default. MEHO-internal:
+    dropped from the wire shape like the RBAC fields.
+
     ``annotations`` (#4202) are the MCP tool hints, see
     :class:`ToolAnnotations`. A tool that only reads passes
     :data:`READ_ONLY`. ``meta`` is the MCP ``_meta`` object of the tool, for
@@ -458,6 +499,8 @@ class ToolDefinition(BaseModel):
     required_addon_family: str | None = None
     broadcast_omit_args: frozenset[str] = frozenset()
     approver_may_call: bool = False
+    caller_check: Callable[[Operator], None] | None = None
+    for_settings: Callable[[ToolDefinition, Operator], ToolDefinition] | None = None
     annotations: ToolAnnotations | None = None
     meta: dict[str, Any] | None = None
 
@@ -719,8 +762,19 @@ def register_mcp_resource(
 
 
 def get_tool(name: str) -> tuple[ToolDefinition, ToolHandler] | None:
-    """Return ``(definition, handler)`` for *name*, or ``None`` if unregistered."""
+    """Return ``(definition, handler)`` for *name*, or ``None`` if unregistered.
+
+    The definition is the registered one. :func:`tool_for_settings` gives
+    the one shown under the current settings.
+    """
     return _TOOLS.get(name)
+
+
+def tool_for_settings(definition: ToolDefinition, operator: Operator) -> ToolDefinition:
+    """Return *definition* as *operator*'s session sees it under the current settings."""
+    if definition.for_settings is None:
+        return definition
+    return definition.for_settings(definition, operator)
 
 
 def registered_tool_names() -> frozenset[str]:
@@ -785,13 +839,16 @@ def all_tools_for(
     Last, the session's tool profile (#4172,
     :attr:`Operator.mcp_tool_profile`) keeps only the tools of that
     profile. It only removes tools; see :mod:`meho_backplane.mcp.profiles`.
+
+    Each tool is the one shown under the current settings (see
+    :attr:`ToolDefinition.for_settings`).
     """
     return [
-        defn
+        tool_for_settings(defn, operator)
         for defn, _ in _TOOLS.values()
         if tool_role_gate_met(operator, defn)
         and capability_satisfied(operator, defn.required_capability)
-        and surface_visible(operator, defn.surface)
+        and surface_visible(operator, tool_surface(defn))
         and addon_family_active(active_addon_families, defn.required_addon_family)
         and profile_admits(operator.mcp_tool_profile, defn.name)
     ]

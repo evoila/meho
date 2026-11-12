@@ -183,6 +183,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Stage the Tailwind CLI for the image build
+        uses: ./.github/actions/stage-tailwind
+
       - name: Build + push PR-tagged image
         # PR-tagged image lives at `ghcr.io/evoila/meho:pr-<n>-<sha>`.
         # The `<sha>` suffix makes the tag immutable per push: a force-push
@@ -336,7 +339,7 @@ jobs:
             --overwrite
 
       - name: Helm install meho chart
-        # Deploys the in-tree chart with the values-rdc-example overlay as
+        # Deploys the in-tree chart with the values-example-lab overlay as
         # the base (real-target fixture layout) and overrides image.tag to
         # the PR-tagged image we pushed above. --wait blocks until the
         # Deployment is ready or the 5min timeout fires. Two timeout
@@ -348,7 +351,7 @@ jobs:
           helm dependency update deploy/charts/meho/
           helm upgrade --install meho deploy/charts/meho/ \
             --namespace "$NS" \
-            -f deploy/values-examples/values-rdc-example.yaml \
+            -f deploy/values-examples/values-example-lab.yaml \
             --set image.tag="$IMAGE_TAG" \
             --set image.repository="$IMAGE_REPO" \
             --wait --timeout 5m

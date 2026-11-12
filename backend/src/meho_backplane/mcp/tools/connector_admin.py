@@ -117,6 +117,13 @@ from meho_backplane.mcp.registry import (
     register_mcp_tool,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.tools._connector_classification import (
+    CLASSIFICATION_PROPERTIES,
+    CLASSIFICATION_TEXT,
+    classification_for_settings,
+    drop_classification_fields,
+    request_from_tool,
+)
 from meho_backplane.mcp.tools._connector_shared import (
     _CONNECTOR_ID_DESCRIPTION,
     _OP_CLASS_READ,
@@ -496,7 +503,7 @@ async def _review_handler(
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.
         raise_invalid_params_for_connector_not_found(exc)
-    return _model_dump_json_safe(payload)
+    return drop_classification_fields(_model_dump_json_safe(payload))
 
 
 async def _edit_group_handler(
@@ -516,6 +523,15 @@ async def _edit_group_handler(
     """
     connector_id: str = arguments["connector_id"]
     group_key: str = arguments["group_key"]
+    requested = await request_from_tool(
+        operator,
+        arguments,
+        tool="meho_connector_edit_group",
+        match={"connector": connector_id, "group": group_key},
+        other_fields=("when_to_use", "name"),
+    )
+    if requested is not None:
+        return requested
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
     patch: dict[str, Any] = {}
     if "when_to_use" in arguments:
@@ -550,6 +566,17 @@ async def _edit_group_handler(
     return {"connector_id": connector_id, "group_key": group_key, "ok": True}
 
 
+#: The fields ``meho_connector_edit_op`` stores at once (PATCH semantics:
+#: only the keys present in the arguments are forwarded).
+_EDIT_OP_FIELDS: Final[tuple[str, ...]] = (
+    "custom_description",
+    "safety_level",
+    "requires_approval",
+    "is_enabled",
+    "reason",
+)
+
+
 async def _edit_op_handler(
     operator: Operator,
     arguments: dict[str, Any],
@@ -579,18 +606,17 @@ async def _edit_op_handler(
     """
     connector_id: str = arguments["connector_id"]
     op_id: str = arguments["op_id"]
+    requested = await request_from_tool(
+        operator,
+        arguments,
+        tool="meho_connector_edit_op",
+        match={"connector": connector_id, "op": op_id},
+        other_fields=_EDIT_OP_FIELDS,
+    )
+    if requested is not None:
+        return requested
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
-    patch: dict[str, Any] = {}
-    if "custom_description" in arguments:
-        patch["custom_description"] = arguments["custom_description"]
-    if "safety_level" in arguments:
-        patch["safety_level"] = arguments["safety_level"]
-    if "requires_approval" in arguments:
-        patch["requires_approval"] = arguments["requires_approval"]
-    if "is_enabled" in arguments:
-        patch["is_enabled"] = arguments["is_enabled"]
-    if "reason" in arguments:
-        patch["reason"] = arguments["reason"]
+    patch: dict[str, Any] = {key: arguments[key] for key in _EDIT_OP_FIELDS if key in arguments}
     service = ReviewService(operator)
     try:
         # #4711: an AI client may make an operation stricter, never looser.
@@ -927,7 +953,7 @@ register_mcp_tool(
             "audit row. Do NOT use this to change group membership "
             "(operation-to-group assignment): that requires re-running "
             "ingest or editing per-op assignments via "
-            "meho_connector_edit_op."
+            "meho_connector_edit_op." + CLASSIFICATION_TEXT
         ),
         inputSchema={
             "type": "object",
@@ -941,12 +967,14 @@ register_mcp_tool(
                 "when_to_use": {"type": ["string", "null"]},
                 "name": {"type": ["string", "null"]},
                 "tenant_id": _TENANT_ID_PROPERTY,
+                **CLASSIFICATION_PROPERTIES,
             },
             "required": ["connector_id", "group_key"],
             "additionalProperties": False,
         },
         required_role=TenantRole.TENANT_ADMIN,
         op_class=_OP_CLASS_WRITE,
+        for_settings=classification_for_settings,
     ),
     handler=_edit_group_handler,
 )
@@ -960,7 +988,11 @@ register_mcp_tool(
         description=(
             "Edit one operation's per-op overrides (tenant_admin only). "
             "Editable fields: custom_description (operator-authored "
-            "agent-facing description), safety_level (safe / caution / "
+            "agent-facing description: while the backplane switch "
+            "AGENT_READS_CUSTOM_DESCRIPTION is on, agents see it in place "
+            "of the original description in search_operations hits, in the "
+            "exact-op contract and in keyword search; null brings the "
+            "original back), safety_level (safe / caution / "
             "dangerous / destructive), requires_approval (gate the "
             "operation behind out-of-band approval), is_enabled (per-op "
             "enable/disable that survives connector-level enable/disable "
@@ -978,7 +1010,7 @@ register_mcp_tool(
             "STICKS: a subsequent meho_connector_enable will NOT "
             "clobber the operator's per-op disable. Do not use this "
             "to flip whole-connector state — pair with "
-            "meho_connector_enable / meho_connector_disable for that."
+            "meho_connector_enable / meho_connector_disable for that." + CLASSIFICATION_TEXT
         ),
         inputSchema={
             "type": "object",
@@ -1004,12 +1036,14 @@ register_mcp_tool(
                 "is_enabled": {"type": ["boolean", "null"]},
                 "reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 1024},
                 "tenant_id": _TENANT_ID_PROPERTY,
+                **CLASSIFICATION_PROPERTIES,
             },
             "required": ["connector_id", "op_id"],
             "additionalProperties": False,
         },
         required_role=TenantRole.TENANT_ADMIN,
         op_class=_OP_CLASS_WRITE,
+        for_settings=classification_for_settings,
     ),
     handler=_edit_op_handler,
 )

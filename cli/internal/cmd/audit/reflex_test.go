@@ -93,6 +93,20 @@ func TestRunReflexRendersSurfaceTable(t *testing.T) {
 				PrecisionPct:                    nil,
 				FirstCorrectActionMedianSeconds: f32(42.0),
 				FirstCorrectActionSessions:      2,
+				Search: api.RetrievalNumbers{
+					HitRatePct:        f32(66.67),
+					HitRateUsed:       2,
+					HitRateRetrievals: 3,
+					PrecisionPct:      f32(50.0),
+					PrecisionRight:    1,
+					PrecisionJudged:   2,
+				},
+				Recall: api.RetrievalNumbers{
+					HitRatePct:        f32(100.0),
+					HitRateUsed:       1,
+					HitRateRetrievals: 1,
+					PrecisionPct:      nil,
+				},
 			},
 		})
 	})
@@ -111,6 +125,8 @@ func TestRunReflexRendersSurfaceTable(t *testing.T) {
 		"50.00%", "n/a",
 		"[learning]", "repeat-mistake rate", "25.00%", "hit rate", "75.00%",
 		"precision", "first correct action", "42.00 s", "2 sessions on known systems",
+		"after a search:      66.67%  (2/3)", "shown before an op: 100.00%  (1/1)",
+		"after a search:      50.00%  (1/2)", "shown before an op:    n/a  (0/0)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q in:\n%s", want, out)

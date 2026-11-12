@@ -90,6 +90,7 @@ from meho_backplane.ui.routes.agents.run import (
     stream_run_events,
     submit_run,
 )
+from meho_backplane.ui.routes.agents.starting_grants import GRANT_SET_MAX, TARGETS_FIELD
 from meho_backplane.ui.routes.agents.views import render_detail, render_index, validate_name
 
 __all__ = ["build_agents_router"]
@@ -102,6 +103,8 @@ _role_probe_dep = Depends(resolve_role_probe)
 _require_admin_dep = Depends(resolve_operator_or_403)
 _require_human_admin_dep = Depends(resolve_human_admin_or_403)
 _require_run_operator_dep = Depends(resolve_run_operator_or_403)
+#: The targets ticked for the "read-targets" starting grant pick (#6192).
+_grant_targets_form = Form(default_factory=list, alias=TARGETS_FIELD)
 
 
 async def _list_handler(
@@ -131,11 +134,15 @@ async def _run_console_handler(
     name: str,
     session_ctx: UISessionContext = _require_operator_dep,
     role_probe: OperatorRoleProbe = _role_probe_dep,
+    run: uuid.UUID | None = None,
 ) -> HTMLResponse:
-    """``GET /ui/agents/{name}/run`` -- the run console page (operator read)."""
+    """``GET /ui/agents/{name}/run`` -- the run console page (operator read).
+
+    ``?run=<id>`` shows that run: its saved events, then the live ones.
+    """
     del role_probe  # the operator role floor is checked by the session dependency.
     validate_name(name)
-    return await render_run_console(request, session_ctx, name=name)
+    return await render_run_console(request, session_ctx, name=name, run_id=run)
 
 
 async def _run_submit_handler(
@@ -164,7 +171,7 @@ async def _run_stream_handler(
     token: str = Query(default="", max_length=4096),
     session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_run_operator_dep,
-) -> StreamingResponse:
+) -> Response:
     """``GET /ui/agents/{name}/run/stream`` -- cookie-authed SSE bridge."""
     validate_name(name)
     return await stream_run_events(
@@ -216,6 +223,8 @@ async def _create_submit_handler(
     system_prompt: str = Form(default="", max_length=SYSTEM_PROMPT_MAX),
     turn_budget: str | None = Form(default=None, max_length=TURN_BUDGET_MAX_LEN),
     enabled: bool = Form(default=False),
+    grant_set: str = Form(default="", alias="starting_grants", max_length=GRANT_SET_MAX),
+    grant_targets: list[str] = _grant_targets_form,
     session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
@@ -236,6 +245,8 @@ async def _create_submit_handler(
         system_prompt=system_prompt,
         turn_budget=turn_budget,
         enabled=enabled,
+        grant_set=grant_set,
+        grant_targets=grant_targets,
     )
 
 
@@ -343,6 +354,8 @@ async def _principals_register_submit_handler(
     # raw-422 boundary.
     name: str = Form(default="", max_length=PRINCIPAL_NAME_MAX),
     owner_sub: str | None = Form(default=None, max_length=OWNER_SUB_MAX),
+    grant_set: str = Form(default="", alias="starting_grants", max_length=GRANT_SET_MAX),
+    grant_targets: list[str] = _grant_targets_form,
     session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_human_admin_dep,
 ) -> HTMLResponse:
@@ -353,6 +366,8 @@ async def _principals_register_submit_handler(
         operator,
         name=name,
         owner_sub=owner_sub,
+        grant_set=grant_set,
+        grant_targets=grant_targets,
     )
 
 

@@ -36,7 +36,13 @@ So the run console splits the flow:
 
 The token is the load-bearing CSRF-equivalence link between the two
 halves: the stream can only run a prompt that a CSRF-validated POST
-authorised, for the same session, within the TTL window. It is **not** a
+authorised, for the same session, within the TTL window.
+
+One token starts one run. Each token carries a random id, and the bridge
+records that id in Valkey on the first accepted GET
+(:func:`claim_run_token`, ``SET NX EX``). A later GET with the same token
+gets ``204 No Content`` and starts nothing. ``204`` is the status that
+tells a browser ``EventSource`` to stop reconnecting. It is **not** a
 capability that widens access -- the bridge still re-lifts the operator
 from the cookie session and re-runs the same tenant-scoped invoker call,
 so tenant isolation comes from the lifted operator (identical to the
@@ -52,7 +58,9 @@ session store uses:
 
     token = fernet.encrypt_at_time(payload_json, now)
 
-where ``payload_json`` is ``{"sd", "name", "input", "work_ref"}``.
+where ``payload_json`` is ``{"id", "sd", "name", "input", "work_ref"}``.
+``id`` is a random value that names this one token (the single-use
+record is keyed on it).
 Fernet encrypts (AES-128-CBC) and authenticates (HMAC-SHA256) the
 payload and stamps the issue time, so:
 
@@ -75,18 +83,21 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import secrets
 from dataclasses import dataclass
 from typing import Final
 
 import structlog
 from cryptography.fernet import Fernet, InvalidToken
 
+from meho_backplane.broadcast.client import get_broadcast_client
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.session_store import EncryptionKeyMissingError
 
 __all__ = [
     "RUN_TOKEN_TTL_SECONDS",
     "DecodedRunToken",
+    "claim_run_token",
     "mint_run_token",
     "verify_run_token",
 ]
@@ -104,6 +115,9 @@ RUN_TOKEN_TTL_SECONDS: Final[int] = 120
 #: confused with any other HMAC the console derives from the same key.
 _SESSION_DIGEST_LABEL: Final[bytes] = b"meho-agent-run-token-session:"
 
+#: Valkey key prefix of the single-use record. One key per token id.
+_USED_KEY_PREFIX: Final[str] = "meho:ui:agent-run-token:"
+
 
 @dataclass(frozen=True)
 class DecodedRunToken:
@@ -112,9 +126,11 @@ class DecodedRunToken:
     ``input`` and ``work_ref`` are the values the originating ``POST``
     authorised; the bridge runs the agent with exactly these (it does
     not read them from the GET query string, so a tampered query cannot
-    redirect the run).
+    redirect the run). ``token_id`` is the random id the bridge records
+    on first use, so the token starts at most one run.
     """
 
+    token_id: str
     name: str
     input: str
     work_ref: str | None
@@ -158,13 +174,14 @@ def mint_run_token(
 ) -> str:
     """Mint an encrypted run token bound to *session_id*.
 
-    The payload carries a keyed digest of the session id (not the id),
-    the agent name, the prompt and the work reference. It is
-    JSON-encoded and Fernet-encrypted with the issue time *now*, so the
-    bridge can reject a stale token without server-side state.
+    The payload carries a random token id, a keyed digest of the
+    session id (not the id), the agent name, the prompt and the work
+    reference. It is JSON-encoded and Fernet-encrypted with the issue
+    time *now*, so the bridge can reject a stale token.
     """
     key = _run_token_key()
     payload = {
+        "id": secrets.token_urlsafe(16),
         "sd": _session_digest(key, session_id),
         "name": name,
         "input": input_,
@@ -185,7 +202,8 @@ def verify_run_token(
 ) -> DecodedRunToken | None:
     """Return the decoded token iff it is valid for *session_id*, else ``None``.
 
-    Stateless verification, in order:
+    Verification, in order (this function does not record the use;
+    the bridge calls :func:`claim_run_token` for that):
 
     1. Decrypt + authenticate + freshness: Fernet checks the MAC and
        that the token is no older than ``RUN_TOKEN_TTL_SECONDS``.
@@ -228,11 +246,34 @@ def verify_run_token(
         _log.info("ui_agent_run_token_rejected", reason="session_mismatch")
         return None
 
+    token_id = payload.get("id")
     name = payload.get("name")
     input_ = payload.get("input")
     work_ref = payload.get("work_ref")
+    if not isinstance(token_id, str) or not token_id:
+        return None
     if not isinstance(name, str) or not isinstance(input_, str):
         return None
     if work_ref is not None and not isinstance(work_ref, str):
         return None
-    return DecodedRunToken(name=name, input=input_, work_ref=work_ref)
+    return DecodedRunToken(token_id=token_id, name=name, input=input_, work_ref=work_ref)
+
+
+async def claim_run_token(token_id: str) -> bool:
+    """Record the first use of a run token. ``True`` only for the first call.
+
+    ``SET <key> 1 NX EX <ttl>`` in Valkey: the key is written only when
+    it is absent, so exactly one caller gets ``True`` for a token id,
+    across all workers. The key lives as long as a token can verify
+    (``RUN_TOKEN_TTL_SECONDS``); after that the token is expired anyway.
+
+    A Valkey error propagates. The bridge then refuses the stream: a run
+    starts only when its first use is on record.
+    """
+    claimed = await get_broadcast_client().set(
+        _USED_KEY_PREFIX + token_id,
+        "1",
+        nx=True,
+        ex=RUN_TOKEN_TTL_SECONDS,
+    )
+    return bool(claimed)

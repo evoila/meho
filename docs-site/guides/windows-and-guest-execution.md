@@ -232,6 +232,12 @@ target 5.1 explicitly — the cmdlet surface is stable across Windows Server
     approver sees its redacted summary (program path, argument size,
     env-var names) at approval time instead.
 
+    With the backplane switch `PREVIEW_TYPED_WRITES` on (off by default),
+    every write previews, also one that runs without approval. A
+    credential operation then previews only when it has its own safe
+    preview, and it shows only that plan, never the params.
+    `guest.program.run` has none of its own, so it stays `unavailable`.
+
 ## Safety tiers of the write operations
 
 Every operation carries a `safety_level`, set when the connector is
@@ -241,7 +247,7 @@ ladder:
 | Tier | Behavior | Estate examples |
 |---|---|---|
 | `safe` | Read-class; executes under default-allow. | `winsrv.service.list`, `msad.user.get`, `wsfc.cluster.get`, `mssql.databases.list`, `hyperv.vms.list` |
-| `caution` | Recoverable write. Runs at once in the web interface; waits for approval when it comes with a token or from an agent. | `winsrv.service.restart`, `msad.group.add-member`, `wsfc.groups.move`, `mssql.backup.database`, `hyperv.export.vm` |
+| `caution` | Recoverable write. Runs at once in the web interface; waits for approval when it comes with a token or from an agent. | `winsrv.service.restart`, `msad.ou.create`, `wsfc.groups.move`, `mssql.backup.database`, `hyperv.export.vm` |
 | `dangerous` + approval | Disruptive or destructive; **parks for a human** before it runs. | `winsrv.power.reboot`, `winsrv.feature.remove`, `msad.user.delete`, `wsfc.nodes.evict`, `wsfc.groups.offline`, `mssql.databases.drop`, `mssql.backup.restore`, `hyperv.checkpoints.revert` |
 | `destructive` + approval | Permanent delete. You must preview it first and pass the preview hash to the call. The call then waits for approval, and the approval request shows what will be deleted. | `windns.record.remove` |
 

@@ -31,7 +31,7 @@ import asyncio
 import re
 import uuid
 import warnings
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from datetime import timedelta
 from typing import Any
 
@@ -41,11 +41,14 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
+from redis.exceptions import ConnectionError as RedisConnectionError
+from sqlalchemy import select
 
 from meho_backplane.agent.invocation import (
     AgentDisabledError,
     AgentNotFoundError,
     AgentRunNotFoundError,
+    AgentRunOutcome,
     BudgetExceededError,
     reset_agent_invoker_for_testing,
 )
@@ -53,7 +56,7 @@ from meho_backplane.agent.run import AgentRunEvent, AgentRunEventKind
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import AgentDefinition, Tenant
+from meho_backplane.db.models import AgentDefinition, AgentRunStatus, AuditLog, Tenant
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -68,8 +71,10 @@ from meho_backplane.ui.auth.session_store import (
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes.agents import run_token as run_token_module
 from meho_backplane.ui.routes.agents.run_token import mint_run_token
 from meho_backplane.ui.templating import reset_templating_for_testing
+from tests._hosted_run_helpers import record_hosted_run
 from tests._oidc_jwt_helpers import (
     AUDIENCE as _DEFAULT_AUDIENCE,
 )
@@ -121,6 +126,32 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_jwks_cache()
     reset_engine_for_testing()
     reset_agent_invoker_for_testing(None)
+
+
+class _FakeValkey:
+    """In-memory stand-in for the Valkey client: ``SET NX EX`` only."""
+
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self._error = error
+        self._keys: set[str] = set()
+
+    async def set(
+        self, name: str, value: str, *, nx: bool = False, ex: int | None = None
+    ) -> bool | None:
+        if self._error is not None:
+            raise self._error
+        if nx and name in self._keys:
+            return None
+        self._keys.add(name)
+        return True
+
+
+@pytest.fixture(autouse=True)
+def _fake_valkey(monkeypatch: pytest.MonkeyPatch) -> _FakeValkey:
+    """Record run-token use in memory instead of a live Valkey."""
+    fake = _FakeValkey()
+    monkeypatch.setattr(run_token_module, "get_broadcast_client", lambda: fake)
+    return fake
 
 
 def _build_app() -> FastAPI:
@@ -249,11 +280,12 @@ def _csrf_headers(token: str) -> dict[str, str]:
 class _FakeInvoker:
     """Deterministic stand-in for :class:`AgentInvoker`.
 
-    ``ensure_runnable`` raises the configured error (or passes); the
-    streaming generator yields a fixed sequence of run events so the SSE
-    bridge emits known frames without a model / DB round-trip. The
-    ``operator`` arg is captured so a test can assert the bridge passed
-    the lifted (tenant-scoped) operator rather than a request parameter.
+    ``ensure_runnable`` raises the configured error (or passes); ``run``
+    writes a finished run with a fixed sequence of saved events to the
+    test database, without a model, so the SSE bridge streams known frames
+    from the store. The ``operator`` arg is captured so a test can assert
+    the bridge passed the lifted (tenant-scoped) operator rather than a
+    request parameter.
     """
 
     def __init__(
@@ -270,22 +302,31 @@ class _FakeInvoker:
         self._cancel_error = cancel_error
         self.stream_calls: list[tuple[str, str]] = []
         self.stream_operators: list[Operator] = []
+        self.run_ids: list[uuid.UUID] = []
         self.cancel_calls: list[tuple[uuid.UUID, Operator]] = []
 
     async def ensure_runnable(self, operator: Operator, name: str) -> None:
         if self._ensure_error is not None:
             raise self._ensure_error
 
-    async def stream_events(
+    async def run(
         self,
         operator: Operator,
         name: str,
         inputs: str,
-    ) -> AsyncIterator[tuple[uuid.UUID, AgentRunEvent]]:
+        *,
+        async_mode: bool = False,
+    ) -> AgentRunOutcome:
         self.stream_calls.append((name, inputs))
         self.stream_operators.append(operator)
-        for event in self._events:
-            yield self._run_id, event
+        run_id = await record_hosted_run(
+            tenant_id=operator.tenant_id,
+            sub=operator.sub,
+            events=[(event.kind.value, event.data) for event in self._events],
+            agent_name=name,
+        )
+        self.run_ids.append(run_id)
+        return AgentRunOutcome(run_id=run_id, status=AgentRunStatus.RUNNING)
 
     async def cancel(self, operator: Operator, run_id: uuid.UUID) -> object:
         """Record the cancel + raise the configured error, else return a sentinel.
@@ -578,7 +619,6 @@ def test_stream_bridge_streams_frames_incrementally() -> None:
     """The bridge proxies stream_events, emitting one SSE frame per event."""
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_agent(tenant_id=_TENANT_A, name="a1")
-    run_id = uuid.uuid4()
     fake = _FakeInvoker(
         events=[
             AgentRunEvent(kind=AgentRunEventKind.TURN, data={}),
@@ -588,7 +628,6 @@ def test_stream_bridge_streams_frames_incrementally() -> None:
             ),
             AgentRunEvent(kind=AgentRunEventKind.FINAL, data={"output": {"ok": True}}),
         ],
-        run_id=run_id,
     )
     reset_agent_invoker_for_testing(fake)
     keypair, jwks = _make_keypair_and_jwks()
@@ -608,10 +647,89 @@ def test_stream_bridge_streams_frames_incrementally() -> None:
     assert "event: tool_call" in text
     assert "event: final" in text
     assert "topology.query" in text
-    assert str(run_id) in text
+    assert str(fake.run_ids[0]) in text
+    # The stream ends with the run's end state.
+    assert "event: end" in text
+    assert '"state":"ended"' in text
     # The bridge ran the prompt the token carried, for the lifted operator.
     assert fake.stream_calls == [("a1", "go")]
     assert fake.stream_operators[0].tenant_id == _TENANT_A
+
+
+def test_stream_bridge_second_get_with_same_token_starts_no_run() -> None:
+    """One token starts one run: a repeated GET gets 204 and runs nothing.
+
+    The browser's EventSource reconnects with the same URL when a stream
+    ends. The second GET must not start the agent again, and 204 tells
+    the EventSource to stop reconnecting.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    fake = _FakeInvoker(
+        events=[AgentRunEvent(kind=AgentRunEventKind.FINAL, data={"output": "done"})],
+    )
+    reset_agent_invoker_for_testing(fake)
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    run_token = mint_run_token(session_id=str(session_id), name="a1", input_="go", work_ref=None)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        first = client.get(f"/ui/agents/a1/run/stream?token={run_token}")
+        second = client.get(f"/ui/agents/a1/run/stream?token={run_token}")
+        third = client.get(f"/ui/agents/a1/run/stream?token={run_token}")
+    finally:
+        mock.stop()
+    assert first.status_code == 200, first.text
+    assert "event: final" in first.text
+    assert second.status_code == 204
+    assert second.content == b""
+    assert third.status_code == 204
+    assert fake.stream_calls == [("a1", "go")]
+
+
+def test_stream_bridge_new_token_starts_a_new_run() -> None:
+    """A second submit mints a second token, and that token runs once too."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    fake = _FakeInvoker(events=[AgentRunEvent(kind=AgentRunEventKind.TURN, data={})])
+    reset_agent_invoker_for_testing(fake)
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    token_one = mint_run_token(session_id=str(session_id), name="a1", input_="one", work_ref=None)
+    token_two = mint_run_token(session_id=str(session_id), name="a1", input_="two", work_ref=None)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        assert client.get(f"/ui/agents/a1/run/stream?token={token_one}").status_code == 200
+        assert client.get(f"/ui/agents/a1/run/stream?token={token_two}").status_code == 200
+        assert client.get(f"/ui/agents/a1/run/stream?token={token_one}").status_code == 204
+    finally:
+        mock.stop()
+    assert fake.stream_calls == [("a1", "one"), ("a1", "two")]
+
+
+def test_stream_bridge_valkey_error_is_503_and_starts_no_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the use of a token cannot be recorded, no run starts."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    fake = _FakeInvoker(events=[AgentRunEvent(kind=AgentRunEventKind.TURN, data={})])
+    reset_agent_invoker_for_testing(fake)
+    broken = _FakeValkey(error=RedisConnectionError("valkey down"))
+    monkeypatch.setattr(run_token_module, "get_broadcast_client", lambda: broken)
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    run_token = mint_run_token(session_id=str(session_id), name="a1", input_="go", work_ref=None)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get(f"/ui/agents/a1/run/stream?token={run_token}")
+    finally:
+        mock.stop()
+    assert response.status_code == 503
+    assert fake.stream_calls == []
 
 
 def test_stream_bridge_rejects_cross_session_token() -> None:
@@ -948,3 +1066,166 @@ def test_can_stop_stays_available_after_stream_drop() -> None:
     assert "this.finalStatus" in can_stop_body
     assert "this.cancelled" in can_stop_body
     assert "this.cancelUrlTemplate" in can_stop_body
+
+
+def test_console_closes_stream_after_final_or_error_frame() -> None:
+    """The controller closes the stream on a ``final`` or ``error`` frame.
+
+    The run token starts one run, so a reconnect can never show more of
+    the run. ``closeStream()`` removes ``sse-connect`` (the sse
+    extension's reconnect timer reads it) and closes the EventSource (the
+    browser's own reconnect). No JS test runner in this repo, so this
+    checks the source.
+    """
+    source = (static_root_dir() / "src" / "app" / "agent-run-console.js").read_text(
+        encoding="utf-8"
+    )
+    for kind in ("final", "error"):
+        case = re.search(rf'case "{kind}":(?P<body>.*?)break;', source, flags=re.DOTALL)
+        assert case is not None, f'case "{kind}" not found in appendEntry'
+        assert "this.closeStream();" in case.group("body"), kind
+
+    close = re.search(r"closeStream\(\)\s*\{(?P<body>.*?)\n    \},", source, flags=re.DOTALL)
+    assert close is not None, "closeStream() not found in controller source"
+    body = close.group("body")
+    assert 'removeAttribute("sse-connect")' in body
+    assert 'removeAttribute("data-sse-connect")' in body
+    assert body.index('removeAttribute("sse-connect")') < body.index("source.close()")
+
+
+# ---------------------------------------------------------------------------
+# Saved events: follow a run after a reload, run detail
+# ---------------------------------------------------------------------------
+
+_TENANT_B = uuid.UUID("22222222-2222-2222-2222-222222222222")
+
+
+def _record_run(
+    *,
+    tenant_id: uuid.UUID = _TENANT_A,
+    events: list[tuple[str, dict[str, Any]]],
+    end: AgentRunStatus | None = AgentRunStatus.SUCCEEDED,
+) -> uuid.UUID:
+    return asyncio.run(record_hosted_run(tenant_id=tenant_id, sub=_OP_A, events=events, end=end))
+
+
+def _reader_client() -> tuple[TestClient, respx.MockRouter]:
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    return client, mock
+
+
+def test_run_console_with_run_query_follows_the_saved_events() -> None:
+    """``?run=<id>`` (set after a run starts) shows that run again after a reload."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    run_id = uuid.uuid4()
+    client, mock = _reader_client()
+    try:
+        response = client.get(f"/ui/agents/a1/run?run={run_id}")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert f'sse-connect="/ui/agents/runs/{run_id}/events"' in response.text
+    assert "rememberRun: false" in response.text
+    assert 'data-state="idle"' not in response.text
+
+
+def test_run_post_transcript_remembers_the_run_in_the_address() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    reset_agent_invoker_for_testing(_FakeInvoker())
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            "/ui/agents/a1/run", data={"input": "go"}, headers=_csrf_headers(csrf)
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "rememberRun: true" in response.text
+    assert "/ui/agents/a1/run/stream?token=" in response.text
+    assert "turn,tool_call,tool_result,final,error,end" in response.text
+
+
+def test_events_stream_replays_saved_events_then_ends() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    run_id = _record_run(
+        events=[("turn", {}), ("tool_call", {"tool_name": "a"}), ("final", {"output": "ok"})]
+    )
+    client, mock = _reader_client()
+    try:
+        response = client.get(f"/ui/agents/runs/{run_id}/events")
+        again = client.get(f"/ui/agents/runs/{run_id}/events", headers={"Last-Event-ID": "2"})
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["X-Accel-Buffering"] == "no"
+    ids = re.findall(r"^id: (\d+)$", response.text, flags=re.MULTILINE)
+    assert ids == ["1", "2", "3"]
+    assert response.text.rstrip().split("\n\n")[-1].startswith("event: end")
+    # A reconnect with Last-Event-ID goes on after that event: no doubles.
+    assert re.findall(r"^id: (\d+)$", again.text, flags=re.MULTILINE) == ["3"]
+
+
+def test_events_stream_of_another_tenant_is_404() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_tenant(_TENANT_B, "tenant-b")
+    run_id = _record_run(tenant_id=_TENANT_B, events=[("turn", {})])
+    client, mock = _reader_client()
+    try:
+        response = client.get(f"/ui/agents/runs/{run_id}/events")
+    finally:
+        mock.stop()
+    assert response.status_code == 404
+
+
+def test_events_stream_read_only_is_403() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    run_id = _record_run(events=[("turn", {})])
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair, role=TenantRole.READ_ONLY)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get(f"/ui/agents/runs/{run_id}/events")
+    finally:
+        mock.stop()
+    assert response.status_code == 403
+
+
+def test_run_detail_lists_saved_events_and_shows_unfinished() -> None:
+    """A run that stopped without a final event shows "unfinished" and its last event."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    run_id = _record_run(
+        events=[("turn", {}), ("tool_call", {"tool_name": "list_targets"})],
+        end=AgentRunStatus.FAILED,
+    )
+    client, mock = _reader_client()
+    try:
+        response = client.get(f"/ui/agents/runs/{run_id}")
+        poll = client.get(f"/ui/agents/runs/{run_id}", headers={"HX-Request": "true"})
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert 'data-role="run-events"' in response.text
+    assert response.text.count('data-role="run-event"') == 2
+    assert "list_targets" in response.text
+    assert 'data-role="events-unfinished"' in response.text
+    assert "The last saved event is #2." in response.text
+    # The status-panel poll does not read the events again.
+    assert poll.status_code == 200
+    assert 'data-role="run-events"' not in poll.text
+
+    async def _reads() -> int:
+        async with get_sessionmaker()() as session:
+            rows = list(await session.scalars(select(AuditLog)))
+        return sum(1 for row in rows if row.payload.get("op_id") == "sessions.run_events.read")
+
+    assert asyncio.run(_reads()) == 1

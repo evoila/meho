@@ -20,6 +20,11 @@ embeddings). Only an entry whose best passage scores at least
 ``KB_SIMILAR_MIN_SCORE`` (setting ``kb_similar_min_score``) is kept. At
 most :data:`SIMILAR_LIMIT` entries are listed.
 
+The search runs only when the ``KB_SIMILAR_CHECK`` setting (``kb_similar_check``)
+is on. It is off by default: then nothing counts as similar, so a create
+is written as before and a dry run lists no entries. It stays off until
+model tests show it helps.
+
 The check is advice at write time, not a lock: a similar entry that
 another writer saves after the check is not caught. The weekly upkeep
 merges such duplicates later.
@@ -190,12 +195,16 @@ async def check_new_entry(
     if create_anyway and not dry_run:
         return None
 
-    similar = await find_similar_entries(
-        tenant_id,
-        body,
-        header,
-        actor_sub=actor_sub,
-        may_change_any=may_change_any,
+    similar = (
+        await find_similar_entries(
+            tenant_id,
+            body,
+            header,
+            actor_sub=actor_sub,
+            may_change_any=may_change_any,
+        )
+        if get_settings().kb_similar_check
+        else []
     )
     if dry_run:
         would_write = create_anyway or not similar

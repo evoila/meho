@@ -52,6 +52,7 @@ Names are `<release>-core-…`. "alnum 32" means 32 characters from
 | `-core-check-runner` | `client_secret` | alnum 32 | `coreKeycloak.enabled` | `checkRunner.clientSecret.secretName` (not while `coreKeycloak.enabled` is on, see below) |
 | `-core-approval-handoff` | `approval_handoff_encryption_key` | Fernet | any built-in part | `approvalHandoff.secretName` |
 | `-core-params-hash` | `params_hash_key` | alnum 32 | any built-in part | `paramsHashKey.secretName` |
+| `-core-web-push` | `vapid_private_key` | base64url of a raw 32-byte P-256 private key (the push key, docs/codebase/ui.md "Approval notifications") | any built-in part, with `webPush.enabled` | `webPush.secretName` |
 | `-core-broadcast-auth` | `requirepass` | alnum 32 | any built-in part, with `broadcast.enabled` and `broadcast.auth.enabled` | `broadcast.auth.existingSecret` |
 | `-core-tls` | `tls.crt`, `tls.key`, `ca.crt` | type `kubernetes.io/tls`; a CA and a certificate for `ingress.host` | any built-in part, with the Ingress and TLS on | `ingress.tls.secretName` |
 
@@ -224,8 +225,8 @@ One namespaced Role, nothing cluster-wide:
 - `create` on Secrets. Kubernetes cannot limit `create` to names; creating a
   name that exists fails with 409 and changes nothing, so an operator's
   Secret is never overwritten.
-- `get` and `patch` only on the fourteen `<release>-core-*` names (the
-  eleven above, and `-core-first-login`, `-core-console-admin` and `-core-ci-login`
+- `get` and `patch` only on the fifteen `<release>-core-*` names (the
+  twelve above, and `-core-first-login`, `-core-console-admin` and `-core-ci-login`
   of the realm stage).
 - `get` only on the Secrets the operator named in values, to check their
   keys.

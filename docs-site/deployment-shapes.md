@@ -9,9 +9,9 @@ own PostgreSQL, Keycloak and OpenBao (an open-source fork of Vault).
 This is the normal way. You can connect your own PostgreSQL or secret
 store instead; the
 [install trail](install/index.md#part-b-bring-your-own-parts-expert-path) says how. The
-Helm chart is the install form available today. A Linux-server install
-and a VMware appliance are in progress; every shape below applies to
-them too.
+Helm chart is available. The Linux server install is available, in
+testing. The VMware appliance is in progress, not released. Every shape
+below applies to all three.
 
 The five shapes below are not five products and not five installs — they are the five ways real estates
 differ: network topology, credential backend, and tenancy. Every shape
@@ -520,7 +520,7 @@ repository:
   counts above 1, ephemeral streams, and the Valkey image source.
 - [`deploy/values-examples/`](https://github.com/evoila/meho/tree/main/deploy/values-examples)
   — the sanitized on-premises archetype
-  (`values-rdc-example.yaml`), the Google Secret Manager archetype
+  (`values-example-lab.yaml`), the Google Secret Manager archetype
   (`values-gsm-example.yaml`), and the local rehearsal overlay
   (`values-kind.yaml`, explicitly *not* a functional federation
   deploy).

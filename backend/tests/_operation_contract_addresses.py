@@ -80,12 +80,18 @@ _FREEIPA_HOST_NAME: Final[str] = (
 )
 _NEW_TARGET_ADDRESS: Final[str] = (
     "the address of a new target, stored in the registry; registering connects to nothing, "
-    "and later calls run that target's own operations"
+    "and later calls run that target's own operations. A machine login's call that no "
+    "person approved may pair it only with the new target's own credential path "
+    "(connectors/targets/register_secret_ref.py)"
 )
 NOT_CALLER_ADDRESSES: Final[Mapping[tuple[str, str], str]] = {
     ("azure.operation.status", "operation.poll_url"): (
         "the poll URL an earlier Azure write returned; MEHO polls it only when it is "
         "on the target's own Azure host (check_poll_url)"
+    ),
+    ("azure.storage.blob.link.create", "allowed_ip"): (
+        "the one IPv4 address Azure lets use the download link (the SAS sip field); "
+        "MEHO and the target never connect to it"
     ),
     ("bind9.record.add", "fqdn"): _DNS_RECORD_NAME,
     ("bind9.record.delete", "fqdn"): _DNS_RECORD_NAME,

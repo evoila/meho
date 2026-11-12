@@ -107,6 +107,7 @@ deploy/charts/meho/
 │   ├── core-secrets-job.yaml  # built-in core: makes missing <release>-core-* Secrets (weight -30)
 │   ├── _core-bootstrap.tpl    # built-in core: the bootstrap Job's realm-stage plan
 │   ├── core-bootstrap-job.yaml # built-in core: finishes the Keycloak realm after install/upgrade (weight 10)
+│   ├── core-keycloak-role-check.yaml # built-in core: pre-upgrade check that meho-admin has manage-realm (weight -28)
 │   ├── _core-postgres-helpers.tpl # shared core helpers: image triple, OpenShift-aware pod security context
 │   ├── tests/test-pgvector.yaml   # helm test pod on the chart's PostgreSQL image
 │   ├── _core-keycloak.tpl  # /auth paths for the Ingress + the hostname check (coreKeycloak.enabled only)
@@ -1078,7 +1079,7 @@ on a person directly: the claim always comes from the group.
 | `meho-cli-approve` | public, authorization code + PKCE (S256) | redirect `http://127.0.0.1:*`; the approval sign-in: its own login flow `meho approval sign-in` (password, then the one-time code), a 15-minute access token and no refresh token |
 | `meho-mcp` | public, authorization code + PKCE (S256) | redirect URIs `http://localhost:*`, `http://127.0.0.1:*`; optional scopes `offline_access`, `mcp:read`, `mcp:execute`, `mcp:admin`; offline login idle limit 48 hours |
 | `meho-web` | confidential, authorization code + PKCE (S256) | redirect `https://<host>/ui/auth/callback`, after logout `https://<host>/ui/auth/login` |
-| `meho-admin` | confidential, service account | realm-management roles `manage-clients` and `manage-users`; with the company login on, the chart adds `manage-identity-providers` and `manage-realm` (#4592) |
+| `meho-admin` | confidential, service account | realm-management roles `manage-clients`, `manage-realm` (the login flows, #6280) and `manage-users`; with the company login on, the chart adds `manage-identity-providers` (#4592) |
 | `meho-check-runner` | confidential, service account | its tokens carry the audience `meho-check-runner`, not `meho-backplane` |
 
 The three main clients people log in with (`meho-cli`, `meho-mcp`, `meho-web`)
@@ -1229,6 +1230,9 @@ What an operator can do now:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
   ```
+
+  `deploy/values-examples/values-vks.yaml` does this for Traefik in the
+  namespace `traefik`, and turns on the OpenBao rule too (#5833).
 
 - Run a service mesh that encrypts traffic between pods (mutual TLS).
 
@@ -1545,14 +1549,14 @@ Three properties make this the right contract:
 `helm lint` against the unmodified `values.yaml` **deliberately fails**
 with the safe-by-default empty fields. The chart's `validate` job in
 [`.github/workflows/chart.yml`](../../.github/workflows/chart.yml) and
-[`deploy/values-examples/values-rdc-example.yaml`](../../deploy/values-examples/values-rdc-example.yaml)
+[`deploy/values-examples/values-example-lab.yaml`](../../deploy/values-examples/values-example-lab.yaml)
 both supply the required overrides; ad-hoc lint invocations pass them via
 `--set` or `-f`.
 
 ### Example values + ESO patterns
 
 A sanitized example values file lives at
-[`deploy/values-examples/values-rdc-example.yaml`](../../deploy/values-examples/values-rdc-example.yaml).
+[`deploy/values-examples/values-example-lab.yaml`](../../deploy/values-examples/values-example-lab.yaml).
 It targets a lab with PostgreSQL, Vault and Keycloak inside the cluster
 and an ingress-nginx controller, and is structured so that other Vault-+-Keycloak-+-Postgres-shaped labs can
 copy it, substitute the `<REPLACE: ...>` placeholders, and apply it.
@@ -1878,7 +1882,7 @@ Every workflow that owns a required status check triggers on
 (all landed with #769), `chart.yml` (closed by #3253) and
 `migration-heads.yml` (#4204, see `docs/codebase/migrations.md`).
 The `merge_group` event fires when a PR is admitted to the GitHub merge
-queue and runs the full check matrix against the **synthesised merge
+queue and runs the check matrix against the **synthesised merge
 commit** — PR head + current `main` tip + any PRs ahead in the queue. A
 merge that would break `main` fails in the queue and never reaches
 `main`, ending the inherited-red episodes from 2026-05-20/21 where
@@ -2013,6 +2017,7 @@ changed by a maintainer, never by a pull request.
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252); on a no-backend diff it requires `python-outside-backend` to pass (#5296). |
 | `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/`, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). |
 | `python-integration` (`Python (integration testcontainers)`) | fan-in | `needs: [changes, python-integration-shard]`; **required check (#698)** so the lane that exercises real connector dispatch can no longer ship red. Fails when any shard failed or was cancelled, or the detector is not green; reports success-by-skip on a docs-only diff and on a no-backend diff (#5296). Same rules as `python-unit-lane` (#5384). |
+| `python-timing-tests` (`Python timing tests (non-blocking)`) | test files with a `slow_runner_tolerant` test | Runs only the tests that compare real elapsed time with a wide fixed limit (`tests/_time_limits.py`). The required unit and integration shards set `MEHO_SKIP_TIME_LIMITS=1`: those tests still run there, but their time limit does not fail the job. Not a required check, and `continue-on-error`, so a busy runner cannot block a merge with a time limit (#6270). |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v9 action, golangci-lint v2) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
@@ -2689,10 +2694,11 @@ reason.
 
 `ci.yml` deliberately does **not** build the backplane container image.
 [`image.yml`](../../.github/workflows/image.yml) runs on PRs that touch
-`backend/**`, `.github/workflows/image.yml` or `.trivyignore`
+`backend/**` or `.github/workflows/image.yml`
 (path-filtered, see `image.yml`'s `on.pull_request.paths`) with
-`push: false` — the Dockerfile + dep-resolution gate — plus a trivy scan
-of `backend/uv.lock` on a hosted runner (the `lock-scan` job; see
+`push: false` — the Dockerfile + dep-resolution gate. The trivy scan of
+`backend/uv.lock` is not in `image.yml`: it is the `python-deps` job of
+`security-scan.yml`, which runs on every PR (see
 `docs/codebase/backend.md`). PRs that don't touch the backend
 (chart-only, CLI-only, docs-only) skip the image build by design,
 because the gate's inputs haven't changed and rebuilding would add zero
@@ -2889,7 +2895,11 @@ A job must not fail because a download failed once. The rules:
   warm-up) with the same three tries.
 - `.github/actions/setup-kind` installs kind this way and starts the
   cluster. It replaces `helm/kind-action`, which downloaded kind on every
-  run.
+  run. It also installs kubectl (`azure/setup-kubectl`), yq (pinned in
+  `tool-versions.env`), and jq and openssl when they are missing. The kind
+  jobs need them, and the image of our own runner pools does not have
+  them, so the merge-queue runs on `meho-runners-ci-heavy-queue` would
+  fail without them.
 - Release-time workflows that cannot rely on the script (they check out a
   tag) use `curl --retry 3 --retry-all-errors`.
 - `scripts/tests/test_ci_tool_scripts.py` tests these scripts with fake
@@ -2920,18 +2930,19 @@ their isolation posture:
 | Workflow | Runs untrusted PR code? | Isolation mechanism |
 | --- | --- | --- |
 | `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
-| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job, which runs on GitHub-hosted `ubuntu-latest` for pull requests and on `meho-runners-ci` only for `main` and tag pushes; the `lock-scan` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
+| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job, which runs on GitHub-hosted `ubuntu-latest` for pull requests and on `meho-runners-ci` only for `main` and tag pushes |
 | `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-latest`; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |
-| `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **hosted runner** for every event (#4626); the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |
-| `dependency-license-check.yml` | yes (`pip install -e ./backend` runs the build backend) | **hosted runner** for every event, all 3 jobs (#4626) |
-| `readme-version-check.yml` | yes (inline shell over PR content) | **hosted runner** for every event (#4626) |
-| `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **hosted runner** for every event (#4626) |
+| `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **hosted runner** for every event, also the merge queue (#6350); the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |
+| `dependency-license-check.yml` | yes (`pip install -e ./backend` runs the build backend) | **route**, all 3 jobs (#6325); the jobs are skipped in the merge queue (#6350) |
+| `readme-version-check.yml` | yes (inline shell over PR content) | **route** (#6325); no merge-queue trigger (#6350) |
+| `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **route** (#6325) for pull requests; the merge-queue run uses a hosted runner (#6350) |
 | `linux-server-test.yml` | yes (shellcheck, and the unit tests run `deploy/linux-server/install.sh` against stub commands) | **route**: fork PR → disposable GitHub-hosted runner |
-| `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for every event (#4626) |
-| `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`) |
-| `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted) |
+| `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for pull requests; both scanner jobs are skipped in the merge queue (#6350) |
+| `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` for pull requests, is skipped in the merge queue (#6350), and only reads `backend/uv.lock` |
+| `security-weekly.yml` | no (`schedule` and `workflow_dispatch` only; trivy reads the lock files of `main`) | GitHub-hosted `ubuntu-latest`; built-in token is `contents: read`; the findings go to a private repo with a separate token (repository secrets `SECURITY_FINDINGS_REPO` and `SECURITY_FINDINGS_TOKEN`, so the log masks the repo name), so a finding is never public before its fix. all severities are reported. `scripts/ci/security_weekly_issue.py` opens one issue or comments only the new findings |
+| `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted); `docs-site.yml` `build` stays in the merge queue on a hosted runner (#6350) |
 
 ### Two in-repo isolation patterns
 
@@ -2960,13 +2971,77 @@ their isolation posture:
   ```
 
   Trusted refs (same-repo PR, `push`, `merge_group`) stay on the internal
-  pool. Only `migration-compat.yml` and `linux-server-test.yml` still use
-  this expression. The other small workflows moved to plain
-  `ubuntu-latest` for every event (#4626 step 2), so they no longer wait
-  for an internal slot: `dependency-license-check.yml`,
-  `secret-scan.yml` (both jobs; the ghcr warm-cache retry of
-  #3307/#3310 stays), `migration-heads.yml`, `plugin-version-check.yml`
-  and `readme-version-check.yml`.
+  pool. `migration-compat.yml`, `linux-server-test.yml`, `compat-gates.yml`,
+  `dependency-license-check.yml`, `migration-heads.yml`,
+  `plugin-version-check.yml` and `readme-version-check.yml` use this
+  expression. (#4626 step 2 had moved the last five to plain
+  `ubuntu-latest`; #6325 moved them back, so a busy evening of hosted jobs
+  does not stop them.)
+
+- **Merge-queue route.** For a job that must run for fork pull requests
+  on a hosted runner, but must never wait for one in the merge queue:
+
+  ```yaml
+  runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
+  ```
+
+  Pull requests, pushes and schedules get `ubuntu-latest`. A merge-queue
+  run gets the own pool. Jobs that need Docker or testcontainers name
+  `meho-runners-ci-heavy-queue` instead. Only this exact expression with
+  a known pool label passes `test_ci_fork_runner_isolation.py`.
+
+### The rule for the merge queue
+
+A merge-queue run starts as few jobs as it can, and none of them waits
+for a pool that is full. Three rules:
+
+1. **A job that only checks the pull request's own files does not run in
+   the queue.** The pull request run did it already. A required check
+   keeps its workflow trigger and skips with
+   `if: github.event_name != 'merge_group'`: a skipped job reports as
+   passed, so the required name still comes and no runner starts. A check
+   that is not required loses its `merge_group` trigger. This holds for
+   the licence checks, TruffleHog, Gitleaks, the Python dependency scan,
+   and the readme version check (#6350).
+2. **A job that can break only when two pull requests meet stays, on an
+   own pool.** These are the Python and Go test gates, the migration
+   checks, the compatibility checks and the chart jobs. Semgrep stays
+   too, because a fork pull request skips it. The plugin version check
+   and the strict docs build stay as well (on a hosted runner, rule 3):
+   two pull requests can raise the same plugin version, or break the
+   docs build together. A queue run starts about
+   12 jobs on `meho-runners-ci`, 6 on `meho-runners-ci-heavy-queue`
+   (the unit shards) and 11 hosted jobs (rule 3).
+3. **A short job that must stay and does not need a pool may use a
+   hosted runner.** It goes on `_HOSTED_ON_MERGE_GROUP_ALLOWED` in
+   `backend/tests/test_ci_fork_runner_isolation.py`, with its reason.
+   Today these are: `docs-site.yml` `deploy` and `build`,
+   `plugin-version-check.yml` `plugin-version`, `ci.yml` `changes`,
+   `python-unit-lane`, `python-integration` and `helm-lint-template`,
+   `chart.yml` `changes` and `helm-test-gate`, and `migration-heads.yml`
+   `check`. Each runs for seconds to about a minute, so it does not fill the
+   hosted limit. The two kind installs of `chart.yml` (`helm-test` and
+   `helm-test-byo`) are hosted too, for a different reason: they need
+   more CPU than the heavy queue pool has today (#6347).
+
+`test_no_merge_group_job_uses_a_hosted_label` fails when a job that can
+run on `merge_group` resolves to a hosted label and is not on the
+allowlist. It reads only the `runs-on` routes it knows. Any other
+expression fails the test, also when it names an own pool.
+
+A pull request from a fork never runs on an own runner. It runs on the
+hosted runner. Once a maintainer adds that pull request to the merge
+queue, its merge-queue run does use the own pool (the jobs that stay in
+the queue, such as the unit shards and Semgrep, run the code of the merged
+commit). So a fork pull request enters the queue only after review.
+Own pools have no `gh` program: a job that needs it installs it in a step (the merge-queue
+watchdog does, and prints a `::warning::` line when that fails).
+
+Every workflow that runs on `pull_request` also has `concurrency` with
+`cancel-in-progress`, so a new push cancels the run of the old commit.
+For `merge_group` it is always off, because a cancelled queue check
+fails the merge. `test_pull_request_workflows_cancel_old_runs_but_not_merge_group`
+checks this.
 
 ### Enforcement outside PR-editable YAML
 
@@ -3149,7 +3224,7 @@ Steps, in order:
    Labels the namespace with `meho.io/managed-by=pr-smoke` and
    `meho.io/pr-number=<n>` for consumer-side audit-log filtering.
 8. **Helm install** — `helm upgrade --install meho deploy/charts/meho/
-   -f deploy/values-examples/values-rdc-example.yaml
+   -f deploy/values-examples/values-example-lab.yaml
    --set image.tag=pr-<n>-<sha> --wait --timeout 5m`. Uses the
    in-tree example overlay as the base (real-target fixture layout)
    with the PR-tagged image as the only override.

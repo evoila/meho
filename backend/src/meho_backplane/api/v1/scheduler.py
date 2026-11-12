@@ -73,6 +73,7 @@ from meho_backplane.scheduler.schemas import (
 )
 from meho_backplane.scheduler.service import (
     AgentDefinitionMissingError,
+    CheckSourceNotFoundError,
     SchedulerAdminService,
 )
 
@@ -200,6 +201,11 @@ async def create_trigger(
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="agent_definition_not_found",
+        ) from exc
+    except CheckSourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="check_source_not_found",
         ) from exc
     structlog.contextvars.bind_contextvars(audit_trigger_id=str(entry.id))
     return entry

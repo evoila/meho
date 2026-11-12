@@ -4290,6 +4290,7 @@ meho runbook next <run_id> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit raw NextStepResponse JSON instead of the human block
+- `--retry` — run the check of a failed step again (after you fixed the cause)
 - `--verify-response` — answer for a confirm-typed verify: yes|no|escalate (omit to prompt interactively)
 
 ### `meho runbook publish-template`

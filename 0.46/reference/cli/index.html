@@ -4203,6 +4203,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-connector-classify" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho connector classify
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-connector-delete" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -11535,6 +11546,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-connector-classify" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho connector classify
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-connector-delete" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -18469,6 +18491,22 @@
 <li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
 <li><code>--json</code> — emit machine-readable JSON to stdout instead of the human table</li>
 </ul>
+<h3 id="meho-connector-classify"><code>meho connector classify</code><a class="headerlink" href="#meho-connector-classify" title="Permanent link">&para;</a></h3>
+<p>Set the category, labels or "always wait" of operations, one at a time or by pattern</p>
+<div class="highlight"><pre><span></span><code>meho connector classify [flags]
+</code></pre></div>
+<ul>
+<li><code>--always-wait</code> — every call of a matched operation waits for approval</li>
+<li><code>--apply</code> — ask for the change (without it: dry run only)</li>
+<li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--category</code> — a category of the taxonomy, for example network</li>
+<li><code>--connector</code> — connector id pattern, for example vault-1.x</li>
+<li><code>--group</code> — operation group key pattern</li>
+<li><code>--json</code> — emit machine-readable JSON to stdout instead of the human summary</li>
+<li><code>--label</code> — a key=value label (repeat for more); replaces the labels of this entry</li>
+<li><code>--no-always-wait</code> — back to the operation's own approval value (never below it)</li>
+<li><code>--op</code> — operation id pattern, for example 'k8s.deployment.*'</li>
+</ul>
 <h3 id="meho-connector-delete"><code>meho connector delete</code><a class="headerlink" href="#meho-connector-delete" title="Permanent link">&para;</a></h3>
 <p>Remove a connector from your tenant (its operations and groups; the built-in copy stays)</p>
 <div class="highlight"><pre><span></span><code>meho connector delete &lt;connector_id&gt; [flags]
@@ -18493,7 +18531,9 @@
 </code></pre></div>
 <ul>
 <li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--category</code> — a category of the taxonomy, for example network</li>
 <li><code>--json</code> — emit machine-readable JSON to stdout instead of the human summary</li>
+<li><code>--label</code> — a key=value label (repeat for more); replaces the labels of this entry</li>
 <li><code>--name</code> — replacement display name; supports <code>@&lt;path&gt;</code> to read from a file</li>
 <li><code>--when-to-use</code> — replacement when_to_use text; supports <code>@&lt;path&gt;</code> to read from a file</li>
 </ul>
@@ -18503,10 +18543,12 @@
 </code></pre></div>
 <ul>
 <li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--category</code> — a category of the taxonomy, for example network</li>
 <li><code>--custom-description</code> — replacement custom_description; supports <code>@&lt;path&gt;</code> to read from a file</li>
 <li><code>--disable</code> — set is_enabled=false on this op</li>
 <li><code>--enable</code> — set is_enabled=true on this op</li>
 <li><code>--json</code> — emit machine-readable JSON to stdout instead of the human summary</li>
+<li><code>--label</code> — a key=value label (repeat for more); replaces the labels of this entry</li>
 <li><code>--no-requires-approval</code> — clear the requires_approval flag</li>
 <li><code>--reason</code> — why you make this change; written to the audit row and required to turn approval off</li>
 <li><code>--requires-approval</code> — mark the op as requiring an approval workflow</li>

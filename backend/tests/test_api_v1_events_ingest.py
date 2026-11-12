@@ -23,6 +23,7 @@ Acceptance-criteria coverage:
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import hmac
 import json
@@ -211,6 +212,26 @@ async def test_capped_reader_streams_before_buffering() -> None:
     request = SimpleNamespace(headers={}, stream=_stream)
     with pytest.raises(Exception) as exc:  # _IngestBodyTooLargeError
         await _read_capped_body(request, max_bytes=150)  # type: ignore[arg-type]
+    assert type(exc.value).__name__ == "_IngestBodyTooLargeError"
+
+
+@pytest.mark.asyncio
+async def test_capped_reader_returns_wire_bytes_under_content_encoding() -> None:
+    """The reader returns the body as sent, even with a ``Content-Encoding`` header.
+
+    The signature is checked over these bytes, and nothing decodes them a
+    second time. The cap counts the compressed bytes that came over the wire.
+    """
+    wire = gzip.compress(b'{"alert":"firing"}' * 50)
+
+    async def _stream():
+        yield wire[:10]
+        yield wire[10:]
+
+    request = SimpleNamespace(headers={"content-encoding": "gzip"}, stream=_stream)
+    assert await _read_capped_body(request, max_bytes=len(wire)) == wire  # type: ignore[arg-type]
+    with pytest.raises(Exception) as exc:  # _IngestBodyTooLargeError
+        await _read_capped_body(request, max_bytes=len(wire) - 1)  # type: ignore[arg-type]
     assert type(exc.value).__name__ == "_IngestBodyTooLargeError"
 
 

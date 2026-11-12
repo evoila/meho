@@ -251,10 +251,24 @@ def normalise_document(document: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def _json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 def canonical_sha256(document: dict[str, Any] | None) -> str:
-    """The SHA-256 of *document*'s meaning: key order, comments and empty keys do not count."""
-    text = json.dumps(normalise_document(document), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(text.encode()).hexdigest()
+    """The SHA-256 of *document*'s meaning.
+
+    Key order, comments and empty keys do not count, and neither does the
+    order of the classification entries or of the categories: the most
+    specific entry wins, not the first one.
+    """
+    meaning = normalise_document(document)
+    if "classifications" in meaning:
+        meaning["classifications"] = sorted(meaning["classifications"], key=_json)
+    taxonomy = meaning.get("taxonomy")
+    if isinstance(taxonomy, dict) and "categories" in taxonomy:
+        taxonomy["categories"] = sorted(taxonomy["categories"], key=_json)
+    return hashlib.sha256(_json(meaning).encode()).hexdigest()
 
 
 def file_sha256(content: bytes) -> str:

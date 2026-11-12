@@ -388,3 +388,40 @@ async def test_a_second_admin_replaces_a_stored_policy_that_is_not_valid(
     result = await _approve(request_id, _admin("admin-b"))
     assert result.status == "ok", result
     assert (await _stored() or {})["description"] == "Network team"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch")
+async def test_the_same_rules_in_another_order_do_not_wait(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await _setup(embedding)
+    async with get_sessionmaker()() as session:
+        session.add(
+            TenantPolicy(
+                tenant_id=_TENANT,
+                document={
+                    "classifications": [
+                        {"match": {"connector": "polapi-1.x"}, "category": "network"},
+                        {"match": {"op": "polapi.*"}, "always_wait": True},
+                    ]
+                },
+                set_by_sub="fixture",
+            )
+        )
+        await session.commit()
+    reordered = (
+        "policy: v1\n"
+        "classifications:\n"
+        "  - {match: {op: polapi.*}, always_wait: true}\n"
+        "  - {match: {connector: polapi-1.x}, category: network}\n"
+    )
+    key = make_rsa_keypair("kid-pol-order")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _post(client, "import", _token(key), reordered)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["message"] == NO_CHANGE
+    assert await _requests() == []
+    async with get_sessionmaker()() as session:
+        assert (await session.execute(select(PolicyRevision))).scalars().all() == []

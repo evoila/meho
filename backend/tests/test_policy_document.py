@@ -466,6 +466,36 @@ async def test_the_same_meaning_twice_is_no_change(embedding: AsyncMock) -> None
 
 
 @pytest.mark.asyncio
+async def test_reordered_rules_and_categories_are_no_change(embedding: AsyncMock) -> None:
+    await _register(embedding, "polfix.vm.list")
+    await _register(embedding, "polfix.vm.delete", safety_level="dangerous", requires_approval=True)
+    first = (
+        "policy: v1\n"
+        "taxonomy: {categories: [team-net, team-db]}\n"
+        "classifications:\n"
+        "  - {match: {connector: polfix-1.x}, category: network}\n"
+        "  - {match: {op: polfix.vm.delete}, always_wait: true}\n"
+    )
+    reordered = (
+        "policy: v1\n"
+        "taxonomy: {categories: [team-db, team-net]}\n"
+        "classifications:\n"
+        "  - {match: {op: polfix.vm.delete}, always_wait: true}\n"
+        "  - {match: {connector: polfix-1.x}, category: network}\n"
+    )
+    assert (await _apply(first))["applied"] is True
+    async with get_sessionmaker()() as session:
+        plan = await build_plan(
+            session, scope="tenant", tenant_id=_TENANT, content=reordered.encode()
+        )
+    assert plan.mistakes == []
+    assert plan.no_change is True
+    assert (await _apply(reordered))["applied"] is False
+    async with get_sessionmaker()() as session:
+        assert len((await session.execute(select(PolicyRevision))).scalars().all()) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_policy_changed_after_the_plan_is_not_applied(embedding: AsyncMock) -> None:
     await _register(embedding, "polfix.vm.list")
     async with get_sessionmaker()() as session:

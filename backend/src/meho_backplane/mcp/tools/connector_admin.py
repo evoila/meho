@@ -121,6 +121,7 @@ from meho_backplane.mcp.tools._connector_classification import (
     CLASSIFICATION_PROPERTIES,
     CLASSIFICATION_TEXT,
     classification_for_settings,
+    drop_classification_fields,
     request_from_tool,
 )
 from meho_backplane.mcp.tools._connector_shared import (
@@ -502,7 +503,7 @@ async def _review_handler(
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.
         raise_invalid_params_for_connector_not_found(exc)
-    return _model_dump_json_safe(payload)
+    return drop_classification_fields(_model_dump_json_safe(payload))
 
 
 async def _edit_group_handler(

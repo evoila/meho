@@ -14,7 +14,8 @@ The fields and their text exist only while the ``POLICY_CLASSIFICATION``
 switch is on: :func:`classification_for_settings` takes them out of the
 description and the input schema while it is off, so ``tools/list`` is
 the same as before and a call that still sends them is refused as an
-invalid input.
+invalid input. :func:`drop_classification_fields` does the same for the
+answer of ``meho_connector_review``.
 
 Connector-wide and pattern edits go through the operations
 ``policy.classify_preview`` (the dry run) and ``policy.classify``.
@@ -38,6 +39,7 @@ __all__ = [
     "CLASSIFICATION_PROPERTIES",
     "CLASSIFICATION_TEXT",
     "classification_for_settings",
+    "drop_classification_fields",
     "request_from_tool",
 ]
 
@@ -82,6 +84,23 @@ def classification_for_settings(definition: ToolDefinition, operator: Operator) 
             "inputSchema": {**schema, "properties": properties},
         },
     )
+
+
+def drop_classification_fields(review: dict[str, Any]) -> dict[str, Any]:
+    """Remove ``category`` / ``labels`` from each op of a review answer while the switch is off.
+
+    *review* is a serialized review payload. Its ops sit in ``groups[].ops``
+    and in ``ungrouped_ops``. While the switch is off, the answer keeps the
+    shape it had before the two fields existed.
+    """
+    if classification_enabled():
+        return review
+    ops = [op for group in review.get("groups", []) for op in group.get("ops", [])]
+    ops.extend(review.get("ungrouped_ops", []))
+    for op in ops:
+        for key in CLASSIFICATION_PROPERTIES:
+            op.pop(key, None)
+    return review
 
 
 async def request_from_tool(

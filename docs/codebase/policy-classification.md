@@ -185,7 +185,9 @@ Rules every surface keeps:
 - While the switch is off, REST answers `409` (`classification_off`), the
   list says `enabled: false`, the console page says so, and the two MCP
   edit tools do not show the fields (`classification_for_settings`), so
-  `tools/list` is as before. The dry-run operation is not registered.
+  `tools/list` is as before. The answer of `meho_connector_review` has no
+  `category` / `labels` on its ops (`drop_classification_fields`), so it
+  is as before too. The dry-run operation is not registered.
 
 `policy.classify_preview` is `safe` and runs at once (no approval). Like
 `policy.classify` it needs the `tenant_admin` role and is registered only

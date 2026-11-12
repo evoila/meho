@@ -65,7 +65,12 @@ def _ref_summary(spec: SecretRef) -> dict[str, str]:
     ``ref`` is an address (a Vault KV path + ``#<field>`` fragment), never
     a value.
     """
-    return {"kind": spec.kind, "ref": spec.ref}
+    summary = {"kind": spec.kind, "ref": spec.ref}
+    if spec.kind == "vault-target":
+        # The target whose role does this read or write, named on its own
+        # so a reviewer does not have to cut it out of the ref.
+        summary["target"] = spec.ref.partition("/")[0]
+    return summary
 
 
 async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -92,6 +97,7 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
         "action": "secret.move",
         "source": _ref_summary(source),
         "sink": _ref_summary(sink),
+        "merge": ctx.params.get("merge") is True,
     }
     reason = ctx.params.get("reason")
     if isinstance(reason, str) and reason:

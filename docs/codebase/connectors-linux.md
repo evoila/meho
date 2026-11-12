@@ -491,17 +491,19 @@ file, change its mode afterwards.
 `linux.file.write` takes the file content as a parameter, so the caller must
 know it. It is the wrong tool for a secret. The secret broker has a `linux`
 store for this (write side only): `secret.move --to
-'linux:<target>/<absolute path>#<owner>'`. The file gets mode 0600 and the
-owner you name, and a missing parent directory gets mode 0700 and the same
-owner. It may also write inside the home directory of `<owner>` (MEHO
-reads it from the host), which `linux.file.write` cannot. The value goes over the SSH channel's standard
+'linux:<target>/<absolute path>#<owner>'`. It writes only inside the home
+directory of `<owner>` (MEHO reads it from the host), and only as the owner:
+`<owner>` is never `root`. The file gets mode 0600, and a missing parent
+directory gets mode 0700. The value goes over the SSH channel's standard
 input through the same sudo helper as `file.write`, and never appears in a
-result, an audit row, a preview, a log line or an error. The ref grammar and
-the rules for allowed paths are in
+result, an audit row, a preview, a log line or an error. It refuses places
+outside a home (`/etc`, `/run`, `/usr`, `/var/lib`, `/opt`, `/srv` and the
+system folders), places in a home that the system runs or reads for logins
+(for example a `.ssh` folder, `.config/systemd` or `.bashrc`), and a target
+that is not a `linux-ssh` target. A person approves each move. The ref
+grammar and the full rules are in
 [connectors-secret-broker.md](connectors-secret-broker.md), "The `linux:`
-store". It refuses a place the system runs or reads for logins and rights
-(for example `/etc/cron*`, `/etc/sudoers*`, `authorized_keys`, `.bashrc`),
-and a target that is not a `linux-ssh` target. A person approves each move.
+store".
 Code: `connectors/linux/secret_endpoint.py`.
 
 ### Root elevation

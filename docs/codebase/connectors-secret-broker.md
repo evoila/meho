@@ -149,8 +149,11 @@ do that, and nobody sees the value:
    handoff_token, handoff_ttl_seconds}`.
 2. **On B: `secret.handoff.import`.** Params: `handoff_token`, `store`
    (the name of a target on B, product `vault`, whose host is A's Vault
-   or OpenBao), `to` (`<kind>:<ref>` sink on B), optional
+   or OpenBao), `to` (a `vault:` place on B), optional
    `expect_fingerprint`, `reason`. The handler:
+   - refuses a `to` of any other kind, for example `linux:`, before it
+     uses the handoff. Only `secret.move` writes to a `linux:` place, and
+     a person approves each move;
    - builds the sink and runs its write check first
      (`VaultKvSecretEndpoint.check_write_allowed`, the tenant check), so
      a wrong sink path does not use up the handoff;
@@ -376,8 +379,8 @@ meho secret move \
 ```
 
 The file gets mode 0600 and the owner you name. A file that already exists
-at the path is replaced. If the owner is `root`, the file is written as
-root. See "The `linux:` store" below.
+at the path is replaced. The path must be inside the owner's home, and the
+owner is never `root`. See "The `linux:` store" below.
 
 The audit rows and the approval previews of the three calls show only the
 client id, the target names, and the paths. For a `linux:` move the approval
@@ -386,7 +389,7 @@ reads both: the path says where the secret goes, the owner says who can read
 it.
 
 A person approves each `secret.move`. No standing grant and no run approval
-covers it, because a move can write a file as root on a host.
+covers it, because a move writes a secret into a store or onto a host.
 
 **Safe to run twice.** A second run changes nothing that matters. The client
 create answers `conflict` and leaves the client as it is. The two moves
@@ -407,57 +410,48 @@ linux:<target>/<absolute path>#<owner>
   of another kind before it reads any credential or opens SSH.
 - `<absolute path>` is the file. One slash or two after the target both work.
 - `<owner>` is the Linux user who will own the file. A user name only:
-  lower-case letters, digits, `_` and `-`.
+  lower-case letters, digits, `_` and `-`. Never `root`, and never a user
+  with user id 0.
 - A ref has no spaces, because the `secret.move` parameter schema refuses
   them.
 
 What MEHO does on the host:
 
-- It writes the value in one atomic step: a temp file, then a rename.
-- The file gets mode 0600 and the owner. A missing parent directory is made
-  with mode 0700 and the same owner.
-- Allowed places: the write roots of `linux.file.write` (`/etc`, `/var/lib`,
-  `/run`, `/opt`, `/srv`, `/usr/local`), or inside the home directory of
-  `<owner>`.
-- Before it opens any SSH connection, MEHO refuses a relative path, `..`, a
-  control character, and a system folder that can never hold a home directory
-  (`/proc`, `/sys`, `/dev`, `/boot`, `/bin`, `/sbin`, `/lib*`, `/tmp`, and
-  `/usr` outside the write roots). A path under `/var` is not refused here:
-  a home can be there, for example `/var/www` or `/var/home/<owner>`.
-- Also before any SSH connection, MEHO refuses a place that the system runs
-  or reads for logins and rights. A secret there could become a command that
-  runs, a sudo rule, or a login key. The list (`_SYSTEM_RUNS` in the code):
-  - under `/etc`: `cron*`, `sudoers*`, `systemd`, `profile*`, `ld.so*`,
-    `pam.d`, `ssh`, and the files `passwd`, `shadow`, `group`;
-  - in any folder: `authorized_keys`, `authorized_keys2`, and the shell
-    start files `.bashrc`, `.bash_profile`, `.bash_login`, `.profile`,
-    `.zshrc`.
+- The only allowed place is the home directory of `<owner>`. A short list of
+  allowed places can be complete; a list of refused places never is.
+- It writes the value in one atomic step: a temp file, then a rename. The
+  owner does every step (`runuser -u <owner>`): the folders, the temp file
+  and the rename. Root only checks; it never writes the file and never
+  makes a folder. So root never follows a link that the owner could have
+  made.
+- The file gets mode 0600. A missing parent directory is made with mode
+  0700.
+- Before it opens any SSH connection, MEHO refuses:
+  - a relative path, `..`, a backslash, and any character that is not
+    printable (for example a tab, ESC or a right-to-left mark);
+  - a place that is never a home: `/etc`, `/run`, `/usr` (also
+    `/usr/local`), `/var/lib`, `/opt`, `/srv`, `/proc`, `/sys`, `/dev`,
+    `/boot`, `/bin`, `/sbin`, `/lib*` and `/tmp`. A home under `/var` (for
+    example `/var/www`) is allowed;
+  - a place inside a home that the system runs or reads for logins
+    (`_SYSTEM_RUNS` in the code): a `.ssh` folder anywhere in the path,
+    `.config/systemd`, `.config/autostart`, and the file names
+    `authorized_keys`, `authorized_keys2`, `.bashrc`, `.bash_profile`,
+    `.bash_login`, `.bash_logout`, `.profile`, `.zshrc`, `.zshenv`,
+    `.zprofile`, `.zlogin`, `.zlogout`, `.pam_environment`, `.forward`,
+    `.rhosts`, `.shosts`, `.k5login`.
+- `secret.move` runs the same checks before the call can wait for approval.
+  A refused place makes no approval card: the call fails with
+  `invalid_params`.
 - Both scripts on the host first check that `realpath -m` works. When it
   does not, they stop with the reason `realpath` and write nothing.
-- For a path outside the write roots, MEHO first asks the host for the
-  owner's home (`getent passwd`). This short script carries no secret. When
-  the path is not inside that home, MEHO stops before it sends the secret. So
-  a home in any place works, for example `/srv/app` or `/data/app`.
-- The script that writes the file checks the path again, as the caller wrote
-  it. The rule: root never follows a link that the owner of the file could
-  have made.
-- Root never writes in a folder that another user can change:
-  - A path inside the owner's home is written by the owner. The folders, the
-    temp file and the rename are all done as the owner
-    (`runuser -u <owner>`), not as root. Root does not resolve or follow
-    links there.
-  - A path under a write root with a symbolic link anywhere in it is refused
-    with the reason `link`.
-  - Under a write root, root writes only when every folder from the write
-    root down belongs to root and is not writable by group or others.
-  - When the parent folder belongs to the owner, the write runs as the owner.
-    This also holds for several folders of the owner in a row (for example
-    the two folders that an earlier run made), when the folder above them
-    belongs to root.
-    Missing folders are made by root (each one while its parent still belongs
-    to root), handed to the owner, and then the write runs as the owner.
-  - Any other folder (one that group or others can write, or a root folder
-    inside a folder of the owner) is refused with the reason `place`.
+- MEHO then asks the host for the owner's home (`getent passwd`). This short
+  script carries no secret, and stops with the reason `root-owner` for an
+  owner with user id 0. When the path is not inside the home, MEHO stops
+  before it sends the secret. So a home in any place works, for example
+  `/data/app`.
+- The script that writes the file checks the owner and the home again, with
+  the path as the caller wrote it.
 - The value travels only inside the SSH channel (standard input), through
   the same sudo helper as `linux.file.write`. During the write the helper
   keeps the script in a temp file of mode 0600 on the host, and removes the

@@ -94,7 +94,7 @@ Three kinds ship today. A move may be **same-kind** (`vault` → `vault`) or
 | --- | --- | --- | --- |
 | `vault` | source **and** sink | `<path>#<field>` — a KV-v2 path with a required `#<field>` fragment selecting one field | `vault:secret/db/prod#password` |
 | `keycloak` | sink **only** | `<target>/<realm>/<username>#password` — `#password` is the only writable field | `keycloak:kc/meho/operator-a#password` |
-| `linux` | sink **only** | `<target>/<absolute path>#<owner>` — a file on a host of a `linux-ssh` target, mode 0600, owned by `<owner>` | `linux:app-host/etc/app/key#app` |
+| `linux` | sink **only** | `<target>/<absolute path>#<owner>` — a file in the home of `<owner>` (never `root`) on a host of a `linux-ssh` target, mode 0600, written as `<owner>` | `linux:app-host/home/app/.config/app/key#app` |
 
 **vault** (`vault:` —
 [`vault_endpoint.py`](../../backend/src/meho_backplane/connectors/secret/vault_endpoint.py)).
@@ -128,8 +128,10 @@ Keycloak.
 **linux** (`linux:` —
 [`secret_endpoint.py`](../../backend/src/meho_backplane/connectors/linux/secret_endpoint.py)).
 A linux adapter is a **sink only**. It writes the value to one file on the
-host of a `linux-ssh` target, over SSH with sudo. A target of another kind is
-refused. The allowed places, the paths it refuses and the link rules are in
+host of a `linux-ssh` target, over SSH with sudo. The file must be inside the
+home of its owner, and the owner writes it. A target of another kind is
+refused. `secret.handoff.import` never writes to a `linux:` place. The
+allowed place, the paths it refuses and the link rules are in
 [`connectors-secret-broker.md`](../codebase/connectors-secret-broker.md),
 "The `linux:` store". A person approves each move: no standing grant and no
 run approval covers `secret.move`.

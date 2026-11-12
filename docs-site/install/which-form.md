@@ -11,7 +11,13 @@ steps for every form.
 Start at the first question and stop at the first "yes".
 
 1. **Do you run VMware vSphere or VMware Cloud Foundation (VCF)?**
-   Yes: use form 1, the [VMware appliance](form-1-vmware-appliance.md).
+   Yes: the [VMware appliance](form-1-vmware-appliance.md) is not
+   released yet. Use form 3 ([your Kubernetes](form-3-your-kubernetes.md))
+   if you have one. This includes your own VKS cluster (vSphere
+   Kubernetes Service): see
+   [VKS](form-3-your-kubernetes.md#vks-vsphere-kubernetes-service).
+   Otherwise use form 2, the [Linux server](form-2-linux-server.md),
+   which can be a VM in vSphere. Ask evoila about the appliance.
 2. **Do you run your own Kubernetes or OpenShift cluster, and may you
    install a Helm chart on it?**
    Yes: use form 3, [your Kubernetes](form-3-your-kubernetes.md).
@@ -31,9 +37,9 @@ Start at the first question and stop at the first "yes".
 
 | Form | Tested | Should work, not tested |
 |---|---|---|
-| 1. VMware appliance | Not released yet. | VMware vSphere, as the release notes say when it ships. |
+| 1. VMware appliance | In progress, not released. | VMware vSphere, as the release notes say when it ships. |
 | 2. Linux server | Ubuntu 24.04 on x86-64. | Another Linux with systemd. The install shows a "not tested" warning and goes on. |
-| 3. Your Kubernetes | Kubernetes 1.28 or newer on kind, and on RKE2 (the Kubernetes inside form 2). | Other Kubernetes that follow the standard, and OpenShift. |
+| 3. Your Kubernetes | Kubernetes 1.28 or newer on kind, and on RKE2 (the Kubernetes inside form 2). VKS (vSphere Kubernetes Service) on VMware Cloud Foundation 9.1 with Kubernetes 1.35, and on vSphere 8 (VMware Cloud Foundation 5.2) with Kubernetes 1.32. | Other Kubernetes that follow the standard, and OpenShift. |
 
 Not on the list? Ask evoila before you use it in production.
 

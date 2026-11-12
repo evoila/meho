@@ -7,7 +7,7 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 """
 
-from meho_backplane.op_classes import declare_op_classes
+from meho_backplane.op_classes import declare_op_classes, declare_root_shell
 
 declare_op_classes(
     # G-Node/RKE2-T2 #2429 -- the server-token rotate mints a new join token
@@ -26,4 +26,16 @@ declare_op_classes(
     # the target save an etcd snapshot. Without this class it would get
     # ``read`` from ``resolve_operation_op_class``.
     write=("rke2.etcd-snapshot.save",),
+)
+
+# The writes run their command as root on the node: the token rotate through
+# the sudo helper, the others over an SSH login as root. A run approval never
+# covers these: a person approves each call.
+declare_root_shell(
+    (
+        "rke2.token.rotate",
+        "rke2.node.service.restart",
+        "rke2.node.config.update",
+        "rke2.etcd-snapshot.save",
+    )
 )

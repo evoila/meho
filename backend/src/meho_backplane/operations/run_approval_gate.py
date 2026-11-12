@@ -22,9 +22,11 @@ from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor, RunApproval
+from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
 from meho_backplane.operations.run_approval_schemas import RunApprovalEntry
 from meho_backplane.operations.run_approvals import as_utc, target_kinds_enabled
 from meho_backplane.operations.service_grants import (
+    always_wait_grant_reason,
     caller_address_grant_reason,
     delete_grant_reason,
 )
@@ -74,7 +76,12 @@ def _target_fields(target: Any) -> tuple[uuid.UUID | None, str | None]:
 def _never_covered(descriptor: EndpointDescriptor) -> bool:
     from meho_backplane.settings import get_settings
 
-    if caller_address_grant_reason(descriptor) is not None:
+    if (
+        is_root_shell(descriptor.op_id)
+        or needs_per_call_approval(descriptor.op_id)
+        or caller_address_grant_reason(descriptor) is not None
+        or always_wait_grant_reason(descriptor) is not None
+    ):
         return True
     patterns = get_settings().service_grant_delete_shaped_patterns
     return delete_grant_reason(descriptor.op_id, patterns, descriptor) is not None
@@ -136,8 +143,9 @@ async def consult_and_record_run_approval(
     Called by the policy gate for a service principal whose call would wait
     for approval and that no standing grant covers. The run reference is
     the request's ``Meho-Work-Ref``; a call without one is never covered.
-    An operation with a delete sign, or one that connects to an address the
-    caller gives, is never covered.
+    An operation with a delete sign, one that connects to an address the
+    caller gives, one that runs a command as root on the host, or one a
+    connector marks for per-call approval, is never covered.
 
     On a hit with ``record=True`` it writes one ``approval.decision`` audit
     row (same shape as a standing grant use) in its own committed

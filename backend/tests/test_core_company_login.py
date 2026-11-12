@@ -77,6 +77,15 @@ class CompanyKeycloak(FakeKeycloak):
         self.linked: set[str] = set()
         # Says which requests (method, path) time out instead of answering.
         self.times_out: Callable[[str, str], bool] | None = None
+        # Settings of the steps of the realm file's flows: step id -> config id.
+        self.step_configs: dict[str, str] = {}
+
+    def flow_steps(self, alias: str, level: int = 0) -> list[dict[str, Any]]:
+        steps = super().flow_steps(alias, level)
+        for step in steps:
+            if step["id"] in self.step_configs:
+                step["authenticationConfig"] = self.step_configs[step["id"]]
+        return steps
 
     def state(self) -> dict[str, Any]:
         return {
@@ -103,7 +112,9 @@ class CompanyKeycloak(FakeKeycloak):
         return next(u for u in self.users.values() if u["id"] == user_id)
 
     async def call(self, method: str, path: str, *, json: Any = None, params: Any = None) -> Reply:
-        if self.forbidden and self._company_path(path):
+        # The realm stage stops on login flows without manage-realm (#6280), so
+        # only the identity provider calls answer 403 here.
+        if self.forbidden and "/identity-provider/" in path:
             self.calls.append((method, path))
             return Reply(403, {"error": "HTTP 403 Forbidden"})
         if self.times_out is not None and self.times_out(method, path):
@@ -181,6 +192,11 @@ class CompanyKeycloak(FakeKeycloak):
             self.auth_configs[new_id] = {"id": new_id, **copy.deepcopy(body)}
             self.redirector["authenticationConfig"] = new_id
             return Reply(201, None, f"{path}/{new_id}")
+        if match := re.fullmatch(rf"{_BASE}/authentication/executions/([^/]+)/config", path):
+            new_id = str(uuid.uuid4())
+            self.auth_configs[new_id] = {"id": new_id, **copy.deepcopy(body)}
+            self.step_configs[match.group(1)] = new_id
+            return Reply(201, None, f"{path}/{new_id}")
         return super()._post(path, body, params)
 
     def _put(self, path: str, body: Any, params: dict[str, str]) -> Reply:
@@ -207,7 +223,10 @@ class CompanyKeycloak(FakeKeycloak):
             return Reply(204, None)
         if match := re.fullmatch(rf"{_BASE}/authentication/config/([^/]+)", path):
             del self.auth_configs[match.group(1)]
-            self.redirector.pop("authenticationConfig", None)
+            if self.redirector.get("authenticationConfig") == match.group(1):
+                del self.redirector["authenticationConfig"]
+            gone = match.group(1)
+            self.step_configs = {s: c for s, c in self.step_configs.items() if c != gone}
             return Reply(204, None)
         if match := re.fullmatch(rf"{_BASE}/users/([^/]+)/groups/([^/]+)", path):
             user = self._user_by_id(match.group(1))
@@ -505,6 +524,32 @@ async def test_auto_redirect_off_removes_the_default_and_on_sets_it_again(
 
     await _run(kc)
     assert kc.default_provider() == "company"
+
+
+async def test_auto_redirect_is_also_set_on_the_consoles_touch_flow(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """#6213: the console logs in through ``meho approval touch``; it redirects too."""
+    kc = _fresh()
+    touch = "meho approval touch"
+    step = next(
+        s for s in kc.flow_steps(touch) if s.get("providerId") == "identity-provider-redirector"
+    )
+
+    await _run(kc)
+    config = kc.auth_configs[kc.step_configs[step["id"]]]
+    assert config["alias"] == "meho-company-login-redirect-touch"
+    assert config["config"] == {"defaultProvider": "company"}
+    out = capfd.readouterr().out
+    assert "auto-redirect: set to company" in out
+    assert f"auto-redirect ({touch}): set to company" in out
+
+    await _run(kc)
+    assert f"auto-redirect ({touch}): kept" in capfd.readouterr().out
+
+    await _run(kc, auto_redirect=False)
+    assert step["id"] not in kc.step_configs
+    assert f"auto-redirect ({touch}): removed" in capfd.readouterr().out
 
 
 async def test_a_default_set_to_another_provider_is_changed_on_and_kept_off() -> None:

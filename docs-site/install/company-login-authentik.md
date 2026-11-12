@@ -257,13 +257,15 @@ group of a removed or changed line.
 !!! note "You turn on the company login on an existing install"
 
     The Job needs two Keycloak rights to set up the broker:
-    `manage-identity-providers` and `manage-realm`. The chart gives them
-    only when the company login is on at the **first** install, because
-    Keycloak reads its realm file only at its first start. If you turn
-    the company login on later, the Job stops with a message that names
-    the two rights. Then add them once by hand: in the Keycloak admin
-    console, realm `meho`, open **Clients > `meho-admin`**, tab
-    **Service accounts roles**, assign the two `realm-management` roles, and run
+    `manage-identity-providers` and `manage-realm`. The chart gives
+    `manage-identity-providers` only when the company login is on at the
+    **first** install, because Keycloak reads its realm file only at its
+    first start (`manage-realm` comes from the realm file since v0.47.0).
+    If you turn the company login on later, the Job stops with a message
+    that names the two rights. Then add the missing ones once by hand: in
+    the Keycloak admin console, realm `meho`, open **Clients >
+    `meho-admin`**, tab **Service accounts roles**, assign the
+    `realm-management` roles it lacks, and run
     `helm upgrade` again. For a Keycloak admin login, see
     [Reach the Keycloak admin console](#reach-the-keycloak-admin-console).
 

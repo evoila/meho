@@ -141,6 +141,214 @@ it again.
     the dedicated `VAULT_CHECK_RUNNER_ROLE` lets you bound exactly what
     that background identity can read.
 
+## Start an agent when a Sensor or Dashboard changes
+
+A trigger can start an agent when a [Sensor](sensors-quickstart.md) or a
+Dashboard changes state. So the simple model is: an agent, plus a trigger.
+The trigger is a schedule, a webhook, or a Sensor or Dashboard change.
+
+### Step 0: turn on the switch
+
+MEHO publishes these events only when `CHECKS_AGENT_EVENTS` is `true`. It is
+off by default. While it is off, a trigger that waits for a Sensor or a
+Dashboard never starts.
+
+The Helm chart has no value of its own for it. Set it with `extraEnv` in your
+values file, then upgrade the release:
+
+```yaml
+extraEnv:
+  - name: CHECKS_AGENT_EVENTS
+    value: "true"
+```
+
+### The four choices
+
+| Start when | CLI flag | Console ("Start on") |
+|---|---|---|
+| One Sensor changes | `--on-sensor <name or id>` | Start on Sensor, then pick the Sensor |
+| One Dashboard changes | `--on-dashboard <name or id>` | Start on Dashboard, then pick the Dashboard |
+| Any Sensor changes | `--on-any-sensor` | Start on Sensor, then "Any sensor" |
+| Any Dashboard changes | `--on-any-dashboard` | Start on Dashboard, then "Any dashboard" |
+
+Add `--only-worse` (console: "Only when it gets worse") to start only when the
+state gets worse (for example from green to degraded). Without it, a recovery starts the agent too.
+
+Use one of these flags with `--kind event`. Do not use them together with
+`--event-filter`. `meho_scheduler_create` (the admin MCP tool) takes the same
+choices. The console form also has a "Custom filter" choice, for people who
+write the filter themselves.
+
+MEHO stores the Sensor or Dashboard by its id, so a rename does not break the
+trigger. A name that does not exist in your tenant is refused with 422.
+
+### What the event says
+
+If you write your own `--event-filter`, these are the fields you can match.
+A Sensor event is `check.sensor.changed`. A Dashboard event is
+`check.dashboard.changed`.
+
+| Field | Meaning |
+|---|---|
+| `event` | The event name, as above. |
+| `source` | `{kind, id, name}`: whether it is a `sensor` or a `dashboard`, and which one. |
+| `previous_state`, `state` | The state before and after the change. |
+| `worsening` | `true` when the state got worse. |
+| `severity` | Sensor events only: the Sensor's severity. |
+| `target`, `connector_id`, `op_id` | Sensor events only: the target name and the operation the Sensor runs. |
+| `cause_group` | Dashboard events only: `{key, members}`, the failing Sensors that share one cause. It is `null` for a recovery. |
+| `known_noise` | Dashboard events only: `true` when an earlier finding said this cause is known noise. |
+| `coalesce_key` | Names the cause. It is the key for "one run per cause", below. |
+
+An event has no raw results from the Sensor. The agent reads those itself,
+with its own grants.
+
+An example filter that starts only on a worse Dashboard change that is not
+known noise:
+
+```json
+{"event": "check.dashboard.changed", "worsening": true, "known_noise": false}
+```
+
+!!! warning "An empty filter matches every event"
+
+    An event trigger with the filter `{}` matches every event. Once the switch
+    is on, it also starts on every Sensor and Dashboard change. Never leave
+    the filter empty. Pick one of the `--on-*` flags, or write a filter with
+    at least an `event` field.
+
+### One run per cause, budgets and the kill switch
+
+- **One run per cause.** Each event carries a `coalesce_key` that names its
+  cause. While a run for that cause is still working (`pending`, `running` or
+  `awaiting_approval`), a new event for the same cause is skipped. When the
+  run is done, the next event starts a new run. So a Sensor that flaps does
+  not start ten agents.
+- **Budgets.** A run takes the agent's own login. A spend cap on that login
+  (`meho agent budget set agent:<name> ...`, see
+  [Hosted agents](hosted-agents.md)) stops a new run with `budget_exceeded`
+  when the cap is reached. The agent's `--turn-budget` limits each run.
+- **Kill switch.** To stop new runs of one agent, run
+  `meho agent edit <name> --disabled`. To stop only one trigger, cancel it
+  with `meho scheduler cancel <trigger_id>`. Neither stops a run that has
+  already started. Find those runs and stop each one:
+
+    ```bash
+    meho agent run-list --agent-name <name> --status pending
+    meho agent run-list --agent-name <name> --status running
+    meho agent run-list --agent-name <name> --status awaiting_approval
+    meho agent run-cancel <run-id>
+    ```
+
+### Worked example: a Sensor starts my agent
+
+You need the `tenant_admin` role. The example uses a test system, so you can
+make a Sensor fail on purpose. Names such as `lab-rke2` and `k8s-1.x` are only
+examples: use your own target and connector.
+
+**1. Make a Sensor.** It turns non-green when a pod is not running. The full
+explanation is in the [Sensors quickstart](sensors-quickstart.md).
+
+```bash
+meho sensor create \
+  --name pods-not-running \
+  --connector-id k8s-1.x \
+  --op-id k8s.pod.list \
+  --target '{"name": "lab-rke2"}' \
+  --params '{"all_namespaces": true, "field_selector": "status.phase!=Running"}' \
+  --assertion '{"select": {"path": "$.total"},
+                "compare": {"type": "threshold", "op": "gt", "degraded": 0, "critical": 2}}' \
+  --cadence-kind interval --interval-seconds 60 \
+  --severity critical
+```
+
+**2. Make a small agent that can only read.** First give it a login. Then
+create it, and give it two grants: deny everything, then allow the pod list.
+
+```bash
+meho agent-principal register pod-reader
+
+cat > pod-reader-toolset.json <<'JSON'
+{
+  "meta_tools": ["list_operation_groups", "search_operations", "call_operation", "result_query"],
+  "connectors": ["k8s-1.x"]
+}
+JSON
+
+meho agent create pod-reader \
+  --identity-ref agent:pod-reader \
+  --model-tier standard \
+  --turn-budget 20 \
+  --system-prompt "You are pod-reader. You only read. You never change anything. A Sensor started you. Use the connector k8s-1.x. Find the operation with search_operations, then run it with call_operation. If the answer is a link to a stored result, read all rows with result_query. Say in short plain sentences which pods are not running." \
+  --toolset @pod-reader-toolset.json
+
+meho agent grant create --principal agent:pod-reader --op '*' --verdict deny
+meho agent grant create --principal agent:pod-reader \
+  --op k8s.pod.list --target '*' --verdict auto-execute
+```
+
+Hosted agents are described in [Hosted agents](hosted-agents.md). You do not
+need that page for this example.
+
+**3. Make the trigger.** `--agent-definition` takes the id of the agent. Read
+it from the `id:` line of `meho agent show pod-reader`.
+
+```bash
+meho agent show pod-reader        # copy the id: line
+
+meho scheduler create --kind event \
+  --agent-definition <agent-id> \
+  --on-sensor pods-not-running \
+  --only-worse
+```
+
+If `CHECKS_AGENT_EVENTS` is still off, the answer carries a notice that the
+trigger will not start until you turn the switch on.
+
+**4. Make the Sensor fail.** Point one deployment at an image that does not
+exist, so a pod gets stuck. Wait for the next Sensor check. The state changes
+from `ok` to `degraded`, and MEHO starts the agent.
+
+```bash
+meho sensor list     # LAST_STATE is now degraded
+```
+
+**5. Find the run and read its answer.**
+
+```bash
+meho agent run-list --agent-name pod-reader
+meho agent run-status <run-id>
+```
+
+`run-status` shows the `status`. When the run has `succeeded`, it shows the
+`output`: the agent's answer. If the status stays `running`, the agent may be
+waiting for a person to approve a step: check `meho approvals list`.
+
+**6. Clean up.** Cancel the trigger with `meho scheduler cancel <trigger_id>`
+(`meho scheduler list` shows the id), and fix the pod.
+
+### Run the checks investigator from a trigger
+
+The checks investigator is an agent that finds the cause of a worse Dashboard
+and answers with a short finding. MEHO stores the finding and mails it to the
+Dashboard's mail address. You can run it from a normal event trigger.
+
+The folder
+[`examples/checks-investigator/`](https://github.com/evoila/meho/tree/main/examples/checks-investigator)
+has everything: the agent (`agent.json`) and the trigger (`trigger.json`).
+Its README lists the commands. In short:
+
+1. Turn on `CHECKS_AGENT_EVENTS`.
+2. Register the login `agent:checks-investigator` with
+   `--grants read-everything`, then create the agent from the file. The agent
+   only reads; anything else it tries waits for a person's approval.
+3. Create the trigger with the filter from `trigger.json`. It matches
+   `check.dashboard.changed` events that are worse and are not known noise.
+
+While an active event trigger for the investigator agent exists, the older
+built-in investigator path steps aside. So one Dashboard change never starts
+the agent twice. To go back to the old path, pause or cancel the trigger.
+
 ## Scheduler and the checks runner
 
 The scheduler fires **agent runs**. It is not the same background worker
@@ -160,6 +368,7 @@ this page is its agent-run twin.
 | Startup logs `scheduler_vault_token_will_expire` (ERROR) | `VAULT_SCHEDULER_TOKEN` is non-renewable or has an `explicit_max_ttl` — it will die despite renewal. | Re-mint it as a periodic token: `vault token create -period=768h …`. |
 | `403 insufficient_role` on `scheduler create` / `cancel` | Creating and cancelling triggers need **tenant_admin**; listing is operator. | Use a tenant_admin session to author triggers. |
 | `scheduler create` answers 422 | MEHO checks the trigger when you create it: a cron expression that does not parse, an unknown `--timezone`, or missing `--inputs` on a `cron` / `one_off` trigger. No trigger is made. | Fix the 5-field expression, the IANA timezone or the inputs, and create it again. |
+| A Sensor trigger never starts the agent | `CHECKS_AGENT_EVENTS` is off, or the trigger's filter does not match. | Turn the switch on (see [Start an agent when a Sensor or Dashboard changes](#start-an-agent-when-a-sensor-or-dashboard-changes)). Check the filter with `meho scheduler list --json`. |
 | A scheduled write is stuck `awaiting_approval` | Working as designed — every agent write above `safe` waits for a person, under the agent's subject. | Approve it as yourself; because the requester is the agent, it is not your own change. A `dangerous` or `destructive` write needs a MEHO-SA-Operator or an admin ([approvals](approvals-and-break-glass.md)). |
 | A run interrupted mid-flight (scheduler restart) shows as failed | The default `--in-flight-policy=fail_into_audit` records a killed-mid-run trigger as a failure rather than silently resuming it. | Set `--in-flight-policy=resume` at create time if you want interrupted runs picked back up on restart. |
 

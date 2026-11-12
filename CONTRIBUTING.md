@@ -17,7 +17,7 @@ merge against **real-target deploys**, not mocks.
 When you propose a feature touching the deploy contract (image, chart,
 or CLI), expect a coupled discussion thread on the lab side —
 that's not a side conversation, it's how we measure done. The
-[`deploy/values-examples/values-rdc-example.yaml`](./deploy/values-examples/values-rdc-example.yaml)
+[`deploy/values-examples/values-example-lab.yaml`](./deploy/values-examples/values-example-lab.yaml)
 in this repo is the sanitized template; the actual live values file
 lives on the consumer side and only flips green once both sides agree
 the contract is right.
@@ -65,7 +65,7 @@ index.
 | --- | --- | --- |
 | Backplane | Python 3.14 + FastAPI | [`backend/README.md`](./backend/README.md) — `uv sync`, pytest layout |
 | Helm chart | YAML + Helm 3 | [`deploy/charts/meho/`](./deploy/charts/meho/) — `helm template`, `helm lint`; [`deploy/values-examples/README.md`](./deploy/values-examples/README.md) covers the install flow |
-| Operator CLI | Go 1.26.10+ | [`cli/README.md`](./cli/README.md) — `go build`, oapi-codegen wiring, `meho version` smoke |
+| Operator CLI | Go (version in `cli/go.mod`) | [`cli/README.md`](./cli/README.md) — `go build`, oapi-codegen wiring, `meho version` smoke |
 
 To exercise the full deploy contract on your laptop, follow the
 **Deploy → Local (kind, ~5 min)** section in [`README.md`](./README.md).

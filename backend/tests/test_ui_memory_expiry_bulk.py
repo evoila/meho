@@ -35,6 +35,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
@@ -886,3 +887,91 @@ def test_apply_bulk_action_unit_delete_counts_succeeded_denied_missing() -> None
     # Physical state: own gone, tenant_row intact, missing never existed.
     assert _read_doc(own) is None
     assert _read_doc(tenant_row) is not None
+
+
+def _memory_row_count(tenant_id: uuid.UUID) -> int:
+    async def _do() -> int:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            result = await session.execute(
+                select(Document).where(
+                    Document.tenant_id == tenant_id, Document.source == MEMORY_SOURCE
+                )
+            )
+            return len(result.scalars().all())
+
+    return asyncio.run(_do())
+
+
+@pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.TENANT_ADMIN])
+@pytest.mark.parametrize("action", ["extend", "delete"])
+def test_apply_bulk_action_counts_a_colleagues_note_as_missing(
+    role: TenantRole, action: str
+) -> None:
+    """A colleague's user-scoped note is missing for the bulk action; no row is added."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    alice_note = _seed_memory(
+        tenant_id=_TENANT_A,
+        scope=MemoryScope.USER,
+        slug="alice-private",
+        body="private",
+        user_sub=_OP_A,
+        expires_at=datetime.now(UTC) + timedelta(hours=2),
+    )
+    rows_before = _memory_row_count(_TENANT_A)
+    from meho_backplane.auth.operator import Operator
+
+    bob = Operator(sub=_OP_B, raw_jwt="test", tenant_id=_TENANT_A, tenant_role=role)
+
+    async def _run() -> Any:
+        return await apply_bulk_action(
+            bob,
+            action=action,  # type: ignore[arg-type]
+            ids=[alice_note],
+            extend_duration=timedelta(days=7),
+        )
+
+    result = asyncio.run(_run())
+    assert result.missing == 1
+    assert result.succeeded == 0
+    assert result.denied == 0
+    assert _memory_row_count(_TENANT_A) == rows_before
+    kept = _read_doc(alice_note)
+    assert kept is not None
+    assert kept.body == "private"
+
+
+def test_apply_bulk_action_extends_an_own_recently_expired_note() -> None:
+    """An own note that expired a moment ago can still be extended."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    doc_id = _seed_memory(
+        tenant_id=_TENANT_A,
+        scope=MemoryScope.USER,
+        slug="just-expired",
+        body="b",
+        user_sub=_OP_A,
+        expires_at=datetime.now(UTC) - timedelta(minutes=5),
+    )
+    from unittest.mock import AsyncMock, patch
+
+    from meho_backplane.auth.operator import Operator
+
+    alice = Operator(
+        sub=_OP_A, raw_jwt="test", tenant_id=_TENANT_A, tenant_role=TenantRole.OPERATOR
+    )
+
+    async def _run() -> Any:
+        return await apply_bulk_action(
+            alice, action="extend", ids=[doc_id], extend_duration=timedelta(days=7)
+        )
+
+    with patch("meho_backplane.retrieval.indexer.get_embedding_service") as mock_embed_factory:
+        mock_embed_factory.return_value = type(
+            "_Stub", (), {"encode_one": AsyncMock(return_value=[0.0] * 384)}
+        )()
+        result = asyncio.run(_run())
+    assert result.succeeded == 1
+    assert result.missing == 0
+    doc = _read_doc(doc_id)
+    assert doc is not None
+    assert datetime.fromisoformat(doc.doc_metadata["expires_at"]) > datetime.now(UTC)

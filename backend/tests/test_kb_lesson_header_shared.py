@@ -417,3 +417,93 @@ def test_the_postgresql_test_for_shared_has_no_cast() -> None:
     sql = str(select(Document.id).where(visible_to(OTHER)).compile(dialect=postgresql.dialect()))
     assert "'true'::jsonb" in sql
     assert "CAST" not in sql.upper()
+
+
+async def _admin_confirmed_shared_entry_of(service: KbService, author: str) -> Any:
+    """Create an entry as *author*, then let a tenant admin confirm and share it."""
+    first, _ = await service.create_entry(
+        OWNER,
+        "agent-note",
+        "first text",
+        {"status": "candidate"},
+        actor_sub=author,
+        own_entries_only=True,
+        may_confirm=False,
+    )
+    reviewed, _ = await service.create_entry(
+        OWNER,
+        "agent-note",
+        "first text",
+        {"status": "confirmed", "shared": True, "source_kind": "reviewed"},
+        actor_sub="admin",
+        expected_revision=first.revision_id,
+    )
+    assert reviewed.metadata["shared"] is True
+    assert await service.get_entry(OTHER, "agent-note") is not None
+    return reviewed
+
+
+@pytest.mark.asyncio
+async def test_an_agent_rewrite_without_metadata_drops_the_review_marks(
+    stub_embedding: AsyncMock,
+) -> None:
+    service = KbService()
+    reviewed = await _admin_confirmed_shared_entry_of(service, "agent-a")
+
+    rewritten, _ = await service.create_entry(
+        OWNER,
+        "agent-note",
+        "new text nobody reviewed",
+        None,
+        actor_sub="agent-a",
+        own_entries_only=True,
+        may_confirm=False,
+        expected_revision=reviewed.revision_id,
+    )
+    assert "shared" not in rewritten.metadata
+    assert "source_kind" not in rewritten.metadata
+    assert rewritten.metadata["status"] == "candidate"
+    assert "expires_at" in rewritten.metadata
+    assert await service.get_entry(OTHER, "agent-note") is None
+    assert [e.slug for e in await service.list_entries(OTHER)] == []
+
+
+@pytest.mark.asyncio
+async def test_a_reviewer_rewrite_keeps_confirmed_but_drops_shared(
+    stub_embedding: AsyncMock,
+) -> None:
+    service = KbService()
+    reviewed = await _admin_confirmed_shared_entry_of(service, "agent-a")
+
+    rewritten, _ = await service.create_entry(
+        OWNER,
+        "agent-note",
+        "edited by a reviewer",
+        None,
+        actor_sub="reviewer",
+        may_set_curation_keys=False,
+        expected_revision=reviewed.revision_id,
+    )
+    assert "shared" not in rewritten.metadata
+    assert rewritten.metadata["status"] == "confirmed"
+    assert await service.get_entry(OTHER, "agent-note") is None
+
+
+@pytest.mark.asyncio
+async def test_a_tenant_admin_rewrite_keeps_the_review_marks(stub_embedding: AsyncMock) -> None:
+    service = KbService()
+    reviewed = await _admin_confirmed_shared_entry_of(service, "agent-a")
+
+    rewritten, _ = await service.create_entry(
+        OWNER,
+        "agent-note",
+        "edited by the admin",
+        None,
+        actor_sub="admin",
+        expected_revision=reviewed.revision_id,
+    )
+    assert rewritten.metadata["shared"] is True
+    assert rewritten.metadata["status"] == "confirmed"
+    seen = await service.get_entry(OTHER, "agent-note")
+    assert seen is not None
+    assert seen.body == "edited by the admin"

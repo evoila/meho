@@ -188,6 +188,23 @@ LINUX_READ_DENY: tuple[str, ...] = (
     # in each monitor and OSD directory.
     "*.keyring",
     "*/keyring",
+    # DNSSEC private keys (K<zone>+<alg>+<id>.private).
+    "*.private",
+    # Postfix relay passwords (sasl_passwd and its sasl_passwd.db map).
+    "*/sasl_passwd*",
+    # cloud-init user and vendor data, the combined cloud-config, the
+    # sensitive instance data and the pickled data source: they carry
+    # passwords and keys of the first boot.
+    "*user-data*",
+    "*vendor-data*",
+    "/var/lib/cloud/*cloud-config.txt",
+    "/var/lib/cloud/*obj.pkl",
+    "*/instance-data-sensitive.json",
+    # Wi-Fi keys.
+    "*wpa_supplicant*",
+    # Web server password files and netrc logins.
+    "*htpasswd*",
+    "*/.netrc",
     # Any file or directory whose name says what it holds.
     "*secret*",
     "*credential*",
@@ -343,11 +360,14 @@ _LINUX_ABOUT_OP = LinuxOp(
     description=(
         "Connects to the host over SSH and runs a single fixed round-trip "
         "(``hostname`` + ``cat /etc/os-release`` + ``uname -r`` + "
-        "init-system detection) to identify it. Returns a flat dict with "
+        "init-system detection, plus ``/proc/uptime`` and ``/proc/loadavg``) to "
+        "identify it. Returns a flat dict with "
         "the vendor (the distro ID family, e.g. ``debian``), product "
         "(always ``linux``), the distro ``VERSION_ID`` (or ``null`` when "
         "``/etc/os-release`` omits it), the kernel release, the "
-        "``PRETTY_NAME``, the hostname, and the detected init system. No "
+        "``PRETTY_NAME``, the hostname, the detected init system, the uptime in "
+        "seconds and the 1, 5 and 15 minute load averages (each ``null`` when "
+        "the host does not answer it). No "
         "params; safe to call on any reachable host. Call this first to "
         "confirm the host is reachable via SSH before issuing the read ops."
     ),
@@ -366,6 +386,10 @@ _LINUX_ABOUT_OP = LinuxOp(
             "os_pretty": {"type": ["string", "null"]},
             "hostname": {"type": ["string", "null"]},
             "init_system": {"type": ["string", "null"]},
+            "uptime_seconds": {"type": ["number", "null"]},
+            "load_1m": {"type": ["number", "null"]},
+            "load_5m": {"type": ["number", "null"]},
+            "load_15m": {"type": ["number", "null"]},
         },
         "required": ["vendor", "product"],
         "additionalProperties": True,
@@ -385,7 +409,8 @@ _LINUX_ABOUT_OP = LinuxOp(
         "output_shape": (
             "Flat dict; ``version`` carries the distro ``VERSION_ID`` "
             "(``null`` when absent), ``kernel`` the ``uname -r`` release, "
-            "``os_pretty`` the ``/etc/os-release`` PRETTY_NAME."
+            "``os_pretty`` the ``/etc/os-release`` PRETTY_NAME, ``uptime_seconds`` "
+            "the host uptime, ``load_1m`` / ``load_5m`` / ``load_15m`` the load averages."
         ),
     },
 )
@@ -397,7 +422,9 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
     Composition: ``linux.about`` (identity canary) + the per-domain read
     tiers -- ``FILE_OPS`` (``file.read`` / ``log.tail``), ``HOST_OPS``
     (``service.status`` / ``sysctl.read`` / ``dns.lookup``), ``FIREWALL_OPS``
-    (``firewall.show``), ``STORAGE_OPS`` (``mount.list``) -- plus the T2
+    (``firewall.show``), ``STORAGE_OPS`` (``mount.list``), ``INSPECT_OPS``
+    (``journal.tail`` / ``fs.usage`` / ``dir.list``), ``DIAGNOSE_OPS``
+    (``tool.which`` / ``identity.show`` / ``http.head``) -- plus the T2
     governed ``WRITE_OPS`` (``file.write`` / ``service.control`` /
     ``script.run`` / ``sysctl.write`` / ``firewall.load``) and
     ``FIREWALL_ROLLBACK_OPS`` (``firewall.confirm``). Implemented as a
@@ -407,11 +434,14 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
     read tiers are imported before ``ops_write``, which imports validators
     from ``ops_host``), the rke2 mold.
     """
+    from meho_backplane.connectors.linux.ops_diagnose import DIAGNOSE_OPS
     from meho_backplane.connectors.linux.ops_file import FILE_OPS
     from meho_backplane.connectors.linux.ops_firewall import FIREWALL_OPS
     from meho_backplane.connectors.linux.ops_firewall_rollback import FIREWALL_ROLLBACK_OPS
     from meho_backplane.connectors.linux.ops_host import HOST_OPS
+    from meho_backplane.connectors.linux.ops_inspect_ops import INSPECT_OPS
     from meho_backplane.connectors.linux.ops_storage import STORAGE_OPS
+    from meho_backplane.connectors.linux.ops_user import USER_OPS
     from meho_backplane.connectors.linux.ops_write import WRITE_OPS
 
     return (
@@ -420,6 +450,9 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
         *HOST_OPS,
         *FIREWALL_OPS,
         *STORAGE_OPS,
+        *INSPECT_OPS,
+        *DIAGNOSE_OPS,
+        *USER_OPS,
         *WRITE_OPS,
         *FIREWALL_ROLLBACK_OPS,
     )
@@ -444,7 +477,10 @@ LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "single named kernel parameter (e.g. ``net.ipv4.ip_forward`` -- did "
         "the first-boot script actually enable IP forwarding?), and "
         "``linux.sysctl.write`` sets one (runtime + a persistent drop-in), "
-        "approval-gated. " + SSH_TRANSPORT_NOTE
+        "approval-gated. ``linux.tool.which`` checks which of up to 20 named "
+        "programs are on the host's PATH, and ``linux.identity.show`` returns "
+        "the login's user, uid and groups and whether ``sudo`` works without a "
+        "password (``sudo -n true``) -- safe checks that need no approval. " + SSH_TRANSPORT_NOTE
     ),
     "file": (
         "Use to read or write the CONTENT of an allow-listed config / log / "
@@ -455,7 +491,13 @@ LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "decisive day-0 signal is the first-boot completion sentinel a "
         "Tools-less appliance writes -- and ``linux.file.write`` atomically "
         "writes an allow-listed config file with a backup and an optional "
-        "validate/rollback gate, approval-gated. " + SSH_TRANSPORT_NOTE
+        "validate/rollback gate, approval-gated. ``linux.dir.list`` lists the "
+        "names, types, sizes, times, modes and owners in a directory under the "
+        "directory allow-list (the read roots plus common export and data "
+        "roots) -- the way to find leftover files in an export path, since "
+        "``linux.file.read`` reads one file and cannot list a directory. Large "
+        "listings spill to a result handle paged with "
+        "``result_query(handle_id, offset, limit)``. " + SSH_TRANSPORT_NOTE
     ),
     "log": (
         "Use to tail the tail end of an allow-listed log file: "
@@ -463,7 +505,10 @@ LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "under the read-root allow-list and returns the lines as rows. The "
         "day-0 signal: tail the first-boot log to see WHY a "
         "``set -euo pipefail`` first-boot script aborted (a missing NIC, an "
-        "unresolvable package mirror, a red config-validate). Large tails "
+        "unresolvable package mirror, a red config-validate). ``linux.journal.tail`` "
+        "reads the systemd journal (optionally one unit, a time window and a "
+        "lowest priority) -- the only place kernel, nfsd, XFS and block layer "
+        "messages are on a systemd host. Large tails "
         "spill to a result handle paged with "
         "``result_query(handle_id, offset, limit)``. " + SSH_TRANSPORT_NOTE
     ),
@@ -506,8 +551,10 @@ LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "changing them: ``linux.mount.list`` returns each mount entry and "
         "each exported path as rows carrying a ``kind`` discriminator "
         "(``mount`` / ``export``). The day-0 signal: is the base NFS export "
-        "live and is the expected mount present. Block-topology / capacity "
-        "(``df`` / ``lsblk``) is a separate op. Large tables spill to a "
+        "live and is the expected mount present. ``linux.fs.usage`` returns the "
+        "size, used and free bytes and the inode counts of the filesystem that "
+        "holds one path (``df``) -- the way to see whether a filesystem is full. "
+        "Block topology (``lsblk``) is a separate op. Large tables spill to a "
         "result handle paged with ``result_query(handle_id, offset, "
         "limit)``. " + SSH_TRANSPORT_NOTE
     ),
@@ -518,7 +565,11 @@ LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "when the name cannot be found. It shows what programs on that host "
         "see, so it proves a resolver repair or explains why a pod cannot pull "
         "an image. For a lookup from MEHO's own side use ``net.dns_lookup``. "
-        "Safe, so a sensor can run it on a schedule. " + SSH_TRANSPORT_NOTE
+        "``linux.http.head`` sends one HTTP HEAD request from the host with "
+        "``curl -I`` and returns the status and headers (or ``reachable=false``), "
+        "to check the host can reach a mirror or registry; it takes an address, "
+        "so it waits for one approval. ``linux.dns.lookup`` is safe, so a "
+        "sensor can run it on a schedule. " + SSH_TRANSPORT_NOTE
     ),
 }
 

@@ -33,6 +33,7 @@ from typing import Any
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.client_identity import apply_client_block
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.operator import Operator
@@ -683,6 +684,7 @@ async def write_audit_row(
         runbook_kwargs["policy_decision"] = policy_decision_var.get()
     async with sessionmaker() as session:
         await _apply_principal_name(session, payload, operator)
+        apply_client_block(payload, operator)
         row = AuditLog(
             id=audit_id,
             occurred_at=datetime.now(UTC),

@@ -385,13 +385,17 @@ async def test_the_window_ends_900_seconds_after_the_sign_in(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("azp", ["meho-cli", "meho-mcp", None])
+@pytest.mark.parametrize("azp", ["meho-cli", "meho-mcp", "meho-mcp-code", "meho-mcp-desktop", None])
 async def test_only_the_approval_client_can_approve(
     azp: str | None,
     _client: tuple[httpx.AsyncClient, Any],
     _fake_resume: list[uuid.UUID],
 ) -> None:
-    """A stored login, an MCP token or a token with no ``azp`` gets the 401 (#5515)."""
+    """A stored login, an MCP token or a token with no ``azp`` gets the 401 (#5515).
+
+    The login clients of Claude Code and Claude Desktop are refused like
+    ``meho-mcp``: an AI tool's login can never approve.
+    """
     ac, key = _client
     request_id = await _park()
     token = mint_token(

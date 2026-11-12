@@ -88,6 +88,7 @@ __all__ = [
     "IngestRequest",
     "IngestResponse",
     "IngestionResultModel",
+    "LoginSetupOutcome",
     "NextStep",
     "OperationOverrideList",
     "OperationOverrideRow",
@@ -103,6 +104,17 @@ __all__ = [
 #: the CLI / MCP sibling tasks can use it as a sentinel without
 #: needing to send ``status=<empty>``.
 ConnectorStatusFilter = Literal["staged", "enabled", "disabled", "all"]
+
+#: What happened to the login setup of an ingest with a login type (the
+#: ``login_setup`` field of :class:`IngestionResultModel`). See
+#: :mod:`meho_backplane.operations.ingest.login_setup`.
+LoginSetupOutcome = Literal[
+    "registered",
+    "replaced",
+    "unchanged",
+    "served_by_connector_code",
+    "served_by_builtin_login_setup",
+]
 
 
 class SpecSource(BaseModel):
@@ -685,6 +697,20 @@ class IngestionResultModel(BaseModel):
     safety_changes: list[SafetyChangeModel] = Field(default_factory=list)
     dropped_count: int = 0
     dropped_ops: list[DroppedOpModel] = Field(default_factory=list)
+    login_setup: LoginSetupOutcome | None = Field(
+        default=None,
+        description=(
+            "What happened to the login setup of an ingest with a login type. "
+            "registered: the scope's calls use it now. replaced: it replaced a "
+            "different login setup of the same scope (audited with the old and the "
+            "new login type). unchanged: the same login setup was already in place. "
+            "served_by_connector_code / served_by_builtin_login_setup: hand-written "
+            "connector code or a shipped or built-in login setup serves this "
+            "connector for every tenant, so this login setup is saved but not used. "
+            "A tenant's login setup applies only to that tenant's calls. Null for an "
+            "ingest without a login type."
+        ),
+    )
 
 
 class GroupSummaryModel(BaseModel):
@@ -1036,6 +1062,18 @@ class ConnectorListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+_CATEGORY_PATTERN = "^[a-z][a-z0-9_-]{0,62}$"
+_CATEGORY_DESCRIPTION = (
+    "A category of the taxonomy. A change of rights: send it without other "
+    "fields; the answer is 202 and the change waits until another tenant admin "
+    "approves it."
+)
+_LABELS_DESCRIPTION = (
+    "Free key=value labels. Same rules as category: a request of its own that "
+    "waits for another tenant admin."
+)
+
+
 class EditGroupBody(BaseModel):
     """PATCH body for ``/api/v1/connectors/{id}/groups/{key}``.
 
@@ -1061,6 +1099,14 @@ class EditGroupBody(BaseModel):
 
     when_to_use: str | None = Field(default=None, min_length=1, max_length=2048)
     name: str | None = Field(default=None, min_length=1, max_length=128)
+    category: str | None = Field(
+        default=None,
+        pattern=_CATEGORY_PATTERN,
+        description=_CATEGORY_DESCRIPTION,
+    )
+    labels: dict[str, str] | None = Field(
+        default=None, max_length=32, description=_LABELS_DESCRIPTION
+    )
 
 
 class EditOpBody(BaseModel):
@@ -1108,6 +1154,14 @@ class EditOpBody(BaseModel):
     requires_approval: bool | None = None
     is_enabled: bool | None = None
     reason: str | None = Field(default=None, min_length=1, max_length=1024)
+    category: str | None = Field(
+        default=None,
+        pattern=_CATEGORY_PATTERN,
+        description=_CATEGORY_DESCRIPTION,
+    )
+    labels: dict[str, str] | None = Field(
+        default=None, max_length=32, description=_LABELS_DESCRIPTION
+    )
 
 
 class OperationOverrideRow(BaseModel):
@@ -1115,8 +1169,9 @@ class OperationOverrideRow(BaseModel):
 
     ``scope`` is ``tenant`` (the change applies to ``tenant_id`` only) or
     ``install`` (the whole install). ``safety_level`` / ``requires_approval``
-    are the values that apply in that scope: the classification with every
-    override there. ``reason`` is the reason a platform admin gave for
+    are the values that apply in that scope: the value in code with every
+    override there, the classification entries and the floors, as at
+    dispatch. ``reason`` is the reason a platform admin gave for
     turning approval off.
     """
 
@@ -1131,6 +1186,14 @@ class OperationOverrideRow(BaseModel):
     reason: str | None
     set_by_sub: str
     set_at: datetime
+    # #6038: with the POLICY_CLASSIFICATION switch on, the classification
+    # is part of the values above. ``rule_ref`` names the entry that
+    # decided it (for example ``tenant:classifications[0]``), and
+    # ``always_wait`` is true when an entry makes every call wait.
+    category: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
+    always_wait: bool = False
+    rule_ref: str | None = None
 
 
 class OperationOverrideList(BaseModel):

@@ -58,10 +58,13 @@ func newReflexCmd() *cobra.Command {
 			"stored lessons help:\n\n" +
 			"  - repeat-mistake rate: %% of failed operations that already " +
 			"failed the same way (same operation, same target) in an earlier session.\n" +
-			"  - hit rate: %% of knowledge and memory entries that searches " +
-			"gave to a session and the session then used (an operation succeeded after it).\n" +
+			"  - hit rate: %% of knowledge and memory entries given to a " +
+			"session that the session then used (an operation succeeded after it).\n" +
 			"  - precision: %% of retrieved entries that were right (not " +
 			"disputed, not expired, replaced or retired when found).\n" +
+			"    The hit rate and the precision show three lines: all " +
+			"entries, entries a search returned, and entries MEHO showed " +
+			"before an operation.\n" +
 			"  - first correct action: median seconds from the start of a " +
 			"session to its first successful operation on a known system.\n\n" +
 			"Usage events are recorded only when the backplane sets " +
@@ -219,8 +222,16 @@ func printReflexReport(w io.Writer, r *api.ReflexReport) {
 		pctOrNA(l.RepeatMistakePct), l.RepeatMistakeRepeats, l.RepeatMistakeFailures)
 	fmt.Fprintf(w, "  hit rate:             %s  (%d/%d retrieved entries used)\n",
 		pctOrNA(l.HitRatePct), l.HitRateUsed, l.HitRateRetrievals)
+	fmt.Fprintf(w, "    after a search:     %s  (%d/%d)\n",
+		pctOrNA(l.Search.HitRatePct), l.Search.HitRateUsed, l.Search.HitRateRetrievals)
+	fmt.Fprintf(w, "    shown before an op: %s  (%d/%d)\n",
+		pctOrNA(l.Recall.HitRatePct), l.Recall.HitRateUsed, l.Recall.HitRateRetrievals)
 	fmt.Fprintf(w, "  precision:            %s  (%d/%d retrieved entries right)\n",
 		pctOrNA(l.PrecisionPct), l.PrecisionRight, l.PrecisionJudged)
+	fmt.Fprintf(w, "    after a search:     %s  (%d/%d)\n",
+		pctOrNA(l.Search.PrecisionPct), l.Search.PrecisionRight, l.Search.PrecisionJudged)
+	fmt.Fprintf(w, "    shown before an op: %s  (%d/%d)\n",
+		pctOrNA(l.Recall.PrecisionPct), l.Recall.PrecisionRight, l.Recall.PrecisionJudged)
 	fmt.Fprintf(w, "  first correct action: %s s  (median over %d sessions on known systems)\n",
 		rateOrNA(l.FirstCorrectActionMedianSeconds), l.FirstCorrectActionSessions)
 }

@@ -477,6 +477,7 @@ async def test_file_read_unreadable_file_reports_present_without_content() -> No
         "truncated": False,
         "size_bytes": None,
         "exists": True,
+        "zero_length": False,
     }
 
 
@@ -513,6 +514,10 @@ async def test_file_read_reads_a_symlink_whose_target_passes_the_check() -> None
         "/etc/ssh/ssh_host_ed25519_key",
         "/etc/ceph/ceph.client.admin.keyring",
         "/var/lib/app/credentials.json",
+        "/etc/bind/keys/Kexample.com.+013+12345.private",
+        "/etc/postfix/sasl_passwd",
+        "/var/lib/cloud/instance/user-data.txt",
+        "/etc/wpa_supplicant/wpa_supplicant.conf",
     ],
 )
 async def test_file_read_refuses_a_real_path_that_fails_the_check(real_path: str) -> None:
@@ -1226,6 +1231,44 @@ def test_confine_read_path_refuses_secret_files_by_name(path: str) -> None:
         confine_read_path(path)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param("/etc/bind/keys/Kexample.com.+013+12345.private", id="dnssec-private-key"),
+        pytest.param("/var/lib/bind/Kexample.com.+008+54321.private", id="dnssec-private-key-var"),
+        pytest.param("/etc/postfix/sasl_passwd", id="postfix-sasl-passwd"),
+        pytest.param("/etc/postfix/sasl_passwd.db", id="postfix-sasl-passwd-map"),
+        pytest.param("/var/lib/cloud/instance/user-data.txt", id="cloud-init-user-data"),
+        pytest.param("/var/lib/cloud/instances/i-1/user-data.txt.i", id="cloud-init-user-data-i"),
+        pytest.param("/var/lib/cloud/seed/nocloud/user-data", id="cloud-init-seed-user-data"),
+        pytest.param("/var/lib/cloud/instance/vendor-data.txt", id="cloud-init-vendor-data"),
+        pytest.param("/var/lib/cloud/instance/cloud-config.txt", id="cloud-init-cloud-config"),
+        pytest.param("/var/lib/cloud/instance/obj.pkl", id="cloud-init-obj-pkl"),
+        pytest.param("/run/cloud-init/instance-data-sensitive.json", id="cloud-init-sensitive"),
+        pytest.param("/etc/wpa_supplicant/wpa_supplicant.conf", id="wpa-supplicant"),
+        pytest.param("/etc/wpa_supplicant.conf", id="wpa-supplicant-etc"),
+        pytest.param("/etc/nginx/.htpasswd", id="htpasswd"),
+        pytest.param("/var/lib/app/.netrc", id="netrc"),
+    ],
+)
+def test_confine_read_path_refuses_more_secret_file_formats(path: str) -> None:
+    with pytest.raises(PathConfinementError, match="keys, tokens or password hashes"):
+        confine_read_path(path)
+
+
+def test_confine_read_path_keeps_cloud_init_status_files() -> None:
+    # The first-boot checks read these; they hold no secret.
+    for path in (
+        "/var/lib/cloud/instance/boot-finished",
+        "/var/lib/cloud/data/status.json",
+        "/var/lib/cloud/data/result.json",
+        "/run/cloud-init/instance-data.json",
+        "/var/log/cloud-init.log",
+        "/etc/postfix/main.cf",
+    ):
+        assert confine_read_path(path) == path
+
+
 @pytest.mark.parametrize("pattern", LINUX_READ_DENY)
 def test_every_deny_pattern_still_matches_its_own_path(pattern: str) -> None:
     # A pattern with capital letters must not go dead when the path is lowered.
@@ -1319,8 +1362,18 @@ _READ_OP_IDS: frozenset[str] = frozenset(
         "linux.dns.lookup",
         "linux.firewall.show",
         "linux.mount.list",
+        "linux.journal.tail",
+        "linux.fs.usage",
+        "linux.dir.list",
+        "linux.tool.which",
+        "linux.identity.show",
+        "linux.user.password_status",
     }
 )
+
+#: ``linux.http.head`` takes an address the host connects to, so MEHO's address
+#: floor makes it caution + approval (tested in test_connectors_linux_diagnose.py).
+_HTTP_HEAD_OP_ID = "linux.http.head"
 
 #: The T2 governed write verbs.
 _WRITE_OP_IDS: frozenset[str] = frozenset(
@@ -1334,11 +1387,11 @@ _WRITE_OP_IDS: frozenset[str] = frozenset(
     }
 )
 
-_EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS
+_EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS | {_HTTP_HEAD_OP_ID}
 
 
 def test_linux_ops_count_matches_expected() -> None:
-    # about + seven read verbs + six write verbs = fourteen.
+    # about + twelve read verbs + http.head + six write verbs = twenty.
     assert len(LINUX_OPS) == len(_EXPECTED_OP_IDS)
 
 

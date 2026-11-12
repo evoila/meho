@@ -25,6 +25,15 @@ Rules for every entry:
   ``retired``, is never shown. Neither is an expired one.
 * A confirmed knowledge entry comes before the others.
 
+Both places show something only when the ``TEAM_KNOWLEDGE_RECALL``
+setting is on. It is off by default, so nothing is shown until model
+tests show it helps.
+
+The entries a ``team_knowledge`` block shows count for the learning numbers
+like search hits (:func:`record_shown`): one retrieval row per shown entry,
+with the channel ``recall``. Entries left out for size are not recorded,
+and neither are the notes of the start text.
+
 Size limits: each entry's text is cut to :data:`MAX_ENTRY_CHARS`, and the
 whole envelope stays under :data:`MAX_BLOCK_CHARS` (before an operation) or
 :data:`MAX_BAND_CHARS` (start text). Entries that do not fit are left out
@@ -57,8 +66,14 @@ from meho_backplane.db.models import Document
 from meho_backplane.kb.schemas import KB_KIND_ENTRY, KB_SOURCE
 from meho_backplane.kb.shared import visible_to
 from meho_backplane.lesson_header import header_expires_at
+from meho_backplane.lessons.retrievals import (
+    RECALL_CHANNEL,
+    record_kb_retrievals,
+    record_memory_retrievals,
+)
 from meho_backplane.memory.schemas import MemoryEntry, MemoryScope, memory_locator
 from meho_backplane.memory.service import MemoryService
+from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
 
 __all__ = [
@@ -69,6 +84,7 @@ __all__ = [
     "RecallItem",
     "memory_band",
     "recall_for_target",
+    "record_shown",
     "unavailable_block",
     "version_matches",
 ]
@@ -140,7 +156,11 @@ _BAND_UNAVAILABLE: Final[str] = (
 
 @dataclass(frozen=True, slots=True)
 class RecallItem:
-    """One entry, ready to show."""
+    """One entry, ready to show.
+
+    ``entry_id``, ``slug`` and ``owner_tenant_id`` name the stored entry, so
+    the shown entry can be recorded as a retrieval (:func:`record_shown`).
+    """
 
     kind: Literal["knowledge", "memory"]
     uri: str
@@ -148,6 +168,9 @@ class RecallItem:
     status: str | None
     confirmed_at: str | None
     source: str | None
+    entry_id: uuid.UUID
+    slug: str
+    owner_tenant_id: uuid.UUID
 
 
 def version_matches(entry_version: str | None, target_version: str | None) -> bool:
@@ -184,7 +207,14 @@ def _cut(text: str, limit: int) -> str:
 
 
 def _item(
-    kind: Literal["knowledge", "memory"], uri: str, body: str, metadata: Mapping[str, Any]
+    kind: Literal["knowledge", "memory"],
+    uri: str,
+    body: str,
+    metadata: Mapping[str, Any],
+    *,
+    entry_id: uuid.UUID,
+    slug: str,
+    owner_tenant_id: uuid.UUID,
 ) -> RecallItem:
     return RecallItem(
         kind=kind,
@@ -193,6 +223,9 @@ def _item(
         status=_text(metadata, "status"),
         confirmed_at=_text(metadata, "confirmed_at"),
         source=_text(metadata, "source"),
+        entry_id=entry_id,
+        slug=slug,
+        owner_tenant_id=owner_tenant_id,
     )
 
 
@@ -250,7 +283,15 @@ async def _knowledge_items(
     # Stable sort: confirmed entries first, newest first inside each group.
     kept.sort(key=lambda doc: _text(doc.doc_metadata, "status") != "confirmed")
     return [
-        _item("knowledge", f"meho://kb/{doc.source_id}", doc.body, doc.doc_metadata)
+        _item(
+            "knowledge",
+            f"meho://kb/{doc.source_id}",
+            doc.body,
+            doc.doc_metadata,
+            entry_id=doc.id,
+            slug=doc.source_id,
+            owner_tenant_id=doc.tenant_id,
+        )
         for doc in kept[:MAX_KNOWLEDGE_ENTRIES]
     ]
 
@@ -258,7 +299,15 @@ async def _knowledge_items(
 def _memory_items(entries: Sequence[MemoryEntry], limit: int) -> list[RecallItem]:
     shown = [entry for entry in entries if _shown(entry.metadata)]
     return [
-        _item("memory", memory_locator(entry.id), entry.body, entry.metadata)
+        _item(
+            "memory",
+            memory_locator(entry.id),
+            entry.body,
+            entry.metadata,
+            entry_id=entry.id,
+            slug=entry.slug,
+            owner_tenant_id=entry.tenant_id,
+        )
         for entry in shown[:limit]
     ]
 
@@ -272,19 +321,21 @@ def _line(item: RecallItem) -> str:
     )
 
 
-def _pack(items: Sequence[RecallItem], max_chars: int) -> tuple[str, int, int]:
+def _pack(items: Sequence[RecallItem], max_chars: int) -> tuple[str, list[RecallItem], int]:
     """Wrap the lines of *items* in one envelope under *max_chars*.
 
     A line that would push the envelope over the limit is left out whole,
-    and packing goes on with the next one. Returns the wrapped text and the
-    counts of lines shown and left out.
+    and packing goes on with the next one. Returns the wrapped text, the
+    items shown and the count of items left out.
     """
     lines: list[str] = []
+    shown: list[RecallItem] = []
     for item in items:
         line = _line(item)
         if len(wrap_untrusted_text("\n".join([*lines, line]))) <= max_chars:
             lines.append(line)
-    return wrap_untrusted_text("\n".join(lines)), len(lines), len(items) - len(lines)
+            shown.append(item)
+    return wrap_untrusted_text("\n".join(lines)), shown, len(items) - len(shown)
 
 
 def unavailable_block() -> dict[str, Any]:
@@ -292,7 +343,9 @@ def unavailable_block() -> dict[str, Any]:
     return {"status": "unavailable", "note": _UNAVAILABLE_NOTE}
 
 
-async def recall_for_target(operator: Operator, target: Any) -> dict[str, Any]:
+async def recall_for_target(
+    operator: Operator, target: Any
+) -> tuple[dict[str, Any], list[RecallItem]]:
     """Build the ``team_knowledge`` block for an operation on *target*.
 
     *target* is the resolved target row (``name``, ``product``, and the
@@ -302,6 +355,9 @@ async def recall_for_target(operator: Operator, target: Any) -> dict[str, Any]:
     ``left_out``), ``none`` (nothing matches) or ``unavailable`` (the lookup
     failed, so nothing is known). A failed lookup never fails the
     operation's answer.
+
+    Also returns the entries the block shows, for :func:`record_shown`. The
+    caller records them only when the block goes out with the answer.
     """
     try:
         knowledge = await _knowledge_items(
@@ -312,18 +368,39 @@ async def recall_for_target(operator: Operator, target: Any) -> dict[str, Any]:
         )
     except Exception:
         _log.warning("recall_lookup_failed", tenant_id=str(operator.tenant_id), exc_info=True)
-        return unavailable_block()
+        return unavailable_block(), []
     items = knowledge + _memory_items(notes, MAX_TARGET_MEMORIES)
     if not items:
-        return {"status": "none", "note": _NONE_NOTE}
+        return {"status": "none", "note": _NONE_NOTE}, []
     text, shown, left_out = _pack(items, MAX_BLOCK_CHARS)
-    return {
+    block = {
         "status": "found",
         "text": text,
-        "shown": shown,
+        "shown": len(shown),
         "left_out": left_out,
         "note": _FOUND_NOTE,
     }
+    return block, shown
+
+
+async def record_shown(tenant_id: uuid.UUID, items: Sequence[RecallItem]) -> None:
+    """Record the entries a delivered block showed, as retrievals of the ``recall`` channel.
+
+    A knowledge entry is recorded by slug and owner tenant, so a shared
+    entry and the tenant's own entry with the same slug are not mixed up.
+    Only a call with a session id is recorded, and recording never fails
+    the operation's answer (:mod:`meho_backplane.lessons.retrievals`).
+    """
+    await record_kb_retrievals(
+        tenant_id,
+        [(item.slug, item.owner_tenant_id) for item in items if item.kind == "knowledge"],
+        channel=RECALL_CHANNEL,
+    )
+    await record_memory_retrievals(
+        tenant_id,
+        [item.entry_id for item in items if item.kind == "memory"],
+        channel=RECALL_CHANNEL,
+    )
 
 
 async def _general_notes(operator: Operator) -> list[MemoryEntry]:
@@ -345,8 +422,11 @@ async def memory_band(operator: Operator) -> str:
 
     Holds the newest notes of the caller's own scopes and the tenant scope;
     target notes come before an operation on that target instead. A failed
-    read gives a short band that says so, never an empty one.
+    read gives a short band that says so, never an empty one. With the
+    ``TEAM_KNOWLEDGE_RECALL`` setting off, there is no band and nothing is read.
     """
+    if not get_settings().team_knowledge_recall:
+        return ""
     read = asyncio.ensure_future(_general_notes(operator))
     _BAND_READS.add(read)
     read.add_done_callback(_BAND_READS.discard)
@@ -361,5 +441,5 @@ async def memory_band(operator: Operator) -> str:
     if not items:
         return ""
     prefix = "\n".join([_BAND_HEADING, "", _BAND_NOTE, ""])
-    text, _shown_count, _left_out = _pack(items, MAX_BAND_CHARS - len(prefix))
+    text, _shown, _left_out = _pack(items, MAX_BAND_CHARS - len(prefix))
     return prefix + text

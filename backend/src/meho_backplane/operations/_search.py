@@ -660,7 +660,10 @@ async def _hydrate_hits(
         descriptor.id: (descriptor, group_key) for descriptor, group_key in rows
     }
     policies = await effective_policy_map(
-        session, tenant_id=tenant_id, rows=[descriptor for descriptor, _ in by_id.values()]
+        session,
+        tenant_id=tenant_id,
+        rows=[descriptor for descriptor, _ in by_id.values()],
+        group_keys={descriptor_id: group_key for descriptor_id, (_, group_key) in by_id.items()},
     )
     hits: list[OperationSearchHit] = []
     for entry in fused:

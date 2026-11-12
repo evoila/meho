@@ -7,11 +7,12 @@ When a human triggers an agent run, the synchronous audit row must record
 *both* the human initiator and the agent that acted — the RFC 8693
 ``sub`` (subject) + ``act`` (actor) two-claim shape
 (https://datatracker.ietf.org/doc/html/rfc8693#section-1.1). The IdP
-cannot mint that token: Keycloak's standard token exchange is
-impersonation-only and the delegation path (RFC 8693's second, *actor*
-token) is unimplemented (keycloak#38279). So MEHO synthesises the binding
-**at the resource server** — where it already records attribution, in the
-synchronous append-only audit log.
+cannot mint that token for MEHO. In Keycloak 26.8, delegation (RFC 8693's
+second, *actor* token; keycloak#38279) is only a preview feature, and it
+is not supported for public clients. The command line (``meho-cli``) and
+MCP clients (``meho-mcp``) are public clients. So MEHO builds the
+person-and-agent binding itself, **at the resource server** — where it
+already records who did what, in the synchronous append-only audit log.
 
 This module is the seam. :func:`actor_delegation` binds the acting agent's
 principal into structlog's contextvars for the lifetime of a user-initiated

@@ -27,6 +27,13 @@
 //     markup would otherwise be parsed into live DOM by the swap (the same
 //     injection class the broadcast surface closed in PR #1044) --
 //     ``x-text`` bindings render every field inert.
+//   * Close the stream when a ``final``, ``error`` or ``end`` frame
+//     arrives, so neither the browser nor the sse extension reconnects to
+//     a finished run (``closeStream``). The stream reads the run's saved
+//     events from the session store, so a reload shows the events so far
+//     and then the live ones. With ``rememberRun`` the controller puts
+//     ``?run=<id>`` in the page address once the run id is known, so a
+//     reload follows the same run.
 //   * Track the run lifecycle the operator cares about: the ``run_id``
 //     (surfaced as a deep-link to the run detail, T3 #1830), the terminal
 //     status pill (``succeeded`` / ``failed`` from ``final`` / ``error``),
@@ -56,6 +63,13 @@
 //     tool_result  -> { tool_name, content }
 //     final        -> { output }
 //     error        -> { error }
+//     end          -> { status, state, last_seq }  (the last frame; state is
+//                     "ended", or "unfinished" when the run stopped
+//                     without a final event)
+//   A saved event's frame also has its ``seq``. When the caller may not
+//   read its data, the frame has ``withheld: true`` (a run another person
+//   started) or ``quarantined: true`` (the secret check was not sure; only
+//   a tenant admin reads it) instead of the data.
 //   The kind is the EventSource event ``type`` (the ``sse-swap`` name),
 //   read off ``$event.detail.type``; ``$event.detail.data`` is the JSON.
 
@@ -80,6 +94,7 @@ document.addEventListener("alpine:init", () => {
     // hx-headers, which is HTMX-only). Defaults keep the component working
     // if a caller omits them (the button just stays hidden / inert).
     agentName: (opts && opts.agentName) || "",
+    rememberRun: !!(opts && opts.rememberRun),
     csrfToken: (opts && opts.csrfToken) || "",
     cancelUrlTemplate: (opts && opts.cancelUrlTemplate) || "",
     // Operator-cancelled: set once the BFF proxy confirms the transition
@@ -113,8 +128,60 @@ document.addEventListener("alpine:init", () => {
       }
       if (frame && typeof frame.run_id === "string" && !this.runId) {
         this.runId = frame.run_id;
+        this.rememberRunInAddress();
+      }
+      if (kind === "end") {
+        this.onEnd(frame);
+        return;
       }
       this.appendEntry(kind, frame);
+    },
+
+    // Put ``?run=<id>`` in the page address, so a reload follows this run
+    // (the console then reads its saved events) instead of showing an
+    // empty form. Only for a run this page started.
+    rememberRunInAddress() {
+      if (!this.rememberRun || !window.history || !window.history.replaceState) {
+        return;
+      }
+      const url = new URL(window.location.href);
+      url.searchParams.set("run", this.runId);
+      window.history.replaceState(window.history.state, "", url.toString());
+    },
+
+    // The ``end`` frame: the run reached its end status. A run that saved
+    // a final or error event already shows its pill. A run that stopped
+    // without one (a crash, a restart, a lost lease) is "unfinished"; its
+    // transcript ends with the last saved event. MEHO never adds an
+    // ending the run did not make.
+    onEnd(frame) {
+      if (!this.finalStatus && !this.cancelled) {
+        if (frame.status === "cancelled") {
+          this.cancelled = true;
+        } else {
+          this.finalStatus = frame.state === "unfinished" ? "unfinished" : frame.status || "";
+        }
+        if (frame.state === "unfinished") {
+          const last = frame.last_seq ? "#" + frame.last_seq : "none";
+          this.entries.push({
+            kind: "unfinished",
+            title: "run stopped without a final event",
+            body: "Last saved event: " + last + ". Run status: " + (frame.status || "unknown") + ".",
+          });
+        }
+      }
+      this.closeStream();
+    },
+
+    // Text for an event whose data the caller may not read.
+    hiddenBody(frame) {
+      if (frame.withheld) {
+        return "Only the person who started this run can read this event.";
+      }
+      if (frame.quarantined) {
+        return "The secret check was not sure about this event. Only a tenant admin can read it.";
+      }
+      return "";
     },
 
     // Map a parsed frame onto the transcript entry shape the template
@@ -140,11 +207,13 @@ document.addEventListener("alpine:init", () => {
           title = "final output";
           body = this.stringify(frame.output);
           this.finalStatus = "succeeded";
+          this.closeStream();
           break;
         case "error":
           title = "error";
           body = typeof frame.error === "string" ? frame.error : this.stringify(frame.error);
           this.finalStatus = "failed";
+          this.closeStream();
           break;
         default:
           // Unknown kind: render it raw rather than dropping it, so a
@@ -157,7 +226,8 @@ document.addEventListener("alpine:init", () => {
       if (frame && frame.status === "awaiting_approval") {
         this.awaitingApproval = true;
       }
-      this.entries.push({ kind: kind, title: title, body: body });
+      const hidden = this.hiddenBody(frame || {});
+      this.entries.push({ kind: kind, title: title, body: hidden || body });
     },
 
     // Pretty-print a JSON-able payload for the transcript body. A string
@@ -178,10 +248,10 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    // The stream errors at end-of-run too (the server closes the
-    // connection after the terminal frame); only treat it as a real drop
-    // when no terminal status landed. Either way, mark the stream done so
-    // the connection dot stops pulsing "live".
+    // A terminal frame closes the stream (see ``closeStream``), so an
+    // error after one is not expected; only treat it as a real drop when
+    // no terminal status landed. Either way, mark the stream done so the
+    // connection dot stops pulsing "live".
     onStreamError() {
       this.connected = false;
       if (!this.finalStatus) {
@@ -272,15 +342,26 @@ document.addEventListener("alpine:init", () => {
     },
 
     // Close the EventSource the HTMX sse extension opened on the sink
-    // element. The extension stores the connection on the element under
-    // ``__htmx_internal_data`` (an internal contract), so we fall back to
-    // dispatching ``htmx:abort`` -- the documented way to tell the sse
-    // extension to close -- when the internal handle is not reachable.
+    // element, and keep it closed. Called on a ``final`` or ``error``
+    // frame and on cancel. The run token in the stream URL starts one run
+    // only, so a new connection can never show more of this run.
+    //
+    // Two things reconnect: the browser's EventSource reconnects by itself
+    // when the server ends the stream, and the sse extension (2.2.4) opens
+    // a new EventSource after a closed one errors. Removing
+    // ``sse-connect`` first stops the extension: its reconnect timer reads
+    // that attribute and does nothing when it is gone. ``close()`` then
+    // stops the browser. The extension stores the connection on the
+    // element under ``__htmx_internal_data`` (an internal contract), so we
+    // fall back to dispatching ``htmx:abort`` when that handle is not
+    // reachable.
     closeStream() {
       const sink = this.$root.querySelector('[hx-ext="sse"], [data-hx-ext="sse"]');
       if (!sink) {
         return;
       }
+      sink.removeAttribute("sse-connect");
+      sink.removeAttribute("data-sse-connect");
       const internal = sink.__htmx_internal_data;
       const source = internal && internal.sseEventSource;
       if (source && typeof source.close === "function") {
@@ -296,6 +377,9 @@ document.addEventListener("alpine:init", () => {
       if (this.cancelled) {
         return "cancelled";
       }
+      if (this.finalStatus === "unfinished") {
+        return "unfinished";
+      }
       if (this.finalStatus) {
         return "complete";
       }
@@ -309,6 +393,9 @@ document.addEventListener("alpine:init", () => {
       if (this.cancelled) {
         return "bg-base-300";
       }
+      if (this.finalStatus === "unfinished") {
+        return "bg-warning";
+      }
       if (this.finalStatus) {
         return "bg-success";
       }
@@ -319,6 +406,9 @@ document.addEventListener("alpine:init", () => {
     },
 
     finalBadgeClass() {
+      if (this.finalStatus === "unfinished") {
+        return "badge-warning";
+      }
       return this.finalStatus === "succeeded" ? "badge-success" : "badge-error";
     },
 
@@ -332,6 +422,8 @@ document.addEventListener("alpine:init", () => {
           return "badge-success";
         case "error":
           return "badge-error";
+        case "unfinished":
+          return "badge-warning";
         default:
           return "badge-outline";
       }

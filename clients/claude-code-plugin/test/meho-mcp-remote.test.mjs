@@ -33,7 +33,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -88,6 +88,29 @@ writeFileSync(
 chmodSync(join(STUB_BIN, "npx"), 0o755);
 const PATH_WITH_STUB = `${STUB_BIN}:${NODE_DIR}:/usr/bin:/bin`;
 
+// The shim asks MEHO for the login client of Claude Code
+// (GET /api/v1/auth-config, lib/tool-client.mjs). No network in this suite:
+// a preload replaces fetch in every node process the shim starts. It answers
+// STUB_AUTH_CONFIG (a JSON body) and writes each requested URL to
+// STUB_FETCH_LOG. Without STUB_AUTH_CONFIG it answers {} like an older MEHO;
+// with STUB_FETCH_FAIL it fails like an unreachable MEHO.
+const FETCH_STUB = join(STUB_BIN, "fetch-stub.mjs");
+writeFileSync(
+  FETCH_STUB,
+  [
+    'import { appendFileSync } from "node:fs";',
+    "globalThis.fetch = async (url) => {",
+    "  if (process.env.STUB_FETCH_LOG) appendFileSync(process.env.STUB_FETCH_LOG, `${url}\\n`);",
+    '  if (process.env.STUB_FETCH_FAIL) throw new TypeError("fetch failed");',
+    '  return new Response(process.env.STUB_AUTH_CONFIG ?? "{}", {',
+    '    headers: { "content-type": "application/json" },',
+    "  });",
+    "};",
+    "",
+  ].join("\n"),
+);
+const NODE_OPTIONS = `--import=${pathToFileURL(FETCH_STUB).href}`;
+
 const TMP_DIRS = [STUB_BIN];
 after(() => {
   for (const d of TMP_DIRS) rmSync(d, { recursive: true, force: true });
@@ -116,6 +139,7 @@ function runWrapper({ cache = freshCache(), extraEnv = {} } = {}) {
       MEHO_PLUGIN_CONFIG: join(cache, "does-not-exist.env"),
       NPM_LOG: npmLog,
       NPX_LOG: npxLog,
+      NODE_OPTIONS,
       ...extraEnv,
     },
   });
@@ -256,6 +280,101 @@ test("no MEHO_TENANT, or an empty one, sends no header", () => {
     assert.deepEqual(headersFrom(res.stdout), [], JSON.stringify(extraEnv));
     assert.equal(argvFrom(res.stdout).length, 5);
   }
+});
+
+// The login client of Claude Code (#6210). With MCP_CLIENT_PER_TOOL_KIND on,
+// MEHO lists one client per tool kind; the shim then signs in with the
+// claude-code client and sends "Meho-Tool: claude-code", so Claude Code keeps
+// a saved login of its own.
+const TOOL_LIST = JSON.stringify({
+  cli_client_id: "meho-cli",
+  mcp_clients: { "claude-code": "meho-mcp-code", "claude-desktop": "meho-mcp-desktop" },
+});
+
+function clientIdFrom(stdout) {
+  const args = argvFrom(stdout);
+  const i = args.indexOf("--static-oauth-client-info");
+  assert.notEqual(i, -1, `client-info flag absent: ${stdout}`);
+  return JSON.parse(args[i + 1]).client_id;
+}
+
+test("MEHO lists a client for Claude Code: the shim uses it and sends Meho-Tool", () => {
+  const cache = freshCache();
+  const fetchLog = join(cache, "fetch.log");
+  const { res } = runWrapper({
+    cache,
+    extraEnv: { STUB_AUTH_CONFIG: TOOL_LIST, STUB_FETCH_LOG: fetchLog },
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(clientIdFrom(res.stdout), "meho-mcp-code");
+  assert.deepEqual(headersFrom(res.stdout), ["Meho-Tool: claude-code"]);
+  assert.equal(argvFrom(res.stdout)[0], URL);
+  // The list comes from the auth-config route next to /mcp.
+  assert.deepEqual(readFileSync(fetchLog, "utf8").trim().split("\n"), [
+    "https://meho.internal.example/api/v1/auth-config",
+  ]);
+});
+
+test("MEHO lists no client for Claude Code: meho-mcp and no Meho-Tool header", () => {
+  for (const body of [
+    { cli_client_id: "meho-cli" }, // an older MEHO
+    { mcp_clients: {} }, // the switch is off
+    { mcp_clients: { "claude-desktop": "meho-mcp-desktop" } },
+    { mcp_clients: { "claude-code": "" } },
+    { mcp_clients: { "claude-code": 'bad" name' } },
+    { mcp_clients: ["meho-mcp-code"] },
+  ]) {
+    const { res } = runWrapper({ extraEnv: { STUB_AUTH_CONFIG: JSON.stringify(body) } });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(clientIdFrom(res.stdout), "meho-mcp", JSON.stringify(body));
+    assert.deepEqual(headersFrom(res.stdout), [], JSON.stringify(body));
+  }
+});
+
+test("MEHO does not answer: meho-mcp, no header, and the shim still starts", () => {
+  const { res } = runWrapper({ extraEnv: { STUB_FETCH_FAIL: "1" } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(clientIdFrom(res.stdout), "meho-mcp");
+  assert.deepEqual(headersFrom(res.stdout), []);
+  assert.match(res.stderr, /could not read the login client list from MEHO/);
+});
+
+test("MEHO_MCP_CLIENT_ID wins over the list, and MEHO is not asked", () => {
+  const cache = freshCache();
+  const fetchLog = join(cache, "fetch.log");
+  const { res } = runWrapper({
+    cache,
+    extraEnv: {
+      STUB_AUTH_CONFIG: TOOL_LIST,
+      STUB_FETCH_LOG: fetchLog,
+      MEHO_MCP_CLIENT_ID: "my-mcp",
+    },
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(clientIdFrom(res.stdout), "my-mcp");
+  assert.deepEqual(headersFrom(res.stdout), []);
+  assert.equal(existsSync(fetchLog), false, "MEHO must not be asked");
+});
+
+test("MEHO_MCP_CLIENT_ID set in the config file wins too", () => {
+  const cache = freshCache();
+  const config = join(cache, "plugin.env");
+  writeFileSync(config, "MEHO_MCP_CLIENT_ID=my-mcp\n");
+  const { res } = runWrapper({
+    cache,
+    extraEnv: { STUB_AUTH_CONFIG: TOOL_LIST, MEHO_PLUGIN_CONFIG: config },
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(clientIdFrom(res.stdout), "my-mcp");
+  assert.deepEqual(headersFrom(res.stdout), []);
+});
+
+test("the tenant header and the tool header are both sent", () => {
+  const { res } = runWrapper({
+    extraEnv: { STUB_AUTH_CONFIG: TOOL_LIST, MEHO_TENANT: "tenant-b" },
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.deepEqual(headersFrom(res.stdout), ["Meho-Tenant: tenant-b", "Meho-Tool: claude-code"]);
 });
 
 // The committed lock is the security artifact: it must pin mcp-remote to the

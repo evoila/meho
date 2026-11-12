@@ -72,6 +72,7 @@ from meho_backplane.instance_settings.schema import (
     SettingsTarget,
     SettingsTenant,
     contains_secret,
+    find_over_long_strings,
     find_secret_shaped_values,
     format_validation_errors,
     parse_settings_file,
@@ -133,10 +134,11 @@ class SettingsForbiddenError(Exception):
 
 
 class SettingsExportRefusedError(Exception):
-    """Stored data holds a secret, so the file is not written. The route answers 409.
+    """Stored data holds a secret or over-long text, so the file is not written.
 
-    ``mistakes`` names each path (never the value), so an admin can move the
-    secret into OpenBao and export again.
+    The route answers 409. ``mistakes`` names each path (never the value), so
+    an admin can move the secret into OpenBao, or shorten the text, and export
+    again.
     """
 
     def __init__(self, mistakes: list[str]) -> None:
@@ -283,11 +285,12 @@ async def export_settings(session: AsyncSession, tenant_ids: list[uuid.UUID]) ->
 
     Raises :class:`SettingsExportRefusedError` when stored data (a target's
     ``notes`` or ``extras``, a convention body, ...) holds something the import
-    would refuse as a secret: the file must never carry one.
+    would refuse: text longer than the import reads, or a secret. The file must
+    never carry a secret, and every file MEHO writes must import again.
     """
     blocks = await load_tenant_blocks(session, tenant_ids)
     spec = {"tenants": list(blocks.values())}
-    mistakes = find_secret_shaped_values(spec, ("spec",))
+    mistakes = find_over_long_strings(spec, ("spec",)) or find_secret_shaped_values(spec, ("spec",))
     if mistakes:
         raise SettingsExportRefusedError(mistakes)
     return {

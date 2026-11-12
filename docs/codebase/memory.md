@@ -282,6 +282,9 @@ Contract for `meho://memory/id/{document_uuid}`:
   equals the natural key this operator would build for it (so for
   user scopes the owner is checked through the key, not only through
   metadata); the row has not expired.
+* The checks after the load live in `MemoryService.readable_entry`.
+  The console bulk route (`POST /ui/memory/bulk`) uses it too, with
+  `include_expired=True`.
 * Every miss returns `None`: unknown id, deleted row, other tenant,
   other owner, non-memory row, broken row, expired row. The MCP
   handler also maps a malformed id to the same answer. The wire error

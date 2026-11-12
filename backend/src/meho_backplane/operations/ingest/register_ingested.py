@@ -135,6 +135,7 @@ from meho_backplane.operations.ingest._upsert import (
     build_upsert_context,
     upsert_one_operation,
 )
+from meho_backplane.operations.ingest.api_schemas import LoginSetupOutcome
 from meho_backplane.operations.ingest.connector_registration import (
     check_version_covered_by_registered_class,
     ensure_connector_class_registered,
@@ -234,6 +235,10 @@ class IngestionResult:
         The ``(method, path)`` of each dropped operation, so the
         operator sees exactly what the allowlist excluded. Empty when
         ``dropped_count`` is ``0``.
+    login_setup:
+        What happened to the login setup of an ingest with a login type
+        (a :data:`~meho_backplane.operations.ingest.login_setup.LoginSetupOutcome`
+        value). ``None`` for an ingest without a login type.
     """
 
     inserted_count: int
@@ -244,6 +249,7 @@ class IngestionResult:
     safety_changes: tuple[SafetyChange, ...] = ()
     dropped_count: int = 0
     dropped_ops: tuple[DroppedOp, ...] = ()
+    login_setup: LoginSetupOutcome | None = None
 
 
 def _detect_op_id_collisions(

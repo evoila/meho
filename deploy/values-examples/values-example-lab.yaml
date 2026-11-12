@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 #
-# Example chart values for the RDC Hetzner dogfooding lab.
+# Example chart values for the example lab.
 #
-# The *actual* values-rdc.yaml is environment-private and lives in
-# `evoila-bosnia/claude-rdc-hetzner-dc/manifests/meho/values-rdc.yaml`
-# (per Goal #11 cross-repo deps). This file is a SANITIZED EXAMPLE
+# The *actual* values-site.yaml is environment-private and lives in
+# the operator's own repo. This file is a SANITIZED EXAMPLE
 # that other operators copy as a template: no real secrets, no real
 # CIDRs, and every site-specific field uses a `<REPLACE: ...>`
 # placeholder so a forgotten substitution fails values.schema.json
@@ -31,7 +30,7 @@ image:
   repository: ghcr.io/evoila/meho
   # MUST be set. Pin to an immutable tag: `sha-<40-char-git-sha>` from CI
   # (preferred for production deploys) or `v<x.y.z>` for a tagged release.
-  # `:latest` and `:main` are forbidden by Goal #11 deploy discipline.
+  # `:latest` and `:main` are forbidden by the deploy rules.
   # install.sh injects this via `--set image.tag=...` so the example file
   # leaves it as the schema's reject-empty trigger.
   tag: "<REPLACE: sha-<40-char-git-sha> or v0.1.0>"
@@ -47,12 +46,12 @@ image:
   # digest: "sha256:<64-hex from the release>"
   pullPolicy: IfNotPresent
 
-# RDC GHCR pulls are anonymous (public package). No pullSecret needed.
+# GHCR pulls are anonymous (public package). No pullSecret needed.
 imagePullSecrets: []
 
 serviceAccount:
-  # The RDC lab pre-provisions a ServiceAccount named `meho-backplane`
-  # via consumer-side ticket #266 (claude-rdc-hetzner-dc). When the lab
+  # The lab pre-provisions a ServiceAccount named `meho-backplane`
+  # via a consumer-side ticket. When the lab
   # admin owns the SA's name + RBAC, set `create: false` and `name:
   # <existing-sa>` to wire the chart's Deployment to the existing SA.
   #
@@ -61,7 +60,7 @@ serviceAccount:
   # release (`<release>` — `meho` for the default release name).
   create: false
   name: meho-backplane
-  # The RDC lab uses ESO + Vault for secret sync, not workload-identity
+  # The example lab uses ESO + Vault for secret sync, not workload-identity
   # bindings, so the SA carries no IAM/IRSA annotations.
   annotations: {}
 
@@ -76,12 +75,12 @@ service:
 
 ingress:
   enabled: true
-  # rke2-infra ships ingress-nginx as the default IngressClass.
+  # the platform cluster ships ingress-nginx as the default IngressClass.
   className: nginx
-  # RDC lab hostname. cert-manager (Cluster Issuer `letsencrypt-prod`)
+  # example lab hostname. cert-manager (Cluster Issuer `letsencrypt-prod`)
   # publishes the certificate; the Secret name below matches the one the
   # Certificate resource projects.
-  host: meho.evba.lab
+  host: meho.example.lab
   path: /
   pathType: Prefix
   # cert-manager-on-Ingress annotation: cert-manager watches Ingress
@@ -120,12 +119,12 @@ resources:
 
 # ConfigMap-sourced env vars. These mirror the vault/keycloak block below
 # (the backplane reads its config from the ConfigMap, not from Helm values
-# directly) so the two must stay in lockstep. The RDC lab realm name is a
+# directly) so the two must stay in lockstep. The example lab realm name is a
 # placeholder — substitute before install.
 config:
-  keycloakIssuerUrl: "https://keycloak.evba.lab/realms/<REPLACE: realm-name>"
+  keycloakIssuerUrl: "https://keycloak.example.lab/realms/<REPLACE: realm-name>"
   keycloakAudience: meho-backplane
-  # G0.9.1-T9 (#789, RDC Signal #16). Public OAuth client_id `meho
+  # (consumer feedback). Public OAuth client_id `meho
   # login` uses for device-code initiation. Must reference a
   # PRE-CREATED public Keycloak client in the realm above (the
   # deployer creates it before `helm install` — auto-provisioning is
@@ -137,13 +136,13 @@ config:
   keycloakCliClientId: meho-cli
   keycloakJwksCacheTtlSeconds: "300"
   keycloakJwtLeewaySeconds: "30"
-  vaultAddr: https://vault.evba.lab
+  vaultAddr: https://vault.example.lab
   vaultOidcRole: meho-mcp
   vaultOidcMountPath: jwt
   vaultTimeoutSeconds: "10.0"
   databasePoolSize: "10"
   databasePoolTimeout: "30.0"
-  # Reverse-proxy trust list (Issue #730, RDC Signal #3). uvicorn's
+  # Reverse-proxy trust list (consumer feedback). uvicorn's
   # default `127.0.0.1` fails-closed in-cluster — the Ingress
   # controller's pod IP is never the loopback.
   # SECURITY BASELINE (narrow forwarded-header trust). Trust `X-Forwarded-*`
@@ -157,14 +156,14 @@ config:
   # See `docs/cross-repo/reverse-proxy-contract.md` for per-cluster values
   # and docs-site install/tls-ingress.md § Reverse-proxy trust.
   forwardedAllowIps: "10.42.0.0/16"   # REPLACE: narrow to the controller /32
-  # Target-destination SSRF allowlist (v0.20.0, PR #2191). The default-
+  # Target-destination allowlist (v0.20.0). The default-
   # deny guard refuses to register or dial a target on non-public space,
-  # but the RDC lab registers on-prem appliances on RFC 1918 ranges as a
+  # but the example lab registers on-prem appliances on RFC 1918 ranges as a
   # matter of course — so scope-open the guard to those ranges or every
   # target create / dispatch is refused. Comma-separated CIDRs / bare
   # IPs / hostname literals; a malformed CIDR fails loudly at runtime.
   # Leave `""` on a chassis-only lab that dials no private-range targets.
-  # See `docs/codebase/target-ssrf-guard.md`.
+  # See the target guard page in `docs/codebase/`.
   targetSsrfAllowlist: "10.0.0.0/8,192.168.0.0/16"
   # SECURITY BASELINE (self-approval off). `approvalAllowSelfApproval`
   # defaults to "false" (four-eyes enforced: the requester of a gated write
@@ -176,8 +175,8 @@ config:
   # approvalAllowSelfApproval: "false"
 
 postgres:
-  # Cluster-internal Postgres on rke2-infra (per Goal #11 cross-repo deps).
-  host: postgres.evba.lab
+  # Cluster-internal Postgres on the platform cluster .
+  host: postgres.example.lab
   port: 5432
   database: meho
   # K8s Secret holding DATABASE_URL at key `url`. The consumer's ESO
@@ -187,9 +186,9 @@ postgres:
   credentialsSecret: meho-postgres
 
 vault:
-  address: https://vault.evba.lab
+  address: https://vault.example.lab
   authMethod: oidc
-  # Provisioned by the consumer per Goal #11 cross-repo deps (Vault role
+  # Provisioned by the consumer (Vault role
   # bound to the Keycloak issuer configured above).
   role: meho-mcp
   paths:
@@ -197,7 +196,7 @@ vault:
 
 keycloak:
   # MUST be substituted: the realm segment is environment-specific.
-  issuer: "https://keycloak.evba.lab/realms/<REPLACE: realm-name>"
+  issuer: "https://keycloak.example.lab/realms/<REPLACE: realm-name>"
   audience: meho-backplane
   clientSecretSyncFromVault: secret/meho/keycloak/client_secret
 
@@ -230,7 +229,7 @@ agent:
 keycloakAdmin:
   enabled: false
   # MUST be substituted: realm-scoped Admin REST API base.
-  url: "https://keycloak.evba.lab/admin/realms/<REPLACE: realm-name>"
+  url: "https://keycloak.example.lab/admin/realms/<REPLACE: realm-name>"
   # MUST match the Keycloak client id provisioned in Step 1.
   clientId: meho-admin
   clientSecret:
@@ -242,7 +241,7 @@ keycloakAdmin:
 
 audit:
   # v0.1: audit rows written to PostgreSQL only. The S3 / object-store
-  # mirror is v0.2 per Goal #11 scope.
+  # mirror is v0.2 by the plan.
   postgresOnly: true
 
 broadcast:
@@ -270,19 +269,19 @@ networkPolicy:
   # downgrade past bring-up. The broadcast subchart renders its own ingress
   # NetworkPolicy + Valkey auth alongside.
   enabled: true
-  # rke2-infra labels the controller namespace `ingress-nginx`.
+  # the platform cluster labels the controller namespace `ingress-nginx`.
   ingressControllerNamespace: ingress-nginx
   # MUST be substituted: site-specific CIDRs. The schema's IPv4-CIDR
   # pattern rejects `<REPLACE: ...>` literals so a forgotten substitution
   # fails-loud at `helm install` time. Recover the actual CIDRs from
-  # `kubectl get endpoints <svc> -n <ns> -o yaml` against the rke2-infra
-  # PG / vault.evba.lab / keycloak.evba.lab services.
-  postgresCIDR: "<REPLACE: rke2-infra Postgres CIDR, e.g. 10.0.1.0/24>"
-  vaultCIDR: "<REPLACE: vault.evba.lab CIDR, e.g. 10.0.2.0/24>"
-  keycloakCIDR: "<REPLACE: keycloak.evba.lab CIDR, e.g. 10.0.3.0/24>"
+  # `kubectl get endpoints <svc> -n <ns> -o yaml` against the platform cluster
+  # PG / vault.example.lab / keycloak.example.lab services.
+  postgresCIDR: "<REPLACE: the platform cluster Postgres CIDR, e.g. 10.0.1.0/24>"
+  vaultCIDR: "<REPLACE: vault.example.lab CIDR, e.g. 10.0.2.0/24>"
+  keycloakCIDR: "<REPLACE: keycloak.example.lab CIDR, e.g. 10.0.3.0/24>"
 
 # Optional chart-side ExternalSecret rendering. Default `false` — the
-# RDC lab convention (per Goal #11 cross-repo deps) is that the
+# example lab convention  is that the
 # consumer's GitOps repo owns the ExternalSecret manifests so that the
 # chart stays decoupled from the secret-sync mechanism. Flip to `true`
 # only if you want the chart to render ExternalSecret resources for
@@ -317,7 +316,7 @@ eso:
     enabled: false
 
 # Trust bundle for internal-CA-signed Vault + Keycloak + Postgres.
-# The RDC lab uses trust-manager (jetstack/trust-manager) to distribute
+# The example lab uses trust-manager (jetstack/trust-manager) to distribute
 # an internal-CA-bundle ConfigMap (key `ca.crt`) into every namespace
 # that has the `trust.cert-manager.io/include` annotation. The chart
 # below mounts that ConfigMap into the backplane Pod AND the migration

@@ -42,6 +42,7 @@ from meho_backplane.operations.approval_queue import (
     pending_chain_positions,
     result_state_of_envelope,
 )
+from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
 
@@ -198,7 +199,8 @@ def project_request_to_view(
     ``StrictUndefined``-safe.
 
     ``reveal_secret`` is ``True`` when the requester asked for the hidden
-    values of the answer: the approved run returns them to the requester.
+    values of the answer. Approving runs nothing: the operation runs once,
+    when the requester gets the values.
 
     ``withdrawn_at`` / ``withdraw_reason`` (#4987) say when and why the
     sender withdrew the request; both are ``None`` on any other row.
@@ -233,6 +235,7 @@ def project_request_to_view(
         "reviewer": subject_ref(row.reviewed_by, row.reviewed_by_name),
         "proposed_effect": row.proposed_effect,
         "reveal_secret": bool(row.reveal_secret),
+        "rights_change": is_rights_change(row),
         "status": row.status,
         "reviewed_by": row.reviewed_by,
         "work_ref": row.work_ref,

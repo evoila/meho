@@ -54,6 +54,7 @@ from meho_backplane.connectors.kubernetes.ops_exec import (
     truncate_bytes_to_cap,
 )
 from meho_backplane.connectors.kubernetes.ops_logs import (
+    ContainerNotFoundError,
     MultiContainerAmbiguityError,
     PodNotFoundError,
 )
@@ -554,10 +555,48 @@ async def test_exec_multi_container_without_container_raises() -> None:
     pods = _pod_list([_pod_obj("web-1", ["app", "sidecar"])])
     patches, _, _ = _patch_exec(ws=ws, list_pods=pods)
     connector = _make_connector()
-    with patches[0], patches[1], patches[2], pytest.raises(MultiContainerAmbiguityError):
+    with patches[0], patches[1], patches[2], pytest.raises(MultiContainerAmbiguityError) as exc:
         await k8s_exec(
             connector,
             _TARGET,
             _make_operator(),
             {"pod_name": "web-1", "namespace": "default", "command": ["ls"]},
         )
+    assert exc.value.containers == ["app", "sidecar"]
+    assert "has multiple containers; specify --container" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_exec_unknown_container_in_single_container_pod_names_the_wrong_name() -> None:
+    ws = _FakeWebSocket([])
+    pods = _pod_list([_pod_obj("web-1", ["app"])])
+    patches, _, _ = _patch_exec(ws=ws, list_pods=pods)
+    connector = _make_connector()
+    with patches[0], patches[1], patches[2], pytest.raises(ContainerNotFoundError) as exc:
+        await k8s_exec(
+            connector,
+            _TARGET,
+            _make_operator(),
+            {"pod_name": "web-1", "namespace": "default", "command": ["ls"], "container": "nope"},
+        )
+    assert exc.value.containers == ["app"]
+    assert str(exc.value.args[0]) == (
+        "pod 'web-1' has no container named 'nope'; its containers are: app"
+    )
+
+
+@pytest.mark.asyncio
+async def test_exec_unknown_container_in_multi_container_pod_names_the_wrong_name() -> None:
+    ws = _FakeWebSocket([])
+    pods = _pod_list([_pod_obj("web-1", ["app", "sidecar"])])
+    patches, _, _ = _patch_exec(ws=ws, list_pods=pods)
+    connector = _make_connector()
+    with patches[0], patches[1], patches[2], pytest.raises(ContainerNotFoundError) as exc:
+        await k8s_exec(
+            connector,
+            _TARGET,
+            _make_operator(),
+            {"pod_name": "web-1", "namespace": "default", "command": ["ls"], "container": "nope"},
+        )
+    assert exc.value.containers == ["app", "sidecar"]
+    assert "its containers are: app, sidecar" in str(exc.value)

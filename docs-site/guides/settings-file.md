@@ -12,6 +12,9 @@ policies, the conventions and the targets. The settings file
 The file never holds a secret. Passwords and keys stay in your secret
 store.
 
+The categories and classifications of operations are in a separate file:
+see [The policy file](policy-file.md).
+
 !!! note "REST only"
 
     The command line and the web console do not have it yet. Today you

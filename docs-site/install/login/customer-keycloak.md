@@ -173,6 +173,51 @@ Your Keycloak's own checks stay in place: its password policy, MFA and
 blocked accounts. They run when MEHO's Keycloak sends the person to
 yours.
 
+**Passkeys.** With a company login, the person signs in at your
+Keycloak, so passkeys (Face ID, Touch ID, a fingerprint or Windows
+Hello) are turned on there, not in MEHO's realm. In your Keycloak 26.4
+or newer, in the realm of your people, set the passkey rows of the
+table in
+[Remember the browser, and passkeys](../keycloak-realm.md#remember-the-browser-and-passkeys):
+**Enable Passkeys** on, and in the **Webauthn Passwordless Policy**
+**User verification requirement** and **Discoverable credential** at
+**Required**. A realm made before Keycloak 26.4 also needs the step that
+skips the one-time code after a passkey (see
+[A realm that already runs](../keycloak-realm.md#a-realm-that-already-runs)).
+Your people then add a passkey on your Keycloak's account page. For a
+company login of another kind (Entra ID, authentik), turn passkeys on in
+that system. When you use your Keycloak in place of MEHO's, set the same
+rows in the realm `meho`.
+
+## 5. Check the approval sign-in (required)
+
+`meho approvals approve` signs in through its own login flow in realm
+`meho`: `meho approval sign-in`, bound to the client `meho-cli-approve`.
+The flow asks for the password, and for the one-time code when the person
+has set one up. It has no other step. Every install needs this flow and
+its binding.
+
+- **MEHO's built-in Keycloak in front of yours (this page):** the install
+  makes the flow and binds it at every `helm upgrade`. On an older install
+  the install may stop and ask you to give `meho-admin` the role
+  `manage-realm` once
+  ([The bootstrap Job needs `manage-realm`](../upgrades.md#the-bootstrap-job-needs-manage-realm)).
+- **Your Keycloak in place of MEHO's (`coreKeycloak.enabled: false`):**
+  set it up yourself, in one of two ways:
+    - by hand, as
+      [The approval client `meho-cli-approve`](../keycloak-realm.md#the-approval-client-meho-cli-approve)
+      says ("Its own login flow");
+    - with the operation `keycloak.authflow.ensure_approval_flow`
+      ([Add the approval flow to a running realm through MEHO](../keycloak-realm.md#add-the-approval-flow-to-a-running-realm-through-meho)).
+      It waits for approval.
+
+Then check it. `meho doctor` shows the line `approval sign-in`, and
+`GET /api/v1/health` shows `approvals.sign_in.state`. Both must say `ok`.
+`flow_missing`, `not_bound` or `flow_differs` mean the flow or its
+binding is not right; `meho doctor` names the fix. `not_checked` with
+`no_right_to_read_login_flows` means MEHO's Keycloak admin client needs
+the realm-management role `view-realm`.
+
 ## The rules
 
 - **One MEHO group per person.** Put each person in one of your MEHO
@@ -197,6 +242,7 @@ Use a test person from your Keycloak who is not an admin.
 
 - [ ] `meho login https://<meho-host>` works with the account from your
       Keycloak. `meho status` shows the right tenant and role.
+- [ ] `meho doctor` shows `approval sign-in` as OK.
 - [ ] The web UI (`https://<meho-host>/ui/`) logs in with the same
       account and shows the same role.
 - [ ] Claude (MCP) logs in through the browser and can call a MEHO

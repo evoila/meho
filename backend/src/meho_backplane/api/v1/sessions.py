@@ -5,7 +5,7 @@
 
 * ``POST /api/v1/sessions`` -- upload one session as a gzip tar archive
   (``multipart/form-data``: the ``archive`` file and the session fields).
-  Every person of the tenant may upload their own sessions.
+  Every person of the tenant may upload their own sessions, one at a time.
 * ``GET /api/v1/sessions`` -- list the tenant's sessions (role
   ``operator`` and up).
 * ``GET /api/v1/sessions/{session_id}`` -- one session with its file
@@ -20,8 +20,10 @@
 
 Only a person may call these routes. Errors: ``404 session_not_found``
 (also for another tenant's session), ``409 session_conflict`` /
-``session_owned_by_another_person`` / ``session_upload_in_progress``,
-``413 session_archive_too_large``, ``422 archive_*``, ``503
+``session_owned_by_another_person`` / ``session_upload_in_progress`` /
+``session_is_a_hosted_run`` (the session id is a hosted agent run's),
+``413 session_archive_too_large``, ``422 archive_*``, ``429
+session_upload_already_running`` / ``session_uploads_busy``, ``503
 session_store_not_configured``, ``502 session_store_unavailable``. See
 ``docs/codebase/session-store.md``.
 """
@@ -66,6 +68,7 @@ from meho_backplane.session_store.service import (
     set_retention,
 )
 from meho_backplane.session_store.upload import SessionConflictError, UploadMeta, upload_session
+from meho_backplane.session_store.upload_slots import UploadBusyError, upload_slot
 
 __all__ = ["router"]
 
@@ -191,11 +194,18 @@ async def upload_agent_session(
         state=state,
         outcome=outcome,
     )
-    data = await _read_limited(archive, config.max_upload_bytes)
     try:
-        return await upload_session(
-            operator, meta, data, store=store, config=config, path=request.url.path
-        )
+        with upload_slot(operator):
+            data = await _read_limited(archive, config.max_upload_bytes)
+            return await upload_session(
+                operator, meta, data, store=store, config=config, path=request.url.path
+            )
+    except UploadBusyError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=exc.reason,
+            headers={"Retry-After": "60"},
+        ) from exc
     except ArchiveError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT, detail=exc.reason

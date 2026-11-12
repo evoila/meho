@@ -115,7 +115,8 @@ async def _check_target_access(
     :func:`~meho_backplane.auth.permissions.resolve_verdict`, keyed on the
     docs *op_id* and the target's id; a human or service principal is not
     gated by those rows. A docs lookup is a read with no vendor traffic, so
-    it is checked as a ``safe`` op: with no matching row it is allowed. The
+    it is checked as a ``safe`` op: with no matching row it is allowed,
+    unless ``AGENT_GRANT_REQUIRED=on`` refuses it (``agent_no_grant``). The
     call proceeds only on ``auto-execute``. ``call_operation`` parks a
     ``needs-approval`` verdict until an operator decides; the docs tools
     have no approval path, so that verdict refuses the call too, and the

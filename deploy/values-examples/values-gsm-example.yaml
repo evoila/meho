@@ -3,7 +3,7 @@
 #
 # Minimal GSM-backend (Vault-free) chart-values example — Initiative #2227.
 #
-# This is the GCP-native counterpart to values-rdc-example.yaml: it selects
+# This is the GCP-native counterpart to values-example-lab.yaml: it selects
 # the GCP Secret Manager credential backend (config.credentialBackend: gsm)
 # so target credentials and the /api/v1/health federation proof resolve
 # through Secret Manager instead of Vault. `vault.address` / `config.vaultAddr`

@@ -14,8 +14,8 @@ backplane's HTTP/JSON API, with the OpenAPI spec at the seam.
 
 As of G2.6-T5 the v0.1 trio is wired (`version`, `login`, `status`)
 and the multi-platform release pipeline ships every `v*` tag as
-four tarballs + `SHA256SUMS` to GitHub Releases via GoReleaser. Each
-tarball and `SHA256SUMS` ships with a matching `.cosign.bundle`
+four tarballs (Linux, macOS), two Windows zip files + `SHA256SUMS` to
+GitHub Releases via GoReleaser. Each archive and `SHA256SUMS` ships with a matching `.cosign.bundle`
 sigstore bundle (signature + Fulcio cert + Rekor proof) under the
 ADR 0006 identity-claim format. Server-driven subcommand discovery
 runs at every startup (empty manifest in v0.1; populated by
@@ -164,7 +164,7 @@ names.
 
 ```text
 cli/
-├── go.mod                  # github.com/evoila/meho/cli; Go 1.26.10.
+├── go.mod                  # github.com/evoila/meho/cli; Go version set by its `go` directive.
 ├── Makefile                # build / test / lint / install / generate / snapshot / release.
 ├── .golangci.yml           # linter config (rationale below).
 ├── .goreleaser.yaml        # GoReleaser v2 release config (rationale: § Release pipeline).
@@ -713,6 +713,29 @@ implementations. `NewTokenStore` picks the backend at runtime:
   `0600` and its parent directory mode `0700` via an atomic
   tmpfile-then-rename so a partial flush can never truncate
   existing credentials.
+* **Profiles.** The global `--profile` flag (or `MEHO_PROFILE`; flag
+  wins) picks a named login. `applyProfile` (`internal/cmd/profile.go`)
+  puts the name on the command context; `auth.KeyForContext` turns it
+  into the store key. The `default` profile uses the plain backplane
+  URL key, so existing logins keep working. A named profile adds
+  `#profile=<name>` to the service part of that key (the URL part
+  stays the plain URL), so every profile has its own slot in the same
+  keyring or the same credentials file. The suffix is not on the URL
+  because a URL can hold a `#` itself; then two (URL, profile) pairs
+  could share one slot. A profile with no
+  login is not found; it never falls back to another profile.
+  `applyProfile` also calls `output.SetLoginProfile`, and
+  `RenderError` turns each `meho login` in an error hint into
+  `meho --profile <name> login`, so following the hint fills the right
+  profile. For the default profile the hint stays `meho login`, except
+  when `MEHO_PROFILE` names another profile: then a plain `meho login`
+  would fill that one, so the hint says `meho --profile default login`.
+  `meho doctor` checks the profile on the context in both its offline
+  and its online layer, so it never sends another profile's token. It
+  reports a named profile as `Profile: <name>` (JSON: `profile`), and
+  its hints follow the same rule. All profiles share the saved
+  backplane URL; `meho login` prints one line when it replaces that URL
+  (`printBackplaneChange`).
 
 The escape hatch (`MEHO_KEYRING_DISABLE=1`) is documented for
 shared dev hosts where the local keyring belongs to a different
@@ -1019,6 +1042,11 @@ lines (indented JSON, an error message) and keeps the line breaks.
   server string through them. So the request the approver reads right
   before "Type yes" is the request the server holds: a subject or
   summary cannot overwrite the risk level line.
+- The audit commands (`meho audit show`, `query`, `recent`, `my-recent`,
+  `who-touched`, `replay`, `trace show`) pass every server string of the
+  human output through `SafeText`. A stored request path with control
+  codes shows as visible escapes, so each field stays on its own line
+  and reads as the server holds it.
 - `output.RenderError` passes the human error line through `SafeLines`,
   so a server body in an error message is shown the same way. The
   `--json` paths are unchanged: JSON encoding already escapes control
@@ -1071,8 +1099,9 @@ versions:
   The CLI and the backplane share release tags, so the backplane's
   version names the CLI release to install.
 - No warning when the comparison makes no sense: a `dev` CLI build, a
-  backplane without `chart_version`, or a main-branch backplane build
-  (date-based `0.1.<YYYYMMDD>-<sha>` chart version).
+  backplane without `chart_version`, or any version that is not a plain
+  `X.Y.Z` release (a release candidate, or a main-branch build such as
+  `0.1.<YYYYMMDD>-<sha>` or `0.1.0-main-<sha>`).
 - The check is best effort. A missing route, a timeout, or a bad body
   prints nothing and never changes the exit code. stdout is not
   touched, so `meho status --json` stays one JSON document.
@@ -1555,10 +1584,10 @@ end-to-end reconnect / 401 / 403 / Ctrl-C tests need the
 [oapi-codegen v2.5](https://github.com/oapi-codegen/oapi-codegen)
 from `cli/api/openapi.json` — a committed snapshot of the
 backplane's OpenAPI document. v2.5 is the last v2.x release that
-supports Go 1.22. The CLI module itself requires Go 1.26.10: Go 1.25
-gets no more security fixes, 1.26.9 is the first 1.26 release
-that fixes nine standard-library CVEs, and 1.26.10 also fixes
-GO-2026-6809 in `crypto/x509`. The generator itself runs
+supports Go 1.22. The CLI module itself requires the Go version in
+`cli/go.mod` (read it with `go mod edit -json cli/go.mod`). It is
+raised when a Go release fixes a standard-library security problem.
+The generator itself runs
 on a newer Go toolchain (downloaded automatically by `go install`
 when the host has Go 1.21+) so this is a build-time vs.
 runtime split.
@@ -1690,8 +1719,12 @@ narrow-waist contract.
   `preview_operation` tool. Resolves the SAME op + target + params a
   real call would and returns the literal would-be request
   (`method` / `resolved_path` / `query` / redacted `body`) plus a
-  `preview_hash` **instead of dispatching** — nothing is sent, no audit
-  row is written. The summary also prints the plan (`proposed_effect`)
+  `preview_hash` **instead of dispatching** — nothing is sent and the
+  operation does not run, so no audit row is written for it. The HTTP
+  request itself is audited like any other request: by default it writes
+  one request row (`http.post:/api/v1/operations/preview`); with
+  `AUDIT_WRAPPER_ROWS_RETIRED=true` it writes none unless it is refused.
+  The summary also prints the plan (`proposed_effect`)
   when the preview has one, or the `plan_note` when it does not (#4028). The `preview_hash` is the binding a
   `safety_level='destructive'` op requires (#3197): the dispatcher
   fail-closes a destructive `call` with `status=denied` /
@@ -2526,7 +2559,9 @@ multi-arch runner pool. Every target uses:
 
 ### Archive layout
 
-Each `<os>/<arch>` target produces one tarball:
+Each `<os>/<arch>` target produces one tarball. Windows targets
+(`windows/amd64`, `windows/arm64`) produce a `.zip` file instead
+(one `format_overrides` entry), with `meho.exe` in place of `meho`:
 
 ```text
 meho_<version-no-leading-v>_<os>_<arch>.tar.gz
@@ -2606,7 +2641,7 @@ than reconstructed at tag time from commit messages.
 
 GoReleaser's `signs:` block runs after `archives:` and `checksum:`,
 so the `artifacts: all` glob covers every file destined for the
-GitHub Release — the four tarballs **and** the combined `SHA256SUMS`
+GitHub Release — the four tarballs, the two Windows zips **and** the combined `SHA256SUMS`
 file. Per artefact, cosign produces a single `.cosign.bundle` JSON
 file containing the signature, the Fulcio-issued certificate, and
 the Rekor transparency-log inclusion proof; the bundle file is
@@ -2704,10 +2739,25 @@ alone implies only `--skip=announce,publish,validate` — it does NOT
 skip the `signs:` block. We pass `--skip=sign` explicitly so the
 dry-run completes on a dev machine without cosign on PATH (and
 without the `id-token: write` permission that's only available in a
-real CI run). Snapshot builds therefore produce only tarballs +
+real CI run). Snapshot builds therefore produce only the archives (four tarballs, two zips) +
 `SHA256SUMS` under `cli/dist/`; the `.cosign.bundle` files are a
 tag-push-only artefact, produced by the CI workflow which omits
 `--skip=sign`.
+
+### Windows check
+
+After the `release` job, the `windows-check` job of `cli-release.yml`
+runs on GitHub-hosted runners (`windows-latest` for amd64,
+`windows-11-arm` for arm64). It downloads the zip and `SHA256SUMS` from
+the Release, checks the hash, unzips, and runs `meho.exe version`. It
+fails unless the output names the release tag. If the organisation does
+not allow the `windows-11-arm` runner, set the repository variable
+`MEHO_WINDOWS_ARM_CHECK` to `skip`. Then only amd64 is checked, and the
+`windows-arm-skipped` job writes in the summary that a person must check
+the arm64 zip by hand. The `Go build (Windows)`
+step in `ci.yml` builds `./...` for both Windows targets on every pull
+request. The Go tests are not run on Windows (they do not compile there
+yet).
 
 ### Draft mode
 
@@ -2781,12 +2831,12 @@ Direct:
   "Login flow" step 5), plus `Config.TokenSource` for the T3 refresh
   path. Pinned at
   `v0.27.0`; the Go 1.22 minimum constraint that previously blocked
-  upgrades is lifted now that the module requires Go 1.26.10.
+  upgrades is lifted now that the module requires a recent Go.
 * `github.com/oapi-codegen/runtime` — runtime helpers the generated
   client uses (JSON merging for `oneOf` unions, parameter styling
   per RFC 6570). Pinned at `v1.1.1`; the Go 1.22 compatibility
   constraint that blocked upgrades is lifted now that the module
-  requires Go 1.26.10 — upgrade tracked as a follow-up.
+  requires a recent Go — upgrade tracked as a follow-up.
 
 Build-time tool (not in `go.mod`; installed under `bin/` via
 `make tools`):
@@ -2794,7 +2844,7 @@ Build-time tool (not in `go.mod`; installed under `bin/` via
 * `github.com/oapi-codegen/oapi-codegen/v2` — the OpenAPI → Go
   client generator itself. Pinned at `v2.5.0`, the last v2.x
   release whose module go directive was compatible with Go 1.22;
-  now that the module requires Go 1.26.10, a newer v2.x may be
+  now that the module requires a recent Go, a newer v2.x may be
   used — upgrade tracked as a follow-up. `make tools` runs
   `go install …@v2.5.0` with
   `GOBIN=$PWD/bin`; the generator itself executes on a Go 1.24+

@@ -114,7 +114,7 @@ func TestDoctor_OfflineLayer(t *testing.T) {
 	})
 
 	r := &doctorReport{}
-	got := runOfflineChecks(r, doctorOptions{}, offlineDeps(t, home))
+	got := runOfflineChecks(context.Background(), r, doctorOptions{}, offlineDeps(t, home))
 	if got != "https://backplane.example" {
 		t.Fatalf("backplane URL = %q", got)
 	}
@@ -151,7 +151,7 @@ func TestDoctor_OfflineLayer_VendoredDrift(t *testing.T) {
 	t.Setenv("MEHO_PLUGIN_CACHE", cache)
 
 	r := &doctorReport{}
-	runOfflineChecks(r, doctorOptions{pluginRoot: root}, offlineDeps(t, home))
+	runOfflineChecks(context.Background(), r, doctorOptions{pluginRoot: root}, offlineDeps(t, home))
 	if c := findCheck(t, r, "vendored lock"); c.Status != doctorFail || !strings.Contains(c.Detail, "0.1.30 is installed") {
 		t.Errorf("installed-version drift not reported: %+v", c)
 	}
@@ -160,7 +160,7 @@ func TestDoctor_OfflineLayer_VendoredDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	r = &doctorReport{}
-	runOfflineChecks(r, doctorOptions{pluginRoot: root}, offlineDeps(t, home))
+	runOfflineChecks(context.Background(), r, doctorOptions{pluginRoot: root}, offlineDeps(t, home))
 	if c := findCheck(t, r, "vendored lock"); c.Status != doctorWarn || !strings.Contains(c.Detail, "differs") {
 		t.Errorf("lock drift not reported: %+v", c)
 	}
@@ -198,7 +198,7 @@ func TestDoctor_OfflineLayer_InstalledPackageBroken(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := &doctorReport{}
-			runOfflineChecks(r, doctorOptions{pluginRoot: root}, offlineDeps(t, home))
+			runOfflineChecks(context.Background(), r, doctorOptions{pluginRoot: root}, offlineDeps(t, home))
 			c := findCheck(t, r, "vendored lock")
 			if c.Status != doctorFail || !strings.Contains(c.Detail, "installed package is broken") || !strings.Contains(c.Detail, tc.wantSub) {
 				t.Errorf("broken install not reported: %+v", c)
@@ -220,7 +220,7 @@ func TestDoctor_OfflineLayer_BadConfigAndCA(t *testing.T) {
 	}
 	t.Setenv("SSL_CERT_FILE", bad)
 	r := &doctorReport{}
-	got := runOfflineChecks(r, doctorOptions{backplaneOverride: "not a url"}, offlineDeps(t, t.TempDir()))
+	got := runOfflineChecks(context.Background(), r, doctorOptions{backplaneOverride: "not a url"}, offlineDeps(t, t.TempDir()))
 	if got != "" {
 		t.Errorf("bad URL should give no backplane, got %q", got)
 	}
@@ -292,7 +292,7 @@ func TestDoctor_CredentialStore(t *testing.T) {
 				}
 				return tc.keyringVal, nil
 			}
-			c := checkCredentialStore(deps, bp)
+			c := checkCredentialStore(context.Background(), deps, bp)
 			if !strings.HasPrefix(c.Detail, tc.wantState) {
 				t.Errorf("detail %q, want state %q", c.Detail, tc.wantState)
 			}
@@ -363,7 +363,7 @@ func TestDoctor_CredentialStore_BrokenFile(t *testing.T) {
 				}
 				return tc.keyringVal, nil
 			}
-			c := checkCredentialStore(deps, bp)
+			c := checkCredentialStore(context.Background(), deps, bp)
 			if c.Status != tc.wantStatus || !strings.HasPrefix(c.Detail, tc.wantState) {
 				t.Fatalf("status=%s detail=%q hint=%q; want %s with state %q", c.Status, c.Detail, c.Hint, tc.wantStatus, tc.wantState)
 			}
@@ -434,6 +434,9 @@ type mcpStub struct {
 	listed     []string
 	scopes     []string
 	gotSession []string
+	// signIn is approvals.sign_in in the meho_status answer; nil leaves
+	// the approvals block out, as an older backplane does.
+	signIn map[string]any
 }
 
 func (s *mcpStub) handler(t *testing.T) http.Handler {
@@ -470,7 +473,7 @@ func (s *mcpStub) handler(t *testing.T) http.Handler {
 			}
 			result = map[string]any{"tools": tools}
 		case "tools/call":
-			payload, _ := json.Marshal(map[string]any{
+			status := map[string]any{
 				"operator":               map[string]any{"sub": "alice-sub", "name": "Alice", "email": nil, "tenant_id": "00000000-0000-0000-0000-000000000001", "tenant_role": "operator"},
 				"vault":                  map[string]any{"reachable": true, "read_ok": true, "detail": nil},
 				"db":                     map[string]any{"migrated": true},
@@ -482,7 +485,14 @@ func (s *mcpStub) handler(t *testing.T) http.Handler {
 					"missing_working_tools":   []string{"search_docs"},
 					"operator_surface_listed": false,
 				},
-			})
+			}
+			if s.signIn != nil {
+				status["approvals"] = map[string]any{
+					"custody": "configured", "effective_posture": "four_eyes_enforced",
+					"delegated_decision_posture": "production_own_hand_only", "sign_in": s.signIn,
+				}
+			}
+			payload, _ := json.Marshal(status)
 			result = map[string]any{"isError": false, "content": []any{map[string]any{"type": "text", "text": string(payload)}}}
 		}
 		w.Header().Set("Content-Type", "application/json")

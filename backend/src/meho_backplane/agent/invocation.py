@@ -136,6 +136,7 @@ from meho_backplane.operations.budget_enforcement import (
     evaluate_pre_run_budget,
 )
 from meho_backplane.operations.identity_budget import TokenUsage
+from meho_backplane.session_store.hosted_runs import RunEventLog, add_run_session
 from meho_backplane.settings import Settings, get_settings
 
 if TYPE_CHECKING:
@@ -156,6 +157,7 @@ __all__ = [
     "ScheduledRunNoInputError",
     "get_agent_invoker",
     "reset_agent_invoker_for_testing",
+    "run_output_visible_to",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -856,6 +858,13 @@ class AgentInvoker:
                 ttl_seconds=get_settings().agent_run_lease_ttl_seconds,
             )
             run_id = row.id
+            add_run_session(
+                session,
+                run_id=run_id,
+                tenant_id=operator.tenant_id,
+                started_by=operator.sub,
+                agent_name=entry.name,
+            )
             await session.commit()
         return run_id, owner
 
@@ -998,6 +1007,26 @@ class AgentInvoker:
                 )
             await session.commit()
 
+    async def _record_loop_failure(
+        self,
+        run_id: uuid.UUID,
+        exc: Exception,
+        events: RunEventLog,
+        handle: AgentRunHandle | None,
+    ) -> None:
+        """Save the ``error`` event of a failed background run, then record the failure."""
+        if not isinstance(exc, AgentRunError):
+            _log.warning("agent_invoke_unexpected_failure", run_id=str(run_id), error=str(exc))
+        await events.save("error", {"error": str(exc)})
+        await _finish_despite_cancel(
+            self._finalize_run(
+                run_id,
+                output=None,
+                error=str(exc),
+                request_usages=_handle_usages(handle),
+            )
+        )
+
     async def _finalize_success(self, run_id: uuid.UUID, result: AgentRunResult) -> None:
         """Record the output of a run that succeeded and charge its calls."""
         usage = TokenUsage(
@@ -1068,11 +1097,17 @@ class AgentInvoker:
         session_token = agent_session_id_var.set(run_id)
         meta_token = agent_run_audit_meta_var.set(meta)
         heartbeat = _LeaseHeartbeat(run_id, lease_owner)
+        events = RunEventLog(run_id, operator.tenant_id)
         handle: AgentRunHandle | None = None
         try:
             try:
                 handle = self._runtime.start(
-                    definition, operator, inputs, run_id=run_id, model=model
+                    definition,
+                    operator,
+                    inputs,
+                    run_id=run_id,
+                    model=model,
+                    on_event=events.save_event,
                 )
                 result = await self._runtime.result(handle)
             except asyncio.CancelledError:
@@ -1083,19 +1118,8 @@ class AgentInvoker:
                 )
                 raise
             except Exception as exc:
-                if not isinstance(exc, AgentRunError):
-                    _log.warning(
-                        "agent_invoke_unexpected_failure", run_id=str(run_id), error=str(exc)
-                    )
                 heartbeat.settle()
-                await _finish_despite_cancel(
-                    self._finalize_run(
-                        run_id,
-                        output=None,
-                        error=str(exc),
-                        request_usages=_handle_usages(handle),
-                    )
-                )
+                await self._record_loop_failure(run_id, exc, events, handle)
                 return
             heartbeat.settle()
             await _finish_despite_cancel(self._finalize_success(run_id, result))
@@ -1427,6 +1451,7 @@ class AgentInvoker:
             operator_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
         )
+        await RunEventLog(run_id, operator.tenant_id).save("error", {"error": error})
         await self._finalize_run(run_id, output=None, error=error)
         return AgentRunOutcome(
             run_id=run_id,
@@ -1465,6 +1490,7 @@ class AgentInvoker:
             operator_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
         )
+        await RunEventLog(run_id, operator.tenant_id).save("error", {"error": error})
         await self._finalize_run(run_id, output=None, error=error)
         return AgentRunOutcome(
             run_id=run_id,
@@ -1604,7 +1630,8 @@ class AgentInvoker:
         Reads the ``agent_run`` row (the durable source of truth), so it
         works after the creating request has returned and even after the
         in-memory task is gone. A cross-tenant / unknown id raises
-        :class:`AgentRunNotFoundError`.
+        :class:`AgentRunNotFoundError`. The view carries ``output`` and
+        ``error`` only when :func:`run_output_visible_to` allows it.
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -1614,7 +1641,12 @@ class AgentInvoker:
             agent_name = await _resolve_run_agent_name(
                 session, tenant_id=operator.tenant_id, row=row
             )
-            return _row_to_view(row, agent_name=agent_name)
+            root_trigger = await _root_trigger(session, row)
+            return _row_to_view(
+                row,
+                agent_name=agent_name,
+                show_output=run_output_visible_to(row, operator, root_trigger=root_trigger),
+            )
 
     async def cancel(self, operator: Operator, run_id: uuid.UUID) -> AgentRunSummary:
         """Cancel a non-terminal run the operator's tenant owns.
@@ -1797,13 +1829,7 @@ class AgentInvoker:
         runbook = _unexecutable_runbook_instruction(definition, inputs)
         if runbook is not None:
             outcome = await self._refuse_unexecutable_runbook(run_id, name, operator, runbook)
-            yield (
-                run_id,
-                AgentRunEvent(
-                    kind=AgentRunEventKind.ERROR,
-                    data={"error": outcome.error},
-                ),
-            )
+            yield run_id, AgentRunEvent(kind=AgentRunEventKind.ERROR, data={"error": outcome.error})
             return
 
         terminal_output: dict[str, object] | None = None
@@ -1835,6 +1861,7 @@ class AgentInvoker:
         # fresh for the stream's lifetime; cancel it once the stream
         # terminates (final/error event, client disconnect, cancel).
         heartbeat = _LeaseHeartbeat(run_id, lease_owner)
+        events = RunEventLog(run_id, operator.tenant_id)
         # Usage of the requests the run finished, kept current by the runtime,
         # so a run that ends by an error or a closed stream is still charged.
         usage_sink: list[TokenUsage] = []
@@ -1855,6 +1882,7 @@ class AgentInvoker:
                     terminal_error = str(event.data.get("error"))
                 elif event.kind is AgentRunEventKind.TURN:
                     turns += 1
+                await events.save_event(event)
                 yield run_id, event
         finally:
             await heartbeat.close()
@@ -1887,10 +1915,22 @@ async def _resolve_child_definition(
     structured :class:`~pydantic_ai.ModelRetry`. Mirrors
     :meth:`AgentInvoker._load_definition` but returns ``None`` instead of
     raising, per the resolver protocol.
+
+    The owner rule is the same as for a direct run: an agent login resolves
+    only the definitions whose ``identity_ref`` is its own client id. A
+    person resolves any enabled definition of the tenant.
     """
     service = AgentDefinitionService()
     entry = await service.get(operator.tenant_id, agent_name)
     if entry is None or not entry.enabled:
+        return None
+    if operator.principal_kind is PrincipalKind.AGENT and entry.identity_ref != operator.client_id:
+        _log.info(
+            "agent_invoke_child_not_owned",
+            agent=agent_name,
+            client_id=operator.client_id,
+            tenant_id=str(operator.tenant_id),
+        )
         return None
     return AgentInvoker._to_agent_definition(entry)
 
@@ -2033,13 +2073,56 @@ async def _resolve_run_agent_name(
     return names.get(row.agent_definition_id)
 
 
-def _row_to_view(row: AgentRunRow, *, agent_name: str | None = None) -> AgentRunStatusView:
+#: The triggers of runs that act as the agent's own login, not for a person.
+_AGENT_OWN_LOGIN_TRIGGERS: Final[frozenset[str]] = frozenset(
+    {AgentRunTrigger.SCHEDULED.value, AgentRunTrigger.EVENT.value}
+)
+
+
+async def _root_trigger(session: AsyncSession, row: AgentRunRow) -> str:
+    """Return the trigger of the first run in *row*'s chain of parent runs.
+
+    A child run (``agent-invoked``) follows its ``parent_run_id`` up, at
+    most ``agent_invoke_max_depth`` steps. When a parent is missing or in
+    another tenant, the walk stops at the child, so the child keeps its
+    own ``agent-invoked`` trigger.
+    """
+    current = row
+    for _ in range(get_settings().agent_invoke_max_depth):
+        if current.trigger != AgentRunTrigger.AGENT_INVOKED.value or current.parent_run_id is None:
+            break
+        parent = await run_lifecycle.get_run(session, current.parent_run_id)
+        if parent is None or parent.tenant_id != row.tenant_id:
+            break
+        current = parent
+    return current.trigger
+
+
+def run_output_visible_to(row: AgentRunRow, operator: Operator, *, root_trigger: str) -> bool:
+    """Whether *operator* may read the ``output`` and ``error`` of the run in *row*.
+
+    *root_trigger* is the trigger of the first run in the chain (see
+    :func:`_root_trigger`); for a run that is not a child it is the run's
+    own trigger. A direct run, and each child run under it, acts for the
+    person who started it. Its output can hold that person's private
+    memory notes, so only that person reads its output and error. Other
+    people in the tenant see its state and token usage. A scheduled or
+    event run, and each child run under it, acts as the agent's own
+    login, so everyone in the tenant reads it.
+    """
+    return root_trigger in _AGENT_OWN_LOGIN_TRIGGERS or row.identity_sub == operator.sub
+
+
+def _row_to_view(
+    row: AgentRunRow, *, agent_name: str | None = None, show_output: bool = True
+) -> AgentRunStatusView:
     """Project an ``agent_run`` row onto the poll-time view.
 
     *agent_name* is the producing definition's name, resolved read-time by
     the caller from the row's ``agent_definition_id`` (``None`` for an
     ad-hoc run or a dangling soft-FK); the id itself is read straight off
-    the row.
+    the row. With *show_output* false, ``output`` and ``error`` are
+    ``None``.
     """
     return AgentRunStatusView(
         run_id=row.id,
@@ -2047,8 +2130,8 @@ def _row_to_view(row: AgentRunRow, *, agent_name: str | None = None) -> AgentRun
         turns=row.turns,
         provider=row.provider,
         model=row.model,
-        output=row.output,
-        error=row.error,
+        output=row.output if show_output else None,
+        error=row.error if show_output else None,
         agent_definition_id=row.agent_definition_id,
         agent_name=agent_name,
         identity_sub=row.identity_sub,

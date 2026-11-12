@@ -136,6 +136,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -154,7 +156,7 @@ jobs:
           files=$(gh api --paginate \
             "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
             --jq '.[].filename')
-          if grep -qE '^(deploy/charts/meho/|deploy/linux-server/packaging/render-values\.yaml$|deploy/linux-server/values-single-node\.yaml$|\.github/workflows/chart\.yml$)' <<<"$files"; then
+          if grep -qE '^(deploy/charts/meho/|deploy/linux-server/packaging/render-values\.yaml$|deploy/linux-server/values-single-node\.yaml$|deploy/golden/|deploy/values-examples/values-openshift\.yaml$|scripts/ci/helm_golden\.py$|\.github/workflows/chart\.yml$)' <<<"$files"; then
             echo "chart=true" >> "$GITHUB_OUTPUT"
           else
             echo "chart=false" >> "$GITHUB_OUTPUT"
@@ -163,7 +165,8 @@ jobs:
   validate:
     name: Lint + template + kubeconform (PR build gate)
     # Fork-PR guard: fork PRs are skipped entirely (mirrors image.yml).
-    # The job runs on a GitHub-hosted runner: helm and kubeconform come from
+    # The job runs on a GitHub-hosted runner (own pool in the merge queue):
+    # helm and kubeconform come from
     # public releases. push events (main, v*) short-circuit the OR. The trailing `needs.changes.outputs.chart` clause skips this job
     # (→ reported Success) on PRs that don't touch the chart.
     needs: changes
@@ -171,7 +174,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.chart == 'true')
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -791,6 +794,14 @@ jobs:
             | python3 scripts/ci/check_chart_namespace_scope.py --namespace meho-scope \
                 --label "coreVault.authDelegator on" --allow-auth-delegator
 
+      - name: Check the golden renders of the chart
+        # deploy/golden/ holds what `helm template` makes of the chart for
+        # three fixed sets of values (built-in core, bring-your-own, OpenShift).
+        # A chart change that changes the installed objects must update these
+        # files, so the review shows the effect. Fix a failure with
+        # `python scripts/ci/helm_golden.py --write`.
+        run: python3 scripts/ci/helm_golden.py
+
   helm-test:
     # Internal "run" job — the REQUIRED branch-protection context lives on the
     # `helm-test-gate` aggregator below, not here. A required job that is gated
@@ -824,10 +835,9 @@ jobs:
     #      tripped Docker Hub's rate-limit on this repo's other CI
     #      lanes -- pre-loading sidesteps it.
     #
-    # Runs on ``ubuntu-latest`` (NOT ``meho-runners-ci``) because kind
-    # needs Docker-in-Docker support that the self-hosted runner
-    # pool isn't configured for; the GitHub-hosted runners ship
-    # Docker pre-installed and helm/kind-action works out of the box.
+    # Runs on ``ubuntu-latest`` for every event, the merge queue too.
+    # kind installs need more CPU than the own heavy-queue pool has today;
+    # back to an own pool when the second runner pool exists (#6026).
     #
     # #4099 -- ``helm install`` and ``helm test`` run as a namespace
     # admin (``--kube-as-user``), not as kind's cluster admin, so a chart
@@ -910,6 +920,9 @@ jobs:
           else
             echo ">> fastembed cache MISS (cold path); warm RUN will download once"
           fi
+
+      - name: Stage the Tailwind CLI for the image build
+        uses: ./.github/actions/stage-tailwind
 
       - name: Build backplane image locally (load into Docker, not push)
         # ``load: true`` (= ``--output=type=docker``) leaves the image
@@ -1668,6 +1681,9 @@ jobs:
             echo ">> fastembed cache MISS (cold path); warm RUN will download once"
           fi
 
+      - name: Stage the Tailwind CLI for the image build
+        uses: ./.github/actions/stage-tailwind
+
       - name: Build backplane image locally (load into Docker, not push)
         # Same build as in `helm-test`, but this job only reads the shared
         # build cache. `helm-test` writes it, so the two jobs do not upload
@@ -1984,6 +2000,9 @@ jobs:
           else
             echo ">> fastembed cache MISS (cold path); warm RUN will download once"
           fi
+
+      - name: Stage the Tailwind CLI for the image build
+        uses: ./.github/actions/stage-tailwind
 
       - name: Build the candidate image locally (load into Docker, not push)
         # Same as in `helm-test-byo`: reads the shared build cache only.
@@ -2310,8 +2329,9 @@ jobs:
     # the same as in `rollback-drill` (kind, loaded images, a PostgreSQL
     # outside the release, one values file).
     #
-    # The last release is the newest GitHub release. The job needs it
-    # to have a published chart and image, as `rollback-drill` does.
+    # The last release is the newest GitHub release that has a published
+    # image. A release page without an image is skipped. The job needs the
+    # release to have a published chart, as `rollback-drill` does.
     #
     # `helm-test-gate` needs this job, so a failed upgrade blocks the merge.
     # The job runs only on same-repo pull requests; the gate does not ask
@@ -2334,12 +2354,35 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          prior=$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name)
-          if ! [[ "$prior" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::the last release tag is '${prior}', not a tag such as v0.45.0"
+          # A release page can exist without its image. Look at the newest
+          # five releases, newest first, and take the first with an image.
+          # Only a missing image manifest skips a release. Any other error
+          # fails, also a login error that says "not found" (for example a
+          # credential helper that is not installed).
+          tags=$(gh api "repos/${{ github.repository }}/releases?per_page=30" \
+            --jq '[.[] | select(.draft == false and .prerelease == false)][:5][].tag_name')
+          prior=""
+          for tag in $tags; do
+            if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::the release tag is '${tag}', not a tag such as v0.45.0"
+              exit 1
+            fi
+            if out=$(docker manifest inspect "ghcr.io/evoila/meho:${tag}" 2>&1); then
+              prior="$tag"
+              break
+            fi
+            if grep -qiE 'no such manifest|manifest unknown' <<<"$out"; then
+              echo ">> skipping ${tag}: its image is not published"
+            else
+              echo "::error::could not look up the image of ${tag}: ${out}"
+              exit 1
+            fi
+          done
+          if [ -z "$prior" ]; then
+            echo "::error::none of the newest five releases has a published image"
             exit 1
           fi
-          echo ">> last release: ${prior}"
+          echo ">> last release with an image: ${prior}"
           echo "PRIOR=${prior}" >> "$GITHUB_ENV"
 
       - name: Checkout
@@ -2377,6 +2420,9 @@ jobs:
           else
             echo ">> fastembed cache MISS (cold path); warm RUN will download once"
           fi
+
+      - name: Stage the Tailwind CLI for the image build
+        uses: ./.github/actions/stage-tailwind
 
       - name: Build the candidate image locally (load into Docker, not push)
         # Same as in `helm-test-byo`: reads the shared build cache only.
@@ -2607,6 +2653,8 @@ jobs:
     # there. The gate skips too, so it does not fail on the skipped `changes`.
     if: always() && github.event_name != 'workflow_dispatch'
     needs: [changes, validate, helm-test, helm-test-byo, upgrade-from-release]
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

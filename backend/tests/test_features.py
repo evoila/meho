@@ -354,6 +354,28 @@ def test_mcp_block_reports_server_pinned_protocol_version() -> None:
     assert "docs" not in mcp
 
 
+@pytest.mark.parametrize("short", [False, True])
+def test_mcp_block_reports_the_short_tool_texts_switch(short: bool) -> None:
+    """``/ready`` says whether the short tool texts are on, so a benchmark knows its state."""
+    block = build_features_block(_settings_with(mcp_short_tool_texts=short))
+    assert block["mcp"]["short_tool_texts"] is short
+
+
+def test_mcp_block_short_tool_texts_is_off_by_default() -> None:
+    assert build_features_block(_settings_with())["mcp"]["short_tool_texts"] is False
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_mcp_block_reports_the_client_per_tool_kind_switch(on: bool) -> None:
+    """``/ready`` says whether Claude Code and Claude Desktop get their own login client."""
+    block = build_features_block(_settings_with(mcp_client_per_tool_kind=on))
+    assert block["mcp"]["client_per_tool_kind"] is on
+
+
+def test_mcp_block_client_per_tool_kind_is_off_by_default() -> None:
+    assert build_features_block(_settings_with())["mcp"]["client_per_tool_kind"] is False
+
+
 # ---------------------------------------------------------------------------
 # approval_custody (#3712)
 # ---------------------------------------------------------------------------
@@ -412,6 +434,7 @@ def test_features_block_carries_all_six_entries() -> None:
         "approval_custody",
         "vault_tenant_scope",
         "mcp",
+        "policy",
     }
 
 
@@ -425,6 +448,7 @@ def test_features_block_carries_all_six_entries() -> None:
         "approval_custody",
         "vault_tenant_scope",
         "mcp",
+        "policy",
     ],
 )
 def test_every_feature_has_configured_bool(feature: str) -> None:
@@ -535,9 +559,10 @@ def test_registry_entry_shape(feature_key: str) -> None:
     * ``maturity`` is one of the three tiers.
     * GA entries carry **neither** ``target_ga`` nor ``tracking`` —
       same absent-not-null convention as ``docs`` on the /ready gates.
-    * Non-GA entries carry both: ``tracking`` is a concrete
+    * Non-GA entries carry ``target_ga``. ``tracking`` is a concrete
       ``evoila/meho`` issue URL (the road-to-promotion pointer #2678
-      renders), ``target_ga`` is a milestone string on beta entries
+      renders) when an open tracker exists, and absent otherwise.
+      ``target_ga`` is a milestone string on beta entries
       and may be ``None`` only on experimental ones (outside the 1.0
       promise — no committed milestone to advertise).
     """
@@ -550,9 +575,10 @@ def test_registry_entry_shape(feature_key: str) -> None:
         assert "tracking" not in entry
         return
 
-    assert _ISSUE_URL_RE.match(entry["tracking"]), (
-        f"{feature_key}: tracking must be an evoila/meho issue URL, got {entry.get('tracking')!r}"
-    )
+    if "tracking" in entry:
+        assert _ISSUE_URL_RE.match(entry["tracking"]), (
+            f"{feature_key}: tracking must be an evoila/meho issue URL, got {entry['tracking']!r}"
+        )
     assert "target_ga" in entry
     if maturity == "beta":
         assert isinstance(entry["target_ga"], str) and entry["target_ga"]

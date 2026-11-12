@@ -4,7 +4,8 @@
 # Usage: fetch_with_retry.sh <url> <output-file> [<sha256>]
 #
 # It tries three times and waits longer after each failure (5 s, then
-# 15 s). A try fails when the download fails or, if a sha256 is given,
+# 15 s). Set FETCH_PAUSES (seconds, separated by spaces) for other pauses.
+# A try fails when the download fails or, if a sha256 is given,
 # when the file does not match it. A half-sent file (for example the body
 # of an HTTP 504) then costs one try, not the whole run.
 set -euo pipefail
@@ -17,7 +18,8 @@ fi
 url="$1"
 out="$2"
 sha="${3:-}"
-pauses=(5 15)
+# shellcheck disable=SC2206
+pauses=(${FETCH_PAUSES:-5 15})
 tries=$((${#pauses[@]} + 1))
 
 for ((try = 1; try <= tries; try++)); do

@@ -13,10 +13,18 @@ other steps than the file is kept as it is, the stage says so in one line,
 and no client is bound to it: a flow that is not the one of the file must
 not guard the approval sign-in.
 
+A flow whose steps need settings (``authenticatorConfig`` in the realm file,
+such as the levels of ``meho approval touch``) is not made here: the stage
+makes steps without settings, and such a step without its settings would
+change how people log in. The stage says so in one line and binds no client
+to it. The Keycloak operation of the flow adds it to a running realm.
+
 Reading and changing login flows needs the ``manage-realm`` role. The
-``meho-admin`` account of the realm file has it only when the company login
-is on (docs/codebase/core-bootstrap.md, "Rights"). Without it the stage says
-so in one line and goes on.
+``meho-admin`` account of the realm file has it. An install made before the
+realm file gave it to ``meho-admin`` may lack it (docs/codebase/core-bootstrap.md,
+"Rights"). Then the stage stops with :data:`NO_FLOW_RIGHT`, which names the
+role and the one-time fix: without the role, the stage cannot make sure that
+the approval sign-in has its own flow (#6280).
 
 :func:`flow_overrides` turns a client's ``authenticationFlowBindingOverrides``
 from the realm file (flow ids of the file) into flow ids of the realm.
@@ -28,14 +36,44 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote
 
-from meho_backplane.core.keycloak_api import REALM, Admin, expect, id_from
+from meho_backplane.core.keycloak_api import (
+    REALM,
+    Admin,
+    RealmStageError,
+    Reply,
+    expect,
+    id_from,
+)
 
-__all__ = ["OVERRIDES", "ensure_flows", "flow_overrides"]
+__all__ = ["NO_FLOW_RIGHT", "OVERRIDES", "ensure_flows", "flow_overrides"]
 
 #: The client field that binds a client to its own login flow.
 OVERRIDES = "authenticationFlowBindingOverrides"
 
 _BASE = f"/admin/realms/{REALM}/authentication"
+
+#: Why the stage stops when ``meho-admin`` may not read or change login flows.
+NO_FLOW_RIGHT = (
+    "meho-admin may not read or change login flows, so the stage cannot keep the "
+    "approval sign-in flow up to date. Give meho-admin the realm-management role "
+    "manage-realm once, then run the upgrade again; see docs-site/install/upgrades.md, "
+    "'The bootstrap Job needs manage-realm'"
+)
+
+
+def _no_right(alias: str) -> RealmStageError:
+    return RealmStageError(f"login flow {alias}: {NO_FLOW_RIGHT}")
+
+
+def _expect(reply: Reply, status: int, alias: str, what: str) -> Reply:
+    """:func:`expect` for a call to the flow *alias*; HTTP 403 names the missing role."""
+    if reply.status == 403:
+        raise _no_right(alias)
+    return expect(reply, status, what=what)
+
+
+#: One step of a flow as Keycloak lists it: its level, its name, its requirement.
+_Row = tuple[int, str, str]
 
 
 def _say(line: str) -> None:
@@ -46,16 +84,28 @@ def _flow_url(alias: str) -> str:
     return f"{_BASE}/flows/{quote(alias, safe='')}/executions"
 
 
+def _ordered(flow: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The steps of *flow* in the realm file, in the order Keycloak runs them."""
+    return sorted(flow.get("authenticationExecutions") or [], key=lambda s: s.get("priority", 0))
+
+
 def _requirements(flow: Mapping[str, Any], by_alias: Mapping[str, Any]) -> dict[str, str]:
     """The requirement of every step of *flow* and its sub-flows, by step name."""
-    wanted: dict[str, str] = {}
-    for step in flow.get("authenticationExecutions") or []:
+    return {name: requirement for _, name, requirement in _wanted_rows(flow, by_alias)}
+
+
+def _wanted_rows(
+    flow: Mapping[str, Any], by_alias: Mapping[str, Any], level: int = 0
+) -> list[_Row]:
+    """The steps of *flow* as Keycloak lists them: a sub-flow's steps follow it."""
+    rows: list[_Row] = []
+    for step in _ordered(flow):
         if step.get("authenticatorFlow"):
-            wanted[step["flowAlias"]] = step["requirement"]
-            wanted.update(_requirements(by_alias[step["flowAlias"]], by_alias))
+            rows.append((level, step["flowAlias"], step["requirement"]))
+            rows += _wanted_rows(by_alias[step["flowAlias"]], by_alias, level + 1)
         else:
-            wanted[step["authenticator"]] = step["requirement"]
-    return wanted
+            rows.append((level, step["authenticator"], step["requirement"]))
+    return rows
 
 
 async def _add_missing_steps(
@@ -69,8 +119,7 @@ async def _add_missing_steps(
     rest in the order of the file.
     """
     added = False
-    steps = sorted(flow.get("authenticationExecutions") or [], key=lambda s: s.get("priority", 0))
-    for step in steps:
+    for step in _ordered(flow):
         if step.get("authenticatorFlow"):
             sub = by_alias[step["flowAlias"]]
             if sub["alias"] not in have:
@@ -79,22 +128,24 @@ async def _add_missing_steps(
                     "type": sub["providerId"],
                     "description": sub.get("description", ""),
                 }
-                expect(
+                _expect(
                     await admin.call("POST", f"{_flow_url(flow['alias'])}/flow", json=body),
                     201,
-                    what=f"cannot add the sub-flow {sub['alias']} to login flow {flow['alias']}",
+                    flow["alias"],
+                    f"cannot add the sub-flow {sub['alias']} to login flow {flow['alias']}",
                 )
                 added = True
             added = await _add_missing_steps(admin, sub, by_alias, have) or added
         elif step["authenticator"] not in have:
-            expect(
+            _expect(
                 await admin.call(
                     "POST",
                     f"{_flow_url(flow['alias'])}/execution",
                     json={"provider": step["authenticator"]},
                 ),
                 201,
-                what=f"cannot add step {step['authenticator']} to login flow {flow['alias']}",
+                flow["alias"],
+                f"cannot add step {step['authenticator']} to login flow {flow['alias']}",
             )
             added = True
     return added
@@ -106,16 +157,21 @@ def _step_name(step: Mapping[str, Any]) -> str:
     return str(name)
 
 
-async def _read_steps(admin: Admin, alias: str) -> dict[str, str] | None:
-    """The requirement of every step of the realm's flow *alias*, by step name.
-
-    ``None`` when the account may not read them.
-    """
+async def _list_steps(admin: Admin, alias: str) -> list[Mapping[str, Any]]:
+    """The steps of the realm's flow *alias*, as Keycloak lists them."""
     reply = await admin.call("GET", _flow_url(alias))
-    if reply.status == 403:
-        return None
-    steps = expect(reply, 200, what=f"cannot list the steps of login flow {alias}").data
-    return {_step_name(step): step.get("requirement") for step in steps}
+    steps: list[Mapping[str, Any]] = _expect(
+        reply, 200, alias, f"cannot list the steps of login flow {alias}"
+    ).data
+    return steps
+
+
+async def _read_rows(admin: Admin, alias: str) -> list[_Row]:
+    """The steps of the realm's flow *alias* in their order, with level and requirement."""
+    return [
+        (step.get("level", -1), _step_name(step), str(step.get("requirement")))
+        for step in await _list_steps(admin, alias)
+    ]
 
 
 async def _set_requirements(
@@ -124,21 +180,17 @@ async def _set_requirements(
     """Set the requirement of the realm file on every step; whether any changed."""
     wanted = _requirements(flow, by_alias)
     alias = flow["alias"]
-    steps = expect(
-        await admin.call("GET", _flow_url(alias)),
-        200,
-        what=f"cannot list the steps of login flow {alias}",
-    ).data
     changed = False
-    for step in steps:
+    for step in await _list_steps(admin, alias):
         name = _step_name(step)
         want = wanted.get(name)
         if want is None or step.get("requirement") == want:
             continue
-        expect(
+        _expect(
             await admin.call("PUT", _flow_url(alias), json={**step, "requirement": want}),
             204,
-            what=f"cannot set the requirement of step {name} in login flow {alias}",
+            alias,
+            f"cannot set the requirement of step {name} in login flow {alias}",
         )
         changed = True
     return changed
@@ -149,25 +201,25 @@ async def _finish_flow(admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[
 
     Adds the steps the flow lacks and sets their requirements: a run that
     stopped half-way leaves both. Returns ``"kept"`` when the flow already
-    matched the file (or its steps cannot be read), ``"completed"`` when it
+    matched the file, ``"completed"`` when it
     matches after this, and ``"differs"`` when it still has other steps
-    than the file.
+    than the file. A match is the whole list as Keycloak shows it: the same
+    steps, in the same order, at the same level, with the same requirement.
+    A step twice or a step in the wrong sub-flow is ``"differs"``.
     """
-    wanted = _requirements(flow, by_alias)
-    have = await _read_steps(admin, flow["alias"])
-    if have is None or have == wanted:
+    wanted = _wanted_rows(flow, by_alias)
+    have = await _read_rows(admin, flow["alias"])
+    if have == wanted:
         return "kept"
-    added = await _add_missing_steps(admin, flow, by_alias, set(have))
+    added = await _add_missing_steps(admin, flow, by_alias, {name for _, name, _ in have})
     changed = await _set_requirements(admin, flow, by_alias)
     if added or changed:
-        have = await _read_steps(admin, flow["alias"])
+        have = await _read_rows(admin, flow["alias"])
     return "completed" if have == wanted else "differs"
 
 
-async def _make_flow(
-    admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[str, Any]
-) -> str | None:
-    """Make *flow* with its steps; ``None`` when the account may not."""
+async def _make_flow(admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[str, Any]) -> str:
+    """Make *flow* with its steps."""
     body = {
         "alias": flow["alias"],
         "description": flow.get("description", ""),
@@ -176,12 +228,40 @@ async def _make_flow(
         "builtIn": False,
     }
     reply = await admin.call("POST", f"{_BASE}/flows", json=body)
-    if reply.status == 403:
-        return None
-    flow_id = id_from(expect(reply, 201, what=f"cannot create login flow {flow['alias']}"))
+    flow_id = id_from(
+        _expect(reply, 201, flow["alias"], f"cannot create login flow {flow['alias']}")
+    )
     await _add_missing_steps(admin, flow, by_alias, set())
     await _set_requirements(admin, flow, by_alias)
     return flow_id
+
+
+def _needs_settings(flow: Mapping[str, Any], by_alias: Mapping[str, Any]) -> bool:
+    """Whether a step of *flow* or of one of its sub-flows has settings in the file."""
+    for step in flow.get("authenticationExecutions") or []:
+        if step.get("authenticatorConfig"):
+            return True
+        if step.get("authenticatorFlow") and _needs_settings(by_alias[step["flowAlias"]], by_alias):
+            return True
+    return False
+
+
+def _flows_to_check(
+    flows: list[Mapping[str, Any]], by_alias: Mapping[str, Any]
+) -> list[Mapping[str, Any]]:
+    """The top-level flows this stage makes and checks; it names the ones it leaves out."""
+    top = []
+    for flow in flows:
+        if not flow.get("topLevel"):
+            continue
+        if _needs_settings(flow, by_alias):
+            _say(
+                f"login flow {flow['alias']}: not checked here (its steps need settings); "
+                "no client is bound to it by this stage"
+            )
+            continue
+        top.append(flow)
+    return top
 
 
 async def ensure_flows(admin: Admin, flows: list[Mapping[str, Any]]) -> dict[str, str]:
@@ -191,21 +271,20 @@ async def ensure_flows(admin: Admin, flows: list[Mapping[str, Any]]) -> dict[str
     (:func:`_finish_flow`). Returns the flow id of the realm file -> the flow
     id in the realm, for every flow that has the steps of the file after
     this step. A flow with other steps is left out, so no client is bound
-    to it.
+    to it. Raises :class:`RealmStageError` (:data:`NO_FLOW_RIGHT`) when the
+    account may not read or change login flows.
     """
-    top = [flow for flow in flows if flow.get("topLevel")]
+    by_alias = {flow["alias"]: flow for flow in flows}
+    top = _flows_to_check(flows, by_alias)
     if not top:
         return {}
     reply = await admin.call("GET", f"{_BASE}/flows")
     if reply.status == 403:
-        for flow in top:
-            _say(f"login flow {flow['alias']}: not checked (no right to read login flows)")
-        return {}
+        raise _no_right(top[0]["alias"])
     have = {
         item["alias"]: item["id"]
         for item in expect(reply, 200, what="cannot list the login flows").data
     }
-    by_alias = {flow["alias"]: flow for flow in flows}
     ids: dict[str, str] = {}
     for flow in top:
         alias = flow["alias"]
@@ -222,11 +301,7 @@ async def ensure_flows(admin: Admin, flows: list[Mapping[str, Any]]) -> dict[str
             else:
                 _say(f"login flow {alias}: kept")
         else:
-            made = await _make_flow(admin, flow, by_alias)
-            if made is None:
-                _say(f"login flow {alias}: not made (no right to change login flows)")
-                continue
-            have[alias] = made
+            have[alias] = await _make_flow(admin, flow, by_alias)
             _say(f"login flow {alias}: created")
         ids[flow["id"]] = have[alias]
     return ids

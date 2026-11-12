@@ -13,6 +13,9 @@ The design is the internal note `core.md` §5. The code is in
 MEHO 0.45.0 ships the REST endpoints below. The command line and the
 console do not have the settings file yet.
 
+The policy file (categories and classifications) is a separate file with
+its own import that waits for a second admin: see [policy.md](policy.md).
+
 Do not confuse this with `backend/src/meho_backplane/settings.py`: those are
 the environment variables, read once at start. They are never in the file.
 
@@ -189,6 +192,12 @@ them at once.
   The anchor name is never shown back.
 - The file is parsed and checked in a worker thread, not on the event loop,
   so a large file does not hold up other requests.
+- The secret check reads each string a fixed number of times, so its time
+  grows in step with the file size. A string or key longer than 64,000
+  characters (the longest field, a convention body) is refused with its
+  path before the secret check runs. A long key is named by the path of its
+  mapping, never by itself, also when it appears twice. Nothing else is
+  checked, as with a secret.
 - `!!binary`, `!!pairs`, `!!omap` and `!!set` values are refused and never
   built: each would hide its contents from the secret check and reach JSON
   as readable text. Nothing else is checked, as with a secret.
@@ -238,7 +247,10 @@ Builds the file from the live state (`application/yaml`, sent as
 on it: stored data that would be refused on import (a JWT in a target's
 `notes`, `extras.password`, a private key in a convention body) stops the
 export with 409 `settings_export_refused` and a `mistakes` list naming each
-path, never the value. Move the secret into OpenBao and export again. Tenants are sorted by id, conventions by slug, targets
+path, never the value. Move the secret into OpenBao and export again. A
+stored string or key longer than 64,000 characters (for example a long
+target `notes`) stops the export the same way, since the import refuses it;
+shorten it and export again. Tenants are sorted by id, conventions by slug, targets
 by name, and keys come in a fixed order, so the same state always gives the
 same `spec`. The export writes each value out each time it appears
 and never writes a YAML anchor or alias, so an exported file always imports

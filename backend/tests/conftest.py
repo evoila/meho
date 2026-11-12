@@ -830,10 +830,11 @@ def _isolate_global_registries() -> Iterator[None]:
     The backplane keeps mutable module-level registries that the app
     lifespan and ``@register_*`` decorators populate:
     ``mcp.registry._TOOLS`` / ``_RESOURCES``,
-    ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2``,
+    ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2`` / ``_TENANT_REGISTRY``,
     ``operations.typed_register._TYPED_OP_REGISTRARS``,
     ``operations._preview._PREVIEW_BUILDERS`` / ``_PERMISSION_PREFLIGHTS``,
     ``operations._park_check._PARK_CHECKS``,
+    ``operations.ingest.safety_floors._FLOORS``,
     and the dispatcher's per-process caches
     ``operations._handler_resolve._HANDLER_CACHE`` /
     ``_CONNECTOR_INSTANCE_CACHE``. None had a process-wide per-test
@@ -879,11 +880,13 @@ def _isolate_global_registries() -> Iterator[None]:
     from meho_backplane.operations import _preview as preview_reg
     from meho_backplane.operations import dispatcher, set_default_reducer
     from meho_backplane.operations import typed_register as typed_reg
+    from meho_backplane.operations.ingest import safety_floors as safety_floors_reg
 
     tools = dict(mcp_reg._TOOLS)
     resources = dict(mcp_reg._RESOURCES)
     connectors_v1 = dict(conn_reg._REGISTRY)
     connectors_v2 = dict(conn_reg._REGISTRY_V2)
+    tenant_connectors = dict(conn_reg._TENANT_REGISTRY)
     registrars = list(typed_reg._TYPED_OP_REGISTRARS)
     handler_cache = dict(handler_resolve._HANDLER_CACHE)
     instance_cache = dict(handler_resolve._CONNECTOR_INSTANCE_CACHE)
@@ -902,6 +905,10 @@ def _isolate_global_registries() -> Iterator[None]:
     preview_builders = dict(preview_reg._PREVIEW_BUILDERS)
     permission_preflights = dict(preview_reg._PERMISSION_PREFLIGHTS)
     park_checks = dict(park_check_reg._PARK_CHECKS)
+    # Connector safety floors register as an import side effect. A test that
+    # clears the connector registry and re-imports one connector leaves only
+    # that connector's floors behind; restore them like the other registries.
+    ingest_safety_floors = dict(safety_floors_reg._FLOORS)
     default_reducer = dispatcher._DEFAULT_REDUCER
     try:
         yield
@@ -914,6 +921,8 @@ def _isolate_global_registries() -> Iterator[None]:
         conn_reg._REGISTRY.update(connectors_v1)
         conn_reg._REGISTRY_V2.clear()
         conn_reg._REGISTRY_V2.update(connectors_v2)
+        conn_reg._TENANT_REGISTRY.clear()
+        conn_reg._TENANT_REGISTRY.update(tenant_connectors)
         typed_reg._TYPED_OP_REGISTRARS[:] = registrars
         handler_resolve._HANDLER_CACHE.clear()
         handler_resolve._HANDLER_CACHE.update(handler_cache)
@@ -925,6 +934,8 @@ def _isolate_global_registries() -> Iterator[None]:
         preview_reg._PERMISSION_PREFLIGHTS.update(permission_preflights)
         park_check_reg._PARK_CHECKS.clear()
         park_check_reg._PARK_CHECKS.update(park_checks)
+        safety_floors_reg._FLOORS.clear()
+        safety_floors_reg._FLOORS.update(ingest_safety_floors)
         set_default_reducer(default_reducer)
 
 
@@ -1373,8 +1384,9 @@ def _no_similar_kb_entries(
 ) -> None:
     """Let a new kb slug find no similar entries, unless a test asks for the real search.
 
-    Every kb create on MCP, REST and the console first searches for
-    similar entries (``kb/similar.py``). That search needs PostgreSQL,
+    With ``KB_SIMILAR_CHECK`` on, every kb create on MCP, REST and the
+    console first searches for similar entries (``kb/similar.py``). That
+    search needs PostgreSQL,
     and the default test database is SQLite. So most tests get an empty
     result; the other parts of the check (slug, header, existing slug)
     still run. A test of the search itself requests

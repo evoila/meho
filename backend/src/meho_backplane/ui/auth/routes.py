@@ -20,12 +20,12 @@ auth surfaces:
   token endpoint, validates the access token through the chassis
   JWT chain (so the BFF inherits the same issuer / audience /
   ``tenant_id`` / ``tenant_role`` defences as ``/api/*``), creates a
-  server-side session row, sets the ``meho_session`` cookie
+  server-side session row, sets the ``__Host-meho_session`` cookie
   (``HttpOnly; Secure; SameSite=Strict; Path=/``), and 302s to the
   originally-requested page.
 
 * ``GET /ui/auth/logout`` -- revokes the session row, clears the
-  ``meho_session`` cookie, and 302s to Keycloak's end-session
+  ``__Host-meho_session`` cookie, and 302s to Keycloak's end-session
   endpoint. The IdP-side logout is best-effort: if the discovery doc
   does not advertise an ``end_session_endpoint`` (a pre-OIDC-Session-
   Management Keycloak release, hypothetically), the route still
@@ -117,6 +117,7 @@ from meho_backplane.ui.auth.flow import (
     exchange_code_for_tokens,
     resolve_oidc_endpoints,
 )
+from meho_backplane.ui.auth.session_cookie import SESSION_COOKIE_NAME, read_session_cookie
 from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.auth.session_store import (
     create_session,
@@ -124,6 +125,7 @@ from meho_backplane.ui.auth.session_store import (
 )
 from meho_backplane.ui.auth.tenant import TENANT_PICKER_PATH, can_switch_tenant
 from meho_backplane.ui.templating import get_templates
+from meho_backplane.web_push.store import refresh_at_sign_in
 
 __all__ = [
     "AUTHORIZATION_STATE_EXPIRED_DETAIL",
@@ -152,10 +154,6 @@ __all__ = [
 LOGIN_PATH: Final[str] = "/ui/auth/login"
 _CALLBACK_PATH: Final[str] = "/ui/auth/callback"
 _LOGOUT_PATH: Final[str] = "/ui/auth/logout"
-
-#: Name of the BFF session cookie. The browser holds only this opaque
-#: value; the real tokens live encrypted in the ``web_session`` table.
-SESSION_COOKIE_NAME: Final[str] = "meho_session"
 
 #: Clock-skew margin trimmed off the access-token TTL when computing
 #: the session lifetime. Keeps the session from outliving the access
@@ -370,7 +368,7 @@ def page_from_htmx_current_url(current_url: str | None) -> str | None:
 
 
 def set_session_cookie(response: RedirectResponse, session_id: uuid.UUID) -> None:
-    """Attach the ``meho_session`` cookie to *response* with the BFF flags.
+    """Attach the ``__Host-meho_session`` cookie to *response* with the BFF flags.
 
     Centralised so every place the BFF sets the cookie (currently the
     callback handler; logout uses :func:`clear_session_cookie`) emits
@@ -393,7 +391,7 @@ def set_session_cookie(response: RedirectResponse, session_id: uuid.UUID) -> Non
 
 
 def clear_session_cookie(response: Response) -> None:
-    """Erase the ``meho_session`` cookie via the same attribute set.
+    """Erase the ``__Host-meho_session`` cookie via the same attribute set.
 
     Setting a cookie with the same name + ``Max-Age=0`` + ``Path=/``
     expires it immediately on the browser. The other attributes must
@@ -629,6 +627,8 @@ async def _persist_session_from_tokens(
             tenant_chosen=operator.tenant_chosen,
             can_switch_tenant=can_switch_tenant(operator),
         )
+    # The push messages decide who may approve from these facts.
+    await refresh_at_sign_in(operator)
     return decrypted.id, operator.sub, operator.tenant_id, operator.tenant_chosen
 
 
@@ -747,7 +747,7 @@ async def _resolve_end_session_target(settings_: Settings) -> str:
 
 async def _handle_logout(request: Request) -> RedirectResponse:
     """Revoke the session row, clear the cookie, 302 to the end-session URL."""
-    await _revoke_session_if_present(request.cookies.get(SESSION_COOKIE_NAME))
+    await _revoke_session_if_present(read_session_cookie(request.scope))
     target = await _resolve_end_session_target(get_settings())
     response = RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
     clear_session_cookie(response)

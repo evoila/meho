@@ -301,7 +301,10 @@ pre-check) that produces a `BudgetDecision`:
 - **ALLOW (no change)** — the run proceeds against the requested tier.
 - **ALLOW (downgraded)** — the runtime resolves the cheaper tier
   one rung down `TIER_DOWNGRADE_LADDER`
-  (INVESTIGATE → SUMMARIZE → TRIAGE) before building the model.
+  (INVESTIGATE → SUMMARIZE → TRIAGE) before building the model. In this
+  version every tier uses the same model (the one backend in
+  `AGENT_MODEL_BACKEND`), so the step changes the tier on the run
+  record, but not the model or the cost.
 
 ### Knobs
 
@@ -310,6 +313,24 @@ pre-check) that produces a `BudgetDecision`:
 | `AGENT_BUDGET_DEGRADE_THRESHOLD` | `0.8` | Ratio at which a window flips to "downgrade tier" |
 | `AGENT_RUNS_DISABLED_GLOBAL` | `false` | Hard global kill switch (refuse every run) |
 | `AGENT_RUNS_DISABLED_TENANTS` | `""` | Comma-separated tenant UUIDs refused |
+
+### Setting the caps (REST + CLI)
+
+`api/v1/agent_budgets.py` is the only runtime caller of `set_limits`
+and `clear_limits`. Routes under `/api/v1/agent-budgets`:
+`GET ?principal_sub=` (the three windows with limits and use so far),
+`PUT` (set one or more limits of one window; a limit left out is kept)
+and `DELETE ?principal_sub=&window=` (clear all limits of the window).
+All need `tenant_admin`; `PUT` and `DELETE` also need a human
+principal (`require_human_principal`), so an agent cannot raise its own
+cap. The audit middleware writes the row (`agent.budget.show` /
+`.set` / `.clear`). CLI: `meho agent budget show|set|clear`.
+
+Buckets are one row per window, so a cap carries over: a new bucket
+copies the limits of the newest earlier bucket of the same kind
+(`_latest_prior_bucket`), and `get_remaining` reports those limits for a
+window that has no row yet. `clear_limits` nulls the current bucket, so
+later buckets copy `NULL`.
 
 The **per-identity kill switch** is the existing
 `IdentityBudget.request_limit = 0` row (set via the consumption

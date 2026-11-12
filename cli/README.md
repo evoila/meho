@@ -11,6 +11,54 @@ This directory holds the Go module; the Python backplane lives at
 [`../backend/`](../backend/) and the Helm chart at
 [`../deploy/charts/meho/`](../deploy/charts/meho/).
 
+## Profiles: more than one login at once
+
+A profile is a named login. Use profiles when one person must act as
+two identities, for example an initiator who starts a write that waits
+for approval, and an approver who decides it. Each profile keeps its
+own login, so you do not log in again each time you switch.
+
+```bash
+# Once for each identity (sign in as that person in the browser):
+meho login https://meho.example.com --profile initiator
+meho login https://meho.example.com --profile approver
+
+# Park the write as the initiator:
+meho --profile initiator operation call ...
+
+# Decide it as the approver:
+meho --profile approver approvals approve <approval-id>
+# The browser sign-in that `approvals approve` asks for decides who
+# approves. The profile only picks the login for `approvals list` and
+# `approvals show`.
+
+# Or set the profile for a whole shell:
+export MEHO_PROFILE=approver
+meho status          # first line: "Profile: approver"
+```
+
+* `--profile <name>` beats `MEHO_PROFILE`. With neither, the CLI uses
+  the `default` profile: the login that `meho login` made before
+  profiles existed. Nothing changes for you if you do not use them.
+* A profile name has letters, digits, `.`, `-` and `_` (up to 64
+  characters, starting with a letter or digit).
+* All profiles live under the same config home, in the same keyring or
+  the same `0600` credentials file. This replaces the old workaround of
+  one `XDG_CONFIG_HOME` for each identity.
+* A profile that never logged in has no login. The CLI does not use
+  another profile's login in its place.
+* `meho status` prints `Profile: <name>` first when a named profile is
+  active, then the identity with its `sub`.
+* When a login is missing or expired, the error tells you to run
+  `meho --profile <name> login <url>`, for the profile you used.
+* The backplane URL (`config.json`) and the tenant chosen with
+  `meho tenants use` are shared by all profiles. So
+  `meho login <url> --profile <name>` with another URL changes the URL
+  for every profile and clears the chosen tenant. The login prints one
+  line when this happens.
+* `meho doctor` checks the profile you asked for, in all its checks,
+  and prints `Profile: <name>` first when it is a named profile.
+
 ## Status
 
 **G2.6-T5 — multi-platform, cosign-signed release pipeline via GoReleaser.**
@@ -247,10 +295,11 @@ contributors run `make lint && make test` locally.
 
 Release builds are driven by [GoReleaser](https://goreleaser.com/)
 configured at [`.goreleaser.yaml`](./.goreleaser.yaml). On every
-`v*` tag push, `.github/workflows/cli-release.yml` builds four
+`v*` tag push, `.github/workflows/cli-release.yml` builds six
 static binaries — `linux/amd64`, `linux/arm64`, `darwin/amd64`,
-`darwin/arm64` — packages each as a `meho_<version>_<os>_<arch>.tar.gz`
-tarball containing the binary plus the top-level
+`darwin/arm64`, `windows/amd64`, `windows/arm64` — packages each as a
+`meho_<version>_<os>_<arch>.tar.gz` tarball (a `.zip` file on Windows)
+containing the binary plus the top-level
 [`LICENSE`](../LICENSE) and this README, computes a combined
 `SHA256SUMS` file, and publishes them as assets on a new draft
 GitHub Release at
@@ -258,7 +307,7 @@ GitHub Release at
 
 The release is created in **draft** mode — a maintainer flips it
 to public via the GitHub Releases UI after verifying the four
-tarballs + matching `.cosign.bundle` files are present and
+archives + matching `.cosign.bundle` files are present and
 `meho version` reports the expected tag. See the [Verify signatures](#verify-signatures)
 section below for the operator-side check.
 
@@ -280,6 +329,8 @@ dist/
 ├── meho_0.0.1-snapshot_darwin_arm64.tar.gz
 ├── meho_0.0.1-snapshot_linux_amd64.tar.gz
 ├── meho_0.0.1-snapshot_linux_arm64.tar.gz
+├── meho_0.0.1-snapshot_windows_amd64.zip
+├── meho_0.0.1-snapshot_windows_arm64.zip
 └── SHA256SUMS
 ```
 
@@ -301,6 +352,14 @@ curl -LO https://github.com/evoila/meho/releases/download/${TAG}/SHA256SUMS
 sha256sum -c SHA256SUMS                   # verify integrity
 tar xzf ${TARBALL} && ./meho version       # meho v0.1.0 (commit ..., built ...)
 ```
+
+On Windows, download the `.zip` file in PowerShell and unzip it with
+`Expand-Archive`. The full steps are in the
+[install guide](../docs-site/clients/cli.md#windows). After a release,
+the `windows-check` job of `cli-release.yml` downloads each Windows zip,
+checks its hash and runs `meho.exe version`. When the repository
+variable `MEHO_WINDOWS_ARM_CHECK` is `skip`, it checks only amd64, and
+the job summary asks for a check of the arm64 zip by hand.
 
 ### Verify signatures
 

@@ -58,6 +58,35 @@ Out of scope (honouring #1683's dispositions):
   `status="unavailable"` rather than fabricating one.
 - **Error-echo on the dispatch path** is deferred (see Known issues).
 
+### Typed writes, behind the `PREVIEW_TYPED_WRITES` switch (#5074)
+
+The backplane switch `PREVIEW_TYPED_WRITES` (an env var, off by default)
+widens the synthetic preview to more typed writes. It changes what an agent
+sees, so it stays off until a before-and-after measurement shows it helps.
+
+- **Off:** the same answers, the same `preview_hash` values and the same
+  tool texts as before the switch existed. The rules above hold.
+- **On:**
+  - A typed or composite op that is not a read previews, also when it does
+    not carry `requires_approval`. Example: `targets.register` runs at once
+    only from the web interface. A call with a token (CLI, MCP, an agent)
+    waits for approval. A `safe` typed op is a read and stays `unavailable`.
+  - A credential-class op with its own preview builder previews too.
+    Example: `keycloak.user.reset_password`. The preview shows only the
+    builder's plan as `proposed_effect`. `redacted_body` is `null`: the
+    params are never copied. `params_digest` (a keyed digest of every param
+    value) keeps `preview_hash` bound to the params.
+  - A credential-class op with no builder of its own stays `unavailable`.
+  - Destructive and approval-gated ops give the same answer and the same
+    hash as with the switch off.
+  - The `preview_operation` tool text says the new rule (full and short
+    text). The registered text is the "off" text, so the reference docs
+    show it.
+- **Code:** `_is_previewable` and `is_credential_builder_op` in
+  `operations/_request_preview.py`; the tool text in
+  `mcp/tools/_preview_typed_writes_text.py`. Tests:
+  `tests/test_operations_preview_typed_writes.py`.
+
 ## Key types
 
 - `meho_backplane.operations._branches.IngestedRequest` — a frozen
@@ -155,7 +184,12 @@ policy gate.
 
 The HTTP transport (`HttpConnector._post_json` / `_request_json`) is
 **never** called: there is no network egress, no audit row, no broadcast
-event, no policy-gate park. The synthetic-preview branch keeps this
+event, no policy-gate park. "No audit row" means no row for the
+operation. The request that asks for the preview is audited like any
+other request: by default the REST route and the MCP tool call each write
+one request row (for REST, `http.post:/api/v1/operations/preview`). With
+`AUDIT_WRAPPER_ROWS_RETIRED=true` a preview is routine and writes no row,
+unless it is refused (see [request-usage.md](request-usage.md#retiring-the-wrapper-rows)). The synthetic-preview branch keeps this
 contract — it reuses `build_proposed_effect` with **no connector instance**,
 so a pure builder (e.g. `vault.kv.delete`) populates while a live-read
 blast-radius builder declines rather than dialling out. A declined plan is

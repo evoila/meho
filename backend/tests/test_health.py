@@ -131,7 +131,10 @@ def test_version_falls_back_to_unknown(client: TestClient, monkeypatch: pytest.M
     response = client.get("/version")
 
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    agent_switches = body.pop("agent_switches")
+    assert isinstance(agent_switches, dict)  # test_version_agent_switches.py
+    assert body == {
         "git_sha": "unknown",
         "build_date": "unknown",
         "chart_version": None,
@@ -147,7 +150,10 @@ def test_version_reads_env_vars(client: TestClient, monkeypatch: pytest.MonkeyPa
     response = client.get("/version")
 
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    agent_switches = body.pop("agent_switches")
+    assert isinstance(agent_switches, dict)  # test_version_agent_switches.py
+    assert body == {
         "git_sha": "abc1234",
         "build_date": "2026-05-09T12:00:00Z",
         "chart_version": "0.1.20260518-abc1234",
@@ -173,7 +179,10 @@ def test_version_treats_empty_env_as_unknown(
     response = client.get("/version")
 
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    agent_switches = body.pop("agent_switches")
+    assert isinstance(agent_switches, dict)  # test_version_agent_switches.py
+    assert body == {
         "git_sha": "unknown",
         "build_date": "unknown",
         "chart_version": None,
@@ -311,6 +320,7 @@ def test_ready_with_empty_registry_returns_503(client: TestClient) -> None:
         "approval_custody",
         "vault_tenant_scope",
         "mcp",
+        "policy",
     }
 
 
@@ -339,6 +349,7 @@ def test_ready_with_all_passing_probes_returns_200(client: TestClient) -> None:
         "approval_custody",
         "vault_tenant_scope",
         "mcp",
+        "policy",
     }
 
 

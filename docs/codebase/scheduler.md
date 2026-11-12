@@ -19,7 +19,8 @@ The third shape (event-subscription, T3 #824) lives in a sibling
 substrate (`event_outbox` table + drain loop in
 `backend/src/meho_backplane/events/`) because events arrive
 asynchronously rather than on a clock boundary. See [events.md](events.md)
-for that surface.
+for that surface. An event that carries a `coalesce_key` starts at most one
+unfinished run per trigger and key (see "Coalescing" in events.md).
 
 T1 (#822) is an in-flight spike that may settle the durable-execution
 layer as DBOS Transact. T2 ships on the codebase's twice-stated
@@ -617,6 +618,39 @@ non-empty-inputs rule (`_payload_yields_prompt` in `schemas.py`): an
 input-less event trigger is creatable because the matcher synthesises a
 prompt from the matched event (untrusted-enveloped) at fire time, rather
 than requiring the operator to author one up front.
+
+### Picking a Sensor or a Dashboard: `check_source` (#6182)
+
+A `kind=event` create may carry `check_source` instead of `event_filter`
+(never both; any other kind refuses it with 422). Shape:
+`{kind: "sensor" | "dashboard", id | name, only_worsening}`. No `id` and no
+`name` means "any Sensor" or "any Dashboard". `id` and `name` together are
+refused.
+
+`SchedulerAdminService.create` calls `scheduler/check_source.py`. It checks
+that the Sensor or Dashboard is in the trigger's tenant (a missing one, or one
+of another tenant, gives 422 `check_source_not_found`; MCP invalid-params with
+the same text). It stores the normal filter with the **id**, not the name, so a
+rename does not break the trigger:
+
+```json
+{"source": {"kind": "dashboard", "id": "<id>"}, "worsening": true}
+```
+
+`worsening` is only present when `only_worsening` is true. The filter matches
+the payload of the `check.sensor.changed` and `check.dashboard.changed` events
+(see [events.md](events.md)).
+
+The console form (`Start on`: Sensor, Dashboard or Custom filter), `meho
+scheduler create` (`--on-sensor`, `--on-dashboard`, `--on-any-sensor`,
+`--on-any-dashboard`, `--only-worse`; not with `--event-filter`) and
+`meho_scheduler_create` all send `check_source` and store the same filter. The
+trigger detail page shows "Starts on: Sensor <name>" for a filter of this
+shape. Such a trigger fires only when `CHECKS_AGENT_EVENTS` is on. While it is
+off, the console form warns, and the create answer carries a `notice` that the
+CLI prints. The MCP tool `meho_scheduler_create` shows the `check_source` input
+and its sentence only while the switch is on. While it is off, the tool has the
+same text and input as before, and its input check refuses `check_source`.
 
 Until #2878 this create was refused with `event_triggers_not_implemented`
 (#2325) and pre-existing `active` event rows were parked by a startup

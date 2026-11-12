@@ -45,6 +45,7 @@ from meho_backplane.operations.approval_object_check import (
     REASON_APPEARED,
     REASON_CHANGED,
     REASON_UNREADABLE,
+    RECORD_VALUES_KEY,
     card_object,
     live_card,
     object_identity,
@@ -633,6 +634,134 @@ async def test_record_set_card_is_compared_by_its_count_as_well(
         assert calls == [], "the vendor must get no call"
         assert result.extras["error_code"] == "object_changed_since_approval"
         assert result.extras["reason"] == reason
+
+
+def _values(*rdata: str, record_type: str = "A") -> list[dict[str, Any]]:
+    """The ``record_value`` children of a DNS card, one per value."""
+    return [{"kind": "record_value", "type": record_type, "rdata": value} for value in rdata]
+
+
+async def test_card_object_names_the_record_values_sorted() -> None:
+    block = {
+        "object": _DNS_CARD,
+        "children": _values("192.0.2.9", "192.0.2.1"),
+        "match_count": 2,
+    }
+
+    obj = card_object({"blast_radius": block})
+
+    assert obj == {
+        **_DNS_CARD,
+        RECORD_VALUES_KEY: [
+            {"type": "A", "rdata": "192.0.2.1"},
+            {"type": "A", "rdata": "192.0.2.9"},
+        ],
+    }
+    assert object_identity(obj) == obj
+
+
+async def test_card_object_of_a_pinned_value_leaves_the_other_values_out() -> None:
+    pinned = {**_DNS_CARD, "rdata": "192.0.2.1"}
+    block = {"object": pinned, "children": _values("192.0.2.1", "192.0.2.9"), "match_count": 1}
+
+    assert card_object({"blast_radius": block}) == pinned
+
+
+async def test_card_object_ignores_children_that_are_not_record_values() -> None:
+    block = {
+        "object": _DNS_CARD,
+        "children": [{"kind": "project_association", "project": "p"}],
+        "match_count": 1,
+    }
+
+    assert card_object({"blast_radius": block}) == _DNS_CARD
+
+
+_DNS_NAME_CARD: dict[str, Any] = {
+    "kind": "dns_name",
+    "zone": "example.test",
+    "name": "web.example.test.",
+    "types": ["A", "AAAA"],
+    "view": None,
+}
+
+
+@pytest.mark.parametrize(
+    ("obj", "approved", "live", "runs"),
+    [
+        pytest.param(_DNS_CARD, _values("192.0.2.1"), _values("192.0.2.2"), False, id="changed"),
+        pytest.param(
+            _DNS_CARD, _values("192.0.2.1"), _values("192.0.2.1", "192.0.2.2"), False, id="added"
+        ),
+        pytest.param(
+            _DNS_CARD, _values("192.0.2.1", "192.0.2.2"), _values("192.0.2.1"), False, id="fewer"
+        ),
+        pytest.param(
+            _DNS_NAME_CARD,
+            _values("192.0.2.1") + _values("2001:db8::1", record_type="AAAA"),
+            _values("192.0.2.1") + _values("2001:db8::2", record_type="AAAA"),
+            False,
+            id="whole-name-changed",
+        ),
+        pytest.param(_DNS_CARD, _values("192.0.2.1"), _values("192.0.2.1"), True, id="same"),
+        pytest.param(
+            _DNS_CARD,
+            _values("192.0.2.1", "192.0.2.2"),
+            _values("192.0.2.2", "192.0.2.1"),
+            True,
+            id="same-other-order",
+        ),
+        pytest.param(
+            {**_DNS_CARD, "rdata": "192.0.2.1"},
+            _values("192.0.2.1", "192.0.2.2"),
+            _values("192.0.2.1", "192.0.2.3"),
+            True,
+            id="pinned-value-sibling-changed",
+        ),
+        pytest.param(_DNS_CARD, _values("192.0.2.1"), [], True, id="gone"),
+    ],
+)
+async def test_record_set_card_is_compared_by_its_values(
+    monkeypatch: pytest.MonkeyPatch,
+    obj: dict[str, Any],
+    approved: list[dict[str, Any]],
+    live: list[dict[str, Any]],
+    runs: bool,
+) -> None:
+    """A delete approved for value X does not run when the live value is Y."""
+    target_id = await _persist_target(f"dns-{uuid.uuid4().hex[:6]}")
+    request = await _park_approved(target_id, card=obj)
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request.id)
+        assert row is not None
+        effect = dict(row.proposed_effect)
+        effect["blast_radius"] = {
+            **effect["blast_radius"],
+            "children": approved,
+            "match_count": len(approved),
+        }
+        row.proposed_effect = effect
+        await s.commit()
+    _same_preview(monkeypatch)
+    live_block = {"object": obj, "children": live, "match_count": len(live)}
+
+    async def _fake_live_card(operator: Operator, **_kwargs: Any) -> dict[str, Any]:
+        return {**_card(None), "blast_radius": live_block}
+
+    monkeypatch.setattr(object_check_module, "live_card", _fake_live_card)
+    calls = _spy_dispatch(monkeypatch)
+
+    result = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+
+    if runs:
+        assert result.status == "ok"
+        assert len(calls) == 1
+    else:
+        assert calls == [], "the nameserver must get no call"
+        assert result.extras["error_code"] == "object_changed_since_approval"
+        assert result.extras["reason"] == REASON_CHANGED
 
 
 async def test_request_without_preview_hash_is_not_checked(

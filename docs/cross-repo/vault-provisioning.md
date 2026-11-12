@@ -255,6 +255,11 @@ path "secret/data/agents/+/credentials" {
 path "secret/metadata/agents/+/credentials" {
   capabilities = ["read"]
 }
+# Only with the agent session store on: the object storage keys at
+# config.sessionStore.credentialsVaultPath (docs-site/guides/agent-sessions.md).
+path "secret/data/services/session-store" {
+  capabilities = ["read"]
+}
 # The dead-token probe (evoila/meho#2652) reads lookup-self after a 403
 # on the write. The built-in `default` policy already grants this, but
 # granting it explicitly keeps the probe sound for a token minted with
@@ -593,6 +598,16 @@ runner's token and the operator-facing client id on an operator's:
 
 ```json
   "bound_claims": {"azp": ["<operator-facing-client-id>", "<cli-client-id>"]},
+```
+
+With the `MCP_CLIENT_PER_TOOL_KIND` switch on, the Claude Code plugin and
+the Claude Desktop extension sign in with their own clients, `meho-mcp-code`
+and `meho-mcp-desktop`. Their tokens carry that client as `azp`. Add both to
+the list, next to `meho-mcp`, before you turn the switch on. Otherwise the
+two tools cannot read Vault through MEHO:
+
+```json
+  "bound_claims": {"azp": ["meho-mcp", "meho-mcp-code", "meho-mcp-desktop", "<cli-client-id>"]},
 ```
 
 Either binding gates **every** `meho-mcp` login, not only the runner's —

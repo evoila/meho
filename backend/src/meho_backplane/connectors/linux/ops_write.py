@@ -210,13 +210,82 @@ _ENV_NAME_PATTERN: str = r"^[A-Za-z_][A-Za-z0-9_]*(?![\s\S])"
 #: declare -- a bounded fan-out of per-call Vault reads, not an open-ended loop.
 _MAX_SECRET_ENV: int = 32
 
-#: env-var names ``secret_env`` must NOT bind: the ``script.run`` wrapper's own
-#: shell variables (:func:`build_script_run_wrapper` sets ``tmp`` and, when
-#: arguments are present, ``args``; the sudo primitive uses ``f``). Binding one
-#: from a resolved secret would clobber the wrapper's control state -- the temp
-#: path it executes and then removes -- so a collision is refused *before* any
-#: Vault read. ``env`` is left unchanged; this guard is ``secret_env``-only.
-_RESERVED_ENV_NAMES: frozenset[str] = frozenset({"tmp", "args", "f"})
+#: env-var names that ``env`` and ``secret_env`` must NOT bind. The approver
+#: sees the script and the env NAMES, not the env values, so a value must not
+#: change which code runs. Two groups:
+#:
+#: * the ``script.run`` wrapper's own shell variables
+#:   (:func:`build_script_run_wrapper` sets ``tmp`` and, when arguments are
+#:   present, ``args``; the sudo primitive uses ``f``);
+#: * names that control how a shell or an interpreter starts, how the wrapper
+#:   splits words, where commands are found, or which libraries are loaded;
+#: * bash variables whose assigned value bash evaluates as arithmetic. An
+#:   arithmetic value can run a command substitution, so the wrapper's own
+#:   ``export`` line would run it.
+#:
+#: Names that start with one of :data:`_RESERVED_ENV_PREFIXES` are refused too.
+#: A script that needs one of these can set it in its own body, where the
+#: approver reads it.
+_RESERVED_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        # The wrapper's own variables.
+        "tmp",
+        "args",
+        "f",
+        # Shell start and word splitting.
+        "ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS4",
+        "IFS",
+        "GLOBIGNORE",
+        "CDPATH",
+        "PROMPT_COMMAND",
+        "ZDOTDIR",
+        "HOME",
+        # Bash evaluates a value assigned to these as arithmetic.
+        "HISTCMD",
+        "OPTIND",
+        "RANDOM",
+        "SRANDOM",
+        # Where commands and libraries are found.
+        "PATH",
+        "GCONV_PATH",
+        # Interpreter start options.
+        "JAVA_TOOL_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "_JAVA_OPTIONS",
+    }
+)
+
+#: Name prefixes that ``env`` and ``secret_env`` must NOT bind: bash
+#: (``BASH_ENV``, ``BASH_XTRACEFD``, ...), the dynamic loader (``LD_PRELOAD``,
+#: ``LD_LIBRARY_PATH``, ...) and the start options of common interpreters
+#: (``PYTHONPATH``, ``PYTHONSTARTUP``, ``PERL5OPT``, ``RUBYOPT``,
+#: ``NODE_OPTIONS``, ...).
+_RESERVED_ENV_PREFIXES: tuple[str, ...] = ("BASH_", "LD_", "NODE_", "PERL", "PYTHON", "RUBY")
+
+#: The reserved names and prefixes as one JSON Schema. The ``env`` and
+#: ``secret_env`` schemas put it under ``propertyNames`` -> ``not``, so the
+#: dispatcher refuses a reserved name before the call waits for approval.
+_RESERVED_ENV_NAME_SCHEMA: dict[str, Any] = {
+    "anyOf": [
+        {"enum": sorted(_RESERVED_ENV_NAMES)},
+        {"pattern": "^(?:" + "|".join(_RESERVED_ENV_PREFIXES) + ")"},
+    ]
+}
+
+#: The ``propertyNames`` schema of ``env`` and ``secret_env``: a POSIX name
+#: that is not reserved.
+_ENV_PROPERTY_NAMES_SCHEMA: dict[str, Any] = {
+    "pattern": _ENV_NAME_PATTERN,
+    "not": _RESERVED_ENV_NAME_SCHEMA,
+    "description": (
+        "ENV_NAME: letters, digits and '_'; must not start with a digit. "
+        "Refused names: " + ", ".join(sorted(_RESERVED_ENV_NAMES)) + ", and every "
+        "name that starts with " + ", ".join(_RESERVED_ENV_PREFIXES) + "."
+    ),
+}
 
 #: Hard cap + default for ``linux.script.run``'s wall-clock timeout.
 _DEFAULT_TIMEOUT_S: int = 120
@@ -524,19 +593,42 @@ def _validate_abspath(raw: Any, field: str) -> str:
     return raw
 
 
+def _is_reserved_env_name(name: str) -> bool:
+    """Return whether *name* is a reserved env-var name (exact or by prefix)."""
+    return name in _RESERVED_ENV_NAMES or name.startswith(_RESERVED_ENV_PREFIXES)
+
+
+def _check_env_name(name: Any, field: str) -> str:
+    """Return *name* when it is a valid, non-reserved env-var name.
+
+    Raises :class:`LinuxWriteSafetyError` naming *field* (``env`` or
+    ``secret_env``) otherwise.
+    """
+    if not isinstance(name, str) or not name or not set(name) <= _ENV_NAME_CHARSET:
+        raise LinuxWriteSafetyError(f"{field} var name {name!r} is not a valid POSIX name")
+    if name[0].isdigit():
+        raise LinuxWriteSafetyError(f"{field} var name {name!r} must not start with a digit")
+    if _is_reserved_env_name(name):
+        raise LinuxWriteSafetyError(
+            f"{field} var name {name!r} is reserved: it is a wrapper variable or it "
+            "controls how the interpreter starts"
+        )
+    return name
+
+
 def _validate_env(raw: Any) -> dict[str, str]:
-    """Return a validated ``{name: value}`` env map (names charset-checked)."""
+    """Return a validated ``{name: value}`` env map.
+
+    Each name must be a POSIX name and must not be reserved
+    (:data:`_RESERVED_ENV_NAMES`, :data:`_RESERVED_ENV_PREFIXES`).
+    """
     if raw is None:
         return {}
     if not isinstance(raw, dict):
         raise LinuxWriteSafetyError("env must be an object of name -> value")
     env: dict[str, str] = {}
     for name, value in raw.items():
-        if not isinstance(name, str) or not name or not set(name) <= _ENV_NAME_CHARSET:
-            raise LinuxWriteSafetyError(f"env var name {name!r} is not a valid POSIX name")
-        if name[0].isdigit():
-            raise LinuxWriteSafetyError(f"env var name {name!r} must not start with a digit")
-        env[name] = str(value)
+        env[_check_env_name(name, "env")] = str(value)
     return env
 
 
@@ -572,8 +664,8 @@ def _validate_secret_env(raw: Any, *, env_names: set[str]) -> dict[str, tuple[st
     """Validate the ``secret_env`` mapping into ``{ENV_NAME: (vault_path, field)}``.
 
     Each key is a POSIX env-var name (the ``env`` charset, not starting with a
-    digit) that must not collide with a reserved wrapper variable
-    (:data:`_RESERVED_ENV_NAMES`) or with a name already declared in ``env`` --
+    digit) that must not be reserved (:data:`_RESERVED_ENV_NAMES`,
+    :data:`_RESERVED_ENV_PREFIXES`) or a name already declared in ``env`` --
     a name resolved from Vault and a name set literally must be unambiguous.
     Each value is a ``"<vault-path>#<field>"`` reference: exactly one ``#``, a
     non-empty logical KV-v2 path (same convention ``load_vault_secret_data``
@@ -596,14 +688,7 @@ def _validate_secret_env(raw: Any, *, env_names: set[str]) -> dict[str, tuple[st
         )
     refs: dict[str, tuple[str, str]] = {}
     for name, ref in raw.items():
-        if not isinstance(name, str) or not name or not set(name) <= _ENV_NAME_CHARSET:
-            raise LinuxWriteSafetyError(f"secret_env var name {name!r} is not a valid POSIX name")
-        if name[0].isdigit():
-            raise LinuxWriteSafetyError(f"secret_env var name {name!r} must not start with a digit")
-        if name in _RESERVED_ENV_NAMES:
-            raise LinuxWriteSafetyError(
-                f"secret_env var name {name!r} collides with a reserved wrapper variable"
-            )
+        _check_env_name(name, "secret_env")
         if name in env_names:
             raise LinuxWriteSafetyError(
                 f"secret_env var name {name!r} is also declared in env; a name must not "
@@ -997,9 +1082,11 @@ async def _linux_file_write_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     """Preview builder for ``linux.file.write`` -- path + byte size, never content.
 
     ``linux.file.write`` classifies ``credential_write`` (its ``content`` may
-    carry secrets), so ``preview_operation`` returns ``preview_unavailable`` for
-    it; this bespoke builder is the deliberate exception that runs *at park
-    time* (a bespoke builder owns its own field discipline). It echoes the
+    carry secrets). ``preview_operation`` returns ``preview_unavailable`` for
+    it, unless the ``PREVIEW_TYPED_WRITES`` switch is on: then its preview
+    shows only this builder's plan and never copies the params. The builder
+    also runs *at park time* (a bespoke builder owns its own field
+    discipline). It echoes the
     target, the path, the content byte size, the deterministic backup path, and
     the validate command (not a secret) -- never the ``content``. Declines
     (``None``) on malformed params.
@@ -1022,8 +1109,10 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     """Preview builder for ``linux.script.run`` -- the script, never the values.
 
     ``linux.script.run`` classifies ``credential_write`` (its ``arguments`` /
-    ``env`` may carry secrets), so ``preview_operation`` returns
-    ``preview_unavailable`` for it; this bespoke builder runs *at park time*.
+    ``env`` may carry secrets). ``preview_operation`` returns
+    ``preview_unavailable`` for it, unless the ``PREVIEW_TYPED_WRITES``
+    switch is on: then its preview shows only this builder's plan and never
+    copies the params. The builder also runs *at park time*.
     The script body is the change the approver decides on, so the preview
     shows it with its SHA-256 and the optional check against a reviewed copy
     (:func:`~meho_backplane.connectors.linux.script_preview.script_preview_fields`).
@@ -1309,22 +1398,24 @@ _SCRIPT_RUN_OP = LinuxOp(
             },
             "env": {
                 "type": "object",
+                # Checked by the dispatcher before the call waits for approval:
+                # the approver sees the names, not the values, so a name that
+                # changes how the script starts is refused at once.
+                "propertyNames": _ENV_PROPERTY_NAMES_SCHEMA,
                 "additionalProperties": {"type": "string"},
                 "description": (
                     "Optional env map. Do NOT put bare secrets in values -- use "
-                    "secret_env for credentials."
+                    "secret_env for credentials. Names that the wrapper uses or "
+                    "that control how the interpreter starts (for example PATH, "
+                    "BASH_ENV, LD_PRELOAD, PYTHONPATH) are refused; set them in "
+                    "the script instead."
                 ),
             },
             "secret_env": {
                 "type": "object",
                 # Checked by the dispatcher before the call waits for approval,
                 # so a bad name or too many entries fail at once (#3554).
-                "propertyNames": {
-                    "pattern": _ENV_NAME_PATTERN,
-                    "description": (
-                        "ENV_NAME: letters, digits and '_'; must not start with a digit."
-                    ),
-                },
+                "propertyNames": _ENV_PROPERTY_NAMES_SCHEMA,
                 "maxProperties": _MAX_SECRET_ENV,
                 "additionalProperties": {"type": "string"},
                 "description": (
@@ -1338,7 +1429,8 @@ _SCRIPT_RUN_OP = LinuxOp(
                     "params, the result, or a log -- only this ENV_NAME -> "
                     "reference mapping is persisted. Use this instead of putting a "
                     "bare secret in arguments/env. A name must not repeat an env "
-                    "name or a reserved wrapper variable. ENV_NAME uses letters, "
+                    "name or be a reserved name (the same list as env). "
+                    "ENV_NAME uses letters, "
                     "digits and '_' and does not start with a digit; at most 32 "
                     "entries."
                 ),
@@ -1390,7 +1482,10 @@ _SCRIPT_RUN_OP = LinuxOp(
             "expected_sha256": "Optional; SHA-256 hex of the reviewed script.",
             "interpreter": "Absolute path; defaults to /bin/bash.",
             "arguments": "Optional command line; word-split.",
-            "env": "Optional; no bare secrets in values.",
+            "env": (
+                "Optional; no bare secrets in values. PATH, BASH_*, LD_*, "
+                "PYTHON* and similar start-up names are refused."
+            ),
             "secret_env": (
                 "Optional; ENV_NAME -> '<vault-path>#<field>' resolved from Vault "
                 "at run time (never persisted). Use for credentials."

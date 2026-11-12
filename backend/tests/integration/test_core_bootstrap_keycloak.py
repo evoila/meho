@@ -91,6 +91,7 @@ from meho_backplane.core.keycloak import (
     finish_realm,
 )
 from meho_backplane.core.keycloak_recovery import ADD_RECOVERY_CODES, RECOVERY_STEP
+from meho_backplane.core.keycloak_role_check import check as check_role
 from meho_backplane.operations import (
     register_typed_operation,
     reset_dispatcher_caches,
@@ -1082,7 +1083,7 @@ async def test_an_older_install_gets_recovery_codes_once_meho_admin_may_change_l
 
         output = capfd.readouterr().out
         assert "login: meho-admin" in output
-        assert "not checked" not in output
+        assert "no right to read" not in output
         assert _recovery_settings(keycloak) == ("false", "DISABLED")
     finally:
         httpx.post(url, headers=_master_headers(keycloak), json=roles).raise_for_status()
@@ -1090,6 +1091,33 @@ async def test_an_older_install_gets_recovery_codes_once_meho_admin_may_change_l
     await _run_stage(keycloak, store)
     assert "recovery codes: set" in capfd.readouterr().out
     assert _recovery_settings(keycloak) == ("true", "ALTERNATIVE")
+
+
+async def test_the_check_before_an_upgrade_stops_only_without_manage_realm(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """The pre-upgrade check (#6336) reads meho-admin's real roles: no role, no upgrade."""
+    await _run_stage(keycloak, store)  # the first-start account is gone; meho-admin is used
+    capfd.readouterr()
+
+    async def check() -> None:
+        async with httpx.AsyncClient(base_url=keycloak.base_url, timeout=30) as http:
+            await check_role(HttpAdmin(http), keycloak.env)
+
+    await check()
+    assert "role check: meho-admin has manage-realm" in capfd.readouterr().out
+
+    url, roles = _manage_realm_of_meho_admin(keycloak)
+    httpx.request("DELETE", url, headers=_master_headers(keycloak), json=roles).raise_for_status()
+    try:
+        with pytest.raises(RealmStageError, match="lacks the realm-management role manage-realm"):
+            await check()
+    finally:
+        httpx.post(url, headers=_master_headers(keycloak), json=roles).raise_for_status()
+    assert keycloak.env[ADMIN_SECRET_ENV] not in capfd.readouterr().out
+
+    await check()
+    assert "has manage-realm" in capfd.readouterr().out
 
 
 _APPROVAL_FLOW = "meho approval sign-in"

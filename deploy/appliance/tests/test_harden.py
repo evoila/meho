@@ -75,10 +75,51 @@ REAL_TOOLS = (
     "ln",
     "install",
     "dirname",
+    "sort",
+    "tail",
 )
 
+PHASED = "-o APT::Get::Always-Include-Phased-Updates=true"
+
+# The login-message scripts of the appliance's Ubuntu 24.04, and the ones
+# that give advice about updates, Ubuntu Pro or news.
+MOTD_SCRIPTS = (
+    "00-header",
+    "10-help-text",
+    "50-landscape-sysinfo",
+    "50-motd-news",
+    "85-fwupd",
+    "90-updates-available",
+    "91-contract-ua-esm-status",
+    "91-release-upgrade",
+    "92-unattended-upgrades",
+    "95-hwe-eol",
+    "98-fsck-at-reboot",
+    "98-reboot-required",
+)
+MOTD_UPDATE_ADVICE = (
+    "10-help-text",
+    "85-fwupd",
+    "90-updates-available",
+    "91-contract-ua-esm-status",
+    "91-release-upgrade",
+    "92-unattended-upgrades",
+    "95-hwe-eol",
+)
+# Ubuntu 24.04's /etc/default/motd-news and the part of
+# /etc/update-manager/release-upgrades that matters.
+MOTD_NEWS = 'ENABLED=1\nURLS="https://motd.ubuntu.com"\nWAIT=5\n'
+RELEASE_UPGRADES = "# Default behavior for the release upgrader.\n[DEFAULT]\nPrompt=lts\n"
+
 STUBS = {
-    "apt-get": 'case "$1" in update) exit "$(cat "$MEHO_FAKE/apt_update_rc")" ;; esac\n',
+    # apt-get -s prints an "Inst" line for each update it would still install.
+    "apt-get": textwrap.dedent("""\
+        case "$*" in
+          "update -q --error-on=any") exit "$(cat "$MEHO_FAKE/apt_update_rc")" ;;
+          *" upgrade --with-new-pkgs") exit "$(cat "$MEHO_FAKE/apt_upgrade_rc")" ;;
+          "-s "*) cat "$MEHO_FAKE/apt_left" ;;
+        esac
+        """),
     # oscap xccdf eval [--remediate] --tailoring-file <f> --profile <p> <ds>
     "oscap": textwrap.dedent("""\
         case "$*" in
@@ -89,6 +130,7 @@ STUBS = {
         exit "$(cat "$MEHO_FAKE/scan_rc")"
         """),
     "systemctl": 'case "$1" in is-enabled) exit 0 ;; esac\n',
+    "uname": 'cat "$MEHO_FAKE/uname_r"\n',
     "mount": "",
     "sysctl": "",
     "sshd": 'exit "$(cat "$MEHO_FAKE/sshd_rc")"\n',
@@ -168,8 +210,18 @@ class FakeBuildVM:
             "profile 1password /opt/1Password/1password flags=(unconfined) {\n}\n",
         )
         self.host_file("/etc/apparmor.d/usr.sbin.rsyslogd", "profile rsyslogd {\n}\n")
+        for name in MOTD_SCRIPTS:
+            self.host_file(f"/etc/update-motd.d/{name}", "#!/bin/sh\n")
+        self.host_file("/etc/default/motd-news", MOTD_NEWS)
+        self.host_file("/etc/update-manager/release-upgrades", RELEASE_UPGRADES)
         self.host_path("/run").mkdir()
+        # Two kernels, the newest runs. 85 sorts after 149 as text, not as a version.
+        self.host_file("/boot/vmlinuz-6.8.0-85-generic", "")
+        self.host_file("/boot/vmlinuz-6.8.0-149-generic", "")
+        self.answer("uname_r", "6.8.0-149-generic\n")
         self.answer("apt_update_rc", "0")
+        self.answer("apt_upgrade_rc", "0")
+        self.answer("apt_left", "Reading package lists...\n0 upgraded, 0 newly installed.\n")
         self.answer("remediate_rc", "2")
         self.answer("scan_rc", "2")
         self.answer("nft_check_rc", "0")
@@ -239,19 +291,55 @@ class HardenTests(unittest.TestCase):
         self.assertIn(fragment, fail_lines[0])
         self.assertIn(" Fix: ", fail_lines[0])
 
-    def test_the_packages_go_in_and_ufw_goes(self) -> None:
+    def test_every_update_and_the_packages_go_in_and_ufw_goes(self) -> None:
         self.assert_succeeds(self.vm.run())
 
         self.assertEqual(
             [
-                "apt-get update -q",
+                "apt-get update -q --error-on=any",
+                f"apt-get -y -q {PHASED} -o Dpkg::Options::=--force-confdef "
+                "-o Dpkg::Options::=--force-confold upgrade --with-new-pkgs",
                 "apt-get install -y -q --no-install-recommends "
                 "aide aide-common openscap-scanner libpam-pwquality "
                 "libpwquality-tools cracklib-runtime apparmor-utils rsyslog-gnutls",
                 "apt-get purge -y -q ufw",
+                f"apt-get -s -q {PHASED} dist-upgrade",
             ],
             self.vm.calls("apt-get"),
         )
+
+    def test_an_update_left_after_the_upgrade_stops_step_1(self) -> None:
+        self.vm.answer(
+            "apt_left",
+            "Inst libfoo1 [1.0] (1.1 Ubuntu:24.04/noble-updates [amd64])\n"
+            "Inst foo [1.0] (1.1 Ubuntu:24.04/noble-updates [amd64])\n"
+            "Conf foo (1.1 Ubuntu:24.04/noble-updates [amd64])\n",
+        )
+
+        result = self.vm.run()
+
+        self.assert_fails(result, "still older than in the Ubuntu archive")
+        self.assertIn(": libfoo1, foo.", result.stderr)
+        self.assertEqual([], self.vm.calls("oscap"))
+
+    def test_an_upgrade_apt_get_refuses_stops_step_1(self) -> None:
+        self.vm.answer("apt_upgrade_rc", "100")
+
+        result = self.vm.run()
+
+        self.assert_fails(result, "could not install the package updates")
+        self.assertEqual([], self.vm.calls("oscap"))
+
+    def test_a_newer_kernel_than_the_running_one_stops_step_1(self) -> None:
+        self.vm.host_file("/boot/vmlinuz-6.8.0-150-generic", "")
+
+        result = self.vm.run()
+
+        self.assert_fails(
+            result,
+            "runs the kernel 6.8.0-149-generic, but the kernel 6.8.0-150-generic is installed too",
+        )
+        self.assertEqual([], self.vm.calls("oscap"))
 
     def test_the_scanner_files_stay_on_the_appliance(self) -> None:
         self.assert_succeeds(self.vm.run())
@@ -413,6 +501,26 @@ class HardenTests(unittest.TestCase):
         )
         self.assertIn("systemctl enable --now nftables.service", self.vm.calls())
 
+    def test_the_login_message_gives_no_update_advice(self) -> None:
+        self.assert_succeeds(self.vm.run())
+
+        left = sorted(path.name for path in self.vm.host_path("/etc/update-motd.d").iterdir())
+        self.assertEqual(sorted(set(MOTD_SCRIPTS) - set(MOTD_UPDATE_ADVICE)), left)
+        self.assertEqual(
+            'ENABLED=0\nURLS="https://motd.ubuntu.com"\nWAIT=5\n',
+            self.vm.read("/etc/default/motd-news"),
+        )
+        self.assertEqual(
+            RELEASE_UPGRADES.replace("Prompt=lts", "Prompt=never"),
+            self.vm.read("/etc/update-manager/release-upgrades"),
+        )
+
+    def test_a_release_upgrades_file_without_prompt_stops_the_hardening(self) -> None:
+        self.vm.host_file("/etc/update-manager/release-upgrades", "[DEFAULT]\n")
+
+        self.assert_fails(self.vm.run(), "has no Prompt line")
+        self.assertEqual("[DEFAULT]\n", self.vm.read("/etc/update-manager/release-upgrades"))
+
     def test_the_firewall_blocks_by_default_in_all_three_directions(self) -> None:
         self.assert_succeeds(self.vm.run())
 
@@ -454,6 +562,8 @@ class HardenTests(unittest.TestCase):
 
         self.assert_fails(result, "apt-get update failed")
         self.assertIn("Ubuntu archive", result.stderr)
+        # Nothing installs from old package lists.
+        self.assertEqual(["apt-get update -q --error-on=any"], self.vm.calls("apt-get"))
         self.assertEqual([], self.vm.calls("oscap"))
 
     def test_oscap_exit_code_2_is_a_failing_rule_and_1_an_error(self) -> None:
@@ -550,6 +660,8 @@ class HardenTests(unittest.TestCase):
                 "/etc/nftables.conf",
                 "/etc/environment",
                 SUDOERS_DROPIN,
+                "/etc/default/motd-news",
+                "/etc/update-manager/release-upgrades",
             )
         }
 

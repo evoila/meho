@@ -76,9 +76,9 @@ from meho_backplane.mcp.tools._operation_recall import (
     recall_schema_for_settings,
     with_recall,
 )
+from meho_backplane.mcp.tools._preview_typed_writes_text import preview_tool_for_settings
 from meho_backplane.mcp.tools._short_tool_texts import (
     CALL_OPERATION_SHORT,
-    PREVIEW_OPERATION_SHORT,
     SEARCH_OPERATIONS_SHORT,
 )
 from meho_backplane.operation_picks.recorder import (
@@ -1129,7 +1129,7 @@ register_mcp_tool(
         # ``call_operation``'s ``"tool_call"`` envelope, which wraps a
         # dispatch whose true class lives on the inner DISPATCH row).
         op_class="read",
-        for_settings=with_short_text(PREVIEW_OPERATION_SHORT, then=recall_schema_for_settings),
+        for_settings=preview_tool_for_settings,
     ),
     handler=_preview_operation_handler,
 )

@@ -1246,6 +1246,16 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_authflow_ensure_passkey_code_skip(self, operator, target, params)
 
+    async def authflow_ensure_approval_touch(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.authflow.ensure_approval_touch``."""
+        from meho_backplane.connectors.keycloak.ops_authflow_touch import (
+            keycloak_authflow_ensure_approval_touch,
+        )
+
+        return await keycloak_authflow_ensure_approval_touch(self, operator, target, params)
+
     async def auth_flow_step_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1316,8 +1326,8 @@ class KeycloakConnector(HttpConnector):
         the destructive ``user.delete`` / ``group.delete`` /
         ``client.delete``. #3851 adds ``user.logout``; #3886 adds ``realm.delete``.
         ``user.check_login`` (one login test) rides the same walk, and so do
-        ``authflow.ensure_approval_flow``, ``authflow.ensure_passkey_code_skip``
-        and ``identity_provider.list``.
+        ``authflow.ensure_approval_flow``, ``authflow.ensure_passkey_code_skip``,
+        ``authflow.ensure_approval_touch`` and ``identity_provider.list``.
         """
         # Lazy imports: the operations package pulls in the embedding
         # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a
@@ -1331,6 +1341,7 @@ class KeycloakConnector(HttpConnector):
         from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import (
             PASSKEY_CODE_SKIP_OPS,
         )
+        from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import TOUCH_OPS
         from meho_backplane.connectors.keycloak.ops_flow_reads import (
             FLOW_READ_OPS,
             WHEN_TO_USE_FLOW_READ_BY_GROUP,
@@ -1373,6 +1384,7 @@ class KeycloakConnector(HttpConnector):
             *LOGIN_CHECK_OPS,
             *APPROVAL_FLOW_OPS,
             *PASSKEY_CODE_SKIP_OPS,
+            *TOUCH_OPS,
             *IDENTITY_PROVIDER_OPS,
             *USER_STATE_OPS,
             *FLOW_READ_OPS,

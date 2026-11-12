@@ -515,10 +515,8 @@ func formatOperatorIdentity(op api.OperatorIdentity) string {
 // backplane sends no checked field; the line then shows the reachable
 // and read state.
 func formatVault(v api.VaultStatus) string {
-	if v.Checked != nil && !*v.Checked {
-		reason := strings.TrimPrefix(strings.TrimSpace(derefString(v.Detail)), "not checked:")
-		reason = strings.TrimSpace(reason)
-		return joinDetail("not checked", &reason)
+	if line, ok := VaultNotChecked(v); ok {
+		return line
 	}
 	if !v.Reachable {
 		return joinDetail("unreachable", v.Detail)
@@ -527,6 +525,19 @@ func formatVault(v api.VaultStatus) string {
 		return joinDetail("reachable, read failed", v.Detail)
 	}
 	return joinDetail("reachable, read OK", v.Detail)
+}
+
+// VaultNotChecked returns "not checked (<reason>)" and true when the
+// backplane ran no Vault check (checked=false), for example "not
+// checked (needs the operator role)". It returns false when the check
+// ran, or when an older backplane sends no checked field.
+func VaultNotChecked(v api.VaultStatus) (string, bool) {
+	if v.Checked == nil || *v.Checked {
+		return "", false
+	}
+	reason := strings.TrimPrefix(strings.TrimSpace(derefString(v.Detail)), "not checked:")
+	reason = strings.TrimSpace(reason)
+	return joinDetail("not checked", &reason), true
 }
 
 // formatDB renders a DbStatus. Migrated == nil ("unknown") happens

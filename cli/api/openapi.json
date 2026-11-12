@@ -5743,7 +5743,8 @@
               }
             }
           }
-        }
+        },
+        "x-maturity": "beta"
       }
     },
     "/api/v1/connectors/{connector_id}/tenant-settings": {
@@ -44920,6 +44921,10 @@
     {
       "name": "operations",
       "x-maturity": "ga"
+    },
+    {
+      "name": "policy",
+      "x-maturity": "beta"
     },
     {
       "name": "retrieval",

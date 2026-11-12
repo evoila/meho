@@ -77,7 +77,11 @@ load-bearing:
 Async submit (`POST /operations/call`, `async: true`):
 
 1. `post_call` strips the transport-only `async_` control and calls
-   `OperationRunService.submit_call(operator, arguments)`.
+   `OperationRunService.submit_call(operator, arguments)`. A call with
+   `reveal_secret: true` in its params is refused first (HTTP 422
+   `reveal_secret_with_async`; on MCP, bad input with the same reason):
+   a reveal call runs at once, or through an approval
+   ([approvals.md](approvals.md)).
 2. `submit_call` computes a `params_hash`, inserts a `pending` row, and
    claims a lease under this worker's `"<hostname>:<pid>"` owner (one
    committed transaction), then launches a background task and returns the

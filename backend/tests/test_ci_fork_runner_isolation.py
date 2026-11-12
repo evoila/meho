@@ -237,3 +237,164 @@ def test_merge_queue_only_route_is_safe() -> None:
 def test_merge_queue_route_variants_fail(runs_on: str, job_if: str, triggers: set[str]) -> None:
     job = {"if": job_if, "runs-on": runs_on}
     assert not _job_is_safe(job, triggers)
+
+
+# --- merge_group jobs must not use a hosted label (#6325) -------------------
+#
+# A merge-queue run waits for a GitHub-hosted runner when a job uses one, and
+# the queue stops when none is free. Every job a merge_group event can start
+# must resolve to an own pool.
+
+_FORK_ROUTE = re.compile(
+    r"\$\{\{ \(github\.event_name == 'pull_request' && "
+    r"github\.event\.pull_request\.head\.repo\.full_name != github\.repository\) && "
+    r"'ubuntu-latest' \|\| '(?P<pool>[^']+)' \}\}"
+)
+# A job `if:` that names one other event first never starts on merge_group.
+_OTHER_EVENT_ONLY = re.compile(
+    r"github\.event_name == '(push|workflow_dispatch|pull_request|schedule)'(\s*&&.*)?",
+    re.S,
+)
+# Jobs that stay on a hosted label although their workflow has a merge_group
+# trigger. Each needs a reason.
+_HOSTED_ON_MERGE_GROUP_ALLOWED: dict[tuple[str, str], str] = {
+    (
+        "docs-site.yml",
+        "deploy",
+    ): "runs only for tag pushes and main pushes; a merge-queue branch is neither",
+}
+
+
+# The merge-queue route whose other side is an own pool too.
+_MERGE_QUEUE_OWN_ROUTE = re.compile(
+    r"\$\{\{ github\.event_name == 'merge_group' && '(?P<pool>[^']+)' \|\| "
+    r"'meho-runners-[^']+' \}\}"
+)
+
+
+def _merge_group_label(runs_on: str) -> str:
+    """The runner label a job gets when the event is merge_group.
+
+    Only the routes listed here are read. Any other expression is returned
+    as it is, so the caller reports it instead of guessing.
+    """
+    for route in (_MERGE_QUEUE_ROUTE, _MERGE_QUEUE_OWN_ROUTE, _FORK_ROUTE):
+        match = route.fullmatch(runs_on)
+        if match is not None:
+            return match.group("pool")
+    return runs_on
+
+
+def _merge_group_hosted_jobs(path: Path, wf: dict[Any, Any]) -> list[str]:
+    if "merge_group" not in _trigger_names(_triggers(wf)):
+        return []
+    found = []
+    for name, job in (wf.get("jobs") or {}).items():
+        job_if = " ".join(str(job.get("if", "")).split())
+        if job_if and "merge_group" not in job_if and _OTHER_EVENT_ONLY.fullmatch(job_if):
+            continue
+        if "uses" in job and "runs-on" not in job:
+            continue
+        label = _merge_group_label(_runs_on_str(job))
+        if label in _KNOWN_POOLS or (path.name, name) in _HOSTED_ON_MERGE_GROUP_ALLOWED:
+            continue
+        found.append(f"{path.name}:{name} -> {label!r}")
+    return found
+
+
+def test_no_merge_group_job_uses_a_hosted_label() -> None:
+    bad: list[str] = []
+    for path in _workflow_files():
+        bad.extend(_merge_group_hosted_jobs(path, _load_workflow(path)))
+    assert not bad, (
+        "These jobs can run on a merge_group event but use a GitHub-hosted runner. "
+        "A merge-queue run then waits for a hosted runner and the queue can stop. "
+        "Use the merge-queue route with an own pool label (see devops.md): " + "; ".join(bad)
+    )
+
+
+def test_merge_group_hosted_check_flags_a_hosted_job() -> None:
+    wf = {
+        "on": {"merge_group": {}, "pull_request": {}},
+        "jobs": {
+            "hosted": {"runs-on": "ubuntu-latest"},
+            "ok-route": {"runs-on": _MQ_ROUTE},
+            "ok-own": {"runs-on": "meho-runners-ci"},
+            "pr-only": {"if": "github.event_name == 'pull_request'", "runs-on": "ubuntu-latest"},
+        },
+    }
+    assert _merge_group_hosted_jobs(Path("x.yml"), wf) == ["x.yml:hosted -> 'ubuntu-latest'"]
+
+
+@pytest.mark.parametrize(
+    "runs_on",
+    [
+        # Hosted on merge_group, own pool otherwise: the pool name must not
+        # make the check pass.
+        "${{ github.event_name == 'merge_group' && 'ubuntu-latest' || 'meho-runners-ci-heavy' }}",
+        "${{ github.event_name != 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}",
+        "${{ matrix.runner }}",
+        "meho-runners-unknown",
+    ],
+    ids=["hosted-on-merge-group", "negated-event", "matrix", "unknown-pool"],
+)
+def test_merge_group_hosted_check_rejects_unknown_routes(runs_on: str) -> None:
+    wf = {"on": {"merge_group": {}}, "jobs": {"job": {"runs-on": runs_on}}}
+    found = _merge_group_hosted_jobs(Path("x.yml"), wf)
+    assert len(found) == 1
+    assert found[0].startswith("x.yml:job -> ")
+
+
+@pytest.mark.parametrize(
+    ("runs_on", "pool"),
+    [
+        (_MQ_ROUTE, "meho-runners-ci"),
+        (
+            "${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue'"
+            " || 'meho-runners-ci-heavy' }}",
+            "meho-runners-ci-heavy-queue",
+        ),
+        (
+            "${{ (github.event_name == 'pull_request' && "
+            "github.event.pull_request.head.repo.full_name != github.repository) && "
+            "'ubuntu-latest' || 'meho-runners-ci' }}",
+            "meho-runners-ci",
+        ),
+        ("meho-runners-ci-heavy", "meho-runners-ci-heavy"),
+    ],
+    ids=["merge-queue-route", "merge-queue-own-route", "fork-route", "plain-label"],
+)
+def test_merge_group_label_reads_the_known_routes(runs_on: str, pool: str) -> None:
+    assert _merge_group_label(runs_on) == pool
+
+
+def test_merge_group_hosted_check_ignores_workflows_without_merge_group() -> None:
+    wf = {"on": {"pull_request": {}}, "jobs": {"hosted": {"runs-on": "ubuntu-latest"}}}
+    assert _merge_group_hosted_jobs(Path("x.yml"), wf) == []
+
+
+def test_pull_request_workflows_cancel_old_runs_but_not_merge_group() -> None:
+    # A new push cancels the run of the old commit; a merge-queue run is never
+    # cancelled by a newer one.
+    bad = []
+    for path in _workflow_files():
+        wf = _load_workflow(path)
+        names = _trigger_names(_triggers(wf))
+        if "pull_request" not in names and "pull_request_target" not in names:
+            continue
+        concurrency = wf.get("concurrency")
+        if not isinstance(concurrency, dict) and path.name != "merge-queue-cleanup.yml":
+            bad.append(f"{path.name}: no concurrency")
+            continue
+        if not isinstance(concurrency, dict):
+            continue
+        cancel = concurrency.get("cancel-in-progress")
+        if cancel is False:
+            bad.append(f"{path.name}: cancel-in-progress is false")
+        elif (
+            isinstance(cancel, str) and "merge_group" in names and "!= 'merge_group'" not in cancel
+        ):
+            bad.append(f"{path.name}: cancel-in-progress does not exclude merge_group")
+        elif cancel is True and "merge_group" in names:
+            bad.append(f"{path.name}: cancels merge_group runs")
+    assert not bad, "; ".join(bad)

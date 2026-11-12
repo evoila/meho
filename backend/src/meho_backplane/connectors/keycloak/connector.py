@@ -1200,6 +1200,44 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_enable(self, operator, target, params)
 
+    async def role_mapping_client_assign(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.role_mapping.client.assign``."""
+        from meho_backplane.connectors.keycloak.ops_write_client_role import (
+            keycloak_role_mapping_client_assign,
+        )
+
+        return await keycloak_role_mapping_client_assign(self, operator, target, params)
+
+    async def role_mapping_client_remove(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.role_mapping.client.remove``."""
+        from meho_backplane.connectors.keycloak.ops_write_client_role import (
+            keycloak_role_mapping_client_remove,
+        )
+
+        return await keycloak_role_mapping_client_remove(self, operator, target, params)
+
+    async def user_update(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.update``."""
+        from meho_backplane.connectors.keycloak.ops_write_user_update import keycloak_user_update
+
+        return await keycloak_user_update(self, operator, target, params)
+
+    async def user_credential_delete(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.credential.delete``."""
+        from meho_backplane.connectors.keycloak.ops_write_user_credential import (
+            keycloak_user_credential_delete,
+        )
+
+        return await keycloak_user_credential_delete(self, operator, target, params)
+
     async def user_check_login(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:

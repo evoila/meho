@@ -1019,8 +1019,12 @@ login client (see the `client` block in [audit_query.md](audit_query.md)):
 ## Changes of rights: the login is never its own approver
 
 `operations/grant_approval.py` checks the Keycloak writes that change who
-has rights: `keycloak.group.member.add`, `keycloak.role_mapping.assign` and
-`keycloak.group.update_attributes`. The connector registers them
+has rights: `keycloak.group.member.add`, `keycloak.role_mapping.assign`,
+`keycloak.role_mapping.client.assign` and `keycloak.group.update_attributes`.
+It also checks two writes that change how a login signs in:
+`keycloak.user.update` (a new email or user name) and
+`keycloak.user.credential.delete` (a passkey or one-time code removed).
+The connector registers them
 (`connectors/keycloak/ops_write_grant.py`) and adds a `grant` block to the
 preview of the waiting request:
 
@@ -1033,7 +1037,8 @@ preview of the waiting request:
 - `login_realm`: the target manages a realm of MEHO's own login, see
   `_backplane_login_realms()`.
 - `platform_admin`: the group the handler will change is the platform
-  admin group, or the roles include the platform admin role.
+  admin group, the roles include the platform admin role, or the change
+  gives a role of the `realm-management` client (in any case).
 - `members`: for a group attribute change in the login realm, the ids of
   the logins in the group (up to 1000, read page by page). `None` when
   they could not be read, when Keycloak answers with something that is
@@ -1084,7 +1089,13 @@ same check refuses the run:
   refused too;
 - when the change now needs a stricter approval than the one it got: the
   live card says login realm or platform admin where the saved one said
-  no, or cannot say which it is.
+  no, or cannot say which it is;
+- for an operation registered with `bound_ids` (a card key and a refusal),
+  when the live card lists other ids under that key than the saved card.
+  `keycloak.user.credential.delete` uses it for `will_remove`, so the run
+  removes only the credentials the approver saw. This check runs before the
+  handler reads the system again, so the handler also compares its own
+  read with the approved card (`approved_preview`) before it deletes.
 
 ## The rights-change mark: another admin must approve
 

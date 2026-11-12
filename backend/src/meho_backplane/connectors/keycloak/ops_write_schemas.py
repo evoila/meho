@@ -40,6 +40,10 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.connectors.keycloak.ops_read import _UUID_PATTERN, KeycloakOp
+from meho_backplane.connectors.keycloak.ops_write_account_schemas import (
+    ACCOUNT_WRITE_OPS,
+    WHEN_TO_USE_ACCOUNT_WRITE,
+)
 from meho_backplane.connectors.keycloak.ops_write_delete_schemas import DELETE_WRITE_OPS
 from meho_backplane.connectors.keycloak.ops_write_groups_schemas import (
     GROUP_WRITE_OPS,
@@ -152,6 +156,7 @@ WHEN_TO_USE_WRITE_BY_GROUP: dict[str, str] = {
     "user_write": _WHEN_TO_USE_USER_WRITE,
     "role_mapping_write": _WHEN_TO_USE_ROLE_MAPPING_WRITE,
     "group_write": WHEN_TO_USE_GROUP_WRITE,
+    "account_write": WHEN_TO_USE_ACCOUNT_WRITE,
 }
 
 # ---------------------------------------------------------------------------
@@ -614,6 +619,10 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
     # Turn a user off and on (``user.disable`` / ``user.enable``) -- rows in
     # ``ops_write_user_enabled_schemas``, handlers in ``ops_write_user_enabled``.
     *USER_ENABLED_OPS,
+    # Client roles, user details and one stored credential -- rows in
+    # ``ops_write_account_schemas``, handlers in the ``ops_write_client_role``,
+    # ``ops_write_user_update`` and ``ops_write_user_credential`` modules.
+    *ACCOUNT_WRITE_OPS,
     # Per-user session logout (#3851).
     KeycloakOp(
         op_id="keycloak.user.logout",

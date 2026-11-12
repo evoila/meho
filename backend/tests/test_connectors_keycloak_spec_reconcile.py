@@ -68,7 +68,9 @@ one, that test fails and the constant must be promoted into
 :data:`_METHODS_BY_CONSTANT`. All reconciled op_ids (19 at #2988, extended
 to 29 by the #3280 group-lifecycle ops, to 33 by the #3944 deletes, to
 34 by the #3851 user logout, to 37 by the #3886 realm delete, to 45 by the login flow
-ops, to 48 by the passkey step op, and to 49 by the user disable / enable PUT) were
+ops, to 48 by the passkey step op, to 49 by the user disable / enable PUT, to 54
+by the client role and credential delete writes, and to 55 by the client role users
+read of the remove card) were
 served on the armed run; no path repoints were needed. Protocol:
 docs/decisions/spec-reconcile-guards-standard.md.
 """
@@ -103,7 +105,7 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_CLIENT_SCOPES_PATH": ("GET", "POST"),
     "_USERS_PATH": ("GET", "POST"),
     # Governed user delete (#3944): the delete plus its 404 read-back. The PUT
-    # is the user disable / enable write (#4940).
+    # is the user disable / enable write (#4940) and the user update write.
     "_USER_PATH": ("GET", "PUT", "DELETE"),
     "_USER_ROLE_MAPPINGS_PATH": ("GET",),
     "_USER_ROLE_MAPPINGS_REALM_PATH": ("POST",),
@@ -111,6 +113,14 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_USER_LOGOUT_PATH": ("POST",),
     "_USER_SESSIONS_PATH": ("GET",),
     "_USER_CREDENTIALS_PATH": ("GET",),
+    # Client role writes: the user's role mappings on one client (the read-back
+    # is a GET) and the role of one client (read before the write).
+    "_USER_ROLE_MAPPINGS_CLIENT_PATH": ("GET", "POST", "DELETE"),
+    "_CLIENT_ROLE_PATH": ("GET",),
+    # The users who hold one client role (the client role remove card).
+    "_CLIENT_ROLE_USERS_PATH": ("GET",),
+    # The delete of one stored credential of a user.
+    "_USER_CREDENTIAL_PATH": ("DELETE",),
     "_ROLES_PATH": ("GET",),
     "_ROLE_PATH": ("GET",),
     "_ROLE_USERS_PATH": ("GET",),
@@ -200,7 +210,9 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "DELETE:/admin/realms/{realm}/clients/{client-uuid}",
         "DELETE:/admin/realms/{realm}/groups/{group-id}",
         "DELETE:/admin/realms/{realm}/users/{user-id}",
+        "DELETE:/admin/realms/{realm}/users/{user-id}/credentials/{credentialId}",
         "DELETE:/admin/realms/{realm}/users/{user-id}/groups/{groupId}",
+        "DELETE:/admin/realms/{realm}/users/{user-id}/role-mappings/clients/{client-id}",
         "GET:/admin/realms/{realm}",
         "GET:/admin/realms/{realm}/authentication/config/{id}",
         "GET:/admin/realms/{realm}/authentication/flows",
@@ -210,6 +222,8 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/clients",
         "GET:/admin/realms/{realm}/clients/{client-uuid}",
         "GET:/admin/realms/{realm}/clients/{client-uuid}/client-secret",
+        "GET:/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}",
+        "GET:/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}/users",
         "GET:/admin/realms/{realm}/events/config",
         "GET:/admin/realms/{realm}/groups",
         "GET:/admin/realms/{realm}/groups/count",
@@ -226,6 +240,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/users/{user-id}/credentials",
         "GET:/admin/realms/{realm}/users/{user-id}/groups",
         "GET:/admin/realms/{realm}/users/{user-id}/role-mappings",
+        "GET:/admin/realms/{realm}/users/{user-id}/role-mappings/clients/{client-id}",
         "GET:/admin/realms/{realm}/users/{user-id}/sessions",
         "POST:/admin/realms",
         "POST:/admin/realms/{realm}/authentication/executions/{executionId}/config",
@@ -241,6 +256,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "POST:/admin/realms/{realm}/groups/{group-id}/children",
         "POST:/admin/realms/{realm}/users",
         "POST:/admin/realms/{realm}/users/{user-id}/logout",
+        "POST:/admin/realms/{realm}/users/{user-id}/role-mappings/clients/{client-id}",
         "POST:/admin/realms/{realm}/users/{user-id}/role-mappings/realm",
         "PUT:/admin/realms/{realm}",
         "PUT:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions",

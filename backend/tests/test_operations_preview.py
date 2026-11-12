@@ -510,7 +510,7 @@ async def test_no_builder_echo_scrubs_secret_param_keys() -> None:
     dicts and lists -- while leaving non-secret params legible.
     """
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="keycloak.user.update"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="keycloak.client.update"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
@@ -636,7 +636,7 @@ async def test_no_builder_echo_keeps_scalar_settings_under_secret_names() -> Non
 async def test_no_builder_echo_scrubs_the_value_of_a_secret_named_pair() -> None:
     """A ``{"name": "PASSWORD", "value": ...}`` pair in the params echoes no value."""
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="keycloak.user.update"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="keycloak.client.update"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
@@ -703,7 +703,7 @@ async def test_no_builder_echo_scrubs_secret_value_shapes() -> None:
     # high-entropy token the secret scanner flags (it is a fake fixture).
     jwt = "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0" + "." + "abcdefghij"
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="keycloak.user.update"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="keycloak.client.update"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),

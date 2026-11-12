@@ -411,6 +411,7 @@ from meho_backplane.operations._secret_values import (
     split_reveal_secret,
 )
 from meho_backplane.operations._target_connector_match import refuse_target_connector_mismatch
+from meho_backplane.operations._tls_presented import probe_presented_leaf
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
     InvalidOpSchemaError,
@@ -1811,8 +1812,17 @@ async def _run_branch_with_error_handling(
         is_tls_verify_failure = isinstance(conn_exc.__cause__, ssl.SSLCertVerificationError) or (
             "CERTIFICATE_VERIFY_FAILED" in str(conn_exc)
         )
+        presented = (
+            await probe_presented_leaf(
+                getattr(target, "host", None) or "",
+                getattr(target, "port", None),
+                getattr(target, "tls_server_name", None),
+            )
+            if is_tls_verify_failure and getattr(target, "tls_ca_pin", None)
+            else None
+        )
         conn_result = (
-            result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms)
+            result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms, presented)
             if is_tls_verify_failure
             else result_connector_error(op_id, conn_exc, duration_ms)
         )

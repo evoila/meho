@@ -200,6 +200,7 @@ func runOneShot(cmd *cobra.Command, backplaneURL string, jsonOut bool) error {
 	if jsonOut {
 		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
 	}
+	printProfile(cmd.OutOrStdout(), cmd)
 	return output.PrintHealth(cmd.OutOrStdout(), resp.JSON200)
 }
 
@@ -226,6 +227,7 @@ func runLiveness(cmd *cobra.Command, client *api.AuthedClient, backplaneURL stri
 	if jsonOut {
 		return output.PrintJSON(cmd.OutOrStdout(), live.JSON200)
 	}
+	printProfile(cmd.OutOrStdout(), cmd)
 	return output.PrintLiveness(cmd.OutOrStdout(), live.JSON200)
 }
 

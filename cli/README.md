@@ -28,6 +28,9 @@ meho --profile initiator operation call ...
 
 # Decide it as the approver:
 meho --profile approver approvals approve <approval-id>
+# The browser sign-in that `approvals approve` asks for decides who
+# approves. The profile only picks the login for `approvals list` and
+# `approvals show`.
 
 # Or set the profile for a whole shell:
 export MEHO_PROFILE=approver
@@ -49,8 +52,12 @@ meho status          # first line: "Profile: approver"
 * When a login is missing or expired, the error tells you to run
   `meho --profile <name> login <url>`, for the profile you used.
 * The backplane URL (`config.json`) and the tenant chosen with
-  `meho tenants use` are shared by all profiles. `meho doctor` checks
-  the default profile.
+  `meho tenants use` are shared by all profiles. So
+  `meho login <url> --profile <name>` with another URL changes the URL
+  for every profile and clears the chosen tenant. The login prints one
+  line when this happens.
+* `meho doctor` checks the profile you asked for, in all its checks,
+  and prints `Profile: <name>` first when it is a named profile.
 
 ## Status
 

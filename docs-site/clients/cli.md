@@ -198,7 +198,11 @@ meho --profile approver status      # or: export MEHO_PROFILE=approver
 Each profile keeps its own login, so switching needs no new login.
 `--profile` beats `MEHO_PROFILE`. Without either, the CLI uses the
 default login. This replaces using one `XDG_CONFIG_HOME` for each
-identity.
+identity. All profiles share the saved backplane URL, so a login with
+another URL changes it for every profile (the login prints one line
+when it does). The browser sign-in of `meho approvals approve` decides
+who approves; the profile only picks the login for `approvals list`
+and `approvals show`.
 
 ### How long the login lasts
 

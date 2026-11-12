@@ -19,7 +19,9 @@ exclusive ``flock`` on a lock file before step 1 and holds it until the
 script ends, so the snapshot, the write, the reload, the verify and a
 rollback of one apply all finish before the next apply starts. A rollback
 therefore never restores over a change that another apply made in
-between. A caller that read the file before the lock can pass
+between. :func:`read_file_locked` reads a file under the same lock
+(shared), so a read never sees a file that a write has half written. A
+caller that read the file before the write can pass
 ``expected_sha256``: when the file no longer has that hash once the lock
 is held, nothing is written and :class:`AtomicApplyError` is raised with
 step ``conflict``. If the lock is not free in time, the step is ``lock``.
@@ -213,6 +215,7 @@ __all__ = [
     "AtomicApplyError",
     "AtomicApplyResult",
     "atomic_apply",
+    "read_file_locked",
 ]
 
 
@@ -293,10 +296,60 @@ class AtomicApplyResult:
 # can run ``named-checkzone`` for record writes and ``named-checkconf``
 # for config writes without per-caller branching outside the env-var
 # slot.
-_LOCK_PATH: str = "/var/lock/meho-bind9-apply.lock"
+# The lock lives in a folder that only root can change: ``/run`` is
+# root-owned, and the step below creates the folder with mode 0700 and
+# refuses it (or the lock file) when it is a link or another user can
+# write to it.
+_LOCK_PATH: str = "/run/meho-bind9/apply.lock"
 # Longer than a normal apply (about 2 seconds), shorter than the 90 s
 # limit of the whole call, so a stuck lock fails here with a clear error.
 _LOCK_WAIT_SECONDS: int = 45
+
+# Takes the per-server lock on file descriptor 9. ``{flock_mode}`` is
+# ``-x`` for a write and ``-s`` for a read: reads share the lock with
+# each other but never run while a write holds it. The lock is released
+# when the script exits. A failure here has changed nothing, so it needs
+# no rollback.
+_LOCK_STEP_TEMPLATE: str = """\
+LOCK_PATH={lock_path}
+LOCK_DIR=$(dirname "$LOCK_PATH")
+lock_fail() {{
+    echo "===FAILED_STEP===lock"
+    echo "===FAILED_DETAIL_BEGIN==="
+    echo "$1"
+    echo "===FAILED_DETAIL_END==="
+    exit 8
+}}
+if [ ! -e "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ]; then
+    mkdir -m 0700 "$LOCK_DIR" 2>/dev/null || true
+fi
+if [ -L "$LOCK_DIR" ] || [ ! -d "$LOCK_DIR" ]; then
+    lock_fail "lock folder $LOCK_DIR is not a plain folder; nothing was done"
+fi
+LOCK_DIR_OWNER=$(stat -c '%u' "$LOCK_DIR")
+LOCK_DIR_MODE=$(stat -c '%a' "$LOCK_DIR")
+if [ "$LOCK_DIR_OWNER" != "$(id -u)" ] || [ $((8#$LOCK_DIR_MODE & 8#022)) -ne 0 ]; then
+    lock_fail "lock folder $LOCK_DIR is owned or writable by another user; nothing was done"
+fi
+if [ -L "$LOCK_PATH" ] || {{ [ -e "$LOCK_PATH" ] && [ ! -f "$LOCK_PATH" ]; }}; then
+    lock_fail "lock file $LOCK_PATH is not a plain file; nothing was done"
+fi
+# ``>>`` opens without cutting the file to zero length.
+{{ exec 9>>"$LOCK_PATH"; }} 2>/dev/null || lock_fail "cannot open lock file $LOCK_PATH"
+if ! flock {flock_mode} -w {lock_wait_seconds} 9; then
+    lock_fail "another bind9 write on this server did not finish within {lock_wait_seconds} seconds"
+fi
+"""
+
+
+def _build_lock_step(*, lock_path: str, lock_wait_seconds: int, shared: bool) -> str:
+    """Render the bash lines that take the per-server lock."""
+    return _LOCK_STEP_TEMPLATE.format(
+        lock_path=shlex.quote(lock_path),
+        lock_wait_seconds=int(lock_wait_seconds),
+        flock_mode="-s" if shared else "-x",
+    )
+
 
 _PIPELINE_TEMPLATE: str = """\
 set -e -u -o pipefail
@@ -304,7 +357,6 @@ SNAPSHOT_PATH={snapshot_path}
 AUDIT_SLICE_PATH={audit_slice_path}
 ZONE_NAME={zone_name}
 BIND_ROOT={bind_root}
-LOCK_PATH={lock_path}
 
 rollback() {{
     if [ -f "$SNAPSHOT_PATH" ]; then
@@ -444,18 +496,7 @@ PYEOF
 # Step 0: take the per-server write lock. Every apply on this server
 # waits here, so the steps below never overlap with another apply (the
 # snapshot of one apply cannot be restored over the change of another).
-# The lock is released when this script exits. Nothing has been changed
-# yet, so a failure here needs no rollback.
-mkdir -p "$(dirname "$LOCK_PATH")"
-exec 9>"$LOCK_PATH"
-if ! flock -w {lock_wait_seconds} 9; then
-    echo "===FAILED_STEP===lock"
-    echo "===FAILED_DETAIL_BEGIN==="
-    echo "another bind9 write on this server did not finish within {lock_wait_seconds} seconds"
-    echo "===FAILED_DETAIL_END==="
-    exit 8
-fi
-
+{lock_step}
 # Step 0b: refuse to write over a file that changed after the caller
 # read it. ``BIND9_EXPECTED_SHA256`` is the hash of the content the
 # caller based its change on; empty means the caller does not need the
@@ -675,8 +716,9 @@ def _build_pipeline_script(
         audit_slice_path=shlex.quote(audit_slice_path),
         zone_name=shlex.quote(zone_name),
         bind_root=shlex.quote(bind_root),
-        lock_path=shlex.quote(lock_path),
-        lock_wait_seconds=int(lock_wait_seconds),
+        lock_step=_build_lock_step(
+            lock_path=lock_path, lock_wait_seconds=lock_wait_seconds, shared=False
+        ),
     )
 
 
@@ -997,3 +1039,51 @@ async def atomic_apply(
         timeout=90.0,
     )
     return _interpret_pipeline_result(proc, audit_slice_path=audit_slice_path)
+
+
+def _build_locked_read_script(
+    path: str,
+    *,
+    lock_path: str = _LOCK_PATH,
+    lock_wait_seconds: int = _LOCK_WAIT_SECONDS,
+) -> str:
+    """Render the bash script that prints *path* while it holds the server lock."""
+    lock_step = _build_lock_step(
+        lock_path=lock_path, lock_wait_seconds=lock_wait_seconds, shared=True
+    )
+    return f"set -e -u -o pipefail\n{lock_step}cat {shlex.quote(path)}\n"
+
+
+async def read_file_locked(
+    connector: Bind9Connector,
+    target: Any,
+    *,
+    operator: Operator | None = None,
+    sudo_password: str,
+    path: str,
+) -> Any:
+    """Read *path* on *target* while holding the server lock that writes take.
+
+    A write cuts the file to zero length before it writes the new
+    content, and a rollback deletes and restores it. A plain ``cat``
+    during that time sees an empty or half-written file. This read takes
+    the same lock as :func:`atomic_apply` (shared, so reads do not wait
+    for each other), so it only ever sees a whole file.
+
+    Returns the finished remote process; its ``stdout`` is the file
+    content. Raises :class:`AtomicApplyError` with step ``lock`` when
+    the lock could not be taken. A failed ``cat`` is left to the caller
+    as a non-zero ``exit_status``.
+    """
+    proc = await connector._remote_bash_with_sudo(
+        target,
+        _build_locked_read_script(path),
+        operator=operator,
+        sudo_password=sudo_password,
+        timeout=90.0,
+    )
+    stdout = getattr(proc, "stdout", "")
+    sections = _parse_pipeline_output(stdout if isinstance(stdout, str) else "")
+    if getattr(proc, "exit_status", 0) != 0 and sections.get("FAILED_STEP") == "lock":
+        raise AtomicApplyError("lock", sections.get("FAILED_DETAIL", ""))
+    return proc

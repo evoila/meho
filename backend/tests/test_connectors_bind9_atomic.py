@@ -1706,14 +1706,10 @@ class TestRecordAddHandler:
 
     async def test_happy_path_with_explicit_zone(self) -> None:
         connector = Bind9Connector()
-        # Step 1+2 (checkconf + cat) go through _run_command.
-        run_mock = AsyncMock(
-            side_effect=[
-                _completed_process(stdout=_CHECKCONF_OUTPUT),
-                _completed_process(stdout=_SAMPLE_ZONEFILE),
-            ]
-        )
-        # Step 3 (atomic-apply) goes through _remote_bash_with_sudo.
+        # Step 1 (checkconf) goes through _run_command.
+        run_mock = AsyncMock(return_value=_completed_process(stdout=_CHECKCONF_OUTPUT))
+        # The locked zonefile read and the atomic apply go through
+        # _remote_bash_with_sudo.
         sudo_output = (
             "===STATE_BEFORE_BEGIN===\n"
             "old\n"
@@ -1723,7 +1719,13 @@ class TestRecordAddHandler:
             "===STATE_AFTER_END===\n"
             "===SUCCESS===\n"
         )
-        sudo_mock = AsyncMock(return_value=_completed_process(stdout=sudo_output))
+        sudo_mock = AsyncMock(
+            side_effect=[
+                # The zonefile read under the server lock, then the apply.
+                _completed_process(stdout=_SAMPLE_ZONEFILE),
+                _completed_process(stdout=sudo_output),
+            ]
+        )
         with (
             patch.object(connector, "_run_command", run_mock),
             patch.object(connector, "_remote_bash_with_sudo", sudo_mock),
@@ -1750,22 +1752,19 @@ class TestRecordAddHandler:
     async def test_zone_omitted_resolves_via_longest_suffix(self) -> None:
         """``--zone`` omitted -> handler picks ``evba.lab`` from checkconf output."""
         connector = Bind9Connector()
-        run_mock = AsyncMock(
-            side_effect=[
-                # First call: checkconf to resolve owning zone.
-                _completed_process(stdout=_CHECKCONF_OUTPUT),
-                # Second call: cat the zonefile.
-                _completed_process(stdout=_SAMPLE_ZONEFILE),
-            ]
-        )
+        run_mock = AsyncMock(return_value=_completed_process(stdout=_CHECKCONF_OUTPUT))
         sudo_mock = AsyncMock(
-            return_value=_completed_process(
-                stdout=(
-                    "===STATE_BEFORE_BEGIN===\nold\n===STATE_BEFORE_END===\n"
-                    "===STATE_AFTER_BEGIN===\nnew\n===STATE_AFTER_END===\n"
-                    "===SUCCESS===\n"
-                )
-            )
+            side_effect=[
+                # The zonefile read under the server lock, then the apply.
+                _completed_process(stdout=_SAMPLE_ZONEFILE),
+                _completed_process(
+                    stdout=(
+                        "===STATE_BEFORE_BEGIN===\nold\n===STATE_BEFORE_END===\n"
+                        "===STATE_AFTER_BEGIN===\nnew\n===STATE_AFTER_END===\n"
+                        "===SUCCESS===\n"
+                    )
+                ),
+            ]
         )
         with (
             patch.object(connector, "_run_command", run_mock),
@@ -1938,20 +1937,19 @@ class TestRecordRemoveHandler:
 
     async def test_remove_happy_path(self) -> None:
         connector = Bind9Connector()
-        run_mock = AsyncMock(
-            side_effect=[
-                _completed_process(stdout=_CHECKCONF_OUTPUT),
-                _completed_process(stdout=_SAMPLE_ZONEFILE),
-            ]
-        )
+        run_mock = AsyncMock(return_value=_completed_process(stdout=_CHECKCONF_OUTPUT))
         sudo_mock = AsyncMock(
-            return_value=_completed_process(
-                stdout=(
-                    "===STATE_BEFORE_BEGIN===\nold\n===STATE_BEFORE_END===\n"
-                    "===STATE_AFTER_BEGIN===\nnew\n===STATE_AFTER_END===\n"
-                    "===SUCCESS===\n"
-                )
-            )
+            side_effect=[
+                # The zonefile read under the server lock, then the apply.
+                _completed_process(stdout=_SAMPLE_ZONEFILE),
+                _completed_process(
+                    stdout=(
+                        "===STATE_BEFORE_BEGIN===\nold\n===STATE_BEFORE_END===\n"
+                        "===STATE_AFTER_BEGIN===\nnew\n===STATE_AFTER_END===\n"
+                        "===SUCCESS===\n"
+                    )
+                ),
+            ]
         )
         with (
             patch.object(connector, "_run_command", run_mock),
@@ -1968,20 +1966,19 @@ class TestRecordRemoveHandler:
 
     async def test_remove_zone_omitted_resolves_via_longest_suffix(self) -> None:
         connector = Bind9Connector()
-        run_mock = AsyncMock(
-            side_effect=[
-                _completed_process(stdout=_CHECKCONF_OUTPUT),
-                _completed_process(stdout=_SAMPLE_ZONEFILE),
-            ]
-        )
+        run_mock = AsyncMock(return_value=_completed_process(stdout=_CHECKCONF_OUTPUT))
         sudo_mock = AsyncMock(
-            return_value=_completed_process(
-                stdout=(
-                    "===STATE_BEFORE_BEGIN===\nold\n===STATE_BEFORE_END===\n"
-                    "===STATE_AFTER_BEGIN===\nnew\n===STATE_AFTER_END===\n"
-                    "===SUCCESS===\n"
-                )
-            )
+            side_effect=[
+                # The zonefile read under the server lock, then the apply.
+                _completed_process(stdout=_SAMPLE_ZONEFILE),
+                _completed_process(
+                    stdout=(
+                        "===STATE_BEFORE_BEGIN===\nold\n===STATE_BEFORE_END===\n"
+                        "===STATE_AFTER_BEGIN===\nnew\n===STATE_AFTER_END===\n"
+                        "===SUCCESS===\n"
+                    )
+                ),
+            ]
         )
         with (
             patch.object(connector, "_run_command", run_mock),
@@ -2048,13 +2045,14 @@ class TestRecordViewHandling:
 
     async def test_add_with_view_selects_file_and_uses_zonestatus_verify(self) -> None:
         connector = Bind9Connector()
-        run_mock = AsyncMock(
+        run_mock = AsyncMock(return_value=_completed_process(stdout=_MULTIVIEW_CHECKCONF_OUTPUT))
+        sudo_mock = AsyncMock(
             side_effect=[
-                _completed_process(stdout=_MULTIVIEW_CHECKCONF_OUTPUT),
+                # The zonefile read under the server lock, then the apply.
                 _completed_process(stdout=_SAMPLE_ZONEFILE),
+                _completed_process(stdout=_SUDO_SUCCESS),
             ]
         )
-        sudo_mock = AsyncMock(return_value=_completed_process(stdout=_SUDO_SUCCESS))
         with (
             patch.object(connector, "_run_command", run_mock),
             patch.object(connector, "_remote_bash_with_sudo", sudo_mock),
@@ -2081,13 +2079,14 @@ class TestRecordViewHandling:
 
     async def test_add_no_view_deployment_uses_dig_verify(self) -> None:
         connector = Bind9Connector()
-        run_mock = AsyncMock(
+        run_mock = AsyncMock(return_value=_completed_process(stdout=_CHECKCONF_OUTPUT))
+        sudo_mock = AsyncMock(
             side_effect=[
-                _completed_process(stdout=_CHECKCONF_OUTPUT),
+                # The zonefile read under the server lock, then the apply.
                 _completed_process(stdout=_SAMPLE_ZONEFILE),
+                _completed_process(stdout=_SUDO_SUCCESS),
             ]
         )
-        sudo_mock = AsyncMock(return_value=_completed_process(stdout=_SUDO_SUCCESS))
         with (
             patch.object(connector, "_run_command", run_mock),
             patch.object(connector, "_remote_bash_with_sudo", sudo_mock),
@@ -2104,13 +2103,14 @@ class TestRecordViewHandling:
 
     async def test_remove_with_view_uses_zonestatus_verify(self) -> None:
         connector = Bind9Connector()
-        run_mock = AsyncMock(
+        run_mock = AsyncMock(return_value=_completed_process(stdout=_MULTIVIEW_CHECKCONF_OUTPUT))
+        sudo_mock = AsyncMock(
             side_effect=[
-                _completed_process(stdout=_MULTIVIEW_CHECKCONF_OUTPUT),
+                # The zonefile read under the server lock, then the apply.
                 _completed_process(stdout=_SAMPLE_ZONEFILE),
+                _completed_process(stdout=_SUDO_SUCCESS),
             ]
         )
-        sudo_mock = AsyncMock(return_value=_completed_process(stdout=_SUDO_SUCCESS))
         with (
             patch.object(connector, "_run_command", run_mock),
             patch.object(connector, "_remote_bash_with_sudo", sudo_mock),
@@ -2244,20 +2244,18 @@ class TestRemoteCommandExitStatus:
         cause (missing file / permissions).
         """
         connector = Bind9Connector()
-        # First call (checkconf) succeeds; second call (cat) fails.
-        run_mock = AsyncMock(
-            side_effect=[
-                _completed_process(stdout=_CHECKCONF_OUTPUT, exit_status=0),
-                _completed_process(
-                    stdout="",
-                    stderr="cat: /etc/bind/db.evba.lab: Permission denied\n",
-                    exit_status=1,
-                ),
-            ]
+        # checkconf succeeds; the zonefile read (under the server lock) fails.
+        run_mock = AsyncMock(return_value=_completed_process(stdout=_CHECKCONF_OUTPUT))
+        sudo_mock = AsyncMock(
+            return_value=_completed_process(
+                stdout="",
+                stderr="cat: /etc/bind/db.evba.lab: Permission denied\n",
+                exit_status=1,
+            )
         )
         with (
             patch.object(connector, "_run_command", run_mock),
-            patch.object(connector, "_remote_bash_with_sudo", AsyncMock()),
+            patch.object(connector, "_remote_bash_with_sudo", sudo_mock),
             pytest.raises(RemoteCommandError) as exc_info,
         ):
             await bind9_record_add(
@@ -2268,6 +2266,8 @@ class TestRemoteCommandExitStatus:
         assert exc_info.value.exit_status == 1
         assert "cat" in exc_info.value.command
         assert "Permission denied" in exc_info.value.stderr
+        # Only the read ran; nothing was written.
+        assert sudo_mock.await_count == 1
 
     async def test_explicit_zone_checkconf_failure_raises_remote_command_error(self) -> None:
         """The explicit --zone branch checks the ``named-checkconf`` exit too."""

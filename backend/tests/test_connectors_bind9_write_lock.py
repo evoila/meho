@@ -20,6 +20,7 @@ import os
 import shutil
 import stat
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -29,12 +30,15 @@ import pytest
 import meho_backplane.connectors.bind9.ops_record as ops_record_module
 from meho_backplane.connectors.bind9 import Bind9Connector
 from meho_backplane.connectors.bind9._atomic import (
+    _LOCK_PATH,
     AtomicApplyError,
     AtomicApplyResult,
+    _build_locked_read_script,
     _build_pipeline_script,
     _compose_full_script,
     _interpret_pipeline_result,
     atomic_apply,
+    read_file_locked,
 )
 from meho_backplane.connectors.bind9.ops_record import (
     bind9_record_add,
@@ -43,13 +47,13 @@ from meho_backplane.connectors.bind9.ops_record import (
 )
 
 _ZONE_TEXT = (
-    "$ORIGIN evba.lab.\n"
+    "$ORIGIN example.test.\n"
     "$TTL 3600\n"
-    "@ IN SOA ns1.evba.lab. admin.evba.lab. (\n"
+    "@ IN SOA ns1.example.test. admin.example.test. (\n"
     "    2026010101 ; serial\n"
     "    3600 1800 604800 3600 )\n"
-    "@ IN NS ns1.evba.lab.\n"
-    "ns1 IN A 10.0.0.1\n"
+    "@ IN NS ns1.example.test.\n"
+    "ns1 IN A 192.0.2.1\n"
 )
 
 
@@ -71,7 +75,7 @@ class TestPipelineLockAndConflict:
     def _sandbox(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
         bind_root = tmp_path / "bind"
         bind_root.mkdir()
-        zonefile = bind_root / "db.evba.lab"
+        zonefile = bind_root / "db.example.test"
         zonefile.write_text(_ZONE_TEXT)
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
@@ -98,7 +102,7 @@ class TestPipelineLockAndConflict:
         pipeline = _build_pipeline_script(
             snapshot_path=str(tmp_path / f"snap-{name}.tar.gz"),
             audit_slice_path=str(zonefile),
-            zone_name="evba.lab",
+            zone_name="example.test",
             bind_root=str(bind_root),
             lock_path=str(tmp_path / "apply.lock"),
             lock_wait_seconds=lock_wait,
@@ -120,7 +124,7 @@ class TestPipelineLockAndConflict:
                 bind_root,
                 zonefile,
                 name=name,
-                new_text=_ZONE_TEXT + f"{name} IN A 10.0.0.9\n",
+                new_text=_ZONE_TEXT + f"{name} IN A 192.0.2.9\n",
                 expected=_sha(_ZONE_TEXT),
             )
             for name in ("alpha", "beta")
@@ -141,7 +145,7 @@ class TestPipelineLockAndConflict:
         assert len(winners) == 1, outputs
         assert len(losers) == 1, outputs
         # The loser wrote nothing: the file is exactly the winner's content.
-        assert zonefile.read_text() == _ZONE_TEXT + f"{winners[0]} IN A 10.0.0.9\n"
+        assert zonefile.read_text() == _ZONE_TEXT + f"{winners[0]} IN A 192.0.2.9\n"
         # And the loser's error is the conflict step the handlers retry on.
         proc = type("P", (), {"stdout": outputs[losers[0]], "stderr": "", "exit_status": 7})()
         with pytest.raises(AtomicApplyError) as exc_info:
@@ -155,14 +159,14 @@ class TestPipelineLockAndConflict:
             bind_root,
             zonefile,
             name="one",
-            new_text=_ZONE_TEXT + "x IN A 10.0.0.7\n",
+            new_text=_ZONE_TEXT + "x IN A 192.0.2.7\n",
             expected=_sha(_ZONE_TEXT),
         )
         out = subprocess.run(
             ["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60, check=False
         ).stdout
         assert "===SUCCESS===" in out
-        assert "x IN A 10.0.0.7" in zonefile.read_text()
+        assert "x IN A 192.0.2.7" in zonefile.read_text()
 
     def test_missing_file_with_a_hash_is_a_conflict(self, tmp_path: Path) -> None:
         bind_root, zonefile, env = self._sandbox(tmp_path)
@@ -178,7 +182,7 @@ class TestPipelineLockAndConflict:
 
     def test_no_expected_hash_skips_the_check(self, tmp_path: Path) -> None:
         bind_root, zonefile, env = self._sandbox(tmp_path)
-        zonefile.write_text(_ZONE_TEXT + "changed IN A 10.0.0.5\n")
+        zonefile.write_text(_ZONE_TEXT + "changed IN A 192.0.2.5\n")
         script = self._script(
             tmp_path, bind_root, zonefile, name="n", new_text="replaced\n", expected=None
         )
@@ -226,8 +230,128 @@ class TestPipelineLockAndConflict:
             zone_name="x",
             bind_root="/etc/bind",
         )
-        assert script.index("flock -w") < script.index("===FAILED_STEP===conflict")
+        assert script.index("flock -x -w") < script.index("===FAILED_STEP===conflict")
         assert script.index("===FAILED_STEP===conflict") < script.index("tar -czf")
+
+    def test_default_lock_is_in_a_root_only_folder(self) -> None:
+        assert _LOCK_PATH.startswith("/run/meho-bind9/")
+        script = _build_pipeline_script(
+            snapshot_path="/tmp/s",
+            audit_slice_path="/etc/bind/db.x",
+            zone_name="x",
+            bind_root="/etc/bind",
+        )
+        assert "/var/lock" not in script
+        assert 'exec 9>>"$LOCK_PATH"' in script
+
+    @staticmethod
+    def _run_with_lock(
+        tmp_path: Path, bind_root: Path, zonefile: Path, env: dict[str, str], lock_path: Path
+    ) -> str:
+        pipeline = _build_pipeline_script(
+            snapshot_path=str(tmp_path / "snap.tar.gz"),
+            audit_slice_path=str(zonefile),
+            zone_name="example.test",
+            bind_root=str(bind_root),
+            lock_path=str(lock_path),
+            lock_wait_seconds=2,
+        )
+        script = _compose_full_script(
+            staged_bytes=b"should not land\n",
+            staged_tar_bytes=None,
+            validate_command="true",
+            verify_command="true",
+            pipeline_script=pipeline,
+        )
+        return subprocess.run(
+            ["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60, check=False
+        ).stdout
+
+    def test_lock_folder_writable_by_others_is_refused(self, tmp_path: Path) -> None:
+        bind_root, zonefile, env = self._sandbox(tmp_path)
+        lock_dir = tmp_path / "locks"
+        lock_dir.mkdir()
+        lock_dir.chmod(0o777)
+        out = self._run_with_lock(tmp_path, bind_root, zonefile, env, lock_dir / "apply.lock")
+        assert "===FAILED_STEP===lock" in out
+        assert "writable by another user" in out
+        assert not (lock_dir / "apply.lock").exists()
+        assert zonefile.read_text() == _ZONE_TEXT
+
+    def test_lock_folder_that_is_a_link_is_refused(self, tmp_path: Path) -> None:
+        bind_root, zonefile, env = self._sandbox(tmp_path)
+        real = tmp_path / "real"
+        real.mkdir(mode=0o700)
+        (tmp_path / "locks").symlink_to(real)
+        out = self._run_with_lock(
+            tmp_path, bind_root, zonefile, env, tmp_path / "locks" / "apply.lock"
+        )
+        assert "===FAILED_STEP===lock" in out
+        assert not (real / "apply.lock").exists()
+        assert zonefile.read_text() == _ZONE_TEXT
+
+    def test_lock_file_that_is_a_link_is_refused_and_its_target_is_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        bind_root, zonefile, env = self._sandbox(tmp_path)
+        lock_dir = tmp_path / "locks"
+        lock_dir.mkdir(mode=0o700)
+        victim = tmp_path / "victim"
+        victim.write_text("keep me\n")
+        (lock_dir / "apply.lock").symlink_to(victim)
+        out = self._run_with_lock(tmp_path, bind_root, zonefile, env, lock_dir / "apply.lock")
+        assert "===FAILED_STEP===lock" in out
+        assert "not a plain file" in out
+        assert victim.read_text() == "keep me\n"
+        assert zonefile.read_text() == _ZONE_TEXT
+
+    def test_missing_lock_folder_is_made_for_the_owner_only(self, tmp_path: Path) -> None:
+        bind_root, zonefile, env = self._sandbox(tmp_path)
+        lock_dir = tmp_path / "new-locks"
+        out = self._run_with_lock(tmp_path, bind_root, zonefile, env, lock_dir / "apply.lock")
+        assert "===SUCCESS===" in out
+        assert stat.S_IMODE(lock_dir.stat().st_mode) == 0o700
+
+    def test_read_during_a_write_waits_and_sees_the_whole_new_file(self, tmp_path: Path) -> None:
+        zonefile = tmp_path / "db.example.test"
+        zonefile.write_text(_ZONE_TEXT)
+        lock_dir = tmp_path / "locks"
+        lock_dir.mkdir(mode=0o700)
+        lock_path = lock_dir / "apply.lock"
+        new_text = _ZONE_TEXT + "late IN A 192.0.2.60\n"
+        staged = tmp_path / "staged"
+        staged.write_text(new_text)
+        started = tmp_path / "started"
+        # A writer that holds the lock, cuts the file to zero length (as the
+        # stage step does), waits, and only then writes the new content.
+        writer = subprocess.Popen(
+            [
+                "flock",
+                "-x",
+                str(lock_path),
+                "sh",
+                "-c",
+                f": > {zonefile}; touch {started}; sleep 1; cat {staged} > {zonefile}",
+            ]
+        )
+        try:
+            for _ in range(200):
+                if started.exists():
+                    break
+                time.sleep(0.01)
+            assert started.exists()
+            assert zonefile.read_text() == ""  # a plain read now would see nothing
+            read = subprocess.run(
+                ["bash", "-c", _build_locked_read_script(str(zonefile), lock_path=str(lock_path))],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        finally:
+            writer.wait(timeout=30)
+        assert read.returncode == 0, read
+        assert read.stdout == new_text
 
 
 class TestExpectedHashValidation:
@@ -243,6 +367,67 @@ class TestExpectedHashValidation:
                 verify_command="true",
                 expected_sha256="abc'; rm -rf /; echo '",
             )
+
+
+class TestReadFileLocked:
+    async def test_lock_failure_is_raised_as_the_lock_step(self) -> None:
+        proc = type(
+            "P",
+            (),
+            {
+                "stdout": "===FAILED_STEP===lock\n===FAILED_DETAIL_BEGIN===\nbusy\n"
+                "===FAILED_DETAIL_END===\n",
+                "stderr": "",
+                "exit_status": 8,
+            },
+        )()
+        connector = Bind9Connector()
+        with (
+            patch.object(connector, "_remote_bash_with_sudo", return_value=proc) as run,
+            pytest.raises(AtomicApplyError) as exc_info,
+        ):
+            await read_file_locked(
+                connector,
+                object(),
+                sudo_password="pw",  # NOSONAR -- unit-test stub
+                path="/etc/bind/db.x",
+            )
+        assert exc_info.value.step == "lock"
+        script = run.call_args.args[1]
+        assert "flock -s" in script
+        assert "cat /etc/bind/db.x" in script
+
+    async def test_write_ops_read_through_the_locked_read(self) -> None:
+        seen: list[dict[str, Any]] = []
+        proc = type("P", (), {"stdout": _ZONE_TEXT, "stderr": "", "exit_status": 0})()
+
+        async def _locked_read(*_a: Any, **kw: Any) -> Any:
+            seen.append(kw)
+            return proc
+
+        async def _apply(*_a: Any, **kw: Any) -> AtomicApplyResult:
+            return AtomicApplyResult(
+                state_before=_ZONE_TEXT,
+                state_after=kw["staged_bytes"].decode("utf-8"),
+                audit_slice_path="/etc/bind/db.example.test",
+            )
+
+        async def _resolve(*_a: Any, **_k: Any) -> tuple[str, str, str | None]:
+            return "example.test", "/etc/bind/db.example.test", None
+
+        async def _pw(*_a: Any, **_k: Any) -> str:
+            return "pw"
+
+        with (
+            patch.object(ops_record_module, "_resolve_zone_and_path", _resolve),
+            patch.object(ops_record_module, "_sudo_password_from_target", _pw),
+            patch.object(ops_record_module, "read_file_locked", _locked_read),
+            patch.object(ops_record_module, "atomic_apply", _apply),
+        ):
+            await _add("y", "192.0.2.70")
+        assert seen == [
+            {"operator": None, "sudo_password": "pw", "path": "/etc/bind/db.example.test"}
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +457,7 @@ class _FakeZone:
         before = self.text
         self.text = kw["staged_bytes"].decode("utf-8")
         return AtomicApplyResult(
-            state_before=before, state_after=self.text, audit_slice_path="/etc/bind/db.evba.lab"
+            state_before=before, state_after=self.text, audit_slice_path="/etc/bind/db.example.test"
         )
 
 
@@ -281,7 +466,7 @@ def zone() -> Any:
     fake = _FakeZone()
 
     async def _resolve(*_a: Any, **_k: Any) -> tuple[str, str, str | None]:
-        return "evba.lab", "/etc/bind/db.evba.lab", None
+        return "example.test", "/etc/bind/db.example.test", None
 
     async def _pw(*_a: Any, **_k: Any) -> str:
         return "pw"
@@ -289,7 +474,7 @@ def zone() -> Any:
     with (
         patch.object(ops_record_module, "_resolve_zone_and_path", _resolve),
         patch.object(ops_record_module, "_sudo_password_from_target", _pw),
-        patch.object(ops_record_module, "_read_zonefile_text", fake.read),
+        patch.object(ops_record_module, "_read_zonefile_text_locked", fake.read),
         patch.object(ops_record_module, "atomic_apply", fake.apply),
     ):
         yield fake
@@ -299,16 +484,16 @@ async def _add(name: str, ip: str) -> dict[str, Any]:
     return await bind9_record_add(
         Bind9Connector(),
         object(),
-        {"fqdn": f"{name}.evba.lab", "ip": ip, "type": "A", "zone": "evba.lab"},
+        {"fqdn": f"{name}.example.test", "ip": ip, "type": "A", "zone": "example.test"},
     )
 
 
 class TestHandlersRedoOnConflict:
     async def test_two_parallel_adds_both_land(self, zone: _FakeZone) -> None:
-        results = await asyncio.gather(_add("one", "10.0.0.11"), _add("two", "10.0.0.12"))
-        assert {r["fqdn"] for r in results} == {"one.evba.lab", "two.evba.lab"}
-        assert "10.0.0.11" in zone.text
-        assert "10.0.0.12" in zone.text
+        results = await asyncio.gather(_add("one", "192.0.2.11"), _add("two", "192.0.2.12"))
+        assert {r["fqdn"] for r in results} == {"one.example.test", "two.example.test"}
+        assert "192.0.2.11" in zone.text
+        assert "192.0.2.12" in zone.text
         # Each write raised the serial once: 2026010101 -> 2026010103.
         assert "2026010103" in zone.text
         # One writer was refused once and read the file again.
@@ -317,36 +502,36 @@ class TestHandlersRedoOnConflict:
         assert zone.expected_hashes[2] != _sha(_ZONE_TEXT)
 
     async def test_add_and_remove_in_parallel_both_land(self, zone: _FakeZone) -> None:
-        zone.text = _ZONE_TEXT + "old IN A 10.0.0.30\n"
+        zone.text = _ZONE_TEXT + "old IN A 192.0.2.30\n"
 
         async def _remove() -> dict[str, Any]:
             return await bind9_record_remove(
-                Bind9Connector(), object(), {"fqdn": "old.evba.lab", "zone": "evba.lab"}
+                Bind9Connector(), object(), {"fqdn": "old.example.test", "zone": "example.test"}
             )
 
-        await asyncio.gather(_add("new", "10.0.0.31"), _remove())
-        assert "10.0.0.31" in zone.text
-        assert "10.0.0.30" not in zone.text
+        await asyncio.gather(_add("new", "192.0.2.31"), _remove())
+        assert "192.0.2.31" in zone.text
+        assert "192.0.2.30" not in zone.text
 
     async def test_delete_that_loses_the_race_is_refused_not_found(self, zone: _FakeZone) -> None:
-        zone.text = _ZONE_TEXT + "gone IN A 10.0.0.40\n"
+        zone.text = _ZONE_TEXT + "gone IN A 192.0.2.40\n"
 
         async def _delete() -> dict[str, Any]:
             return await bind9_record_delete(
                 Bind9Connector(),
                 object(),
-                {"fqdn": "gone.evba.lab", "type": "A", "zone": "evba.lab"},
+                {"fqdn": "gone.example.test", "type": "A", "zone": "example.test"},
             )
 
         async def _remove() -> dict[str, Any]:
             return await bind9_record_remove(
-                Bind9Connector(), object(), {"fqdn": "gone.evba.lab", "zone": "evba.lab"}
+                Bind9Connector(), object(), {"fqdn": "gone.example.test", "zone": "example.test"}
             )
 
         deleted, _removed = await asyncio.gather(_delete(), _remove())
         # The remove landed first or second; either way the record is gone and
         # a delete that finds nothing on the new file says so.
-        assert "10.0.0.40" not in zone.text
+        assert "192.0.2.40" not in zone.text
         assert deleted["status"] in {"deleted", "not_found"}
         if deleted["status"] == "not_found":
             assert deleted["deleted"] is False
@@ -363,7 +548,7 @@ class TestHandlersRedoOnConflict:
             raise AtomicApplyError("conflict", "the file changed after it was read")
 
         async def _resolve(*_a: Any, **_k: Any) -> tuple[str, str, str | None]:
-            return "evba.lab", "/etc/bind/db.evba.lab", None
+            return "example.test", "/etc/bind/db.example.test", None
 
         async def _pw(*_a: Any, **_k: Any) -> str:
             return "pw"
@@ -371,11 +556,11 @@ class TestHandlersRedoOnConflict:
         with (
             patch.object(ops_record_module, "_resolve_zone_and_path", _resolve),
             patch.object(ops_record_module, "_sudo_password_from_target", _pw),
-            patch.object(ops_record_module, "_read_zonefile_text", _read),
+            patch.object(ops_record_module, "_read_zonefile_text_locked", _read),
             patch.object(ops_record_module, "atomic_apply", _always_conflict),
             pytest.raises(AtomicApplyError) as exc_info,
         ):
-            await _add("x", "10.0.0.50")
+            await _add("x", "192.0.2.50")
         assert exc_info.value.step == "conflict"
         assert reads == ops_record_module._MAX_CONFLICT_RETRIES + 1
 
@@ -391,7 +576,7 @@ class TestHandlersRedoOnConflict:
             raise AtomicApplyError("verify", "dig did not answer")
 
         async def _resolve(*_a: Any, **_k: Any) -> tuple[str, str, str | None]:
-            return "evba.lab", "/etc/bind/db.evba.lab", None
+            return "example.test", "/etc/bind/db.example.test", None
 
         async def _pw(*_a: Any, **_k: Any) -> str:
             return "pw"
@@ -399,10 +584,10 @@ class TestHandlersRedoOnConflict:
         with (
             patch.object(ops_record_module, "_resolve_zone_and_path", _resolve),
             patch.object(ops_record_module, "_sudo_password_from_target", _pw),
-            patch.object(ops_record_module, "_read_zonefile_text", _read),
+            patch.object(ops_record_module, "_read_zonefile_text_locked", _read),
             patch.object(ops_record_module, "atomic_apply", _verify_failed),
             pytest.raises(AtomicApplyError) as exc_info,
         ):
-            await _add("x", "10.0.0.50")
+            await _add("x", "192.0.2.50")
         assert exc_info.value.step == "verify"
         assert reads == 1

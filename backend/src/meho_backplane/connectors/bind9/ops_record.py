@@ -98,6 +98,7 @@ from meho_backplane.connectors.bind9._atomic import (
     AtomicApplyError,
     AtomicApplyResult,
     atomic_apply,
+    read_file_locked,
 )
 from meho_backplane.connectors.bind9.ops import Bind9Op
 
@@ -1197,7 +1198,9 @@ async def _apply_zone_change(
 ) -> tuple[AtomicApplyResult, _ZonePlan] | dict[str, Any]:
     """Read the zonefile, plan the change, and write it; redo it if the file moved.
 
-    ``plan`` gets the zonefile text and returns the :class:`_ZonePlan`, or
+    The read holds the server lock, so it never sees a file that another
+    write has half written. ``plan`` gets the zonefile text and returns
+    the :class:`_ZonePlan`, or
     a finished answer (a refusal) that is handed back as it is. The write
     carries the hash of the text that was read. If another write changed
     the file in between, ``atomic_apply`` writes nothing and raises step
@@ -1208,7 +1211,9 @@ async def _apply_zone_change(
     attempt = 0
     while True:
         attempt += 1
-        current_text = await _read_zonefile_text(connector, target, zonefile_path, operator)
+        current_text = await _read_zonefile_text_locked(
+            connector, target, zonefile_path, operator, sudo_password
+        )
         outcome = plan(current_text)
         if isinstance(outcome, dict):
             return outcome
@@ -1253,6 +1258,29 @@ async def _read_zonefile_text(
     # remote exit status + stderr.
     cat_proc = await connector._run_command(target, cmd, operator=operator)
     return _require_zero_exit(cat_proc, command=cmd)
+
+
+async def _read_zonefile_text_locked(
+    connector: Bind9Connector,
+    target: Any,
+    zonefile_path: str,
+    operator: Operator | None,
+    sudo_password: str,
+) -> str:
+    """Read the zonefile while holding the server lock that writes take.
+
+    Used by the write ops: a plain ``cat`` (:func:`_read_zonefile_text`)
+    can run while another write has cut the file to zero length, and a
+    change planned on that text would fail or answer ``not_found``.
+    """
+    proc = await read_file_locked(
+        connector,
+        target,
+        operator=operator,
+        sudo_password=sudo_password,
+        path=zonefile_path,
+    )
+    return _require_zero_exit(proc, command=f"cat {shlex.quote(zonefile_path)}")
 
 
 async def bind9_record_add(

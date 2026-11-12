@@ -55,6 +55,7 @@ own page:
 | `/ui/runners` | [`satellite-runner.md`](satellite-runner.md) |
 | `/ui/automation`, `/ui/pairing` | [`addon-pairing.md`](addon-pairing.md) |
 | `/ui/connectors/overrides` | [`spec-ingestion.md`](spec-ingestion.md) |
+| `/ui/policy/classify` | [`policy-classification.md`](policy-classification.md) |
 | `/ui/keycloak` | [`ui-keycloak-console.md`](ui-keycloak-console.md) |
 | `/ui/agents/{name}/run` | [`ui-agent-run-console.md`](ui-agent-run-console.md) |
 | `/ui/sensors` | the `meho_backplane.ui.routes` row of "Key types" below, and [`sensor.md`](sensor.md) |
@@ -938,8 +939,9 @@ button answers at once".
 ## Approval notifications
 
 A person can switch on "Notify me about approvals in this browser" on the
-account page. MEHO then stores that browser's push subscription. Sending
-the messages is the next step and is not built yet.
+account page. MEHO then stores that browser's push subscription, and sends
+a message to it when a request waits for the person's approval. How the
+messages are sent: [approvals.md, "Notifications"](approvals.md#notifications).
 
 **Off by default.** The admin turns the feature on for the whole site with
 the setting `WEB_PUSH_ENABLED` (chart value `webPush.enabled`). While it is
@@ -986,7 +988,10 @@ to `POST /ui/account/push/subscribe`. MEHO checks it
   base64url.
 
 MEHO stores the row in `push_subscription` (migration `0151`) for the
-signed-in person and the current tenant, with the time. The person and the
+signed-in person and the current tenant, with the time, and with the
+person's login facts there (migration `0161`: `tenant_role`, `approver`,
+`self_approver`, `platform_admin` and `facts_read_at`, read from their
+login). The person and the
 tenant come from the session, never from the form. The endpoint names one
 browser, so it is unique: switching on again replaces the row, and when
 another person switches on the same browser, the browser moves to them. A
@@ -1004,7 +1009,11 @@ subscription. The script asks `POST /ui/account/push/status` (form field
 `endpoint`; answer `{"on": true|false}`) when the page opens and again each
 time the list below reloads. So the switch shows "off" after a "Remove" in
 the list, and for a person who signs in on a browser that another person
-switched on.
+switched on. When the answer is "on", MEHO also reads the login facts again
+from the person's login, for their rows of the current tenant. MEHO does the
+same at each console sign-in and tenant pick. So a changed login group
+counts from the next sign-in or account page open. When MEHO cannot read the
+login at that moment, it keeps the stored facts.
 
 Switching off drops the subscription in the browser and posts
 `POST /ui/account/push/unsubscribe`, which deletes the person's own row for
@@ -1021,10 +1030,12 @@ Every route is a console route: it needs the session and the CSRF token.
 Logs name the person, the tenant, the row id and the push service, never
 the endpoint or the keys.
 
-Code: `web_push/` (`keys.py`, `endpoints.py`, `models.py`, `store.py`),
-`ui/routes/account_push.py`, `templates/account/_push.html` and
-`_push_subscriptions.html`. Tests: `tests/test_ui_account_push.py`,
-`tests/test_web_push_checks.py`.
+Code: `web_push/` (`keys.py`, `endpoints.py`, `models.py`, `store.py`,
+`recipients.py`, `encryption.py`, `send.py`), `ui/routes/account_push.py`,
+`templates/account/_push.html` and `_push_subscriptions.html`, and the
+`push` and `notificationclick` handlers in `app/service-worker.js`. Tests:
+`tests/test_ui_account_push.py`, `tests/test_web_push_checks.py`,
+`tests/test_web_push_send.py`, `tests/test_web_push_service_worker.py`.
 
 On iPhone and iPad, web push works only in the installed app (iOS 16.4 and
 newer), so the switch says to install MEHO first.

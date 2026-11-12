@@ -1541,6 +1541,14 @@ class Settings(BaseModel):
         none of it and every operation keeps today's risk level and
         approval. Env ``POLICY_CLASSIFICATION``; Helm
         ``config.policy.classification``.
+    policy_engine_shadow:
+        Off by default. When on, the policy evaluator
+        (:mod:`meho_backplane.policy.evaluate`) works out its own answer
+        for every call and every approval, next to today's checks. It
+        logs ``policy_shadow_mismatch`` and counts a metric when the two
+        answers differ. Today's checks still decide. When off, the
+        evaluator does not run. Env ``POLICY_ENGINE_SHADOW``; Helm
+        ``config.policy.engineShadow``.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -2448,6 +2456,7 @@ class Settings(BaseModel):
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = False
+    policy_engine_shadow: bool = False
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
     #: forwarded operator JWT. Empty ("") means the add-on is not
@@ -2538,6 +2547,13 @@ class Settings(BaseModel):
     #: The node list then also reads the pods of all namespaces. Off: the op
     #: is as before. Set via ``K8S_NODE_LIST_RESOURCES``.
     k8s_node_list_resources: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Wider ``preview_operation`` for typed writes (#5074), behind a switch
+    #: that is off by default. When on, a typed write previews also when it
+    #: does not carry ``requires_approval``, and a credential write with its
+    #: own preview builder shows that plan (never a copy of the params).
+    #: Off: the same answers, hashes and tool texts as before. Set via
+    #: ``PREVIEW_TYPED_WRITES``.
+    preview_typed_writes: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3536,6 +3552,9 @@ def get_settings() -> Settings:
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),
         ),
+        policy_engine_shadow=parse_bool_env(
+            os.environ.get("POLICY_ENGINE_SHADOW"),
+        ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),
         corpus_service_token=os.environ.get("CORPUS_SERVICE_TOKEN", "").strip(),
@@ -3563,6 +3582,9 @@ def get_settings() -> Settings:
         ),
         k8s_node_list_resources=parse_bool_env(
             os.environ.get("K8S_NODE_LIST_RESOURCES"),
+        ),
+        preview_typed_writes=parse_bool_env(
+            os.environ.get("PREVIEW_TYPED_WRITES"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

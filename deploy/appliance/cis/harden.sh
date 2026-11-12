@@ -9,7 +9,10 @@
 # the data stream to the build VM and runs it as root, after the form-2
 # install and the appliance pieces, before the clean. In this order:
 #
-#   1. the packages the hardening and meho-host log-server need, and ufw goes
+#   1. every package update of the build day, the packages the hardening
+#      and meho-host log-server need, and ufw goes; the build stops when an
+#      update is left, or when a newer kernel than the running one is
+#      installed
 #   2. the scanner files under /opt/meho/appliance/cis, where meho-host check
 #      and the update find them, and oscap-run-sce-script in /usr/local/bin,
 #      so the script checks run from the noexec /tmp
@@ -20,7 +23,8 @@
 #      unconfined turned off; IPv6 off; SSH with keys only, no root and
 #      only for admin; root's PATH without /snap/bin; /etc/cron.allow in
 #      the group crontab; the folders AIDE skips; nftables.service loads
-#      the MEHO firewall too, without its flush
+#      the MEHO firewall too, without its flush; the login message without
+#      Ubuntu's advice about updates
 #   5. the MEHO firewall blocks by default: policy drop on the chains input,
 #      forward and output. Last, because the fixes of step 3 install
 #      packages from the internet
@@ -60,6 +64,20 @@ readonly RULE_PREFIX=xccdf_org.ssgproject.content_rule_
 # rsyslog-gnutls: the TLS module of rsyslog for meho-host log-server --tls
 # (#5752). The appliance has no way to the Ubuntu archive later.
 readonly PACKAGES=(aide aide-common openscap-scanner libpam-pwquality libpwquality-tools cracklib-runtime apparmor-utils rsyslog-gnutls)
+# Also the updates Ubuntu hands out to a share of the machines at a time
+# (phased updates), so the OVA has every update of its build day.
+readonly ALL_UPDATES=(-o APT::Get::Always-Include-Phased-Updates=true)
+# The appliance gets its OS fixes only with MEHO versions (form-1 design,
+# section 7), so the login message gives no advice about updates, a new
+# Ubuntu release, Ubuntu Pro or news. These scripts are configuration files
+# of their packages: a package update does not bring a deleted one back.
+# 91-release-upgrade goes too: for a day it shows the release check that a
+# root login of the build saved, before Prompt=never was set.
+readonly MOTD_DIR=/etc/update-motd.d
+readonly MOTD_UPDATE_ADVICE=(10-help-text 85-fwupd 90-updates-available 91-contract-ua-esm-status 91-release-upgrade 92-unattended-upgrades 95-hwe-eol)
+# A timer runs 50-motd-news, so the script stays; ENABLED=0 silences it.
+readonly MOTD_NEWS=/etc/default/motd-news
+readonly RELEASE_UPGRADES=/etc/update-manager/release-upgrades
 readonly FSTAB=/etc/fstab
 readonly UBUNTU_TMP_MOUNT=/usr/share/systemd/tmp.mount
 readonly TMP_MOUNT=/etc/systemd/system/tmp.mount
@@ -177,15 +195,42 @@ rule_names() {
 # --- Step 1 ----------------------------------------------------------------
 
 install_packages() {
+    local left kernels newest running
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -q ||
+    # --error-on=any: without it, a failed download keeps the old package
+    # lists, and the build would miss the updates published since.
+    apt-get update -q --error-on=any ||
         fail "apt-get update failed, so the packages of the hardening cannot be installed." \
             "check that the build VM reaches the Ubuntu archive (archive.ubuntu.com and security.ubuntu.com over HTTP), then run the build again from step 3."
+    # As the update in place does (deploy/linux-server/lib/update.sh): it may
+    # add a package and never removes one, and a configuration file the
+    # form-2 install changed keeps its version.
+    apt-get -y -q "${ALL_UPDATES[@]}" -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+        upgrade --with-new-pkgs ||
+        fail "apt-get could not install the package updates." "read apt-get's message above, then run the build again from step 3."
     apt-get install -y -q --no-install-recommends "${PACKAGES[@]}" ||
         fail "apt-get could not install ${PACKAGES[*]}." "read apt-get's message above, then run the build again from step 3."
     # One firewall tool (CIS 4.1.1): nftables. The form-2 install turned ufw off.
     apt-get purge -y -q ufw
-    ok "installed ${PACKAGES[*]}; ufw is removed"
+    # The same package lists as the upgrade, so no update published since
+    # can stop the build. An "Inst" line is an update still to install.
+    left=$(apt-get -s -q "${ALL_UPDATES[@]}" dist-upgrade | awk '$1 == "Inst" { print $2 }') ||
+        fail "apt-get could not check that every package update is installed." "read apt-get's message above, then run the build again from step 3."
+    if [[ -n $left ]]; then
+        fail "These packages are still older than in the Ubuntu archive, because apt would have to remove another package for them: ${left//$'\n'/, }." \
+            "run 'apt-get -s dist-upgrade' on the build VM to see what apt would remove. If that is safe, purge it in install_packages of harden.sh; then run the build again from step 3."
+    fi
+    # build.sh restarts the build VM after the updates of its step 2. A newer
+    # kernel here came out during the build; the scan must not check an
+    # older kernel than the appliance starts.
+    kernels=("$HOST_ROOT"/boot/vmlinuz-*)
+    newest=$(printf '%s\n' "${kernels[@]##*/vmlinuz-}" | sort -V | tail -n 1)
+    running=$(uname -r)
+    if [[ $newest != "$running" ]]; then
+        fail "The build VM runs the kernel $running, but the kernel $newest is installed too: Ubuntu published it during the build, and the scan would check the older kernel." \
+            "destroy the build VM and build again from step 1; step 2 restarts it into the newest kernel."
+    fi
+    ok "installed every package update of today and ${PACKAGES[*]}; ufw is removed; the newest kernel, $running, runs"
 }
 
 # --- Step 2 ----------------------------------------------------------------
@@ -356,6 +401,26 @@ EOF
     ok "nftables.service loads $MEHO_FIREWALL_FILE too, and its stop no longer flushes the rules"
 }
 
+quiet_login_message() {
+    local name settings
+    for name in "${MOTD_UPDATE_ADVICE[@]}"; do
+        rm -f "${HOST_ROOT}${MOTD_DIR}/$name"
+    done
+    if [[ -f ${HOST_ROOT}${MOTD_NEWS} ]]; then
+        sed 's/^ENABLED=.*/ENABLED=0/' "${HOST_ROOT}${MOTD_NEWS}" | write_root_file "$MOTD_NEWS" 0644
+    fi
+    # Prompt=never: do-release-upgrade offers no new Ubuntu release. A
+    # package update keeps the changed file (dpkg --force-confold in the
+    # update in place).
+    if ! settings=$(sed 's/^Prompt=.*/Prompt=never/' "${HOST_ROOT}${RELEASE_UPGRADES}") ||
+        ! grep -qx 'Prompt=never' <<<"$settings"; then
+        fail "$RELEASE_UPGRADES has no Prompt line in the form of Ubuntu 24.04." \
+            "read the file, then adapt quiet_login_message in harden.sh."
+    fi
+    printf '%s\n' "$settings" | write_root_file "$RELEASE_UPGRADES" 0644
+    ok "the login message gives no advice about updates, a new Ubuntu release, Ubuntu Pro or news"
+}
+
 # --- Step 5 ----------------------------------------------------------------
 
 # The form-2 file has the chains input, forward and output with policy
@@ -452,6 +517,7 @@ main() {
     set_cron_allow_group
     set_aide_skipped_folders
     enable_nftables_service
+    quiet_login_message
     step "Hardening 5: the firewall blocks by default"
     set_firewall_drop_policies
     step "Hardening 6: the scan"

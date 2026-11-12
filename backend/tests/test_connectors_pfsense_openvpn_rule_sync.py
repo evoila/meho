@@ -28,19 +28,13 @@ from unittest.mock import MagicMock
 import pytest
 from jsonschema import Draft202012Validator
 
-import meho_backplane.connectors.pfsense  # noqa: F401 -- import for registry side-effects
+import meho_backplane.connectors.pfsense as pfsense  # import for registry side-effects
 import meho_backplane.connectors.pfsense.ops_openvpn_rule as rule_module
 from meho_backplane.broadcast.events import classify_op
-from meho_backplane.connectors.pfsense import PFSENSE_OPS, PfSenseConnector
-from meho_backplane.connectors.pfsense.ops_openvpn_rule import (
-    OPENVPN_RULE_OPS,
-    build_rule_sync_playback,
-    rule_tag,
-)
 from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 from meho_backplane.op_classes import is_root_shell
 
-_OP = OPENVPN_RULE_OPS[0]
+_OP = rule_module.OPENVPN_RULE_OPS[0]
 _RID_A = "123456789"
 _RID_B = "123456790"
 
@@ -67,7 +61,7 @@ def _rule_xml(
 
 
 def _mine(tracker: str, source: str, destination: str, name: str = "guest-1", **kw: Any) -> str:
-    return _rule_xml(tracker, source, destination, descr=rule_tag(name), **kw)
+    return _rule_xml(tracker, source, destination, descr=rule_module.rule_tag(name), **kw)
 
 
 _LAN_RULE = _rule_xml("1700000001", "192.0.2.0/24", "any", interface="lan", descr="lan out")
@@ -89,7 +83,7 @@ def _proc(stdout: str = "", exit_status: int = 0) -> Any:
     return proc
 
 
-class _Fake(PfSenseConnector):
+class _Fake(pfsense.PfSenseConnector):
     """A scripted pfSense: config reads replay a list, the playback prints *playback_out*."""
 
     def __init__(self, configs: list[str], *, playback_out: str = "") -> None:
@@ -103,14 +97,22 @@ class _Fake(PfSenseConnector):
     async def _auth_config(self, target: Any, operator: Any = None) -> dict[str, Any]:
         return {"username": "admin", "client_keys": [], "known_hosts": None}
 
-    async def _run_command(self, target: Any, command: str, operator: Any = None) -> Any:
-        self.commands.append(command)
-        if command == "cat /cf/conf/config.xml":
+    async def _run_command(
+        self,
+        target: Any,
+        cmd: str,
+        *,
+        operator: Any = None,
+        timeout: float = 30.0,
+        stdin: str | None = None,
+    ) -> Any:
+        self.commands.append(cmd)
+        if cmd == "cat /cf/conf/config.xml":
             return _proc(self._configs.pop(0) if len(self._configs) > 1 else self._configs[0])
-        if command.startswith("cat > /etc/phpshellsessions/"):
-            self.staged.append(command)
-        if command.startswith("pfSsh.php playback"):
-            self.played.append(command)
+        if cmd.startswith("cat > /etc/phpshellsessions/"):
+            self.staged.append(cmd)
+        if cmd.startswith("pfSsh.php playback"):
+            self.played.append(cmd)
             return _proc(self._playback_out)
         return _proc()
 
@@ -259,7 +261,9 @@ async def test_sync_saves_a_rollback_copy_writes_and_verifies() -> None:
 
 
 async def test_sync_writes_nothing_when_the_rules_changed_after_the_plan() -> None:
-    fake = _Fake([_config()], playback_out=f"MEHO_RULES_CHANGED={rule_tag('guest-1')}\n")
+    fake = _Fake(
+        [_config()], playback_out=f"MEHO_RULES_CHANGED={rule_module.rule_tag('guest-1')}\n"
+    )
     with pytest.raises(RuntimeError, match="changed after the plan was made"):
         await _sync(fake, [_want()])
     assert fake.commands.count("cat /cf/conf/config.xml") == 1
@@ -290,10 +294,18 @@ async def test_sync_fails_when_something_else_changed_during_the_write() -> None
 
 async def test_sync_fails_when_the_rollback_copy_cannot_be_saved() -> None:
     class _NoCopy(_Fake):
-        async def _run_command(self, target: Any, command: str, operator: Any = None) -> Any:
-            if "cp /cf/conf/config.xml" in command:
+        async def _run_command(
+            self,
+            target: Any,
+            cmd: str,
+            *,
+            operator: Any = None,
+            timeout: float = 30.0,
+            stdin: str | None = None,
+        ) -> Any:
+            if "cp /cf/conf/config.xml" in cmd:
                 return _proc("", 1)
-            return await super()._run_command(target, command, operator)
+            return await super()._run_command(target, cmd, operator=operator)
 
     fake = _NoCopy([_config()])
     with pytest.raises(RuntimeError, match="rollback copy"):
@@ -428,7 +440,7 @@ def test_fragment_adds_the_rules_below_the_openvpn_rules(tmp_path: Path) -> None
             "guest-1", _RID_B, destination="192.0.2.80", protocol="tcp", destination_port="443"
         ),
     ]
-    fragment = build_rule_sync_playback(plan, {rule_tag("guest-1"): 0})
+    fragment = rule_module.build_rule_sync_playback(plan, {rule_module.rule_tag("guest-1"): 0})
     printed, out = _run_php(tmp_path, _PHP_BEFORE, fragment)
     assert printed == ""
     rules = out["config"]["filter"]["rule"]
@@ -454,7 +466,9 @@ def test_fragment_adds_the_rules_below_the_openvpn_rules(tmp_path: Path) -> None
 @_needs_php
 def test_fragment_appends_when_the_openvpn_tab_is_empty(tmp_path: Path) -> None:
     before = {"filter": {"rule": [_php_rule("1", "lan", "lan out")]}}
-    fragment = build_rule_sync_playback([_plan_row("guest-1", _RID_A)], {rule_tag("guest-1"): 0})
+    fragment = rule_module.build_rule_sync_playback(
+        [_plan_row("guest-1", _RID_A)], {rule_module.rule_tag("guest-1"): 0}
+    )
     _, out = _run_php(tmp_path, before, fragment)
     assert [r["tracker"] for r in out["config"]["filter"]["rule"]] == ["1", _RID_A]
 
@@ -473,15 +487,18 @@ def test_fragment_writes_nothing_when_the_rules_changed(
     tmp_path: Path, extra: dict[str, Any]
 ) -> None:
     before = {"filter": {"rule": [*_PHP_BEFORE["filter"]["rule"], extra]}}
-    fragment = build_rule_sync_playback([_plan_row("guest-1", _RID_A)], {rule_tag("guest-1"): 0})
+    fragment = rule_module.build_rule_sync_playback(
+        [_plan_row("guest-1", _RID_A)], {rule_module.rule_tag("guest-1"): 0}
+    )
     printed, out = _run_php(tmp_path, before, fragment)
     assert printed.startswith("MEHO_RULES_CHANGED=")
     assert out["config"] == before and out["calls"] == []
 
 
 def test_fragment_shape() -> None:
-    fragment = build_rule_sync_playback(
-        [_plan_row("guest-1", _RID_A)], {rule_tag("guest-1"): 2, rule_tag("other"): 0}
+    fragment = rule_module.build_rule_sync_playback(
+        [_plan_row("guest-1", _RID_A)],
+        {rule_module.rule_tag("guest-1"): 2, rule_module.rule_tag("other"): 0},
     )
     assert all(not line.lstrip().startswith(("!", "=")) for line in fragment.splitlines())
     assert fragment.count("write_config(") == 1 and "unset(" not in fragment
@@ -494,11 +511,11 @@ def test_fragment_shape() -> None:
 
 
 def test_the_op_is_registered_and_needs_approval() -> None:
-    (op,) = [o for o in PFSENSE_OPS if o.op_id == "pfsense.openvpn.rule.sync"]
+    (op,) = [o for o in pfsense.PFSENSE_OPS if o.op_id == "pfsense.openvpn.rule.sync"]
     assert (op.safety_level, op.requires_approval, op.group_key) == ("dangerous", True, "vpn")
     Draft202012Validator.check_schema(op.parameter_schema)
     Draft202012Validator.check_schema(op.response_schema or {})
-    assert callable(getattr(PfSenseConnector, op.handler_attr))
+    assert callable(getattr(pfsense.PfSenseConnector, op.handler_attr))
     assert classify_op(op.op_id) == "write"
     assert is_root_shell(op.op_id)
 

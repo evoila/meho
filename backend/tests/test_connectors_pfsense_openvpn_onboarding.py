@@ -36,11 +36,10 @@ import hvac.exceptions
 import pytest
 from jsonschema import Draft202012Validator
 
-import meho_backplane.connectors.pfsense  # noqa: F401 -- import for registry side-effects
+import meho_backplane.connectors.pfsense as pfsense  # import for registry side-effects
 import meho_backplane.connectors.pfsense.ops_openvpn_user as user_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import classify_op
-from meho_backplane.connectors.pfsense import PFSENSE_OPS, PfSenseConnector
 from meho_backplane.connectors.pfsense.openvpn_config import (
     parse_csc_entries,
     parse_openvpn_servers,
@@ -49,12 +48,6 @@ from meho_backplane.connectors.pfsense.ops_openvpn_csc import (
     OPENVPN_CSC_OPS,
     build_csc_sync_playback,
     plan_csc_sync,
-)
-from meho_backplane.connectors.pfsense.ops_openvpn_user import (
-    OPENVPN_USER_OPS,
-    build_user_create_playback,
-    build_user_delete_playback,
-    build_user_undo_playback,
 )
 from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 from meho_backplane.op_classes import is_root_shell
@@ -155,7 +148,7 @@ def _proc(stdout: str = "", exit_status: int = 0) -> Any:
     return proc
 
 
-class _Fake(PfSenseConnector):
+class _Fake(pfsense.PfSenseConnector):
     """A scripted pfSense: config reads replay a list, other commands match by prefix."""
 
     def __init__(
@@ -182,22 +175,30 @@ class _Fake(PfSenseConnector):
     async def _auth_config(self, target: Any, operator: Any = None) -> dict[str, Any]:
         return {"username": "admin", "client_keys": [], "known_hosts": None}
 
-    async def _run_command(self, target: Any, command: str, operator: Any = None) -> Any:
-        self.commands.append(command)
-        if command == "cat /cf/conf/config.xml":
+    async def _run_command(
+        self,
+        target: Any,
+        cmd: str,
+        *,
+        operator: Any = None,
+        timeout: float = 30.0,
+        stdin: str | None = None,
+    ) -> Any:
+        self.commands.append(cmd)
+        if cmd == "cat /cf/conf/config.xml":
             if len(self._configs) > 1:
                 return _proc(self._configs.pop(0))
             return _proc(self._configs[0])
-        if command.startswith("[ -d /var/etc/openvpn ]"):
+        if cmd.startswith("[ -d /var/etc/openvpn ]"):
             return _proc(self._rendered, self._rendered_exit)
-        if command.startswith("cat > /etc/phpshellsessions/"):
-            self.staged.append(command)
+        if cmd.startswith("cat > /etc/phpshellsessions/"):
+            self.staged.append(cmd)
             return _proc()
-        if command.startswith("pfSsh.php playback"):
-            self.played.append(command)
+        if cmd.startswith("pfSsh.php playback"):
+            self.played.append(cmd)
             return _proc(self._playback_out, 1 if self._playback_fails else 0)
         for key, (out, code) in self._sockets.items():
-            if f"/server{key}/sock" in command:
+            if f"/server{key}/sock" in cmd:
                 return _proc(out, code)
         return _proc()
 
@@ -283,7 +284,15 @@ async def test_next_free_fails_loudly_when_the_rendered_files_cannot_be_read() -
 
 async def test_next_free_fails_loudly_when_the_config_cannot_be_read() -> None:
     class _Broken(_Fake):
-        async def _run_command(self, target: Any, command: str, operator: Any = None) -> Any:
+        async def _run_command(
+            self,
+            target: Any,
+            cmd: str,
+            *,
+            operator: Any = None,
+            timeout: float = 30.0,
+            stdin: str | None = None,
+        ) -> Any:
             return _proc("", 1)
 
     with pytest.raises(RuntimeError, match=r"config\.xml"):
@@ -549,10 +558,18 @@ async def test_sync_is_safe_to_run_twice() -> None:
 
 async def test_sync_fails_when_the_rollback_copy_cannot_be_saved() -> None:
     class _NoCopy(_Fake):
-        async def _run_command(self, target: Any, command: str, operator: Any = None) -> Any:
-            if "cp /cf/conf/config.xml" in command:
+        async def _run_command(
+            self,
+            target: Any,
+            cmd: str,
+            *,
+            operator: Any = None,
+            timeout: float = 30.0,
+            stdin: str | None = None,
+        ) -> Any:
+            if "cp /cf/conf/config.xml" in cmd:
                 return _proc("", 1)
-            return await super()._run_command(target, command, operator)
+            return await super()._run_command(target, cmd, operator=operator)
 
     fake = _NoCopy([_config()])
     with pytest.raises(RuntimeError, match="rollback copy"):
@@ -996,10 +1013,18 @@ async def test_vault_failure_and_failed_undo_names_the_user(
     monkeypatch.setattr(user_module, "vault_client_for_operator", _FakeVault(fail=True))
 
     class _NoUndo(_Fake):
-        async def _run_command(self, target: Any, command: str, operator: Any = None) -> Any:
-            if command.startswith("pfSsh.php playback meho_openvpn_user_undo"):
+        async def _run_command(
+            self,
+            target: Any,
+            cmd: str,
+            *,
+            operator: Any = None,
+            timeout: float = 30.0,
+            stdin: str | None = None,
+        ) -> Any:
+            if cmd.startswith("pfSsh.php playback meho_openvpn_user_undo"):
                 return _proc("", 1)
-            return await super()._run_command(target, command, operator)
+            return await super()._run_command(target, cmd, operator=operator)
 
     fake = _NoUndo([_config(), _config(users=_user("guest-1", "2000"))], playback_out=_CREATED_OUT)
     with pytest.raises(RuntimeError, match=r"'guest-1' could not be removed again"):
@@ -1074,12 +1099,20 @@ async def test_create_keeps_the_password_when_the_read_back_fails(vault: _FakeVa
     class _ReadBackFails(_Fake):
         reads = 0
 
-        async def _run_command(self, target: Any, command: str, operator: Any = None) -> Any:
-            if command == "cat /cf/conf/config.xml":
+        async def _run_command(
+            self,
+            target: Any,
+            cmd: str,
+            *,
+            operator: Any = None,
+            timeout: float = 30.0,
+            stdin: str | None = None,
+        ) -> Any:
+            if cmd == "cat /cf/conf/config.xml":
                 self.reads += 1
                 if self.reads == 2:
                     return _proc("", 1)
-            return await super()._run_command(target, command, operator)
+            return await super()._run_command(target, cmd, operator=operator)
 
     fake = _ReadBackFails([_config()], playback_out=_CREATED_OUT)
     with pytest.raises(RuntimeError, match="could not be read again") as err:
@@ -1132,22 +1165,24 @@ async def test_create_needs_an_operator(vault: _FakeVault) -> None:
 
 
 def test_create_fragment_shape_and_password_alphabet() -> None:
-    body = build_user_create_playback("guest-1", "A note")
+    body = user_module.build_user_create_playback("guest-1", "A note")
     assert all(not line.lstrip().startswith(("!", "=")) for line in body.splitlines())
     assert body.count("write_config(") == 1
     assert "random_int" in body
     with pytest.raises(ValueError, match="name must match"):
-        build_user_create_playback("x'; system('id'); //", "d")
+        user_module.build_user_create_playback("x'; system('id'); //", "d")
     # An allowed name only fills the string literals.
-    assert build_user_create_playback("a.b", "d") == body.replace("guest-1", "a.b").replace(
-        "A note", "d"
-    )
+    assert user_module.build_user_create_playback("a.b", "d") == body.replace(
+        "guest-1", "a.b"
+    ).replace("A note", "d")
 
 
 @_needs_php
 def test_create_fragment_run_in_php(tmp_path: Path) -> None:
     before = _php_config([])
-    printed, out = _run_php(tmp_path, before, build_user_create_playback("guest-1", "A note"))
+    printed, out = _run_php(
+        tmp_path, before, user_module.build_user_create_playback("guest-1", "A note")
+    )
     found = re.fullmatch(
         r"MEHO_VPN_CREATED_UID=2000\nMEHO_VPN_PASSWORD=([A-Za-z0-9]{24})\n", printed
     )
@@ -1174,7 +1209,9 @@ def test_create_fragment_run_in_php_does_nothing_when_the_name_exists(tmp_path: 
         {"name": "guest-1", "uid": "2000", "scope": "user", "bcrypt-hash": "old"},
     ]
     before = _php_config([], users)
-    printed, out = _run_php(tmp_path, before, build_user_create_playback("guest-1", "d"))
+    printed, out = _run_php(
+        tmp_path, before, user_module.build_user_create_playback("guest-1", "d")
+    )
     assert printed == "MEHO_VPN_EXISTS\n"
     assert out["config"] == before and out["calls"] == []
 
@@ -1398,12 +1435,12 @@ async def test_delete_rejects_a_hostile_name_before_any_ssh_call() -> None:
 
 
 def test_delete_fragment_shape() -> None:
-    body = build_user_delete_playback("guest-1")
+    body = user_module.build_user_delete_playback("guest-1")
     assert all(not line.lstrip().startswith(("!", "=")) for line in body.splitlines())
     assert body.count("write_config(") == 1
     assert "(string)$config['system']['user'][$meho_idx]['uid'] !== '0'" in body
     with pytest.raises(ValueError, match="name must match"):
-        build_user_delete_playback("a b")
+        user_module.build_user_delete_playback("a b")
 
 
 @_needs_php
@@ -1421,7 +1458,7 @@ def test_delete_fragment_run_in_php(tmp_path: Path) -> None:
         ],
         users,
     )
-    _, out = _run_php(tmp_path, before, build_user_delete_playback("guest-1"))
+    _, out = _run_php(tmp_path, before, user_module.build_user_delete_playback("guest-1"))
     assert [u["name"] for u in out["config"]["system"]["user"]] == ["admin", "other"]
     assert [e["common_name"] for e in out["config"]["openvpn"]["openvpn-csc"]] == ["other"]
     assert out["config"]["openvpn"]["openvpn-csc"][0] == before["openvpn"]["openvpn-csc"][1]
@@ -1449,7 +1486,7 @@ def test_delete_fragment_run_in_php_writes_nothing_while_a_tagged_rule_remains(
             {"tracker": "2", "descr": " meho-vpn-user:guest-1 "},
         ]
     }
-    printed, out = _run_php(tmp_path, before, build_user_delete_playback("guest-1"))
+    printed, out = _run_php(tmp_path, before, user_module.build_user_delete_playback("guest-1"))
     assert printed.strip() == "MEHO_VPN_RULES_REMAIN=1"
     assert out["config"] == before and out["calls"] == []
 
@@ -1461,7 +1498,7 @@ def test_undo_fragment_run_in_php_keeps_the_overrides_of_the_name(tmp_path: Path
         {"name": "guest-1", "uid": "2000", "scope": "user"},
     ]
     before = _php_config([_csc_row("guest-1", "1", "198.51.100.5/24")], users)
-    _, out = _run_php(tmp_path, before, build_user_undo_playback("guest-1", "2000"))
+    _, out = _run_php(tmp_path, before, user_module.build_user_undo_playback("guest-1", "2000"))
     assert [u["name"] for u in out["config"]["system"]["user"]] == ["admin"]
     assert out["config"]["openvpn"] == before["openvpn"]
     assert out["calls"] == [
@@ -1477,13 +1514,13 @@ def test_undo_fragment_run_in_php_leaves_a_user_with_another_uid(tmp_path: Path)
         {"name": "guest-1", "uid": "2007", "scope": "user"},
     ]
     before = _php_config([], users)
-    _, out = _run_php(tmp_path, before, build_user_undo_playback("guest-1", "2000"))
+    _, out = _run_php(tmp_path, before, user_module.build_user_undo_playback("guest-1", "2000"))
     assert out["config"] == before and out["calls"] == []
 
 
 def test_undo_fragment_needs_a_numeric_uid() -> None:
     with pytest.raises(ValueError, match="uid"):
-        build_user_undo_playback("guest-1", "1' || '1")
+        user_module.build_user_undo_playback("guest-1", "1' || '1")
 
 
 @_needs_php
@@ -1492,7 +1529,7 @@ def test_delete_fragment_run_in_php_writes_nothing_when_its_own_guard_fails(
     tmp_path: Path, name: str
 ) -> None:
     before = _php_config([_csc_row("admin", "1")])
-    _, out = _run_php(tmp_path, before, build_user_delete_playback(name))
+    _, out = _run_php(tmp_path, before, user_module.build_user_delete_playback(name))
     assert out["config"] == before and out["calls"] == []
 
 
@@ -1502,7 +1539,7 @@ def test_delete_fragment_run_in_php_writes_nothing_when_its_own_guard_fails(
 
 
 def test_ops_are_registered_with_the_right_risk_level() -> None:
-    by_id = {op.op_id: op for op in PFSENSE_OPS}
+    by_id = {op.op_id: op for op in pfsense.PFSENSE_OPS}
     expected = {
         "pfsense.openvpn.address.next_free": ("safe", False),
         "pfsense.openvpn.csc.sync": ("caution", True),
@@ -1514,12 +1551,12 @@ def test_ops_are_registered_with_the_right_risk_level() -> None:
         assert by_id[op_id].group_key == "vpn"
         Draft202012Validator.check_schema(by_id[op_id].parameter_schema)
         Draft202012Validator.check_schema(by_id[op_id].response_schema or {})
-    assert {op.op_id for op in (*OPENVPN_CSC_OPS, *OPENVPN_USER_OPS)} == set(expected)
+    assert {op.op_id for op in (*OPENVPN_CSC_OPS, *user_module.OPENVPN_USER_OPS)} == set(expected)
 
 
 def test_every_op_has_a_connector_handler() -> None:
-    for op in (*OPENVPN_CSC_OPS, *OPENVPN_USER_OPS):
-        assert callable(getattr(PfSenseConnector, op.handler_attr))
+    for op in (*OPENVPN_CSC_OPS, *user_module.OPENVPN_USER_OPS):
+        assert callable(getattr(pfsense.PfSenseConnector, op.handler_attr))
 
 
 def test_broadcast_classes_and_root_shell_marks() -> None:
@@ -1536,7 +1573,9 @@ def test_broadcast_classes_and_root_shell_marks() -> None:
 
 
 def test_the_create_response_schema_has_no_password_field() -> None:
-    schema = next(op for op in OPENVPN_USER_OPS if op.op_id.endswith("user.create")).response_schema
+    schema = next(
+        op for op in user_module.OPENVPN_USER_OPS if op.op_id.endswith("user.create")
+    ).response_schema
     assert schema is not None
     assert "password" not in json.dumps(schema["properties"]).replace('"field"', "")
 

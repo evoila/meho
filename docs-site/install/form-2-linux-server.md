@@ -391,11 +391,16 @@ Satellite, or updates by hand. The download holds no operating system
 packages. A server with no internet gets its updates from your own
 package mirror.
 
+While MEHO is on the machine:
+
 - Install operating system updates as usual. A restart is fine: RKE2
   and MEHO start again by themselves, and OpenBao unseals itself.
 - Do not change or delete `/var/lib/rancher`, `/etc/rancher`,
   `/var/lib/meho` or `/etc/meho`. They hold the built-in Kubernetes, the
-  data of MEHO, its settings and the firewall file.
+  data of MEHO, its settings and the firewall file. There are three
+  exceptions, each described in this chapter: your own rules in
+  `/etc/meho/firewall.nft`, the two first-login files, and the support
+  bundles in `/var/lib/meho/support/`.
 - Do not replace the MEHO firewall, and do not turn on firewalld or ufw
   again. Add your own rules to the MEHO firewall file instead (see
   [The firewall file](#the-firewall-file)).

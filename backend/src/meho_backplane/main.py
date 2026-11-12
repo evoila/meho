@@ -115,6 +115,7 @@ from meho_backplane.api.v1.operation_overrides import (
 )
 from meho_backplane.api.v1.operation_runs import router as api_v1_operation_runs_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
+from meho_backplane.api.v1.policy import router as api_v1_policy_router
 from meho_backplane.api.v1.policy_classification import (
     connector_router as api_v1_connector_classification_router,
 )
@@ -1146,6 +1147,10 @@ app.include_router(api_v1_tenants_router)
 # tenant_admin (own tenant) or platform_admin (several tenants); human-only
 # import. Operator-plane REST + CLI only; no MCP tool.
 app.include_router(api_v1_instance_settings_router)
+# The policy file (policy: v1): /api/v1/policy/validate, /import
+# (?preview=true), /export, /history. tenant_admin or platform_admin; the
+# import is human-only and waits for a second admin. REST + CLI only.
+app.include_router(api_v1_policy_router)
 # T3 (#2880) -- event_source registry admin surface at
 # /api/v1/event-sources*. Tenant-scoped CRUD (operator reads,
 # tenant_admin writes) the inbound webhook ingest (#2881) resolves a

@@ -16,6 +16,7 @@ Every command accepts the global flags below.
 ## Global flags
 
 - `--config` — path to the meho config file (default: `$XDG_CONFIG_HOME/meho/config.json`).
+- `--profile` — named login to use (default: `$MEHO_PROFILE`, else `default`). Each profile keeps its own login, so one person can hold several identities side by side. `meho login <url> --profile <name>` stores the login under that name. The flag wins over `$MEHO_PROFILE`.
 - `--verbose`, `-v` — enable verbose output.
 - `--work-ref` — external change-ticket reference, any ticket id on one line (for example `gh:evoila/meho#13` or `CHG0012345`; default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Five commands have their own `--work-ref` flag that tags the run with the reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the header. List commands filter by reference with `--filter-work-ref`.
 
@@ -4156,6 +4157,76 @@ meho pfsense version [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON instead of the human render
 - `--target` — target slug to dispatch against (required)
+
+## `meho policy`
+
+Manage the policy file (validate / diff / import / export / history)
+
+```
+meho policy
+```
+
+### `meho policy diff`
+
+Show what importing a policy file would change (dry run)
+
+```
+meho policy diff FILE [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
+### `meho policy export`
+
+Write the stored policy as a policy file
+
+```
+meho policy export [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--output`, `-o` — write the file here instead of stdout
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
+### `meho policy history`
+
+List the imported policy files, newest first
+
+```
+meho policy history [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--limit` — how many entries to show (1 to 20)
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
+### `meho policy import`
+
+Ask to import a policy file; a second admin must approve it
+
+```
+meho policy import FILE [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
+### `meho policy validate`
+
+Check a policy file and list every mistake
+
+```
+meho policy validate FILE [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
 
 ## `meho promote`
 

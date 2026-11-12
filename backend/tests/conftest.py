@@ -1211,6 +1211,28 @@ def pytest_fixture_setup(fixturedef, request):
     )
 
 
+def pytest_runtest_logstart(nodeid: str, location: object) -> None:
+    """Write the running test of this worker to a progress file, in CI only.
+
+    ``MEHO_CI_PROGRESS_DIR`` is set by the CI test jobs. The memory sampler
+    (``scripts/ci/memory_sampler.sh``) reads these files, so when memory runs
+    high its log line names the test each worker runs. A killed runner loses
+    its files, but the lines the sampler already printed stay in the job log.
+    A write error never fails a test.
+    """
+    directory = os.environ.get("MEHO_CI_PROGRESS_DIR")
+    if not directory:
+        return
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "master")
+    try:
+        target = os.path.join(directory, f"{worker}.txt")
+        with open(f"{target}.tmp", "w") as fh:
+            fh.write(nodeid + "\n")
+        os.replace(f"{target}.tmp", target)
+    except OSError:
+        pass
+
+
 def _save_worker_coverage_data() -> None:
     """Write this xdist worker's coverage data file before the worker reports done.
 

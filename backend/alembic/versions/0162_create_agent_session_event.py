@@ -3,8 +3,8 @@
 
 """Create ``agent_session_event``: the saved events of a hosted agent run.
 
-Revision ID: 0161
-Revises: 0160
+Revision ID: 0162
+Revises: 0161
 Create Date: 2026-11-12
 
 A hosted agent run (a run that MEHO starts itself) gets one session in the
@@ -28,8 +28,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision: str = "0161"
-down_revision: str | None = "0160"
+revision: str = "0162"
+down_revision: str | None = "0161"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

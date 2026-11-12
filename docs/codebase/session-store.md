@@ -104,7 +104,7 @@ is two separate sessions.
 | `AgentSessionEvent` | `models.py` | One saved event of a hosted agent run: kind, checked data, quarantine flag, `seq` |
 | `RunEventLog` | `hosted_runs.py` | Saves the events of one hosted run, in order, when they happen |
 
-The tables come from migrations `0152` and `0161` (`agent_session_event`).
+The tables come from migrations `0152` and `0162` (`agent_session_event`).
 
 ## Control flow
 

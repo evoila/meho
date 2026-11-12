@@ -87,7 +87,7 @@ class AgentSessionUpload(Base):
 
 
 class AgentSessionEvent(Base):
-    """One saved event of a hosted agent run (migration ``0161``).
+    """One saved event of a hosted agent run (migration ``0162``).
 
     ``record_id`` is the run's session record; its id is the run id.
     ``seq`` counts from 1 in the order the run made the events. ``data``

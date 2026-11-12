@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0161_create_agent_session_event``.
+"""Tests for Alembic migration ``0162_create_agent_session_event``.
 
 The migration adds the table of the saved events of hosted agent runs. The
 tests check that ``upgrade`` creates it with the columns of the model, that
@@ -25,8 +25,8 @@ from meho_backplane.db.migrations import alembic_config
 from meho_backplane.session_store.models import AgentSessionEvent
 from meho_backplane.settings import get_settings
 
-_REVISION = "0161"
-_DOWN_REVISION = "0160"
+_REVISION = "0162"
+_DOWN_REVISION = "0161"
 _MODELS = (AgentSessionEvent,)
 
 
@@ -36,7 +36,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0161.db"
+    db_path = tmp_path / "migration_0162.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

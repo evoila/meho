@@ -142,12 +142,26 @@ The merge queue runs the full matrix on the exact code that will land on
 `main`. But a reviewer should see test results before that. What a
 maintainer does before merge:
 
-1. Push the head commit of the pull request to a branch in this
-   repository, for example `ci/pr-<number>`. The full matrix runs there.
-2. Link that CI run in the review.
-3. If you cannot push the branch, run ruff, mypy and the tests of the
+1. Read the change first. The next step runs its code on our own
+   runners.
+2. Push the head commit of the pull request to a branch in this
+   repository, for example `ci/pr-<number>`, and open a draft pull
+   request from that branch to `main`. CI runs only on pull requests
+   (and in the merge queue), so a pushed branch alone starts nothing.
+   The draft pull request runs the full matrix:
+
+   ```bash
+   gh pr checkout <number>
+   git push origin HEAD:ci/pr-<number>
+   gh pr create --draft --base main --head ci/pr-<number> \
+     --title "CI run for #<number>" --body "CI only. Do not merge."
+   ```
+
+3. Link that CI run in the review of the fork pull request.
+4. If you cannot push the branch, run ruff, mypy and the tests of the
    changed code on your machine and write the result in the review.
-4. Delete the `ci/pr-<number>` branch when the review is done.
+5. When the review is done, close the draft pull request and delete
+   the `ci/pr-<number>` branch.
 
 ## Code style
 

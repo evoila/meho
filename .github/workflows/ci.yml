@@ -1612,7 +1612,7 @@ jobs:
                 echo "- The unit test shards run on our own runners. A fork pull request cannot use them, so they were skipped. A skipped job shows as green. Green here does **not** mean the tests passed."
                 echo "- Lint and type check (ruff + mypy): ${lint}."
                 echo "- The merge queue runs the full test matrix before this code lands on \`main\`."
-                echo "- Maintainer: before you approve, push the head commit to a branch in this repository (for example \`ci/pr-<number>\`) and link that CI run in the review. See \"Pull requests from forks\" in CONTRIBUTING.md."
+                echo "- Maintainer: before you approve, push the head commit to a branch in this repository (for example \`ci/pr-<number>\`), open a draft pull request from it to \`main\`, and link its CI run in the review. A pushed branch alone starts no CI. See \"Pull requests from forks\" in CONTRIBUTING.md."
               } >> "${GITHUB_STEP_SUMMARY}"
               echo "Unit lane GREEN for a fork pull request, but the unit test shards did not run (lint: ${lint}). The merge queue runs them. See the step summary."
             fi

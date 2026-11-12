@@ -2705,9 +2705,10 @@ the test map, and sysmon cannot record that (see
 
 ### Fork-PR guard
 
-Every job that runs on a pull request carries the same `if:` guard the
-publish workflows use (the fan-in jobs wrap it in `always() && ...`;
-`merge-queue-watchdog` runs only on `merge_group`):
+Every job that runs on a pull request, except the six hosted jobs named
+below, carries the same `if:` guard the publish workflows use (the integration fan-in wraps
+it in `always() && ...`; `merge-queue-watchdog` runs only on
+`merge_group`):
 
 ```yaml
 if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -2719,14 +2720,18 @@ arbitrary code from a forked PR (`go test`, `pytest`, `helm template`
 with custom values) is never allowed to execute on it. The OR
 short-circuits on `push` events so main-branch CI is unaffected.
 
-The six jobs that moved to GitHub-hosted runners (#4626, step 1) keep the
-same guard. On a hosted runner the guard no longer protects internal
-infrastructure. It stays because the `python-unit-lane` fan-in expects
-`python-lint`, the shards and itself to skip together on a fork PR, and
-because one identical guard on every `ci.yml` job keeps the
-`test_ci_fork_runner_isolation.py` invariant simple to reason about. A
-fork PR still gets every `ci.yml` required context reported as
-success-by-skip, exactly as before.
+The six jobs that moved to GitHub-hosted runners (#4626, step 1) have no
+guard since #4835: `changes`, `python-lint`, `go-lint-test`,
+`cli-api-snapshot-freshness`, `helm-lint-template` and the fan-in
+`python-unit-lane`. On a pull request they run on GitHub-hosted runners
+with a read-only token and no secret, so a fork pull request runs them.
+The unit shards still skip on a fork PR. The `python-unit-lane` fan-in
+then passes when lint passed, and its step summary says that the unit
+tests did not run. `test_ci_fork_runner_isolation.py` pins both sides:
+the six jobs have no guard, and every job on our own pool keeps it.
+`CONTRIBUTING.md`, "Pull requests from forks", has the maintainer steps
+to get a full CI run: push the head commit to a branch here and open a
+draft pull request from it.
 
 This guard is `ci.yml`'s arm of the repo-wide untrusted-PR isolation
 model — the full inventory, the disposable-runner routing pattern, and

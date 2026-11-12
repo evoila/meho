@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0160_add_policy_revision``.
+"""Behavioural tests for ``0161_add_policy_revision``.
 
 The migration only adds the ``policy_revision`` table; ``downgrade()``
 removes it again. Every step targets this migration's own revision
-(``0160``) and its ``down_revision`` (``0159``), never ``head``.
+(``0161``) and its ``down_revision`` (``0160``), never ``head``.
 """
 
 from __future__ import annotations
@@ -23,13 +23,13 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0160"
-_DOWN_REVISION = "0159"
+_REVISION = "0161"
+_DOWN_REVISION = "0160"
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0160.db"
+    db_path = tmp_path / "migration_0161.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

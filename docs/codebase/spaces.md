@@ -4,8 +4,8 @@
 
 A space is an area inside one tenant that belongs to one person or a small
 team. It lists its members and the systems assigned to it. This page covers
-the three tables and the history rule. Operations, routes and the overview
-come in later Tasks of the same Initiative.
+the three tables, the history rule and the five operations. Routes and the
+import come in later Tasks of the same Initiative.
 
 The words:
 
@@ -47,18 +47,49 @@ key, not the name.
   is "not found".
 - The callers commit.
 
+## Operations
+
+The built-in connector `spaces-records-1.x` (code in
+`backend/src/meho_backplane/connectors/spaces/`) has five operations. They
+are typed operations, like the ones of `audit-integrity-1.x`.
+
+| Operation | What it does | Risk level |
+|---|---|---|
+| `spaces.assign` | Assigns a target, a machine, a service or a fact to a space. Needs a reason. The same thing twice in one space changes nothing. | `caution` |
+| `spaces.unassign` | Ends an assignment. The row stays, with an end time. | `caution` |
+| `spaces.reassign` | Ends an assignment and starts a new one in another space, in one step. | `caution` |
+| `spaces.member.disable` | "Leave a lab": ends one person's membership in one space (a new row with state `disabled` starts). Nothing is deleted. It never calls the Keycloak connector; the company account is a separate step. | `caution` |
+| `spaces.overview` | Per space: owner, members, assigned systems. Per target: product, version, when it was detected, and health. Reads stored data only. | `safe` |
+
+- The four writes need the `tenant_admin` role, a reason, and they only work
+  in the caller's tenant. The audit row of the call holds who and why, and
+  the new row holds `changed_by` and `reason`.
+- The four writes have `requires_approval` on, so every call waits for an
+  approval click, also in the web interface. This keeps the operation
+  contract rules (`test_operation_contracts.py`).
+- "Owner left": when a person with role `owner` is disabled and the space
+  has no active owner, `spaces.member.disable` lists the current assignments
+  of the space, and `spaces.overview` shows `owner_left: true` on the space
+  and on each of its assignments. They wait for `spaces.reassign`. No column
+  stores this; it is read from the member rows.
+- Health of a target: the state of the newest run of the checks (Sensors)
+  that watch the target by name. When that run is older than twice the
+  check's interval, or has no time, the health is `unknown`. For a cron
+  check the interval is the gap between two runs.
+- A long overview comes back behind a result handle (JSONFlux); `count`
+  stays in the answer.
+
 ## Dependencies
 
 - The setting `SPACES_ENABLED` (off by default) turns spaces on. The tables
-  exist either way and are empty. With the setting off, nothing changes for
-  an install.
+  exist either way and are empty. With the setting off, all five operations
+  answer "Spaces are off" and nothing else changes for an install.
 
 ## Known issues
 
-- Only the tables and the store exist. No operation, route, or CLI verb uses
-  them yet.
+- No route, CLI verb or import uses the store yet.
 
 ## References
 
-- Tests: `backend/tests/test_spaces_store.py`,
+- Tests: `backend/tests/test_spaces_ops.py`, `backend/tests/test_spaces_store.py`,
   `backend/tests/migrations/test_migration_0156_create_spaces_tables.py`.

@@ -5,6 +5,7 @@ package sessions
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -147,8 +148,30 @@ func TestCheckReplacesBINDKeySecrets(t *testing.T) {
 
 func TestCheckHoldsBackABINDSecretOverTwoLines(t *testing.T) {
 	got := checkFile([]byte("secret \"bWFkZVVw\n  U2VjcmV0VmFsdWU=\";\n"))
-	if len(got.Unsure) != 1 || got.Unsure[0] != reasonPossible {
+	if !slices.Contains(got.Unsure, reasonPossible) {
 		t.Fatalf("unsure = %v", got.Unsure)
+	}
+}
+
+func TestCheckHoldsBackABINDSecretThatRunsOverLines(t *testing.T) {
+	for _, text := range []string{
+		"secret /* key */ \"bWFkZVVw\nU2VjcmV0VmFsdWU=\";\n",
+		"secret\n  \"bWFkZVVwU2VjcmV0VmFsdWU=\";\n",
+		"secret // the key\n  \"bWFkZVVwU2VjcmV0VmFsdWU=\";\n",
+		"cookie-secret\n  0123456789abcdef0123;\n",
+	} {
+		got := checkFile([]byte(text))
+		if !slices.Contains(got.Unsure, reasonBindLines) {
+			t.Errorf("%q: unsure = %v", text, got.Unsure)
+		}
+	}
+}
+
+func TestCheckIsSureAboutABINDSecretOnOneLine(t *testing.T) {
+	text := "key \"k\" {\n  secret /* key */ \"bWFkZVVwU2VjcmV0VmFsdWU=\";\n};\nthe secret is rotated\n"
+	got := checkFile([]byte(text))
+	if len(got.Unsure) != 0 || strings.Contains(string(got.Content), "bWFkZVVw") {
+		t.Fatalf("content %q, unsure %v", got.Content, got.Unsure)
 	}
 }
 

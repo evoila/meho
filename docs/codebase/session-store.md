@@ -273,8 +273,10 @@ the outbox.
    also finds GitHub tokens and AWS access keys. Secrets in links
    (`urlsecret.go`) and BIND key secrets (`bindsecret.go`) are found by
    code, ported from the server's `url_secret.py` and `bind_secret.py`.
-   A BIND secret in quotes that does not end on its line holds the
-   session back, because the check reads one line at a time.
+   The check reads one line at a time, so it then reads all text lines
+   of a file at once with the BIND finder. A BIND secret that it still
+   finds there (the value on a later line than `secret`, or a value over
+   a line break) holds the session back.
    A session that cannot be read or packed counts as failed, and `push`
    exits non-zero, like for a failed upload.
 6. **Upload.** All checked files go in one gzip tar archive to `POST

@@ -157,7 +157,8 @@ meho sessions push
   `push` says why. This happens when a file is not UTF-8 text, when a
   name that looks like a secret still has a value (for example
   `"password": "..."`), when a private key has no `END` line, or when a
-  BIND secret in quotes goes on to the next line.
+  BIND secret runs over more than one line (for example `secret` on one
+  line and the value on the next).
 - The upload goes to the MEHO of your `meho login`, with your normal
   login. It needs no extra key. MEHO stores it in your tenant.
 - `push` sends the transcript `<session-id>.jsonl` and the files of the

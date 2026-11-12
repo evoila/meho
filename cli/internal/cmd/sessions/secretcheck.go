@@ -24,7 +24,9 @@ import (
 // The check works line by line, and a line's result depends only on
 // that line (and on an open private key block before it). So when an
 // open session grows, the checked file grows at the end too, and the
-// server can add the new tail to what it stored before.
+// server can add the new tail to what it stored before. One more check
+// reads all text lines at once, but it can only hold the session back:
+// a BIND secret that runs over more than one line.
 //
 // A JSON line (a JSON Lines transcript) is parsed and each string in it
 // is checked, so a replacement never breaks the JSON. A changed line is
@@ -98,6 +100,7 @@ const (
 	reasonPossible     = "a secret-like name still has a value"
 	reasonOpenKeyBlock = "a private key block has no END line"
 	reasonJSONReEncode = "a JSON line could not be written back"
+	reasonBindLines    = "a BIND secret runs over more than one line"
 )
 
 // checkedFile is the result of the check on one file.
@@ -176,6 +179,9 @@ type lineCheck struct {
 	unsure     bool
 	badJSON    bool
 	insideKey  bool
+	// plain holds the checked text lines; a JSON line adds only its line
+	// break. See bindAcrossLines.
+	plain strings.Builder
 }
 
 func (c *lineCheck) text(value string) string {
@@ -238,35 +244,45 @@ func compactJSON(value any) (string, bool) {
 
 // line returns the checked line; "" drops a line inside a private key block.
 func (c *lineCheck) line(line string) string {
+	checked, isJSON := c.checkLine(line)
+	if isJSON || checked == "" {
+		c.plain.WriteString("\n")
+	} else {
+		c.plain.WriteString(checked)
+	}
+	return checked
+}
+
+func (c *lineCheck) checkLine(line string) (string, bool) {
 	body := strings.TrimRight(line, "\r\n")
 	ending := line[len(body):]
 	if c.insideKey {
 		if loc := endMark(body); loc >= 0 {
 			c.insideKey = false
 		}
-		return ""
+		return "", false
 	}
 	if parsed := jsonValue(body); parsed != nil {
 		before := c.redactions
 		checked := c.walk(parsed)
 		if c.redactions == before {
-			return line
+			return line, true
 		}
 		encoded, ok := compactJSON(checked)
 		if !ok {
 			c.badJSON = true
-			return ""
+			return "", true
 		}
-		return encoded + ending
+		return encoded + ending, true
 	}
 	if begin := openKeyAt(body); begin >= 0 {
 		// A private key starts on this line and ends on a later one: the
 		// lines up to its END line become one marker.
 		c.insideKey = true
 		c.redactions++
-		return c.text(body[:begin]) + keyMarker + ending
+		return c.text(body[:begin]) + keyMarker + ending, false
 	}
-	return c.text(body) + ending
+	return c.text(body) + ending, false
 }
 
 // openKeyAt returns where a private key block starts that has no END on
@@ -292,6 +308,19 @@ func endMark(body string) int {
 	return -1
 }
 
+// bindAcrossLines says whether the checked text lines still hold a BIND
+// secret value. The finder reads one line at a time, so it misses a value
+// that starts on a later line than its keyword, or that runs over a line
+// break. Reading all text lines at once finds those.
+func bindAcrossLines(text string) bool {
+	for _, sp := range bindSecretSpans(text) {
+		if !strings.HasPrefix(text[sp[0]:sp[1]], "[REDACTED:") {
+			return true
+		}
+	}
+	return false
+}
+
 // checkFile runs the secret check on the bytes of one file.
 func checkFile(data []byte) checkedFile {
 	if !utf8.Valid(data) {
@@ -312,6 +341,9 @@ func checkFile(data []byte) checkedFile {
 	var unsure []string
 	if c.unsure {
 		unsure = append(unsure, reasonPossible)
+	}
+	if bindAcrossLines(c.plain.String()) {
+		unsure = append(unsure, reasonBindLines)
 	}
 	if c.insideKey {
 		unsure = append(unsure, reasonOpenKeyBlock)

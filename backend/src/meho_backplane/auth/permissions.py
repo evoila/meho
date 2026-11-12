@@ -127,6 +127,7 @@ __all__ = [
     "agent_grant_name",
     "agent_no_grant_already_logged",
     "agent_no_grant_log_scope",
+    "matched_grant",
     "resolve_verdict",
 ]
 
@@ -472,6 +473,55 @@ def _no_grant_refusal(
 # ---------------------------------------------------------------------------
 
 
+def _target_str(target_id: Any | None) -> str | None:
+    """*target_id* (a UUID or an object with ``.id``) as a plain string, or ``None``."""
+    if target_id is None:
+        return None
+    return str(getattr(target_id, "id", target_id))
+
+
+async def _matching_rows(
+    session: AsyncSession, *, operator: Operator, op_id: str, target_str: str | None
+) -> tuple[list[AgentPermission], list[AgentPermission]]:
+    """Load the grant rows of *operator*; return ``(all rows, the rows that match)``.
+
+    Rows are matched on the token ``sub`` and, for an agent, its client
+    identity (``agent:<name>``), the name a grant is keyed on (#3795). A
+    row matches when its ``op_pattern`` matches *op_id* and its
+    ``target_scope`` is empty, ``"*"`` or *target_str*.
+    """
+    rows = await _load_rows(session, operator.tenant_id, _grant_principal_subs(operator))
+    matching = [
+        row
+        for row in rows
+        if fnmatch(op_id, row.op_pattern)
+        and (not row.target_scope or row.target_scope == "*" or target_str == row.target_scope)
+    ]
+    return rows, matching
+
+
+async def matched_grant(
+    *,
+    session: AsyncSession,
+    operator: Operator,
+    op_id: str,
+    target_id: Any | None,
+) -> tuple[PermissionVerdict, str] | None:
+    """The verdict of the agent grant that covers this call, before any ceiling.
+
+    Returns ``(verdict, source)`` of the most specific matching row (ties
+    fold to the strictest), or ``None`` when no row matches. It only reads:
+    no ceiling, no ``AGENT_GRANT_REQUIRED`` rule and no log line. The policy
+    evaluator (:mod:`meho_backplane.policy.evaluate`) applies those itself.
+    """
+    _, matching = await _matching_rows(
+        session, operator=operator, op_id=op_id, target_str=_target_str(target_id)
+    )
+    if not matching:
+        return None
+    return _pick_raw_verdict(matching, "safe")
+
+
 def _finalize_verdict(
     *,
     raw_verdict: PermissionVerdict,
@@ -545,36 +595,15 @@ async def resolve_verdict(
         reached.  Callers log + forward the reason to the structured
         error payload.
     """
-    # Normalise target_id to a plain string for comparison against
-    # target_scope column values.
-    target_str: str | None = None
-    if target_id is not None:
-        raw = getattr(target_id, "id", target_id)
-        target_str = str(raw)
+    target_str = _target_str(target_id)
 
     # --- Gate 1: user role ceiling ------------------------------------
     role_ceil = _role_ceiling(operator.tenant_role)
 
     # --- Gate 2: agent-permission rows --------------------------------
-    # Match on the token ``sub`` AND, for an agent principal, its client
-    # identity (``agent:<name>``) — the identifier a grant is keyed on
-    # (#3795). ``_grant_principal_subs`` encapsulates that fold.
-    principal_subs = _grant_principal_subs(operator)
-    rows = await _load_rows(session, operator.tenant_id, principal_subs)
-
-    # Filter rows to those whose op_pattern and target_scope match.
-    matching: list[AgentPermission] = []
-    for row in rows:
-        if not fnmatch(op_id, row.op_pattern):
-            continue
-        # target_scope: NULL or "*" = any target; else exact UUID match.
-        if (
-            row.target_scope
-            and row.target_scope != "*"
-            and (target_str is None or target_str != row.target_scope)
-        ):
-            continue
-        matching.append(row)
+    rows, matching = await _matching_rows(
+        session, operator=operator, op_id=op_id, target_str=target_str
+    )
 
     # --- Gate 3: pick verdict -----------------------------------------
     if not matching:

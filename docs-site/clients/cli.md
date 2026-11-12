@@ -184,6 +184,22 @@ no secret; the token lives in the keyring, or in a `0600`-mode
 `credentials.json` sibling on headless hosts where no keyring is
 available.
 
+### Several logins at once (profiles)
+
+One person sometimes needs two identities, for example one that starts
+a write and one that approves it. Give each identity a profile name:
+
+```bash
+meho login https://meho.example.com --profile initiator
+meho login https://meho.example.com --profile approver
+meho --profile approver status      # or: export MEHO_PROFILE=approver
+```
+
+Each profile keeps its own login, so switching needs no new login.
+`--profile` beats `MEHO_PROFILE`. Without either, the CLI uses the
+default login. This replaces using one `XDG_CONFIG_HOME` for each
+identity.
+
 ### How long the login lasts
 
 `meho login` asks for a long login by default (the OIDC scope

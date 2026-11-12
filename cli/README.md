@@ -11,6 +11,45 @@ This directory holds the Go module; the Python backplane lives at
 [`../backend/`](../backend/) and the Helm chart at
 [`../deploy/charts/meho/`](../deploy/charts/meho/).
 
+## Profiles: more than one login at once
+
+A profile is a named login. Use profiles when one person must act as
+two identities, for example an initiator who parks a write and an
+approver who decides it. Each profile keeps its own login, so you do
+not log in again each time you switch.
+
+```bash
+# Once for each identity (sign in as that person in the browser):
+meho login https://meho.example.com --profile initiator
+meho login https://meho.example.com --profile approver
+
+# Park the write as the initiator:
+meho --profile initiator operation call ...
+
+# Decide it as the approver:
+meho --profile approver approvals approve <approval-id>
+
+# Or set the profile for a whole shell:
+export MEHO_PROFILE=approver
+meho status          # first line: "Profile: approver"
+```
+
+* `--profile <name>` beats `MEHO_PROFILE`. With neither, the CLI uses
+  the `default` profile: the login that `meho login` made before
+  profiles existed. Nothing changes for you if you do not use them.
+* A profile name has letters, digits, `.`, `-` and `_` (up to 64
+  characters, starting with a letter or digit).
+* All profiles live under the same config home, in the same keyring or
+  the same `0600` credentials file. This replaces the old workaround of
+  one `XDG_CONFIG_HOME` for each identity.
+* A profile that never logged in has no login. The CLI does not use
+  another profile's login in its place.
+* `meho status` prints `Profile: <name>` first when a named profile is
+  active, then the identity with its `sub`.
+* The backplane URL (`config.json`) and the tenant chosen with
+  `meho tenants use` are shared by all profiles. `meho doctor` checks
+  the default profile.
+
 ## Status
 
 **G2.6-T5 — multi-platform, cosign-signed release pipeline via GoReleaser.**

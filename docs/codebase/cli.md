@@ -713,6 +713,14 @@ implementations. `NewTokenStore` picks the backend at runtime:
   `0600` and its parent directory mode `0700` via an atomic
   tmpfile-then-rename so a partial flush can never truncate
   existing credentials.
+* **Profiles.** The global `--profile` flag (or `MEHO_PROFILE`; flag
+  wins) picks a named login. `applyProfile` (`internal/cmd/profile.go`)
+  puts the name on the command context; `auth.KeyForContext` turns it
+  into the store key. The `default` profile uses the plain backplane
+  URL key, so existing logins keep working. A named profile adds
+  `#profile=<name>` to that key, so every profile has its own slot in
+  the same keyring or the same credentials file. A profile with no
+  login is not found; it never falls back to another profile.
 
 The escape hatch (`MEHO_KEYRING_DISABLE=1`) is documented for
 shared dev hosts where the local keyring belongs to a different

@@ -192,7 +192,7 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			stored := auth.ConvertOAuthToken(result.Token, backplaneURL, result.Issuer, cfg.ClientID)
-			service, user := auth.KeyForBackplane(backplaneURL)
+			service, user := auth.KeyForContext(parentCtx, backplaneURL)
 			if err := store.Save(service, user, stored); err != nil {
 				return fmt.Errorf("token obtained but storage failed: %w", err)
 			}
@@ -211,6 +211,9 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			fmt.Fprintf(humanOut, "Logged in to %s; token stored in %s.\n", backplaneURL, store.Describe())
+			if profile := auth.ProfileFrom(parentCtx); profile != auth.DefaultProfile {
+				fmt.Fprintf(humanOut, "Profile: %s. Use it with `meho --profile %s <command>` or MEHO_PROFILE=%s.\n", profile, profile, profile)
+			}
 			printVersionSkew(parentCtx, httpClient, backplaneURL, errOut)
 			printMigrationNudge(humanOut)
 

@@ -138,7 +138,7 @@ every tenant yet; that needs a decision first.
 
 ## Versions: `policy_revision`
 
-Migration `0162`. One row per imported file: the tenant (`NULL` for the
+Migration `0163`. One row per imported file: the tenant (`NULL` for the
 install), when, who imported it (`imported_by_sub`, the person who asked),
 who approved it (`approved_by_sub`), the file's SHA-256, the file as sent,
 the stored document after the import, and the diff. The service only adds
@@ -176,5 +176,5 @@ Code: `backend/src/meho_backplane/api/v1/policy.py`,
 `backend/tests/test_policy_document.py` (parser, floors, plan, apply,
 versions), `backend/tests/test_api_v1_policy.py` (routes, waiting import,
 approval by a second admin),
-`backend/tests/migrations/test_migration_0162_add_policy_revision.py`,
+`backend/tests/migrations/test_migration_0163_add_policy_revision.py`,
 `cli/internal/cmd/policy/file_test.go`.

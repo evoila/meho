@@ -22,8 +22,9 @@ name: Plugin Version Check
 on:
   pull_request:
     branches: [main]
-  # Bare `merge_group:`: the event does not support `paths:` filtering.
-  merge_group:
+  # No `merge_group` trigger: the check reads only the pull request's own
+  # files, and it is not a required check. A merge-queue run adds nothing,
+  # so it does not start (#6350).
 
 concurrency:
   # Same shape as readme-version-check.yml: never cancel a merge-queue run,

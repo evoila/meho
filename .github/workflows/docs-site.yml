@@ -72,13 +72,9 @@ on:
       - 'scripts/ci/check_tested_live_claims.py'
       - 'backend/scripts/validate_live_tests.py'
       - '.github/workflows/docs-site.yml'
-  # Fires when a PR enters the merge queue, so the check can be made
-  # required in branch protection and still report against the
-  # synthesised merge commit. Bare `merge_group:` because the event
-  # does not support `paths:` filtering — same rationale as
-  # readme-version-check.yml (#769). The build is a strict mkdocs run
-  # (~seconds), so the redundant queue runs are negligible.
-  merge_group:
+  # No `merge_group` trigger: the strict build reads only the pull
+  # request's own docs files, and it is not a required check. A merge-queue
+  # run adds nothing, so it does not start (#6350).
   push:
     # A tag publishes a new docs version, like the image / chart / CLI
     # artefacts. Pre-release tags (v1.0.0-rc.1) publish too, but never
@@ -113,7 +109,7 @@ jobs:
   build:
     name: mkdocs build --strict
     if: github.event_name != 'push'
-    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 

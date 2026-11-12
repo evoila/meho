@@ -1881,7 +1881,7 @@ Every workflow that owns a required status check triggers on
 (all landed with #769), `chart.yml` (closed by #3253) and
 `migration-heads.yml` (#4204, see `docs/codebase/migrations.md`).
 The `merge_group` event fires when a PR is admitted to the GitHub merge
-queue and runs the full check matrix against the **synthesised merge
+queue and runs the check matrix against the **synthesised merge
 commit** — PR head + current `main` tip + any PRs ahead in the queue. A
 merge that would break `main` fails in the queue and never reaches
 `main`, ending the inherited-red episodes from 2026-05-20/21 where
@@ -2849,15 +2849,15 @@ their isolation posture:
 | `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-latest`; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |
-| `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **route**: fork PR → hosted runner, everything else (same-repo PR, merge queue) → `meho-runners-ci` (#6325); the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |
-| `dependency-license-check.yml` | yes (`pip install -e ./backend` runs the build backend) | **route**, all 3 jobs (#6325) |
-| `readme-version-check.yml` | yes (inline shell over PR content) | **route** (#6325) |
-| `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **route** (#6325) |
+| `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **hosted runner** for every event, also the merge queue (#6350); the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |
+| `dependency-license-check.yml` | yes (`pip install -e ./backend` runs the build backend) | **route**, all 3 jobs (#6325); the jobs are skipped in the merge queue (#6350) |
+| `readme-version-check.yml` | yes (inline shell over PR content) | **route** (#6325); no merge-queue trigger (#6350) |
+| `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **route** (#6325); no merge-queue trigger (#6350) |
 | `linux-server-test.yml` | yes (shellcheck, and the unit tests run `deploy/linux-server/install.sh` against stub commands) | **route**: fork PR → disposable GitHub-hosted runner |
-| `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for pull requests, `meho-runners-ci-heavy-queue` (Docker) in the merge queue (#6325); the second scanner job uses `meho-runners-ci` in the merge queue |
-| `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` for pull requests and `meho-runners-ci` in the merge queue, and only reads `backend/uv.lock` |
+| `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for pull requests; both scanner jobs are skipped in the merge queue (#6350) |
+| `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` for pull requests, is skipped in the merge queue (#6350), and only reads `backend/uv.lock` |
 | `security-weekly.yml` | no (`schedule` and `workflow_dispatch` only; trivy reads the lock files of `main`) | GitHub-hosted `ubuntu-latest`; built-in token is `contents: read`; the findings go to a private repo with a separate token (repository secrets `SECURITY_FINDINGS_REPO` and `SECURITY_FINDINGS_TOKEN`, so the log masks the repo name), so a finding is never public before its fix. all severities are reported. `scripts/ci/security_weekly_issue.py` opens one issue or comments only the new findings |
-| `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted) |
+| `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted); `docs-site.yml` has no merge-queue trigger (#6350) |
 
 ### Two in-repo isolation patterns
 
@@ -2907,23 +2907,43 @@ their isolation posture:
 
 ### The rule for the merge queue
 
-A merge-queue run never waits for a GitHub-hosted runner. Every job that
-a `merge_group` event can start runs on an own pool. The organisation
-allows only a few hosted jobs at once, for all its repos together, so a
-busy evening of pull requests can fill that limit and stop the queue.
-`test_no_merge_group_job_uses_a_hosted_label` in
-`backend/tests/test_ci_fork_runner_isolation.py` fails when a job that can
-run on `merge_group` resolves to a hosted label. It reads only the
-`runs-on` routes it knows. Any other expression fails the test, also when
-it names an own pool. One job is allowed to
-stay hosted, with its reason in the test: `docs-site.yml` `deploy` (tag
-and main pushes only).
+A merge-queue run starts as few jobs as it can, and none of them waits
+for a pool that is full. Three rules:
+
+1. **A job that only checks the pull request's own files does not run in
+   the queue.** The pull request run did it already. A required check
+   keeps its workflow trigger and skips with
+   `if: github.event_name != 'merge_group'`: a skipped job reports as
+   passed, so the required name still comes and no runner starts. A check
+   that is not required loses its `merge_group` trigger. This holds for
+   the licence checks, TruffleHog, Gitleaks, the Python dependency scan,
+   the docs site, and the plugin and readme version checks (#6350).
+2. **A job that can break only when two pull requests meet stays, on an
+   own pool.** These are the Python and Go test gates, the migration
+   checks, the compatibility checks and the chart jobs. Semgrep stays
+   too, because a fork pull request skips it. A queue run starts about
+   12 jobs on `meho-runners-ci`, 8 on `meho-runners-ci-heavy-queue`
+   (six unit shards and two chart installs) and 7 hosted jobs (rule 3).
+3. **A short job that must stay and does not need a pool may use a
+   hosted runner.** It goes on `_HOSTED_ON_MERGE_GROUP_ALLOWED` in
+   `backend/tests/test_ci_fork_runner_isolation.py`, with its reason.
+   Today these are: `docs-site.yml` `deploy`, `ci.yml` `changes`,
+   `python-unit-lane`, `python-integration` and `helm-lint-template`,
+   `chart.yml` `changes` and `helm-test-gate`, and `migration-heads.yml`
+   `check`. Each runs for seconds to 40 seconds, so it does not fill the
+   hosted limit.
+
+`test_no_merge_group_job_uses_a_hosted_label` fails when a job that can
+run on `merge_group` resolves to a hosted label and is not on the
+allowlist. It reads only the `runs-on` routes it knows. Any other
+expression fails the test, also when it names an own pool.
 
 A pull request from a fork never runs on an own runner. It runs on the
 hosted runner. Once a maintainer adds that pull request to the merge
-queue, its merge-queue run does use the own pool. So a fork pull request
-must be reviewed before it enters the queue. Own pools have no `gh`
-program: a job that needs it installs it in a step (the merge-queue
+queue, its merge-queue run does use the own pool (the jobs that stay in
+the queue, such as the unit shards and Semgrep, run the code of the merged
+commit). So a fork pull request enters the queue only after review.
+Own pools have no `gh` program: a job that needs it installs it in a step (the merge-queue
 watchdog does, and prints a `::warning::` line when that fails).
 
 Every workflow that runs on `pull_request` also has `concurrency` with

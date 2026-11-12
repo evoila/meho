@@ -3,10 +3,12 @@
 
 """The four ``spaces.*`` writes: assign, unassign, reassign and member.disable.
 
-Each write needs the ``tenant_admin`` role and a reason, and works only in
-the caller's tenant. A write never deletes a row. It ends the current row
-with a time and adds a new one when needed (``spaces/store.py``). The audit
-row of the call holds who made it and the reason.
+Each write needs a reason, and works only in the caller's tenant. The
+``tenant_admin`` role is the operation's role floor (see ``registry.py``),
+so the handlers do not check the role again. A write never deletes a row. It
+ends the current row with a time and adds a new one when needed
+(``spaces/store.py``). The audit row of the call holds who made it and the
+reason (``audit_reason``).
 
 ``spaces.member.disable`` ends one person's membership in one space. It
 never calls the Keycloak connector: the person's company account is a
@@ -18,11 +20,12 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import structlog
+
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.spaces.common import (
     assignment_dict,
     parse_uuid,
-    require_admin,
     require_enabled,
 )
 from meho_backplane.db.engine import get_sessionmaker
@@ -47,6 +50,15 @@ def owner_left(members: list[SpaceMember]) -> bool:
     )
 
 
+def _reason(params: dict[str, Any]) -> str:
+    """The required reason, also put on the audit row of the call."""
+    reason = str(params.get("reason", "")).strip()
+    if not reason:
+        raise ValueError("reason must not be empty")
+    structlog.contextvars.bind_contextvars(audit_reason=reason)
+    return reason
+
+
 def _not_found(exc: LookupError) -> ValueError:
     if isinstance(exc, store.SpaceNotFoundError):
         return ValueError(f"No space {exc} in your tenant.")
@@ -60,12 +72,9 @@ async def spaces_assign(operator: Operator, target: Any, params: dict[str, Any])
     returns ``unchanged`` and adds no row.
     """
     require_enabled()
-    require_admin(operator, "spaces.assign")
     space_id = parse_uuid(params, "space_id")
     kind = str(params["kind"])
-    reason = str(params["reason"]).strip()
-    if not reason:
-        raise ValueError("reason must not be empty")
+    reason = _reason(params)
     name = params.get("name")
     object_id = params.get("object_id")
     target_id = parse_uuid(params, "target_id") if params.get("target_id") else None
@@ -114,12 +123,16 @@ async def _find_current(
     object_id: str | None,
     name: str,
 ) -> ResourceAssignment | None:
-    """The current assignment of the same thing in the same space, if any."""
+    """The current assignment of the same thing in the same space, if any.
+
+    The thing is the same only on the same target: two targets can have
+    objects with the same vendor id, or services with the same name.
+    """
     rows = await store.list_assignments(session, tenant_id=tenant_id, space_id=space_id)
     for row in rows:
-        if row.kind != kind:
+        if row.kind != kind or row.target_id != target_id:
             continue
-        if kind == "target" and row.target_id == target_id:
+        if kind == "target":
             return row
         if kind == "object" and row.object_id == object_id:
             return row
@@ -136,10 +149,8 @@ async def spaces_unassign(
     Op-id: ``spaces.unassign``.
     """
     require_enabled()
-    require_admin(operator, "spaces.unassign")
     assignment_id = parse_uuid(params, "assignment_id")
-    if not str(params["reason"]).strip():
-        raise ValueError("reason must not be empty")
+    _reason(params)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
         try:
@@ -161,12 +172,9 @@ async def spaces_reassign(
     the same time. A move to the space it is in changes nothing.
     """
     require_enabled()
-    require_admin(operator, "spaces.reassign")
     assignment_id = parse_uuid(params, "assignment_id")
     to_space_id = parse_uuid(params, "to_space_id")
-    reason = str(params["reason"]).strip()
-    if not reason:
-        raise ValueError("reason must not be empty")
+    reason = _reason(params)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
         try:
@@ -204,13 +212,10 @@ async def spaces_member_disable(
     is not touched, and no Keycloak call is made.
     """
     require_enabled()
-    require_admin(operator, "spaces.member.disable")
     space_id = parse_uuid(params, "space_id")
     issuer = str(params["member_issuer"])
     sub = str(params["member_sub"])
-    reason = str(params["reason"]).strip()
-    if not reason:
-        raise ValueError("reason must not be empty")
+    reason = _reason(params)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
         try:

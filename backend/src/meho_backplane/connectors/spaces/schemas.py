@@ -273,8 +273,8 @@ GROUP_WHEN_TO_USE: Final[str] = (
 )
 
 _ADMIN_PRECONDITION: Final[str] = (
-    "Needs the `tenant_admin` role and a reason. The call waits for approval. "
-    "The setting SPACES_ENABLED must be on."
+    "Needs a reason. A person needs the `tenant_admin` role. The call waits until "
+    "a `tenant_admin` approves it. The setting SPACES_ENABLED must be on."
 )
 
 ASSIGN_GUIDANCE: Final[dict[str, Any]] = {

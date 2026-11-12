@@ -7,9 +7,10 @@ Natural key ``(product="spaces", version="1.x", impl_id="spaces-records")``,
 so the wire connector id is ``spaces-records-1.x``.
 
 Risk levels: the four writes are ``caution`` and need approval; the overview
-is ``safe``. The four writes need the ``tenant_admin`` role from a person
-(role floor, checked on every path) and the handler checks it again for the
-login that runs the call.
+is ``safe``. The four writes have a ``tenant_admin`` role floor
+(``operations/role_floors.py``): a person below it is refused on every path,
+and only a ``tenant_admin`` can approve a waiting call. An agent's call runs
+under the agent's own login once a ``tenant_admin`` approved it.
 """
 
 from __future__ import annotations

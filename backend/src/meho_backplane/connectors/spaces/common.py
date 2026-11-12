@@ -8,7 +8,6 @@ from __future__ import annotations
 import uuid
 from typing import Any, Final
 
-from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.settings import get_settings
 from meho_backplane.spaces.models import ResourceAssignment
 
@@ -16,7 +15,6 @@ __all__ = [
     "SPACES_CONNECTOR_ID",
     "assignment_dict",
     "parse_uuid",
-    "require_admin",
     "require_enabled",
 ]
 
@@ -28,18 +26,6 @@ def require_enabled() -> None:
     """Refuse the call while spaces are off (the default)."""
     if not get_settings().spaces_enabled:
         raise ValueError("Spaces are off. Set SPACES_ENABLED=true to use them.")
-
-
-def require_admin(operator: Operator, op_id: str) -> None:
-    """Refuse the call unless the login that runs it has ``tenant_admin``.
-
-    A call that waited for approval runs under the approver, so this checks
-    the person who decided.
-    """
-    if operator.tenant_role is not TenantRole.TENANT_ADMIN:
-        raise ValueError(
-            f"{op_id} needs the tenant_admin role; your role is {operator.tenant_role}"
-        )
 
 
 def parse_uuid(params: dict[str, Any], field: str) -> uuid.UUID:

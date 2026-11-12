@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -29,6 +30,7 @@ from meho_backplane.connectors.spaces.writes import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
+    AuditLog,
     EndpointDescriptor,
     Sensor,
     SensorCadenceKind,
@@ -38,6 +40,7 @@ from meho_backplane.db.models import (
     Tenant,
 )
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations.approval_queue import approve_request
 from meho_backplane.settings import get_settings
 from meho_backplane.spaces import store
 from meho_backplane.spaces.models import ResourceAssignment, SpaceMember
@@ -252,6 +255,55 @@ async def test_assign_never_crosses_tenants(world: _World) -> None:
             },
         )
     assert await _count(ResourceAssignment) == 0
+
+
+@pytest.mark.asyncio
+async def test_assign_same_object_id_on_two_targets_adds_two_rows(world: _World) -> None:
+    second_target = uuid.uuid4()
+    await _add_target(world.tenant_a, second_target, "demo-lab-a2")
+    operator = _operator(world.tenant_a)
+    results = []
+    for target_id in (world.target_a, second_target):
+        results.append(
+            await spaces_assign(
+                operator,
+                None,
+                {
+                    "space_id": str(world.space_a),
+                    "kind": "object",
+                    "target_id": str(target_id),
+                    "object_id": "vm-42",
+                    "name": "web-1",
+                    "reason": "runs the shop",
+                },
+            )
+        )
+
+    assert [r["status"] for r in results] == ["assigned", "assigned"]
+    assert [r["assignment"]["target_id"] for r in results] == [
+        str(world.target_a),
+        str(second_target),
+    ]
+    assert await _count(ResourceAssignment) == 2
+
+
+@pytest.mark.asyncio
+async def test_assign_same_service_name_on_two_targets_adds_two_rows(world: _World) -> None:
+    second_target = uuid.uuid4()
+    await _add_target(world.tenant_a, second_target, "demo-lab-a2")
+    operator = _operator(world.tenant_a)
+    for target_id in (world.target_a, second_target, None):
+        params = {
+            "space_id": str(world.space_a),
+            "kind": "service",
+            "name": "dns",
+            "reason": "r",
+        }
+        if target_id is not None:
+            params["target_id"] = str(target_id)
+        result = await spaces_assign(operator, None, params)
+        assert result["status"] == "assigned"
+    assert await _count(ResourceAssignment) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -470,28 +522,35 @@ def test_spaces_package_does_not_import_keycloak() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.READ_ONLY])
-async def test_writes_need_tenant_admin(world: _World, role: TenantRole) -> None:
-    operator = _operator(world.tenant_a, role)
-    for handler, params in (
-        (
-            spaces_assign,
-            {"space_id": str(world.space_a), "kind": "fact", "name": "n", "reason": "r"},
-        ),
-        (spaces_unassign, {"assignment_id": str(uuid.uuid4()), "reason": "r"}),
-        (
-            spaces_reassign,
-            {
-                "assignment_id": str(uuid.uuid4()),
-                "to_space_id": str(world.space_a2),
-                "reason": "r",
-            },
-        ),
-        (spaces_member_disable, _disable_params(world, "owner-1")),
-    ):
-        with pytest.raises(ValueError, match="tenant_admin"):
-            await handler(operator, None, params)
-    assert await _count(ResourceAssignment) == 0
+async def test_writes_run_under_an_agent_login_below_tenant_admin(world: _World) -> None:
+    """The role floor gates people and approvers; the handler does not check the role.
+
+    An agent with the ``operator`` role resumes its own call after a
+    ``tenant_admin`` approved it, so the handler must run for that login.
+    """
+    await _member(world, "owner-1", "owner")
+    agent = _operator(world.tenant_a, TenantRole.OPERATOR, PrincipalKind.AGENT)
+    assigned = await spaces_assign(
+        agent,
+        None,
+        {"space_id": str(world.space_a), "kind": "fact", "name": "n", "reason": "r"},
+    )
+    assignment_id = assigned["assignment"]["assignment_id"]
+    moved = await spaces_reassign(
+        agent,
+        None,
+        {"assignment_id": assignment_id, "to_space_id": str(world.space_a2), "reason": "r"},
+    )
+    ended = await spaces_unassign(
+        agent, None, {"assignment_id": moved["assignment"]["assignment_id"], "reason": "r"}
+    )
+    disabled = await spaces_member_disable(agent, None, _disable_params(world, "owner-1"))
+    assert (assigned["status"], moved["status"], ended["status"], disabled["status"]) == (
+        "assigned",
+        "moved",
+        "ended",
+        "disabled",
+    )
 
 
 @pytest.mark.asyncio
@@ -770,3 +829,79 @@ async def test_overview_dispatches_and_a_write_below_the_floor_is_denied(world: 
     )
     assert denied.status != "ok"
     assert await _count(ResourceAssignment) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered")
+async def test_agent_completes_every_write_after_admin_approval(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent's write waits, a tenant_admin approves, the agent's own resume runs it.
+
+    The audit row of each run holds the reason.
+    """
+    monkeypatch.setenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    get_settings.cache_clear()
+    agent = _operator(world.tenant_a, TenantRole.OPERATOR, PrincipalKind.AGENT)
+    agent = agent.model_copy(update={"sub": "agent-1"})
+    approver = _operator(world.tenant_a, TenantRole.TENANT_ADMIN)
+    await _member(world, "owner-1", "owner")
+
+    async def run(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        parked = await dispatch(
+            operator=agent,
+            connector_id=SPACES_CONNECTOR_ID,
+            op_id=op_id,
+            target=None,
+            params=params,
+        )
+        assert parked.status == "awaiting_approval", parked.error
+        request_id = uuid.UUID(parked.extras["approval_request_id"])
+        async with get_sessionmaker()() as session:
+            await approve_request(session, request_id, operator=approver, params=params)
+            await session.commit()
+        done = await dispatch(
+            operator=agent,
+            connector_id=SPACES_CONNECTOR_ID,
+            op_id=op_id,
+            target=None,
+            params=params,
+            _approved=True,
+        )
+        assert done.status == "ok", done.error
+        assert isinstance(done.result, dict)
+        return done.result
+
+    assigned = await run(
+        "spaces.assign",
+        {"space_id": str(world.space_a), "kind": "fact", "name": "n", "reason": "why assign"},
+    )
+    moved = await run(
+        "spaces.reassign",
+        {
+            "assignment_id": assigned["assignment"]["assignment_id"],
+            "to_space_id": str(world.space_a2),
+            "reason": "why reassign",
+        },
+    )
+    await run(
+        "spaces.unassign",
+        {"assignment_id": moved["assignment"]["assignment_id"], "reason": "why unassign"},
+    )
+    await run("spaces.member.disable", {**_disable_params(world, "owner-1"), "reason": "why leave"})
+
+    async with get_sessionmaker()() as session:
+        audit_rows = list(await session.scalars(select(AuditLog)))
+    reasons = {
+        row.payload.get("op_id"): row.payload.get("reason")
+        for row in audit_rows
+        if row.operator_sub == "agent-1"
+        and isinstance(row.payload, dict)
+        and row.payload.get("result_status") == "ok"
+    }
+    assert reasons == {
+        "spaces.assign": "why assign",
+        "spaces.reassign": "why reassign",
+        "spaces.unassign": "why unassign",
+        "spaces.member.disable": "why leave",
+    }

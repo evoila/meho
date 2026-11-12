@@ -61,9 +61,15 @@ are typed operations, like the ones of `audit-integrity-1.x`.
 | `spaces.member.disable` | "Leave a lab": ends one person's membership in one space (a new row with state `disabled` starts). Nothing is deleted. It never calls the Keycloak connector; the company account is a separate step. | `caution` |
 | `spaces.overview` | Per space: owner, members, assigned systems. Per target: product, version, when it was detected, and health. Reads stored data only. | `safe` |
 
-- The four writes need the `tenant_admin` role, a reason, and they only work
-  in the caller's tenant. The audit row of the call holds who and why, and
-  the new row holds `changed_by` and `reason`.
+- The four writes need a reason, and they only work in the caller's tenant.
+  A person needs the `tenant_admin` role (the operation's role floor), and
+  only a `tenant_admin` can approve a waiting call. An agent's call runs
+  under the agent's own login after that approval.
+- The audit row of every write holds who made it and the reason
+  (`reason` in its payload). Assign, reassign and member.disable also save
+  `changed_by` and `reason` on the new row.
+- "The same thing" means the same kind on the same target: two targets can
+  have objects with the same vendor id, or services with the same name.
 - The four writes have `requires_approval` on, so every call waits for an
   approval click, also in the web interface. This keeps the operation
   contract rules (`test_operation_contracts.py`).

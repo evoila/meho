@@ -33,14 +33,12 @@ exercises the real spill + read-back logic without a container.
 from __future__ import annotations
 
 import inspect
-import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-import msgspec
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +52,7 @@ from meho_backplane.db.models import DispatchTrace, DispatchTraceSpan, Tenant
 from meho_backplane.flight_recorder.agent_read import materialize_agent_trace_handle
 from meho_backplane.flight_recorder.config import reset_flight_recorder_config_cache_for_testing
 from meho_backplane.flight_recorder.store import SpanInput, record_trace
+from meho_backplane.operations.delivery_budget import tool_result_text
 from meho_backplane.operations.result_query import ResultHandleNotFoundError, read_result_window
 from meho_backplane.settings import get_settings
 
@@ -252,6 +251,11 @@ async def test_inline_sample_is_byte_bounded_not_a_raw_payload(
     assert window["returned_rows"] == 5
 
 
+def _mcp_size(sample: list[dict[str, Any]]) -> int:
+    """Bytes of the preview in the text MCP sends to the agent."""
+    return len(tool_result_text(sample).encode())
+
+
 def test_bounded_sample_cuts_a_first_row_that_is_over_the_budget() -> None:
     """A first row far over the budget ships cut down, not at full size."""
     body = "y" * 60_000
@@ -268,7 +272,7 @@ def test_bounded_sample_cuts_a_first_row_that_is_over_the_budget() -> None:
     }
     sample = agent_read_mod._bounded_sample([row], byte_budget=4096)
     assert len(sample) == 1
-    assert len(msgspec.json.encode(sample[0])) <= 4096
+    assert _mcp_size(sample) <= 4096
     cut = sample[0]["attributes"]["response_body"]
     assert cut["cut"].endswith("result_query")
     assert cut["length"] == 60_000
@@ -287,14 +291,14 @@ def test_bounded_sample_fits_a_tiny_budget_with_many_attributes() -> None:
     row = {"seq": 0, "name": "n", "attributes": {f"k{i}": "z" * 5000 for i in range(200)}}
     sample = agent_read_mod._bounded_sample([row], byte_budget=512)
     assert len(sample) == 1
-    assert len(msgspec.json.encode(sample[0])) <= 512
+    assert _mcp_size(sample) <= 512
 
 
 def test_bounded_sample_handles_a_row_without_attributes() -> None:
     row = {"seq": 0, "name": "n" * 10_000, "attributes": {}}
     sample = agent_read_mod._bounded_sample([row], byte_budget=512)
     assert len(sample) == 1
-    assert len(msgspec.json.encode(sample[0])) <= 512
+    assert _mcp_size(sample) <= 512
 
 
 def test_bounded_sample_cuts_long_top_level_text_fields() -> None:
@@ -306,8 +310,40 @@ def test_bounded_sample_cuts_long_top_level_text_fields() -> None:
         "attributes": {"a": "v" * 5000},
     }
     sample = agent_read_mod._bounded_sample([row], byte_budget=1024)
-    assert len(msgspec.json.encode(sample[0])) <= 1024
+    assert _mcp_size(sample) <= 1024
     assert sample[0]["name"]["cut"]
+
+
+def test_bounded_sample_measures_non_ascii_text_as_mcp_sends_it() -> None:
+    """Non-ASCII text grows when MCP escapes it; the preview still fits."""
+    body = "\U0001f600" * 2000
+    row = {
+        "seq": 0,
+        "name": "GET /api/emoji",
+        "attributes": {"response_body": body, "request_body": body},
+    }
+    sample = agent_read_mod._bounded_sample([row], byte_budget=4096)
+    assert len(sample) == 1
+    assert _mcp_size(sample) <= 4096
+    assert sample[0]["attributes"]["response_body"]["cut"]
+
+
+def test_bounded_sample_fits_a_budget_below_the_fallback_size() -> None:
+    """A budget smaller than the keys fallback still gets a row that fits."""
+    row = {
+        "seq": 0,
+        "name": "GET /" + "a" * 500,
+        "attributes": {"response_body": "b" * 20_000},
+    }
+    for budget in (128, 64, 16, 4):
+        sample = agent_read_mod._bounded_sample([row], byte_budget=budget)
+        assert len(sample) == 1
+        assert _mcp_size(sample) <= budget
+
+
+def test_bounded_sample_is_empty_when_not_even_an_empty_row_fits() -> None:
+    row = {"seq": 0, "name": "n", "attributes": {"a": "b" * 100}}
+    assert agent_read_mod._bounded_sample([row], byte_budget=3) == []
 
 
 async def test_first_span_with_a_60kb_body_gets_a_small_preview_and_full_read(
@@ -334,7 +370,7 @@ async def test_first_span_with_a_60kb_body_gets_a_small_preview_and_full_read(
     assert handle is not None
     assert handle.sample_rows is not None
     budget = get_settings().jsonflux_sample_byte_budget
-    assert len(json.dumps(list(handle.sample_rows), default=dict)) <= budget
+    assert _mcp_size(handle.model_dump(mode="json")["sample_rows"]) <= budget
     window = await read_result_window(operator, handle.handle_id, offset=0, limit=5)
     assert window["rows"][0]["attributes"]["response_body"] == body
 

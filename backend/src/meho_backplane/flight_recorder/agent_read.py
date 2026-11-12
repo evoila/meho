@@ -55,11 +55,11 @@ on doubt is *less* agent exposure, never more.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
-import msgspec
 import structlog
 from sqlalchemy import select
 
@@ -158,9 +158,20 @@ _CUT_MARKER_KEY: Final[str] = "cut"
 _CUT_MARKER_NOTE: Final[str] = "value cut in this preview; read it in full with result_query"
 
 
+def _wire_size(value: Any) -> int:
+    """Return the size of ``value`` as the agent gets it.
+
+    MCP sends a tool result as ``json.dumps`` text (see
+    :func:`meho_backplane.operations.delivery_budget.tool_result_text`). That
+    escapes every non-ASCII character, so an emoji takes up to 12 bytes there.
+    The output is ASCII only, so its length is its size in bytes.
+    """
+    return len(json.dumps(value))
+
+
 def _cut_value(value: Any, *, max_chars: int) -> Any:
     """Return ``value`` unchanged when small, else a short preview with a marker."""
-    text = value if isinstance(value, str) else msgspec.json.encode(value).decode()
+    text = value if isinstance(value, str) else json.dumps(value)
     if len(text) <= max_chars:
         return value
     return {
@@ -170,13 +181,14 @@ def _cut_value(value: Any, *, max_chars: int) -> Any:
     }
 
 
-def _shrink_row(row: dict[str, Any], *, byte_budget: int) -> dict[str, Any]:
+def _shrink_row(row: dict[str, Any], *, byte_budget: int) -> dict[str, Any] | None:
     """Cut a row that alone is over the byte budget down to fit it.
 
     Large values are replaced with a short preview and a marker: the attribute
     values and the top-level text fields (name, status, span_kind). The stored
-    row is not touched. If cutting values is not enough, the final fallback
-    keeps only the attribute key names and a short name, so the budget holds.
+    row is not touched. If cutting values is not enough, smaller and smaller
+    fallbacks follow, down to an empty object. Returns ``None`` only when not
+    even an empty row fits the budget.
     """
     attributes = row.get("attributes") or {}
     max_chars = max(16, byte_budget // (4 * max(1, len(attributes) + 3)))
@@ -188,19 +200,32 @@ def _shrink_row(row: dict[str, Any], *, byte_budget: int) -> dict[str, Any]:
         shrunk["attributes"] = {
             k: _cut_value(v, max_chars=max_chars) for k, v in attributes.items()
         }
-        if len(msgspec.json.encode(shrunk)) <= byte_budget:
+        if _wire_size([shrunk]) <= byte_budget:
             return shrunk
         max_chars //= 2
+    seq = row.get("seq")
     keys = [str(k)[:32] for k in sorted(attributes)]
     while True:
         fallback = {
-            "seq": row.get("seq"),
+            "seq": seq,
             "name": _cut_value(str(row.get("name", "")), max_chars=16),
             "attributes": {_CUT_MARKER_KEY: _CUT_MARKER_NOTE, "keys": keys},
         }
-        if len(msgspec.json.encode(fallback)) <= byte_budget or not keys:
+        if _wire_size([fallback]) <= byte_budget:
             return fallback
+        if not keys:
+            break
         keys = keys[: len(keys) // 2]
+    smallest: list[dict[str, Any]] = [
+        {"seq": seq, _CUT_MARKER_KEY: _CUT_MARKER_NOTE},
+        {"seq": seq, _CUT_MARKER_KEY: True},
+        {"seq": seq},
+        {},
+    ]
+    for candidate in smallest:
+        if _wire_size([candidate]) <= byte_budget:
+            return candidate
+    return None
 
 
 def _bounded_sample(rows: list[dict[str, Any]], *, byte_budget: int) -> list[dict[str, Any]]:
@@ -210,22 +235,24 @@ def _bounded_sample(rows: list[dict[str, Any]], *, byte_budget: int) -> list[dic
     sized to a byte budget, not only a count. A trace span body is capped at
     F3's 64 KB, so a count-only bound could ship hundreds of KB of preview into
     agent context; this keeps the sample small and pushes the full ordered set
-    to ``result_query``. A non-empty trace never yields an empty preview: when
-    the first row alone is over the budget, a cut-down copy of it ships (large
-    values replaced by a short preview and a marker). Then rows accrue until the
-    next would exceed the budget.
+    to ``result_query``. The size is that of the whole preview list as MCP
+    sends it (:func:`_wire_size`). When the first row alone is over the
+    budget, a cut-down copy of it ships (large values replaced by a short
+    preview and a marker). Then rows accrue until the next would exceed the
+    budget. The preview is empty only when the budget cannot hold even an
+    empty row.
     """
     sample: list[dict[str, Any]] = []
-    used = 0
     for row in rows[:_SAMPLE_SIZE]:
-        encoded = len(msgspec.json.encode(row))
-        if not sample and encoded > byte_budget:
-            row = _shrink_row(row, byte_budget=byte_budget)
-            encoded = len(msgspec.json.encode(row))
-        if sample and used + encoded > byte_budget:
+        if _wire_size([*sample, row]) <= byte_budget:
+            sample.append(row)
+            continue
+        if sample:
             break
-        sample.append(row)
-        used += encoded
+        shrunk = _shrink_row(row, byte_budget=byte_budget)
+        if shrunk is None:
+            break
+        sample.append(shrunk)
     return sample
 
 

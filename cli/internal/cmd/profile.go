@@ -19,7 +19,8 @@ import (
 // --profile flag, else MEHO_PROFILE, else the default profile. It puts
 // the name on the command context. Every place that reads or writes a
 // login (login, the authed client, status --watch) takes the name from
-// there, so each profile has its own stored login.
+// there, so each profile has its own stored login. Error hints that
+// say "run `meho login`" name the profile too.
 func applyProfile(cmd *cobra.Command) error {
 	flagValue, changed := "", false
 	if f := cmd.Root().PersistentFlags().Lookup("profile"); f != nil {
@@ -34,6 +35,11 @@ func applyProfile(cmd *cobra.Command) error {
 		return output.RenderError(cmd.ErrOrStderr(), output.Usage(err.Error()), jsonOut)
 	}
 	cmd.SetContext(auth.WithProfile(cmd.Context(), name))
+	if name == auth.DefaultProfile {
+		output.SetLoginProfile("")
+	} else {
+		output.SetLoginProfile(name)
+	}
 	return nil
 }
 

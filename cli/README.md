@@ -14,9 +14,9 @@ This directory holds the Go module; the Python backplane lives at
 ## Profiles: more than one login at once
 
 A profile is a named login. Use profiles when one person must act as
-two identities, for example an initiator who parks a write and an
-approver who decides it. Each profile keeps its own login, so you do
-not log in again each time you switch.
+two identities, for example an initiator who starts a write that waits
+for approval, and an approver who decides it. Each profile keeps its
+own login, so you do not log in again each time you switch.
 
 ```bash
 # Once for each identity (sign in as that person in the browser):
@@ -46,6 +46,8 @@ meho status          # first line: "Profile: approver"
   another profile's login in its place.
 * `meho status` prints `Profile: <name>` first when a named profile is
   active, then the identity with its `sub`.
+* When a login is missing or expired, the error tells you to run
+  `meho --profile <name> login <url>`, for the profile you used.
 * The backplane URL (`config.json`) and the tenant chosen with
   `meho tenants use` are shared by all profiles. `meho doctor` checks
   the default profile.

@@ -721,6 +721,11 @@ implementations. `NewTokenStore` picks the backend at runtime:
   `#profile=<name>` to that key, so every profile has its own slot in
   the same keyring or the same credentials file. A profile with no
   login is not found; it never falls back to another profile.
+  `applyProfile` also calls `output.SetLoginProfile`, and
+  `RenderError` turns each `meho login` in an error hint into
+  `meho --profile <name> login`, so following the hint fills the right
+  profile. `meho doctor` always checks the default profile, in both
+  its offline and its online layer.
 
 The escape hatch (`MEHO_KEYRING_DISABLE=1`) is documented for
 shared dev hosts where the local keyring belongs to a different

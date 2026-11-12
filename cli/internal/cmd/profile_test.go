@@ -6,6 +6,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/output"
 )
 
 // profileBackplane serves /api/v1/health and records the bearer of each call.
@@ -35,7 +37,8 @@ func (p *profileBackplane) last(t *testing.T) string {
 }
 
 // setupProfiles starts a backplane and stores three logins on it: the
-// default one and the "initiator" and "approver" profiles.
+// default one and the "initiator" and "approver" profiles. The
+// backplane refuses the token "tok-stale" as expired.
 func setupProfiles(t *testing.T) (*httptest.Server, *profileBackplane) {
 	t.Helper()
 	rec := &profileBackplane{}
@@ -44,6 +47,10 @@ func setupProfiles(t *testing.T) (*httptest.Server, *profileBackplane) {
 			rec.mu.Lock()
 			rec.bearers = append(rec.bearers, r.Header.Get("Authorization"))
 			rec.mu.Unlock()
+		}
+		if r.Header.Get("Authorization") == "Bearer tok-stale" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(healthBody())
@@ -70,6 +77,7 @@ func runRootOut(t *testing.T, args ...string) (stdout, stderr string, err error)
 	t.Helper()
 	restore := setDynamicRegistrar(func(*cobra.Command) {})
 	t.Cleanup(restore)
+	t.Cleanup(func() { output.SetLoginProfile("") })
 	root := newRootCmdFor(args)
 	var out, errOut bytes.Buffer
 	root.SetOut(&out)
@@ -181,5 +189,91 @@ func TestLoginWithProfileFillsOnlyThatSlot(t *testing.T) {
 	svc, user = auth.KeyForBackplane(idp.URL)
 	if _, err := store.Load(svc, user); err == nil {
 		t.Error("the default slot must stay empty after a login under a profile")
+	}
+}
+
+func TestLoginHintNamesTheProfile(t *testing.T) {
+	cases := []struct {
+		name     string
+		env      string
+		args     []string
+		wantHint string
+	}{
+		{"missing login, flag", "", []string{"--profile", "never-logged-in", "status"}, "run `meho --profile never-logged-in login "},
+		{"missing login, flag beats env", "approver", []string{"--profile", "never-logged-in", "status"}, "run `meho --profile never-logged-in login "},
+		{"missing login, env", "never-logged-in", []string{"status"}, "run `meho --profile never-logged-in login "},
+		{"expired login, flag beats env", "approver", []string{"--profile", "stale", "status"}, "run `meho --profile stale login "},
+		{"expired login, json", "", []string{"--profile", "stale", "status", "--json"}, "run `meho --profile stale login "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := setupProfiles(t)
+			store, err := auth.NewFileStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			svc, user := auth.KeyForProfile(srv.URL, "stale")
+			if err := store.Save(svc, user, auth.StoredToken{BackplaneURL: srv.URL, AccessToken: "tok-stale", TokenType: "Bearer", Expiry: time.Now().Add(-time.Hour)}); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(auth.ProfileEnv, tc.env)
+			_, stderr, err := runRootOut(t, tc.args...)
+			if err == nil {
+				t.Fatal("want an auth error")
+			}
+			if !strings.Contains(stderr, tc.wantHint) {
+				t.Errorf("stderr = %q; want the hint %q", stderr, tc.wantHint)
+			}
+			if strings.Contains(stderr, "`meho login") {
+				t.Errorf("the hint must not point at the default login; stderr = %q", stderr)
+			}
+		})
+	}
+}
+
+func TestLoginHintForTheDefaultProfileIsUnchanged(t *testing.T) {
+	withTempXDG(t)
+	t.Setenv(auth.ProfileEnv, "")
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	_, stderr, err := runRootOut(t, "status", "--backplane", srv.URL)
+	if err == nil {
+		t.Fatal("want an auth error")
+	}
+	if !strings.Contains(stderr, "run `meho login "+srv.URL+"`") {
+		t.Errorf("stderr = %q; want the plain login hint", stderr)
+	}
+}
+
+// The doctor checks the default profile in both layers, also when
+// MEHO_PROFILE names a profile with no login.
+func TestDoctorChecksTheDefaultProfileUnderMEHOPROFILE(t *testing.T) {
+	xdg := withTempXDG(t)
+	stub := &mcpStub{liveStatus: 200, tools: []string{"meho_status", "call_operation"}, listed: []string{"call_operation", "meho_status"}, scopes: []string{"mcp:read", "openid"}}
+	srv := httptest.NewServer(stub.handler(t))
+	t.Cleanup(srv.Close)
+	seedCreds(t, xdg, srv.URL, auth.StoredToken{BackplaneURL: srv.URL, AccessToken: jwtMarker, Expiry: time.Now().Add(time.Hour)})
+
+	t.Setenv(auth.ProfileEnv, "approver")
+	t.Cleanup(func() { output.SetLoginProfile("") })
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := applyProfile(cmd); err != nil {
+		t.Fatal(err)
+	}
+	if got := auth.ProfileFrom(cmd.Context()); got != "approver" {
+		t.Fatalf("profile = %q; want approver", got)
+	}
+
+	deps := onlineDeps(t)
+	deps.stat = func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist }
+	r := runDoctor(cmd, doctorOptions{backplaneOverride: srv.URL}, deps)
+	for _, c := range r.Checks {
+		if c.Class == classNotLoggedIn || strings.Contains(c.Detail, "no stored login") {
+			t.Errorf("the doctor used the approver profile in a check: %+v", c)
+		}
+	}
+	if cls := failedClass(r); cls != "" {
+		t.Errorf("unexpected failure %q: %+v", cls, r.Checks)
 	}
 }

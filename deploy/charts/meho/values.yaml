@@ -739,8 +739,14 @@ config:
   # mark, and an operation takes the values of its group and connector.
   # When `"false"` (the default), MEHO reads none of it and behaves as
   # before. See `docs/codebase/policy-classification.md`.
+  # `policy.engineShadow` is rendered into `POLICY_ENGINE_SHADOW`. When
+  # `"true"`, the policy evaluator works out its own answer next to
+  # today's checks and logs every difference. It decides nothing. When
+  # `"false"` (the default), it does not run. See
+  # `docs/codebase/policy-evaluator.md`.
   policy:
     classification: "false"
+    engineShadow: "false"
   # -- Tenants whose knowledge entries marked `shared` every tenant on
   # this instance can read. Comma-separated tenant ids. Rendered into
   # `KB_SHARED_TENANT_IDS`. Empty (the default): no tenant may share, and

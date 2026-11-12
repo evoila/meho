@@ -380,7 +380,13 @@ at the path is replaced. If the owner is `root`, the file is written as
 root. See "The `linux:` store" below.
 
 The audit rows and the approval previews of the three calls show only the
-client id, the target names, and the paths.
+client id, the target names, and the paths. For a `linux:` move the approval
+card shows the path and the owner, never the content. The person who approves
+reads both: the path says where the secret goes, the owner says who can read
+it.
+
+A person approves each `secret.move`. No standing grant and no run approval
+covers it, because a move can write a file as root on a host.
 
 **Safe to run twice.** A second run changes nothing that matters. The client
 create answers `conflict` and leaves the client as it is. The two moves
@@ -397,7 +403,8 @@ fails with an error that names no value.
 linux:<target>/<absolute path>#<owner>
 ```
 
-- `<target>` is a `linux-ssh` target name (or alias).
+- `<target>` is a `linux-ssh` target name (or alias). MEHO refuses a target
+  of another kind before it reads any credential or opens SSH.
 - `<absolute path>` is the file. One slash or two after the target both work.
 - `<owner>` is the Linux user who will own the file. A user name only:
   lower-case letters, digits, `_` and `-`.
@@ -417,6 +424,16 @@ What MEHO does on the host:
   (`/proc`, `/sys`, `/dev`, `/boot`, `/bin`, `/sbin`, `/lib*`, `/tmp`, and
   `/usr` outside the write roots). A path under `/var` is not refused here:
   a home can be there, for example `/var/www` or `/var/home/<owner>`.
+- Also before any SSH connection, MEHO refuses a place that the system runs
+  or reads for logins and rights. A secret there could become a command that
+  runs, a sudo rule, or a login key. The list (`_SYSTEM_RUNS` in the code):
+  - under `/etc`: `cron*`, `sudoers*`, `systemd`, `profile*`, `ld.so*`,
+    `pam.d`, `ssh`, and the files `passwd`, `shadow`, `group`;
+  - in any folder: `authorized_keys`, `authorized_keys2`, and the shell
+    start files `.bashrc`, `.bash_profile`, `.bash_login`, `.profile`,
+    `.zshrc`.
+- Both scripts on the host first check that `realpath -m` works. When it
+  does not, they stop with the reason `realpath` and write nothing.
 - For a path outside the write roots, MEHO first asks the host for the
   owner's home (`getent passwd`). This short script carries no secret. When
   the path is not inside that home, MEHO stops before it sends the secret. So
@@ -442,7 +459,9 @@ What MEHO does on the host:
   - Any other folder (one that group or others can write, or a root folder
     inside a folder of the owner) is refused with the reason `place`.
 - The value travels only inside the SSH channel (standard input), through
-  the same sudo helper as `linux.file.write`. It is never in the remote
+  the same sudo helper as `linux.file.write`. During the write the helper
+  keeps the script in a temp file of mode 0600 on the host, and removes the
+  file when the script ends. It is never in the remote
   command line, a log line, or an error text. An error names only a short
   reason such as `place` or `owner`.
 

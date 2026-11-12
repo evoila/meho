@@ -499,7 +499,10 @@ input through the same sudo helper as `file.write`, and never appears in a
 result, an audit row, a preview, a log line or an error. The ref grammar and
 the rules for allowed paths are in
 [connectors-secret-broker.md](connectors-secret-broker.md), "The `linux:`
-store". Code: `connectors/linux/secret_endpoint.py`.
+store". It refuses a place the system runs or reads for logins and rights
+(for example `/etc/cron*`, `/etc/sudoers*`, `authorized_keys`, `.bashrc`),
+and a target that is not a `linux-ssh` target. A person approves each move.
+Code: `connectors/linux/secret_endpoint.py`.
 
 ### Root elevation
 

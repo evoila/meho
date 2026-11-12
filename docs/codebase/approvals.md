@@ -1037,7 +1037,8 @@ preview of the waiting request:
 - `login_realm`: the target manages a realm of MEHO's own login, see
   `_backplane_login_realms()`.
 - `platform_admin`: the group the handler will change is the platform
-  admin group, or the roles include the platform admin role.
+  admin group, the roles include the platform admin role, or the change
+  gives a role of the `realm-management` client (in any case).
 - `members`: for a group attribute change in the login realm, the ids of
   the logins in the group (up to 1000, read page by page). `None` when
   they could not be read, when Keycloak answers with something that is
@@ -1088,7 +1089,11 @@ same check refuses the run:
   refused too;
 - when the change now needs a stricter approval than the one it got: the
   live card says login realm or platform admin where the saved one said
-  no, or cannot say which it is.
+  no, or cannot say which it is;
+- for an operation registered with `bound_ids` (a card key and a refusal),
+  when the live card lists other ids under that key than the saved card.
+  `keycloak.user.credential.delete` uses it for `will_remove`, so the run
+  removes only the credentials the approver saw.
 
 ## The rights-change mark: another admin must approve
 

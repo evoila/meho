@@ -68,8 +68,9 @@ one, that test fails and the constant must be promoted into
 :data:`_METHODS_BY_CONSTANT`. All reconciled op_ids (19 at #2988, extended
 to 29 by the #3280 group-lifecycle ops, to 33 by the #3944 deletes, to
 34 by the #3851 user logout, to 37 by the #3886 realm delete, to 45 by the login flow
-ops, to 48 by the passkey step op, to 49 by the user disable / enable PUT, and to 54
-by the client role and credential delete writes) were
+ops, to 48 by the passkey step op, to 49 by the user disable / enable PUT, to 54
+by the client role and credential delete writes, and to 55 by the client role users
+read of the remove card) were
 served on the armed run; no path repoints were needed. Protocol:
 docs/decisions/spec-reconcile-guards-standard.md.
 """
@@ -116,6 +117,8 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     # is a GET) and the role of one client (read before the write).
     "_USER_ROLE_MAPPINGS_CLIENT_PATH": ("GET", "POST", "DELETE"),
     "_CLIENT_ROLE_PATH": ("GET",),
+    # The users who hold one client role (the client role remove card).
+    "_CLIENT_ROLE_USERS_PATH": ("GET",),
     # The delete of one stored credential of a user.
     "_USER_CREDENTIAL_PATH": ("DELETE",),
     "_ROLES_PATH": ("GET",),
@@ -220,6 +223,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/clients/{client-uuid}",
         "GET:/admin/realms/{realm}/clients/{client-uuid}/client-secret",
         "GET:/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}",
+        "GET:/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}/users",
         "GET:/admin/realms/{realm}/events/config",
         "GET:/admin/realms/{realm}/groups",
         "GET:/admin/realms/{realm}/groups/count",

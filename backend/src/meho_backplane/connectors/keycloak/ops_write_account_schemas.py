@@ -35,9 +35,8 @@ WHEN_TO_USE_ACCOUNT_WRITE = (
     "realm). ``keycloak.user.update`` changes the user name, email, first name "
     "and last name. ``keycloak.user.credential.delete`` removes one stored "
     "credential, for example a lost passkey or a one-time code app on a lost "
-    "phone; the other credentials stay. All four wait for approval. Giving a "
-    "client role and removing a credential are dangerous: a second person "
-    "must approve."
+    "phone; the other credentials stay. All four wait for approval; in MEHO's "
+    "own sign-in realm another admin must approve."
 )
 
 _USER_PROPS: dict[str, Any] = {
@@ -55,8 +54,9 @@ _USER_PROPS: dict[str, Any] = {
 _USER_ANY: list[dict[str, Any]] = [{"required": ["id"]}, {"required": ["username"]}]
 
 _PRECONDITIONS = (
-    "The user exists in the target's managed realm. A second person with the "
-    "right to approve this risk level approves the call."
+    "The user exists in the target's managed realm. A person with the right to "
+    "approve this risk level approves the call; in MEHO's own sign-in realm "
+    "another admin must approve."
 )
 
 _ROLE_PARAMS: dict[str, Any] = {

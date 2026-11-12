@@ -88,6 +88,8 @@ _USER_ROLE_MAPPINGS_CLIENT_PATH = (
     "/admin/realms/{realm}/users/{user-id}/role-mappings/clients/{client-id}"
 )
 _CLIENT_ROLE_PATH = "/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}"
+# The users who hold one client role directly (the client role remove card).
+_CLIENT_ROLE_USERS_PATH = "/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}/users"
 # One stored credential of a user.
 _USER_CREDENTIAL_PATH = "/admin/realms/{realm}/users/{user-id}/credentials/{credentialId}"
 _ROLES_PATH = "/admin/realms/{realm}/roles"

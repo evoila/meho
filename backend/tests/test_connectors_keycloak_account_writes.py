@@ -40,6 +40,8 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write import WRITE_OPS
+from meho_backplane.connectors.keycloak.ops_write_account_preview import _credential_warning
+from meho_backplane.connectors.keycloak.ops_write_grant import CREDENTIALS_CHANGED
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakClientCredentials,
@@ -897,6 +899,7 @@ async def _park_sign_in_change(op_id: str, requester: Operator) -> uuid.UUID:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         _mount_user_lookup(mock)
+        mock.get(_USER_PATH).respond(200, json=_USER_BEFORE)
         mock.get(_CREDENTIALS_PATH).respond(200, json=_CREDENTIALS)
         call = await call_operation(
             requester,
@@ -966,3 +969,211 @@ async def test_a_sign_in_change_needs_another_admin_not_a_self_approver(
 
     with pytest.raises(ApprovalRoleFloorError):
         await _approve_as(request_id, self_approver)
+
+
+# ---------------------------------------------------------------------------
+# A realm-management client role needs a platform admin in the login realm
+# ---------------------------------------------------------------------------
+
+
+async def _park_client_role(action: str, client_id: str, requester: Operator) -> uuid.UUID:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        _mount_user_lookup(mock)
+        call = await call_operation(
+            requester,
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": f"keycloak.role_mapping.client.{action}",
+                "target": _TARGET_NAME,
+                "params": {
+                    "username": "jane.example",
+                    "client_id": client_id,
+                    "roles": ["realm-admin"],
+                },
+            },
+        )
+    assert call["status"] == "awaiting_approval", call
+    return uuid.UUID(call["extras"]["approval_request_id"])
+
+
+@pytest.mark.parametrize("client_id", ["realm-management", "Realm-Management"])
+async def test_a_realm_management_role_needs_a_platform_admin_in_the_login_realm(
+    kc: KeycloakConnector, client_id: str
+) -> None:
+    request_id = await _park_client_role("assign", client_id, _operator())
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert row.proposed_effect["preview"]["grant"]["platform_admin"] is True
+    tenant_admin = _operator("kc-account-approver").model_copy(
+        update={"tenant_role": TenantRole.TENANT_ADMIN}
+    )
+
+    with pytest.raises(ApprovalRoleFloorError) as exc:
+        await _approve_as(request_id, tenant_admin)
+    assert "platform admin" in exc.value.reason_text
+
+    platform_admin = tenant_admin.model_copy(
+        update={"sub": "kc-platform-admin", "platform_admin": True}
+    )
+    await _approve_as(request_id, platform_admin)
+
+
+async def test_another_client_role_needs_a_tenant_admin_not_a_platform_admin(
+    kc: KeycloakConnector,
+) -> None:
+    request_id = await _park_client_role("assign", "account", _operator())
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert row.proposed_effect["preview"]["grant"]["platform_admin"] is False
+    tenant_admin = _operator("kc-account-approver").model_copy(
+        update={"tenant_role": TenantRole.TENANT_ADMIN}
+    )
+    await _approve_as(request_id, tenant_admin)
+
+
+# ---------------------------------------------------------------------------
+# The approval cards
+# ---------------------------------------------------------------------------
+
+
+async def test_the_remove_card_says_a_realm_management_role_and_who_still_holds_it(
+    kc: KeycloakConnector,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        _mount_user_lookup(mock)
+        _mount_client_and_roles(mock)
+        holders = mock.get(
+            f"/admin/realms/{_REALM}/clients/{_CLIENT_UUID}/roles/realm-admin/users"
+        ).respond(200, json=[{"id": _USER_UUID}, {"id": "other-admin"}])
+        call = await call_operation(
+            _operator(),
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": "keycloak.role_mapping.client.remove",
+                "target": _TARGET_NAME,
+                "params": {
+                    "username": "jane.example",
+                    "client_id": "realm-management",
+                    "roles": ["realm-admin"],
+                },
+            },
+        )
+    assert call["status"] == "awaiting_approval", call
+    assert holders.called
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, uuid.UUID(call["extras"]["approval_request_id"]))
+    assert row is not None
+    card = row.proposed_effect["preview"]
+    assert card["holders_after"] == {"realm-admin": 1}
+    assert "realm-management" in card["warning"]
+    assert "realm-admin: 1" in card["warning"]
+
+
+async def test_the_remove_card_of_another_client_has_no_warning(kc: KeycloakConnector) -> None:
+    request_id = await _park_client_role("remove", "account", _operator())
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert "warning" not in row.proposed_effect["preview"]
+
+
+async def test_the_update_card_shows_the_current_user_name_and_email(
+    kc: KeycloakConnector,
+) -> None:
+    request_id = await _park_sign_in_change("keycloak.user.update", _operator())
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    card = row.proposed_effect["preview"]
+    assert card["current"] == {
+        "username": _USER_BEFORE["username"],
+        "email": _USER_BEFORE["email"],
+    }
+    assert card["changes"] == {"email": "j@example.com"}
+
+
+@pytest.mark.parametrize(
+    ("kept_ids", "expected"),
+    [
+        ((), "no stored credential at all"),
+        (("cred-pw",), "no second factor"),
+        (("cred-pw", "cred-key"), None),
+    ],
+)
+def test_the_credential_card_says_when_the_user_is_left_without_a_factor(
+    kept_ids: tuple[str, ...], expected: str | None
+) -> None:
+    warning = _credential_warning(_clean(*(c["id"] for c in _CREDENTIALS)), _clean(*kept_ids))
+    if expected is None:
+        assert warning is None
+    else:
+        assert warning is not None and expected in warning
+
+
+async def test_a_credential_delete_does_not_run_when_the_credentials_changed(
+    kc: KeycloakConnector,
+) -> None:
+    """Parked by type; a new credential of that type appears; the approved run is refused."""
+    approver = _operator("kc-account-approver").model_copy(
+        update={"tenant_role": TenantRole.TENANT_ADMIN}
+    )
+    new_otp = {**_CREDENTIALS[1], "id": "cred-otp-3", "userLabel": "New phone"}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        _mount_user_lookup(mock)
+        mock.get(_CREDENTIALS_PATH).mock(
+            side_effect=[
+                httpx.Response(200, json=_CREDENTIALS),  # preview
+                httpx.Response(200, json=[*_CREDENTIALS, new_otp]),  # live card before the run
+            ]
+        )
+        delete = mock.delete(url__regex=r".*/credentials/.*").respond(204)
+        call = await call_operation(
+            _operator(),
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": "keycloak.user.credential.delete",
+                "target": _TARGET_NAME,
+                "params": {"username": "jane.example", "credential_type": "otp"},
+            },
+        )
+        assert call["status"] == "awaiting_approval", call
+        request_id = uuid.UUID(call["extras"]["approval_request_id"])
+        await _approve_as(request_id, approver)
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, request_id)
+            assert row is not None
+            resumed = await resume_dispatch_after_approval(
+                operator=approver, request=row, params=None
+            )
+
+    assert resumed.status == "denied", resumed
+    assert resumed.extras["reason"] == CREDENTIALS_CHANGED
+    assert not delete.called
+
+
+# ---------------------------------------------------------------------------
+# A realm that is not MEHO's own sign-in realm
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("op_id", sorted(_SIGN_IN_CHANGES))
+async def test_outside_the_login_realm_a_self_approver_may_approve_their_own_change(
+    kc: KeycloakConnector, op_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not a change of rights there: the risk level's normal approval rules apply."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/another-login")
+    get_settings.cache_clear()
+    requester = _operator().model_copy(update={"self_approver": True})
+    request_id = await _park_sign_in_change(op_id, requester)
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert not row.rights_change
+    assert row.proposed_effect["preview"]["grant"]["login_realm"] is False
+
+    await _approve_as(request_id, requester)

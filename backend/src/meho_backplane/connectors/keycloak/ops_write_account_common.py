@@ -23,7 +23,16 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
 
-__all__ = ["opt_str", "raise_user_not_found_on_404", "resolve_user"]
+__all__ = [
+    "REALM_MANAGEMENT_CLIENT",
+    "is_realm_management",
+    "opt_str",
+    "raise_user_not_found_on_404",
+    "resolve_user",
+]
+
+#: The client whose roles decide who may manage a realm.
+REALM_MANAGEMENT_CLIENT = "realm-management"
 
 
 def opt_str(value: Any) -> str | None:
@@ -31,6 +40,12 @@ def opt_str(value: Any) -> str | None:
     if isinstance(value, str):
         return value.strip() or None
     return None
+
+
+def is_realm_management(params: dict[str, Any]) -> bool:
+    """True when the request names the ``realm-management`` client, in any case."""
+    client_id = opt_str(params.get("client_id"))
+    return client_id is not None and client_id.casefold() == REALM_MANAGEMENT_CLIENT
 
 
 async def resolve_user(

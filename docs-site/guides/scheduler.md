@@ -228,9 +228,17 @@ known noise:
   (`meho agent budget set agent:<name> ...`, see
   [Hosted agents](hosted-agents.md)) stops a new run with `budget_exceeded`
   when the cap is reached. The agent's `--turn-budget` limits each run.
-- **Kill switch.** To stop all runs of one agent, run
+- **Kill switch.** To stop new runs of one agent, run
   `meho agent edit <name> --disabled`. To stop only one trigger, cancel it
-  with `meho scheduler cancel <trigger_id>`.
+  with `meho scheduler cancel <trigger_id>`. Neither stops a run that has
+  already started. Find those runs and stop each one:
+
+    ```bash
+    meho agent run-list --agent-name <name> --status pending
+    meho agent run-list --agent-name <name> --status running
+    meho agent run-list --agent-name <name> --status awaiting_approval
+    meho agent run-cancel <run-id>
+    ```
 
 ### Worked example: a Sensor starts my agent
 
@@ -262,7 +270,7 @@ meho agent-principal register pod-reader
 
 cat > pod-reader-toolset.json <<'JSON'
 {
-  "meta_tools": ["list_operation_groups", "search_operations", "call_operation"],
+  "meta_tools": ["list_operation_groups", "search_operations", "call_operation", "result_query"],
   "connectors": ["k8s-1.x"]
 }
 JSON
@@ -271,7 +279,7 @@ meho agent create pod-reader \
   --identity-ref agent:pod-reader \
   --model-tier standard \
   --turn-budget 20 \
-  --system-prompt "You are pod-reader. You only read. You never change anything. A Sensor started you. Use the connector k8s-1.x. Find the operation with search_operations, then run it with call_operation. Say in short plain sentences which pods are not running." \
+  --system-prompt "You are pod-reader. You only read. You never change anything. A Sensor started you. Use the connector k8s-1.x. Find the operation with search_operations, then run it with call_operation. If the answer is a link to a stored result, read all rows with result_query. Say in short plain sentences which pods are not running." \
   --toolset @pod-reader-toolset.json
 
 meho agent grant create --principal agent:pod-reader --op '*' --verdict deny

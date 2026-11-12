@@ -426,6 +426,7 @@ from meho_backplane.operations._vendor_text import (
     redact_error_result,
     withhold_vendor_text,
 )
+from meho_backplane.operations.approved_step_check import approved_step_refusal
 from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
@@ -1129,8 +1130,8 @@ async def _agent_step_refusal(
 
     A write step with no grant (#6189), or with a ``deny`` grant (#6285),
     or a multi-step operation that changes something and declares no
-    steps (#6298). Run before the call waits for approval, and again when
-    an approved call resumes (#6298).
+    steps (#6298). Run before the call waits for approval. An approved
+    call is checked again by :func:`approved_step_refusal` (#6314).
 
     Only for an agent with ``AGENT_GRANT_REQUIRED`` not ``off`` and only at
     the top level: the steps of the call are checked here, with the same
@@ -4140,11 +4141,12 @@ async def _dispatch_now(
                     error_extras=_error_extras_for_audit(denied),
                 )
                 return with_audit_receipt(denied, receipt)
-            # #6298: an agent's grants may have changed while the call
-            # waited. Check its steps again before the first one runs, so
-            # the resumed call does not stop half-way. The approval
+            # #6298, #6314: an agent's grants may have changed while the
+            # call waited. Check its steps again before the first one runs,
+            # also when a person runs the call from an approvals surface,
+            # so the resumed call does not stop half-way. The approval
             # request then ends as a failed run with this reason.
-            step_refusal = await _agent_step_refusal(
+            step_refusal = await approved_step_refusal(
                 operator=operator,
                 descriptor=descriptor,
                 connector_id=connector_id,

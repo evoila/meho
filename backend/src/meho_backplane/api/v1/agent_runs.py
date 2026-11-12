@@ -287,6 +287,18 @@ def _outcome_response(outcome: AgentRunOutcome) -> JSONResponse:
     )
 
 
+def _header_work_ref(raw: str | None) -> str | None:
+    """Return the text of a ``Meho-Work-Ref`` header read through ``Header()``.
+
+    Starlette gives header values as latin-1 text. Turn the value back
+    into its bytes and decode it like the audit middleware does, so a
+    ticket id sent as UTF-8 (such as ``Änderung-7``) stays the same text
+    on the run row. Only header values come here: latin-1 can encode
+    every one of them.
+    """
+    return decode_work_ref_header(raw.encode("latin-1")) if raw is not None else None
+
+
 @contextlib.contextmanager
 def _bound_work_ref(raw: str | None) -> Iterator[None]:
     """Bind the inbound ``Meho-Work-Ref`` header onto ``work_ref_var``.
@@ -299,11 +311,11 @@ def _bound_work_ref(raw: str | None) -> Iterator[None]:
     set/reset discipline the approval-queue boundary uses. A missing /
     blank header binds nothing — the run's ``work_ref`` lands ``NULL``.
 
-    Starlette decodes header values as latin-1, so the value is turned
-    back into its bytes and decoded like the audit middleware does: a
-    non-ASCII ticket id sent as UTF-8 stays the same text on the run row.
+    ``raw`` is normal text. The REST routes pass the header through
+    :func:`_header_work_ref` first; the console run passes its form value
+    as it is.
     """
-    cleaned = decode_work_ref_header(raw.encode("latin-1")) if raw is not None else None
+    cleaned = raw.strip() if raw is not None else None
     if not cleaned:
         yield
         return
@@ -365,7 +377,7 @@ async def run_agent(
     )
     invoker = get_agent_invoker()
     try:
-        with _bound_work_ref(meho_work_ref):
+        with _bound_work_ref(_header_work_ref(meho_work_ref)):
             outcome = await invoker.run(operator, name, body.input, async_mode=body.async_)
     except AgentNotFoundError as exc:
         raise HTTPException(
@@ -628,7 +640,7 @@ async def run_agent_events(
             detail={"error": "budget_exceeded", "reason": exc.reason},
         ) from exc
     return StreamingResponse(
-        _events_generator(operator, name, body.input, meho_work_ref),
+        _events_generator(operator, name, body.input, _header_work_ref(meho_work_ref)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",

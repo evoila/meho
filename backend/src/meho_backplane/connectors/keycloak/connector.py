@@ -112,7 +112,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
-from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
+from meho_backplane.connectors.keycloak.redaction import redact_trace_fields
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakAdminCredentialsLoader,
@@ -630,11 +630,13 @@ class KeycloakConnector(HttpConnector):
         A client representation carries the confidential client's
         ``secret``, a user representation can carry ``credentials``, and a
         realm's ``smtpServer`` map carries a ``password``. The trace gets
-        the same scrub the operation result gets
-        (:func:`~meho_backplane.connectors.keycloak.redaction.redact_secret_fields`),
-        so the stored trace and the agent copy hold ``***REDACTED***`` where
-        the result does. An empty body is recorded as it is. A body that is
-        not JSON is replaced by a fixed marker. Never raises.
+        the same scrub the operation result gets, plus the personal fields
+        an operation leaves out of its result, such as the ``lastIPFailure``
+        of a user's lock status
+        (:func:`~meho_backplane.connectors.keycloak.redaction.redact_trace_fields`),
+        so the stored trace and the agent copy hold ``***REDACTED***`` there.
+        An empty body is recorded as it is. A body that is not JSON is
+        replaced by a fixed marker. Never raises.
         """
         if not response.content:
             return None
@@ -643,7 +645,7 @@ class KeycloakConnector(HttpConnector):
         except ValueError:
             return _TRACE_BODY_WITHHELD
         try:
-            return redact_secret_fields(body)
+            return redact_trace_fields(body)
         except Exception:  # a trace must never break the call, and never hold a secret
             return _TRACE_BODY_WITHHELD
 

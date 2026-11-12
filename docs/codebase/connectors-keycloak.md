@@ -312,9 +312,11 @@ the general posture (see "Write ops" below).
 The flight recorder stores the vendor answer of each recorded call, before
 the handler's scrub runs. So the connector masks the trace body too:
 `KeycloakConnector.trace_response_body` (`connectors/keycloak/connector.py`)
-parses the Admin REST answer and returns `redact_secret_fields(payload)`,
-the same scrub the result gets. The stored trace and the agent copy of it
-show `***REDACTED***` where the result does. This covers every admin read
+parses the Admin REST answer and returns `redact_trace_fields(payload)`:
+the same scrub the result gets, plus personal fields that an op leaves out
+of its result (today `lastIPFailure`, the IP address of a user's last failed
+sign-in). The stored trace and the agent copy of it show `***REDACTED***`
+for these fields. This covers every admin read
 that goes through the recorded `_get_admin_json` path: the curated read
 ops, and the client reads inside `keycloak.client.update`, the client
 delete lookup and the realm delete. An empty answer is recorded as it is; an
@@ -322,8 +324,9 @@ answer that is not JSON is replaced by a fixed marker. The shared trace
 engine (`docs/codebase/redaction.md`) still runs on what the hook returns
 and masks secret-named fields by name as well.
 `tests/test_connectors_keycloak_trace_mask.py` dispatches
-`keycloak.client.get` with the recorder on and checks that a made-up client
-secret is in neither the stored trace nor the agent copy.
+`keycloak.client.get` and `keycloak.user.lock_status` with the recorder on
+and checks that a made-up client secret and the failure IP are in neither
+the stored trace nor the agent copy.
 
 ## User state reads (`ops_user_state.py`)
 
@@ -360,7 +363,7 @@ apart:
   `GET .../attack-detection/brute-force/users/{user-id}`. The result is
   `{userId, locked, numFailures, numTemporaryLockouts, lastFailure}`. The IP
   address of the last failure (`lastIPFailure`) is personal data and is never
-  returned. `lastFailure` is ISO 8601 UTC, or `null` when there was no
+  returned. The trace mask hides it in the flight recorder trace too. `lastFailure` is ISO 8601 UTC, or `null` when there was no
   failure. An unknown user raises "user not found". An answer without the
   `disabled` flag is an error, never "not locked".
 - `keycloak.realm.lock_settings` reads the realm and copies only the lock

@@ -9,7 +9,10 @@ Two layers are pinned here:
   no event loop and no HTTP;
 * one real ``keycloak.client.get`` dispatch with the recorder on, against a
   respx-mocked Admin REST API: the stored trace and the agent copy of it
-  hold the client's fields but not its secret.
+  hold the client's fields but not its secret;
+* one real ``keycloak.user.lock_status`` dispatch with the recorder on: the
+  stored trace and the agent copy hold the lock counts but not the IP
+  address of the last failed sign-in.
 """
 
 from __future__ import annotations
@@ -58,6 +61,16 @@ _MANAGED_REALM = "example-realm"
 _CLIENT_UUID = "33333333-3333-3333-3333-333333333333"
 _MADE_UP_SECRET = "made-up-client-secret-0123456789abcdef"
 _MADE_UP_SMTP_PASSWORD = "made-up-smtp-password-fedcba9876543210"
+_USER_UUID = "44444444-4444-4444-4444-444444444444"
+_FAILURE_IP = "192.0.2.88"
+
+_LOCK_ANSWER: dict[str, Any] = {
+    "numFailures": 5,
+    "disabled": True,
+    "lastIPFailure": _FAILURE_IP,
+    "lastFailure": 1767225600000,
+    "numTemporaryLockouts": 1,
+}
 
 _CLIENT_ANSWER: dict[str, Any] = {
     "id": _CLIENT_UUID,
@@ -102,6 +115,17 @@ def test_the_trace_hook_masks_every_secret_field() -> None:
     assert recorded["client"]["redirectUris"] == ["https://app.example.test/callback"]
 
 
+def test_the_trace_hook_masks_the_failure_ip_of_a_lock_status() -> None:
+    connector = KeycloakConnector(credentials_loader=_stub_loader)
+
+    recorded = connector.trace_response_body(httpx.Response(200, json=_LOCK_ANSWER))
+
+    assert _FAILURE_IP not in json.dumps(recorded)
+    assert recorded["lastIPFailure"] == REDACTED
+    assert recorded["numFailures"] == 5
+    assert recorded["disabled"] is True
+
+
 def test_the_trace_hook_masks_a_list_answer() -> None:
     connector = KeycloakConnector(credentials_loader=_stub_loader)
 
@@ -133,7 +157,7 @@ def test_the_trace_hook_withholds_a_body_the_mask_cannot_walk(
     def _boom(_value: Any) -> Any:
         raise RuntimeError("mask failed")
 
-    monkeypatch.setattr(connector_mod, "redact_secret_fields", _boom)
+    monkeypatch.setattr(connector_mod, "redact_trace_fields", _boom)
     connector = KeycloakConnector(credentials_loader=_stub_loader)
 
     recorded = connector.trace_response_body(httpx.Response(200, json=_CLIENT_ANSWER))
@@ -314,3 +338,47 @@ async def test_client_get_trace_and_agent_copy_hold_no_client_secret(
     assert window["total_rows"] >= 1
     assert _MADE_UP_SECRET not in json.dumps(window)
     assert _MADE_UP_SECRET not in json.dumps(handle_json)
+
+
+@pytest.mark.asyncio
+async def test_lock_status_trace_and_agent_copy_hold_no_failure_ip(
+    recorded_keycloak: Operator,
+    shared_store: ResultHandleStore,
+) -> None:
+    operator = recorded_keycloak
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.post("/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": "kc-admin-token", "expires_in": 300}
+        )
+        mock.get(
+            f"/admin/realms/{_MANAGED_REALM}/attack-detection/brute-force/users/{_USER_UUID}"
+        ).respond(200, json=_LOCK_ANSWER)
+        result = await call_operation(
+            operator,
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": "keycloak.user.lock_status",
+                "target": {"name": _TARGET_NAME},
+                "params": {"id": _USER_UUID},
+            },
+        )
+    assert result["status"] == "ok", f"user.lock_status failed: {result.get('error')}"
+    assert _FAILURE_IP not in json.dumps(result)
+
+    # The stored trace: the vendor answer is recorded, with the failure IP masked.
+    header, spans = await _stored_spans(operator.tenant_id)
+    assert header.redaction_uncertain is False
+    vendor_calls = [span for span in spans if span.span_kind == "vendor_call"]
+    assert len(vendor_calls) == 1
+    body = vendor_calls[0].attributes["response_body"]
+    assert vendor_calls[0].attributes["body_recorded"] is True
+    assert body["numFailures"] == 5
+    assert body["lastIPFailure"] == REDACTED
+    assert _FAILURE_IP not in json.dumps([span.attributes for span in spans])
+
+    # The agent copy: the handle pages the same spans back, still masked.
+    handle_json = result["extras"][AGENT_TRACE_HANDLE_EXTRA_KEY]
+    window = await read_result_window(operator, UUID(handle_json["handle_id"]), offset=0, limit=50)
+    assert window["total_rows"] >= 1
+    assert _FAILURE_IP not in json.dumps(window)
+    assert _FAILURE_IP not in json.dumps(handle_json)

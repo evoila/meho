@@ -2350,6 +2350,25 @@ func TestBootstrap_StopsWhenAnotherNameHasTheApprovalLevel(t *testing.T) {
 	}
 }
 
+// A realm acr.loa.map that is not a JSON object, such as the JSON value
+// null, stops the bootstrap before it writes the realm, like the realm
+// stage of the backend.
+func TestBootstrap_StopsWhenTheRealmLevelMapIsNotAnObject(t *testing.T) {
+	for _, raw := range []string{`null`, `[2]`} {
+		t.Run(raw, func(t *testing.T) {
+			fake := newFakeKeycloak()
+			fake.setRealmAttr(levelMapAttribute, raw)
+			_, _, err := runBootstrapOnce(t, fake, fullOpts())
+			if err == nil || !strings.Contains(err.Error(), "the realm attribute acr.loa.map is not a JSON object") {
+				t.Fatalf("Bootstrap error = %v, want the not-a-JSON-object stop", err)
+			}
+			if got, _ := fake.realmAttr(levelMapAttribute); got != raw {
+				t.Errorf("acr.loa.map changed: %q", got)
+			}
+		})
+	}
+}
+
 // The bootstrap stops when the approval client has its own acr.loa.map:
 // Keycloak would then not use the realm's approval level (#6281). An
 // empty map is fine.

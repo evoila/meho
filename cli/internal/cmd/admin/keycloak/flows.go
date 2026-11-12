@@ -391,7 +391,8 @@ func readLevelMap(ctx context.Context, c *adminClient) (map[string]string, map[s
 	}
 	levels := map[string]any{}
 	if raw := realm.Attributes[levelMapAttribute]; raw != "" {
-		if err := json.Unmarshal([]byte(raw), &levels); err != nil {
+		// The JSON value null gives no error and a nil map.
+		if err := json.Unmarshal([]byte(raw), &levels); err != nil || levels == nil {
 			return nil, nil, fmt.Errorf("the realm attribute %s is not a JSON object; fix it in the Keycloak admin console and run again", levelMapAttribute)
 		}
 	}

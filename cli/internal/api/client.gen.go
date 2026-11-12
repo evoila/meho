@@ -13893,6 +13893,11 @@ type UiAgentsRunsListUiAgentsRunsGetParams struct {
 	WorkRef *string         `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 }
 
+// UiAgentsRunConsoleUiAgentsNameRunGetParams defines parameters for UiAgentsRunConsoleUiAgentsNameRunGet.
+type UiAgentsRunConsoleUiAgentsNameRunGetParams struct {
+	Run *openapi_types.UUID `form:"run,omitempty" json:"run,omitempty"`
+}
+
 // UiAgentsRunStreamUiAgentsNameRunStreamGetParams defines parameters for UiAgentsRunStreamUiAgentsNameRunStreamGet.
 type UiAgentsRunStreamUiAgentsNameRunStreamGetParams struct {
 	Token *string `form:"token,omitempty" json:"token,omitempty"`
@@ -17685,6 +17690,9 @@ type ClientInterface interface {
 	// RunDetailUiAgentsRunsHandleGet request
 	RunDetailUiAgentsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// RunEventsStreamUiAgentsRunsHandleEventsGet request
+	RunEventsStreamUiAgentsRunsHandleEventsGet(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiAgentsDetailUiAgentsNameGetWithBody request with any body
 	UiAgentsDetailUiAgentsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -17711,9 +17719,9 @@ type ClientInterface interface {
 	UiAgentsEditModalUiAgentsNameEditGet(ctx context.Context, name string, body UiAgentsEditModalUiAgentsNameEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAgentsRunConsoleUiAgentsNameRunGetWithBody request with any body
-	UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	UiAgentsRunConsoleUiAgentsNameRunGet(ctx context.Context, name string, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	UiAgentsRunConsoleUiAgentsNameRunGet(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAgentsRunSubmitUiAgentsNameRunPostWithBody request with any body
 	UiAgentsRunSubmitUiAgentsNameRunPostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -22730,6 +22738,18 @@ func (c *Client) RunDetailUiAgentsRunsHandleGet(ctx context.Context, handle open
 	return c.Client.Do(req)
 }
 
+func (c *Client) RunEventsStreamUiAgentsRunsHandleEventsGet(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunEventsStreamUiAgentsRunsHandleEventsGetRequest(c.Server, handle)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) UiAgentsDetailUiAgentsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAgentsDetailUiAgentsNameGetRequestWithBody(c.Server, name, contentType, body)
 	if err != nil {
@@ -22850,8 +22870,8 @@ func (c *Client) UiAgentsEditModalUiAgentsNameEditGet(ctx context.Context, name 
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(c.Server, name, contentType, body)
+func (c *Client) UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(c.Server, name, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -22862,8 +22882,8 @@ func (c *Client) UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx context.Contex
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiAgentsRunConsoleUiAgentsNameRunGet(ctx context.Context, name string, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiAgentsRunConsoleUiAgentsNameRunGetRequest(c.Server, name, body)
+func (c *Client) UiAgentsRunConsoleUiAgentsNameRunGet(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentsRunConsoleUiAgentsNameRunGetRequest(c.Server, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -42493,6 +42513,40 @@ func NewRunDetailUiAgentsRunsHandleGetRequest(server string, handle openapi_type
 	return req, nil
 }
 
+// NewRunEventsStreamUiAgentsRunsHandleEventsGetRequest generates requests for RunEventsStreamUiAgentsRunsHandleEventsGet
+func NewRunEventsStreamUiAgentsRunsHandleEventsGetRequest(server string, handle openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "handle", runtime.ParamLocationPath, handle)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/runs/%s/events", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiAgentsDetailUiAgentsNameGetRequest calls the generic UiAgentsDetailUiAgentsNameGet builder with application/json body
 func NewUiAgentsDetailUiAgentsNameGetRequest(server string, name string, body UiAgentsDetailUiAgentsNameGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -42729,18 +42783,18 @@ func NewUiAgentsEditModalUiAgentsNameEditGetRequestWithBody(server string, name 
 }
 
 // NewUiAgentsRunConsoleUiAgentsNameRunGetRequest calls the generic UiAgentsRunConsoleUiAgentsNameRunGet builder with application/json body
-func NewUiAgentsRunConsoleUiAgentsNameRunGetRequest(server string, name string, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody) (*http.Request, error) {
+func NewUiAgentsRunConsoleUiAgentsNameRunGetRequest(server string, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(server, name, "application/json", bodyReader)
+	return NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(server, name, params, "application/json", bodyReader)
 }
 
 // NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody generates requests for UiAgentsRunConsoleUiAgentsNameRunGet with any type of body
-func NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+func NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(server string, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -42763,6 +42817,28 @@ func NewUiAgentsRunConsoleUiAgentsNameRunGetRequestWithBody(server string, name 
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Run != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "run", runtime.ParamLocationQuery, *params.Run); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), body)
@@ -53885,6 +53961,9 @@ type ClientWithResponsesInterface interface {
 	// RunDetailUiAgentsRunsHandleGetWithResponse request
 	RunDetailUiAgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*RunDetailUiAgentsRunsHandleGetResponse, error)
 
+	// RunEventsStreamUiAgentsRunsHandleEventsGetWithResponse request
+	RunEventsStreamUiAgentsRunsHandleEventsGetWithResponse(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*RunEventsStreamUiAgentsRunsHandleEventsGetResponse, error)
+
 	// UiAgentsDetailUiAgentsNameGetWithBodyWithResponse request with any body
 	UiAgentsDetailUiAgentsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsDetailUiAgentsNameGetResponse, error)
 
@@ -53911,9 +53990,9 @@ type ClientWithResponsesInterface interface {
 	UiAgentsEditModalUiAgentsNameEditGetWithResponse(ctx context.Context, name string, body UiAgentsEditModalUiAgentsNameEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsEditModalUiAgentsNameEditGetResponse, error)
 
 	// UiAgentsRunConsoleUiAgentsNameRunGetWithBodyWithResponse request with any body
-	UiAgentsRunConsoleUiAgentsNameRunGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error)
+	UiAgentsRunConsoleUiAgentsNameRunGetWithBodyWithResponse(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error)
 
-	UiAgentsRunConsoleUiAgentsNameRunGetWithResponse(ctx context.Context, name string, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error)
+	UiAgentsRunConsoleUiAgentsNameRunGetWithResponse(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error)
 
 	// UiAgentsRunSubmitUiAgentsNameRunPostWithBodyWithResponse request with any body
 	UiAgentsRunSubmitUiAgentsNameRunPostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsRunSubmitUiAgentsNameRunPostResponse, error)
@@ -60501,6 +60580,29 @@ func (r RunDetailUiAgentsRunsHandleGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RunDetailUiAgentsRunsHandleGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunEventsStreamUiAgentsRunsHandleEventsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunEventsStreamUiAgentsRunsHandleEventsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunEventsStreamUiAgentsRunsHandleEventsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -68068,6 +68170,15 @@ func (c *ClientWithResponses) RunDetailUiAgentsRunsHandleGetWithResponse(ctx con
 	return ParseRunDetailUiAgentsRunsHandleGetResponse(rsp)
 }
 
+// RunEventsStreamUiAgentsRunsHandleEventsGetWithResponse request returning *RunEventsStreamUiAgentsRunsHandleEventsGetResponse
+func (c *ClientWithResponses) RunEventsStreamUiAgentsRunsHandleEventsGetWithResponse(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*RunEventsStreamUiAgentsRunsHandleEventsGetResponse, error) {
+	rsp, err := c.RunEventsStreamUiAgentsRunsHandleEventsGet(ctx, handle, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunEventsStreamUiAgentsRunsHandleEventsGetResponse(rsp)
+}
+
 // UiAgentsDetailUiAgentsNameGetWithBodyWithResponse request with arbitrary body returning *UiAgentsDetailUiAgentsNameGetResponse
 func (c *ClientWithResponses) UiAgentsDetailUiAgentsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsDetailUiAgentsNameGetResponse, error) {
 	rsp, err := c.UiAgentsDetailUiAgentsNameGetWithBody(ctx, name, contentType, body, reqEditors...)
@@ -68154,16 +68265,16 @@ func (c *ClientWithResponses) UiAgentsEditModalUiAgentsNameEditGetWithResponse(c
 }
 
 // UiAgentsRunConsoleUiAgentsNameRunGetWithBodyWithResponse request with arbitrary body returning *UiAgentsRunConsoleUiAgentsNameRunGetResponse
-func (c *ClientWithResponses) UiAgentsRunConsoleUiAgentsNameRunGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error) {
-	rsp, err := c.UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx, name, contentType, body, reqEditors...)
+func (c *ClientWithResponses) UiAgentsRunConsoleUiAgentsNameRunGetWithBodyWithResponse(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error) {
+	rsp, err := c.UiAgentsRunConsoleUiAgentsNameRunGetWithBody(ctx, name, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseUiAgentsRunConsoleUiAgentsNameRunGetResponse(rsp)
 }
 
-func (c *ClientWithResponses) UiAgentsRunConsoleUiAgentsNameRunGetWithResponse(ctx context.Context, name string, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error) {
-	rsp, err := c.UiAgentsRunConsoleUiAgentsNameRunGet(ctx, name, body, reqEditors...)
+func (c *ClientWithResponses) UiAgentsRunConsoleUiAgentsNameRunGetWithResponse(ctx context.Context, name string, params *UiAgentsRunConsoleUiAgentsNameRunGetParams, body UiAgentsRunConsoleUiAgentsNameRunGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsRunConsoleUiAgentsNameRunGetResponse, error) {
+	rsp, err := c.UiAgentsRunConsoleUiAgentsNameRunGet(ctx, name, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -78742,6 +78853,39 @@ func ParseRunDetailUiAgentsRunsHandleGetResponse(rsp *http.Response) (*RunDetail
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunEventsStreamUiAgentsRunsHandleEventsGetResponse parses an HTTP response from a RunEventsStreamUiAgentsRunsHandleEventsGetWithResponse call
+func ParseRunEventsStreamUiAgentsRunsHandleEventsGetResponse(rsp *http.Response) (*RunEventsStreamUiAgentsRunsHandleEventsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunEventsStreamUiAgentsRunsHandleEventsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

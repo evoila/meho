@@ -497,8 +497,9 @@ It is off until you opt in, and it has real prerequisites:
 
 - An **enabled agent definition named `checks-investigator`** in your
   tenant (the name is configurable deploy-side). The
-  [tiered-triage example](https://github.com/evoila/meho/tree/main/examples/r1-tiered-triage)
-  is the mould — read-only toolset, writes need approval.
+  [checks investigator example](https://github.com/evoila/meho/tree/main/examples/checks-investigator)
+  shows it: a read-only toolset, and an agent login registered with
+  `--grants read-everything`, so writes wait for approval.
 - The agent runtime, which is **experimental** maturity — check the
   [feature-maturity index](../reference/maturity.md) before leaning
   on it.

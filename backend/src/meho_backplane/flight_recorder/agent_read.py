@@ -152,6 +152,47 @@ def _span_row(span: DispatchTraceSpan) -> dict[str, Any]:
     }
 
 
+#: Marker key on a cut value in the preview. Tells the agent the value was cut
+#: and where to read it in full.
+_CUT_MARKER_KEY: Final[str] = "cut"
+_CUT_MARKER_NOTE: Final[str] = "value cut in this preview; read it in full with result_query"
+
+
+def _cut_value(value: Any, *, max_chars: int) -> Any:
+    """Return ``value`` unchanged when small, else a short preview with a marker."""
+    text = value if isinstance(value, str) else msgspec.json.encode(value).decode()
+    if len(text) <= max_chars:
+        return value
+    return {
+        _CUT_MARKER_KEY: _CUT_MARKER_NOTE,
+        "length": len(text),
+        "preview": text[:max_chars],
+    }
+
+
+def _shrink_row(row: dict[str, Any], *, byte_budget: int) -> dict[str, Any]:
+    """Cut a row that alone is over the byte budget down to fit it.
+
+    Large attribute values (a vendor response or request body) are replaced
+    with a short preview and a marker. The stored row is not touched. If cutting
+    values is not enough, the attributes are dropped and only the marker stays.
+    """
+    attributes = row.get("attributes") or {}
+    max_chars = max(16, byte_budget // (4 * max(1, len(attributes))))
+    while max_chars >= 16:
+        shrunk = {
+            **row,
+            "attributes": {k: _cut_value(v, max_chars=max_chars) for k, v in attributes.items()},
+        }
+        if len(msgspec.json.encode(shrunk)) <= byte_budget:
+            return shrunk
+        max_chars //= 2
+    return {
+        **row,
+        "attributes": {_CUT_MARKER_KEY: _CUT_MARKER_NOTE, "keys": sorted(attributes)[:20]},
+    }
+
+
 def _bounded_sample(rows: list[dict[str, Any]], *, byte_budget: int) -> list[dict[str, Any]]:
     """Inline preview bounded by BOTH a row count and a serialized-byte budget.
 
@@ -159,14 +200,18 @@ def _bounded_sample(rows: list[dict[str, Any]], *, byte_budget: int) -> list[dic
     sized to a byte budget, not only a count. A trace span body is capped at
     F3's 64 KB, so a count-only bound could ship hundreds of KB of preview into
     agent context; this keeps the sample small and pushes the full ordered set
-    to ``result_query``. The first row always ships (a non-empty trace never
-    yields an empty preview), then rows accrue until the next would exceed the
-    budget.
+    to ``result_query``. A non-empty trace never yields an empty preview: when
+    the first row alone is over the budget, a cut-down copy of it ships (large
+    values replaced by a short preview and a marker). Then rows accrue until the
+    next would exceed the budget.
     """
     sample: list[dict[str, Any]] = []
     used = 0
     for row in rows[:_SAMPLE_SIZE]:
         encoded = len(msgspec.json.encode(row))
+        if not sample and encoded > byte_budget:
+            row = _shrink_row(row, byte_budget=byte_budget)
+            encoded = len(msgspec.json.encode(row))
         if sample and used + encoded > byte_budget:
             break
         sample.append(row)

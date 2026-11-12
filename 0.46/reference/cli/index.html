@@ -17662,11 +17662,13 @@
 <ul>
 <li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
 <li><code>--disabled</code> — create the definition parked (enabled=false; default is enabled)</li>
+<li><code>--grants</code> — the agent's first grants: none, read-everything or read-targets. none: no grant; with AGENT_GRANT_REQUIRED=on the agent runs nothing until an admin adds a grant. read-everything: safe operations run at once on every target; everything else waits for a person's approval. read-targets: safe operations run at once on the targets you name with --target; with AGENT_GRANT_REQUIRED=on, only there. Note: with AGENT_GRANT_REQUIRED off (the default) or observe, the agent can also run safe operations that no grant covers, on any target</li>
 <li><code>--identity-ref</code> — reference to the agent principal whose permissions bound the toolset</li>
 <li><code>--json</code> — emit raw AgentDefinitionRead JSON instead of the human summary</li>
 <li><code>--model-tier</code> — logical model tier: standard | fast | deep</li>
 <li><code>--output-schema</code> — optional structured-output JSON Schema as a JSON object: inline JSON, @<path>, or @-</li>
 <li><code>--system-prompt</code> — the agent's standing rules, the same for every run; the task for one run goes in the --input flag of meho agent run (guide: https://evoila.github.io/meho/latest/guides/hosted-agents/)</li>
+<li><code>--target</code> — a target name for --grants read-targets; repeat the flag for more targets</li>
 <li><code>--toolset</code> — allowed-tools spec as a JSON object: inline JSON, @<path>, or @- (default {}); fields and tool names: https://evoila.github.io/meho/latest/guides/hosted-agents/</li>
 <li><code>--turn-budget</code> — max model turns the runtime allows (1..1000)</li>
 </ul>
@@ -17841,8 +17843,10 @@
 </code></pre></div>
 <ul>
 <li><code>--backplane</code> — backplane URL (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--grants</code> — the agent's first grants: none, read-everything or read-targets. none: no grant; with AGENT_GRANT_REQUIRED=on the agent runs nothing until an admin adds a grant. read-everything: safe operations run at once on every target; everything else waits for a person's approval. read-targets: safe operations run at once on the targets you name with --target; with AGENT_GRANT_REQUIRED=on, only there. Note: with AGENT_GRANT_REQUIRED off (the default) or observe, the agent can also run safe operations that no grant covers, on any target</li>
 <li><code>--json</code> — emit raw AgentPrincipalRead JSON instead of the human summary</li>
 <li><code>--owner-sub</code> — OIDC sub of the kill-switch owner (defaults to the caller's sub)</li>
+<li><code>--target</code> — a target name for --grants read-targets; repeat the flag for more targets</li>
 </ul>
 <h3 id="meho-agent-principal-revoke"><code>meho agent-principal revoke</code><a class="headerlink" href="#meho-agent-principal-revoke" title="Permanent link">&para;</a></h3>
 <p>Revoke an agent principal — kill switch (tenant_admin)</p>

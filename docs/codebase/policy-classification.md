@@ -47,6 +47,8 @@ classifications:
   document MEHO uses its built-in list (`DEFAULT_TAXONOMY` in
   `policy/classification.py`). A tenant's document can add categories
   for that tenant only. The default category is always the install's.
+  The install's `categories` and `default` each replace the built-in
+  value when set.
 
 ## How one operation is classified
 

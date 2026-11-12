@@ -314,14 +314,16 @@ def taxonomy_from_documents(
 ) -> Taxonomy:
     """Return the taxonomy for a tenant: the install's list plus the tenant's own categories.
 
-    Without an install policy, :data:`DEFAULT_TAXONOMY` is the install's
-    list. The default category is always the install's.
+    The install's ``categories`` and ``default`` each replace the one of
+    :data:`DEFAULT_TAXONOMY` when set. The default category is always the
+    install's.
     """
     base = DEFAULT_TAXONOMY
     install_tax = (install or {}).get("taxonomy")
-    if isinstance(install_tax, Mapping) and install_tax.get("categories"):
+    if isinstance(install_tax, Mapping):
+        categories = install_tax.get("categories")
         base = Taxonomy(
-            categories=tuple(str(c) for c in install_tax["categories"]),
+            categories=tuple(str(c) for c in categories) if categories else base.categories,
             default=str(install_tax.get("default") or base.default),
         )
     tenant_tax = (tenant or {}).get("taxonomy")

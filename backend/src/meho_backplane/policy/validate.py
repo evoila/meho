@@ -101,16 +101,19 @@ async def load_known_ops(
 
 def _taxonomy_mistakes(document: dict[str, Any], *, scope: Scope, taxonomy: Taxonomy) -> list[str]:
     raw = document.get("taxonomy") or {}
-    default = raw.get("default")
-    if default is None:
-        return []
     if scope == "tenant":
+        if raw.get("default") is None:
+            return []
         return [
             "`taxonomy.default` belongs to the install's policy file; a tenant's file can "
             "only add categories."
         ]
-    if default not in taxonomy.categories:
-        return [f"`taxonomy.default` `{default}` is not in `taxonomy.categories`."]
+    if taxonomy.default not in taxonomy.categories:
+        known = ", ".join(taxonomy.categories)
+        return [
+            f"`taxonomy.default` `{taxonomy.default}` is not in the categories ({known}). "
+            "Set `taxonomy.default` to one of them."
+        ]
     return []
 
 

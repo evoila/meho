@@ -33,7 +33,9 @@ classifications:
 - `policy` is required and is always `v1`.
 - `taxonomy.categories` in a tenant's file adds categories for that
   tenant. In the install's file it is the category list of every tenant.
-  `taxonomy.default` is allowed only in the install's file.
+  `taxonomy.default` is allowed only in the install's file. Each of the
+  two replaces the built-in value when set, and the default must be one
+  of the categories (the built-in default is `other`).
 - Each `classifications` entry has a `match` (at least one of `connector`,
   `group`, `op`; patterns as in
   [policy-classification.md](policy-classification.md)) and sets at least

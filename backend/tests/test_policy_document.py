@@ -30,7 +30,12 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PolicyRevision, TenantPolicy
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.policy import validate as validate_module
-from meho_backplane.policy.classification import OpCoordinates
+from meho_backplane.policy.classification import (
+    OpCoordinates,
+    Taxonomy,
+    classify,
+    taxonomy_from_documents,
+)
 from meho_backplane.policy.document import (
     canonical_sha256,
     document_of,
@@ -249,10 +254,14 @@ def test_a_file_can_raise_a_level_and_add_a_wait() -> None:
 def test_unknown_category_and_level_are_one_sentence_each() -> None:
     mistakes = _check({"match": {"op": "x"}, "category": "cars", "risk": "huge"}, [])
     assert mistakes == [
-        "`classifications[0].risk` `huge` is not a risk level; use safe, caution, dangerous "
-        "or destructive.",
-        "`classifications[0].category` `cars` is not in the taxonomy (network, storage, compute, "
-        "identity, secrets, other).",
+        (
+            "`classifications[0].risk` `huge` is not a risk level; use safe, caution, dangerous "
+            "or destructive."
+        ),
+        (
+            "`classifications[0].category` `cars` is not in the taxonomy (network, storage, "
+            "compute, identity, secrets, other)."
+        ),
     ]
 
 
@@ -263,6 +272,29 @@ def test_a_tenant_file_cannot_set_the_default_category() -> None:
         "`taxonomy.default` belongs to the install's policy file; a tenant's file can only add "
         "categories."
     ]
+
+
+def test_an_install_default_alone_is_used() -> None:
+    document = {"taxonomy": {"default": "network"}, "classifications": []}
+    assert check_document(document, scope="install", install_document=None, ops=[]) == ([], [])
+    taxonomy = taxonomy_from_documents(document, None)
+    assert taxonomy.default == "network"
+    unmatched = classify(OpCoordinates("polfix-1.x", None, "polfix.vm.list"), [], taxonomy)
+    assert unmatched.category == "network"
+
+
+def test_install_categories_without_their_default_are_a_mistake() -> None:
+    document = {"taxonomy": {"categories": ["network"]}, "classifications": []}
+    mistakes, _ = check_document(document, scope="install", install_document=None, ops=[])
+    assert mistakes == [
+        (
+            "`taxonomy.default` `other` is not in the categories (network). "
+            "Set `taxonomy.default` to one of them."
+        )
+    ]
+    fixed = {"taxonomy": {"categories": ["network"], "default": "network"}}
+    assert taxonomy_from_documents(fixed, None) == Taxonomy(("network",), "network")
+    assert check_document(fixed, scope="install", install_document=None, ops=[]) == ([], [])
 
 
 def test_a_conflict_in_the_file_is_a_mistake() -> None:

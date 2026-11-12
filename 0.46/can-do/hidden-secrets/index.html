@@ -3149,11 +3149,25 @@ result of an operation.</p>
   person approves it. For every request with <code>reveal_secret</code> that waits
   for approval, also one that creates a credential, approving does not
   run the operation. The person who asked then runs it and gets the
-  value: with <code>POST /api/v1/approvals/&lt;id&gt;/reveal</code>, with "Show value" in
-  the console's Vault view, or with
-  <code>meho secret read --approval &lt;id&gt; --field &lt;name&gt;</code>. This works once, and
-  only for 15 minutes after the approval. The person who approved does
-  not see the value, and MEHO does not store it.</li>
+  value. This works once, and only for 15 minutes after the approval. The
+  person who approved does not see the value, and MEHO does not store it.
+  No browser or proxy keeps the answer with the value: it says
+  <code>Cache-Control: no-store</code>. The same is true when a person sees the
+  values at once, on a read that needs no approval.</li>
+<li>A call with <code>reveal_secret: true</code> cannot run in the background. With
+  <code>async: true</code> it is refused. It runs at once, or through an approval.</li>
+<li>How the person who asked gets the value:<ul>
+<li><strong>Command line:</strong> <code>meho secret read --approval &lt;id&gt; --field &lt;name&gt;</code>.</li>
+<li><strong>Console:</strong> "Show value" in the Vault view.</li>
+<li><strong>REST:</strong> <code>POST /api/v1/approvals/&lt;id&gt;/reveal</code>.</li>
+<li><strong>MCP (an AI tool such as Claude Code):</strong> call <code>call_operation</code>
+  again with the same <code>connector_id</code> and <code>op_id</code>, and
+  <code>approval_request_id: &lt;id&gt;</code>. Send nothing else. This needs the
+  switch <code>MCP_REVEAL_FETCH</code>, which is off by default. With it off, a
+  person who works through MCP uses the command line or the console.</li>
+<li>A second try is refused, and it shows no value.</li>
+</ul>
+</li>
 <li>An operation that makes a new credential still gives it to the
   caller once.</li>
 <li>A connector can mark a field that only looks secret, such as a date

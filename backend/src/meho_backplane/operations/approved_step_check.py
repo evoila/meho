@@ -29,8 +29,9 @@ steps to check, the run is refused, and the agent must ask again. A call
 with no steps to check runs as before.
 
 Only ``on`` checks again. ``observe`` already logged its "would deny" lines
-when the call was made, so it writes nothing more here. ``off`` changes
-nothing.
+when the call was made. At resume it only marks them as written, so the
+step gate of the resumed call does not log them again: one line per call,
+whoever runs it. ``off`` changes nothing.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from meho_backplane.operations._preview_steps import (
     agent_acts,
     agent_step_refusal,
     has_steps_to_check,
+    mark_step_lines_logged,
 )
 from meho_backplane.operations.composite import COMPOSITE_DEPTH_TOP_LEVEL, composite_depth_var
 from meho_backplane.operations.deny_reasons import POLICY_DENIED
@@ -73,14 +75,18 @@ def requester_record(operator: Operator) -> dict[str, Any] | None:
 async def approved_step_refusal(
     *, operator: Operator, descriptor: EndpointDescriptor, connector_id: str, target: Any
 ) -> str | None:
-    """The refusal of an approved call's steps for the agent that asked, or ``None``."""
-    if (
-        get_settings().agent_grant_required != "on"
-        or composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
-    ):
+    """The refusal of an approved call's steps for the agent that asked, or ``None``.
+
+    With ``observe`` this refuses nothing. It marks the steps' "would deny"
+    lines as written, so the step gate of the resumed call does not write
+    them a second time (:func:`mark_step_lines_logged`).
+    """
+    mode = get_settings().agent_grant_required
+    if mode == "off" or composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
         return None
+    check = agent_step_refusal if mode == "on" else mark_step_lines_logged
     if agent_acts(operator):
-        return await agent_step_refusal(
+        return await check(
             operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
         )
     requester = approved_agent_requester()
@@ -88,7 +94,7 @@ async def approved_step_refusal(
         return None
     principal, act = requester
     if principal is None:
-        if not has_steps_to_check(descriptor):
+        if mode != "on" or not has_steps_to_check(descriptor):
             return None
         return (
             f"{POLICY_DENIED}: the agent's grants for the steps of {descriptor.op_id!r} "
@@ -96,6 +102,6 @@ async def approved_step_refusal(
             "The agent must ask again."
         )
     with structlog.contextvars.bound_contextvars(**{ACTOR_SUB_KEY: act}):
-        return await agent_step_refusal(
+        return await check(
             operator=principal, descriptor=descriptor, connector_id=connector_id, target=target
         )

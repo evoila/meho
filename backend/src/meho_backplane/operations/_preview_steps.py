@@ -47,7 +47,7 @@ import structlog
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind
-from meho_backplane.auth.permissions import agent_grant_name
+from meho_backplane.auth.permissions import agent_grant_name, agent_no_grant_already_logged
 from meho_backplane.broadcast.history import WRITE_OP_CLASSES
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._audit import descriptor_op_class
@@ -64,7 +64,13 @@ from meho_backplane.operations.governed_subops import governed_subops_for, steps
 from meho_backplane.operations.op_policy import apply_step_classification
 from meho_backplane.settings import get_settings
 
-__all__ = ["agent_acts", "agent_step_refusal", "has_steps_to_check", "preview_step_verdict"]
+__all__ = [
+    "agent_acts",
+    "agent_step_refusal",
+    "has_steps_to_check",
+    "mark_step_lines_logged",
+    "preview_step_verdict",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -265,3 +271,19 @@ async def agent_step_refusal(
                 f"before any step runs ({reason}). {_how_to_change_grant(agent)}"
             )
     return None
+
+
+async def mark_step_lines_logged(
+    *, operator: Operator, descriptor: EndpointDescriptor, connector_id: str, target: Any
+) -> None:
+    """Mark the ``agent_no_grant_would_deny`` lines of the write steps as written.
+
+    With ``observe`` :func:`agent_step_refusal` wrote them when the call was
+    made. An approved call that resumes runs this first, so the step gate
+    of the resumed call does not write them again (#6314).
+    """
+    with agent_no_grant_already_logged():
+        for step_op_id in _write_steps(descriptor.op_id):
+            await _step_verdict(
+                operator=operator, step_op_id=step_op_id, connector_id=connector_id, target=target
+            )

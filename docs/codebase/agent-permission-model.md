@@ -330,8 +330,10 @@ claim for audit parent-linkage (#3446), is never matched against this table).
      approval request ends as a failed run with the reason, and the
      person who runs it sees the reason in the answer. People and
      service logins that asked are not checked again. With `observe`
-     nothing is checked again: the "would deny" lines were logged once,
-     when the call was made.
+     nothing is refused again: the "would deny" lines were logged when
+     the call was made. At resume the dispatcher only marks them as
+     written (`agent_no_grant_already_logged`), so the step gate of the
+     resumed call does not log them a second time, whoever runs it.
 
    A composite that checks a step that is not on its declared list
    (`enforce_subop_policy`) logs one `composite_step_not_declared`

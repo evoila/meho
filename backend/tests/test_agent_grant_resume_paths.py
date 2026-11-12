@@ -14,7 +14,7 @@ first step, on every path:
   claims the call first.
 
 People and service logins, ``off`` and ``observe`` keep the old behaviour.
-``observe`` logs its "would deny" line once per call.
+``observe`` logs its "would deny" line once per call, whoever resumes it.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from meho_backplane.operations.approval_queue import (
     result_state_of_envelope,
     resume_dispatch_after_approval,
 )
+from meho_backplane.operations.composite import enforce_subop_policy
 from meho_backplane.operations.deny_reasons import AGENT_GRANT_DENIED, POLICY_DENIED
 from meho_backplane.operations.governed_subops import register_governed_subops
 from tests.test_agent_grant_required import (
@@ -80,7 +81,25 @@ def _reviewer() -> Operator:
     )
 
 
-async def _register(stub: AsyncMock) -> None:
+async def _write_step_checking_handler(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    """A multi-step op's handler that checks its write step at the step gate first."""
+    gated = await enforce_subop_policy(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id=_WRITE_STEP,
+        safety_level="dangerous",
+        requires_approval=False,
+        target=target,
+        params=params,
+    )
+    assert gated is None, gated
+    _MULTI_RUNS.append(params)
+    return {"ran": True}
+
+
+async def _register(stub: AsyncMock, handler: Any = _multi_step_handler) -> None:
     _MULTI_RUNS.clear()
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     await register_typed_operation(
@@ -88,7 +107,7 @@ async def _register(stub: AsyncMock) -> None:
         version="1.x",
         impl_id="vault",
         op_id=_OP,
-        handler=_multi_step_handler,
+        handler=handler,
         summary="Multi-step op.",
         description="Reads, then writes.",
         parameter_schema={"type": "object"},
@@ -320,9 +339,13 @@ async def test_off_changes_nothing(
 async def test_observe_logs_the_would_deny_line_once_per_call(
     monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock, resumer: str
 ) -> None:
-    """The line comes when the call is made, not again when it resumes."""
+    """The line comes when the call is made, not again when it resumes.
+
+    The handler checks its write step at the step gate, as a real
+    multi-step operation does, so a resume that logs again is caught.
+    """
     _switch(monkeypatch, "observe")
-    await _register(stub_embedding_service)
+    await _register(stub_embedding_service, handler=_write_step_checking_handler)
     await _grant(_OP, "needs-approval")
     spy = MagicMock()
     monkeypatch.setattr(permissions, "_log", spy)
@@ -331,6 +354,7 @@ async def test_observe_logs_the_would_deny_line_once_per_call(
     result = await _resume(request_id, _operator() if resumer == "agent" else _reviewer())
 
     assert result.status == "ok", result.error
+    assert len(_MULTI_RUNS) == 1
     lines = [
         c.kwargs
         for c in spy.info.call_args_list

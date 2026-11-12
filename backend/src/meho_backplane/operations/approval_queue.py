@@ -4091,6 +4091,11 @@ async def record_approval_step_event(
     No Broadcast event is published (#3758). The stored approval row is
     what waiters, the approvals bell and the console read.
 
+    It also starts the push messages to the browsers of the people who may
+    approve the request (:func:`~meho_backplane.web_push.send.notify_approval_step`).
+    Every caller runs this after its commit, so a message never goes out
+    for a request whose audit row did not commit.
+
     An ``approved`` event also carries ``reviewed_by`` (who approved),
     ``self_approved`` and, when :func:`approve_request` set it,
     ``approval_rule`` (#3328) -- the same fields as the
@@ -4101,7 +4106,12 @@ async def record_approval_step_event(
     (#3596): "this is step k of N waiting under this change ticket".
     """
     from meho_backplane.operations.addon_step_events import AddonStepEventService
+    from meho_backplane.web_push.send import notify_approval_step
 
+    # Push messages to the people who may approve (web_push/send.py). It
+    # only starts a background task, so it never slows the caller, and
+    # never raises.
+    notify_approval_step(tenant_id=tenant_id, request=request, decision=decision)
     payload: dict[str, object] = {
         "approval_request_id": str(request.id),
         "decision": decision,

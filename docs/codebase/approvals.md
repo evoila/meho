@@ -3953,6 +3953,90 @@ the run worked. To learn that, read `result_state` / `resume_outcome` on
 the request, or the result on `/result` (see "Ordered and dependent
 approvals" above).
 
+## Notifications
+
+When a request waits for approval, MEHO sends a push message to the phones
+and laptops of the people who may approve it. When the request is decided,
+a second message with the result replaces the first. A person switches the
+messages on per browser on the account page
+([ui.md, "Approval notifications"](ui.md#approval-notifications)). The
+whole feature is off until an admin sets `WEB_PUSH_ENABLED`.
+
+**When.** `record_approval_step_event` calls
+`web_push.send.notify_approval_step`. Every caller runs that function only
+after the transaction with the audit row has committed (table in
+[Approval step events](#approval-step-events-no-broadcast-events)). So a
+message never goes out for a request whose audit row did not commit. The
+call only starts a background task and returns at once: the request never
+waits for a push service, and a failed send never changes the request.
+
+| Step | Message |
+|---|---|
+| `pending` | "An approval waits" |
+| `approved` / `rejected` / `expired` / `withdrawn` | "Approval approved" (and so on), with the same tag, so it replaces the first message on the device |
+
+**Who gets it.** The login groups are in the login token, not in the
+database. So each subscription keeps the person's login facts in its tenant:
+`tenant_role`, `approver`, `self_approver`, `platform_admin`, and when they
+were read (`facts_read_at`). MEHO reads them from the login when the person
+switches the messages on, at each console sign-in (also when they pick a
+tenant), and each time they open the account page.
+
+For each request, `web_push/recipients.py` builds a person from each row's
+facts and asks `approve_right_any_status` (`operations/approval_rights.py`)
+whether that person may approve the request. That is the same rule as the
+approve: the group rule for `dangerous` and `destructive` changes, the
+own-change rules, the rule for a change of rights (only another admin), and
+the role an operation needs from its approver (for example `tenant_admin`
+for `targets.register`). It only leaves out the "still pending" check, so
+the decision message goes to the same people as the first message.
+
+Only subscriptions of the request's tenant count. A row whose facts are
+more than 7 days old gets no message, because the person's groups may have
+changed since. Rows made before the facts columns (migration `0161`) get no
+message until the person signs in again. This is only the list of who gets
+a message: the approve itself checks the person again, as always.
+
+**What the message holds.** A JSON object with `title`, `body` (the tenant
+name and the request id), `tag` (`approval-<request id>`) and `url`
+(`/ui/approvals`). Never the operation, the parameters or the target. It is
+encrypted for each browser (RFC 8291, `aes128gcm`; `web_push/encryption.py`),
+so the push service cannot read it. The request carries a token signed with
+the push key (RFC 8292, `Authorization: vapid t=..., k=...`), whose `sub` is
+`BACKPLANE_URL` when that is an `https://` address. Other headers: `TTL`
+(one day), `Urgency: high`, and `Topic` (the request id), so the result
+also replaces a first message that the push service has not delivered yet.
+The service worker shows the notification; a click opens the approvals page
+of this MEHO, never another address.
+
+**Rate limit.** A person gets at most one "An approval waits" message per
+tenant per 30 seconds (`RATE_LIMIT_SECONDS`). The messages held back in that
+time become one summary at its end, sent only to the person's browsers of
+that tenant: "N more approval messages. Open the
+approvals page." (tag `approval-summary`). A decision goes out at once only
+to a person who got the "An approval waits" message of that request, because
+it replaces that message. For everyone else a decision counts against the
+same limit, so a burst of decisions (for example many requests expiring at
+once) gives one message and one summary, not one message per request. MEHO
+remembers up to 1,000 such requests per person and tenant (the oldest are
+forgotten first). The limit is kept in memory, per process.
+
+**Order.** The steps of one request go out in the order they happened. Each
+step waits until the step before it of the same request was sent. So a
+first message that was slow can never arrive after the result and replace
+it. The order is kept in memory, per process.
+
+**Where messages go.** Only to the browser makers' push services: the
+endpoint is checked again before each send, not only when it was stored.
+Redirects are not followed, and each send has a 10 second timeout. A push
+service that answers 404 or 410 (the browser dropped the subscription)
+gets the row deleted. Other errors are logged and the row stays. Logs name
+the row id, the person, the push service and the status or the error type.
+Never the endpoint or a key.
+
+Tests: `tests/test_web_push_send.py` (a fake push service that decrypts
+each message), `tests/test_web_push_service_worker.py`.
+
 ## Audit rows
 
 Two rows per request lifecycle (the synchronous-audit invariant). A

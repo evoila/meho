@@ -38,10 +38,36 @@ type fakeServer struct {
 	mu       sync.Mutex
 	uploads  []fakeUpload
 	statuses []int // answers to give, in order; then 200
+	// tokenTenants names the one tenant of a login, by access token.
+	tokenTenants map[string]string
+}
+
+// fakeTenantIDs are the tenant IDs the fake server knows, by tenant name.
+var fakeTenantIDs = map[string]string{
+	"":         "00000000-0000-4000-8000-000000000001",
+	"tenant-a": "00000000-0000-4000-8000-00000000000a",
+	"tenant-b": "00000000-0000-4000-8000-00000000000b",
+}
+
+// tenantID is the tenant a request works in: the tenant header, else the
+// one tenant of the login.
+func (f *fakeServer) tenantID(r *http.Request) string {
+	name := r.Header.Get(api.TenantHeader)
+	if name == "" {
+		name = f.tokenTenants[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+	}
+	return fakeTenantIDs[name]
 }
 
 func (f *fakeServer) handler(t *testing.T) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/health/live" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"operator": map[string]any{"sub": "op", "tenant_id": f.tenantID(r), "tenant_role": "operator"},
+			})
+			return
+		}
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -372,9 +398,10 @@ func TestPushNetworkErrorWritesNoReceipt(t *testing.T) {
 	_, srv, outbox := setup(t, opsFolder)
 	dir := writeSession(t, outbox, "s11", userLine(opsFolder, "hello"), endedMarkerFile)
 	srv.Close()
-	report, err := push(t, srv, false)
-	if err == nil || report.Sessions[0].Result != resultFailed {
-		t.Fatalf("want a failed upload, got %+v, %v", report, err)
+	cmd, _, stderr := newCmd(t, "")
+	err := runPush(cmd, pushOptions{JSONOut: true, BackplaneOverride: srv.URL})
+	if err == nil || !strings.Contains(stderr.String(), "unreachable") {
+		t.Fatalf("want an unreachable error, got %v; stderr=%s", err, stderr.String())
 	}
 	if loadReceipt(dir) != nil {
 		t.Fatal("a network error wrote a receipt")
@@ -496,7 +523,52 @@ func TestPushSendsAgainToAnotherTenant(t *testing.T) {
 	if fake.count() != 2 || report.Sessions[0].Result != resultSent || fake.uploads[1].Tenant != "tenant-b" {
 		t.Fatalf("uploads %d; report=%+v", fake.count(), report)
 	}
-	if r := loadReceipt(dir); r == nil || r.Tenant != "tenant-b" {
+	if r := loadReceipt(dir); r == nil || r.Tenant != fakeTenantIDs["tenant-b"] {
+		t.Fatalf("receipt = %+v", r)
+	}
+}
+
+// loginAs stores a login for url whose token belongs to one tenant only.
+func loginAs(t *testing.T, fake *fakeServer, url, token, tenant string) {
+	t.Helper()
+	store, err := auth.NewFileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, user := auth.KeyForBackplane(url)
+	if err := store.Save(service, user, auth.StoredToken{
+		BackplaneURL: url, AccessToken: token, TokenType: "Bearer", Expiry: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.tokenTenants == nil {
+		fake.tokenTenants = map[string]string{}
+	}
+	fake.tokenTenants[token] = tenant
+}
+
+func TestPushSendsAgainAfterALoginInAnotherTenant(t *testing.T) {
+	fake, srv, outbox := setup(t, opsFolder)
+	loginAs(t, fake, srv.URL, "eyJ.tenant-a.token", "tenant-a")
+	dir := writeSession(t, outbox, "s24", userLine(opsFolder, "hello"), endedMarkerFile)
+	if _, err := pushTo(t, srv.URL, ""); err != nil {
+		t.Fatalf("first push: %v", err)
+	}
+	report, err := pushTo(t, srv.URL, "")
+	if err != nil || report.Sessions[0].Result != resultAlreadySent {
+		t.Fatalf("same login: %+v, %v", report, err)
+	}
+	loginAs(t, fake, srv.URL, "eyJ.tenant-b.token", "tenant-b")
+	report, err = pushTo(t, srv.URL, "")
+	if err != nil {
+		t.Fatalf("push after the new login: %v", err)
+	}
+	if fake.count() != 2 || report.Sessions[0].Result != resultSent || fake.uploads[1].Tenant != "" {
+		t.Fatalf("uploads %d; report=%+v", fake.count(), report)
+	}
+	if r := loadReceipt(dir); r == nil || r.Tenant != fakeTenantIDs["tenant-b"] {
 		t.Fatalf("receipt = %+v", r)
 	}
 }
@@ -537,5 +609,22 @@ func TestPushKeepsBINDAndURLSecretsOnTheLaptop(t *testing.T) {
 		if strings.Contains(sent, secret) {
 			t.Fatalf("%s left the laptop: %s", secret, sent)
 		}
+	}
+}
+
+func TestPushHoldsBackABINDSecretOverLinesInATextFile(t *testing.T) {
+	fake, srv, outbox := setup(t, opsFolder)
+	dir := writeSession(t, outbox, "s25", userLine(opsFolder, "hello"), endedMarkerFile)
+	notes := filepath.Join(dir, "s25", "named.conf")
+	if err := os.WriteFile(notes, []byte("secret /* key */ \"bWFkZVVw\nU2VjcmV0VmFsdWU=\";\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := push(t, srv, false)
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	row := report.Sessions[0]
+	if fake.count() != 0 || row.Result != resultHeldBack || !strings.Contains(row.Reason, "s25/named.conf") {
+		t.Fatalf("uploads %d; row = %+v", fake.count(), row)
 	}
 }

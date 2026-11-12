@@ -259,9 +259,11 @@ the outbox.
    last newline, like the server does.
 4. **Receipt.** `meho-receipt.json` in the session folder holds, per
    file, the bytes sent (`offset`) and their SHA-256 hash, the state,
-   the backplane URL, the tenant (the `Meho-Tenant` value, or none) and
-   MEHO's answer. The same files, state, backplane and tenant as the
-   receipt: nothing is sent. A failed upload writes no receipt, so the next run tries again.
+   the backplane URL, the tenant ID and MEHO's answer. Before it compares
+   receipts, `push` asks `GET /api/v1/health/live` which tenant the login
+   works in: a login in one tenant sends no `Meho-Tenant` header, so only
+   the server knows its tenant. The same files, state, backplane and
+   tenant as the receipt: nothing is sent. A failed upload writes no receipt, so the next run tries again.
    The receipt is written to a temporary file and renamed.
 5. **Secret check** (`secretcheck.go`). It follows the server's check:
    known secrets are replaced, JSON lines are parsed and each string is

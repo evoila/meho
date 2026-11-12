@@ -108,9 +108,13 @@ func runPush(cmd *cobra.Command, opts pushOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), opts.JSONOut)
 	}
-	dest, err := resolveDestination(cmd, opts)
-	if err != nil {
-		return err
+	var dest destination
+	var authed *api.AuthedClient
+	if len(sessions) > 0 {
+		dest, authed, err = resolveDestination(cmd, opts)
+		if err != nil {
+			return err
+		}
 	}
 	report := pushReport{Outbox: settings.Outbox, DryRun: opts.DryRun, Sessions: []pushRow{}}
 	var toSend []preparedSession
@@ -128,11 +132,7 @@ func runPush(cmd *cobra.Command, opts pushOptions) error {
 		}
 	}
 	if len(toSend) > 0 && !opts.DryRun {
-		uploadFailed, uerr := uploadAll(cmd, opts, dest, toSend, toSendRows, report.Sessions)
-		if uerr != nil {
-			return uerr
-		}
-		failed += uploadFailed
+		failed += uploadAll(cmd, authed, dest, toSend, toSendRows, report.Sessions)
 	}
 	if opts.JSONOut {
 		if perr := output.PrintJSON(cmd.OutOrStdout(), report); perr != nil {
@@ -149,26 +149,47 @@ func runPush(cmd *cobra.Command, opts pushOptions) error {
 	return nil
 }
 
-// destination is where push sends sessions: the backplane and the
-// tenant chosen for it ("" when none is chosen). A receipt counts only
-// for the destination it was written for.
+// destination is where push sends sessions: the backplane and the ID of
+// the tenant the server puts the uploads in. A receipt counts only for
+// the destination it was written for.
 type destination struct {
 	Backplane string
 	Tenant    string
 }
 
-// resolveDestination finds the backplane and the tenant. A dry run
-// without a login has no backplane; then no receipt matches, and every
-// session with content shows as "would send".
-func resolveDestination(cmd *cobra.Command, opts pushOptions) (destination, error) {
+// resolveDestination finds the backplane and asks it for the tenant the
+// login works in. A login in one tenant sends no tenant header, so only
+// the server knows that tenant. A dry run that cannot reach the server
+// has no destination; then no receipt matches, and every session with
+// content shows as "would send".
+func resolveDestination(cmd *cobra.Command, opts pushOptions) (destination, *api.AuthedClient, error) {
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		if opts.DryRun {
-			return destination{}, nil
+			return destination{}, nil, nil
 		}
-		return destination{}, output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
+		return destination{}, nil, output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	return destination{Backplane: backplaneURL, Tenant: api.TenantFrom(cmd.Context())}, nil
+	authed, err := newAuthedClient(cmd.Context(), backplaneURL)
+	if err != nil {
+		if opts.DryRun {
+			return destination{}, nil, nil
+		}
+		return destination{}, nil, renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	resp, err := authed.GetLiveness(cmd.Context())
+	switch {
+	case opts.DryRun && (err != nil || resp.JSON200 == nil || resp.JSON200.Operator.TenantId == nil):
+		return destination{}, nil, nil
+	case err != nil:
+		return destination{}, nil, renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	case resp.JSON200 == nil:
+		return destination{}, nil, renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	case resp.JSON200.Operator.TenantId == nil:
+		return destination{}, nil, output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("the backplane did not say which tenant the login works in"), opts.JSONOut)
+	}
+	return destination{Backplane: backplaneURL, Tenant: resp.JSON200.Operator.TenantId.String()}, authed, nil
 }
 
 // prepareSession decides what to do with one session. It returns the
@@ -265,12 +286,8 @@ func gzipTar(files map[string][]byte) ([]byte, error) {
 // how many uploads failed. A failed upload writes no receipt, so the next
 // run sends the session again.
 func uploadAll(
-	cmd *cobra.Command, opts pushOptions, dest destination, toSend []preparedSession, rowIdx []int, rows []pushRow,
-) (int, error) {
-	authed, err := newAuthedClient(cmd.Context(), dest.Backplane)
-	if err != nil {
-		return 0, renderRequestError(cmd, dest.Backplane, err, opts.JSONOut)
-	}
+	cmd *cobra.Command, authed *api.AuthedClient, dest destination, toSend []preparedSession, rowIdx []int, rows []pushRow,
+) int {
 	failed := 0
 	for i, p := range toSend {
 		row := &rows[rowIdx[i]]
@@ -291,7 +308,7 @@ func uploadAll(
 			row.Reason = fmt.Sprintf("uploaded, but the receipt was not written: %v", werr)
 		}
 	}
-	return failed, nil
+	return failed
 }
 
 func uploadOne(ctx context.Context, authed *api.AuthedClient, p preparedSession) (*api.SessionUploadResult, []byte, error) {

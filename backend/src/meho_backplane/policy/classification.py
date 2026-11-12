@@ -302,11 +302,13 @@ def entries_from_document(
     raw_entries = document.get("classifications") or []
     if not isinstance(raw_entries, list):
         raise ValueError(f"{scope}: `classifications` must be a list.")
-    return [
-        _entry_from_raw(raw, ref=f"{scope}:classifications[{index}]", scope=scope)
-        for index, raw in enumerate(raw_entries)
-        if isinstance(raw, Mapping)
-    ]
+    entries = []
+    for index, raw in enumerate(raw_entries):
+        ref = f"{scope}:classifications[{index}]"
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"{ref}: an entry must be a map.")
+        entries.append(_entry_from_raw(raw, ref=ref, scope=scope))
+    return entries
 
 
 def taxonomy_from_documents(

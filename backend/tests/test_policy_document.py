@@ -596,3 +596,17 @@ async def test_a_bad_stored_document_names_the_document_and_the_entry() -> None:
         )
     assert plan.mistakes == []
     assert any("is not valid" in w and "The import replaces it." in w for w in plan.warnings)
+
+
+@pytest.mark.asyncio
+async def test_a_stored_entry_that_is_not_a_map_is_not_valid() -> None:
+    async with get_sessionmaker()() as session:
+        session.add(
+            TenantPolicy(
+                tenant_id=_TENANT, document={"classifications": ["network"]}, set_by_sub="fixture"
+            )
+        )
+        await session.commit()
+    async with get_sessionmaker()() as session:
+        with pytest.raises(ValueError, match=r"classifications\[0\]: an entry must be a map"):
+            await load_classification(session, _TENANT)

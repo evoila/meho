@@ -940,12 +940,11 @@ async def test_request_json_deflate_encoded_response_decodes_once() -> None:
 async def test_request_json_rejects_oversize_compressed_body_by_content_length(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The cap measures the compressed transfer length, not the decoded size.
+    """The compressed-transfer ceiling refuses a body by its ``Content-Length``.
 
-    The compressed-transfer ceiling counts wire bytes, matching the ``Content-Length``
-    fast-reject — both measure the compressed length the vendor actually put on
-    the wire. A gzip body whose *compressed* ``Content-Length`` exceeds the cap
-    is refused up front, and the rejection quotes that compressed length.
+    This tests the ceiling on bytes on the wire. A gzip body whose
+    *compressed* ``Content-Length`` exceeds the cap is refused before its
+    body is read, and the rejection quotes that compressed length.
     """
     monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 8)
     conn = _ConcreteHttpConnector()
@@ -966,6 +965,7 @@ async def test_request_json_rejects_oversize_compressed_body_by_content_length(
             )
 
     assert "Content-Length" in str(exc_info.value)
+    assert "bytes on the wire" in str(exc_info.value)
     assert str(len(compressed)) in str(exc_info.value)
     assert route.called
     await conn.aclose()
@@ -1000,7 +1000,7 @@ async def test_request_json_rejects_compression_bomb_by_decoded_size(
                 target, "GET", "/api/inventory", operator=_make_operator("tok")
             )
 
-    assert "cap" in str(exc_info.value)
+    assert "cap on decoded bytes" in str(exc_info.value)
     assert "Content-Length" not in str(exc_info.value)
     assert route.called
     await conn.aclose()
@@ -1071,9 +1071,10 @@ async def test_capped_read_counts_wire_chunks_that_decode_to_nothing(
             headers={"content-type": "application/json", "content-encoding": "gzip"},
         )
         async with httpx.AsyncClient(base_url="https://vcenter.example.com") as client:
-            with pytest.raises(ResponseTooLargeError):
+            with pytest.raises(ResponseTooLargeError) as exc_info:
                 await http_adapter._read_capped_json_response(client, "GET", "/api/items")
 
+    assert "cap on bytes on the wire" in str(exc_info.value)
     assert stream.sent == 1024 // 256 + 1
     assert stream.sent < len(stream.chunks)
 
@@ -1104,6 +1105,49 @@ async def test_capped_read_stops_a_chunked_compression_bomb_early(
                 await http_adapter._read_capped_json_response(client, "GET", "/api/items")
 
     assert stream.sent < len(stream.chunks) // 4
+
+
+@pytest.mark.asyncio
+async def test_capped_read_refuses_two_content_codings_before_reading() -> None:
+    """A body that is gzipped twice is refused, and no body byte is read.
+
+    httpx would decode both layers of one wire chunk in a single step, before
+    the decoded-size check runs, so MEHO accepts at most one coding.
+    """
+    wire = gzip.compress(gzip.compress(b"{}"))
+    stream = _CountingChunkStream([wire])
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/items").respond(
+            200,
+            stream=stream,
+            headers={"content-type": "application/json", "content-encoding": "gzip, gzip"},
+        )
+        async with httpx.AsyncClient(base_url="https://vcenter.example.com") as client:
+            with pytest.raises(ResponseTooLargeError) as exc_info:
+                await http_adapter._read_capped_json_response(client, "GET", "/api/items")
+
+    assert "at most one" in str(exc_info.value)
+    assert stream.sent == 0
+
+
+@pytest.mark.asyncio
+async def test_capped_read_keeps_an_unknown_content_coding() -> None:
+    """A coding that httpx does not know is not decoded, so its header stays."""
+    body = b"\x00\x01opaque"
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/items").respond(
+            200,
+            content=body,
+            headers={"content-encoding": "x-vendor-pack"},
+        )
+        async with httpx.AsyncClient(base_url="https://vcenter.example.com") as client:
+            resp = await http_adapter._read_capped_json_response(client, "GET", "/api/items")
+
+    assert resp.content == body
+    assert resp.headers["content-encoding"] == "x-vendor-pack"
+    assert resp.headers["content-length"] == str(len(body))
 
 
 @pytest.mark.asyncio

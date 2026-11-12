@@ -508,7 +508,18 @@ func formatOperatorIdentity(op api.OperatorIdentity) string {
 // formatVault renders a VaultStatus as "reachable, read ok",
 // "reachable, read failed (<detail>)", or "unreachable (<detail>)".
 // The exact phrasing matches the issue body's example output.
+//
+// When the backplane ran no check (checked=false), it prints
+// "not checked (<reason>)", for example "not checked (needs the
+// operator role)" for a caller below the operator role. An older
+// backplane sends no checked field; the line then shows the reachable
+// and read state.
 func formatVault(v api.VaultStatus) string {
+	if v.Checked != nil && !*v.Checked {
+		reason := strings.TrimPrefix(strings.TrimSpace(derefString(v.Detail)), "not checked:")
+		reason = strings.TrimSpace(reason)
+		return joinDetail("not checked", &reason)
+	}
 	if !v.Reachable {
 		return joinDetail("unreachable", v.Detail)
 	}

@@ -357,3 +357,34 @@ async def test_the_importer_cannot_rerun_a_failed_approved_import(
     assert await _stored() is None
     async with get_sessionmaker()() as session:
         assert (await session.execute(select(PolicyRevision))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch")
+async def test_a_second_admin_replaces_a_stored_policy_that_is_not_valid(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await _setup(embedding)
+    async with get_sessionmaker()() as session:
+        session.add(
+            TenantPolicy(
+                tenant_id=_TENANT,
+                document={"classifications": [{"match": {"op": "x"}, "risk": "huge"}]},
+                set_by_sub="fixture",
+            )
+        )
+        await session.commit()
+    key = make_rsa_keypair("kid-pol-repair")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _post(client, "import", _token(key), _FILE)
+    assert resp.status_code == 202, resp.text
+    request_id = uuid.UUID(resp.json()["approval_request_id"])
+
+    async with get_sessionmaker()() as session:
+        with pytest.raises(RightsChangeApprovalError):
+            await approve_request(session, request_id, operator=_admin("admin-a"))
+        await session.rollback()
+    result = await _approve(request_id, _admin("admin-b"))
+    assert result.status == "ok", result
+    assert (await _stored() or {})["description"] == "Network team"

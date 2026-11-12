@@ -13,7 +13,8 @@ standing grant and no run approval covers it).
 
 The same holds for ``policy.apply``, the import of a whole policy file
 (:mod:`meho_backplane.connectors.policy.apply`). Its approval card shows
-the plan of the import.
+the plan of the import. It also runs while a stored policy is not valid:
+it is the way to replace that policy.
 """
 
 from meho_backplane.auth.operator import TenantRole
@@ -27,6 +28,7 @@ from meho_backplane.connectors.policy.classify import (
     register_policy_classify_operation,
 )
 from meho_backplane.op_classes import declare_per_call_approval
+from meho_backplane.operations.op_policy import register_policy_repair_op
 from meho_backplane.operations._preview import register_preview_builder
 from meho_backplane.operations.grant_approval import register_rights_change_op
 from meho_backplane.operations.role_floors import register_role_floor
@@ -42,5 +44,6 @@ register_role_floor(POLICY_APPLY_OP_ID, TenantRole.TENANT_ADMIN)
 register_rights_change_op(POLICY_APPLY_OP_ID)
 declare_per_call_approval([POLICY_APPLY_OP_ID])
 register_preview_builder(POLICY_APPLY_OP_ID, build_policy_apply_preview)
+register_policy_repair_op("policy-registry", POLICY_APPLY_OP_ID)
 
 __all__ = ["register_policy_apply_operation", "register_policy_classify_operation"]

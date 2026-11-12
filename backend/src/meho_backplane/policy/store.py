@@ -54,6 +54,7 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "ClassificationEdit",
+    "InvalidStoredPolicyError",
     "classification_enabled",
     "classify_rows",
     "classify_step",
@@ -65,6 +66,10 @@ __all__ = [
 _MAX_LABELS = 32
 _MAX_LABEL_KEY = 63
 _MAX_LABEL_VALUE = 255
+
+
+class InvalidStoredPolicyError(ValueError):
+    """A stored policy document is not valid, so no operation can be classified."""
 
 
 def classification_enabled() -> bool:
@@ -138,7 +143,7 @@ def _stored_entries(
     try:
         return entries_from_document(document, scope=scope)
     except ValueError as exc:
-        raise ValueError(
+        raise InvalidStoredPolicyError(
             f"{name} is not valid, so MEHO cannot classify operations: {exc} "
             "Import a fixed policy file."
         ) from exc

@@ -1072,33 +1072,42 @@ def _node_events(
     """Map one framework node to its :class:`AgentRunEvent` list + new cursor.
 
     Split out of :meth:`PydanticAgentRun.stream_events` so the generator's
-    body stays small. A model-request node is one ``turn``; a call-tools
-    node emits a ``tool_call`` per tool-call part on the response and a
-    ``tool_result`` per tool return that has appeared in the run's message
-    history since *emitted_tool_returns* (the history is append-only, so the
-    count is a stable cursor). Returns the events to yield and the updated
-    cursor.
+    body stays small. A call-tools node emits a ``tool_call`` per tool-call
+    part on the response. A model-request node emits a ``tool_result`` per
+    tool return it carries, then one ``turn``. The loop yields that node
+    after the tools ran and before the request goes to the model, so a
+    result is sent also when that request then fails. A tool return is in
+    the run's message history only after its request ran, so
+    *emitted_tool_returns* counts the returns sent so far over the history
+    plus the pending request (both only grow). Returns the events to yield
+    and the updated cursor.
     """
     if Agent.is_model_request_node(node):
-        return [AgentRunEvent(kind=AgentRunEventKind.TURN, data={})], emitted_tool_returns
+        history = run.ctx.state.message_history
+        pending = [] if any(m is node.request for m in history) else [node.request]
+        returns = _tool_returns([*history, *pending])
+        events = [
+            AgentRunEvent(kind=AgentRunEventKind.TOOL_RESULT, data=ret)
+            for ret in returns[emitted_tool_returns:]
+        ]
+        events.append(AgentRunEvent(kind=AgentRunEventKind.TURN, data={}))
+        return events, len(returns)
     if not Agent.is_call_tools_node(node):
         return [], emitted_tool_returns
 
-    events: list[AgentRunEvent] = []
-    for part in node.model_response.parts:
-        if part.part_kind == "tool-call":
-            events.append(
-                AgentRunEvent(
-                    kind=AgentRunEventKind.TOOL_CALL,
-                    data={"tool_name": part.tool_name, "args": part.args},
-                )
-            )
-    # Tool returns land in the run's message history only after the
-    # call-tools node completes, so emit the ones not yet surfaced.
+    events = [
+        AgentRunEvent(
+            kind=AgentRunEventKind.TOOL_CALL,
+            data={"tool_name": part.tool_name, "args": part.args},
+        )
+        for part in node.model_response.parts
+        if part.part_kind == "tool-call"
+    ]
+    # Catch any return that reached the history without a request node.
     new_returns = _tool_returns(run.ctx.state.message_history)
     for ret in new_returns[emitted_tool_returns:]:
         events.append(AgentRunEvent(kind=AgentRunEventKind.TOOL_RESULT, data=ret))
-    return events, len(new_returns)
+    return events, max(emitted_tool_returns, len(new_returns))
 
 
 async def _send_node_events(

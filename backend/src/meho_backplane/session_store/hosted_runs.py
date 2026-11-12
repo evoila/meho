@@ -14,7 +14,9 @@ session in the store:
   ``tool_call``, ``tool_result``, ``final`` or ``error``) as one
   ``agent_session_event`` row, in order, when it happens. Each event passes
   the same secret check as an upload (:func:`check_event`). A ``final`` or
-  ``error`` event sets the session state to ``ended``.
+  ``error`` event sets the session state to ``ended``. An event that comes
+  after the session left ``open`` (the run ended, for example by a cancel)
+  is not saved.
 * :func:`end_run_session` runs when the run reaches its end state (it
   succeeded, failed or was cancelled). It writes the outcome. A session
   that is still ``open`` then becomes ``unfinished``: the run stopped
@@ -163,6 +165,7 @@ class RunEventLog:
     A save that fails is logged, and the log stops saving: the saved events
     then end before the failure and never have a gap. The run itself goes
     on. Its session ends ``unfinished`` unless a final event was saved.
+    The log also stops when the session is no longer ``open``.
     """
 
     def __init__(self, run_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
@@ -176,8 +179,9 @@ class RunEventLog:
 
         The save runs in its own task, shielded from a cancel of the run: a
         save that has started always ends with a commit or a rollback, so a
-        cancel never leaves a database transaction open. The event happened,
-        so it is kept.
+        cancel never leaves a database transaction open. A save that holds
+        the session row when the run is cancelled commits before the cancel
+        does (:meth:`_claim_open_session`), so the event is kept.
         """
         if self._stopped:
             return
@@ -209,11 +213,11 @@ class RunEventLog:
         checked = check_event(data)
         now = datetime.now(UTC)
         async with get_sessionmaker()() as session:
+            if not await self._claim_open_session(session, kind, now):
+                self._stopped = True
+                return
             if self._next_seq is None:
-                self._next_seq = await self._first_seq(session)
-                if self._next_seq is None:
-                    self._stopped = True
-                    return
+                self._next_seq = await self._next_free_seq(session)
             session.add(
                 AgentSessionEvent(
                     record_id=self.run_id,
@@ -226,27 +230,36 @@ class RunEventLog:
                     created_at=now,
                 )
             )
-            if kind in END_KINDS:
-                await session.execute(
-                    update(AgentSessionRecord)
-                    .where(AgentSessionRecord.id == self.run_id, AgentSessionRecord.state == "open")
-                    .values(state="ended", last_seen_at=now)
-                    .execution_options(synchronize_session=False)
-                )
             await session.commit()
         self._next_seq += 1
 
-    async def _first_seq(self, session: AsyncSession) -> int | None:
-        """Return the next free ``seq``, or ``None`` when the run has no session."""
-        record = await session.scalar(
-            select(AgentSessionRecord.id).where(
+    async def _claim_open_session(self, session: AsyncSession, kind: str, now: datetime) -> bool:
+        """Lock the run's session row while it is ``open``; return whether it is.
+
+        The end of the run (:func:`end_run_session`) writes the same row. So
+        a save and the end of the run never overlap: the save commits before
+        the run's end status does, or it sees the run ended and saves
+        nothing. A reader that sees the end status therefore sees every
+        saved event. ``False`` also when the run has no session.
+        """
+        values: dict[str, Any] = {"last_seen_at": now}
+        if kind in END_KINDS:
+            values["state"] = "ended"
+        result = await session.execute(
+            update(AgentSessionRecord)
+            .where(
                 AgentSessionRecord.id == self.run_id,
                 AgentSessionRecord.tenant_id == self.tenant_id,
                 AgentSessionRecord.app == HOSTED_RUN_APP,
+                AgentSessionRecord.state == "open",
             )
+            .values(**values)
+            .execution_options(synchronize_session=False)
         )
-        if record is None:
-            return None
+        return bool(result.rowcount)  # type: ignore[attr-defined]
+
+    async def _next_free_seq(self, session: AsyncSession) -> int:
+        """Return the next free ``seq`` of the run's events."""
         last = await session.scalar(
             select(func.max(AgentSessionEvent.seq)).where(
                 AgentSessionEvent.record_id == self.run_id

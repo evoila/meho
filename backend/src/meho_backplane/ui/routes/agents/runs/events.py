@@ -18,7 +18,10 @@ no doubles.
 The last frame is ``event: end``. It carries the run's end status and the
 session state: ``ended`` when the run saved its final (or error) event,
 ``unfinished`` when it stopped without one (a crash, a restart, a lost
-lease or a cancel). MEHO never adds an ending that the run did not make.
+lease or a cancel). MEHO never adds an ending that the run did not make. The run's end status
+commits only after its last saved event
+(:meth:`~meho_backplane.session_store.hosted_runs.RunEventLog.save`), so
+``end`` always comes after every saved event.
 
 Opening the stream writes one audit row (``sessions.run_events.read``).
 The reads that follow while the stream is open write none.

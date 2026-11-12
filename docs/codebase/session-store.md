@@ -278,6 +278,16 @@ code is in `session_store/hosted_runs.py` (write) and `agent/run_events.py`
   A session that is still `open` then becomes `unfinished`: the run
   stopped without a final event (a crash, a restart, a lost lease or a
   cancel). MEHO never adds an ending that the run did not make.
+- **A save and the end do not overlap.** Each save first updates the
+  session row, and only while its state is `open`. The end of the run
+  updates the same row. So the database runs them one after the other: a
+  save that started before a cancel commits before the `cancelled` status
+  does, and a save that comes after the end saves nothing. A reader that
+  sees the end status therefore sees every saved event.
+- **A tool result is saved before the next model call.** The agent loop
+  sends a `tool_result` as soon as the tool is done, before it asks the
+  model again. So the result is kept also when that model call fails or
+  the run hits its turn limit.
 - **A failed save.** When one save fails, MEHO logs
   `hosted_run_event_not_saved` and saves no more events for that run. So
   the saved events never have a gap. The run goes on, and its session

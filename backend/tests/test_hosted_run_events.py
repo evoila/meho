@@ -154,10 +154,7 @@ async def test_background_run_saves_events_in_order_and_ends(
 
     events = await _saved(outcome.run_id)
     kinds = [event.kind for event in events]
-    assert kinds[0] == "turn"
-    assert "tool_call" in kinds
-    assert "tool_result" in kinds
-    assert kinds[-1] == "final"
+    assert kinds == ["turn", "tool_call", "tool_result", "turn", "final"]
     assert [event.seq for event in events] == list(range(1, len(events) + 1))
     assert events[-1].data == {"output": "answer"}
     record = await _record(outcome.run_id)
@@ -167,6 +164,31 @@ async def test_background_run_saves_events_in_order_and_ends(
     assert record.project == "reader"
     assert record.state == "ended"
     assert record.outcome == "succeeded"
+
+
+async def test_tool_result_is_saved_when_the_next_model_request_fails(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A tool that finished keeps its result, also when the model fails after it."""
+    await _seed_echo_op(stub_embedding_service)
+    await _seed_definition(toolset={"meta_tools": ["call_operation"]})
+    calls_then_text = _call_op_with_secret_then_text("unused")
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if len(messages) > 1:
+            raise RuntimeError("model is down")
+        return calls_then_text.function(messages, info)
+
+    invoker = _invoker_with(FunctionModel(fn))
+    outcome = await invoker.run(_make_operator(), "reader", "go", async_mode=True)
+    await _wait_done(outcome.run_id)
+
+    events = await _saved(outcome.run_id)
+    assert [event.kind for event in events] == ["turn", "tool_call", "tool_result", "turn", "error"]
+    assert events[2].data["tool_name"] == "call_operation"
+    record = await _record(outcome.run_id)
+    assert record is not None
+    assert (record.state, record.outcome) == ("ended", "failed")
 
 
 async def test_planted_secret_in_tool_result_is_not_saved_in_clear_text(
@@ -465,6 +487,61 @@ async def test_tail_shows_events_so_far_then_live_ones_without_gaps_or_doubles(
     assert frames[-1].startswith("event: end\n")
     assert '"state":"ended"' in frames[-1]
     assert '"status":"succeeded"' in frames[-1]
+
+
+async def test_cancel_during_a_save_streams_that_event_before_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A save that is under way when the run is cancelled reaches the stream before ``end``."""
+    monkeypatch.setattr(events_stream, "POLL_SECONDS", 0.01)
+    await _seed_tenants()
+    run_id = await record_hosted_run(
+        tenant_id=_TENANT_A, sub="op-agent", events=[("turn", {})], end=None
+    )
+    operator = _make_operator()
+    first = await events_stream.first_read(operator, run_id, after=0, path="/p")
+    log = RunEventLog(run_id, _TENANT_A)
+    real_next_free_seq = RunEventLog._next_free_seq
+    save_started = asyncio.Event()
+    let_save_go = asyncio.Event()
+
+    async def slow_next_free_seq(self: RunEventLog, session: Any) -> int:
+        save_started.set()
+        await let_save_go.wait()
+        return await real_next_free_seq(self, session)
+
+    monkeypatch.setattr(RunEventLog, "_next_free_seq", slow_next_free_seq)
+    save = asyncio.create_task(log.save("tool_result", {"tool_name": "a", "content": "ok"}))
+    await save_started.wait()
+    cancel = asyncio.create_task(end_hosted_run(run_id, AgentRunStatus.CANCELLED))
+
+    async def read_stream() -> list[str]:
+        return [frame async for frame in events_stream.tail_frames(operator, first)]
+
+    stream = asyncio.create_task(read_stream())
+    await asyncio.sleep(0.2)
+    let_save_go.set()
+    await asyncio.gather(save, cancel)
+    frames = await stream
+
+    ids = [int(frame.split("\n")[0][4:]) for frame in frames if frame.startswith("id: ")]
+    assert ids == [1, 2]
+    assert frames[-1].startswith("event: end\n")
+    assert '"last_seq":2' in frames[-1]
+    assert '"status":"cancelled"' in frames[-1]
+    assert '"state":"unfinished"' in frames[-1]
+
+
+async def test_an_event_after_the_run_ended_is_not_saved() -> None:
+    """Once the run's end is saved, a late event is dropped, so the stream stays complete."""
+    await _seed_tenants()
+    run_id = await record_hosted_run(
+        tenant_id=_TENANT_A, sub="op-agent", events=[("turn", {})], end=AgentRunStatus.CANCELLED
+    )
+    log = RunEventLog(run_id, _TENANT_A)
+    await log.save("tool_result", {"tool_name": "a", "content": "late"})
+
+    assert [event.kind for event in await _saved(run_id)] == ["turn"]
 
 
 async def test_tail_after_last_event_id_continues_without_doubles() -> None:

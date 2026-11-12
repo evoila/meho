@@ -76,6 +76,7 @@ from meho_backplane.connectors._shared.system_operator import (
 )
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.kubernetes._dial_check import check_api_client_dials
+from meho_backplane.connectors.kubernetes._node_resources import add_requested
 from meho_backplane.connectors.kubernetes._wire_span import instrument_api_client
 from meho_backplane.connectors.kubernetes.kubeconfig import (
     CredentialLoader,
@@ -789,7 +790,9 @@ class KubernetesConnector(Connector):
 
         Op-id: ``k8s.node.list``. Wraps ``CoreV1Api.list_node()`` and
         projects each :class:`V1Node` through
-        :func:`~meho_backplane.connectors.kubernetes.ops_core.node_row`.
+        :func:`~meho_backplane.connectors.kubernetes.ops_core.node_row`,
+        then adds each node's ``requested`` sum from the pod list
+        (:func:`~meho_backplane.connectors.kubernetes._node_resources.add_requested`).
         The Ready-condition mapping ("Ready" / "NotReady" / "Unknown") and
         the role-label derivation are both helpers in :mod:`ops_core` so
         the unit tests pin those mappings against synthetic
@@ -803,6 +806,7 @@ class KubernetesConnector(Connector):
         core_v1 = client.CoreV1Api(api_client)
         resp = await core_v1.list_node()
         rows = [node_row(n) for n in resp.items]
+        await add_requested(rows, core_v1.list_pod_for_all_namespaces)
         return {"rows": rows, "total": len(rows)}
 
     async def k8s_service_list(

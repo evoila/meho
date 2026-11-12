@@ -83,6 +83,10 @@ from meho_backplane.connectors.kubernetes._node_identity import (
     NODE_IDENTITY_PROPERTIES,
     node_identity,
 )
+from meho_backplane.connectors.kubernetes._node_resources import (
+    NODE_RESOURCE_PROPERTIES,
+    node_resources,
+)
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
 
 if TYPE_CHECKING:
@@ -263,6 +267,7 @@ def node_row(node: V1Node, *, now: datetime | None = None) -> dict[str, Any]:
         ),
         "labels": (metadata.labels or {}) if metadata is not None else {},
         **node_identity(node),
+        **node_resources(node),
     }
 
 
@@ -481,6 +486,11 @@ _K8S_NODE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
                     "age_seconds": {"type": ["integer", "null"]},
                     "labels": {"type": "object"},
                     **NODE_IDENTITY_PROPERTIES,
+                    **NODE_RESOURCE_PROPERTIES,
+                    "requests_error": {
+                        "type": ["string", "null"],
+                        "description": "Why requested is null (pod list failed or cut), else null.",
+                    },
                 },
                 "required": [
                     "name",
@@ -494,6 +504,8 @@ _K8S_NODE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
                     "age_seconds",
                     "labels",
                     *NODE_IDENTITY_PROPERTIES,
+                    *NODE_RESOURCE_PROPERTIES,
+                    "requests_error",
                 ],
                 "additionalProperties": False,
             },
@@ -516,10 +528,19 @@ K8S_NODE_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     "output_shape": (
         "{'rows': [{name, status, roles, version, kernel, os, "
         "internal_ip, taints, age_seconds, labels, system_uuid (BIOS UUID), "
-        "os_image, architecture, cpu_capacity, memory_capacity}], 'total': <int>}. "
+        "os_image, architecture, cpu_capacity, memory_capacity, capacity, "
+        "allocatable, requested, requests_error}], 'total': <int>}. "
         "``status`` reflects the Ready condition ('Ready' / 'NotReady' "
         "/ 'Unknown'). ``roles`` is the sorted list of role suffixes "
-        "from the node-role.kubernetes.io/<role> labels."
+        "from the node-role.kubernetes.io/<role> labels. ``capacity`` and "
+        "``allocatable`` are {cpu, memory, pods} as the API writes them "
+        "('4', '16393216Ki', '110'). ``requested`` is the sum of the "
+        "requests of the pods on the node that have not ended: "
+        "{cpu_millicores, memory_bytes, pods}. Free room = allocatable "
+        "minus requested (cpu '4' = 4000 millicores; 'Ki' = 1024 bytes). "
+        "``requested`` is null when the pod list could not be read to "
+        "the end: then ``requests_error`` says why. Never treat null as "
+        "zero."
     ),
 }
 
@@ -583,7 +604,10 @@ CORE_OPS: tuple[KubernetesOp, ...] = (
         description=(
             "Calls ``CoreV1Api.list_node()`` and projects each row "
             "down to {name, status, roles, version, kernel, os, "
-            "internal_ip, taints, age_seconds, labels}. ``status`` "
+            "internal_ip, taints, age_seconds, labels, capacity, "
+            "allocatable, requested}. ``capacity`` / ``allocatable`` are "
+            "the node's cpu, memory and pods; ``requested`` is the sum of "
+            "the requests of the pods on it that have not ended. ``status`` "
             "reflects the Ready condition: 'Ready' when the Ready "
             "condition's status is 'True', 'NotReady' on any other "
             "state, 'Unknown' when the condition is missing. ``roles`` "

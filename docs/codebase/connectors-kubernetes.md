@@ -46,6 +46,11 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   `k8s.node.list`. Helpers stay pure-function so the unit suite can pin
   the wire shape against synthetic `V1Namespace` / `V1Node` model
   instances without booting an event loop.
+- **Node size and reserved room** (`_node_resources.py`) -- `capacity` and
+  `allocatable` of a node (cpu, memory, pods, as the API writes them) and
+  the `requested` sum of the pods on it, added to each `k8s.node.list` row.
+  It answers "how much more fits on this node?". Details in "Node capacity
+  and reserved requests".
 - **Workload helpers** (`ops_workload.py`) -- pure row mappers
   (`pod_row`, `pod_info`, `deployment_row`, `deployment_info`,
   `container_status_row`, `pod_ready_string`) plus the prefix
@@ -1519,7 +1524,7 @@ updates / soft-deletes in one transaction.
 | --------------- | ----------------- | ----------------------------------------------- |
 | `target`        | exactly 1         | `git_version` / `major` / `minor` / `platform` from `VersionApi.get_code()` (same payload `k8s.about` returns) |
 | `namespace`     | N (≥ 4 on k3s)    | Mirrors [`namespace_row`](../../backend/src/meho_backplane/connectors/kubernetes/ops_core.py): `status` / `age_seconds` / `labels` |
-| `node`          | M (≥ 1)           | Mirrors [`node_row`](../../backend/src/meho_backplane/connectors/kubernetes/ops_core.py): `status` / `roles` / `version` (kubelet) / `kernel` / `os` / `internal_ip` / `taints` / `age_seconds` / `labels` |
+| `node`          | M (≥ 1)           | Mirrors [`node_row`](../../backend/src/meho_backplane/connectors/kubernetes/ops_core.py): `status` / `roles` / `version` (kubelet) / `kernel` / `os` / `internal_ip` / `taints` / `age_seconds` / `labels` / `capacity` / `allocatable` |
 
 `EdgeHint` rows: one `belongs-to` from every namespace to the target,
 one `belongs-to` from every cluster node to the target. `cluster` is
@@ -1680,3 +1685,36 @@ The `total` key in the response envelope is the full row count
   <https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/>
 - Kubernetes Deployment API:
   <https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/deployment-v1/>
+
+
+## Node capacity and reserved requests
+
+`k8s.node.list` rows carry, besides status, roles and version:
+
+- `capacity` and `allocatable`: `{cpu, memory, pods}` as the API writes
+  them (for example `"4"`, `"16393216Ki"`, `"110"`). Other resources such as
+  ephemeral storage are not listed. `null` when the node has no status yet.
+- `requested`: `{cpu_millicores, memory_bytes, pods}`, the sum of the
+  requests of the pods on the node. Free room is `allocatable` minus
+  `requested`.
+- `requests_error`: `null`, or the reason `requested` is `null`.
+
+How `requested` is built (`_node_resources.py`):
+
+1. The handler reads the pods of all namespaces, 500 per page, at most 40
+   pages (the same bound as the migration reads), in addition to the node
+   list.
+2. Pods that ended (`Succeeded`, `Failed`) and pods with no node yet are not
+   counted. Pending pods that are already on a node are counted, like the
+   scheduler does.
+3. Each pod counts as the scheduler counts it: the sum of its containers
+   and sidecars (init containers with `restartPolicy: Always`), or the peak
+   of the init containers when that is higher, plus the pod overhead.
+4. A container without a request counts as zero. CPU is rounded up to whole
+   millicores.
+
+A failure is never an answer. When the pod read fails (any error but a 401,
+which is raised so the login can be renewed), is cut at the page cap, or one
+pod has a quantity that cannot be read, `requested` is `null` and
+`requests_error` says why. A node with no pods has `requested` of zeros.
+The node list itself still comes back.

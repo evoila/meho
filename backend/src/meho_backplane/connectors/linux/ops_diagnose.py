@@ -159,10 +159,12 @@ def build_http_head_command(url: str) -> str:
 
     ``curl`` sends one HEAD request, follows no redirect, speaks only
     ``http`` and ``https`` and does not expand ``[]`` or ``{}`` in the URL.
+    ``-q`` must be the first argument: it stops ``curl`` from reading the
+    login's ``.curlrc``, which could otherwise change the request.
     """
     return (
         f"command -v curl >/dev/null 2>&1 || exit {_NO_BINARY_EXIT}; "
-        f"curl -sS -I -g --proto '=http,https' --max-time {_CURL_MAX_TIME_S} "
+        f"curl -q -sS -I -g --proto '=http,https' --max-time {_CURL_MAX_TIME_S} "
         f"--connect-timeout {_CURL_CONNECT_TIMEOUT_S} {shlex.quote(validate_url(url))}"
     )
 
@@ -463,8 +465,9 @@ _IDENTITY_SHOW_OP = LinuxOp(
             "asks for a password or the login may not use it."
         ),
         "next_step": (
-            "If sudo_passwordless is false, an approval-gated change that needs root "
-            "will fail; tell the operator before you plan it."
+            "This checks only sudo without a password. If sudo_passwordless is false, a "
+            "change that needs root can still work when the target has a stored sudo "
+            "password; this answer does not tell you whether it has one."
         ),
     },
 )

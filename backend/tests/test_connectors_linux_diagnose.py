@@ -10,9 +10,13 @@ an error, never "not found"), and that no secret-shaped value is returned.
 
 from __future__ import annotations
 
+import os
 import shlex
+import shutil
+import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -277,8 +281,34 @@ _HEAD_OK = (
 def test_http_head_command_is_exact_for_valid_urls(url: str) -> None:
     cmd = build_http_head_command(url)
     assert cmd.endswith(f" {shlex.quote(url)}")
-    assert "curl -sS -I -g --proto '=http,https' --max-time 15 " in cmd
+    assert "curl -q -sS -I -g --proto '=http,https' --max-time 15 " in cmd
     assert " -L" not in cmd
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl is not installed")
+def test_http_head_command_ignores_the_login_curlrc(tmp_path: Path) -> None:
+    # A .curlrc in HOME must not change the request. If curl read it, the
+    # write-out marker would be printed.
+    (tmp_path / ".curlrc").write_text('-w "CURLRC-LOADED"\n-L\n-X POST\n')
+    proc = subprocess.run(
+        ["sh", "-c", build_http_head_command("http://127.0.0.1:1/")],
+        env={"HOME": str(tmp_path), "PATH": os.environ.get("PATH", "")},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 7
+    assert "CURLRC-LOADED" not in proc.stdout
+
+
+def test_identity_guidance_does_not_say_password_sudo_fails() -> None:
+    op = next(op for op in DIAGNOSE_OPS if op.op_id == "linux.identity.show")
+    hints = op.llm_instructions
+    assert hints is not None
+    assert "will fail" not in hints["next_step"]
+    assert "stored sudo password" in hints["next_step"]
+    assert "only sudo without a password" in hints["next_step"]
 
 
 @pytest.mark.parametrize(

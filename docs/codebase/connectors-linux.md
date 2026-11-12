@@ -285,13 +285,17 @@ read but the few values.
   `path` is `null` for a shell builtin.
 - **`linux.identity.show`.** No parameters. It runs `id` and one constant
   `sudo -n true`. `sudo_passwordless` is true only when that exits 0.
+  It checks only sudo without a password. A change that needs root can
+  still work with a stored sudo password, so `false` does not mean it fails.
   `sudo_installed` is false when the host has no `sudo`. An unreadable
   user or uid raises an error.
 - **`linux.http.head`.** `url` must be a plain `http` or `https` URL (host
   name or bracketed IPv6, optional port, path and query). No user name or
   password, no `&`, no `#`, no quote, no space. `curl` sends one HEAD
-  request (`curl -sS -I -g --proto '=http,https'`), follows no redirect and
-  stops after 15 seconds. Any HTTP status gives `reachable: true`. A network
+  request (`curl -q -sS -I -g --proto '=http,https'`), follows no redirect and
+  stops after 15 seconds. `-q` comes first, so `curl` does not read the
+  login's `.curlrc`, and that file cannot change the request. Any HTTP
+  status gives `reachable: true`. A network
   failure (no DNS answer, refused, timeout, TLS) gives `reachable: false`
   with `curl_exit_code` and `error`. A missing `curl` or a request `curl`
   cannot make (exit 1 to 4) raises an error. `Set-Cookie` headers are

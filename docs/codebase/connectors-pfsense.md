@@ -1125,8 +1125,9 @@ per-user rule sync). Checked against the pfSense
   target (`vault_path_is_target_secret`), and the handler reads it with the
   caller's Vault login. When the field already holds a value, the call fails
   (`vault_field_exists`). The approval card says whether the path is `new`,
-  `holds_other_fields`, `field_exists` or `target_secret` (no value is
-  shown). The fragment refuses a name that is in `/etc/passwd` or
+  `holds_other_fields`, `field_exists`, `target_secret` or `outside_tenant`
+  (no value is shown). For a path outside the caller's tenant path it looks
+  up nothing, neither the targets nor Vault. The fragment refuses a name that is in `/etc/passwd` or
   `/etc/group` on the firewall (`system_name`), like the pfSense web page,
   and any name when it cannot read these files (`system_names_unreadable`):
   it changes nothing. Else it makes a 24-character password (letters and
@@ -1158,8 +1159,10 @@ per-user rule sync). Checked against the pfSense
   rule grants access by tunnel address, and the delete frees that address,
   so `pfsense.openvpn.address.next_free` could give it to the next user.
   Remove the rules with `pfsense.filter.rule.delete` first; the error lists
-  their `ridentifier`. The fragment counts these rules again and changes
-  nothing when it finds one. It also refuses a name that is a system account
+  their `ridentifier`. The fragment checks again on the config as it is at
+  that moment, and changes nothing when a check fails: it counts these rules
+  (also for an override address that changed since the first read), and it
+  refuses a user that got a group or a permission meanwhile (`protected`). It also refuses a name that is a system account
   or group of the firewall (a line in `/etc/passwd` with another `uid`, or a
   line in `/etc/group`; `system_name`), and any name when it cannot read
   these files (`system_names_unreadable`): `local_user_del()` would remove

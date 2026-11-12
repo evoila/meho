@@ -78,7 +78,9 @@ tunnel address, and the delete frees that address for the next user. Then
 it asks every enabled user-login OpenVPN server for its connected clients
 through the server's management socket (``status 2``), then plays back one
 fragment. The fragment counts these rules again and changes nothing when
-there are any (``MEHO_VPN_RULES_REMAIN``). It also refuses a name that is a
+there are any (``MEHO_VPN_RULES_REMAIN``), with the override addresses as
+they are at that moment. It checks groups and permissions again too
+(``MEHO_VPN_PROTECTED``, refused as ``protected``). It also refuses a name that is a
 system account or group of the firewall (a line in ``/etc/passwd`` with
 another ``uid``, or a line in ``/etc/group``), and any name when it cannot
 read these files: ``local_user_del()`` would remove that system account.
@@ -139,7 +141,10 @@ from meho_backplane.connectors.pfsense.ops_write import (
     serialized_config_write,
 )
 from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
-from meho_backplane.connectors.vault.tenant_scope import enforce_tenant_scope
+from meho_backplane.connectors.vault.tenant_scope import (
+    VaultTenantScopeError,
+    enforce_tenant_scope,
+)
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 from meho_backplane.settings import get_settings
 
@@ -170,6 +175,8 @@ _EXISTS_RE: Final = re.compile(rf"^{_EXISTS_MARKER}\s*$", re.MULTILINE)
 _UID_RE: Final = re.compile(r"^[0-9]{1,10}$")
 _RULES_REMAIN_MARKER: Final = "MEHO_VPN_RULES_REMAIN="
 _RULES_REMAIN_RE: Final = re.compile(rf"^{_RULES_REMAIN_MARKER}([0-9]+)\s*$", re.MULTILINE)
+_PROTECTED_MARKER: Final = "MEHO_VPN_PROTECTED"
+_PROTECTED_RE: Final = re.compile(rf"^{_PROTECTED_MARKER}\s*$", re.MULTILINE)
 _SYSTEM_NAME_MARKER: Final = "MEHO_VPN_SYSTEM_NAME"
 _SYSTEM_UNREADABLE_MARKER: Final = "MEHO_VPN_SYSTEM_NAMES_UNREADABLE"
 _SYSTEM_FILES: Final = ("/etc/passwd", "/etc/group")
@@ -331,10 +338,13 @@ def build_user_delete_playback(name: str, addresses: Iterable[str] = ()) -> str:
     """Return the fragment that removes ONE local user and the overrides with its name.
 
     Acts only when exactly one user has the name, it is not uid 0, the name
-    is not a system account or group of the firewall, and no firewall rule
-    carries the user's tag or has one of *addresses* (the user's fixed
-    tunnel addresses) as its source on the OpenVPN tab. When such rules
-    remain, it prints ``MEHO_VPN_RULES_REMAIN=<count>`` and changes nothing.
+    is not a system account or group of the firewall, the user has no
+    permission and is in no group other than ``all``, and no firewall rule
+    carries the user's tag or has one of the user's fixed tunnel addresses
+    as its source on the OpenVPN tab. These addresses are *addresses* (from
+    the handler's read) and the addresses of the user's overrides as they
+    are now. It prints ``MEHO_VPN_PROTECTED`` for a group or permission and
+    ``MEHO_VPN_RULES_REMAIN=<count>`` for remaining rules, and changes nothing.
     """
     hosts = [str(ipaddress.IPv4Address(a)) for a in addresses]
     return _build_user_remove_playback(name, uid=None, addresses=hosts)
@@ -360,11 +370,40 @@ def _build_user_remove_playback(name: str, *, uid: str | None, addresses: list[s
     if uid is not None:
         guard += f" && (string){users}[$meho_idx]['uid'] === {_php_squote(uid)}"
     else:
-        guard += " && $meho_tagged === 0"
+        guard += " && $meho_protected === 0 && $meho_tagged === 0"
     sources = [s for a in addresses for s in (a, f"{a}/32")]
+    # The checks of the handler again, on the config as it is now: a group,
+    # a permission or an override address may have changed since the read.
+    protected = [
+        "$meho_protected = 0;",
+        "if ($meho_found === 1) {",
+        f"  $meho_uid = (string){users}[$meho_idx]['uid'];",
+        f"  foreach ((array)({users}[$meho_idx]['priv'] ?? array()) as $meho_p) {{",
+        "    if (trim((string)$meho_p) !== '') {",
+        "      $meho_protected = 1;",
+        "    }",
+        "  }",
+        "  foreach ((array)($config['system']['group'] ?? array()) as $meho_g) {",
+        "    $meho_members = array_map('strval', (array)($meho_g['member'] ?? array()));",
+        "    if (trim((string)($meho_g['name'] ?? '')) !== 'all'",
+        "        && in_array($meho_uid, $meho_members, true)) {",
+        "      $meho_protected = 1;",
+        "    }",
+        "  }",
+        "}",
+    ]
     tagged = [
         "$meho_tagged = 0;",
         f"$meho_sources = array({', '.join(_php_squote(a) for a in sources)});",
+        f"foreach ((array)({csc} ?? array()) as $meho_e) {{",
+        "  if (isset($meho_e['common_name']) && (string)$meho_e['common_name'] === $meho_name) {",
+        "    $meho_a = trim(explode('/', (string)($meho_e['tunnel_network'] ?? ''))[0]);",
+        "    if (filter_var($meho_a, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false) {",
+        "      $meho_sources[] = $meho_a;",
+        "      $meho_sources[] = $meho_a . '/32';",
+        "    }",
+        "  }",
+        "}",
         f"if (isset({rules}) && is_array({rules})) {{",
         f"  foreach ({rules} as $meho_r) {{",
         "    $meho_if = isset($meho_r['interface'])",
@@ -408,7 +447,7 @@ def _build_user_remove_playback(name: str, *, uid: str | None, addresses: list[s
         "    }",
         "  }",
         "}",
-        *(tagged if uid is None else []),
+        *(protected + tagged if uid is None else []),
         *_system_name_check("$meho_found === 1", f"{users}[$meho_idx]['uid']"),
         f"if ({guard}) {{",
         f"  $meho_user = {users}[$meho_idx];",
@@ -423,6 +462,9 @@ def _build_user_remove_playback(name: str, *, uid: str | None, addresses: list[s
     ]
     if uid is None:
         lines += [
+            "if ($meho_protected === 1) {",
+            f"  echo '{_PROTECTED_MARKER}' . \"\\n\";",
+            "}",
             "if ($meho_tagged > 0) {",
             f"  echo '{_RULES_REMAIN_MARKER}' . $meho_tagged . \"\\n\";",
             "}",
@@ -994,6 +1036,13 @@ async def pfsense_openvpn_user_delete(
     refused = _system_refusal(_DELETE_OP_ID, name, played)
     if refused is not None:
         raise refused
+    if _PROTECTED_RE.search(played):
+        raise PfSenseRefusedError(
+            _DELETE_OP_ID,
+            "protected",
+            f"{name!r} got a group or a permission after the first check; this op deletes "
+            "only VPN users. Nothing changed.",
+        )
     remain = _RULES_REMAIN_RE.search(played)
     if remain is not None:
         raise _rules_remain(name, int(remain.group(1)), [])
@@ -1036,8 +1085,8 @@ async def _create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "exists": None,
         "note": (
             "The password is made on the firewall and written to Vault. It is never shown. "
-            "vault.path_state is new, holds_other_fields, field_exists, target_secret or "
-            "unknown."
+            "vault.path_state is new, holds_other_fields, field_exists, target_secret, "
+            "outside_tenant or unknown."
         ),
     }
     vault = {**preview["vault"], "path_state": await _vault_path_state(ctx, mount, path, field)}
@@ -1058,6 +1107,10 @@ async def _vault_path_state(ctx: PreviewContext, mount: str, path: str, field: s
     """Say whether the Vault path is new or already holds fields; no value is read out."""
     if ctx.operator is None:
         return "unknown"
+    try:
+        enforce_tenant_scope(ctx.operator, mount=mount, path=path, read_only=False)
+    except VaultTenantScopeError:
+        return "outside_tenant"
     try:
         if _path_form(path) in await _target_secret_paths():
             return "target_secret"

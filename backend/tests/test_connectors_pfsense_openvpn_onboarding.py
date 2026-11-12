@@ -1495,6 +1495,17 @@ async def test_delete_is_refused_when_the_fragment_finds_a_new_tagged_rule() -> 
     assert len(fake.played) == 1
 
 
+async def test_delete_is_refused_when_the_fragment_finds_a_new_group_or_permission() -> None:
+    fake = _Fake(
+        [_vpn_config()],
+        sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY},
+        playback_out="MEHO_VPN_PROTECTED\n",
+    )
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(protected\)"):
+        await _delete(fake)
+    assert len(fake.played) == 1
+
+
 async def test_delete_fails_when_the_rule_list_cannot_be_read() -> None:
     config = _vpn_config().replace("<filter></filter>", "")
     fake = _Fake([config], sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY})
@@ -1578,6 +1589,57 @@ def test_delete_fragment_run_in_php_writes_nothing_while_a_tagged_rule_remains(
     printed, out = _run_php(tmp_path, before, user_module.build_user_delete_playback("guest-1"))
     assert printed.strip() == "MEHO_VPN_RULES_REMAIN=1"
     assert out["config"] == before and out["calls"] == []
+
+
+@pytest.mark.parametrize(
+    ("change", "printed"),
+    [
+        ("priv", "MEHO_VPN_PROTECTED"),
+        ("group", "MEHO_VPN_PROTECTED"),
+        ("new_address", "MEHO_VPN_RULES_REMAIN=1"),
+    ],
+)
+@_needs_php
+def test_delete_fragment_run_in_php_checks_the_config_as_it_is_now(
+    tmp_path: Path, change: str, printed: str
+) -> None:
+    # The handler read the user with no group, no permission and the override
+    # address 198.51.100.5. Someone changed the config before the playback.
+    users = [
+        {"name": "admin", "uid": "0", "scope": "system"},
+        {"name": "guest-1", "uid": "2000", "scope": "user"},
+    ]
+    before = _php_config([_csc_row("guest-1", "1", "198.51.100.5/24")], users)
+    if change == "priv":
+        before["system"]["user"][1]["priv"] = ["page-all"]
+    elif change == "group":
+        before["system"]["group"].append({"name": "admins", "member": ["0", "2000"]})
+    else:
+        before["openvpn"]["openvpn-csc"][0]["tunnel_network"] = "198.51.100.9/24"
+        rule = {"tracker": "7", "interface": "openvpn", "source": {"address": "198.51.100.9"}}
+        before["filter"] = {"rule": [rule]}
+    fragment = user_module.build_user_delete_playback("guest-1", ["198.51.100.5"])
+    out_text, out = _run_php(tmp_path, before, fragment)
+    assert out_text.strip() == printed
+    assert out["config"] == before and out["calls"] == []
+
+
+@_needs_php
+def test_delete_fragment_run_in_php_ignores_the_all_group_and_empty_permissions(
+    tmp_path: Path,
+) -> None:
+    users = [
+        {"name": "admin", "uid": "0", "scope": "system"},
+        {"name": "guest-1", "uid": "2000", "scope": "user", "priv": [""]},
+    ]
+    before = _php_config([_csc_row("guest-1", "1", "198.51.100.5/24")], users)
+    before["system"]["group"] = [
+        {"name": "all", "member": ["0", "2000"]},
+        {"name": "admins", "member": "0"},
+    ]
+    printed, out = _run_php(tmp_path, before, user_module.build_user_delete_playback("guest-1"))
+    assert printed.strip() == ""
+    assert [u["name"] for u in out["config"]["system"]["user"]] == ["admin"]
 
 
 @_needs_php
@@ -1909,6 +1971,30 @@ async def test_the_create_preview_says_whether_the_vault_path_is_new(
     assert preview is not None
     assert preview["vault"]["path_state"] == state
     assert "older" not in json.dumps(preview)
+
+
+async def test_the_create_preview_reads_nothing_for_a_path_outside_the_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from meho_backplane.operations._preview import PreviewContext
+
+    async def _no_db() -> set[str]:
+        raise AssertionError("the target paths must not be read")
+
+    fake_vault = _FakeVault(data={"password": "older"})
+    monkeypatch.setattr(user_module, "vault_client_for_operator", fake_vault)
+    monkeypatch.setattr(user_module, "_target_secret_paths", _no_db)
+    ctx = PreviewContext(
+        descriptor=MagicMock(),
+        connector_instance=None,
+        operator=_operator(),
+        target=None,
+        params={"name": "guest-1", "vault_path": "tenants/someone-else/vpn"},
+    )
+    preview = await user_module._create_preview(ctx)
+    assert preview is not None
+    assert preview["vault"]["path_state"] == "outside_tenant"
+    assert fake_vault.opened == 0
 
 
 # ===========================================================================

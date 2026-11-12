@@ -192,6 +192,27 @@ bounds. A refusal from the per-tenant scope raises the same
 so the operator knows the per-tenant bound, not the instance floor,
 refused.
 
+#### The tenant bound lists addresses the backplane can reach
+
+The bound is checked on the address the probe dials. It does not know
+whether the backplane has a route to that address. Some estates use a
+private network that the backplane cannot reach directly. The backplane
+reaches them only through NAT alias addresses on a routing host. If the
+tenant bound lists only the private network, then:
+
+- a probe to a private address passes the check, but it times out;
+- a probe to the alias address is refused by the bound.
+
+So put the addresses the backplane really reaches (for example the NAT
+aliases) in the tenant bound. Do this in
+`netdiag.probeAllowlistTenants`. The allow list check itself is
+unchanged.
+
+A `timeout` result from `net.tcp_check` or `net.dns_lookup` carries a
+`hint` field. It says that no route from the backplane is a possible
+cause, so a timeout is not read as an outage of the probed service.
+Other results have no `hint`.
+
 ### 2. Audit-visible host:port
 
 Unlike `secret.move` (whose refs are secret-adjacent and are only

@@ -771,27 +771,61 @@ func TestRunCallForwardsValidWorkRef(t *testing.T) {
 	}
 }
 
-// TestRunCallRejectsMalformedWorkRefBeforeRequest ensures bad ticket syntax
-// fails locally rather than issuing a dispatch without trustworthy linkage.
-func TestRunCallRejectsMalformedWorkRefBeforeRequest(t *testing.T) {
-	f := &fakeOperationsClient{}
-	withFakeClient(t, f)
+// TestRunCallForwardsNonGitHubWorkRef checks that a ticket id from
+// another system (a ServiceNow change, a Jira key) goes into the body
+// unchanged, like the backplane accepts it.
+func TestRunCallForwardsNonGitHubWorkRef(t *testing.T) {
+	for _, ref := range []string{"CHG0012345", "OPS-123"} {
+		t.Run(ref, func(t *testing.T) {
+			cr, _ := json.Marshal(CallResult{Status: "ok", OpID: "vault.kv.read", DurationMs: 1})
+			f := &fakeOperationsClient{
+				callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+					{HTTPResponse: makeHTTPResp(200), Body: cr},
+				},
+			}
+			withFakeClient(t, f)
 
-	cmd := newCallCmd()
-	cmd.SetOut(&bytes.Buffer{})
-	var errBuf bytes.Buffer
-	cmd.SetErr(&errBuf)
-	cmd.SetArgs([]string{
-		"vault-1.x", "vault.kv.read", "--work-ref", "not-a-ticket", "--backplane", "https://x",
-	})
-	if err := cmd.Execute(); err == nil {
-		t.Fatal("malformed work ref should return a command error")
+			cmd := newCallCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--work-ref", ref, "--backplane", "https://x"})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if f.lastCallBody == nil || f.lastCallBody.WorkRef == nil || *f.lastCallBody.WorkRef != ref {
+				t.Fatalf("work_ref not forwarded from flag; got %+v", f.lastCallBody)
+			}
+		})
 	}
-	if !strings.Contains(errBuf.String(), "--work-ref must match gh:<owner>/<repo>#<n>") {
-		t.Fatalf("expected work-ref validation message; got %q", errBuf.String())
-	}
-	if f.lastCallBody != nil {
-		t.Fatalf("malformed work ref must fail before dispatch; got %+v", f.lastCallBody)
+}
+
+// TestRunCallRejectsMalformedWorkRefBeforeRequest checks that a blank
+// value or a value with a line break fails locally, before any request.
+func TestRunCallRejectsMalformedWorkRefBeforeRequest(t *testing.T) {
+	for name, ref := range map[string]string{
+		"blank":        "   ",
+		"line break":   "OPS-123\nX-Other: 1",
+		"carriage ret": "OPS-123\r",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeOperationsClient{}
+			withFakeClient(t, f)
+
+			cmd := newCallCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			var errBuf bytes.Buffer
+			cmd.SetErr(&errBuf)
+			cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--work-ref", ref, "--backplane", "https://x"})
+			if err := cmd.Execute(); err == nil {
+				t.Fatal("malformed work ref should return a command error")
+			}
+			if !strings.Contains(errBuf.String(), "--work-ref "+api.WorkRefRule) {
+				t.Fatalf("expected work-ref error message; got %q", errBuf.String())
+			}
+			if f.lastCallBody != nil {
+				t.Fatalf("malformed work ref must fail before dispatch; got %+v", f.lastCallBody)
+			}
+		})
 	}
 }
 

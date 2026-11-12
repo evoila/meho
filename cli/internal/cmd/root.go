@@ -134,7 +134,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 		"work-ref",
 		"",
 		"external change-ticket reference sent on every backplane request, so the audit rows carry it "+
-			"(e.g. gh:evoila/meho#13; default: $"+api.WorkRefEnv+")",
+			"(e.g. gh:evoila/meho#13 or CHG0012345; default: $"+api.WorkRefEnv+")",
 	)
 	root.PersistentPreRunE = applyRequestContext
 
@@ -654,9 +654,10 @@ func newRootCmdFor(args []string) *cobra.Command {
 }
 
 // applyWorkRef reads the global --work-ref flag (or MEHO_WORK_REF when
-// the flag is not set), checks its shape, and puts it on the command
-// context. Every AuthedClient request and every hand-rolled backplane
-// request built from that context then sends the Meho-Work-Ref header.
+// the flag is not set), checks it (not blank, one line), and puts it on
+// the command context. Every AuthedClient request and every hand-rolled
+// backplane request built from that context then sends the
+// Meho-Work-Ref header.
 //
 // A subcommand that defines its own local --work-ref (operation call,
 // scheduler create, runbook start, agent run, broadcast announce) hides
@@ -690,8 +691,8 @@ func applyWorkRef(cmd *cobra.Command, _ []string) error {
 		// On a read command that filters by reference, the old
 		// --work-ref spelling still filters for one release when
 		// --filter-work-ref is not given, and a filter value need not
-		// have the tag shape. Skip the tag and let workref.Filter
-		// filter and warn. With --filter-work-ref given, --work-ref
+		// be a value the header can carry. Skip the tag and let
+		// workref.Filter filter and warn. With --filter-work-ref given, --work-ref
 		// only tags, so a bad value is an error like everywhere else.
 		if source == "--work-ref" && workref.OldFlagFilters(cmd) {
 			return nil
@@ -701,7 +702,7 @@ func applyWorkRef(cmd *cobra.Command, _ []string) error {
 			jsonOut = f.Value.String() == "true"
 		}
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(source+" must match gh:<owner>/<repo>#<n>"), jsonOut)
+			output.Unexpected(source+" "+api.WorkRefRule), jsonOut)
 	}
 	cmd.SetContext(api.WithWorkRef(cmd.Context(), ref))
 	return nil

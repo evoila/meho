@@ -155,8 +155,9 @@ func render(root *cobra.Command) string {
 	sb.WriteString("- `--config` — path to the meho config file " +
 		"(default: `$XDG_CONFIG_HOME/meho/config.json`).\n")
 	sb.WriteString("- `--verbose`, `-v` — enable verbose output.\n")
-	sb.WriteString("- `--work-ref` — external change-ticket reference " +
-		"(`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the " +
+	sb.WriteString("- `--work-ref` — external change-ticket reference, any ticket id on one " +
+		"line (for example `gh:evoila/meho#13` or `CHG0012345`; default: `$MEHO_WORK_REF`). " +
+		"The CLI sends it as the " +
 		"`Meho-Work-Ref` header on every backplane request, so the audit rows carry it. " +
 		"Five commands have their own `--work-ref` flag that tags the run with the " +
 		"reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, " +

@@ -22,6 +22,9 @@ import (
 
 const testWorkRef = "gh:evoila/meho#3804"
 
+// badWorkRef has a line break, so the CLI refuses it.
+const badWorkRef = "bad\nref"
+
 // workRefRecorder is a fake backplane. It answers every request with a
 // 500 (the verbs under test only need to send their request) and keeps
 // the Meho-Work-Ref header seen per "METHOD path".
@@ -144,13 +147,47 @@ func TestWorkRefEnvFallbackAndFlagPrecedence(t *testing.T) {
 	})
 }
 
+// TestWorkRefAcceptsAnyTicketID checks that the global flag and the
+// environment variable take the same values as the backplane: a GitHub
+// reference, a ServiceNow change number or a Jira key all go out as the
+// Meho-Work-Ref header unchanged.
+func TestWorkRefAcceptsAnyTicketID(t *testing.T) {
+	addArgs := []string{"targets", "add", "vault-a", "--product", "vault", "--host", "vault.example.test"}
+	cases := []struct {
+		name, flag, env, want string
+	}{
+		{"flag, ServiceNow change", "CHG0012345", "", "CHG0012345"},
+		{"flag, Jira key", "OPS-123", "", "OPS-123"},
+		{"flag, GitHub issue", "gh:evoila/meho#13", "", "gh:evoila/meho#13"},
+		{"env, Jira key", "", "OPS-123", "OPS-123"},
+		{"env, ServiceNow change", "", "CHG0012345", "CHG0012345"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, rec := newWorkRefBackplane(t)
+			t.Setenv(api.WorkRefEnv, tc.env)
+			args := addArgs
+			if tc.flag != "" {
+				args = append([]string{"--work-ref", tc.flag}, addArgs...)
+			}
+			if stderr, err := runRoot(t, args...); err == nil || strings.Contains(stderr, api.WorkRefRule) {
+				t.Fatalf("want only the 500 backplane error; err=%v stderr=%s", err, stderr)
+			}
+			if got := rec.header(t, "POST /api/v1/targets"); got != tc.want {
+				t.Errorf("%s header = %q; want %q", api.WorkRefHeader, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWorkRefMalformedRejectedBeforeAnyRequest(t *testing.T) {
 	addArgs := []string{"targets", "add", "vault-a", "--product", "vault", "--host", "vault.example.test"}
 	cases := []struct {
 		name, flag, env, wantInErr string
 	}{
-		{"bad flag", "JIRA-12", "", "--work-ref must match"},
-		{"bad env", "", "not-a-ref", api.WorkRefEnv + " must match"},
+		{"blank flag", "   ", "", "--work-ref " + api.WorkRefRule},
+		{"flag with a line break", "OPS-123\nX-Other: 1", "", "--work-ref " + api.WorkRefRule},
+		{"env with a line break", "", "OPS-123\nX-Other: 1", api.WorkRefEnv + " " + api.WorkRefRule},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -261,7 +298,7 @@ func TestWorkRefMalformedEnvSkippedForLocalCommands(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, rec := newWorkRefBackplane(t)
-			t.Setenv(api.WorkRefEnv, "bad")
+			t.Setenv(api.WorkRefEnv, badWorkRef)
 			if stderr, err := runRoot(t, tc.args...); err != nil {
 				t.Fatalf("want success with a bad %s; err=%v stderr=%s", api.WorkRefEnv, err, stderr)
 			}
@@ -278,7 +315,7 @@ func TestWorkRefMalformedEnvSkippedForLocalCommands(t *testing.T) {
 	// and it is the only request that leaves.
 	t.Run("version", func(t *testing.T) {
 		_, rec := newWorkRefBackplane(t)
-		t.Setenv(api.WorkRefEnv, "bad")
+		t.Setenv(api.WorkRefEnv, badWorkRef)
 		if stderr, err := runRoot(t, "version"); err != nil {
 			t.Fatalf("want success with a bad %s; err=%v stderr=%s", api.WorkRefEnv, err, stderr)
 		}
@@ -300,13 +337,13 @@ func TestWorkRefMalformedEnvSkippedForLocalCommands(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("CLAUDE_PLUGIN_ROOT", "")
 			_, rec := newWorkRefBackplane(t)
-			t.Setenv(api.WorkRefEnv, "bad")
+			t.Setenv(api.WorkRefEnv, badWorkRef)
 			stderr, err := runRoot(t, tc.args...)
 			if err == nil {
 				t.Fatal("want an error for a malformed work-ref")
 			}
-			if !strings.Contains(stderr, api.WorkRefEnv+" must match") {
-				t.Errorf("stderr = %q; want the shape error", stderr)
+			if !strings.Contains(stderr, api.WorkRefEnv+" "+api.WorkRefRule) {
+				t.Errorf("stderr = %q; want the work-ref error", stderr)
 			}
 			rec.mu.Lock()
 			defer rec.mu.Unlock()

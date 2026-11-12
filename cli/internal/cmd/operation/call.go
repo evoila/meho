@@ -53,7 +53,7 @@ type CallResult struct {
 //	meho operation call <connector_id> <op_id> \
 //	  [--target <slug>]                        # target name (required for ops that read a target)
 //	  [--params '<json>' | @<file>]            # operation params (object)
-//	  [--work-ref gh:<owner>/<repo>#<n>]       # external change-ticket reference
+//	  [--work-ref <ticket>]                    # external change-ticket reference
 //	  [--preview-hash <hash>]                  # destructive-tier binding from `operation preview` (#3197)
 //	  [--async]                                # start in the background, print a run id
 //	  [--json]                                 # machine-readable output
@@ -129,7 +129,8 @@ func newCallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&paramsFlag, "params", "",
 		"operation params as inline JSON or @<file>; omitted means no params")
 	cmd.Flags().StringVar(&workRef, "work-ref", "",
-		"external change-ticket reference for this dispatch's audit and approval rows (e.g. gh:evoila/meho#13)")
+		"external change-ticket reference for this dispatch's audit and approval rows "+
+			"(e.g. gh:evoila/meho#13 or CHG0012345)")
 	cmd.Flags().StringVar(&previewHash, "preview-hash", "",
 		"preview_hash from a prior `meho operation preview` — required for a destructive-tier op (#3197)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
@@ -156,7 +157,7 @@ type callOptions struct {
 func runCall(cmd *cobra.Command, opts callOptions) error {
 	if opts.WorkRef != "" && !api.ValidWorkRef(opts.WorkRef) {
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected("--work-ref must match gh:<owner>/<repo>#<n>"), opts.JSONOut)
+			output.Unexpected("--work-ref "+api.WorkRefRule), opts.JSONOut)
 	}
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {

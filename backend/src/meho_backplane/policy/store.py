@@ -25,8 +25,9 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, or_, select, text
@@ -53,13 +54,16 @@ from meho_backplane.policy.classification import (
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "SWITCH_OFF_REFUSAL",
     "ClassificationEdit",
+    "EditPlan",
     "InvalidStoredPolicyError",
     "classification_enabled",
     "classify_rows",
     "classify_step",
     "connector_id_of",
     "load_classification",
+    "plan_edit",
     "set_classification",
 ]
 
@@ -70,6 +74,13 @@ _MAX_LABEL_VALUE = 255
 
 class InvalidStoredPolicyError(ValueError):
     """A stored policy document is not valid, so no operation can be classified."""
+
+
+#: What every surface says while the switch is off.
+SWITCH_OFF_REFUSAL: Final[str] = (
+    "Classification is off on this MEHO. An admin turns it on with the "
+    "POLICY_CLASSIFICATION setting."
+)
 
 
 def classification_enabled() -> bool:
@@ -375,6 +386,73 @@ async def _override_entries_for(
     return entries
 
 
+@dataclass(frozen=True)
+class EditPlan:
+    """What one edit would do, worked out without writing anything.
+
+    ``before`` and ``after`` hold every entry that applies to the tenant
+    without and with the edit; ``matched`` the operations the changed
+    entry matches, sorted and without repeats.
+    """
+
+    taxonomy: Taxonomy
+    document: dict[str, Any]
+    index: int
+    before: list[ClassificationEntry]
+    after: list[ClassificationEntry]
+    matched: list[OpCoordinates]
+    tenant_row: TenantPolicy | None
+
+    @property
+    def rule_ref(self) -> str:
+        """Where the changed entry is in the tenant's document."""
+        return f"tenant:classifications[{self.index}]"
+
+    @property
+    def entry(self) -> dict[str, Any]:
+        """The changed entry as it would be stored."""
+        entry: dict[str, Any] = self.document["classifications"][self.index]
+        return entry
+
+
+async def plan_edit(
+    session: AsyncSession, *, tenant_id: UUID, edit: ClassificationEdit
+) -> EditPlan:
+    """Work out what *edit* changes for *tenant_id*; write nothing.
+
+    Refuses (``ValueError``) an edit that is not valid. A conflict is not
+    checked here: :func:`set_classification` refuses it, and a dry run
+    shows it.
+    """
+    install, tenant = await _documents(session, tenant_id)
+    install_doc = install.document if install is not None else None
+    tenant_doc = tenant.document if tenant is not None else None
+    taxonomy = taxonomy_from_documents(install_doc, tenant_doc)
+    edit.check(taxonomy)
+    new_doc, index = _merged_document(tenant_doc, edit)
+    install_entries = entries_from_document(install_doc, scope="install")
+    overrides = await _override_entries_for(session, tenant_id)
+    new_tenant_entries = entries_from_document(new_doc, scope="tenant")
+    changed = new_tenant_entries[index]
+    matched = sorted(
+        {c for c in await _visible_coords(session, tenant_id) if changed.matches(c)},
+        key=lambda c: (c.connector_id, c.group_key or "", c.op_id),
+    )
+    return EditPlan(
+        taxonomy=taxonomy,
+        document=new_doc,
+        index=index,
+        before=[
+            *install_entries,
+            *entries_from_document(tenant_doc, scope="tenant"),
+            *overrides,
+        ],
+        after=[*install_entries, *new_tenant_entries, *overrides],
+        matched=matched,
+        tenant_row=tenant,
+    )
+
+
 async def set_classification(
     session: AsyncSession,
     *,
@@ -391,36 +469,25 @@ async def set_classification(
     The caller owns the transaction.
     """
     await _lock_tenant_policy(session, tenant_id)
-    install, tenant = await _documents(session, tenant_id)
-    install_doc = install.document if install is not None else None
-    tenant_doc = tenant.document if tenant is not None else None
-    taxonomy = taxonomy_from_documents(install_doc, tenant_doc)
-    edit.check(taxonomy)
-    new_doc, index = _merged_document(tenant_doc, edit)
-    entries = [
-        *entries_from_document(install_doc, scope="install"),
-        *entries_from_document(new_doc, scope="tenant"),
-        *await _override_entries_for(session, tenant_id),
-    ]
-    changed = entries_from_document(new_doc, scope="tenant")[index]
-    matched = [c for c in await _visible_coords(session, tenant_id) if changed.matches(c)]
-    check_no_conflict(matched, entries, taxonomy)
+    plan = await plan_edit(session, tenant_id=tenant_id, edit=edit)
+    check_no_conflict(plan.matched, plan.after, plan.taxonomy)
+    tenant = plan.tenant_row
     if tenant is None:
         session.add(
             TenantPolicy(
                 tenant_id=tenant_id,
-                document=new_doc,
+                document=plan.document,
                 set_by_sub=set_by_sub,
                 set_at=datetime.now(UTC),
             )
         )
     else:
-        tenant.document = new_doc
+        tenant.document = plan.document
         tenant.set_by_sub = set_by_sub
         tenant.set_at = datetime.now(UTC)
     await session.flush()
     return {
-        "rule_ref": f"tenant:classifications[{index}]",
-        "entry": new_doc["classifications"][index],
-        "matched_operations": len(matched),
+        "rule_ref": plan.rule_ref,
+        "entry": plan.entry,
+        "matched_operations": len(plan.matched),
     }

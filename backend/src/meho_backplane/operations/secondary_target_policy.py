@@ -59,10 +59,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SecondaryTargetWrite",
+    "approved_agent_requester",
     "approved_requester_sub",
     "approved_requester_subject",
     "bind_approved_requester",
     "requester_policy_preflight",
+    "requester_subject",
     "secondary_target_refusal",
 ]
 
@@ -82,15 +84,17 @@ class SecondaryTargetWrite:
 class _Requester(NamedTuple):
     """The requester of an approved request.
 
-    ``sub`` and ``act`` come from the approval row. ``subject`` is the card's
-    ``permission_preflight["requester"]`` record, or ``None`` when the card
-    has none or its ``sub`` does not match the row.
+    ``sub``, ``act`` and ``kind`` come from the approval row. ``subject`` is
+    the card's ``permission_preflight["requester"]`` record, or ``None`` when
+    the card has none or its ``sub`` does not match the row.
     """
 
     tenant_id: Any
     sub: str
     act: str | None
     subject: Mapping[str, Any] | None
+    #: The row's ``principal_kind``; ``None`` on a row parked before it existed.
+    kind: str | None = None
 
 
 #: The requester of the approved request a reviewer is running. Bound by
@@ -148,7 +152,7 @@ async def _refusal(
     return None
 
 
-def _subject_of(operator: Operator) -> dict[str, Any]:
+def requester_subject(operator: Operator) -> dict[str, Any]:
     """The fields the policy gate reads about a caller, as stored on the card."""
     return {
         "sub": operator.sub,
@@ -174,7 +178,7 @@ async def requester_policy_preflight(
     """
     reason = await _refusal(operator, write, target, approved=True, decide_only=True)
     return {
-        "requester": _subject_of(operator),
+        "requester": requester_subject(operator),
         "requester_denied": reason is not None,
         "requester_reason": reason,
     }
@@ -186,14 +190,22 @@ def bind_approved_requester(request: ApprovalRequest) -> Iterator[None]:
 
     Who asked comes from the row (``principal_sub`` / ``principal_act``).
     The card's ``proposed_effect["permission_preflight"]["requester"]``
-    record is kept only when its ``sub`` matches the row. Only operations
-    that call :func:`secondary_target_refusal` read the binding.
+    record is kept only when its ``sub`` matches the row. Operations that
+    call :func:`secondary_target_refusal` read the binding, and so does the
+    step check of an agent's approved multi-step call
+    (:func:`approved_agent_requester`, #6314).
     """
     preflight = (request.proposed_effect or {}).get("permission_preflight")
     subject = preflight.get("requester") if isinstance(preflight, dict) else None
     if not isinstance(subject, Mapping) or subject.get("sub") != request.principal_sub:
         subject = None
-    requester = _Requester(request.tenant_id, request.principal_sub, request.principal_act, subject)
+    requester = _Requester(
+        request.tenant_id,
+        request.principal_sub,
+        request.principal_act,
+        subject,
+        request.principal_kind,
+    )
     token = _approved_requester_var.set(requester)
     try:
         yield
@@ -209,6 +221,29 @@ def approved_requester_sub() -> str | None:
     """
     requester = _approved_requester_var.get()
     return None if requester is None else requester.sub
+
+
+def approved_agent_requester() -> tuple[Operator | None, str | None] | None:
+    """The bound requester when an agent asked for the call, else ``None``.
+
+    An agent asked when the row's kind is ``agent`` (an agent login) or the
+    row has an ``act`` (a hosted agent run that a person or a login
+    started). Returns ``(principal, act)``: *principal* is the requester
+    rebuilt from the card's record, or ``None`` when the card has no
+    readable record. *act* is the row's ``act``, the hosted agent.
+    """
+    requester = _approved_requester_var.get()
+    if requester is None:
+        return None
+    if requester.kind != PrincipalKind.AGENT.value and requester.act is None:
+        return None
+    if requester.subject is None:
+        return None, requester.act
+    try:
+        principal = _requester_operator(requester, requester.subject)
+    except (KeyError, TypeError, ValueError):
+        return None, requester.act
+    return principal, requester.act
 
 
 def approved_requester_subject() -> dict[str, Any] | None:

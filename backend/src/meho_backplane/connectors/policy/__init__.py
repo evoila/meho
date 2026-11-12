@@ -31,6 +31,10 @@ from meho_backplane.connectors.policy.classify import (
     POLICY_CLASSIFY_OP_ID,
     register_policy_classify_operation,
 )
+from meho_backplane.connectors.policy.preview import (
+    POLICY_CLASSIFY_PREVIEW_OP_ID,
+    register_policy_classify_preview_operation,
+)
 from meho_backplane.op_classes import declare_per_call_approval
 from meho_backplane.operations._preview import (
     register_permission_preflight,
@@ -42,7 +46,9 @@ from meho_backplane.operations.role_floors import register_requester_check, regi
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
 register_typed_op_registrar(register_policy_classify_operation)
+register_typed_op_registrar(register_policy_classify_preview_operation)
 register_role_floor(POLICY_CLASSIFY_OP_ID, TenantRole.TENANT_ADMIN)
+register_role_floor(POLICY_CLASSIFY_PREVIEW_OP_ID, TenantRole.TENANT_ADMIN)
 register_rights_change_op(POLICY_CLASSIFY_OP_ID)
 declare_per_call_approval([POLICY_CLASSIFY_OP_ID])
 
@@ -55,4 +61,8 @@ register_preview_builder(POLICY_APPLY_OP_ID, build_policy_apply_preview)
 register_permission_preflight(POLICY_APPLY_OP_ID, record_policy_apply_requester)
 register_policy_repair_op("policy-registry", POLICY_APPLY_OP_ID)
 
-__all__ = ["register_policy_apply_operation", "register_policy_classify_operation"]
+__all__ = [
+    "register_policy_apply_operation",
+    "register_policy_classify_operation",
+    "register_policy_classify_preview_operation",
+]

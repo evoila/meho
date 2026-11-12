@@ -116,6 +116,12 @@ from meho_backplane.api.v1.operation_overrides import (
 from meho_backplane.api.v1.operation_runs import router as api_v1_operation_runs_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
 from meho_backplane.api.v1.policy import router as api_v1_policy_router
+from meho_backplane.api.v1.policy_classification import (
+    connector_router as api_v1_connector_classification_router,
+)
+from meho_backplane.api.v1.policy_classification import (
+    router as api_v1_policy_classification_router,
+)
 from meho_backplane.api.v1.read_docs import router as api_v1_read_docs_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_operation_picks import (
@@ -1199,6 +1205,10 @@ app.include_router(api_v1_connectors_ingest_router)
 # #4711 -- the override report: operator overrides of risk levels and
 # approval flags, and the "operations running with reduced approval" list.
 app.include_router(api_v1_operation_overrides_router)
+# #6038 -- read and edit the classification of operations (category,
+# labels, "always wait"): dry run, then a request a second admin approves.
+app.include_router(api_v1_policy_classification_router)
+app.include_router(api_v1_connector_classification_router)
 # #5029 -- each tenant turns built-in operations on or off for itself.
 app.include_router(api_v1_connector_tenant_settings_router)
 # G4.1-T2 (#416) -- knowledge-base REST surface at /api/v1/kb*.

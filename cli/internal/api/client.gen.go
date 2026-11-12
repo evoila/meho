@@ -776,6 +776,13 @@ const (
 	ShowTemplateResponseStatusPublished  ShowTemplateResponseStatus = "published"
 )
 
+// Defines values for StartingGrantSet.
+const (
+	StartingGrantSetNone           StartingGrantSet = "none"
+	StartingGrantSetReadEverything StartingGrantSet = "read-everything"
+	StartingGrantSetReadTargets    StartingGrantSet = "read-targets"
+)
+
 // Defines values for StatusFilterValue.
 const (
 	StatusFilterValueActive    StatusFilterValue = "active"
@@ -1227,9 +1234,12 @@ type AgentDefinitionCreate struct {
 	ModelTier    AgentModelTier          `json:"model_tier"`
 	Name         string                  `json:"name"`
 	OutputSchema *map[string]interface{} `json:"output_schema"`
-	SystemPrompt string                  `json:"system_prompt"`
-	Toolset      *map[string]interface{} `json:"toolset,omitempty"`
-	TurnBudget   int                     `json:"turn_budget"`
+
+	// StartingGrants The first grants of a new agent, picked when it is registered or defined.
+	StartingGrants *StartingGrants         `json:"starting_grants,omitempty"`
+	SystemPrompt   string                  `json:"system_prompt"`
+	Toolset        *map[string]interface{} `json:"toolset,omitempty"`
+	TurnBudget     int                     `json:"turn_budget"`
 }
 
 // AgentDefinitionListResponse Response envelope for “GET /api/v1/agents“.
@@ -1488,6 +1498,9 @@ type AgentModelTier string
 type AgentPrincipalCreate struct {
 	Name     string  `json:"name"`
 	OwnerSub *string `json:"owner_sub"`
+
+	// StartingGrants The first grants of a new agent, picked when it is registered or defined.
+	StartingGrants *StartingGrants `json:"starting_grants,omitempty"`
 }
 
 // AgentPrincipalListResponse Response envelope for “GET /api/v1/agent-principals“.
@@ -2850,6 +2863,7 @@ type BodyRunbooksRunAbortUiRunbooksRunsRunIdAbortPost struct {
 // BodyRunbooksRunNextUiRunbooksRunsRunIdNextPost defines model for Body_runbooks_run_next_ui_runbooks_runs__run_id__next_post.
 type BodyRunbooksRunNextUiRunbooksRunsRunIdNextPost struct {
 	Answer     *string `json:"answer,omitempty"`
+	Retry      *string `json:"retry,omitempty"`
 	VerifyType *string `json:"verify_type,omitempty"`
 }
 
@@ -7879,8 +7893,14 @@ type NextStep struct {
 // “confirm“ step or the engine's captured result for an
 // “operation_call“ step. “None“ is valid only on the very first
 // “meho_runbook_next“ call (when no prior step exists to verify).
+//
+// :attr:`retry` “= True“ asks MEHO to run the check of a “failed“
+// current step again. Without it, a “failed“ step refuses to
+// advance, as before. On a step that is not “failed“ the flag has
+// no effect.
 type NextStepRequest struct {
 	LastVerified   bool                            `json:"last_verified"`
+	Retry          *bool                           `json:"retry,omitempty"`
 	VerifyResponse *NextStepRequest_VerifyResponse `json:"verify_response"`
 }
 
@@ -10842,6 +10862,18 @@ type StartRunRequest struct {
 	Target       string                  `json:"target"`
 	TemplateSlug string                  `json:"template_slug"`
 	WorkRef      *string                 `json:"work_ref"`
+}
+
+// StartingGrantSet The three starting grant sets a person can pick.
+type StartingGrantSet string
+
+// StartingGrants The first grants of a new agent, picked when it is registered or defined.
+type StartingGrants struct {
+	// Set The three starting grant sets a person can pick.
+	Set StartingGrantSet `json:"set"`
+
+	// Targets Target names. Only for 'read-targets', and required there.
+	Targets *[]string `json:"targets,omitempty"`
 }
 
 // StatusFilterValue Closed enum of the trigger “status“ values exposed in the filter URL.

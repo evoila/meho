@@ -2032,9 +2032,11 @@ type ApprovalSignInStatusState string
 // is the value of “APPROVAL_SIGN_IN_LEVEL“ (#6281): “off“,
 // “observe“, “auto“ or “required“. “sign_in_level_in_force“ is
 // what MEHO does now with an approval sign-in that lacks the approval
-// level: “off“, “observe“ or “required“ (“auto“ is “required“
-// only while “sign_in“ is “ok“). “sign_in_level_warning“ is a short
-// sentence whenever the level is not required in practice, else “None“.
+// level: “off“, “observe“ or “required“ (“auto“ is “observe“
+// only while “sign_in“ shows for sure that the realm does not give the
+// level, and “required“ when it is “ok“ or its read failed).
+// “sign_in_level_warning“ is a short sentence whenever the level is not
+// required in practice or the read failed, else “None“.
 type ApprovalsStatus struct {
 	Custody                  string `json:"custody"`
 	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
@@ -6681,9 +6683,11 @@ type HealthResponse struct {
 	// is the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,
 	// ``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is
 	// what MEHO does now with an approval sign-in that lacks the approval
-	// level: ``off``, ``observe`` or ``required`` (``auto`` is ``required``
-	// only while ``sign_in`` is ``ok``). ``sign_in_level_warning`` is a short
-	// sentence whenever the level is not required in practice, else ``None``.
+	// level: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``
+	// only while ``sign_in`` shows for sure that the realm does not give the
+	// level, and ``required`` when it is ``ok`` or its read failed).
+	// ``sign_in_level_warning`` is a short sentence whenever the level is not
+	// required in practice or the read failed, else ``None``.
 	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 

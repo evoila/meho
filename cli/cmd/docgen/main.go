@@ -154,6 +154,10 @@ func render(root *cobra.Command) string {
 	sb.WriteString("## Global flags\n\n")
 	sb.WriteString("- `--config` — path to the meho config file " +
 		"(default: `$XDG_CONFIG_HOME/meho/config.json`).\n")
+	sb.WriteString("- `--profile` — named login to use (default: `$MEHO_PROFILE`, else " +
+		"`default`). Each profile keeps its own login, so one person can hold several " +
+		"identities side by side. `meho login <url> --profile <name>` stores the login " +
+		"under that name. The flag wins over `$MEHO_PROFILE`.\n")
 	sb.WriteString("- `--verbose`, `-v` — enable verbose output.\n")
 	sb.WriteString("- `--work-ref` — external change-ticket reference " +
 		"(`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the " +

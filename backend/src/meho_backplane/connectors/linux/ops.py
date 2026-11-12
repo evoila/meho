@@ -423,7 +423,8 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
     tiers -- ``FILE_OPS`` (``file.read`` / ``log.tail``), ``HOST_OPS``
     (``service.status`` / ``sysctl.read`` / ``dns.lookup``), ``FIREWALL_OPS``
     (``firewall.show``), ``STORAGE_OPS`` (``mount.list``), ``INSPECT_OPS``
-    (``journal.tail`` / ``fs.usage`` / ``dir.list``) -- plus the T2
+    (``journal.tail`` / ``fs.usage`` / ``dir.list``), ``DIAGNOSE_OPS``
+    (``tool.which`` / ``identity.show`` / ``http.head``) -- plus the T2
     governed ``WRITE_OPS`` (``file.write`` / ``service.control`` /
     ``script.run`` / ``sysctl.write`` / ``firewall.load``) and
     ``FIREWALL_ROLLBACK_OPS`` (``firewall.confirm``). Implemented as a
@@ -433,12 +434,14 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
     read tiers are imported before ``ops_write``, which imports validators
     from ``ops_host``), the rke2 mold.
     """
+    from meho_backplane.connectors.linux.ops_diagnose import DIAGNOSE_OPS
     from meho_backplane.connectors.linux.ops_file import FILE_OPS
     from meho_backplane.connectors.linux.ops_firewall import FIREWALL_OPS
     from meho_backplane.connectors.linux.ops_firewall_rollback import FIREWALL_ROLLBACK_OPS
     from meho_backplane.connectors.linux.ops_host import HOST_OPS
     from meho_backplane.connectors.linux.ops_inspect_ops import INSPECT_OPS
     from meho_backplane.connectors.linux.ops_storage import STORAGE_OPS
+    from meho_backplane.connectors.linux.ops_user import USER_OPS
     from meho_backplane.connectors.linux.ops_write import WRITE_OPS
 
     return (
@@ -448,6 +451,8 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
         *FIREWALL_OPS,
         *STORAGE_OPS,
         *INSPECT_OPS,
+        *DIAGNOSE_OPS,
+        *USER_OPS,
         *WRITE_OPS,
         *FIREWALL_ROLLBACK_OPS,
     )
@@ -472,7 +477,10 @@ LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "single named kernel parameter (e.g. ``net.ipv4.ip_forward`` -- did "
         "the first-boot script actually enable IP forwarding?), and "
         "``linux.sysctl.write`` sets one (runtime + a persistent drop-in), "
-        "approval-gated. " + SSH_TRANSPORT_NOTE
+        "approval-gated. ``linux.tool.which`` checks which of up to 20 named "
+        "programs are on the host's PATH, and ``linux.identity.show`` returns "
+        "the login's user, uid and groups and whether ``sudo`` works without a "
+        "password (``sudo -n true``) -- safe checks that need no approval. " + SSH_TRANSPORT_NOTE
     ),
     "file": (
         "Use to read or write the CONTENT of an allow-listed config / log / "
@@ -557,7 +565,11 @@ LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "when the name cannot be found. It shows what programs on that host "
         "see, so it proves a resolver repair or explains why a pod cannot pull "
         "an image. For a lookup from MEHO's own side use ``net.dns_lookup``. "
-        "Safe, so a sensor can run it on a schedule. " + SSH_TRANSPORT_NOTE
+        "``linux.http.head`` sends one HTTP HEAD request from the host with "
+        "``curl -I`` and returns the status and headers (or ``reachable=false``), "
+        "to check the host can reach a mirror or registry; it takes an address, "
+        "so it waits for one approval. ``linux.dns.lookup`` is safe, so a "
+        "sensor can run it on a schedule. " + SSH_TRANSPORT_NOTE
     ),
 }
 

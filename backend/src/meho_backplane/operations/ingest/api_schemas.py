@@ -1062,6 +1062,18 @@ class ConnectorListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+_CATEGORY_PATTERN = "^[a-z][a-z0-9_-]{0,62}$"
+_CATEGORY_DESCRIPTION = (
+    "A category of the taxonomy. A change of rights: send it without other "
+    "fields; the answer is 202 and the change waits until another tenant admin "
+    "approves it."
+)
+_LABELS_DESCRIPTION = (
+    "Free key=value labels. Same rules as category: a request of its own that "
+    "waits for another tenant admin."
+)
+
+
 class EditGroupBody(BaseModel):
     """PATCH body for ``/api/v1/connectors/{id}/groups/{key}``.
 
@@ -1087,6 +1099,14 @@ class EditGroupBody(BaseModel):
 
     when_to_use: str | None = Field(default=None, min_length=1, max_length=2048)
     name: str | None = Field(default=None, min_length=1, max_length=128)
+    category: str | None = Field(
+        default=None,
+        pattern=_CATEGORY_PATTERN,
+        description=_CATEGORY_DESCRIPTION,
+    )
+    labels: dict[str, str] | None = Field(
+        default=None, max_length=32, description=_LABELS_DESCRIPTION
+    )
 
 
 class EditOpBody(BaseModel):
@@ -1134,6 +1154,14 @@ class EditOpBody(BaseModel):
     requires_approval: bool | None = None
     is_enabled: bool | None = None
     reason: str | None = Field(default=None, min_length=1, max_length=1024)
+    category: str | None = Field(
+        default=None,
+        pattern=_CATEGORY_PATTERN,
+        description=_CATEGORY_DESCRIPTION,
+    )
+    labels: dict[str, str] | None = Field(
+        default=None, max_length=32, description=_LABELS_DESCRIPTION
+    )
 
 
 class OperationOverrideRow(BaseModel):
@@ -1141,8 +1169,9 @@ class OperationOverrideRow(BaseModel):
 
     ``scope`` is ``tenant`` (the change applies to ``tenant_id`` only) or
     ``install`` (the whole install). ``safety_level`` / ``requires_approval``
-    are the values that apply in that scope: the classification with every
-    override there. ``reason`` is the reason a platform admin gave for
+    are the values that apply in that scope: the value in code with every
+    override there, the classification entries and the floors, as at
+    dispatch. ``reason`` is the reason a platform admin gave for
     turning approval off.
     """
 
@@ -1157,6 +1186,14 @@ class OperationOverrideRow(BaseModel):
     reason: str | None
     set_by_sub: str
     set_at: datetime
+    # #6038: with the POLICY_CLASSIFICATION switch on, the classification
+    # is part of the values above. ``rule_ref`` names the entry that
+    # decided it (for example ``tenant:classifications[0]``), and
+    # ``always_wait`` is true when an entry makes every call wait.
+    category: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
+    always_wait: bool = False
+    rule_ref: str | None = None
 
 
 class OperationOverrideList(BaseModel):

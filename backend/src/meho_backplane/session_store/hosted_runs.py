@@ -28,6 +28,8 @@ follow a live run in order.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import uuid
 from dataclasses import dataclass
@@ -56,6 +58,10 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
+
+#: Saves in flight. A strong reference, so a save that outlives a cancelled
+#: run is not garbage-collected before it commits.
+_SAVES: set[asyncio.Future[None]] = set()
 
 #: The ``app`` of the session record of a hosted run.
 HOSTED_RUN_APP: Final[str] = "meho-agent-run"
@@ -166,19 +172,34 @@ class RunEventLog:
         self._stopped = False
 
     async def save(self, kind: str, data: dict[str, Any]) -> None:
-        """Check and save one event. Never raises, except on cancel."""
+        """Check and save one event. Never raises, except on cancel.
+
+        The save runs in its own task, shielded from a cancel of the run: a
+        save that has started always ends with a commit or a rollback, so a
+        cancel never leaves a database transaction open. The event happened,
+        so it is kept.
+        """
         if self._stopped:
             return
+        task = asyncio.ensure_future(self._save(kind, data))
+        _SAVES.add(task)
+        task.add_done_callback(_SAVES.discard)
+        task.add_done_callback(functools.partial(self._note_failure, kind))
         try:
-            await self._save(kind, data)
-        except Exception as exc:
+            await asyncio.shield(task)
+        except Exception:  # logged by _note_failure
             self._stopped = True
-            _log.warning(
-                "hosted_run_event_not_saved",
-                run_id=str(self.run_id),
-                kind=kind,
-                error_type=type(exc).__name__,
-            )
+
+    def _note_failure(self, kind: str, task: asyncio.Future[None]) -> None:
+        if task.cancelled() or task.exception() is None:
+            return
+        self._stopped = True
+        _log.warning(
+            "hosted_run_event_not_saved",
+            run_id=str(self.run_id),
+            kind=kind,
+            error_type=type(task.exception()).__name__,
+        )
 
     async def save_event(self, event: AgentRunEvent) -> None:
         """Check and save one event of the agent loop (:meth:`save`)."""

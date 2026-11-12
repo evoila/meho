@@ -910,6 +910,29 @@ cached (skipped where `node` is missing).
 Installing needs HTTPS (or `localhost`). Opening the app needs the same
 network access as the console, for example the VPN.
 
+## Operations page: Run answers at once (#5111)
+
+Pressing Run in the operations Run dialog (`POST /ui/operations/call`) no
+longer waits for the whole operation. The route starts a background run and
+answers within about a second (the same pattern as the console approve,
+[`approvals.md`](approvals.md)). The details are in
+[`async-governed-dispatch.md`](async-governed-dispatch.md), "The console Run
+button answers at once".
+
+- `ui/routes/operations/run_view.py` turns a stored run into the view state
+  (`running`, `finished`, `failed`, `uncertain`, `cancelled`, `no_result`).
+- `ui/templates/operations/_run_state.html` draws it into
+  `#operations-run-result-region`. While the run goes on it asks
+  `GET /ui/operations/runs/{run_id}` every 3 seconds (`hx-trigger="every 3s"`,
+  `outerHTML`) and carries `data-run-lock` and `data-meho-watch-run`. A final
+  view has neither of the `hx-*` attributes, so the asking stops.
+- `ui/static/src/app/operation-run-lock.js` (loaded by `base.html`) keeps the
+  Run button disabled while the region holds a `data-run-lock` element.
+- The result, error and approval link use the unchanged
+  `operations/_result.html`. A call with `reveal_secret: true` still runs
+  inline.
+- Tests: `backend/tests/test_ui_operations_background_run.py`.
+
 ## Approval notifications
 
 A person can switch on "Notify me about approvals in this browser" on the

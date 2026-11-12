@@ -208,6 +208,40 @@ run of a request through it (index `operation_run_approval_request_id_idx`).
 `identity_sub` is the approver, so the "the run has ended" notice goes to
 the approver.
 
+## The console Run button answers at once (#5111)
+
+The Run button on the operations page (`POST /ui/operations/call`) starts
+the call with `OperationRunService.submit_call` (origin `direct`) and waits
+at most one second (`wait_until_done`). It then answers with the run view
+(`operations/_run_state.html`): the result when the run already ended, else
+"The operation is running." The dialog asks `GET /ui/operations/runs/{run_id}`
+every 3 seconds, which reads the stored run with `poll`, and stops at a final
+state. The console cannot use `POST /api/v1/operations/call` with
+`"async": true`: that route takes tokens, not the console's login cookie.
+
+- **Same result view.** A stored result envelope (ok, error, denied, or
+  awaiting approval) uses `operations/_result.html`, as the inline call
+  did. A target that did not resolve (`target_required`, `no_target`, ...)
+  is still the inline form error (HTTP 400), also when it shows up in a
+  later ask. Bad `params` JSON is a form error before any run starts.
+- **Final states.** A run that ended as `failed`, `cancelled` or
+  `uncertain`, or as `succeeded` with no stored result, shows its own
+  text and stops the asking. A run whose server died is driven to `failed`
+  by the reaper, so the view never shows "running" forever.
+- **Who reads it.** Only the person who started the run, and only a run
+  with origin `direct`. Any other run id is 404.
+- **One click, one run.** While the view has `data-run-lock`,
+  `operation-run-lock.js` keeps the Run button disabled. It enables the
+  button again when a final view arrives.
+- **Notice.** The running view carries `data-meho-watch-run`, so the
+  "the run has ended" notice (`run-notices.js`, see
+  [`approvals.md`](approvals.md)) tells the person when it ends, also after
+  the dialog is closed. The dashboard's recent operations show the finished
+  call.
+- **Exception: `reveal_secret: true`.** Such a call runs inline in the
+  route, as before. The REST and MCP routes refuse it with `async`, because
+  the answer would be stored on the run.
+
 ## Synchronous path: caller gone (#3696)
 
 Without `async: true`, the REST `/call` route and the MCP `POST /mcp` route

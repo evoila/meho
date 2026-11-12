@@ -1003,7 +1003,27 @@ jobs:
         with:
           version: v3.16.4
 
+      - name: Name the PHP package cache
+        # The key holds the OS release and the CPU type, because the cached
+        # package files fit only that. Bump the -v1 at the end to drop a
+        # bad cache entry.
+        id: php-debs
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          . /etc/os-release
+          echo "key=php-cli-debs-${ID}-${VERSION_ID}-$(dpkg --print-architecture)-v1" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the PHP package files from the cache
+        id: php-debs-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-php-debs
+          key: ${{ steps.php-debs.outputs.key }}
+
       - name: Install PHP CLI
+        id: php-install
         # The pfSense user-write tests
         # (tests/test_connectors_pfsense_user_write_ops.py) run the
         # `pfSsh.php playback` fragment with the php command-line
@@ -1013,41 +1033,90 @@ jobs:
         # step below. Every shard needs it: the file split can put the
         # test file in any shard.
         #
-        # Own limit: the step stops after 6 minutes, and each try stops
-        # after 150 seconds with `timeout`. There are two tries, so a
-        # stalled download cannot use up the job's time.
+        # How php gets on the runner, in this order:
+        # 1. The runner image already has php: nothing to do.
+        # 2. The package files are in the cache (the step before restores
+        #    them): `dpkg -i` installs them. This needs no network, so a
+        #    package mirror that does not answer cannot fail the shard.
+        # 3. Else apt downloads php-cli into the cache folder and installs
+        #    it, and the step after saves the folder. A push to main fills
+        #    the cache, and pull request and merge-queue runs read it, so
+        #    the download happens about once per OS release.
+        # If the cached files do not install (the runner image changed),
+        # the step warns and falls back to 3. `--fix-broken` repairs what
+        # the failed `dpkg -i` left half done.
         #
-        # `apt-get update` exits 100 when any one package index fails to
-        # download, even one that php-cli does not need. The runner image
-        # carries the git-core PPA (it installs a newer git from there), and
-        # that mirror answered 503 in a merge-queue run (#4759), which
-        # dropped the pull request from the queue. apt had already retried
-        # the file three times in that run, so more retries alone do not
-        # help. So a failed update is a warning, not the end of the step:
-        # apt keeps the indexes it did download, and the install below
-        # fails on its own when the Ubuntu indexes are missing.
+        # Why downloads failed in merge-queue runs (#6312): the runner image
+        # carries the git-core PPA, and that mirror sometimes does not
+        # answer at all. apt waited 120 seconds for each try of the file,
+        # so `apt-get update` ran into the 150 second `timeout`, was killed
+        # before it stored any index, and the install then said "Unable to
+        # locate package php-cli". So the download in 3 gives apt a 10
+        # second wait and no retry for each file (`Acquire::*::Timeout`,
+        # `Acquire::Retries`): a dead mirror is skipped, and the update
+        # stores the Ubuntu indexes. `apt-get update` still exits 100 for
+        # the skipped mirror, so a failed update is only a warning.
+        #
+        # Own limit: the step stops after 6 minutes, and each apt or dpkg
+        # call stops after 150 seconds with `timeout`. There are two
+        # download tries. If the install still fails, the step prints
+        # "SETUP FAILURE" so a person and the fleet loop can tell it from a
+        # test failure. The pfSense tests still run with php in every shard
+        # (MEHO_REQUIRE_PHP below makes them fail, not skip, when php is
+        # missing).
         shell: bash
         timeout-minutes: 6
+        env:
+          PHP_DEBS_CACHE_HIT: ${{ steps.php-debs-cache.outputs.cache-hit }}
         run: |
           set -euo pipefail
           if command -v php >/dev/null 2>&1; then
             echo "php ready: $(php --version | head -1)"
             exit 0
           fi
+          debs="${HOME}/.cache/meho-ci-php-debs"
+          shopt -s nullglob
+          cached=("${debs}"/*.deb)
+          if [ "${#cached[@]}" -gt 0 ]; then
+            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive dpkg -i "${cached[@]}"; then
+              echo "php ready from the package cache: $(php --version | head -1)"
+              exit 0
+            fi
+            echo "::warning::the cached php-cli package files did not install; downloading php-cli"
+          fi
+          mkdir -p "${debs}/partial"
+          apt_opts=(-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=0)
           for attempt in 1 2; do
-            if ! timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y; then
+            if ! timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" update -y; then
               echo "::warning::apt-get update could not refresh every package index (try ${attempt} of 2); installing php-cli from the indexes that did download"
             fi
-            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli; then
+            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" \
+                -o Dir::Cache::archives="${debs}" -o APT::Keep-Downloaded-Packages=true \
+                install -y --fix-broken --no-install-recommends php-cli; then
               break
             fi
             if [ "${attempt}" = "2" ]; then
-              echo "::error::php-cli install failed after 2 tries"
+              echo "::error::SETUP FAILURE, not a test failure: php-cli install failed after 2 tries (package mirror problem on the runner)"
               exit 1
             fi
             echo "::warning::php-cli install failed or timed out; trying once more"
           done
+          # apt ran as root; the cache save runs as the runner user.
+          sudo -n chown -R "$(id -u):$(id -g)" "${debs}"
+          if [ "${PHP_DEBS_CACHE_HIT:-}" != "true" ]; then
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
           php --version | head -1
+
+      - name: Save the PHP package files to the cache
+        # Only after a download into an empty cache. A cache entry cannot
+        # be changed, so a bad one needs a new key (see "Name the PHP
+        # package cache").
+        if: steps.php-install.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-php-debs
+          key: ${{ steps.php-debs.outputs.key }}
 
       - name: Download the picked unit tests
         # Test map run (#5642): the list the `changes` job stored.
@@ -3179,9 +3248,12 @@ jobs:
             echo "gh and jq are already installed"
             exit 0
           fi
-          sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
-          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
-          gh --version
+          if ! { sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y \
+            && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}" \
+            && gh --version; }; then
+            echo "::warning::Could not install ${missing[*]}. The watchdog cannot call the API and will not cancel this run."
+            exit 1
+          fi
       - name: Cancel this run once the queue has dropped its group
         env:
           GH_TOKEN: ${{ github.token }}

@@ -3,6 +3,8 @@ description: >-
   Start a kind cluster. The kind program comes from the runner, then from
   the cache (keyed by its version), and is downloaded with retries only as
   the last choice. The kind version is pinned in scripts/ci/tool-versions.env.
+  The action also puts kubectl, yq, jq and openssl on the runner: the kind
+  jobs use them, and the image of our own runner pools does not have them.
 inputs:
   cluster-name:
     description: Name of the cluster.
@@ -17,6 +19,39 @@ runs:
       with:
         path: ~/.cache/meho-ci-tools
         key: ci-tools-kind-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
+
+    - name: Install kubectl
+      # The same version as the node image of the pinned kind.
+      uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e  # v5.2.0
+      with:
+        version: v1.37.0
+
+    - name: Install jq and openssl when they are missing
+      shell: bash
+      run: |
+        set -euo pipefail
+        missing=()
+        command -v jq >/dev/null 2>&1 || missing+=(jq)
+        command -v openssl >/dev/null 2>&1 || missing+=(openssl)
+        if [[ ${#missing[@]} -eq 0 ]]; then
+          exit 0
+        fi
+        sudo=()
+        if command -v sudo >/dev/null 2>&1; then
+          sudo=(sudo -n)
+        fi
+        "${sudo[@]}" env DEBIAN_FRONTEND=noninteractive apt-get update -q
+        "${sudo[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+
+    - name: Install yq
+      shell: bash
+      run: |
+        set -euo pipefail
+        # shellcheck source=/dev/null
+        source "${GITHUB_WORKSPACE}/scripts/ci/tool-versions.env"
+        "${GITHUB_WORKSPACE}/scripts/ci/install_tool.sh" yq "${YQ_VER}" \
+          "https://github.com/mikefarah/yq/releases/download/${YQ_VER}/yq_linux_amd64" \
+          "${YQ_SHA}"
 
     - name: Install kind
       shell: bash

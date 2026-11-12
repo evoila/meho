@@ -65,11 +65,12 @@ concurrency:
 jobs:
   check:
     name: Migration chain (single head)
-    # Runs on a GitHub-hosted runner for every event. The job runs the
+    # Own pool, except a fork pull request (hosted runner). Merge-queue
+    # runs never use a hosted runner (#6325). The job runs the
     # check script as it is on the pull request branch and needs no
     # internal route or credential. See docs/codebase/devops.md
     # "Untrusted pull-request isolation".
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 5
     steps:
       - name: Checkout

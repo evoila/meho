@@ -499,8 +499,9 @@ input through the same sudo helper as `file.write`, and never appears in a
 result, an audit row, a preview, a log line or an error. It refuses places
 outside a home (`/etc`, `/run`, `/usr`, `/var/lib`, `/opt`, `/srv` and the
 system folders), places in a home that the system runs or reads for logins
-(for example a `.ssh` folder, `.config/systemd` or `.bashrc`), and a target
-that is not a `linux-ssh` target. A person approves each move. The ref
+(for example a `.ssh` folder, `.config/systemd` or `.bashrc`), a link in
+any folder of the path below the home, and a target that is not a
+`linux-ssh` target. A person approves each move. The ref
 grammar and the full rules are in
 [connectors-secret-broker.md](connectors-secret-broker.md), "The `linux:`
 store".

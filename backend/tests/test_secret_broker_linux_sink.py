@@ -392,7 +392,7 @@ def test_script_refuses_a_place_outside_the_home(tmp_path: Path) -> None:
 
 
 @_NEEDS_LINUX
-def test_script_follows_a_link_in_the_home_only_as_the_owner(tmp_path: Path) -> None:
+def test_script_refuses_a_link_out_of_the_home(tmp_path: Path) -> None:
     home = tmp_path / "home" / "seat"
     home.mkdir(parents=True)
     outside = tmp_path / "outside"
@@ -400,10 +400,69 @@ def test_script_follows_a_link_in_the_home_only_as_the_owner(tmp_path: Path) -> 
     (home / "link").symlink_to(outside)
     owner = getpass.getuser()
     proc = _run_script(build_secret_sink_script(str(home / "link" / "key"), owner, b"v"), home=home)
-    # Root does not decide on the link. The owner does the write, so the link
-    # can only reach what the owner can already change.
-    assert proc.returncode == 0, proc.stderr
+    assert proc.returncode == 6
+    assert "===MEHO_SINK_ERR:link===" in proc.stderr
     assert _runuser_log(home) == [owner]
+    assert list(outside.iterdir()) == []
+
+
+@_NEEDS_LINUX
+def test_script_refuses_a_link_into_a_refused_folder(tmp_path: Path) -> None:
+    # "services" passes the path check, but it leads to .config/systemd/user.
+    home = tmp_path / "home" / "seat"
+    units = home / ".config" / "systemd" / "user"
+    units.mkdir(parents=True)
+    (home / "services").symlink_to(units)
+    target = home / "services" / "example.service"
+    proc = _run_script(build_secret_sink_script(str(target), getpass.getuser(), b"v"), home=home)
+    assert proc.returncode == 6
+    assert "===MEHO_SINK_ERR:link===" in proc.stderr
+    assert list(units.iterdir()) == []
+
+
+@_NEEDS_LINUX
+def test_script_refuses_a_link_deeper_in_the_path(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "seat"
+    (home / "a").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (home / "a" / "b").symlink_to(outside)
+    proc = _run_script(
+        build_secret_sink_script(str(home / "a" / "b" / "c" / "key"), getpass.getuser(), b"v"),
+        home=home,
+    )
+    assert proc.returncode == 6
+    assert "===MEHO_SINK_ERR:link===" in proc.stderr
+    assert list(outside.iterdir()) == []
+
+
+@_NEEDS_LINUX
+def test_script_refuses_a_broken_link_in_the_path(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "seat"
+    home.mkdir(parents=True)
+    missing = tmp_path / "missing"
+    (home / "dir").symlink_to(missing)
+    proc = _run_script(
+        build_secret_sink_script(str(home / "dir" / "key"), getpass.getuser(), b"v"), home=home
+    )
+    assert proc.returncode == 6
+    assert "===MEHO_SINK_ERR:link===" in proc.stderr
+    assert not missing.exists()
+
+
+@_NEEDS_LINUX
+def test_script_writes_when_the_home_itself_is_a_link(tmp_path: Path) -> None:
+    # The home as the host names it may be a link; only links below it stop.
+    real = tmp_path / "data" / "seat"
+    real.mkdir(parents=True)
+    home = tmp_path / "home" / "seat"
+    home.parent.mkdir()
+    home.symlink_to(real)
+    for path in (home / "a" / "key", real / "b" / "key"):
+        proc = _run_script(build_secret_sink_script(str(path), getpass.getuser(), b"v"), home=home)
+        assert proc.returncode == 0, proc.stderr
+    assert (real / "a" / "key").read_bytes() == b"v"
+    assert (real / "b" / "key").read_bytes() == b"v"
 
 
 @_NEEDS_LINUX
@@ -421,12 +480,13 @@ def test_script_writes_inside_the_home_as_the_owner(tmp_path: Path) -> None:
 def test_script_writes_only_as_the_owner() -> None:
     script = build_secret_sink_script("/home/seat/key", "seat", b"v")
     assert script.count("runuser -u") == 1
-    # The caller's path is used as given: no link is resolved for it.
-    assert 'meho-sink "$path"' in script
+    # The caller's path is used as given: root resolves no link in it.
+    assert 'meho-sink "$base" "$rel"' in script
     # Root makes no folder, no temp file, and hands nothing over.
-    assert "chown" not in script
-    assert "mkdir -m" not in script
-    assert 'mktemp "$dir' not in script.replace(shlex.quote(_OWNER_WRITE_SCRIPT), "")
+    root_part = script.replace(shlex.quote(_OWNER_WRITE_SCRIPT), "")
+    assert "chown" not in root_part
+    assert "mkdir" not in root_part
+    assert "mktemp" not in root_part
 
 
 @_NEEDS_LINUX
@@ -497,8 +557,8 @@ def test_a_link_from_the_home_into_a_root_only_folder_writes_nothing_as_root(
     owner = getpass.getuser()
     script = build_secret_sink_script(str(home / "link" / "key"), owner, b"v")
     proc = _run_script(script, home=home)
-    # Only the owner step ran. It could not write there, so nothing was written.
-    assert proc.returncode == 4
+    # Only the owner step ran. It refused the link, so nothing was written.
+    assert proc.returncode == 6
     assert _runuser_log(home) == [owner]
     assert list(secret.iterdir()) == []
     secret.chmod(0o700)

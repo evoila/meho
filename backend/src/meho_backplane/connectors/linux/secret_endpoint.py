@@ -23,6 +23,13 @@ It writes the value in one atomic step (temp file, then rename), as the owner
 is made with mode 0700. Root never writes the file and never makes a folder,
 so root never follows a link the owner could have made.
 
+The owner walks from the home to the file one folder at a time and checks the
+real folder after each step. A link in any folder of the path below the home
+stops the write with the reason ``link``: a link could lead into a refused
+place or out of the home. The temp file and the rename happen in the folder
+the owner already stands in, so a link made after the check cannot move the
+write. A link in place of the file itself is replaced, never followed.
+
 The only allowed place is the home directory of ``<owner>``. A list of
 allowed places stays short and complete; a list of refused places never is.
 
@@ -96,16 +103,24 @@ _log = structlog.get_logger(__name__)
 #: allows by default. It goes into a shell script, so the set is narrow.
 _OWNER_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
-#: Runs as the owner (never as root) for a path inside the owner's home. The
-#: value comes on standard input; ``$1`` is the target path. Every folder,
-#: the temp file and the rename are made by the owner.
+#: Runs as the owner (never as root). The value comes on standard input; ``$1``
+#: is the home and ``$2`` the path inside it. The owner walks from the home one
+#: folder at a time and makes a missing folder. After each step it checks the
+#: real folder: a link in any folder of the path stops the write (exit 6). The
+#: temp file and the rename are then made in the folder it already stands in,
+#: so a link made later cannot move the write.
 _OWNER_WRITE_SCRIPT = (
-    'set -u; umask 077; real=$1; dir=$(dirname -- "$real"); '
-    'mkdir -p -m 0700 -- "$dir" || exit 4; '
-    'tmp=$(mktemp "$dir/.meho-sink.XXXXXX") || exit 4; '
+    'set -u; umask 077; cd -P -- "$1" || exit 6; here=$(pwd -P); rel=$2; '
+    "name=${rel##*/}; parts=(); "
+    'case "$rel" in */*) IFS=/ read -r -a parts <<< "${rel%/*}";; esac; '
+    'for p in ${parts[@]+"${parts[@]}"}; do '
+    '[ -e "$p" ] || [ -L "$p" ] || mkdir -m 0700 -- "$p" || exit 4; '
+    'cd -P -- "$p" 2>/dev/null || exit 6; '
+    '[ "$(pwd -P)" = "${here%/}/$p" ] || exit 6; here=${here%/}/$p; done; '
+    "tmp=$(mktemp ./.meho-sink.XXXXXX) || exit 4; "
     'if ! base64 -d > "$tmp"; then rm -f "$tmp"; exit 4; fi; '
     'if ! chmod 0600 "$tmp"; then rm -f "$tmp"; exit 4; fi; '
-    'if ! mv -f -T -- "$tmp" "$real"; then rm -f "$tmp"; exit 4; fi'
+    'if ! mv -f -T -- "$tmp" "$name"; then rm -f "$tmp"; exit 4; fi'
 )
 
 _SINK_OK = "===MEHO_SINK_OK==="
@@ -320,7 +335,8 @@ def build_secret_sink_script(path: str, owner: str, value: bytes) -> str:
     It runs with sudo, but root only checks: the owner is known and not user
     id 0, and *path* is inside the owner's home (as the caller wrote it, and
     with the home's links resolved). Then the owner makes the folders and the
-    file (``runuser -u``). *path* and *owner* are already checked by
+    file (``runuser -u``) and refuses a link in any folder of the path.
+    *path* and *owner* are already checked by
     :func:`parse_linux_secret_ref`; both are ``shlex.quote``d anyway. The value
     is base64-carried. The script stops with a marker and a non-zero exit when
     a check or the write fails. It prints :data:`_SINK_OK` at the end.
@@ -340,19 +356,22 @@ def build_secret_sink_script(path: str, owner: str, value: bytes) -> str:
         'home="$(getent passwd "$owner" | cut -d: -f6)"',
         # Decide on the path as the caller gave it. Root never resolves or
         # follows a link inside the home: the owner could have made it.
-        "inhome=0",
+        'base=""',
         'if [ -n "$home" ] && [ "$home" != / ]; then',
-        '  case "$path" in "$home"/*) inhome=1;; esac',
+        '  case "$path" in "$home"/*) base=$home;; esac',
         f'  realhome="$(realpath -m -- "$home")" || {{ echo "{err}realpath===" >&2; exit 7; }}',
         # An empty "$realhome" would make the pattern "/*", which every
         # absolute path matches.
-        '  if [ -n "$realhome" ] && [ "$realhome" != / ]; then',
-        '    case "$path" in "$realhome"/*) inhome=1;; esac',
+        '  if [ -z "$base" ] && [ -n "$realhome" ] && [ "$realhome" != / ]; then',
+        '    case "$path" in "$realhome"/*) base=$realhome;; esac',
         "  fi",
         "fi",
-        f'[ "$inhome" = 1 ] || {{ echo "{err}place===" >&2; exit 6; }}',
-        f'printf %s {q_b64} | runuser -u "$owner" -- bash -c {q_inner} meho-sink "$path" '
-        f'|| {{ echo "{err}write===" >&2; exit 4; }}',
+        f'[ -n "$base" ] || {{ echo "{err}place===" >&2; exit 6; }}',
+        'rel=${path#"$base"/}',
+        f'printf %s {q_b64} | runuser -u "$owner" -- bash -c {q_inner} meho-sink "$base" "$rel"',
+        "rc=$?",
+        f'[ "$rc" != 6 ] || {{ echo "{err}link===" >&2; exit 6; }}',
+        f'[ "$rc" = 0 ] || {{ echo "{err}write===" >&2; exit 4; }}',
         f'echo "{_SINK_OK}"',
     ]
     return "\n".join(lines) + "\n"

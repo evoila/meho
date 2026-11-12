@@ -424,6 +424,13 @@ What MEHO does on the host:
   and the rename. Root only checks; it never writes the file and never
   makes a folder. So root never follows a link that the owner could have
   made.
+- The owner walks from the home to the file one folder at a time, and checks
+  the real folder after each step. A link in any folder of the path below the
+  home stops the write with the reason `link`. A link could lead into a
+  refused place or out of the home. The temp file and the rename happen in
+  the folder the owner already stands in, so a link made after the check
+  cannot move the write. A link in place of the file itself is replaced,
+  never followed.
 - The file gets mode 0600. A missing parent directory is made with mode
   0700.
 - Before it opens any SSH connection, MEHO refuses:

@@ -380,8 +380,37 @@ path. Only root can read the file. It holds:
 - the log of RKE2 of the last 24 hours;
 - facts about the operating system.
 
-Passwords, tokens and keys are removed from it. Send the file to evoila
-support, then delete it.
+**Check the file before you send it.** The command removes the
+passwords and keys that the install made, and the value of each setting
+whose name has PASSWORD, TOKEN, SECRET or KEY in it. It cannot find
+every secret in the logs. For example, it keeps a login token after
+`Authorization: Bearer`, and a password inside an address such as
+`https://<user>:<password>@<host>`.
+
+So unpack the file and search it. Use the path that the command
+printed:
+
+```bash
+sudo install -d -m 0700 /root/support-check
+sudo tar -xzf /var/lib/meho/support/<file>.tar.gz -C /root/support-check
+sudo grep -r -n -i -E 'authorization:|bearer |://[^/@ ]+:[^/@ ]+@|--password' /root/support-check
+```
+
+The search shows the usual places where a secret can stay. It does not
+find every secret. Read each line it shows. When a line holds a secret,
+replace the secret in that file, for example with `[removed]`. Then
+pack the folder again and send the new file to evoila support:
+
+```bash
+sudo tar -czf /root/meho-support-checked.tar.gz -C /root/support-check .
+```
+
+When support has the file, delete the bundle, the folder and the new
+file:
+
+```bash
+sudo rm -r /var/lib/meho/support/<file>.tar.gz /root/support-check /root/meho-support-checked.tar.gz
+```
 
 ## Who keeps the operating system up to date
 
@@ -477,7 +506,8 @@ The profile hardens the built-in Kubernetes, not the operating system.
   `/var/lib/meho/unseal-key`. Delete both after the first login
   ([Step 4](#step-4-first-login)).
 - Only root can open the folders `/etc/meho` and `/var/lib/meho`.
-- The support bundle holds no password, token or key.
+- The support bundle can still hold secrets from the logs. Check it
+  before you send it (see [Get help from support](#get-help-from-support)).
 
 ## Uninstall
 

@@ -4,10 +4,13 @@
 // Package sessions hosts `meho sessions ...`: the admin commands of the
 // agent session store (#4901).
 //
-//   - `meho sessions list [--project P] [--state S] [--limit N] [--all]`
-//     — GET /api/v1/sessions. Role operator and up.
+//   - `meho sessions list [--project P] [--state S] [--since T] [--until T]
+//     [--limit N] [--all]` — GET /api/v1/sessions. Role operator and up.
 //   - `meho sessions show <session-id>` — GET /api/v1/sessions/{id}: the
 //     index row, the file hashes and the uploads. Role operator and up.
+//   - `meho sessions get <session-id> <folder>` — downloads every upload
+//     and writes the whole (checked) files under <folder>/<session-id>/.
+//     Role operator and up; a quarantined upload needs tenant_admin.
 //   - `meho sessions delete <session-id> [--confirm]` — DELETE
 //     /api/v1/sessions/{id}: the session and its files. tenant_admin only.
 //
@@ -33,15 +36,17 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sessions",
-		Short: "List, show and delete stored agent sessions",
+		Short: "List, show, download and delete stored agent sessions",
 		Long: "The agent session store keeps a copy of agent sessions that people " +
 			"uploaded. These commands list the sessions of your tenant, show one " +
-			"session, and delete one. Listing and showing need the operator role; " +
+			"session, download one as whole files, and delete one. Listing, showing " +
+			"and downloading need the operator role; " +
 			"deleting needs tenant_admin. Every call is audited.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newShowCmd())
+	cmd.AddCommand(newGetCmd())
 	cmd.AddCommand(newDeleteCmd())
 	return cmd
 }

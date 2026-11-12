@@ -13,9 +13,10 @@ because only the stored row knows whether an upload is in quarantine.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
@@ -42,6 +43,7 @@ from meho_backplane.session_store.schemas import (
 __all__ = [
     "QuarantinedError",
     "SessionNotFoundError",
+    "SessionWindow",
     "delete_record_rows",
     "delete_session",
     "get_retention",
@@ -59,6 +61,19 @@ class SessionNotFoundError(Exception):
 
 class QuarantinedError(Exception):
     """The upload is in quarantine and the caller is not an admin."""
+
+
+@dataclass(frozen=True)
+class SessionWindow:
+    """A time window for the list: the sessions that were active in it.
+
+    A session matches when its last upload is at or after ``since`` and it
+    started before ``until``. A session without a start time counts from
+    its first upload.
+    """
+
+    since: datetime | None = None
+    until: datetime | None = None
 
 
 async def _record(
@@ -80,6 +95,7 @@ async def list_sessions(
     path: str,
     project: str | None,
     state: str | None,
+    window: SessionWindow,
     limit: int,
     offset: int,
 ) -> SessionListResponse:
@@ -89,6 +105,11 @@ async def list_sessions(
         query = query.where(AgentSessionRecord.project == project)
     if state is not None:
         query = query.where(AgentSessionRecord.state == state)
+    if window.since is not None:
+        query = query.where(AgentSessionRecord.last_seen_at >= window.since)
+    if window.until is not None:
+        started = func.coalesce(AgentSessionRecord.started_at, AgentSessionRecord.created_at)
+        query = query.where(started < window.until)
     query = query.order_by(AgentSessionRecord.last_seen_at.desc(), AgentSessionRecord.id).offset(
         offset
     )
@@ -101,7 +122,14 @@ async def list_sessions(
             op_id="sessions.list",
             method="GET",
             path=path,
-            payload={"project": project, "state": state, "offset": offset, "count": len(page)},
+            payload={
+                "project": project,
+                "state": state,
+                "since": window.since.isoformat() if window.since else None,
+                "until": window.until.isoformat() if window.until else None,
+                "offset": offset,
+                "count": len(page),
+            },
         )
         await session.commit()
     more = len(rows) > limit

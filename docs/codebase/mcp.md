@@ -1176,7 +1176,8 @@ is not set.
 - `meho_status` (and `GET /api/v1/health`) then answers with
   `operator.tenant_id` and `operator.tenant_role` set to `null`,
   `operator.tenants` (each tenant's `tenant_id`, `name`, `tenant_role`,
-  `current`), `vault.detail = "tenant_not_chosen"`, the database
+  `current`), `vault.checked = false` with
+  `vault.detail = "tenant_not_chosen"`, the database
   state and `server_time` (#5504). It runs no tenant work (no credential check, no add-on
   pairings, no tool comparison). With a current tenant, `meho_status`
   answers as before and also lists `operator.tenants`, with `current`
@@ -1276,6 +1277,18 @@ add-on-family gate.
 | `search_knowledge` | operator | — | Search the tenant knowledge base, and the tenant's own wiki when one is set (`kb.md`). |
 | `search_memory` | operator | — | Search the operator's accessible memories. |
 | `search_operations` | operator | — | Hybrid BM25 + cosine search over a connector's operations. With `op_id` (exact-op mode) it returns that one operation's call contract instead: the stored `parameter_schema`, small examples, the target-by-name rule, the result shape and retry rules (#3668). |
+
+**`meho_status` and the Vault check.** The tool is open to every role,
+but its Vault check runs only for a caller with the `operator` role or
+higher. That is the rule of `GET /api/v1/health`
+(`_federation_status_for` in `api/v1/health.py`). The check logs in to
+Vault as the caller and reads a secret. A `read_only` caller gets every
+other part of the answer, and `vault.checked = false` with
+`vault.detail = "not checked: needs the operator role"`. MEHO makes no
+Vault login and no secret read for that caller. `meho status` prints
+`Vault: not checked (needs the operator role)`, and `meho doctor`
+(which reads the `meho_status` answer) prints
+`vault not checked (needs the operator role)`.
 
 ### Operator surface (`mcp:admin` elevation required)
 

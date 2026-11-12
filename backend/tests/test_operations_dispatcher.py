@@ -4666,3 +4666,43 @@ async def test_dispatch_ingested_write_with_person_token_waits(
         params=params,
     )
     assert result.status == "awaiting_approval", result.error
+
+
+def test_isolate_global_registries_restores_safety_floors() -> None:
+    """The autouse isolation fixture restores the connector safety floors.
+
+    Connector floors register on import. A test that empties the floor store
+    (as a registry-clearing test does) must not strip every other connector's
+    floors for the rest of the worker. Drive the conftest fixture by hand so
+    the assertion sees the state after its teardown.
+    """
+    from meho_backplane.operations.ingest import safety_floors
+    from tests import conftest
+
+    isolate_gen_fn = cast(
+        "Callable[[], Iterator[None]]",
+        conftest._isolate_global_registries.__wrapped__,  # type: ignore[attr-defined]
+    )
+    marker = ("isolation-test-product", "isolation-test-impl")
+    safety_floors.register_ingest_safety_floor(
+        product=marker[0], impl_id=marker[1], floor=lambda _impl, proto: proto
+    )
+    before = dict(safety_floors._FLOORS)
+    try:
+        gen = isolate_gen_fn()
+        next(gen)  # setup: snapshot
+
+        safety_floors._FLOORS.clear()
+        safety_floors.register_ingest_safety_floor(
+            product="other-product", impl_id="other-impl", floor=lambda _impl, proto: proto
+        )
+
+        with pytest.raises(StopIteration):
+            next(gen)  # teardown: restore
+
+        assert dict(safety_floors._FLOORS) == before
+        assert marker in safety_floors._FLOORS
+        assert ("other-product", "other-impl") not in safety_floors._FLOORS
+    finally:
+        safety_floors._FLOORS.clear()
+        safety_floors._FLOORS.update(before)

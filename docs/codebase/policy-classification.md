@@ -56,6 +56,8 @@ classifications:
   document MEHO uses its built-in list (`DEFAULT_TAXONOMY` in
   `policy/classification.py`). A tenant's document can add categories
   for that tenant only. The default category is always the install's.
+  The install's `categories` and `default` each replace the built-in
+  value when set.
 
 ## How one operation is classified
 
@@ -227,8 +229,9 @@ and the report is as before.
 
 ## Known limits
 
-- The policy file import comes in a later change. It uses the same
-  rights-change mark.
+- The policy file import (`policy.apply`, see [policy.md](policy.md))
+  replaces the whole document of a tenant or the install, also the entries
+  that `policy.classify` wrote.
 - A connector id, group key or operation id that holds `*`, `?` or `[` is
   read as a pattern, also on the PATCH routes. The dry run shows what it
   matches.

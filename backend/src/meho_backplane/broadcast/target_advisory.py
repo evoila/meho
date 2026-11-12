@@ -33,7 +33,7 @@ from sqlalchemy import select
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
-from meho_backplane.broadcast.claim_archive import CLAIM_STEPS_NEWEST_FIRST
+from meho_backplane.broadcast.claim_archive import CLAIM_STEPS_NEWEST_FIRST, completed_claim_ids
 from meho_backplane.broadcast.claim_state import is_active_claim_step, latest_claim_steps
 from meho_backplane.broadcast.history import (
     WRITE_OP_CLASSES,
@@ -97,8 +97,10 @@ async def _active_target_claims_newest_first(
     One bounded archive read of the tenant's trusted claim steps inside the
     window (``agent_announcement_tenant_created_at_idx``), then the claim
     rules run in-process on the stored values, never on the read tools'
-    untrusted wrap. Propagates database errors to the caller's fail-open
-    guard.
+    untrusted wrap. A claim with a stored ``completion`` is left out also
+    when that completion is past the read's cap
+    (:func:`~meho_backplane.broadcast.claim_archive.completed_claim_ids`).
+    Propagates database errors to the caller's fail-open guard.
     """
     since = datetime.now(UTC) - timedelta(minutes=window_minutes)
     stmt = (
@@ -114,11 +116,16 @@ async def _active_target_claims_newest_first(
     )
     async with get_sessionmaker()() as session:
         rows = (await session.execute(stmt)).scalars().all()
+        completed = await completed_claim_ids(
+            session, operator.tenant_id, (row.claim_id for row in rows)
+        )
     now = datetime.now(UTC)
     return [
         claim
         for claim in latest_claim_steps(row_to_announcement(row) for row in rows)
-        if is_active_claim_step(claim, now) and _target_matches(claim, target_name)
+        if claim.claim_id not in completed
+        and is_active_claim_step(claim, now)
+        and _target_matches(claim, target_name)
     ]
 
 

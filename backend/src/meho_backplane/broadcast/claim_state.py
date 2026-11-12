@@ -55,8 +55,10 @@ def latest_claim_steps(steps: Iterable[AgentAnnouncementEvent]) -> list[AgentAnn
     (:data:`~meho_backplane.broadcast.claim_archive.CLAIM_STEPS_NEWEST_FIRST`).
     A ``completion`` is always the newest step of its claim: the publisher
     refuses every step after it. So it wins over the order, which can be
-    wrong for a row an older release wrote without a number. Steps that
-    are not trusted claim steps are left out. The result keeps the
+    wrong for a row an older release wrote without a number. A completion
+    outside *steps* is not seen here: a reader with a capped read also
+    asks :func:`~meho_backplane.broadcast.claim_archive.completed_claim_ids`.
+    Steps that are not trusted claim steps are left out. The result keeps the
     newest-first order.
     """
     trusted = [step for step in steps if step.is_trusted_claim]

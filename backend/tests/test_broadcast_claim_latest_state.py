@@ -6,7 +6,8 @@
 * ``active_only`` reads drop every step of a claim that has ended, also a
   start whose own TTL has not run out;
 * the target advisory and the caller's claim lookup pick the newest step
-  by commit order, also when the timestamps say something else.
+  by commit order, also when the timestamps say something else;
+* a stored completion ends its claim, also when it is past a reader's cap.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.broadcast import announce_claim_lookup, target_advisory
 from meho_backplane.broadcast import client as broadcast_client
 from meho_backplane.broadcast.announce_claim_lookup import announce_claim_gap
 from meho_backplane.broadcast.archive_cursor import encode_watch_checkpoint
@@ -89,13 +91,14 @@ async def _step(
     minutes_ago: float = 1,
     principal_sub: str = _PEER,
     ttl_minutes: int | None = 60,
+    target: str = _TARGET,
 ) -> str:
     """Store one step of *claim_id* and return its event id."""
     fields: dict[str, Any] = {
         "principal_sub": principal_sub,
         "claim_id": claim_id,
         "phase": phase,
-        "target": _TARGET,
+        "target": target,
         "ttl_minutes": ttl_minutes,
         "planned_op_class": "write",
         "ts": datetime.now(UTC) - timedelta(minutes=minutes_ago),
@@ -345,3 +348,36 @@ async def test_unnumbered_start_without_completion_stays_active(tenant_id: UUID)
 
     assert [entry["phase"] for entry in advisory[ADVISORY_EXTRAS_KEY]] == ["start"]
     assert await _recent_ids(tenant_id) == [start]
+
+
+async def test_advisory_ignores_completion_past_its_read_cap(
+    tenant_id: UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(target_advisory, "_ADVISORY_SCAN_LIMIT", 2)
+    claim_id = uuid4()
+    await _unnumbered_start(tenant_id, claim_id)
+    await _step(tenant_id, claim_id, "completion", minutes_ago=2, ttl_minutes=None)
+    await _step(tenant_id, uuid4(), "start", target="other-target")
+
+    assert (
+        await build_target_activity_advisory(
+            _operator(tenant_id), op_class="write", target_name=_TARGET
+        )
+        == {}
+    )
+
+
+async def test_claim_lookup_ignores_completion_past_its_read_cap(
+    tenant_id: UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(announce_claim_lookup, "_CLAIM_SCAN_LIMIT", 2)
+    claim_id = uuid4()
+    await _unnumbered_start(tenant_id, claim_id, principal_sub=_ME)
+    await _step(
+        tenant_id, claim_id, "completion", minutes_ago=2, principal_sub=_ME, ttl_minutes=None
+    )
+    await _step(tenant_id, uuid4(), "start", principal_sub=_ME, target="other-target")
+
+    gap = await announce_claim_gap(_operator(tenant_id), op_class="write", target_name=_TARGET)
+
+    assert gap == "other_target"

@@ -27,7 +27,7 @@ from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
-from meho_backplane.broadcast.claim_archive import CLAIM_STEPS_NEWEST_FIRST
+from meho_backplane.broadcast.claim_archive import CLAIM_STEPS_NEWEST_FIRST, completed_claim_ids
 from meho_backplane.broadcast.claim_state import latest_claim_steps
 from meho_backplane.broadcast.history import _target_matches, row_to_announcement
 from meho_backplane.db.engine import get_sessionmaker
@@ -126,8 +126,9 @@ async def announce_claim_gap(
     ``owner_sub`` are history from before trusted admission. Each claim is
     judged by its newest step
     (:func:`~meho_backplane.broadcast.claim_state.latest_claim_steps`); a
-    claim whose newest step is the ``completion`` is finished and counts
-    as no claim.
+    claim with a stored ``completion`` is finished and counts as no claim,
+    also when that completion is past the read's cap
+    (:func:`~meho_backplane.broadcast.claim_archive.completed_claim_ids`).
 
     A claim covers the op when all hold:
 
@@ -160,10 +161,13 @@ async def announce_claim_gap(
     )
     async with get_sessionmaker()() as session:
         rows = (await session.execute(stmt)).scalars().all()
+        completed = await completed_claim_ids(
+            session, operator.tenant_id, (row.claim_id for row in rows)
+        )
     now = datetime.now(UTC)
     gap: ClaimGap = "no_claim"
     for claim in latest_claim_steps(row_to_announcement(row) for row in rows):
-        if claim.phase == "completion":
+        if claim.phase == "completion" or claim.claim_id in completed:
             continue
         row_gap = _claim_gap(claim, op_class=op_class, target_name=target_name, now=now)
         if row_gap is None:

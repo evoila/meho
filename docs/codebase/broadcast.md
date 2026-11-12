@@ -419,7 +419,9 @@ dispatcher._reduce_and_audit_success(...)   # after the audit commit
         → agent_announcement rows of the tenant with claim_id and
           owner_sub set, created inside the window, newest first, LIMIT 100
         → latest_claim_steps(...)        # the newest step of each claim
-        → keep claims where is_active_claim_step(step, now) and the
+        → completed_claim_ids(...)       # claims with a stored completion,
+                                         # also past the LIMIT
+        → keep claims without a stored completion where is_active_claim_step(step, now) and the
           step names target_name in target / targets
         → drop claims where (principal_sub, actor_sub) == the caller's
         → keep the newest 5, restore chronological order
@@ -620,7 +622,10 @@ own. So nothing may wait for an announcement a person cannot make:
   the tenant's lock and server clocks can differ. A stored `completion`
   always ends its claim, whatever the order says: the publisher refuses
   every step after it, and a start that an older release wrote without
-  a number gets a higher `seq` later than the completion. `active_only` keeps
+  a number gets a higher `seq` later than the completion. Each capped
+  read asks for the completions of its claims by claim id
+  (`broadcast/claim_archive.py::completed_claim_ids`), so a completion
+  past the cap still counts. `active_only` keeps
   only steps that keep their claim active: legacy rows, steps without a
   TTL and `completion` steps do not pass. The archive reads also check
   the newest stored step of each claim

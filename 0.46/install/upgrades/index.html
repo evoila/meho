@@ -3457,13 +3457,38 @@ the steps of the realm file, and binds the client <code>meho-cli-approve</code> 
 it. For this, its account <code>meho-admin</code> needs the realm-management role
 <code>manage-realm</code>. A new install gets the role from the realm file.</p>
 <p>An install whose first start was older, and had the company login off,
-may lack the role. Then the Job stops, and its log names the role and
-this section:</p>
+may lack the role. What you see depends on when MEHO finds out.</p>
+<p><strong>Before the upgrade (the usual case).</strong> Before an upgrade changes
+anything, a short Job checks that <code>meho-admin</code> has the role. Without it,
+the upgrade stops, and the version that runs now keeps running. Helm's
+error names the Job, and so the role:</p>
+<div class="highlight"><pre><span></span><code>Error: UPGRADE FAILED: pre-upgrade hooks failed: ... job &lt;release&gt;-check-manage-realm failed ...
+</code></pre></div>
+<p>The Job's log says what to do. The failed Job stays until the next
+upgrade, so you can read it at any time:</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>-n<span class="w"> </span>&lt;namespace&gt;<span class="w"> </span>logs<span class="w"> </span>job/&lt;release&gt;-check-manage-realm
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>core_bootstrap_failed: meho-admin lacks the realm-management role manage-realm, so the bootstrap Job would stop after the upgrade. The upgrade stops now and changes nothing. ...
+</code></pre></div>
+<p>When the check cannot reach Keycloak, or cannot read the roles, its log
+says <code>role check: unknown (...)</code>, and the upgrade goes on. Then the
+bootstrap Job checks again after the upgrade.</p>
+<p><strong>After the upgrade.</strong> When the bootstrap Job still stops, the new
+version already runs. Without <code>helm upgrade --atomic</code> (for example with
+the Helm job of RKE2 or k3s), the release then ends as <code>failed</code>, and
+Helm says only:</p>
+<div class="highlight"><pre><span></span><code>post-upgrade hooks failed: ... job &lt;release&gt;-core-bootstrap failed ...
+</code></pre></div>
+<p>The reason is in the Job's log. The failed Job stays until the next
+install or upgrade:</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>-n<span class="w"> </span>&lt;namespace&gt;<span class="w"> </span>logs<span class="w"> </span>job/&lt;release&gt;-core-bootstrap
+</code></pre></div>
 <div class="highlight"><pre><span></span><code>core_bootstrap_failed: login flow meho approval sign-in: meho-admin may not read or change login flows, ...
 </code></pre></div>
 <p>With <code>helm upgrade --atomic</code>, Helm rolls the release back when the Job
 stops, so the old version keeps running until you add the role.</p>
-<p>Give <code>meho-admin</code> the role once, then run the upgrade again:</p>
+<p>In both cases, give <code>meho-admin</code> the role once, then run the upgrade
+again:</p>
 <ol>
 <li>Log in to the Keycloak admin console as the console admin
    (<a href="../keycloak-realm/#the-console-admin">The console admin</a>) and pick

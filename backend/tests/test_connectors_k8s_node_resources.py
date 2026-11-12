@@ -373,3 +373,14 @@ async def test_register_with_the_switch_uses_the_new_text(
     assert kwargs["description"] == on.description
     assert kwargs["llm_instructions"] == on.llm_instructions
     assert kwargs["response_schema"] == on.response_schema
+
+
+@pytest.mark.asyncio
+async def test_register_does_not_need_the_other_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KEYCLOAK_ISSUER_URL", raising=False)
+    get_settings.cache_clear()
+    _switch_on(monkeypatch)
+    kwargs = await _registered_node_list(monkeypatch)
+    assert kwargs["description"] == with_node_resources(_node_list_op()).description

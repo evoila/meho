@@ -21,6 +21,7 @@ default). Off: ``k8s.node.list`` answers, and is described, as before.
 from __future__ import annotations
 
 import copy
+import os
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
@@ -30,7 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from kubernetes_asyncio.client.exceptions import ApiException
 
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import parse_bool_env
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.kubernetes.ops import KubernetesOp
@@ -129,8 +130,13 @@ _OUTPUT_SHAPE_MORE = (
 
 
 def node_list_resources_on() -> bool:
-    """Return the state of the ``K8S_NODE_LIST_RESOURCES`` switch."""
-    return get_settings().k8s_node_list_resources
+    """Return the state of the ``K8S_NODE_LIST_RESOURCES`` switch.
+
+    Read from the env name, with the same parser as
+    :attr:`~meho_backplane.settings.Settings.k8s_node_list_resources`, so
+    operation registration does not need the rest of the settings.
+    """
+    return parse_bool_env(os.environ.get("K8S_NODE_LIST_RESOURCES"))
 
 
 def with_node_resources(op: KubernetesOp) -> KubernetesOp:

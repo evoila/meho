@@ -1190,3 +1190,61 @@ async def test_an_upgrade_makes_the_approval_flow_and_binds_it_again(
     assert settings["config"] == {"loa-condition-level": "2", "loa-max-age": "0"}
     realm = httpx.get(admin, headers=headers).json()
     assert json.loads(realm["attributes"]["acr.loa.map"])["meho-approve"] == 2
+
+
+#: Realm settings the write of the level map must leave alone, with values
+#: that differ from the realm file and from Keycloak's defaults.
+_REALM_SETTINGS = {
+    "bruteForceProtected": True,
+    "failureFactor": 7,
+    "waitIncrementSeconds": 120,
+    "maxFailureWaitSeconds": 900,
+    "maxDeltaTimeSeconds": 3600,
+    "offlineSessionMaxLifespanEnabled": True,
+    "offlineSessionMaxLifespan": 86400,
+    "displayName": "MEHO level test",
+    "webAuthnPolicyPasswordlessUserVerificationRequirement": "preferred",
+}
+
+
+def _kept_settings(realm: Mapping[str, Any]) -> dict[str, Any]:
+    """The realm settings the level write must keep: the ones above and the passkey policy."""
+    return {
+        key: value
+        for key, value in realm.items()
+        if key in _REALM_SETTINGS or key.startswith("webAuthnPolicyPasswordless")
+    }
+
+
+async def test_the_level_write_keeps_the_other_realm_settings(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A realm without ``meho-approve`` gets it; nothing else of the realm changes (#6281).
+
+    The stage reads the realm attributes, changes only ``acr.loa.map`` and
+    sends the attributes back. Some realm settings live in realm attributes
+    inside Keycloak, so this checks them after a real write.
+    """
+    admin = f"{keycloak.base_url}/admin/realms/meho"
+    headers = _master_headers(keycloak)
+    realm = httpx.get(admin, headers=headers).json()
+    realm.update(_REALM_SETTINGS)
+    realm["attributes"] = {
+        **realm["attributes"],
+        "acr.loa.map": json.dumps({"meho-touch": 3}),
+        "meho-test-extra": "kept",
+    }
+    httpx.put(admin, headers=headers, json=realm).raise_for_status()
+    before = httpx.get(admin, headers=headers).json()
+    assert json.loads(before["attributes"]["acr.loa.map"]) == {"meho-touch": 3}
+    assert {key: before[key] for key in _REALM_SETTINGS} == _REALM_SETTINGS
+    capfd.readouterr()
+
+    await _run_stage(keycloak, store)
+
+    assert "sign-in levels: set (meho-approve)" in capfd.readouterr().out
+    after = httpx.get(admin, headers=headers).json()
+    assert json.loads(after["attributes"]["acr.loa.map"]) == {"meho-touch": 3, "meho-approve": 2}
+    assert _kept_settings(after) == _kept_settings(before)
+    others = {k: v for k, v in before["attributes"].items() if k != "acr.loa.map"}
+    assert {k: after["attributes"].get(k) for k in others} == others

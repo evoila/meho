@@ -255,7 +255,8 @@ tool) shows the state in `approvals.sign_in.state`:
 `meho doctor` shows the same state in its line `approval sign-in`, with
 the fix, and in its line `approval level` whether MEHO requires the
 approval level now. MEHO keeps the answer for one minute, so a fix shows
-up within a minute. MEHO reads the realm with its Keycloak admin client
+up within a minute. A failed read (a timeout, Keycloak not reachable, an
+odd answer) is kept for 5 seconds only. MEHO reads the realm with its Keycloak admin client
 (`keycloakAdmin` in the chart). Reading login flows and the realm's
 sign-in levels needs the realm-management role `view-realm` (or
 `manage-realm`) on that client.

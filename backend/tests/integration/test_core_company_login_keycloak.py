@@ -40,7 +40,8 @@ tokens carry one issuer, whichever port the browser used.
 9. A person with a one-time code signs in for an approval with the password
    and the code, never through the company login, and the token carries the
    approval level ``meho-approve`` and passes MEHO's approval sign-in check,
-   also with ``APPROVAL_SIGN_IN_LEVEL=required``.
+   also with ``APPROVAL_SIGN_IN_LEVEL=required``. A sign-in without
+   ``acr_values`` (a CLI of an earlier release) gets the level too.
 10. A sign-in through the company login that starts on the approval page
     comes back without the approval level, and MEHO refuses it with the
     usual message under ``required`` (#6281).
@@ -778,10 +779,15 @@ async def test_auto_redirect_off_works_while_the_company_login_does_not_answer(
     _login_form_shows(keycloak)
 
 
-def _start_approval_sign_in(browser: _Browser, challenge: str, **extra: str) -> httpx.Response:
+def _start_approval_sign_in(
+    browser: _Browser, challenge: str, *, acr_values: bool = True, **extra: str
+) -> httpx.Response:
     """The request ``meho approvals approve`` sends: the approval client, PKCE,
-    ``prompt=login``, ``max_age=0`` and ``acr_values=meho-approve``. *extra*
+    ``prompt=login``, ``max_age=0`` and ``acr_values=meho-approve``. Without
+    *acr_values* it is the request of a CLI of an earlier release. *extra*
     adds query parameters, such as ``kc_idp_hint``."""
+    if acr_values:
+        extra = {"acr_values": "meho-approve", **extra}
     return browser.send(
         "GET",
         f"{browser.kc.base_url}/realms/meho/protocol/openid-connect/auth",
@@ -795,7 +801,6 @@ def _start_approval_sign_in(browser: _Browser, challenge: str, **extra: str) -> 
             "code_challenge_method": "S256",
             "prompt": "login",
             "max_age": "0",
-            "acr_values": "meho-approve",
             **extra,
         },
     )
@@ -954,10 +959,11 @@ def _person_with_a_code(kc: _Keycloak, username: str) -> tuple[str, str]:
 
 
 def _approval_sign_in(
-    kc: _Keycloak, username: str, password: str, code_secret: str
+    kc: _Keycloak, username: str, password: str, code_secret: str, *, acr_values: bool = True
 ) -> dict[str, Any]:
     """The browser sign-in of ``meho approvals approve``; returns the token's claims.
 
+    Without *acr_values* it is the sign-in of a CLI of an earlier release.
     Fails when a page other than the password form or the code form shows,
     or when the sign-in passes through the company login.
     """
@@ -967,7 +973,7 @@ def _approval_sign_in(
     pages: list[str] = []
     code = ""
     try:
-        response = _start_approval_sign_in(browser, challenge)
+        response = _start_approval_sign_in(browser, challenge, acr_values=acr_values)
         for _ in range(10):
             if response.is_redirect:
                 location = urljoin(str(response.url), response.headers["location"])
@@ -1049,6 +1055,34 @@ async def test_approval_sign_in_asks_for_the_password_and_the_code_and_passes_th
     assert proof.channel == "rest"
     assert proof.method == "fresh_sign_in"
     assert proof.auth_time == claims["auth_time"]
+    assert proof.acr == "meho-approve"
+    assert proof.level_missing is False
+
+
+async def test_an_approval_sign_in_without_acr_values_gets_the_approval_level(
+    keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A CLI of an earlier release sends no ``acr_values`` (#6281).
+
+    The approval client's own flow still runs its level step, so the token
+    carries ``acr`` ``meho-approve`` and MEHO accepts it under ``required``.
+    """
+    password, code_secret = _person_with_a_code(keycloak, "older-cli-person")
+
+    claims = _approval_sign_in(
+        keycloak, "older-cli-person", password, code_secret, acr_values=False
+    )
+
+    assert claims["azp"] == _APPROVAL_CLIENT
+    assert claims["acr"] == "meho-approve"
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{keycloak.base_url}/realms/meho")
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "required")
+    get_settings.cache_clear()
+    clear_jwks_cache()
+    operator = await verify_jwt_for_audience(
+        f"Bearer {claims['_raw']}", expected_audience="meho-backplane"
+    )
+    proof = check_fresh_approval_sign_in(operator, get_settings())
     assert proof.acr == "meho-approve"
     assert proof.level_missing is False
 

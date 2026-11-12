@@ -991,7 +991,65 @@ async def policy_gate(
     service-principal grant consult in sandbox mode (a ``destructive``
     delete must present its own preview hash and a valid blast radius
     first). ``decide_only`` (#4923, #5492) returns the verdict and writes
-    nothing: a grant that would clear the call is reported but not used."""
+    nothing: a grant that would clear the call is reported but not used.
+    With ``POLICY_ENGINE_SHADOW`` on, :mod:`meho_backplane.policy.shadow`
+    compares the policy evaluator with this answer; this answer counts."""
+    return await _verdict_with_shadow(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        preview_hash=preview_hash,
+        params=params,
+        decide_only=decide_only,
+    )
+
+
+async def _verdict_with_shadow(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str | None,
+    preview_hash: str | None,
+    params: dict[str, Any] | None,
+    decide_only: bool,
+) -> tuple[PermissionVerdict, str | None]:
+    """Today's verdict; then the shadow compares the policy evaluator with it."""
+    from meho_backplane.policy.shadow import shadow_call
+
+    today = await _today_verdict(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        preview_hash=preview_hash,
+        params=params,
+        decide_only=decide_only,
+    )
+    await shadow_call(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        today=today,
+        preview_hash=preview_hash,
+        decide_only=decide_only,
+    )
+    return today
+
+
+async def _today_verdict(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str | None,
+    preview_hash: str | None,
+    params: dict[str, Any] | None,
+    decide_only: bool,
+) -> tuple[PermissionVerdict, str | None]:
+    """Today's verdict: a hosted agent run (#4237) or the caller alone."""
     actor_sub = resolve_actor_sub()
     if actor_sub is not None:
         return await _direct_run_verdict(

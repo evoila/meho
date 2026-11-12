@@ -534,10 +534,16 @@ def _policy_block(settings: Settings) -> dict[str, Any]:
     operations (:mod:`meho_backplane.policy.classification`). It is off by
     default. Nothing is missing when it is off, so ``configured`` is always
     ``True`` and ``missing_env`` is always empty.
+
+    ``engine_shadow`` is the ``POLICY_ENGINE_SHADOW`` switch: the policy
+    evaluator runs next to today's checks and logs every difference
+    (:mod:`meho_backplane.policy.shadow`). It decides nothing. Off by
+    default.
     """
     return {
         "configured": True,
         "classification": settings.policy_classification,
+        "engine_shadow": settings.policy_engine_shadow,
         "missing_env": [],
     }
 
@@ -595,7 +601,7 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
           "mcp":            {"configured": true,   "protocol_version": "...",
                              "short_tool_texts": <bool>, "missing_env": []},
           "policy":         {"configured": true, "classification": <bool>,
-                             "missing_env": []}
+                             "engine_shadow": <bool>, "missing_env": []}
         }
     """
     block: dict[str, dict[str, Any]] = {

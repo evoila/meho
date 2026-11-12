@@ -862,9 +862,9 @@ async def test_request_json_gzip_encoded_response_decodes_once_regression_3459()
     ``httpx.DecodingError: Error -3 while decompressing data: incorrect header
     check``. Every ingested/typed HTTP read of a compressing vendor broke.
     This models a vCenter 8.x target behind an ingested ``vmware-rest``
-    connector that gzips its response; buffering the raw wire bytes
-    (:meth:`~httpx.Response.aiter_raw`) keeps them consistent with the retained
-    header, so the body decodes exactly once and parses.
+    connector that gzips its response; the cap loop now keeps the decoded bytes
+    and drops the ``Content-Encoding`` header, so the body decodes exactly once
+    and parses.
     """
     conn = _ConcreteHttpConnector()
     target = _make_target()
@@ -941,7 +941,7 @@ async def test_request_json_rejects_oversize_compressed_body_by_content_length(
 ) -> None:
     """The cap measures the compressed transfer length, not the decoded size.
 
-    The cap loop now counts raw wire bytes, matching the ``Content-Length``
+    The compressed-transfer ceiling counts wire bytes, matching the ``Content-Length``
     fast-reject — both measure the compressed length the vendor actually put on
     the wire. A gzip body whose *compressed* ``Content-Length`` exceeds the cap
     is refused up front, and the rejection quotes that compressed length.
@@ -968,6 +968,93 @@ async def test_request_json_rejects_oversize_compressed_body_by_content_length(
     assert str(len(compressed)) in str(exc_info.value)
     assert route.called
     await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_json_rejects_compression_bomb_by_decoded_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A small gzip body that expands past the cap is refused (decoded ceiling).
+
+    The compressed body is far under the cap, so the transfer ceiling and the
+    ``Content-Length`` fast-reject both pass. Only the decoded-size ceiling
+    can stop it. The decoded body would be ``"x" * 64 KiB`` - well over the
+    1 KiB cap - and is not valid JSON, so a parse would not raise the cap error.
+    """
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    compressed = gzip.compress(b"x" * 65536)
+    assert len(compressed) < 1024  # passes the compressed ceiling
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.get("/api/inventory").respond(
+            200,
+            content=compressed,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+        )
+        with pytest.raises(ResponseTooLargeError) as exc_info:
+            await conn._request_json(
+                target, "GET", "/api/inventory", operator=_make_operator("tok")
+            )
+
+    assert "cap" in str(exc_info.value)
+    assert "Content-Length" not in str(exc_info.value)
+    assert route.called
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_rejects_compression_bomb_by_decoded_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The non-idempotent path has the same decoded-size ceiling."""
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    compressed = zlib.compress(b"y" * 65536)
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.post("/api/sessions").respond(
+            200,
+            content=compressed,
+            headers={"content-type": "application/json", "content-encoding": "deflate"},
+        )
+        with pytest.raises(ResponseTooLargeError):
+            await conn._post_json(
+                target,
+                "/api/sessions",
+                operator=_make_operator("tok"),
+                json={"provider": "Local"},
+            )
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_capped_read_drops_encoding_headers_after_decoding() -> None:
+    """An under-cap gzip body is returned decoded, without stale encoding headers.
+
+    A stale ``Content-Length`` would be the compressed size, and a kept
+    ``Content-Encoding`` would make a second read decode plain bytes again.
+    """
+    body = json.dumps({"value": list(range(20))}).encode()
+    compressed = gzip.compress(body)
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/items").respond(
+            200,
+            content=compressed,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+        )
+        async with httpx.AsyncClient(base_url="https://vcenter.example.com") as client:
+            resp = await http_adapter._read_capped_json_response(client, "GET", "/api/items")
+
+    assert resp.content == body
+    assert "content-encoding" not in resp.headers
+    assert resp.headers.get("content-length") in (None, str(len(body)))
+    assert resp.headers["content-type"] == "application/json"
 
 
 # ---------------------------------------------------------------------------

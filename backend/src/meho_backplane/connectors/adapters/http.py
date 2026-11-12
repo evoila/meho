@@ -428,16 +428,20 @@ async def _read_capped_json_response(
     :exc:`ResponseTooLargeError` before :func:`json_payload_or_empty` can
     parse it.
 
-    The cap iterates :meth:`~httpx.Response.aiter_raw` — the raw wire bytes,
-    still carrying whatever ``Content-Encoding`` the vendor applied — rather
-    than :meth:`~httpx.Response.aiter_bytes`, which yields already-decoded
-    bytes. Buffering the raw bytes keeps them consistent with the retained
-    ``Content-Encoding`` header, so the re-materialised response decodes
-    exactly once on first access (a plaintext body under a ``gzip`` header
-    would otherwise make httpx attempt a second decode and raise
-    :exc:`httpx.DecodingError`). The running total therefore counts
-    compressed transfer bytes, matching the ``Content-Length`` fast-reject
-    above, which measures that same compressed length.
+    The cap has two ceilings, both :data:`_MAX_RESPONSE_BYTES`. The first
+    bounds the compressed transfer: ``Content-Length`` and
+    :attr:`~httpx.Response.num_bytes_downloaded` count the bytes on the
+    wire. The second bounds the decoded body: the loop iterates
+    :meth:`~httpx.Response.aiter_bytes`, which decodes ``Content-Encoding``
+    chunk by chunk, and stops as soon as the decoded total passes the cap.
+    So a small compressed body that expands a great deal (a compression
+    bomb) is refused too. One wire chunk is decoded in a single step, so
+    memory is bounded by the cap plus the expansion of one chunk.
+
+    Because the kept bytes are already decoded, the rebuilt response drops
+    the ``Content-Encoding`` and ``Content-Length`` headers. Otherwise
+    httpx would decode the plain bytes a second time and raise
+    :exc:`httpx.DecodingError`.
 
     An under-cap body is joined and re-materialised into a fully-read
     :class:`httpx.Response` carrying the original status, headers, request,
@@ -462,17 +466,22 @@ async def _read_capped_json_response(
             _reject_oversize_content_length(resp)
         chunks: list[bytes] = []
         total = 0
-        async for chunk in resp.aiter_raw():
+        async for chunk in resp.aiter_bytes():
             total += len(chunk)
-            if total > _MAX_RESPONSE_BYTES:
+            if total > _MAX_RESPONSE_BYTES or resp.num_bytes_downloaded > _MAX_RESPONSE_BYTES:
                 raise ResponseTooLargeError(
                     f"vendor response body exceeded the "
                     f"{_MAX_RESPONSE_BYTES}-byte response-body cap"
                 )
             chunks.append(chunk)
+        out_headers = resp.headers.copy()
+        if "content-encoding" in out_headers:
+            del out_headers["content-encoding"]
+            if "content-length" in out_headers:
+                del out_headers["content-length"]
         return httpx.Response(
             status_code=resp.status_code,
-            headers=resp.headers,
+            headers=out_headers,
             content=b"".join(chunks),
             request=resp.request,
             extensions=resp.extensions,

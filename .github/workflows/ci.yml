@@ -184,8 +184,7 @@ permissions:
   contents: read
 
 concurrency:
-  # On push to main: one in-flight CI run per ref so a fast follow-up
-  # commit cancels its predecessor. On PRs: scoped per PR ref so an
+  # There is no push run (#6387). On PRs: scoped per PR ref so an
   # author force-push cancels its own prior CI run cleanly. Mirrors
   # the pattern used by image.yml, chart.yml, and cli-release.yml.
   #
@@ -241,7 +240,7 @@ jobs:
     # docs-only. `--no-renames` makes a rename appear as delete(old)+add(new)
     # so a code→`*.md` (or `*.md`→code) rename can never smuggle a non-docs
     # path past the allow-list. merge_group / push NEVER fast-path (a queue
-    # batch may mix docs + code; a push to `main` must always run the full
+    # batch may mix docs + code; the queue run must always run the full
     # matrix) — they emit `docs_only=false` unconditionally.
     #
     #   single_connector — the connector name when a PR changes only one
@@ -1042,7 +1041,7 @@ jobs:
         #    them): `dpkg -i` installs them. This needs no network, so a
         #    package mirror that does not answer cannot fail the shard.
         # 3. Else apt downloads php-cli into the cache folder and installs
-        #    it, and the step after saves the folder. A push to main fills
+        #    it, and the step after saves the folder. The nightly run on main fills
         #    the cache, and pull request and merge-queue runs read it, so
         #    the download happens about once per OS release.
         # If the cached files do not install (the runner image changed),
@@ -3220,7 +3219,7 @@ jobs:
   merge-queue-watchdog:
     name: Merge queue watchdog
     # Only merge-queue runs. A pull-request run must still show every failing
-    # job, and a push to `main` has no queue group that can be dropped.
+    # job, and the nightly run has no queue group that can be dropped.
     if: github.event_name == 'merge_group'
     # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
     runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}

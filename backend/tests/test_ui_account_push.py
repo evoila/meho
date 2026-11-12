@@ -61,6 +61,7 @@ from meho_backplane.web_push.keys import (
     reset_key_cache_for_testing,
 )
 from meho_backplane.web_push.models import PushSubscription
+from meho_backplane.web_push.recipients import LoginFacts
 from meho_backplane.web_push.store import save_subscription
 from tests._oidc_jwt_helpers import (
     AUDIENCE,
@@ -339,7 +340,7 @@ def test_saving_the_same_browser_twice_in_one_transaction_keeps_one_row() -> Non
                     operator_sub=_ME,
                     tenant_id=_TENANT_A,
                     subscription=checked,
-                    approve_scope=None,
+                    facts=LoginFacts(tenant_role=None),
                 )
 
     asyncio.run(_do())
@@ -620,20 +621,22 @@ def test_a_failed_write_logs_no_endpoint_and_no_key(
 
 
 # ---------------------------------------------------------------------------
-# What the person may approve (approve_scope), read from the login
+# The login facts of the person, read from the login
 # ---------------------------------------------------------------------------
 
 
-def test_switch_on_stores_what_a_tenant_admin_may_approve() -> None:
+def test_switch_on_stores_the_login_facts_of_a_tenant_admin() -> None:
     client, mock = _client(role=TenantRole.TENANT_ADMIN)
     try:
         assert client.post(_SUBSCRIBE, data=_subscription()).status_code == 200
     finally:
         mock.stop()
-    assert [row.approve_scope for row in _rows()] == ["all"]
+    (row,) = _rows()
+    assert row.tenant_role == "tenant_admin"
+    assert row.facts_read_at is not None
 
 
-def test_switch_on_stores_no_scope_for_an_operator_or_an_unknown_login() -> None:
+def test_switch_on_stores_the_role_of_an_operator_and_none_for_an_unknown_login() -> None:
     operator, mock_op = _client(role=TenantRole.OPERATOR)
     unknown, mock_unknown = _client(sub=_OTHER)
     try:
@@ -642,13 +645,13 @@ def test_switch_on_stores_no_scope_for_an_operator_or_an_unknown_login() -> None
     finally:
         mock_op.stop()
         mock_unknown.stop()
-    assert sorted((row.operator_sub, row.approve_scope) for row in _rows()) == [
+    assert sorted((row.operator_sub, row.tenant_role) for row in _rows()) == [
         (_OTHER, None),
-        (_ME, None),
+        (_ME, "operator"),
     ]
 
 
-def _store_row(*, endpoint: str, tenant_id: uuid.UUID, scope: str | None) -> None:
+def _store_row(*, endpoint: str, tenant_id: uuid.UUID, role: str | None) -> None:
     async def _do() -> None:
         async with get_sessionmaker()() as session, session.begin():
             await save_subscription(
@@ -656,27 +659,27 @@ def _store_row(*, endpoint: str, tenant_id: uuid.UUID, scope: str | None) -> Non
                 operator_sub=_ME,
                 tenant_id=tenant_id,
                 subscription=check_subscription(**{**_subscription(), "endpoint": endpoint}),
-                approve_scope=scope,
+                facts=LoginFacts(tenant_role=role),
             )
 
     asyncio.run(_do())
 
 
-def test_status_reads_the_scope_again_from_the_login() -> None:
+def test_status_reads_the_login_facts_again() -> None:
     """A login group that changed counts from the next account page open,
     for the rows of the current tenant only."""
     here = "https://fcm.googleapis.com/fcm/send/here"
     there = "https://fcm.googleapis.com/fcm/send/there"
-    _store_row(endpoint=here, tenant_id=_TENANT_A, scope="all")
-    _store_row(endpoint=there, tenant_id=_TENANT_B, scope="all")
+    _store_row(endpoint=here, tenant_id=_TENANT_A, role="tenant_admin")
+    _store_row(endpoint=there, tenant_id=_TENANT_B, role="tenant_admin")
     client, mock = _client(role=TenantRole.OPERATOR)
     try:
         response = client.post(_STATUS, data={"endpoint": here})
     finally:
         mock.stop()
     assert response.json() == {"on": True}
-    scopes = {row.endpoint: row.approve_scope for row in _rows()}
-    assert scopes == {here: None, there: "all"}
+    roles = {row.endpoint: row.tenant_role for row in _rows()}
+    assert roles == {here: "operator", there: "tenant_admin"}
 
     clear_jwks_cache()  # the next login is signed with a new key
     admin, mock_admin = _client(role=TenantRole.TENANT_ADMIN)
@@ -684,14 +687,14 @@ def test_status_reads_the_scope_again_from_the_login() -> None:
         assert admin.post(_STATUS, data={"endpoint": here}).json() == {"on": True}
     finally:
         mock_admin.stop()
-    assert {row.endpoint: row.approve_scope for row in _rows()}[here] == "all"
+    assert {row.endpoint: row.tenant_role for row in _rows()}[here] == "tenant_admin"
 
 
-def test_status_keeps_the_scope_when_the_login_cannot_be_read(
+def test_status_keeps_the_facts_when_the_login_cannot_be_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     here = "https://fcm.googleapis.com/fcm/send/here"
-    _store_row(endpoint=here, tenant_id=_TENANT_A, scope="all")
+    _store_row(endpoint=here, tenant_id=_TENANT_A, role="tenant_admin")
 
     async def _no_login(_: object) -> None:
         return None
@@ -703,12 +706,14 @@ def test_status_keeps_the_scope_when_the_login_cannot_be_read(
     finally:
         mock.stop()
     assert response.json() == {"on": True}
-    assert [row.approve_scope for row in _rows()] == ["all"]
+    assert [row.tenant_role for row in _rows()] == ["tenant_admin"]
 
 
 def test_status_off_writes_nothing() -> None:
     _store_row(
-        endpoint="https://fcm.googleapis.com/fcm/send/mine", tenant_id=_TENANT_A, scope="all"
+        endpoint="https://fcm.googleapis.com/fcm/send/mine",
+        tenant_id=_TENANT_A,
+        role="tenant_admin",
     )
     client, mock = _client(role=TenantRole.OPERATOR)
     try:
@@ -718,4 +723,4 @@ def test_status_off_writes_nothing() -> None:
     finally:
         mock.stop()
     assert response.json() == {"on": False}
-    assert [row.approve_scope for row in _rows()] == ["all"]
+    assert [row.tenant_role for row in _rows()] == ["tenant_admin"]

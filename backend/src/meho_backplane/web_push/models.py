@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The ``push_subscription`` table (migrations ``0151`` and ``0152``)."""
+"""The ``push_subscription`` table (migrations ``0151`` and ``0161``)."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Index, Text, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, DateTime, Index, Text, UniqueConstraint, Uuid, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from meho_backplane.db.models import Base
@@ -23,6 +23,12 @@ class PushSubscription(Base):
     tenant the person worked in when they switched the notifications on; a
     ``tenant_admin`` of that tenant may remove the row. ``endpoint``,
     ``p256dh`` and ``auth`` are never logged and never shown.
+
+    ``tenant_role``, ``approver``, ``self_approver`` and ``platform_admin``
+    are the person's login facts in that tenant, read from their login at
+    ``facts_read_at``. MEHO uses them to decide who may approve a request
+    (:mod:`meho_backplane.web_push.recipients`). ``tenant_role`` is
+    ``NULL`` when the facts were never read or the login is not a person.
     """
 
     __tablename__ = "push_subscription"
@@ -39,4 +45,16 @@ class PushSubscription(Base):
     p256dh: Mapped[str] = mapped_column(Text, nullable=False)
     auth: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    approve_scope: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    tenant_role: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    approver: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    self_approver: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    platform_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    facts_read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )

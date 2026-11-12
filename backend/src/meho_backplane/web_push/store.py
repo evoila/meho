@@ -13,14 +13,18 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import Insert, delete, or_, select, update
+import structlog
+from sqlalchemy import Insert, delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.web_push.endpoints import CheckedSubscription, push_service_name
 from meho_backplane.web_push.models import PushSubscription
+from meho_backplane.web_push.recipients import LoginFacts, login_facts_for
 
 __all__ = [
     "MAX_SUBSCRIPTIONS_PER_PERSON",
@@ -31,10 +35,13 @@ __all__ = [
     "is_own_endpoint",
     "list_for_person",
     "list_for_tenant",
-    "refresh_approve_scope",
+    "refresh_at_sign_in",
+    "refresh_login_facts",
     "remove_subscription",
     "save_subscription",
 ]
+
+_log = structlog.get_logger(__name__)
 
 #: A person rarely has more browsers than this. Above it, the oldest go.
 MAX_SUBSCRIPTIONS_PER_PERSON = 10
@@ -76,9 +83,9 @@ async def save_subscription(
     operator_sub: str,
     tenant_id: uuid.UUID,
     subscription: CheckedSubscription,
-    approve_scope: str | None,
+    facts: LoginFacts,
 ) -> None:
-    """Store *subscription* for this person, with the time and *approve_scope*.
+    """Store *subscription* for this person, with the time and the login *facts*.
 
     The endpoint names one browser. When it is stored already (the same
     browser switched on again, or another person now uses it), the row is
@@ -96,7 +103,7 @@ async def save_subscription(
                 operator_sub=operator_sub,
                 tenant_id=tenant_id,
                 subscription=subscription,
-                approve_scope=approve_scope,
+                facts=facts,
             )
             await _drop_oldest(db, operator_sub=operator_sub)
     except SQLAlchemyError:
@@ -109,8 +116,9 @@ async def _upsert(
     operator_sub: str,
     tenant_id: uuid.UUID,
     subscription: CheckedSubscription,
-    approve_scope: str | None,
+    facts: LoginFacts,
 ) -> None:
+    now = datetime.now(UTC)
     values = {
         "id": uuid.uuid4(),
         "operator_sub": operator_sub,
@@ -118,8 +126,8 @@ async def _upsert(
         "endpoint": subscription.endpoint,
         "p256dh": subscription.p256dh,
         "auth": subscription.auth,
-        "created_at": datetime.now(UTC),
-        "approve_scope": approve_scope,
+        "created_at": now,
+        **_fact_values(facts, now),
     }
     replaced = {k: v for k, v in values.items() if k not in ("id", "endpoint")}
     conn = await db.connection()
@@ -182,13 +190,24 @@ async def is_own_endpoint(db: AsyncSession, *, operator_sub: str, endpoint: str)
     return found.first() is not None
 
 
-async def refresh_approve_scope(
-    db: AsyncSession, *, operator_sub: str, tenant_id: uuid.UUID, approve_scope: str | None
-) -> None:
-    """Set *approve_scope* on this person's rows of *tenant_id*.
+def _fact_values(facts: LoginFacts, now: datetime) -> dict[str, object]:
+    return {
+        "tenant_role": facts.tenant_role,
+        "approver": facts.approver,
+        "self_approver": facts.self_approver,
+        "platform_admin": facts.platform_admin,
+        "facts_read_at": now,
+    }
 
-    The login groups can change after the switch was turned on; the account
-    page calls this each time it opens. Rows of another tenant keep theirs.
+
+async def refresh_login_facts(
+    db: AsyncSession, *, operator_sub: str, tenant_id: uuid.UUID, facts: LoginFacts
+) -> None:
+    """Set the login *facts* and the time on this person's rows of *tenant_id*.
+
+    The login groups can change after the switch was turned on. MEHO calls
+    this at each console sign-in and each time the account page opens.
+    Rows of another tenant keep theirs.
     Raises :class:`PushStoreError` when the database refuses the write.
     """
     try:
@@ -197,18 +216,35 @@ async def refresh_approve_scope(
                 update(PushSubscription)
                 .where(PushSubscription.operator_sub == operator_sub)
                 .where(PushSubscription.tenant_id == tenant_id)
-                .where(
-                    or_(
-                        PushSubscription.approve_scope.is_(None),
-                        PushSubscription.approve_scope != approve_scope,
-                    )
-                    if approve_scope is not None
-                    else PushSubscription.approve_scope.is_not(None)
-                )
-                .values(approve_scope=approve_scope)
+                .values(**_fact_values(facts, datetime.now(UTC)))
             )
     except SQLAlchemyError:
         raise PushStoreError("could not update the push subscription") from None
+
+
+async def refresh_at_sign_in(operator: Operator) -> None:
+    """Read the login facts of a person who just signed in, in their tenant; never raises.
+
+    Does nothing before the person chose a tenant. A failed write is
+    logged and does not stop the sign-in.
+    """
+    if not operator.tenant_chosen:
+        return
+    try:
+        async with get_sessionmaker()() as db, db.begin():
+            await refresh_login_facts(
+                db,
+                operator_sub=operator.sub,
+                tenant_id=operator.tenant_id,
+                facts=login_facts_for(operator),
+            )
+    except Exception as exc:
+        _log.warning(
+            "web_push_sign_in_refresh_failed",
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            error=type(exc).__name__,
+        )
 
 
 async def delete_gone(db: AsyncSession, *, subscription_id: uuid.UUID) -> None:

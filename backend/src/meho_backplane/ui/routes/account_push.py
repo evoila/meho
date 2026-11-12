@@ -13,18 +13,18 @@ or while the push key is missing):
   ``p256dh``, ``auth`` from the browser's push subscription. Checked by
   :func:`~meho_backplane.web_push.endpoints.check_subscription`; a refused
   subscription gets 422 with one plain sentence. Stored for the signed-in
-  person (from the session, never from the body), with what the person
-  may approve in the current tenant (``approve_scope``, read from their
-  login; see :mod:`meho_backplane.web_push.recipients`).
+  person (from the session, never from the body), with the person's login
+  facts in the current tenant (read from their login; see
+  :mod:`meho_backplane.web_push.recipients`).
 * ``POST /ui/account/push/unsubscribe`` -- form field ``endpoint``: deletes
   the person's own subscription of this browser.
 * ``POST /ui/account/push/status`` -- form field ``endpoint``: answers
   ``{"on": true}`` when the signed-in person has a stored subscription for
   this browser, else ``{"on": false}``. The switch shows this answer, not
   only what the browser holds. It is a POST so the endpoint never lands in
-  a URL or an access log. When it is on, the person's ``approve_scope`` in
-  the current tenant is read again from their login, so a changed login
-  group counts from the next page open.
+  a URL or an access log. When it is on, the person's login facts in the
+  current tenant are read again from their login, so a changed login group
+  counts from the next page open.
 * ``POST /ui/account/push/remove`` -- form field ``subscription_id``:
   deletes one subscription of the person, or (for a ``tenant_admin``) one
   made in the current tenant. Any other id is 404.
@@ -54,14 +54,14 @@ from meho_backplane.web_push.endpoints import (
     push_service_name,
 )
 from meho_backplane.web_push.keys import push_public_key
-from meho_backplane.web_push.recipients import approve_scope_for
+from meho_backplane.web_push.recipients import login_facts_for
 from meho_backplane.web_push.store import (
     PushStoreError,
     delete_own_by_endpoint,
     is_own_endpoint,
     list_for_person,
     list_for_tenant,
-    refresh_approve_scope,
+    refresh_login_facts,
     remove_subscription,
     save_subscription,
 )
@@ -142,7 +142,7 @@ async def _subscribe(
             operator_sub=session_ctx.operator_sub,
             tenant_id=session_ctx.tenant_id,
             subscription=checked,
-            approve_scope=approve_scope_for(await resolve_ui_operator(session_ctx)),
+            facts=login_facts_for(await resolve_ui_operator(session_ctx)),
         )
     except PushStoreError:
         return _store_failed("ui_push_subscription_save_failed", session_ctx)
@@ -187,15 +187,15 @@ async def _status(
         on = await is_own_endpoint(
             db_session, operator_sub=session_ctx.operator_sub, endpoint=endpoint
         )
-        # No login read (a short outage) keeps the stored scope: writing
+        # No login read (a short outage) keeps the stored facts: writing
         # "none" would stop the messages until the next page open.
         operator = await resolve_ui_operator(session_ctx) if on else None
         if operator is not None:
-            await refresh_approve_scope(
+            await refresh_login_facts(
                 db_session,
                 operator_sub=session_ctx.operator_sub,
                 tenant_id=session_ctx.tenant_id,
-                approve_scope=approve_scope_for(operator),
+                facts=login_facts_for(operator),
             )
     except PushStoreError:
         return _store_failed("ui_push_subscription_status_failed", session_ctx)

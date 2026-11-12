@@ -4,44 +4,50 @@
 """Who gets a push message about a request that waits for approval.
 
 The login groups are in the login token, not in the database. So each
-subscription keeps what its person may approve (``approve_scope``), read
-from their login when they switch the notifications on, and again each time
-they open the account page (:func:`approve_scope_for`):
+subscription keeps the person's login facts in its tenant
+(:class:`LoginFacts`: role, approver flag, SA-Operator flag, platform admin
+flag) and when they were read. MEHO reads them from the login when the
+person switches the notifications on, at each console sign-in and each
+time the account page opens.
 
-* ``"all"`` -- a ``tenant_admin`` or a MEHO-SA-Operator. They may approve
-  every request of the tenant, also their own and the ``dangerous`` and
-  ``destructive`` ones.
-* ``"lower_risk"`` -- a MEHO-Approver. They may approve another person's
-  ``safe`` or ``caution`` change.
-* ``None`` -- anyone else. No message.
+:func:`subscriptions_for` builds an :class:`~meho_backplane.auth.operator.Operator`
+from each row's facts and asks
+:func:`~meho_backplane.operations.approval_rights.approve_right_any_status`
+whether that person may approve the request. That is the same rule as the
+approve itself, with the group rule, the rights-change rule and the role
+floor of the operation. The answer leaves out only the "still pending"
+check, so a decision message goes to the same people as the first message.
 
-:func:`subscriptions_for` picks the rows of one request with the same group
-rule as ``approve_request`` (``operations/approval_queue.py``). It is only
-the message list: the approve itself checks the person again.
+A row whose facts are older than :data:`FACTS_MAX_AGE` gets no message: the
+person's groups may have changed since. It is only the message list: the
+approve itself checks the person again.
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.db.models import ApprovalRequest
+from meho_backplane.operations.approval_rights import approve_right_any_status
 from meho_backplane.web_push.models import PushSubscription
 
 __all__ = [
-    "SCOPE_ALL",
-    "SCOPE_LOWER_RISK",
+    "FACTS_MAX_AGE",
+    "LoginFacts",
     "PushTarget",
-    "approve_scope_for",
+    "login_facts_for",
     "subscriptions_for",
     "subscriptions_of_person",
 ]
 
-SCOPE_ALL = "all"
-SCOPE_LOWER_RISK = "lower_risk"
+#: A row whose login facts are older than this gets no message.
+FACTS_MAX_AGE = timedelta(days=7)
 
 
 @dataclass(frozen=True)
@@ -55,48 +61,88 @@ class PushTarget:
     auth: str
 
 
-def approve_scope_for(operator: Operator | None) -> str | None:
-    """Return the ``approve_scope`` of *operator* in its current tenant."""
-    if operator is None or not is_human_principal(operator):
+@dataclass(frozen=True)
+class LoginFacts:
+    """What a subscription keeps of the person's login in its tenant.
+
+    ``tenant_role`` is ``None`` for a login that is not a person, or one
+    without a chosen tenant: such a row gets no message.
+    """
+
+    tenant_role: str | None
+    approver: bool = False
+    self_approver: bool = False
+    platform_admin: bool = False
+
+
+def login_facts_for(operator: Operator | None) -> LoginFacts:
+    """Return the login facts of *operator* in its current tenant."""
+    if operator is None or not is_human_principal(operator) or not operator.tenant_chosen:
+        return LoginFacts(tenant_role=None)
+    return LoginFacts(
+        tenant_role=operator.tenant_role.value,
+        approver=operator.approver,
+        self_approver=operator.self_approver,
+        platform_admin=operator.platform_admin,
+    )
+
+
+def _fresh_rows(tenant_id: uuid.UUID, now: datetime) -> Select[tuple[PushSubscription]]:
+    return (
+        select(PushSubscription)
+        .where(PushSubscription.tenant_id == tenant_id)
+        .where(PushSubscription.tenant_role.is_not(None))
+        .where(PushSubscription.facts_read_at >= now - FACTS_MAX_AGE)
+    )
+
+
+def _operator_of(row: PushSubscription) -> Operator | None:
+    """The person of *row*, as their stored login facts describe them."""
+    if row.tenant_role is None:
         return None
-    if operator.may_self_approve or operator.tenant_role == TenantRole.TENANT_ADMIN:
-        return SCOPE_ALL
-    if operator.approver:
-        return SCOPE_LOWER_RISK
-    return None
+    try:
+        role = TenantRole(row.tenant_role)
+    except ValueError:
+        return None
+    # web_session: the message opens the web interface, where the person
+    # approves with a click.
+    return Operator(
+        sub=row.operator_sub,
+        raw_jwt="",
+        tenant_id=row.tenant_id,
+        tenant_role=role,
+        approver=row.approver,
+        self_approver=row.self_approver,
+        platform_admin=row.platform_admin,
+        web_session=True,
+    )
 
 
 async def subscriptions_for(
-    db: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    requester_sub: str,
-    high_risk: bool,
+    db: AsyncSession, *, request: ApprovalRequest, now: datetime | None = None
 ) -> list[PushTarget]:
-    """Return the browsers of the people who may approve this request.
+    """Return the browsers of the people who may approve *request*.
 
-    Only rows of *tenant_id*. A ``lower_risk`` person gets no message for a
-    ``dangerous`` or ``destructive`` change, and none for their own request.
+    Only rows of the request's tenant, with login facts read in the last
+    :data:`FACTS_MAX_AGE`.
     """
-    lower_risk_ok = and_(
-        PushSubscription.approve_scope == SCOPE_LOWER_RISK,
-        PushSubscription.operator_sub != requester_sub,
-    )
-    allowed = PushSubscription.approve_scope == SCOPE_ALL
-    if not high_risk:
-        allowed = or_(allowed, lower_risk_ok)
-    rows = await db.execute(
-        select(PushSubscription).where(PushSubscription.tenant_id == tenant_id).where(allowed)
-    )
-    return [_target(row) for row in rows.scalars()]
+    rows = await db.execute(_fresh_rows(request.tenant_id, now or datetime.now(UTC)))
+    targets: list[PushTarget] = []
+    for row in rows.scalars():
+        operator = _operator_of(row)
+        if operator is not None and approve_right_any_status(operator, request).may_approve:
+            targets.append(_target(row))
+    return targets
 
 
-async def subscriptions_of_person(db: AsyncSession, *, operator_sub: str) -> list[PushTarget]:
-    """Return the browsers of one person that get approval messages (for the summary)."""
+async def subscriptions_of_person(
+    db: AsyncSession, *, operator_sub: str, tenant_id: uuid.UUID, now: datetime | None = None
+) -> list[PushTarget]:
+    """Return the browsers of one person in one tenant that get messages (for the summary)."""
     rows = await db.execute(
-        select(PushSubscription)
-        .where(PushSubscription.operator_sub == operator_sub)
-        .where(PushSubscription.approve_scope.is_not(None))
+        _fresh_rows(tenant_id, now or datetime.now(UTC)).where(
+            PushSubscription.operator_sub == operator_sub
+        )
     )
     return [_target(row) for row in rows.scalars()]
 

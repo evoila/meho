@@ -962,9 +962,10 @@ to `POST /ui/account/push/subscribe`. MEHO checks it
   base64url.
 
 MEHO stores the row in `push_subscription` (migration `0151`) for the
-signed-in person and the current tenant, with the time, and with what the
-person may approve there (`approve_scope`, migration `0152`: `all`,
-`lower_risk` or none, read from their login). The person and the
+signed-in person and the current tenant, with the time, and with the
+person's login facts there (migration `0161`: `tenant_role`, `approver`,
+`self_approver`, `platform_admin` and `facts_read_at`, read from their
+login). The person and the
 tenant come from the session, never from the form. The endpoint names one
 browser, so it is unique: switching on again replaces the row, and when
 another person switches on the same browser, the browser moves to them. A
@@ -982,10 +983,11 @@ subscription. The script asks `POST /ui/account/push/status` (form field
 `endpoint`; answer `{"on": true|false}`) when the page opens and again each
 time the list below reloads. So the switch shows "off" after a "Remove" in
 the list, and for a person who signs in on a browser that another person
-switched on. When the answer is "on", MEHO also reads `approve_scope` again
-from the person's login, for their rows of the current tenant. So a changed
-login group counts from the next time they open the account page. When
-MEHO cannot read the login at that moment, it keeps the stored value.
+switched on. When the answer is "on", MEHO also reads the login facts again
+from the person's login, for their rows of the current tenant. MEHO does the
+same at each console sign-in and tenant pick. So a changed login group
+counts from the next sign-in or account page open. When MEHO cannot read the
+login at that moment, it keeps the stored facts.
 
 Switching off drops the subscription in the browser and posts
 `POST /ui/account/push/unsubscribe`, which deletes the person's own row for

@@ -2841,6 +2841,7 @@ type BodyRunbooksRunAbortUiRunbooksRunsRunIdAbortPost struct {
 // BodyRunbooksRunNextUiRunbooksRunsRunIdNextPost defines model for Body_runbooks_run_next_ui_runbooks_runs__run_id__next_post.
 type BodyRunbooksRunNextUiRunbooksRunsRunIdNextPost struct {
 	Answer     *string `json:"answer,omitempty"`
+	Retry      *string `json:"retry,omitempty"`
 	VerifyType *string `json:"verify_type,omitempty"`
 }
 
@@ -7864,8 +7865,14 @@ type NextStep struct {
 // “confirm“ step or the engine's captured result for an
 // “operation_call“ step. “None“ is valid only on the very first
 // “meho_runbook_next“ call (when no prior step exists to verify).
+//
+// :attr:`retry` “= True“ asks MEHO to run the check of a “failed“
+// current step again. Without it, a “failed“ step refuses to
+// advance, as before. On a step that is not “failed“ the flag has
+// no effect.
 type NextStepRequest struct {
 	LastVerified   bool                            `json:"last_verified"`
+	Retry          *bool                           `json:"retry,omitempty"`
 	VerifyResponse *NextStepRequest_VerifyResponse `json:"verify_response"`
 }
 

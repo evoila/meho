@@ -2186,6 +2186,7 @@ example a Vault write that Vault refused). `result_state` already tells
 | `error_code` | `extras.error_code` of a failed run, for example `connector_error`. |
 | `audit_id` | The audit row the dispatcher wrote for the run. |
 | `execution_outcome` | `uncertain` when MEHO does not know if the change happened (#5025). `null` for any other run. |
+| `exit_code` | The exit code of a finished command or script, when the `ok` result body has an integer `exit_code` (for example `linux.script.run`). `result_status` stays `ok` because MEHO ran the script, so read this field for the script's own result. A non-zero code shows in `meho approvals show` ("the script ran, but it failed"), in the console card after Approve and in the dialog. `null` when the result has no exit code. |
 | `guidance` | The next step a failed multi-step operation names (#5377), for example "The VM waits on question _vmx1: show it to the user and answer it with vmware.vm.question.answer." For an `uncertain` run without such a stamp, MEHO's fixed advice: "MEHO does not know if the change happened. Do not run it again. Check the target first." `null` for any other run. |
 
 `resume_outcome` is `null` for a request that is not approved, and before

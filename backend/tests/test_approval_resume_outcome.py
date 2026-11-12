@@ -228,6 +228,7 @@ async def test_failed_resume_shows_on_show_and_list(monkeypatch: pytest.MonkeyPa
         "audit_id",
         "guidance",
         "execution_outcome",
+        "exit_code",
     }
     assert outcome["guidance"] is None
     assert "permission denied" not in str(shown)

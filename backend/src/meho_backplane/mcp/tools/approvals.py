@@ -164,6 +164,7 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
                 "audit_id": str(outcome.audit_id) if outcome.audit_id else None,
                 "guidance": outcome.guidance,
                 "execution_outcome": outcome.execution_outcome,
+                "exit_code": outcome.exit_code,
             }
             if outcome is not None
             else None

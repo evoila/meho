@@ -3402,7 +3402,12 @@ wire.</p>
   says the plan is shown on the approval request. An approval-gated
   operation that writes a credential (for example <code>vault.kv.put</code>) is
   not previewable. It stays <code>status: "unavailable"</code>, so its secret
-  params never surface.</li>
+  params never surface.
+  With the backplane switch <code>PREVIEW_TYPED_WRITES</code> on (off by default),
+  every typed or composite write previews, also one that waits for
+  approval only for some callers. A credential write with its own safe
+  preview (for example <code>keycloak.user.reset_password</code>) then shows only
+  that plan and never copies the params.</li>
 <li>It is available over MCP, REST (<code>POST /api/v1/operations/preview</code>),
   and the CLI (<code>meho operation preview &lt;connector_id&gt; &lt;op_id&gt;</code>).</li>
 </ul>

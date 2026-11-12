@@ -262,6 +262,42 @@ _HOSTED_ON_MERGE_GROUP_ALLOWED: dict[tuple[str, str], str] = {
         "docs-site.yml",
         "deploy",
     ): "runs only for tag pushes and main pushes; a merge-queue branch is neither",
+    (
+        "docs-site.yml",
+        "build",
+    ): "about 30 seconds; two pull requests can break the strict build together, so it stays",
+    (
+        "plugin-version-check.yml",
+        "plugin-version",
+    ): "about a minute; two pull requests can raise the same plugin version, so it stays",
+    (
+        "ci.yml",
+        "changes",
+    ): "about 13 seconds of git diff; the other jobs need its answer",
+    (
+        "ci.yml",
+        "python-unit-lane",
+    ): "only adds up the results of other jobs (about 6 seconds)",
+    (
+        "ci.yml",
+        "python-integration",
+    ): "only adds up the results of other jobs (about 6 seconds)",
+    (
+        "ci.yml",
+        "helm-lint-template",
+    ): "about 20 seconds with public tools only; a short job that stays in the queue",
+    (
+        "chart.yml",
+        "changes",
+    ): "about 4 seconds of git diff; the chart jobs need its answer",
+    (
+        "chart.yml",
+        "helm-test-gate",
+    ): "only adds up the results of the chart jobs (about 5 seconds)",
+    (
+        "migration-heads.yml",
+        "check",
+    ): "about 40 seconds; it can break only when two pull requests meet, so it stays in the queue",
     ("chart.yml", "helm-test"): (
         "kind installs need more CPU than the own heavy-queue pool has today; "
         "back to an own pool when the second runner pool exists (#6026)"

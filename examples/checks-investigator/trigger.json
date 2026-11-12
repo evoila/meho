@@ -1,0 +1,12 @@
+{
+  "_comment": "The event trigger of the checks investigator. It starts the agent for each cause group of a worsening Dashboard change that is not known noise. Replace the agent_definition_id with the id that `meho agent show checks-investigator --json` prints. Remove the known_noise line if you also want to see known noise.",
+  "kind": "event",
+  "agent_definition_id": "00000000-0000-0000-0000-000000000000",
+  "event_filter": {
+    "event": "check.dashboard.changed",
+    "worsening": true,
+    "known_noise": false
+  },
+  "identity_sub": "agent:checks-investigator",
+  "in_flight_policy": "fail_into_audit"
+}

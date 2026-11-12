@@ -209,7 +209,7 @@ class CoreInstallTests(InstallTestCase):
         self.assert_succeeds(self.machine.run())
 
         cli = self.machine.host_path(CLI_PATH)
-        self.assertEqual("fake meho CLI\n", cli.read_text())
+        self.assertEqual((self.machine.download / "bin" / "meho").read_text(), cli.read_text())
         self.assertEqual(0o755, mode(cli))
 
     def test_the_install_record(self) -> None:
@@ -246,7 +246,8 @@ class CoreInstallTests(InstallTestCase):
             "Console:               https://meho.example.com/ui/",
             f"First-login passwords: {FIRST_LOGIN_FILE} (root only;",
             f"Unseal key:            {UNSEAL_KEY_FILE} (root only;",
-            "First-start list:      not in this version yet.",
+            "Console CA:            /var/lib/meho/console-ca.crt (not secret;",
+            "First-start list:      green",
         ):
             with self.subTest(line=line):
                 self.assertIn(line, result.stdout)

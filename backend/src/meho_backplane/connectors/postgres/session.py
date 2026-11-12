@@ -234,4 +234,4 @@ async def connect_read_only(
     async def _open(address: str) -> asyncpg.Connection:
         return await asyncpg.connect(host=address, **connect_kwargs)
 
-    return await connect_checked(target.host, _open)
+    return await connect_checked(target.host, _open, port=target.port)

@@ -47,6 +47,7 @@ from meho_backplane.targets.ssrf_guard import (
     TARGET_SSRF_ALLOWLIST_ENV,
     TargetDestinationBlockedError,
     _dialed_host,
+    _effective_port,
     is_allowlisted,
     screen_and_resolve,
 )
@@ -86,7 +87,7 @@ def _unresolved(host: str) -> list[str] | None:
     )
 
 
-def screen_dial_addresses(host: str) -> list[str] | None:
+def screen_dial_addresses(host: str, port: int | None = None) -> list[str] | None:
     """Check *host* at connect time and return the addresses to dial.
 
     Returns the checked IP addresses, in resolver order. Returns ``None``
@@ -95,28 +96,32 @@ def screen_dial_addresses(host: str) -> list[str] | None:
     host is, or resolves to, a blocked address, and
     :class:`DialHostUnresolvedError` when the name does not resolve (or the
     host is empty).
+
+    *port* is the port the caller will dial, when it knows it; an allowlist
+    entry written with a port matches only that port.
     """
-    addresses = screen_and_resolve(host)
+    addresses = screen_and_resolve(host, port)
     if addresses:
         return addresses
     candidate = host.strip()
-    if candidate and is_allowlisted(_dialed_host(candidate)):
+    if candidate and is_allowlisted(_dialed_host(candidate), _effective_port(candidate, port)):
         return None
     return _unresolved(host)
 
 
-async def screen_dial_addresses_async(host: str) -> list[str] | None:
+async def screen_dial_addresses_async(host: str, port: int | None = None) -> list[str] | None:
     """Run :func:`screen_dial_addresses` in a worker thread.
 
     The DNS lookup blocks, so it must not run on the event loop.
     """
-    return await asyncio.to_thread(screen_dial_addresses, host)
+    return await asyncio.to_thread(screen_dial_addresses, host, port)
 
 
 async def connect_checked[T](
     host: str,
     connect: Callable[[str], Awaitable[T]],
     *,
+    port: int | None = None,
     retry_on: tuple[type[BaseException], ...] = (OSError,),
 ) -> T:
     """Check *host*, then call *connect* with one checked address at a time.
@@ -132,7 +137,7 @@ async def connect_checked[T](
     host name listed verbatim on the allowlist is handed to *connect* as
     written, once.
     """
-    addresses = await screen_dial_addresses_async(host)
+    addresses = await screen_dial_addresses_async(host, port)
     if addresses is None:
         return await connect(host)
     last_exc: BaseException | None = None

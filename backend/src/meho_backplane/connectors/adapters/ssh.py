@@ -406,7 +406,7 @@ async def _dial(target: Target, auth_kwargs: dict[str, Any]) -> asyncssh.SSHClie
             **alias_kwargs,
         )
 
-    return await connect_checked(target.host, _open)
+    return await connect_checked(target.host, _open, port=target.port)
 
 
 class SshConnector(Connector):

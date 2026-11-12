@@ -82,6 +82,7 @@ unpinned target's key is unchanged in its pin slot from the #1781 shape.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import os
 import ssl
@@ -259,7 +260,22 @@ def _ca_pin_digest(ca_pem: str | None) -> str:
     return hashlib.sha256(ca_pem.encode("utf-8")).hexdigest()[:16]
 
 
-def _pin_target_addresses(host: str) -> list[str] | None:
+def _target_dial_port(target: Target) -> int | None:
+    """The port the transport dials for *target*, or ``None`` when it cannot tell.
+
+    The target's own port, else the default of its scheme. A scheme the
+    transport would refuse later gives ``None``, so the guard screens the
+    host as before and the usual error comes from ``_base_url``.
+    """
+    if target.port:
+        return int(target.port)
+    try:
+        return _DEFAULT_PORTS[_effective_scheme(target)]
+    except (KeyError, ValueError):
+        return None
+
+
+def _pin_target_addresses(host: str, port: int | None = None) -> list[str] | None:
     """Connect-time screen for the pinned transport, in ``SsrfBlockedError`` terms.
 
     Wraps :func:`~meho_backplane.connectors._shared.dial_guard.screen_dial_addresses`
@@ -276,7 +292,7 @@ def _pin_target_addresses(host: str) -> list[str] | None:
     the pre-check's rejection is: the verdict is deterministic policy.
     """
     try:
-        return screen_dial_addresses(host)
+        return screen_dial_addresses(host, port)
     except TargetDestinationBlockedError as exc:
         raise SsrfBlockedError(str(exc)) from exc
 
@@ -747,7 +763,7 @@ class HttpConnector(Connector):
         # lookup so a previously-pooled client for a now-rebinding
         # hostname is refused too.
         try:
-            await assert_public_destination_async(str(target.host))
+            await assert_public_destination_async(str(target.host), _target_dial_port(target))
         except TargetDestinationBlockedError as exc:
             raise SsrfBlockedError(str(exc)) from exc
         cache_key = self._client_cache_key(target)
@@ -819,7 +835,10 @@ class HttpConnector(Connector):
         # blocked answer surfaces as ``SsrfBlockedError`` via
         # ``_pin_target_addresses``, reaching the dispatcher's
         # ``ConnectError`` arm and staying out of the retry policy.
-        transport = build_pinned_async_transport(_pin_target_addresses, verify=verify_arg)
+        transport = build_pinned_async_transport(
+            functools.partial(_pin_target_addresses, port=_target_dial_port(target)),
+            verify=verify_arg,
+        )
         client_class = self._client_class or _SameOriginRedirectClient
         return client_class(
             base_url=self._base_url(target),
@@ -846,7 +865,7 @@ class HttpConnector(Connector):
         must not share the pooled client's cookie jar (evoila/meho#3890).
         """
         try:
-            await assert_public_destination_async(str(target.host))
+            await assert_public_destination_async(str(target.host), _target_dial_port(target))
         except TargetDestinationBlockedError as exc:
             raise SsrfBlockedError(str(exc)) from exc
         return self._build_http_client(target)

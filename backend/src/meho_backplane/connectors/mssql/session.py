@@ -316,7 +316,7 @@ async def _connect(
             query_timeout=query_timeout,
         )
 
-    return await connect_checked(target.host, _open)
+    return await connect_checked(target.host, _open, port=target.port)
 
 
 def _blocking_fetch(conn: pytds.Connection, sql: str, params: Any) -> list[dict[str, Any]]:

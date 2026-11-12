@@ -33,8 +33,12 @@ off-switch.
 - `meho_backplane/targets/ssrf_guard.py` — the shared guard module:
   - `TARGET_SSRF_ALLOWLIST_ENV` = `MEHO_TARGET_SSRF_ALLOWLIST`.
     Comma-separated CIDR ranges (`10.0.0.0/8`), bare IPs, and/or
-    hostname literals (`vcenter.lab.internal`). Read per call (no
-    process cache). A malformed CIDR raises a loud `ValueError` —
+    hostname literals (`vcenter.lab.internal`). A hostname or IP entry
+    may end in a port (`vcenter.lab.internal:8443`, `192.168.7.10:8443`,
+    `[fd00::5]:8443`): it admits that destination on that port only,
+    while a plain entry admits every port. A CIDR range takes no port.
+    A port that is not 1 to 65535 raises a loud `ValueError`. Read per
+    call (no process cache). A malformed CIDR raises a loud `ValueError` —
     silently dropping an entry would re-block a destination the
     operator explicitly opted in.
   - `TargetDestinationBlockedError(ValueError)` — raised on rejection.
@@ -42,6 +46,14 @@ off-switch.
   - `assert_public_destination(host)` / `assert_public_destination_async(host)`
     — sync (schema-validator) and async (dispatch pre-check hot path, via
     `asyncio.to_thread`) entry points; screen and discard.
+  - Port checks — `assert_public_destination`, `screen_and_resolve`,
+    `screen_dial_addresses` and `connect_checked` take an optional
+    `port`. A port embedded in the stored host wins over it. The HTTP
+    dial path passes the target port (or the scheme default); the
+    Postgres, MSSQL, MongoDB and SSH paths pass `target.port`. An entry
+    with a port never matches while the port is unknown, so the guard
+    stays closed. The pinning transport binds the port per client
+    (`functools.partial`), so its resolver signature is unchanged.
   - `screen_and_resolve(host)` — the connect-time arm the pinning
     transport consumes: it shares `_screen` with
     `assert_public_destination` (same allowlist, same block predicate,
@@ -50,7 +62,8 @@ off-switch.
     literal / unresolvable name).
   - `is_allowlisted(host)` — true when the host is an exact entry on the
     allowlist: a hostname listed verbatim, or an IP literal listed as a
-    single address (bare IP, `/32`, or `/128`). An IP that only falls
+    single address (bare IP, `/32`, or `/128`), or as `host:port` when the
+    caller gives that port. An IP that only falls
     inside a wider listed range does not count. No DNS lookup. The corpus client uses it to allow
     plain `http` for a trusted in-cluster corpus host (#3573); it grants
     nothing on the target dial path.

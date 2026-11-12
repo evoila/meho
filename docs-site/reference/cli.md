@@ -4157,6 +4157,76 @@ meho pfsense version [flags]
 - `--json` — emit the full OperationResult envelope as JSON instead of the human render
 - `--target` — target slug to dispatch against (required)
 
+## `meho policy`
+
+Manage the policy file (validate / diff / import / export / history)
+
+```
+meho policy
+```
+
+### `meho policy diff`
+
+Show what importing a policy file would change (dry run)
+
+```
+meho policy diff FILE [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
+### `meho policy export`
+
+Write the stored policy as a policy file
+
+```
+meho policy export [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--output`, `-o` — write the file here instead of stdout
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
+### `meho policy history`
+
+List the imported policy files, newest first
+
+```
+meho policy history [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--limit` — how many entries to show (1 to 20)
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
+### `meho policy import`
+
+Ask to import a policy file; a second admin must approve it
+
+```
+meho policy import FILE [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
+### `meho policy validate`
+
+Check a policy file and list every mistake
+
+```
+meho policy validate FILE [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
 ## `meho promote`
 
 Promote one memory to a strictly broader scope (POST /api/v1/memory/{scope}/{slug}/promote)

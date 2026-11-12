@@ -20,7 +20,8 @@
 
 Only a person may call these routes. Errors: ``404 session_not_found``
 (also for another tenant's session), ``409 session_conflict`` /
-``session_owned_by_another_person`` / ``session_upload_in_progress``,
+``session_owned_by_another_person`` / ``session_upload_in_progress`` /
+``session_is_a_hosted_run`` (the session id is a hosted agent run's),
 ``413 session_archive_too_large``, ``422 archive_*``, ``429
 session_upload_already_running`` / ``session_uploads_busy``, ``503
 session_store_not_configured``, ``502 session_store_unavailable``. See

@@ -150,7 +150,6 @@ def _request(work: Path, name: str, subject: str) -> None:
     _openssl(work, "req", "-new", *key, "-subj", subject, "-out", f"{name}.csr")
 
 
-@functools.cache
 def console_certificate(
     host: str = HOSTNAME,
     *,
@@ -158,6 +157,7 @@ def console_certificate(
     end: int = 365,
     ca: str = "MEHO install CA",
     intermediate_end: int | None = None,
+    usage: str = "serverAuth",
 ) -> tuple[str, str]:
     """(tls.crt, ca.crt) of a test certificate for the host, signed by a test
     CA with the given name, valid from NOW + start to NOW + end days. The
@@ -167,7 +167,27 @@ def console_certificate(
     certificate usually has: the CA is the root, it signs an intermediate CA
     that is valid until NOW + intermediate_end days, and the intermediate
     signs the server certificate. tls.crt is then the server certificate and
-    the intermediate; ca.crt is the root."""
+    the intermediate; ca.crt is the root. usage is the extended key usage
+    of the server certificate, for example clientAuth for one that is only
+    for client logins."""
+    chain, ca_pem, _ = certificate_with_key(
+        host, start=start, end=end, ca=ca, intermediate_end=intermediate_end, usage=usage
+    )
+    return chain, ca_pem
+
+
+@functools.cache
+def certificate_with_key(
+    host: str = HOSTNAME,
+    *,
+    start: int = -30,
+    end: int = 365,
+    ca: str = "MEHO install CA",
+    intermediate_end: int | None = None,
+    usage: str = "serverAuth",
+) -> tuple[str, str, str]:
+    """The certificate of console_certificate, and the private key of the
+    server certificate (PEM, PKCS#8, no pass phrase)."""
     with tempfile.TemporaryDirectory(prefix="meho-host-cert-") as folder:
         work = Path(folder)
         (work / "ca.cnf").write_text(_CA_CONFIG)
@@ -203,7 +223,7 @@ def console_certificate(
             issuer = "intermediate"
         (work / "leaf.ext").write_text(
             "basicConstraints = critical,CA:false\nkeyUsage = critical,digitalSignature\n"
-            f"extendedKeyUsage = serverAuth\nsubjectAltName = DNS:{host}\n"
+            f"extendedKeyUsage = {usage}\nsubjectAltName = DNS:{host}\n"
         )
         _request(work, "leaf", f"/CN={host}")
         leaf_pem = _sign(
@@ -219,7 +239,8 @@ def console_certificate(
             "-extfile",
             "leaf.ext",
         )
-    return leaf_pem + chain_tail, ca_pem
+        leaf_key = (work / "leaf.key").read_text()
+    return leaf_pem + chain_tail, ca_pem, leaf_key
 
 
 def expires(days: int) -> str:
@@ -552,11 +573,8 @@ class FakeHost:
         """Every stub call so far, one line each: the command and its arguments."""
         return (self.fake / "calls.log").read_text()
 
-    def run(
-        self, *args: str, stdin: str = "", ssh_client: str | None = None
-    ) -> subprocess.CompletedProcess[str]:
-        """Run meho-host with the arguments. stdin holds the answers to its
-        questions; ssh_client is the SSH_CLIENT value of an SSH session."""
+    def environment(self, ssh_client: str | None = None) -> dict[str, str]:
+        """The environment meho-host runs with on the fake machine."""
         env = {
             "PATH": f"{self.stubs}:{self.tools}",
             "MEHO_TEST_ROOT": str(self.root),
@@ -568,11 +586,18 @@ class FakeHost:
             env["SSH_CLIENT"] = ssh_client
         if self.trust_folder is not None:
             env["SSL_CERT_DIR"] = str(self.trust_folder)
+        return env
+
+    def run(
+        self, *args: str, stdin: str = "", ssh_client: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """Run meho-host with the arguments. stdin holds the answers to its
+        questions; ssh_client is the SSH_CLIENT value of an SSH session."""
         return subprocess.run(
             [str(MEHO_HOST), *args],
             capture_output=True,
             text=True,
-            env=env,
+            env=self.environment(ssh_client),
             input=stdin,
             check=False,
             timeout=60,

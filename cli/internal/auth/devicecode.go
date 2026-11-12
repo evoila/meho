@@ -335,6 +335,14 @@ var (
 	lastCheckMargin = 2 * time.Second
 )
 
+// pollNow and pollSleep are the clock and the wait of the polling
+// loop. Tests replace them with a clock they control, so no test has
+// to wait in real time.
+var (
+	pollNow   = time.Now
+	pollSleep = sleepCtx
+)
+
 // errDeviceCodeExpired is returned when the code's lifetime ran out
 // before the IdP approved it — either because the IdP said so
 // (expired_token) or because our own last check before the end was
@@ -387,11 +395,11 @@ func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, cli
 
 	first := true
 	for {
-		delay, last, ok := nextCheck(time.Now(), wait, first, da.Expiry)
+		delay, last, ok := nextCheck(pollNow(), wait, first, da.Expiry)
 		if !ok {
 			return nil, errDeviceCodeExpired
 		}
-		if err := sleepCtx(pollCtx, delay); err != nil {
+		if err := pollSleep(pollCtx, delay); err != nil {
 			if codeEnded() {
 				return nil, errDeviceCodeExpired
 			}

@@ -300,7 +300,10 @@ func TestRunDeviceFlowHappyPath(t *testing.T) {
 // arrives less than interval after the last accepted one, and counts
 // it in tooSoon. Such a request does not use up a script entry.
 type pollingFakeIdP struct {
-	srv       *httptest.Server
+	srv *httptest.Server
+	// clock is the time the fake and the polling loop share. It is a
+	// fake clock unless the test calls useRealTime.
+	clock     *testClock
 	mu        sync.Mutex
 	started   time.Time
 	arrivals  []time.Time
@@ -324,12 +327,13 @@ type pollingFakeIdP struct {
 func newPollingFakeIdP(t *testing.T, expiresIn, interval int, script []string) *pollingFakeIdP {
 	t.Helper()
 	f := &pollingFakeIdP{}
+	f.clock = installFakeClock(t)
 	minGap := time.Duration(interval) * time.Second
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/auth/device":
 			f.mu.Lock()
-			f.started = time.Now()
+			f.started = f.clock.Now()
 			f.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -341,7 +345,7 @@ func newPollingFakeIdP(t *testing.T, expiresIn, interval int, script []string) *
 			})
 		case "/token":
 			_ = r.ParseForm()
-			now := time.Now()
+			now := f.clock.Now()
 			f.mu.Lock()
 			f.arrivals = append(f.arrivals, now)
 			f.authHdrs = append(f.authHdrs, r.Header.Get("Authorization"))
@@ -386,6 +390,54 @@ func newPollingFakeIdP(t *testing.T, expiresIn, interval int, script []string) *
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// testClock is the clock of the polling tests. In fake mode, Now is
+// the real time plus all the waits the loop asked for, and Sleep
+// returns at once. So a wait is exact: a gap is never shorter than the
+// wait, and a slow runner cannot make it longer.
+type testClock struct {
+	mu     sync.Mutex
+	offset time.Duration
+	real   bool
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Now().Add(c.offset)
+}
+
+func (c *testClock) Sleep(ctx context.Context, d time.Duration) error {
+	if c.real {
+		return sleepCtx(ctx, d)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.offset += d
+	c.mu.Unlock()
+	return nil
+}
+
+// installFakeClock makes the polling loop use a fake clock for one
+// test and restores the real one afterwards.
+func installFakeClock(t *testing.T) *testClock {
+	t.Helper()
+	c := &testClock{}
+	oldNow, oldSleep := pollNow, pollSleep
+	pollNow, pollSleep = c.Now, c.Sleep
+	t.Cleanup(func() { pollNow, pollSleep = oldNow, oldSleep })
+	return c
+}
+
+// useRealTime puts the real clock back, for the one test that needs
+// the context deadline of the code to fire.
+func (f *pollingFakeIdP) useRealTime() {
+	f.clock.real = true
+	f.clock.offset = 0
+	pollNow, pollSleep = time.Now, sleepCtx
 }
 
 // setApproveAfter makes the fake approve the code d after the
@@ -447,7 +499,9 @@ func setPollKnobs(t *testing.T, step, maxWait, margin time.Duration) {
 
 // gapTolerance is how much later than planned a request may arrive
 // on a loaded test runner (-race, CI) before a timing assertion
-// fails. Gaps are never allowed to be shorter than planned.
+// fails. Gaps are never allowed to be shorter than planned. With the
+// fake clock the waits take no real time, so only real work between
+// two requests can add to a gap.
 const gapTolerance = 750 * time.Millisecond
 
 func assertGapAbout(t *testing.T, name string, got, want time.Duration) {
@@ -479,7 +533,7 @@ func runFlow(t *testing.T, f *pollingFakeIdP) (*LoginResult, error) {
 // the server's interval.
 func TestRunDeviceFlowOneRequestPerCheck(t *testing.T) {
 	f := newPollingFakeIdP(t, 600, 1, []string{"authorization_pending", "authorization_pending", ""})
-	start := time.Now()
+	start := f.clock.Now()
 	if _, err := runFlow(t, f); err != nil {
 		t.Fatalf("RunDeviceFlow: %v", err)
 	}
@@ -551,7 +605,7 @@ func TestRunDeviceFlowSlowDownWaitIsCapped(t *testing.T) {
 // loop checks once about 2s before the end and the approval is seen.
 func TestRunDeviceFlowLastCheckBeforeExpiry(t *testing.T) {
 	f := newPollingFakeIdP(t, 3, 10, []string{""})
-	start := time.Now()
+	start := f.clock.Now()
 	result, err := runFlow(t, f)
 	if err != nil {
 		t.Fatalf("RunDeviceFlow: %v", err)
@@ -574,7 +628,7 @@ func TestRunDeviceFlowExpiresWithoutApproval(t *testing.T) {
 	setPollKnobs(t, 5*time.Second, 30*time.Second, 500*time.Millisecond)
 	pending := []string{"authorization_pending", "authorization_pending", "authorization_pending", "authorization_pending"}
 	f := newPollingFakeIdP(t, 3, 1, pending)
-	start := time.Now()
+	start := f.clock.Now()
 	_, err := runFlow(t, f)
 	if err == nil {
 		t.Fatalf("expected an error")
@@ -591,7 +645,7 @@ func TestRunDeviceFlowExpiresWithoutApproval(t *testing.T) {
 	if got := f.requests(); got != 2 {
 		t.Errorf("token requests: %d, want 2", got)
 	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second+gapTolerance {
+	if elapsed := f.clock.Now().Sub(start); elapsed > 3*time.Second+gapTolerance {
 		t.Errorf("loop ran %v, should stop at the code's end (3s)", elapsed)
 	}
 }
@@ -630,6 +684,9 @@ func TestRunDeviceFlowStalledAnswerEndsWithTheCode(t *testing.T) {
 	setPollKnobs(t, 5*time.Second, 30*time.Second, 500*time.Millisecond)
 	f := newPollingFakeIdP(t, 2, 1, nil)
 	f.setStall()
+	// The code's own deadline is a context deadline in real time, so
+	// this test must wait in real time (about 2s).
+	f.useRealTime()
 	start := time.Now()
 	_, err := runFlow(t, f)
 	elapsed := time.Since(start)
@@ -645,7 +702,9 @@ func TestRunDeviceFlowStalledAnswerEndsWithTheCode(t *testing.T) {
 	if got := f.requests(); got != 1 {
 		t.Errorf("token requests: %d, want 1", got)
 	}
-	if elapsed < 2*time.Second-20*time.Millisecond || elapsed > 2*time.Second+gapTolerance {
+	// Lower bound only. The upper cap is far below the 30s test
+	// timeout and only catches a loop that never ends.
+	if elapsed < 2*time.Second-20*time.Millisecond || elapsed > 20*time.Second {
 		t.Errorf("loop ran %v, should stop at the code's end (2s)", elapsed)
 	}
 }

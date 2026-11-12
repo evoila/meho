@@ -125,6 +125,7 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "agent_grant_name",
+    "agent_no_grant_already_logged",
     "agent_no_grant_log_scope",
     "resolve_verdict",
 ]
@@ -377,6 +378,26 @@ def agent_no_grant_log_scope(*, new: bool = False) -> Iterator[None]:
         _no_grant_logged.reset(token)
 
 
+#: True inside :func:`agent_no_grant_already_logged`.
+_no_grant_log_muted: ContextVar[bool] = ContextVar("_no_grant_log_muted", default=False)
+
+
+@contextmanager
+def agent_no_grant_already_logged() -> Iterator[None]:
+    """Count the ``agent_no_grant_would_deny`` lines of this block as written.
+
+    A check inside this block writes no line, but it marks its agent,
+    operation and target as logged in the open call. An approved call
+    that resumes uses it: its lines were written when the call was made
+    (#6314), so a step check of the resumed call writes them no second time.
+    """
+    token = _no_grant_log_muted.set(True)
+    try:
+        yield
+    finally:
+        _no_grant_log_muted.reset(token)
+
+
 def _log_would_deny(
     *, operator: Operator, agent: str, op_id: str, target_str: str | None, safety_level: str
 ) -> None:
@@ -387,6 +408,8 @@ def _log_would_deny(
         if key in logged:
             return
         logged.add(key)
+    if _no_grant_log_muted.get():
+        return
     _log.info(
         "agent_no_grant_would_deny",
         agent=agent,

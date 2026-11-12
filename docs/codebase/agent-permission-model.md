@@ -306,13 +306,34 @@ claim for audit parent-linkage (#3446), is never matched against this table).
      the call's arguments.
    - **A resumed call is checked again.** A call that waited for approval
      can run much later, and an admin may have changed a grant in
-     between. When the agent's own run resumes the approved call, the
-     dispatcher runs the same step check again before the first step. A
-     refusal writes a `denied` audit row like the first check, and the
-     approval request ends as a failed run with the reason. When a
-     reviewer runs the approved call from an approvals surface, the steps
-     are checked for the reviewer, so the agent's grants do not apply
-     there.
+     between. With the switch `on`, the dispatcher runs the same step
+     check again before the first step, for the agent that asked, on
+     every path that runs the approved call (#6314,
+     `operations/approved_step_check.py`):
+     - the agent's own run resumes it (the waiter of a hosted agent run,
+       or a re-run by the agent login): the check runs for the caller;
+     - a person runs it from an approvals surface (console, CLI, REST
+       `/approve` and `/decide`): the check runs for the requester of
+       the request, which the resume binds
+       (`secondary_target_policy.bind_approved_requester`). An agent
+       login over MCP has no waiter, so this is its only path. For a
+       hosted agent run, the waiter and the approvals surface race for
+       the call; both give the same answer.
+
+     To rebuild the agent there, the park stores a requester record on
+     the approval card (`permission_preflight.requester`: sub, kind,
+     client id, role, actor) when an agent asks and the switch is not
+     `off`. A card with no record (made while the switch was `off`)
+     cannot be checked. When the operation has steps to check, the run
+     is refused with `policy_denied` and the agent must ask again. A
+     call with no steps to check runs as before. A refusal writes one `denied` audit row, the
+     approval request ends as a failed run with the reason, and the
+     person who runs it sees the reason in the answer. People and
+     service logins that asked are not checked again. With `observe`
+     nothing is refused again: the "would deny" lines were logged when
+     the call was made. At resume the dispatcher only marks them as
+     written (`agent_no_grant_already_logged`), so the step gate of the
+     resumed call does not log them a second time, whoever runs it.
 
    A composite that checks a step that is not on its declared list
    (`enforce_subop_policy`) logs one `composite_step_not_declared`

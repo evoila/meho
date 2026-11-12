@@ -96,7 +96,7 @@ type AuthedClientOptions struct {
 // Returns an error satisfying IsTokenNotFound when the operator
 // hasn't run `meho login`; callers errors.Is against it to surface
 // a `meho login <url>` hint via output.AuthExpired.
-func NewAuthedClient(_ context.Context, backplaneURL string, opts AuthedClientOptions) (*AuthedClient, error) {
+func NewAuthedClient(ctx context.Context, backplaneURL string, opts AuthedClientOptions) (*AuthedClient, error) {
 	store := opts.Store
 	if store == nil {
 		s, err := auth.NewTokenStore()
@@ -105,7 +105,7 @@ func NewAuthedClient(_ context.Context, backplaneURL string, opts AuthedClientOp
 		}
 		store = s
 	}
-	service, user := auth.KeyForBackplane(backplaneURL)
+	service, user := auth.KeyForContext(ctx, backplaneURL)
 	tok, err := store.Load(service, user)
 	if err != nil {
 		return nil, err

@@ -14,7 +14,10 @@ has.
 
 How a call runs:
 
-1. Read ``GET .../users/{id}/credentials``.
+1. Read ``GET .../users/{id}/credentials``. In the approved run of a
+   request, the matches must be the credentials the approval card lists
+   under ``will_remove``. When they differ, nothing is deleted
+   (:class:`KeycloakCredentialsChangedError`).
 2. ``DELETE .../users/{id}/credentials/{credentialId}`` for each match.
    When a delete fails after some ran, the error says which credentials are
    already removed.
@@ -51,7 +54,9 @@ from meho_backplane.connectors.keycloak.ops_write_account_common import (
     raise_user_not_found_on_404,
     resolve_user,
 )
+from meho_backplane.connectors.keycloak.ops_write_grant import CREDENTIALS_CHANGED
 from meho_backplane.connectors.keycloak.session import quote_segment
+from meho_backplane.operations._preview import approved_preview
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -62,7 +67,9 @@ __all__ = [
     "CREDENTIAL_FIELDS",
     "KeycloakCredentialDeleteError",
     "KeycloakCredentialNotFoundError",
+    "KeycloakCredentialsChangedError",
     "allowed_credential",
+    "check_approved_matches",
     "keycloak_user_credential_delete",
     "match_credentials",
     "read_credentials",
@@ -78,6 +85,10 @@ class KeycloakCredentialNotFoundError(Exception):
 
 class KeycloakCredentialDeleteError(Exception):
     """A delete failed after others of the same call had run."""
+
+
+class KeycloakCredentialsChangedError(Exception):
+    """The approved run matches other credentials than the approval card lists."""
 
 
 def allowed_credential(row: Any) -> dict[str, Any]:
@@ -139,6 +150,24 @@ def match_credentials(
     return found
 
 
+def check_approved_matches(matches: list[dict[str, Any]], *, op_id: str) -> None:
+    """Refuse an approved run whose matches are not the credentials on the card.
+
+    The card is the one the approver saw (:func:`approved_preview`), not the
+    params of the call. On an ordinary run there is no card and nothing to
+    compare. A card without a readable ``will_remove`` list is refused too.
+    """
+    card = approved_preview(op_id)
+    if card is None:
+        return
+    rows = card.get("will_remove")
+    approved = (
+        {row.get("id") for row in rows if isinstance(row, dict)} if isinstance(rows, list) else None
+    )
+    if approved != {entry["id"] for entry in matches}:
+        raise KeycloakCredentialsChangedError(CREDENTIALS_CHANGED)
+
+
 async def keycloak_user_credential_delete(
     self: KeycloakConnector,
     operator: Operator,
@@ -158,6 +187,7 @@ async def keycloak_user_credential_delete(
         raise_user_not_found_on_404(exc, op_id=op_id, user_id=uuid, realm=realm)
         raise
     matches = match_credentials(current, params, op_id=op_id)
+    check_approved_matches(matches, op_id=op_id)
     removed: list[dict[str, Any]] = []
     for entry in matches:
         path = fill_path(

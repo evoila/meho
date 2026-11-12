@@ -1093,7 +1093,9 @@ same check refuses the run:
 - for an operation registered with `bound_ids` (a card key and a refusal),
   when the live card lists other ids under that key than the saved card.
   `keycloak.user.credential.delete` uses it for `will_remove`, so the run
-  removes only the credentials the approver saw.
+  removes only the credentials the approver saw. This check runs before the
+  handler reads the system again, so the handler also compares its own
+  read with the approved card (`approved_preview`) before it deletes.
 
 ## The rights-change mark: another admin must approve
 

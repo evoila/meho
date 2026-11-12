@@ -704,7 +704,12 @@ their risk level apply, and only the person the change is for is refused.
   runs, MEHO builds the card again, and when `will_remove` lists other ids
   (for example a new one-time code of the same type), the run is refused
   with "the credentials changed since the request; send a new request" and
-  nothing is deleted (`bound_ids` in `operations/grant_approval.py`).
+  nothing is deleted (`bound_ids` in `operations/grant_approval.py`). The
+  handler checks again with its own read: in the approved run it compares
+  the credentials it matched with the ids on the card the approver saw
+  (`approved_preview`, not the call params). When they differ, it deletes
+  nothing (`KeycloakCredentialsChangedError`). So a credential added
+  between the check and the delete is never removed.
   A test with recorded `secretData` and `credentialData` checks the result,
   the approval rows and the audit rows
   (`tests/test_connectors_keycloak_account_writes.py`).

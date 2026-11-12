@@ -1156,6 +1156,69 @@ async def test_a_credential_delete_does_not_run_when_the_credentials_changed(
     assert not delete.called
 
 
+async def _approve_and_resume_credential_delete(
+    credential_reads: list[list[dict[str, Any]]],
+) -> tuple[Any, respx.Route, respx.Route]:
+    """Park a delete by type, approve it, run it; Keycloak answers *credential_reads* in order."""
+    approver = _operator("kc-account-approver").model_copy(
+        update={"tenant_role": TenantRole.TENANT_ADMIN}
+    )
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        _mount_user_lookup(mock)
+        mock.get(_CREDENTIALS_PATH).mock(
+            side_effect=[httpx.Response(200, json=rows) for rows in credential_reads]
+        )
+        otp = mock.delete(url__regex=r".*/credentials/cred-otp-(1|2)$").respond(204)
+        other = mock.delete(url__regex=r".*/credentials/cred-(pw|key|otp-3)$").respond(204)
+        call = await call_operation(
+            _operator(),
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": "keycloak.user.credential.delete",
+                "target": _TARGET_NAME,
+                "params": {"username": "jane.example", "credential_type": "otp"},
+            },
+        )
+        assert call["status"] == "awaiting_approval", call
+        request_id = uuid.UUID(call["extras"]["approval_request_id"])
+        await _approve_as(request_id, approver)
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, request_id)
+            assert row is not None
+            resumed = await resume_dispatch_after_approval(
+                operator=approver, request=row, params=None
+            )
+    return resumed, otp, other
+
+
+async def test_an_approved_credential_delete_removes_the_credentials_on_the_card(
+    kc: KeycloakConnector,
+) -> None:
+    kept = [c for c in _CREDENTIALS if c["type"] != "otp"]
+    # Reads: the card, the check before the run, the handler, the read back.
+    resumed, otp, other = await _approve_and_resume_credential_delete(
+        [_CREDENTIALS, _CREDENTIALS, _CREDENTIALS, kept]
+    )
+    assert resumed.status == "ok", resumed
+    assert otp.call_count == 2
+    assert not other.called
+
+
+async def test_an_approved_credential_delete_stops_when_the_list_changes_after_the_check(
+    kc: KeycloakConnector,
+) -> None:
+    """A new credential appears between the check before the run and the handler's own read."""
+    new_otp = {**_CREDENTIALS[1], "id": "cred-otp-3", "userLabel": "New phone"}
+    resumed, otp, other = await _approve_and_resume_credential_delete(
+        [_CREDENTIALS, _CREDENTIALS, [*_CREDENTIALS, new_otp]]
+    )
+    assert resumed.status != "ok", resumed
+    assert "KeycloakCredentialsChangedError" in str(resumed)
+    assert not otp.called
+    assert not other.called
+
+
 # ---------------------------------------------------------------------------
 # A realm that is not MEHO's own sign-in realm
 # ---------------------------------------------------------------------------

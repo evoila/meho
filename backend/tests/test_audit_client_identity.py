@@ -432,6 +432,38 @@ async def test_long_user_agent_is_cut(switch_on: None) -> None:
     assert agent == {"value": "x" * 256, "self_declared": True}
 
 
+@pytest.mark.asyncio
+async def test_user_agent_goes_through_the_client_text_cleaner(switch_on: None) -> None:
+    # The same cleaner as the MCP client name: control and format
+    # characters, line separators and lone surrogates are dropped.
+    request = await _park(_operator(sub="op-requester"))
+    reviewer = _operator(sub="op-reviewer", role=TenantRole.TENANT_ADMIN)
+    async with get_sessionmaker()() as session:
+        await approve_request(
+            session,
+            request.id,
+            operator=reviewer,
+            user_agent="tool\x00/1\u2028.0\x1b[0m\u200b\ud800",
+        )
+        await session.commit()
+
+    agent = (await _decision_payload(request.id))["approver_user_agent"]
+    assert agent == {"value": "tool/1.0[0m", "self_declared": True}
+
+
+@pytest.mark.asyncio
+async def test_user_agent_of_only_unsafe_characters_is_not_stored(switch_on: None) -> None:
+    request = await _park(_operator(sub="op-requester"))
+    reviewer = _operator(sub="op-reviewer", role=TenantRole.TENANT_ADMIN)
+    async with get_sessionmaker()() as session:
+        await approve_request(session, request.id, operator=reviewer, user_agent="\x00\u2029")
+        await session.commit()
+
+    payload = await _decision_payload(request.id)
+    assert "approver_user_agent" not in payload
+    assert payload["approver_channel"] == "token"
+
+
 # ---------------------------------------------------------------------------
 # A REST approve, end to end
 # ---------------------------------------------------------------------------

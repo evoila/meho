@@ -1076,8 +1076,9 @@ versions:
   The CLI and the backplane share release tags, so the backplane's
   version names the CLI release to install.
 - No warning when the comparison makes no sense: a `dev` CLI build, a
-  backplane without `chart_version`, or a main-branch backplane build
-  (date-based `0.1.<YYYYMMDD>-<sha>` chart version).
+  backplane without `chart_version`, or any version that is not a plain
+  `X.Y.Z` release (a release candidate, or a main-branch build such as
+  `0.1.<YYYYMMDD>-<sha>` or `0.1.0-main-<sha>`).
 - The check is best effort. A missing route, a timeout, or a bad body
   prints nothing and never changes the exit code. stdout is not
   touched, so `meho status --json` stays one JSON document.

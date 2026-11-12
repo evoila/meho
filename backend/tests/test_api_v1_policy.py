@@ -559,6 +559,7 @@ async def test_the_preview_denies_what_dispatch_denies(embedding: AsyncMock) -> 
     )
     assert preview["policy_verdict"] == "deny", preview
     assert INSTALL_ASK_NEEDS_PLATFORM_ADMIN in str(preview["policy_reason"])
+    assert "proposed_effect" not in preview, preview
     result = await _dispatch_apply(operator, "install")
     assert result.status == "denied", result
     assert INSTALL_ASK_NEEDS_PLATFORM_ADMIN in str(result.error)

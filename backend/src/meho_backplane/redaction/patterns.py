@@ -56,6 +56,7 @@ from meho_backplane.redaction.bind_secret import BIND_KEY_SECRET
 from meho_backplane.redaction.url_secret import URL_SECRET
 
 __all__ = [
+    "MASK_CHARS",
     "NAMED_PATTERNS",
     "PATTERN_NAMES",
     "SecretFinder",
@@ -180,13 +181,17 @@ _JWT = re.compile(
 # and ``\b`` would see no boundary between ``DB_`` and ``PASSWORD``. A
 # label glued to letters (``mypassword=``) still does not match.
 _NOT_A_PLACEHOLDER: Final[str] = r"(?!\[REDACTED:[^\]\s'\"]+\](?!" + _VALUE_CHARS + "))"
+#: The characters a tool prints in place of a typed password: ``*``, the
+#: bullets ``\u2022`` and ``\u25cf``, and the middle dot ``\u00b7``. A value
+#: made only of them is not a secret. Safe inside a regex ``[...]`` class.
+MASK_CHARS: Final[str] = "*\u2022\u25cf\u00b7"
 # A value made only of mask characters is not a secret either. A tool that
 # reads a password prints just ``*`` for each key, and the label ends the
 # line before it (``Enter SYS user password:`` then ``*****``). The match
 # crosses that line break, so the prompt line was hidden. Only a value
 # that is mask characters to its end is skipped: ``****abc123`` goes on
 # after the masks and is redacted whole.
-_NOT_A_MASK: Final[str] = r"(?![*\u2022\u25cf\u00b7]+(?!" + _VALUE_CHARS + "))"
+_NOT_A_MASK: Final[str] = r"(?![" + MASK_CHARS + "]+(?!" + _VALUE_CHARS + "))"
 _API_KEY = re.compile(
     r"(?<![A-Za-z0-9])(?:"
     r"api[_-]?key"

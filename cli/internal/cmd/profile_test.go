@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -309,67 +310,182 @@ func TestLoginHintUnchangedWhenEnvNamesTheDefault(t *testing.T) {
 	}
 }
 
-// The doctor checks the default login; under MEHO_PROFILE=approver its
-// hint names the default profile.
-func TestDoctorLoginHintNamesTheDefaultProfileUnderMEHOPROFILE(t *testing.T) {
+// The doctor checks the asked profile; under MEHO_PROFILE=approver its
+// login hints name that profile, and under --profile default they say
+// --profile default.
+func TestDoctorLoginHintNamesTheAskedProfile(t *testing.T) {
 	withTempXDG(t)
-	t.Setenv(auth.ProfileEnv, "approver")
-	cmd := &cobra.Command{}
-	cmd.SetContext(context.Background())
+	t.Cleanup(func() { output.SetLoginProfile("") })
 	deps := offlineDeps(t, t.TempDir())
 	deps.stat = func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist }
-	r := runDoctor(cmd, doctorOptions{noNetwork: true}, deps)
-	found := false
-	for _, c := range r.Checks {
-		if strings.Contains(c.Hint, "`meho login") || strings.Contains(c.Detail, "`meho login") {
-			t.Errorf("a doctor hint is a plain login: %+v", c)
+	run := func(flagProfile, env string) *doctorReport {
+		t.Setenv(auth.ProfileEnv, env)
+		cmd := &cobra.Command{}
+		cmd.PersistentFlags().String("profile", "", "")
+		if flagProfile != "" {
+			if err := cmd.PersistentFlags().Set("profile", flagProfile); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if strings.Contains(c.Hint, "meho --profile default login") {
-			found = true
+		cmd.SetContext(context.Background())
+		if err := applyProfile(cmd); err != nil {
+			t.Fatal(err)
 		}
+		return runDoctor(cmd, doctorOptions{noNetwork: true}, deps)
 	}
-	if !found {
-		t.Errorf("want a hint with --profile default; checks: %+v", r.Checks)
+	for _, tc := range []struct{ flag, env, want string }{
+		{env: "approver", want: "meho --profile approver login"},
+		{flag: "default", env: "approver", want: "meho --profile default login"},
+	} {
+		r := run(tc.flag, tc.env)
+		found := false
+		for _, c := range r.Checks {
+			if strings.Contains(c.Hint, "`meho login") || strings.Contains(c.Detail, "`meho login") {
+				t.Errorf("a doctor hint is a plain login: %+v", c)
+			}
+			if strings.Contains(c.Hint, tc.want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("want a hint with %q; checks: %+v", tc.want, r.Checks)
+		}
 	}
 
-	t.Setenv(auth.ProfileEnv, "")
-	r = runDoctor(cmd, doctorOptions{noNetwork: true}, deps)
+	r := run("", "")
 	for _, c := range r.Checks {
 		if strings.Contains(c.Hint, "--profile") {
-			t.Errorf("without MEHO_PROFILE the hint must stay plain: %+v", c)
+			t.Errorf("without a profile the hint must stay plain: %+v", c)
 		}
 	}
 }
 
-// The doctor checks the default profile in both layers, also when
-// MEHO_PROFILE names a profile with no login.
-func TestDoctorChecksTheDefaultProfileUnderMEHOPROFILE(t *testing.T) {
+// doctorBearers wraps h and records the bearer of each request.
+func doctorBearers(h http.Handler, rec *profileBackplane) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "" {
+			rec.mu.Lock()
+			rec.bearers = append(rec.bearers, got)
+			rec.mu.Unlock()
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// runDoctorWithProfile stores a default login and an "approver" login
+// on one backplane, picks the profile the way the root command does,
+// and runs the doctor. It returns the report and the bearers the
+// backplane got.
+func runDoctorWithProfile(t *testing.T, flagProfile, envProfile string) (*doctorReport, []string) {
+	t.Helper()
 	xdg := withTempXDG(t)
 	stub := &mcpStub{liveStatus: 200, tools: []string{"meho_status", "call_operation"}, listed: []string{"call_operation", "meho_status"}, scopes: []string{"mcp:read", "openid"}}
-	srv := httptest.NewServer(stub.handler(t))
+	rec := &profileBackplane{}
+	srv := httptest.NewServer(doctorBearers(stub.handler(t), rec))
 	t.Cleanup(srv.Close)
-	seedCreds(t, xdg, srv.URL, auth.StoredToken{BackplaneURL: srv.URL, AccessToken: jwtMarker, Expiry: time.Now().Add(time.Hour)})
-
-	t.Setenv(auth.ProfileEnv, "approver")
-	t.Cleanup(func() { output.SetLoginProfile("") })
-	cmd := &cobra.Command{}
-	cmd.SetContext(context.Background())
-	if err := applyProfile(cmd); err != nil {
+	seedCreds(t, xdg, srv.URL, auth.StoredToken{BackplaneURL: srv.URL, AccessToken: "tok-default", Expiry: time.Now().Add(time.Hour)})
+	store, err := auth.NewFileStore()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := auth.ProfileFrom(cmd.Context()); got != "approver" {
-		t.Fatalf("profile = %q; want approver", got)
+	svc, user := auth.KeyForProfile(srv.URL, "approver")
+	if err := store.Save(svc, user, auth.StoredToken{BackplaneURL: srv.URL, AccessToken: "tok-approver", Expiry: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
 	}
 
-	deps := onlineDeps(t)
-	deps.stat = func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist }
-	r := runDoctor(cmd, doctorOptions{backplaneOverride: srv.URL}, deps)
-	for _, c := range r.Checks {
-		if c.Class == classNotLoggedIn || strings.Contains(c.Detail, "no stored login") {
-			t.Errorf("the doctor used the approver profile in a check: %+v", c)
+	t.Setenv(auth.ProfileEnv, envProfile)
+	t.Cleanup(func() { output.SetLoginProfile("") })
+	root := &cobra.Command{}
+	root.PersistentFlags().String("profile", "", "")
+	if flagProfile != "" {
+		if err := root.PersistentFlags().Set("profile", flagProfile); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if cls := failedClass(r); cls != "" {
-		t.Errorf("unexpected failure %q: %+v", cls, r.Checks)
+	root.SetContext(context.Background())
+	if err := applyProfile(root); err != nil {
+		t.Fatal(err)
+	}
+	deps := onlineDeps(t)
+	deps.stat = func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist }
+	r := runDoctor(root, doctorOptions{backplaneOverride: srv.URL}, deps)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return r, append([]string(nil), rec.bearers...)
+}
+
+// Under MEHO_PROFILE and under --profile the doctor checks the asked
+// profile in both layers and sends only that profile's token.
+func TestDoctorChecksTheAskedProfile(t *testing.T) {
+	for name, tc := range map[string]struct{ flag, env string }{
+		"MEHO_PROFILE": {env: "approver"},
+		"--profile":    {flag: "approver", env: "other"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, bearers := runDoctorWithProfile(t, tc.flag, tc.env)
+			if len(bearers) == 0 {
+				t.Fatal("the backplane got no authenticated request")
+			}
+			for _, b := range bearers {
+				if b != "Bearer tok-approver" {
+					t.Errorf("the doctor sent %q; want only the approver token", b)
+				}
+			}
+			if r.Profile != "approver" {
+				t.Errorf("report profile = %q; want approver", r.Profile)
+			}
+			if cls := failedClass(r); cls != "" {
+				t.Errorf("unexpected failure %q: %+v", cls, r.Checks)
+			}
+			var out bytes.Buffer
+			printDoctorHuman(&out, r)
+			if !strings.HasPrefix(out.String(), "Profile: approver\n") {
+				t.Errorf("human report must start with the profile; got %q", out.String())
+			}
+		})
+	}
+}
+
+// With the default profile the doctor sends the default token and
+// prints no profile line.
+func TestDoctorDefaultProfilePrintsNoProfileLine(t *testing.T) {
+	r, bearers := runDoctorWithProfile(t, "", "")
+	for _, b := range bearers {
+		if b != "Bearer tok-default" {
+			t.Errorf("the doctor sent %q; want only the default token", b)
+		}
+	}
+	var out bytes.Buffer
+	printDoctorHuman(&out, r)
+	if r.Profile != "" || strings.Contains(out.String(), "Profile:") {
+		t.Errorf("the default profile must print no profile line; got %q", out.String())
+	}
+}
+
+// A login that replaces the saved backplane URL says so in one line,
+// because all profiles share that URL. A login to the same backplane
+// or a first login prints nothing.
+func TestLoginSaysWhenTheSavedBackplaneChanges(t *testing.T) {
+	xdg := withTempXDG(t)
+	var out bytes.Buffer
+	printBackplaneChange(&out, "https://meho.example.test")
+	if out.Len() != 0 {
+		t.Errorf("first login printed %q; want nothing", out.String())
+	}
+
+	chosen := &auth.Tenant{ID: tenantBID, Name: "lab-b"}
+	if err := auth.SaveConfigAt(filepath.Join(xdg, "meho", "config.json"),
+		auth.Config{BackplaneURL: "https://meho.example.test", Tenant: chosen}); err != nil {
+		t.Fatal(err)
+	}
+	printBackplaneChange(&out, "https://meho.example.test/")
+	if out.Len() != 0 {
+		t.Errorf("same backplane printed %q; want nothing", out.String())
+	}
+
+	printBackplaneChange(&out, "https://other.example.test")
+	want := "The saved backplane URL changes from https://meho.example.test to https://other.example.test, for all profiles. The chosen tenant is cleared.\n"
+	if out.String() != want {
+		t.Errorf("got %q; want %q", out.String(), want)
 	}
 }

@@ -36,15 +36,23 @@ func applyProfile(cmd *cobra.Command) error {
 		return output.RenderError(cmd.ErrOrStderr(), output.Usage(err.Error()), jsonOut)
 	}
 	cmd.SetContext(auth.WithProfile(cmd.Context(), name))
+	output.SetLoginProfile(loginHintProfile(name))
+	return nil
+}
+
+// loginHintProfile returns the profile that a "meho login" hint for
+// the profile name must name, or "" when a plain `meho login` already
+// fills it: a named profile always, the default profile only when
+// MEHO_PROFILE names another one.
+func loginHintProfile(name string) string {
 	switch {
 	case name != auth.DefaultProfile:
-		output.SetLoginProfile(name)
+		return name
 	case envNamesOtherProfile():
-		output.SetLoginProfile(auth.DefaultProfile)
+		return auth.DefaultProfile
 	default:
-		output.SetLoginProfile("")
+		return ""
 	}
-	return nil
 }
 
 // envNamesOtherProfile reports whether MEHO_PROFILE names a profile
@@ -55,16 +63,12 @@ func envNamesOtherProfile() bool {
 	return env != "" && env != auth.DefaultProfile
 }
 
-// defaultLoginHints makes the "meho login" hints of a report that
-// checked the default profile name it when MEHO_PROFILE names another
-// profile.
-func defaultLoginHints(r *doctorReport) {
-	if !envNamesOtherProfile() {
-		return
-	}
+// nameLoginHints makes the "meho login" hints of a doctor report name
+// the profile (see loginHintProfile). An empty name changes nothing.
+func nameLoginHints(r *doctorReport, name string) {
 	for i := range r.Checks {
-		r.Checks[i].Detail = output.NameLoginProfile(r.Checks[i].Detail, auth.DefaultProfile)
-		r.Checks[i].Hint = output.NameLoginProfile(r.Checks[i].Hint, auth.DefaultProfile)
+		r.Checks[i].Detail = output.NameLoginProfile(r.Checks[i].Detail, name)
+		r.Checks[i].Hint = output.NameLoginProfile(r.Checks[i].Hint, name)
 	}
 }
 

@@ -73,6 +73,9 @@ type doctorSurface struct {
 
 // doctorReport is the whole doctor result. It never carries a token.
 type doctorReport struct {
+	// Profile is the named profile the doctor checked; empty for the
+	// default profile.
+	Profile       string         `json:"profile,omitempty"`
 	Checks        []doctorCheck  `json:"checks"`
 	GrantedScopes []string       `json:"granted_scopes,omitempty"`
 	Surface       *doctorSurface `json:"surface,omitempty"`
@@ -151,14 +154,17 @@ func newDoctorCmd() *cobra.Command {
 // runDoctor runs the layers and returns the report. The server layer
 // comes last, after the doctor's own checks.
 //
-// The doctor always checks the default profile, also under --profile
-// or MEHO_PROFILE: its offline credential check reads the default
-// slot, so the online checks must use the same login. Its login hints
-// say --profile default when MEHO_PROFILE names another profile.
+// Both layers check the profile the person asked for (--profile or
+// MEHO_PROFILE), so the doctor never sends the login of another
+// profile. Its login hints name that profile when a plain `meho login`
+// would fill another one.
 func runDoctor(cmd *cobra.Command, opts doctorOptions, deps doctorDeps) *doctorReport {
-	ctx := auth.WithProfile(cmd.Context(), auth.DefaultProfile)
+	ctx := cmd.Context()
 	report := &doctorReport{}
-	backplaneURL := runOfflineChecks(report, opts, deps)
+	if name := auth.ProfileFrom(ctx); name != auth.DefaultProfile {
+		report.Profile = name
+	}
+	backplaneURL := runOfflineChecks(ctx, report, opts, deps)
 	switch {
 	case opts.noNetwork:
 		report.add(doctorCheck{Layer: layerAuthed, Name: "authenticated layer", Status: doctorSkip,
@@ -170,7 +176,7 @@ func runDoctor(cmd *cobra.Command, opts doctorOptions, deps doctorDeps) *doctorR
 		runAuthenticatedChecks(ctx, report, backplaneURL, deps)
 	}
 	runServerChecks(ctx, report, opts, deps)
-	defaultLoginHints(report)
+	nameLoginHints(report, loginHintProfile(auth.ProfileFrom(ctx)))
 	return report
 }
 
@@ -195,6 +201,9 @@ func renderDoctor(w io.Writer, report *doctorReport, jsonOut bool) error {
 // come last, after the summary of the authenticated layer, so the
 // doctor's own output comes first.
 func printDoctorHuman(w io.Writer, r *doctorReport) {
+	if r.Profile != "" {
+		fmt.Fprintf(w, "Profile: %s\n", r.Profile)
+	}
 	var serverLines []doctorCheck
 	layer := ""
 	for _, c := range r.Checks {
@@ -282,6 +291,7 @@ func (e *doctorExit) ExitCode() int { return e.code }
 // string reaches the terminal without it.
 func (r *doctorReport) redacted() *doctorReport {
 	out := &doctorReport{
+		Profile:       r.Profile,
 		GrantedScopes: append([]string(nil), r.GrantedScopes...),
 		MCPSessionID:  redactSensitive(r.MCPSessionID),
 	}

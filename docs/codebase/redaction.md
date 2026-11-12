@@ -503,7 +503,10 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
   principal's call waits for a person's approval, also when the policy
   gate would run it at once (`dispatcher._reveal_waits_for_approval` turns
   the `auto-execute` verdict into `needs-approval`); a person's call keeps
-  the verdict of the gate. The people's call
+  the verdict of the gate. On a credential read that hides its values by
+  default (`vault.kv.read`) the flag also raises the call to at least
+  `caution` with approval (`operations/credential_read.py`), so a
+  person's reveal waits for a second person too. The people's call
   sites are the `/ui` Vault console (`ui/routes/vault/routes.py`,
   reveal-on-click) and CLI `meho secret read`
   (`cli/internal/cmd/secret/read.go`).
@@ -512,12 +515,15 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
   `0131`), not with the params and not in the encrypted payload of a
   credential write, and outside `params_hash`, so the retry check and the
   approve surfaces compare the call without it. `resume_dispatch_after_approval`
-  and the rerun of a failed run read the choice from the row (also after the
-  first run deleted the encrypted payload of a credential write), take a
-  flag sent again with the params off before the hash and preview checks
-  (`_secret_values.split_reveal_secret`), and put the stored choice on the
+  reads the choice from the row, takes a flag sent again with the params
+  off before the hash and preview checks
+  (`_secret_values.split_reveal_secret`), and puts the stored choice on the
   params of the approved run, which answers with the values and stamps the
-  choice on its audit row.
+  choice on its audit row. For every such request, a read or an operation
+  that creates a credential, the approve runs nothing: the operation runs
+  once, when the person who asked fetches the value, the stored run result
+  has no value, and "run again" refuses it
+  ([approvals.md](approvals.md#an-approved-secret-reveal-runs-when-the-person-who-asked-fetches-it)).
 - **Audit stamp.** `reveal_secret_var` (bound with the same token/finally
   discipline as `policy_decision_var`) lands as `payload['reveal_secret']`
   on the audit row of every secret read (`True` = values asked for,

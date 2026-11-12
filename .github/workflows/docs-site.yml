@@ -67,6 +67,10 @@ on:
       - 'docs-site/**'
       - 'backend/pyproject.toml'
       - 'backend/uv.lock'
+      - 'docs/compatibility/**'
+      - 'CHANGELOG.md'
+      - 'scripts/ci/check_tested_live_claims.py'
+      - 'backend/scripts/validate_live_tests.py'
       - '.github/workflows/docs-site.yml'
   # Fires when a PR enters the merge queue, so the check can be made
   # required in branch protection and still report against the
@@ -109,7 +113,7 @@ jobs:
   build:
     name: mkdocs build --strict
     if: github.event_name != 'push'
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -124,6 +128,12 @@ jobs:
       - name: Install docs toolchain (locked)
         run: uv sync --locked --only-group docs
         working-directory: backend
+
+      - name: Check "tested live" claims
+        # A page or the release notes may say a version was tested live
+        # only when docs/compatibility/live-tests.yaml records the test.
+        # Needs only Python and PyYAML (a dependency of mkdocs).
+        run: uv run --project backend --no-sync python scripts/ci/check_tested_live_claims.py
 
       - name: Build site (strict)
         # --strict is redundant with `strict: true` in mkdocs.yml but

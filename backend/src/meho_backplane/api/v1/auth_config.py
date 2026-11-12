@@ -32,7 +32,7 @@ Response shape locked by the CLI's discovery parser in
 ``fetchBackplaneAuthConfig``). Field renames here are wire-compat
 breaks for the CLI.
 
-The four fields:
+The fields:
 
 * ``keycloak_issuer`` — the realm issuer URL.
 * ``audience`` — the JWT ``aud`` value the backplane validates inbound
@@ -52,6 +52,16 @@ The four fields:
   Only a token made for this client can approve on the command line or
   REST. Empty means the backplane accepts no token approve.
 
+* ``mcp_clients`` -- the **public** login client of each AI tool kind
+  (``{"claude-code": "meho-mcp-code", "claude-desktop":
+  "meho-mcp-desktop"}``). Listed only when the ``MCP_CLIENT_PER_TOOL_KIND``
+  switch is on, and only the clients MEHO found in Keycloak
+  (:mod:`meho_backplane.auth.tool_clients`); empty otherwise. The Claude
+  Code plugin and the Claude Desktop extension read it at start. A tool
+  whose kind is listed signs in with that client and sends the
+  ``Meho-Tool`` header, so it keeps a saved login of its own. A tool
+  whose kind is not listed keeps the shared ``meho-mcp`` client.
+
 The ``cli_client_id`` field was added by G0.9.1-T9 after the 2026-05-21
 RDC dogfood (Signal #16) showed that the v0.3.1 endpoint (issuer +
 audience only) silently broke ``meho login`` on its documented happy
@@ -64,11 +74,12 @@ closed Task #44's coordination note that was never filed.
 from __future__ import annotations
 
 from fastapi import APIRouter
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
+from meho_backplane.auth.tool_clients import MCP_TOOL_CLIENTS, listed_tool_clients
 from meho_backplane.settings import get_settings
 
-__all__ = ["router"]
+__all__ = ["MCP_TOOL_CLIENTS", "router"]
 
 
 class AuthConfigResponse(BaseModel):
@@ -91,6 +102,9 @@ class AuthConfigResponse(BaseModel):
     #: The public client of the approval sign-in (#5515). A client that
     #: does not know this field ignores it.
     cli_approve_client_id: str = ""
+    #: The login client of each AI tool kind. Empty while the
+    #: ``MCP_CLIENT_PER_TOOL_KIND`` switch is off.
+    mcp_clients: dict[str, str] = Field(default_factory=dict)
 
 
 router = APIRouter(prefix="/api/v1", tags=["auth"])
@@ -98,7 +112,7 @@ router = APIRouter(prefix="/api/v1", tags=["auth"])
 
 @router.get("/auth-config", response_model=AuthConfigResponse)
 async def auth_config() -> AuthConfigResponse:
-    """Return Keycloak issuer, audience, and the CLI's two public client ids.
+    """Return Keycloak issuer, audience, and the public client ids.
 
     Reads :func:`~meho_backplane.settings.get_settings` so the response
     cannot drift from the values :mod:`~meho_backplane.auth.jwt` uses
@@ -116,4 +130,5 @@ async def auth_config() -> AuthConfigResponse:
         audience=settings.keycloak_audience,
         cli_client_id=settings.keycloak_cli_client_id,
         cli_approve_client_id=settings.keycloak_cli_approve_client_id,
+        mcp_clients=await listed_tool_clients(settings),
     )

@@ -671,16 +671,22 @@ _COMPANY_ON = [
 ]
 
 
-def test_the_job_account_gets_two_more_roles_only_with_the_company_login() -> None:
+def test_the_job_account_gets_one_more_role_only_with_the_company_login() -> None:
     realm = json.loads(_REALM_FILE.read_text())
     (account,) = realm["users"]
     assert account["serviceAccountClientId"] == "meho-admin"
-    assert account["clientRoles"]["realm-management"] == ["manage-clients", "manage-users"]
+    # manage-realm is always there: the Job keeps the login flows up to date.
+    assert account["clientRoles"]["realm-management"] == [
+        "manage-clients",
+        "manage-realm",
+        "manage-users",
+    ]
 
     rendered = json.loads(_keycloak_docs(*_COMPANY_ON)["ConfigMap"]["data"]["meho-realm.json"])
 
-    account["clientRoles"]["realm-management"] += list(ROLES)
+    account["clientRoles"]["realm-management"].append("manage-identity-providers")
     assert rendered == realm
+    assert set(ROLES) <= set(account["clientRoles"]["realm-management"])
     assert "${MEHO_REALM_TENANT_ID}" in json.dumps(rendered)
 
 

@@ -283,7 +283,7 @@ $ meho bind9 config reload --target dns-01
 | --- | --- | --- |
 | `config show <file>` | `bind9.config.show` | `<file>` may be absolute (must be under the bind config root) or relative (resolved against it). Reads only `named.conf`, `named.conf.*` and `*.conf` files, without approval; key secrets come back hidden. Key files, zone files, traversal and outside-root paths are refused with no content. |
 | `config apply-file <name> <local-src>` | `bind9.config.apply_file` | `safety_level=dangerous`, `requires_approval=True`, `op_class=write`. CLI reads `<local-src>` locally and stages it as the replacement for `<name>` on the target. |
-| `config apply-views <local-views.conf> <zones-dir>` | `bind9.config.apply_views` | `safety_level=dangerous`, `requires_approval=True`, `op_class=write`. CLI reads `<local-views.conf>` (lands at `named.conf.local`) and every regular file under `<zones-dir>` (each lands at its relative path under `/etc/bind/`). `--verify-fqdn` adds a dig-verify post-reload; `--primary-path` selects which staged key drives the audit row's pre/post-op capture. |
+| `config apply-views <local-views.conf> <zones-dir>` | `bind9.config.apply_views` | `safety_level=dangerous`, `requires_approval=True`, `op_class=write`. CLI reads `<local-views.conf>` (lands at `named.conf.local`) and every regular file under `<zones-dir>` (each lands at its relative path under `/etc/bind/`). `--verify-fqdn` adds a dig-verify post-reload; `--verify-source <server address>` sends that dig from and to an address of the server, so it reaches the view whose `match-clients` lists the address; `--primary-path` selects which staged key drives the audit row's pre/post-op capture. |
 | `config backup [--tag T]` | `bind9.config.backup` | `safety_level=caution`, `op_class=write`. Creates a UTC-timestamped tar.gz under `/var/backups/meho-bind9/`. `--tag` (optional) embeds a `[A-Za-z0-9._-]{1,64}` friendly tag in the filename. |
 | `config reload` | `bind9.config.reload` | `safety_level=caution`, `op_class=write`. `rndc reload`. Use only when you needed to bypass the apply ops' automatic reload (rare). |
 
@@ -306,7 +306,11 @@ primitive. The contract:
 5. **Reload.** `rndc reload`. Non-zero exit → rollback.
 6. **Verify.** Either `named-checkconf -p` against the live config (no
    `--verify-fqdn`) or `dig @localhost <fqdn> +short` returning
-   non-empty (with `--verify-fqdn`). Failure → rollback.
+   non-empty (with `--verify-fqdn`). For `apply_views`, the live config
+   must parse, then the server must serve the serial of every staged
+   zone file in every view that uses it (`rndc zonestatus`), then the
+   optional dig runs (from `--verify-source` when given). Failure →
+   rollback.
 
 A failed validate / reload / verify produces a `connector_error`
 envelope with `op_class=write` + the failing step name and an

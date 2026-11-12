@@ -439,7 +439,8 @@ class AuditEventClass(StrEnum):
       rejected, or let an approval request expire, or its sender withdrew
       it (#5717). The operation did not run on any of these rows.
     * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
-      refresh-token replay or a broken satellite effect chain.
+      refresh-token replay or a broken satellite effect chain. The
+      ``mcp.session_open`` row of a new MCP session has this class too.
     * :attr:`CONFIG_CHANGE` -- an operator changed the settings of
       operations, and none of them ran. Two writers: an edit of one
       operation with ``meho_connector_edit_op`` (turned it on or off, or
@@ -2010,6 +2011,12 @@ class EndpointDescriptor(Base):
         nullable=False,
         default=False,
     )
+    #: Not a column. ``True`` on a row that
+    #: :func:`~meho_backplane.operations.op_policy.apply_effective_policy`
+    #: returned when a classification entry makes the operation always
+    #: wait (or two entries conflict). Then no standing grant and no run
+    #: approval clears a call: a person approves each one.
+    policy_always_wait = False
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,
@@ -2125,7 +2132,14 @@ class OperationPolicyOverride(Base):
     ``requires_approval`` ``True`` means "require approval", ``False``
     means "a platform admin turned approval off" (only allowed with a
     ``reason``, never for a destructive operation), ``NULL`` means "no
-    change". A row with both fields ``NULL`` is deleted.
+    change". A row with both fields ``NULL`` and no category or labels is
+    deleted.
+
+    ``category`` and ``labels`` classify this one operation (the most
+    specific classification level). They are read only when the
+    ``POLICY_CLASSIFICATION`` switch is on; see
+    :mod:`meho_backplane.policy.classification`. ``labels`` is a map of
+    free ``key=value`` text, kept apart from the code's ``tags``.
     """
 
     __tablename__ = "operation_policy_override"
@@ -2141,6 +2155,10 @@ class OperationPolicyOverride(Base):
         sa.Boolean(), nullable=True, default=None
     )
     reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    labels: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON, nullable=True, default=None
+    )
     set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     set_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -2174,6 +2192,53 @@ class OperationPolicyOverride(Base):
             "safety_level IS NULL OR safety_level IN "
             "('safe', 'caution', 'dangerous', 'destructive')",
             name="ck_operation_policy_override_safety_level",
+        ),
+    )
+
+
+class TenantPolicy(Base):
+    """The stored classification policy of one tenant, or of the whole install.
+
+    One row per scope: ``tenant_id`` is a tenant UUID for a tenant's
+    policy and ``NULL`` for the install's. ``document`` holds the
+    ``taxonomy`` (the categories and the default category) and the
+    ``classifications`` (category, labels, risk level and "always wait"
+    for connectors, operation groups and operations, matched by pattern).
+    The install's taxonomy is the one category list; a tenant's taxonomy
+    only adds categories for that tenant.
+
+    Read only when the ``POLICY_CLASSIFICATION`` switch is on; see
+    :mod:`meho_backplane.policy.classification`. The policy file import
+    writes whole documents here; a single classification edit changes one
+    entry.
+    """
+
+    __tablename__ = "tenant_policy"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    document: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "tenant_policy_install_idx",
+            sa.text("(tenant_id IS NULL)"),
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NULL"),
+            sqlite_where=sa.text("tenant_id IS NULL"),
+        ),
+        Index(
+            "tenant_policy_tenant_idx",
+            "tenant_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NOT NULL"),
+            sqlite_where=sa.text("tenant_id IS NOT NULL"),
         ),
     )
 
@@ -7448,6 +7513,77 @@ class ApprovalRequest(Base):
     )
 
 
+#: Where a passkey touch for an approval was started (#6214): the web
+#: console, a link the command line prints, or a link a REST answer carries.
+APPROVAL_PRESENCE_CHANNELS: tuple[str, ...] = ("web", "cli_link", "rest_link")
+
+
+class ApprovalPresenceChallenge(Base):
+    """One started passkey touch for an approval (#6214).
+
+    When a person clicks Approve on a request that needs a passkey touch,
+    MEHO makes this row. It names exactly what the approval will run, and
+    it can be used once, until ``expires_at``. Made and checked by
+    :mod:`meho_backplane.operations.approval_presence`. Nothing writes it
+    while the ``APPROVAL_PRESENCE_TOUCH`` switch is off.
+
+    Columns
+    -------
+
+    * ``tenant_id`` -- the tenant of the requests (no foreign key).
+    * ``approver_sub`` -- the person who started the touch. Only they can
+      use the row.
+    * ``request_ids`` -- the ids of the approval requests the touch
+      approves, in the order the person saw them (a JSON list of strings).
+    * ``binding_hash`` -- SHA-256 over the tenant, each request's stored
+      hashes and release, the ``card_hash`` and ``server_random``. MEHO
+      sends it to Keycloak as the ``nonce``.
+    * ``server_random`` -- 32 random bytes (hex) that MEHO made for this
+      row. Part of the binding hash, so the hash cannot be guessed and can
+      be built again to see if a request changed.
+    * ``card_hash`` -- SHA-256 over the approval card text the person saw.
+    * ``match_code`` -- 6 characters from the binding hash. The person sees
+      the same code in MEHO and next to the touch.
+    * ``created_at`` / ``expires_at`` -- when the row was made, and when it
+      ends (``created_at`` + ``APPROVAL_PRESENCE_TOUCH_VALID_SECONDS``).
+    * ``used_at`` -- when an approval used the row. NULL until then. Set
+      once.
+    * ``channel`` -- ``web``, ``cli_link`` or ``rest_link``.
+    * ``session_kind`` -- what kind of session started the touch.
+
+    A daily clean-up deletes rows that were never used and are older than
+    14 days. Added by migration ``0157``.
+    """
+
+    __tablename__ = "approval_presence_challenge"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    approver_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    request_ids: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False
+    )
+    binding_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    server_random: Mapped[str] = mapped_column(Text, nullable=False)
+    card_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    match_code: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    session_kind: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        Index("approval_presence_challenge_created_at_idx", "created_at"),
+        sa.CheckConstraint(
+            _ck_in("channel", APPROVAL_PRESENCE_CHANNELS),
+            name="ck_approval_presence_challenge_channel",
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Gateway command queue (Initiative #2415 / #2498)
 # ---------------------------------------------------------------------------
@@ -8737,6 +8873,14 @@ class RunbookRunStepState(Base):
         nullable=True,
         default=None,
     )
+    # Every check attempt of the step, oldest first: ``{"at", "passed",
+    # "verify_response"}``. ``verify_response`` above holds the latest one.
+    # A retry of a failed step adds an entry; no entry is ever replaced.
+    attempts: Mapped[object] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         sa.CheckConstraint(
@@ -9759,6 +9903,9 @@ class RequestUsageEvent(Base):
       ``context_selected``.
     * ``correlation_id`` -- opaque id that links a ``context_selected``
       event to later evaluation data; ``NULL`` on ``request_finished``.
+    * ``tool_texts`` -- ``short`` when the MCP session asked for the short
+      tool texts with ``?texts=short``; ``NULL`` otherwise (migration
+      ``0158``).
 
     Indexes are declared in migrations ``0107`` and ``0113``:
     ``(tenant_id, occurred_at)`` for tenant-scoped window reads,
@@ -9785,6 +9932,7 @@ class RequestUsageEvent(Base):
     route: Mapped[str] = mapped_column(Text, nullable=False)
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    tool_texts: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class OperationSearchRecord(Base):

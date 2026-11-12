@@ -48,6 +48,7 @@ Run from ``backend/``::
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 from meho_backplane.connectors.registry import (
@@ -59,9 +60,20 @@ from meho_backplane.mcp.human_only import HUMAN_ONLY_MCP_TOOLS
 from meho_backplane.mcp.registry import ToolSurface, eager_import_mcp_modules
 from meho_backplane.operations.ingest.catalog import load_catalog
 
+if __package__ in (None, ""):
+    # Run as a file (``python scripts/...py``): make ``scripts`` importable.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.live_test_cells import LiveTestRecord
+
 #: Where the rendered pages land, relative to the repo root.
 CONNECTORS_RELPATH = "docs-site/reference/connectors.md"
 MCP_TOOLS_RELPATH = "docs-site/reference/mcp-tools.md"
+OVERVIEW_RELPATH = "docs-site/can-do/connectors-overview.md"
+
+#: The generated block in the overview page sits between these two lines.
+OVERVIEW_START = "<!-- live-tests:start -->"
+OVERVIEW_END = "<!-- live-tests:end -->"
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -171,7 +183,7 @@ _ENTERPRISE_PACK: tuple[tuple[str, str, str, str], ...] = (
     (
         "VMware vCenter and vSphere",
         "vmware-rest-9.0, vmware-rest-8.0",
-        "8.0, 9.x",
+        "8.0 Update 1 or newer, 9.x",
         "Reads and manages virtual machines, hosts, clusters, storage and networks.",
     ),
     (
@@ -305,8 +317,13 @@ _ENTERPRISE_PACK: tuple[tuple[str, str, str, str], ...] = (
 
 
 _VERSIONS_PARAGRAPH = (
-    "**Supported versions** is the product-version range an "
-    "implementation advertises. Where a product has more than one "
+    "**Built for** is the range the code declares and CI tests. "
+    "**Tested live on** lists the versions where a person ran MEHO "
+    "against a real system. Reads means read operations ran; changes "
+    "means change operations ran too, with approval. A version that is "
+    "not listed there was not tested live. A test that is much older "
+    "than the newest MEHO release shows the release it was tested with.\n\n"
+    "Where a product has more than one "
     "implementation — a modern and a legacy one, say — both are "
     "registered and MEHO resolves the right one per target from the "
     "target's fingerprint, so one estate spanning old and new versions "
@@ -316,7 +333,7 @@ _VERSIONS_PARAGRAPH = (
     "itself. Outside the range, MEHO refuses the call with "
     "`unqualified_target_version`, and a Sensor on that connector can "
     "read `unknown`. So pick the connector whose version matches the "
-    "target, for example `vmware-rest-8.0` for vCenter 8.0.x and "
+    "target, for example `vmware-rest-8.0` for vCenter 8.0 Update 1 to Update 3 and "
     "`vmware-rest-9.0` for vCenter 9.0.x."
 )
 
@@ -329,22 +346,38 @@ def _docs_link(product: str) -> str:
     return f"[docs]({_DOCS_PAGE_URL.format(name=name)})"
 
 
+def _enterprise_pack_rows(record: LiveTestRecord) -> list[str]:
+    """Return the rows of the enterprise pack table of the inventory page."""
+    rows: list[str] = []
+    for product, connectors, versions, summary in _ENTERPRISE_PACK:
+        id_list = [c.strip() for c in connectors.split(",")]
+        ids = ", ".join(f"`{_md_escape(c)}`" for c in id_list)
+        tested = _md_escape(record.tested_live_cell(id_list))
+        rows.append(
+            f"| {_md_escape(product)} | {ids} | {_md_escape(versions)} | {tested} "
+            f"| {_md_escape(summary)} |"
+        )
+    return rows
+
+
 def render_connector_index() -> str:
     """Render the connector-inventory page from the v2 registry + catalog."""
     _eager_import_connectors()
     kinds = _catalog_kind_by_triple()
+    record = LiveTestRecord.from_repo(_REPO_ROOT)
 
-    rows: list[tuple[str, str, str, str, str]] = []
+    rows: list[tuple[str, str, str, str, str, str]] = []
     for (product, version, impl_id), cls in all_connectors_v2().items():
         # Skip the wildcard / v1-compat padding rows (empty version /
         # impl_id): they are resolver-internal, never operator-addressable.
         if not version or not impl_id:
             continue
         connector_id = f"{impl_id}-{version}"
-        supported = cls.supported_version_range or cls.version_range_reason or "—"
+        supported = cls.supported_version_range or cls.version_range_reason or "no range stated"
         kind = kinds.get((product, version, impl_id), "—")
         summary = cls.summary or "—"
-        rows.append((product, connector_id, summary, supported, kind))
+        tested = record.tested_live_cell([connector_id])
+        rows.append((product, connector_id, summary, supported, tested, kind))
     rows.sort(key=lambda row: (row[0], row[1]))
 
     lines = _generated_header(
@@ -383,14 +416,14 @@ def render_connector_index() -> str:
         "it, and is blank otherwise — it is a property of how a connector's "
         "operations are sourced, not something this table infers.",
         "",
-        "| Connector | Product | What it does | Supported versions | Kind | Docs |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| Connector | Product | What it does | Built for | Tested live on | Kind | Docs |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for product, connector_id, summary, supported, kind in rows:
+    for product, connector_id, summary, supported, tested, kind in rows:
         lines.append(
             f"| `{_md_escape(connector_id)}` | `{_md_escape(product)}` "
-            f"| {_md_escape(summary)} | {_md_escape(supported)} | {kind} "
-            f"| {_docs_link(product)} |"
+            f"| {_md_escape(summary)} | {_md_escape(supported)} | {_md_escape(tested)} "
+            f"| {kind} | {_docs_link(product)} |"
         )
     lines += [
         "",
@@ -402,14 +435,10 @@ def render_connector_index() -> str:
         "Their setup guides and operation lists come with the pack. To get "
         "the pack, contact evoila.",
         "",
-        "| Product | Connectors | Product versions | What it does |",
-        "| --- | --- | --- | --- |",
+        "| Product | Connectors | Built for | Tested live on | What it does |",
+        "| --- | --- | --- | --- | --- |",
     ]
-    for product, connectors, versions, summary in _ENTERPRISE_PACK:
-        ids = ", ".join(f"`{_md_escape(c.strip())}`" for c in connectors.split(","))
-        lines.append(
-            f"| {_md_escape(product)} | {ids} | {_md_escape(versions)} | {_md_escape(summary)} |"
-        )
+    lines += _enterprise_pack_rows(record)
     lines += [
         "",
         "## Versions and how a connector is chosen",
@@ -430,6 +459,34 @@ def render_connector_index() -> str:
         "",
     ]
     return "\n".join(lines).rstrip() + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Overview page block
+# ---------------------------------------------------------------------------
+
+
+def render_overview_block() -> str:
+    """Render the enterprise-pack table of the overview page, markers included."""
+    record = LiveTestRecord.from_repo(_REPO_ROOT)
+    lines = [
+        OVERVIEW_START,
+        "| Product | Built for | Tested live on |",
+        "| --- | --- | --- |",
+    ]
+    for product, connectors, versions, _summary in _ENTERPRISE_PACK:
+        id_list = [c.strip() for c in connectors.split(",")]
+        tested = _md_escape(record.tested_live_cell(id_list))
+        lines.append(f"| {_md_escape(product)} | {_md_escape(versions)} | {tested} |")
+    lines.append(OVERVIEW_END)
+    return "\n".join(lines)
+
+
+def splice_overview_block(page: str, block: str) -> str:
+    """Return *page* with the text between the two markers replaced by *block*."""
+    start = page.index(OVERVIEW_START)
+    end = page.index(OVERVIEW_END) + len(OVERVIEW_END)
+    return page[:start] + block + page[end:]
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +651,12 @@ def main() -> None:
         target = _REPO_ROOT / relpath
         target.write_text(render(), encoding="utf-8")
         print(f"wrote {target}")
+    overview = _REPO_ROOT / OVERVIEW_RELPATH
+    overview.write_text(
+        splice_overview_block(overview.read_text(encoding="utf-8"), render_overview_block()),
+        encoding="utf-8",
+    )
+    print(f"wrote {overview}")
 
 
 if __name__ == "__main__":

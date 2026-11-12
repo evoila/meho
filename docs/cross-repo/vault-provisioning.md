@@ -600,6 +600,16 @@ runner's token and the operator-facing client id on an operator's:
   "bound_claims": {"azp": ["<operator-facing-client-id>", "<cli-client-id>"]},
 ```
 
+With the `MCP_CLIENT_PER_TOOL_KIND` switch on, the Claude Code plugin and
+the Claude Desktop extension sign in with their own clients, `meho-mcp-code`
+and `meho-mcp-desktop`. Their tokens carry that client as `azp`. Add both to
+the list, next to `meho-mcp`, before you turn the switch on. Otherwise the
+two tools cannot read Vault through MEHO:
+
+```json
+  "bound_claims": {"azp": ["meho-mcp", "meho-mcp-code", "meho-mcp-desktop", "<cli-client-id>"]},
+```
+
 Either binding gates **every** `meho-mcp` login, not only the runner's —
 including the `/api/v1/health` federation proof, which dispatches
 `vault.kv.read` under the calling operator's own JWT. An operator without

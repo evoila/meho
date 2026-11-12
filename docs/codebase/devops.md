@@ -1078,7 +1078,7 @@ on a person directly: the claim always comes from the group.
 | `meho-cli-approve` | public, authorization code + PKCE (S256) | redirect `http://127.0.0.1:*`; the approval sign-in: its own login flow `meho approval sign-in` (password, then the one-time code), a 15-minute access token and no refresh token |
 | `meho-mcp` | public, authorization code + PKCE (S256) | redirect URIs `http://localhost:*`, `http://127.0.0.1:*`; optional scopes `offline_access`, `mcp:read`, `mcp:execute`, `mcp:admin`; offline login idle limit 48 hours |
 | `meho-web` | confidential, authorization code + PKCE (S256) | redirect `https://<host>/ui/auth/callback`, after logout `https://<host>/ui/auth/login` |
-| `meho-admin` | confidential, service account | realm-management roles `manage-clients` and `manage-users`; with the company login on, the chart adds `manage-identity-providers` and `manage-realm` (#4592) |
+| `meho-admin` | confidential, service account | realm-management roles `manage-clients`, `manage-realm` (the login flows, #6280) and `manage-users`; with the company login on, the chart adds `manage-identity-providers` (#4592) |
 | `meho-check-runner` | confidential, service account | its tokens carry the audience `meho-check-runner`, not `meho-backplane` |
 
 The three main clients people log in with (`meho-cli`, `meho-mcp`, `meho-web`)
@@ -2810,7 +2810,11 @@ A job must not fail because a download failed once. The rules:
   warm-up) with the same three tries.
 - `.github/actions/setup-kind` installs kind this way and starts the
   cluster. It replaces `helm/kind-action`, which downloaded kind on every
-  run.
+  run. It also installs kubectl (`azure/setup-kubectl`), yq (pinned in
+  `tool-versions.env`), and jq and openssl when they are missing. The kind
+  jobs need them, and the image of our own runner pools does not have
+  them, so the merge-queue runs on `meho-runners-ci-heavy-queue` would
+  fail without them.
 - Release-time workflows that cannot rely on the script (they check out a
   tag) use `curl --retry 3 --retry-all-errors`.
 - `scripts/tests/test_ci_tool_scripts.py` tests these scripts with fake
@@ -2845,13 +2849,13 @@ their isolation posture:
 | `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-latest`; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |
-| `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **hosted runner** for every event (#4626); the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |
-| `dependency-license-check.yml` | yes (`pip install -e ./backend` runs the build backend) | **hosted runner** for every event, all 3 jobs (#4626) |
-| `readme-version-check.yml` | yes (inline shell over PR content) | **hosted runner** for every event (#4626) |
-| `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **hosted runner** for every event (#4626) |
+| `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **route**: fork PR → hosted runner, everything else (same-repo PR, merge queue) → `meho-runners-ci` (#6325); the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |
+| `dependency-license-check.yml` | yes (`pip install -e ./backend` runs the build backend) | **route**, all 3 jobs (#6325) |
+| `readme-version-check.yml` | yes (inline shell over PR content) | **route** (#6325) |
+| `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **route** (#6325) |
 | `linux-server-test.yml` | yes (shellcheck, and the unit tests run `deploy/linux-server/install.sh` against stub commands) | **route**: fork PR → disposable GitHub-hosted runner |
-| `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for every event (#4626) |
-| `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` and only reads `backend/uv.lock` |
+| `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for pull requests, `meho-runners-ci-heavy-queue` (Docker) in the merge queue (#6325); the second scanner job uses `meho-runners-ci` in the merge queue |
+| `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` for pull requests and `meho-runners-ci` in the merge queue, and only reads `backend/uv.lock` |
 | `security-weekly.yml` | no (`schedule` and `workflow_dispatch` only; trivy reads the lock files of `main`) | GitHub-hosted `ubuntu-latest`; built-in token is `contents: read`; the findings go to a private repo with a separate token (repository secrets `SECURITY_FINDINGS_REPO` and `SECURITY_FINDINGS_TOKEN`, so the log masks the repo name), so a finding is never public before its fix. all severities are reported. `scripts/ci/security_weekly_issue.py` opens one issue or comments only the new findings |
 | `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted) |
 
@@ -2882,13 +2886,51 @@ their isolation posture:
   ```
 
   Trusted refs (same-repo PR, `push`, `merge_group`) stay on the internal
-  pool. Only `migration-compat.yml` and `linux-server-test.yml` still use
-  this expression. The other small workflows moved to plain
-  `ubuntu-latest` for every event (#4626 step 2), so they no longer wait
-  for an internal slot: `dependency-license-check.yml`,
-  `secret-scan.yml` (both jobs; the ghcr warm-cache retry of
-  #3307/#3310 stays), `migration-heads.yml`, `plugin-version-check.yml`
-  and `readme-version-check.yml`.
+  pool. `migration-compat.yml`, `linux-server-test.yml`, `compat-gates.yml`,
+  `dependency-license-check.yml`, `migration-heads.yml`,
+  `plugin-version-check.yml` and `readme-version-check.yml` use this
+  expression. (#4626 step 2 had moved the last five to plain
+  `ubuntu-latest`; #6325 moved them back, so a busy evening of hosted jobs
+  does not stop them.)
+
+- **Merge-queue route.** For a job that must run for fork pull requests
+  on a hosted runner, but must never wait for one in the merge queue:
+
+  ```yaml
+  runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
+  ```
+
+  Pull requests, pushes and schedules get `ubuntu-latest`. A merge-queue
+  run gets the own pool. Jobs that need Docker or testcontainers name
+  `meho-runners-ci-heavy-queue` instead. Only this exact expression with
+  a known pool label passes `test_ci_fork_runner_isolation.py`.
+
+### The rule for the merge queue
+
+A merge-queue run never waits for a GitHub-hosted runner. Every job that
+a `merge_group` event can start runs on an own pool. The organisation
+allows only a few hosted jobs at once, for all its repos together, so a
+busy evening of pull requests can fill that limit and stop the queue.
+`test_no_merge_group_job_uses_a_hosted_label` in
+`backend/tests/test_ci_fork_runner_isolation.py` fails when a job that can
+run on `merge_group` resolves to a hosted label. It reads only the
+`runs-on` routes it knows. Any other expression fails the test, also when
+it names an own pool. One job is allowed to
+stay hosted, with its reason in the test: `docs-site.yml` `deploy` (tag
+and main pushes only).
+
+A pull request from a fork never runs on an own runner. It runs on the
+hosted runner. Once a maintainer adds that pull request to the merge
+queue, its merge-queue run does use the own pool. So a fork pull request
+must be reviewed before it enters the queue. Own pools have no `gh`
+program: a job that needs it installs it in a step (the merge-queue
+watchdog does, and prints a `::warning::` line when that fails).
+
+Every workflow that runs on `pull_request` also has `concurrency` with
+`cancel-in-progress`, so a new push cancels the run of the old commit.
+For `merge_group` it is always off, because a cancelled queue check
+fails the merge. `test_pull_request_workflows_cancel_old_runs_but_not_merge_group`
+checks this.
 
 ### Enforcement outside PR-editable YAML
 

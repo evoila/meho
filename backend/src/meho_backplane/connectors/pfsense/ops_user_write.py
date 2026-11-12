@@ -37,7 +37,8 @@ Checks before any change
 ------------------------
 
 The handler reads ``config.xml`` first and refuses, without staging
-anything:
+anything. A refusal raises :class:`PfSenseRefusedError`, so the call, its audit
+record and its approval say "failed" (#5138):
 
 * ``not_found`` -- no local user has this name;
 * ``ambiguous`` -- more than one user has this name (a broken config);
@@ -96,6 +97,7 @@ from meho_backplane.connectors.pfsense.ops_write import (
     _read_config_xml,
     serialized_config_write,
 )
+from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -268,7 +270,7 @@ async def _set_user_disabled(
     before_rows = _user_rows(await _read_config_xml(self, target, operator))
     status, guidance = _refusal(before_rows, name)
     if status is not None:
-        return {**result, "status": status, "new_state": None, "guidance": guidance}
+        raise PfSenseRefusedError(f"pfsense.user.{result['action']}", status, guidance or "")
 
     current = next(r for r in before_rows if r["name"] == name)
     result["previous_state"] = _state(current["disabled"])
@@ -399,9 +401,6 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
                 "disabled",
                 "enabled",
                 "nothing_to_do",
-                "not_found",
-                "ambiguous",
-                "protected",
             ],
         },
         "name": {"type": "string"},
@@ -434,8 +433,8 @@ _OUTPUT_SHAPE = (
     "previous_state, new_state, nothing_to_do, applied, verified, guidance}``. "
     "``status`` is the new state (``disabled`` / ``enabled``) after a verified "
     "change; ``nothing_to_do`` when the user already had that state (nothing "
-    "written); ``not_found`` / ``ambiguous`` / ``protected`` when the call was "
-    "refused before any change (``guidance`` says why). No secret field of the "
+    "written); A refusal (``not_found`` / ``ambiguous`` / ``protected``) "
+    "fails the call before any change; the error text says why. No secret field of the "
     "user is ever returned."
 )
 
@@ -475,7 +474,7 @@ def _description(disable: bool) -> str:
         "page: change the flag, ``local_user_set()``, ``write_config()``. No "
         "firewall reload; no change to password, groups or certificates. Needs "
         "approval from a second person; the approval card shows the user, the "
-        "current state and the new state. Refused before any change for an "
+        "current state and the new state. The call fails before any change for an "
         "unknown name (``not_found``), a duplicate name (``ambiguous``) and the "
         "built-in admin account (``protected``). A user already in the wanted "
         "state returns ``nothing_to_do: true`` and nothing is written. After the "

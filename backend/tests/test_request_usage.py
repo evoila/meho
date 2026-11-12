@@ -66,6 +66,7 @@ from meho_backplane.request_usage.schema import (
     CATALOG_CONTEXT_KEY,
     EVENT_KINDS,
     OUTCOMES,
+    TOOL_TEXTS,
     TRANSPORTS,
     UNMATCHED_ROUTE,
     RequestUsageEventData,
@@ -245,6 +246,27 @@ def test_migration_value_sets_match_schema() -> None:
     assert module._KINDS == EVENT_KINDS
     assert module._TRANSPORTS == TRANSPORTS
     assert module._OUTCOMES == OUTCOMES
+
+
+def test_tool_texts_migration_value_set_matches_schema() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "0158_add_request_usage_tool_texts.py"
+    )
+    spec = importlib.util.spec_from_file_location("_migration_0158", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module._TOOL_TEXTS == TOOL_TEXTS
+
+
+def test_schema_accepts_only_the_short_tool_texts() -> None:
+    assert _validate(_event(tool_texts="short")).tool_texts == "short"
+    assert _validate(_event()).tool_texts is None
+    with pytest.raises(ValidationError):
+        _validate(_event(tool_texts="full"))
 
 
 # ---------------------------------------------------------------------------

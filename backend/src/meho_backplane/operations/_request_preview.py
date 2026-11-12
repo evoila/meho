@@ -99,9 +99,10 @@ from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._park_check import park_check_refusal, park_check_registered
 from meho_backplane.operations._preview import _SENSITIVE_CLASSES
 from meho_backplane.operations._preview_steps import (
-    agent_no_grant_step_reason,
+    agent_step_refusal,
     preview_step_verdict,
 )
+from meho_backplane.operations._secret_values import split_reveal_secret
 from meho_backplane.operations._target_connector_match import mismatch_preview_envelope
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
@@ -109,6 +110,7 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
+from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
@@ -544,8 +546,10 @@ async def _governance_fields(
     also checked step by step (:func:`preview_step_verdict`, #5492): a
     multi-step operation reads as covered only when its write steps are
     too. With ``AGENT_GRANT_REQUIRED=on`` a call that would run or wait
-    reads as ``deny`` when a write step has no grant
-    (:func:`agent_no_grant_step_reason`), as the dispatcher refuses it.
+    reads as ``deny`` when a write step has no grant or a ``deny`` grant,
+    or when an agent calls a multi-step operation that changes something
+    and declares no steps (:func:`agent_step_refusal`), as the dispatcher
+    refuses it.
     All four are advisory: none is in :data:`_PREVIEW_HASH_KEYS`, so
     the hash does not change.
     """
@@ -559,8 +563,8 @@ async def _governance_fields(
     step_refusal = None
     if verdict is not PermissionVerdict.DENY and get_settings().agent_grant_required == "on":
         # The same up-front check the dispatcher runs (#6189).
-        step_refusal = await agent_no_grant_step_reason(
-            operator=operator, op_id=descriptor.op_id, connector_id=connector_id, target=target
+        step_refusal = await agent_step_refusal(
+            operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
         )
     if step_refusal is not None:
         verdict, reason = PermissionVerdict.DENY, step_refusal
@@ -825,6 +829,11 @@ async def preview_dispatch(
     if isinstance(resolved, dict):
         return resolved  # the op or the target did not resolve (see _resolve_descriptor)
     descriptor, connector_id = resolved
+    # ``reveal_secret`` is a dispatch control, not an op param: the
+    # dispatcher strips it before the schema check and the hash, and a call
+    # that asks for the hidden values of a secret read gets the floor.
+    params, reveal_secret = split_reveal_secret(params)
+    raise_descriptor_for_reveal(descriptor, reveal_secret=reveal_secret)
     # The park check and the governance fields each run the policy gate.
     with agent_no_grant_log_scope():
         envelope = await _park_check_envelope(

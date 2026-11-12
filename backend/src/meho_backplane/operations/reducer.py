@@ -43,6 +43,7 @@ from typing import Any, Protocol, runtime_checkable
 from meho_backplane.connectors.schemas import ResultHandle
 
 __all__ = [
+    "SECRET_REVEAL_CONTEXT_KEY",
     "FullResultCapture",
     "PassThroughReducer",
     "Reducer",
@@ -58,6 +59,12 @@ __all__ = [
 #: under the approver, so the handle inside the stored result belongs to the
 #: principal that ``GET /api/v1/approvals/{id}/result`` serves.
 handle_owner_sub_var: ContextVar[str | None] = ContextVar("handle_owner_sub", default=None)
+
+#: ``context`` key the dispatcher sets on a ``reveal_secret: true`` run. Its
+#: answer holds secret values, and MEHO keeps no copy of them: the reducer
+#: stores nothing and returns the payload whole. A sample would lose the
+#: rest, because the person who asked gets the answer only once.
+SECRET_REVEAL_CONTEXT_KEY = "secret_reveal"
 
 
 @dataclass

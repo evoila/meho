@@ -72,6 +72,7 @@ from meho_backplane.api.v1.agent_principals import (
 )
 from meho_backplane.api.v1.agent_runs import router as api_v1_agent_runs_router
 from meho_backplane.api.v1.agents import router as api_v1_agents_router
+from meho_backplane.api.v1.approval_reveal import router as api_v1_approval_reveal_router
 from meho_backplane.api.v1.approvals import router as api_v1_approvals_router
 from meho_backplane.api.v1.ask_docs import router as api_v1_ask_docs_router
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
@@ -208,6 +209,10 @@ from meho_backplane.operations.approval_expiry import (
     expire_approvals_from_older_release,
     start_approval_expiry_sweeper,
     stop_approval_expiry_sweeper,
+)
+from meho_backplane.operations.approval_presence import (
+    start_presence_challenge_cleanup,
+    stop_presence_challenge_cleanup,
 )
 from meho_backplane.operations.approval_restart_recovery import recover_interrupted_approvals
 from meho_backplane.operations.ingest import (
@@ -614,6 +619,7 @@ class _BackgroundTasks:
     audit_raw_payload_retention: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
     approval_expiry: asyncio.Task[None] | None
+    approval_presence_cleanup: asyncio.Task[None]
     scheduler: asyncio.Task[None] | None
     sensor_runner: asyncio.Task[None] | None
     sensor_watchdog: asyncio.Task[None] | None
@@ -719,6 +725,9 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
     approval_expiry: asyncio.Task[None] | None = None
     if settings.approval_expiry_enabled:
         approval_expiry = start(start_approval_expiry_sweeper)
+    # #6214 -- always on: once a day, delete passkey touch challenges that
+    # were never used and are older than 14 days.
+    approval_presence_cleanup = start(start_presence_challenge_cleanup)
     # G11.3-T2 #823 — cron + one-off agent-trigger scheduler. Gated on
     # SCHEDULER_ENABLED so operators using an external orchestrator
     # (or running the test path without a scheduler) can opt out.
@@ -797,6 +806,7 @@ def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTas
         audit_raw_payload_retention=audit_raw_payload_retention,
         grant_expiry=grant_expiry,
         approval_expiry=approval_expiry,
+        approval_presence_cleanup=approval_presence_cleanup,
         scheduler=scheduler,
         sensor_runner=sensor_runner,
         sensor_watchdog=sensor_watchdog,
@@ -853,6 +863,7 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_sensor_runner(tasks.sensor_runner)
     if tasks.scheduler is not None:
         await stop_scheduler(tasks.scheduler)
+    await stop_presence_challenge_cleanup(tasks.approval_presence_cleanup)
     if tasks.approval_expiry is not None:
         await stop_approval_expiry_sweeper(tasks.approval_expiry)
     if tasks.grant_expiry is not None:
@@ -1397,6 +1408,8 @@ app.include_router(api_v1_checks_dashboard_files_router)
 # (T5) so a ``broadcast_watch`` operator session learns of pending
 # requests without polling. Operator-level; tenant-scoped via the JWT.
 app.include_router(api_v1_approvals_router)
+# The person who asked fetches the value of an approved secret reveal once.
+app.include_router(api_v1_approval_reveal_router)
 # #3151 -- operator-managed standing scoped auto-approval grants for
 # service principals (the persistent form of an approve decision).
 app.include_router(api_v1_service_grants_router)

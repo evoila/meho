@@ -24,6 +24,7 @@ from meho_backplane.db.models import AuditEventClass
 from meho_backplane.session_store.audit import add_audit_row, write_audit_row
 from meho_backplane.session_store.config import SessionStoreConfig
 from meho_backplane.session_store.models import (
+    AgentSessionEvent,
     AgentSessionRecord,
     AgentSessionRetention,
     AgentSessionUpload,
@@ -215,10 +216,11 @@ async def delete_session(
 
 
 async def delete_record_rows(session: AsyncSession, record_id: uuid.UUID) -> None:
-    """Delete one record and its upload rows in *session* (the caller commits)."""
+    """Delete one record, its upload rows and its saved events in *session* (the caller commits)."""
     await session.execute(
         delete(AgentSessionUpload).where(AgentSessionUpload.record_id == record_id)
     )
+    await session.execute(delete(AgentSessionEvent).where(AgentSessionEvent.record_id == record_id))
     await session.execute(delete(AgentSessionRecord).where(AgentSessionRecord.id == record_id))
 
 

@@ -1144,6 +1144,26 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_logout(self, operator, target, params)
 
+    async def user_required_actions_update(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.required_actions.update``."""
+        from meho_backplane.connectors.keycloak.ops_user_required_actions import (
+            keycloak_user_required_actions_update,
+        )
+
+        return await keycloak_user_required_actions_update(self, operator, target, params)
+
+    async def user_otp_status(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.otp_status``."""
+        from meho_backplane.connectors.keycloak.ops_user_required_actions import (
+            keycloak_user_otp_status,
+        )
+
+        return await keycloak_user_otp_status(self, operator, target, params)
+
     async def user_get(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1207,6 +1227,16 @@ class KeycloakConnector(HttpConnector):
         )
 
         return await keycloak_authflow_ensure_passkey_code_skip(self, operator, target, params)
+
+    async def authflow_ensure_approval_touch(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.authflow.ensure_approval_touch``."""
+        from meho_backplane.connectors.keycloak.ops_authflow_touch import (
+            keycloak_authflow_ensure_approval_touch,
+        )
+
+        return await keycloak_authflow_ensure_approval_touch(self, operator, target, params)
 
     async def auth_flow_step_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
@@ -1278,8 +1308,8 @@ class KeycloakConnector(HttpConnector):
         the destructive ``user.delete`` / ``group.delete`` /
         ``client.delete``. #3851 adds ``user.logout``; #3886 adds ``realm.delete``.
         ``user.check_login`` (one login test) rides the same walk, and so do
-        ``authflow.ensure_approval_flow``, ``authflow.ensure_passkey_code_skip``
-        and ``identity_provider.list``.
+        ``authflow.ensure_approval_flow``, ``authflow.ensure_passkey_code_skip``,
+        ``authflow.ensure_approval_touch`` and ``identity_provider.list``.
         """
         # Lazy imports: the operations package pulls in the embedding
         # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a
@@ -1293,6 +1323,7 @@ class KeycloakConnector(HttpConnector):
         from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import (
             PASSKEY_CODE_SKIP_OPS,
         )
+        from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import TOUCH_OPS
         from meho_backplane.connectors.keycloak.ops_flow_reads import (
             FLOW_READ_OPS,
             WHEN_TO_USE_FLOW_READ_BY_GROUP,
@@ -1308,6 +1339,9 @@ class KeycloakConnector(HttpConnector):
         from meho_backplane.connectors.keycloak.ops_read import (
             READ_OPS,
             WHEN_TO_USE_BY_GROUP,
+        )
+        from meho_backplane.connectors.keycloak.ops_user_required_actions import (
+            USER_REQUIRED_ACTION_OPS,
         )
         from meho_backplane.connectors.keycloak.ops_user_state import USER_STATE_OPS
         from meho_backplane.connectors.keycloak.ops_write import (
@@ -1335,7 +1369,9 @@ class KeycloakConnector(HttpConnector):
             *LOGIN_CHECK_OPS,
             *APPROVAL_FLOW_OPS,
             *PASSKEY_CODE_SKIP_OPS,
+            *TOUCH_OPS,
             *IDENTITY_PROVIDER_OPS,
+            *USER_REQUIRED_ACTION_OPS,
             *USER_STATE_OPS,
             *FLOW_READ_OPS,
         ):

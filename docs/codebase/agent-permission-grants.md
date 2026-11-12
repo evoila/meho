@@ -150,7 +150,13 @@ definition, they pick the agent's first grants in the field
 |---|---|---|
 | `none` | no row | Nothing runs until an admin adds a grant (with `AGENT_GRANT_REQUIRED=on`). Discovery tools still work. |
 | `read-everything` | one row: `op_pattern="*"`, `target_scope="*"`, `auto-execute` | `safe` operations run at once on every target. Everything above `safe` waits for a person (the risk-level ceiling). |
-| `read-targets` | one row per named target: `op_pattern="*"`, `target_scope=<target id>`, `auto-execute` | The same, but only on those targets. |
+| `read-targets` | one row per named target: `op_pattern="*"`, `target_scope=<target id>`, `auto-execute` | The same, but only on those targets (with `AGENT_GRANT_REQUIRED=on`). |
+
+The limits of `none` and `read-targets` hold only with
+`AGENT_GRANT_REQUIRED=on`. With `off` (the default) or `observe`, a call
+that no grant covers gets the risk-level default: `safe` operations still
+run at once, on any target. The CLI and the console texts say this (see
+below).
 
 Rules:
 
@@ -184,10 +190,37 @@ Rules:
   `not-chosen` when no set was picked) and, for `read-targets`,
   `starting_grant_targets` (the names as sent).
 
-Surfaces: `POST /api/v1/agent-principals`, `POST /api/v1/agents`, and
-the admin MCP tools `meho_agent_principals_register` and
-`meho_agents_create`. The CLI flags and the console pick come later
-(#6192).
+Surfaces: `POST /api/v1/agent-principals`, `POST /api/v1/agents`, the
+admin MCP tools `meho_agent_principals_register` and
+`meho_agents_create`, the CLI and the console.
+
+CLI (`cli/internal/startinggrants/`, #6192): `meho agent-principal
+register` and `meho agent create` take `--grants
+none|read-everything|read-targets` and `--target <name>` (repeat it for
+more targets). The CLI refuses `--target` without `--grants
+read-targets`, and `read-targets` without a `--target`. Without
+`--grants` it sends no pick; when MEHO then answers 422
+`starting_grants_required`, the CLI prints the three choices and stops.
+With `--grants`, it reads the agent's grants after the create (every
+page of `GET /api/v1/agents/grants?principal_sub=`) and shows them;
+`--json` adds them as `grants`. If that read fails, `grants` is `null`
+and `grants_error` says why. The CLI cannot see the server's
+`AGENT_GRANT_REQUIRED`, so the `--grants` help and the printed choices
+say that `none` and `read-targets` limit the agent only with `on`.
+
+Console (`ui/routes/agents/starting_grants.py`, #6192): the register
+form and the create-agent form show the three choices as radio buttons,
+none selected at first, and the tenant's targets as checkboxes for
+`read-targets`. While the switch is not `off` the choice is required in
+the form. A missing or wrong pick, or a target name that does not
+resolve, shows the service's text next to the field. After a pick that
+writes grants, the console opens `/ui/agents/grants?principal_sub=<the
+agent>`. The help text of each choice follows the current
+`AGENT_GRANT_REQUIRED`: with `off` or `observe`, "None" and "Read some
+targets" say that safe operations still run, and name the value. The
+register modal's container on the principals page lets htmx swap the
+register and revoke error answers (404, 409, 422, 502, 503 to a POST), so
+the field error or banner shows in the open modal.
 
 The two MCP tools show the `starting_grants` input and the sentence about
 it only while `AGENT_GRANT_REQUIRED` is `observe` or `on`

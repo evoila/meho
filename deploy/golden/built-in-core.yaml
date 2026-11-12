@@ -327,7 +327,8 @@ data:
       "webAuthnPolicyPasswordlessResidentKey": "required",
       "attributes": {
         "adminEventsExpiration": "15552000",
-        "CreateDefaultClientScopes": "true"
+        "CreateDefaultClientScopes": "true",
+        "acr.loa.map": "{\"meho-touch\":3}"
       },
       "clientScopes": [
         {
@@ -489,6 +490,215 @@ data:
               "userSetupAllowed": false
             }
           ]
+        },
+        {
+          "id": "c41e7a90-2f5d-4b8a-9e36-7d0b1a5f8c24",
+          "alias": "meho approval touch",
+          "description": "Console login of meho-web. Level 1 is the normal login. Level 3 (acr meho-touch) asks for a passkey touch every time; MEHO asks for it before a dangerous or destructive approval.",
+          "providerId": "basic-flow",
+          "topLevel": true,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "auth-cookie",
+              "authenticatorFlow": false,
+              "requirement": "ALTERNATIVE",
+              "priority": 10,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "ALTERNATIVE",
+              "priority": 20,
+              "flowAlias": "meho approval touch - levels",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "id": "3e8b5f12-7c4a-4d91-b0e6-2a9f6c1d8e57",
+          "alias": "meho approval touch - levels",
+          "description": "Level 1, then level 3 when it is asked for.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticatorFlow": true,
+              "requirement": "CONDITIONAL",
+              "priority": 10,
+              "flowAlias": "meho approval touch - level 1",
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "CONDITIONAL",
+              "priority": 20,
+              "flowAlias": "meho approval touch - level 3",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "id": "8d2f4a6b-1e9c-4b37-a5d0-6f3e2c7b9a18",
+          "alias": "meho approval touch - level 1",
+          "description": "The normal login: company login or password, then the one-time code when the person has one.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "conditional-level-of-authentication",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "authenticatorConfig": "meho approval touch - level 1",
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "REQUIRED",
+              "priority": 20,
+              "flowAlias": "meho approval touch - sign-in",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "id": "5b7e1c3d-9a2f-4e68-8c41-0d6a3f2e5b79",
+          "alias": "meho approval touch - sign-in",
+          "description": "Company login, or the password form.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "identity-provider-redirector",
+              "authenticatorFlow": false,
+              "requirement": "ALTERNATIVE",
+              "priority": 10,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "ALTERNATIVE",
+              "priority": 20,
+              "flowAlias": "meho approval touch - password",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "id": "a1c9e5f3-6b2d-4087-9e4a-7f1b3d8c2e60",
+          "alias": "meho approval touch - password",
+          "description": "The password form (it also takes a passkey), then the one-time code.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "auth-username-password-form",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "CONDITIONAL",
+              "priority": 20,
+              "flowAlias": "meho approval touch - one-time code",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "id": "2f6d8b4a-3c1e-4a95-b7d2-9e0c5a1f4b83",
+          "alias": "meho approval touch - one-time code",
+          "description": "Asks for the one-time code when the person has set one up and did not use a passkey.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "conditional-user-configured",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "conditional-credential",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 20,
+              "authenticatorConfig": "meho approval touch - skip code after passkey",
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "auth-otp-form",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 30,
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "id": "7e4a2c9f-5d1b-4f36-8a0e-3b6d9c2f1e74",
+          "alias": "meho approval touch - level 3",
+          "description": "The passkey touch: a passkey with user verification, every time.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "conditional-level-of-authentication",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "authenticatorConfig": "meho approval touch - level 3",
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "webauthn-authenticator-passwordless",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 20,
+              "authenticatorConfig": "meho approval touch - passkey",
+              "userSetupAllowed": false
+            }
+          ]
+        }
+      ],
+      "authenticatorConfig": [
+        {
+          "alias": "meho approval touch - level 1",
+          "config": {
+            "loa-condition-level": "1",
+            "loa-max-age": "36000"
+          }
+        },
+        {
+          "alias": "meho approval touch - level 3",
+          "config": {
+            "loa-condition-level": "3",
+            "loa-max-age": "0"
+          }
+        },
+        {
+          "alias": "meho approval touch - skip code after passkey",
+          "config": {
+            "credentials": "webauthn-passwordless",
+            "included": "false"
+          }
+        },
+        {
+          "alias": "meho approval touch - passkey",
+          "config": {
+            "default.reference.value": "hwk",
+            "default.reference.maxAge": "120"
+          }
         }
       ],
       "clients": [
@@ -1314,6 +1524,9 @@ data:
             "use.refresh.tokens": "true",
             "client.use.lightweight.access.token.enabled": "false"
           },
+          "authenticationFlowBindingOverrides": {
+            "browser": "c41e7a90-2f5d-4b8a-9e36-7d0b1a5f8c24"
+          },
           "redirectUris": [
             "${MEHO_REALM_PUBLIC_URL}/ui/auth/callback"
           ],
@@ -1443,6 +1656,16 @@ data:
                 "access.token.claim": "true",
                 "introspection.token.claim": "true",
                 "userinfo.token.claim": "false"
+              }
+            },
+            {
+              "name": "amr",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-amr-mapper",
+              "config": {
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true"
               }
             }
           ]
@@ -2198,7 +2421,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: 0b8bf1934d542dae3cef712efdd35556080073c1a1b1075685d802c9021c12a9
+        checksum/config: fed9d80fa4d44d035517d038dd8bcd8ebc5a2a6edce20fad8d47e64c5daf1b92
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.
@@ -3478,6 +3701,9 @@ data:
   # Category, labels and "always wait" on connectors, groups and
   # operations. Off by default.
   POLICY_CLASSIFICATION: "false"
+  # The policy evaluator runs next to today's checks and logs every
+  # difference. It decides nothing. Off by default.
+  POLICY_ENGINE_SHADOW: "false"
   # The shared knowledge scope and the weekly knowledge upkeep. Rendered
   # always; the defaults match the backplane's own defaults (nothing
   # shared, upkeep on, once a week).
@@ -3734,7 +3960,9 @@ metadata:
     # successful one is removed, a failed one stays for `kubectl logs`.
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
-  ttlSecondsAfterFinished: 600
+  # No `ttlSecondsAfterFinished` (#6336): a failed Job and its log stay until
+  # the next install or upgrade replaces them. Helm's own error says only
+  # "Job failed"; the log names the reason (docs-site/install/upgrades.md).
   backoffLimit: 3
   template:
     metadata:
@@ -3833,6 +4061,86 @@ spec:
         - name: realm
           configMap:
             name: golden-keycloak-realm
+---
+# Source: meho-chart/templates/core-keycloak-role-check.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: golden-check-manage-realm
+  labels:
+    helm.sh/chart: meho-chart-0.2.0
+    app.kubernetes.io/name: meho
+    app.kubernetes.io/instance: golden
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: core-keycloak-role-check
+  annotations:
+    # After the secrets Job (-30) and before the database Jobs (-25, -10),
+    # so a stop here leaves the old version as it was.
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-28"
+    # A failed Job stays, with its log, until the next upgrade.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  # No `ttlSecondsAfterFinished`: the log of a failed check must stay.
+  # No retry: a second run gives the same answer.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        # The labels of the bootstrap Job's pod: the Keycloak NetworkPolicy
+        # admits them. Not `meho.selectorLabels`.
+        app.kubernetes.io/instance: golden
+        app.kubernetes.io/component: core-bootstrap
+    spec:
+      restartPolicy: Never
+      serviceAccountName: golden-core-bootstrap
+      # The check talks to Keycloak only, never to the Kubernetes API.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: role-check
+          # The backplane image, with the same digest pin as the Deployment.
+          image: "ghcr.io/evoila/meho:test"
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "meho_backplane.core.bootstrap", "keycloak-role-check"]
+          terminationMessagePolicy: FallbackToLogsOnError
+          env:
+            - name: MEHO_CORE_KEYCLOAK_PLAN
+              value: "{\"admin_username\":\"admin\",\"approver_username\":\"approver\",\"ci\":{\"enabled\":false,\"secret_name\":\"golden-core-ci-login\",\"tenant_id\":\"\"},\"console_admin_secret\":\"golden-core-console-admin\",\"console_admin_username\":\"console-admin\",\"first_login_secret\":\"golden-core-first-login\",\"keycloak_url\":\"http://golden-keycloak:8080/auth\",\"realm_file\":\"/opt/meho/realm/meho-realm.json\",\"tenants\":[]}"
+            # The secrets Job (-30) makes it. Optional, so a missing Secret
+            # means "cannot tell" and not a pod that never starts.
+            - name: MEHO_REALM_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: golden-core-keycloak-admin
+                  key: client_secret
+                  optional: true
+          resources:
+            limits:
+              cpu: 500m
+              ephemeral-storage: 256Mi
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              ephemeral-storage: 64Mi
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ---
 # Source: meho-chart/templates/core-secrets-job.yaml
 apiVersion: batch/v1

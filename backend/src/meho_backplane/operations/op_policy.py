@@ -83,7 +83,12 @@ from meho_backplane.operations.caller_address import (
 )
 from meho_backplane.operations.credential_read import raise_for_credential_read
 from meho_backplane.policy.classification import Classification
-from meho_backplane.policy.store import classification_enabled, classify_rows, classify_step
+from meho_backplane.policy.store import (
+    InvalidStoredPolicyError,
+    classification_enabled,
+    classify_rows,
+    classify_step,
+)
 
 __all__ = [
     "SAFETY_RANK",
@@ -99,6 +104,7 @@ __all__ = [
     "effective_policy_map",
     "list_overrides",
     "load_overrides",
+    "register_policy_repair_op",
     "remove_override",
 ]
 
@@ -254,6 +260,24 @@ async def load_overrides(
     return found
 
 
+#: Built-in operations that replace a stored policy, as ``(impl_id, op_id)``.
+_POLICY_REPAIR_OPS: set[tuple[str, str]] = set()
+
+
+def register_policy_repair_op(impl_id: str, op_id: str) -> None:
+    """Let the built-in *op_id* run while a stored policy document is not valid.
+
+    Such an operation is the way to replace the bad document, so it must
+    not need that document to be classified. Its own checks (its risk
+    level, its approval, the role and second-person rules) still apply.
+    """
+    _POLICY_REPAIR_OPS.add((impl_id, op_id))
+
+
+def _is_policy_repair_op(row: EndpointDescriptor) -> bool:
+    return row.tenant_id is None and (row.impl_id, row.op_id) in _POLICY_REPAIR_OPS
+
+
 async def effective_policy_map(
     session: AsyncSession,
     *,
@@ -280,13 +304,21 @@ async def effective_policy_map(
         for row in rows
     ]
     if classification_enabled():
-        classified = await classify_rows(
-            session,
-            tenant_id=tenant_id,
-            rows=rows,
-            overrides=[overrides.get(OpKey.of(row), []) for row in rows],
-            group_keys=group_keys,
-        )
+        try:
+            classified = await classify_rows(
+                session,
+                tenant_id=tenant_id,
+                rows=rows,
+                overrides=[overrides.get(OpKey.of(row), []) for row in rows],
+                group_keys=group_keys,
+            )
+        except InvalidStoredPolicyError:
+            if not rows or not all(_is_policy_repair_op(row) for row in rows):
+                raise
+            # The import that replaces the bad document runs without it.
+            return {
+                OpKey.of(row): _with_floors(row, p) for row, p in zip(rows, policies, strict=True)
+            }
         policies = [_with_classification(p, c) for p, c in zip(policies, classified, strict=True)]
     return {
         OpKey.of(row): _with_floors(row, policy) for row, policy in zip(rows, policies, strict=True)
@@ -903,18 +935,21 @@ async def list_overrides(
 async def _scope_policy(session: AsyncSession, row: OperationPolicyOverride) -> EffectivePolicy:
     """Return the effective policy of *row*'s operation in *row*'s scope.
 
-    Like dispatch, the two floors run last, so the report never
-    lists approval as off for an operation that still waits for it. With no
-    descriptor (the operation is gone) the lowest values apply, so only the
-    overrides count.
+    The same steps as dispatch (:func:`effective_policy_map`): the
+    overrides, then the classification (with the ``POLICY_CLASSIFICATION``
+    switch on), then the floors. So the report never lists approval as off
+    for an operation that a classification entry or a floor still makes
+    wait, and ``rule_ref`` says which entry decided it. With no descriptor
+    (the operation is gone) the lowest values apply, so only the overrides
+    count.
     """
     key = OpKey(row.product, row.version, row.impl_id, row.op_id)
     descriptor = await _scope_descriptor(session, key, row.tenant_id)
-    overrides = (await load_overrides(session, tenant_id=row.tenant_id, keys=[key])).get(key, [])
     if descriptor is None:
-        return effective_policy("safe", False, overrides)
-    policy = effective_policy(descriptor.safety_level, descriptor.requires_approval, overrides)
-    return _with_floors(descriptor, policy)
+        overrides = await load_overrides(session, tenant_id=row.tenant_id, keys=[key])
+        return effective_policy("safe", False, overrides.get(key, []))
+    policies = await effective_policy_map(session, tenant_id=row.tenant_id, rows=[descriptor])
+    return policies[key]
 
 
 async def _classification(

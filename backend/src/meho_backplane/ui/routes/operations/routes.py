@@ -193,6 +193,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operations._lookup import enabled_for_tenant_clause, parse_connector_id
 from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import (
@@ -913,6 +914,11 @@ async def _render_call_result(
     A blank target field sends no target (see :func:`_form_target`), so a
     target-less op runs; an op that needs a target answers
     ``target_required``, shown as that inline ``400``.
+
+    A ``reveal_secret: true`` in ``params`` that shows the values at once
+    makes the page say ``Cache-Control: no-store`` and ``Pragma: no-cache``
+    (:mod:`meho_backplane.no_store`), so no browser or proxy keeps them.
+    Other pages keep the usual headers.
     """
     operator = await _resolve_operator(session)
 
@@ -939,7 +945,8 @@ async def _render_call_result(
     if preview_hash_value:
         arguments["preview_hash"] = preview_hash_value
 
-    envelope = await call_operation(operator, arguments)
+    with answer_scope() as mark:
+        envelope = await call_operation(operator, arguments)
     # #136: target-resolution failures ride the envelope (``target_required`` /
     # ``no_target``) instead of raising; render them as the inline form error,
     # preserving the pre-#136 UX. Every other envelope status renders normally.
@@ -957,7 +964,8 @@ async def _render_call_result(
         # the ticket's oldest-first view.
         "chain": await parked_request_chain(operator.tenant_id, envelope),
     }
-    return get_templates().TemplateResponse(request, "operations/_result.html", context)
+    response = get_templates().TemplateResponse(request, "operations/_result.html", context)
+    return set_no_store(response) if mark.holds_secret else response
 
 
 def _render_call_form_error(

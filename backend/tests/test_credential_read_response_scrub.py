@@ -39,7 +39,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import respx
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from httpx import ASGITransport
 from sqlalchemy import select, update
 
@@ -946,19 +946,19 @@ async def test_rest_reveal_route_gives_the_value_once_to_the_person_who_asked(
     request_id = await _approved_reveal()
 
     with pytest.raises(HTTPException) as forbidden:
-        await reveal_approved_request(request_id, operator=_REVIEWER)
+        await reveal_approved_request(request_id, Response(), operator=_REVIEWER)
     assert forbidden.value.status_code == 403
     with pytest.raises(HTTPException) as missing:
-        await reveal_approved_request(uuid4(), operator=_make_operator())
+        await reveal_approved_request(uuid4(), Response(), operator=_make_operator())
     assert missing.value.status_code == 404
 
-    body = await reveal_approved_request(request_id, operator=_make_operator())
+    body = await reveal_approved_request(request_id, Response(), operator=_make_operator())
     assert body.status == "ok", body.error
     assert body.result is not None
     assert body.result["data"]["password"] == _PASSWORD_SECRET
 
     with pytest.raises(HTTPException) as again:
-        await reveal_approved_request(request_id, operator=_make_operator())
+        await reveal_approved_request(request_id, Response(), operator=_make_operator())
     assert again.value.status_code == 409
     assert str(again.value.detail).startswith("reveal_already_used:")
 

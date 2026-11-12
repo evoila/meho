@@ -96,6 +96,7 @@ from meho_backplane.auth.client_identity import (
     apply_client_block,
     build_client_block,
     channel_of,
+    clean_client_text,
     client_identity_enabled,
 )
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
@@ -1833,9 +1834,9 @@ def _approver_client_fields(operator: Operator, user_agent: str | None) -> dict[
 
     ``approver_azp`` and ``approver_channel`` come from the checked login.
     ``approver_user_agent`` is the ``User-Agent`` header of a REST approve,
-    cut to 256 characters. The tool sends it about itself and MEHO cannot
-    check it, so it is marked ``"self_declared": true``. Empty when the
-    switch is off.
+    cleaned like every client text and cut to 256 characters. The tool sends
+    it about itself and MEHO cannot check it, so it is marked
+    ``"self_declared": true``. Empty when the switch is off.
     """
     if not client_identity_enabled():
         return {}
@@ -1843,11 +1844,9 @@ def _approver_client_fields(operator: Operator, user_agent: str | None) -> dict[
         "approver_azp": operator.azp,
         "approver_channel": channel_of(operator),
     }
-    if user_agent:
-        fields["approver_user_agent"] = {
-            "value": user_agent[:_USER_AGENT_MAX_LENGTH],
-            "self_declared": True,
-        }
+    cleaned = clean_client_text(user_agent, _USER_AGENT_MAX_LENGTH)
+    if cleaned:
+        fields["approver_user_agent"] = {"value": cleaned, "self_declared": True}
     return fields
 
 

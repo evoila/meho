@@ -583,20 +583,35 @@ def _is_waiting_first_state(
     current: str,
     evaluations: list[_MemberRow],
 ) -> bool:
-    """True for a new Dashboard whose non-green fold has no failing member.
+    """True for a new Dashboard that is red only because members have not reported.
 
     A Dashboard with no memo yet and a ``degraded`` / ``critical`` fold, where
-    no member actually reports ``degraded`` / ``critical`` (members that never
-    ran, or whose results are not confirmed yet, count as ``unknown`` and fold
-    to ``degraded``), is only waiting for its first results. The memo stays
-    ``NULL`` so every later evaluation in the wait is judged the same way.
+    every failing member is only waiting for its first confirmed result
+    (:func:`_awaits_first_result`), is not alerted. The memo stays ``NULL`` so
+    every later evaluation in the wait is judged the same way.
     """
     if previous_memo is not None or current not in ("degraded", "critical"):
         return False
-    return not any(
-        ev.raw_state in ("degraded", "critical") and ev.effective_state != "ok"
-        for _, _, ev in evaluations
+    return all(
+        _awaits_first_result(s, ev)
+        for _, s, ev in evaluations
+        if ev.effective_state in ("degraded", "critical")
     )
+
+
+def _awaits_first_result(sensor: Sensor, evaluation: MemberEvaluation) -> bool:
+    """True when a member is ``unknown`` only because it has no confirmed result yet.
+
+    That is a Sensor that never ran, or one whose first results still wait for
+    confirmation (``pending_state`` set while ``last_state`` is still the
+    initial ``unknown``). A Sensor that ran and has no reading in waiting
+    reports a real ``unknown`` (a timeout or a run error) and counts as failing.
+    """
+    if evaluation.raw_state != "unknown":
+        return False
+    if sensor.last_evaluated_at is None:
+        return True
+    return sensor.last_state == "unknown" and sensor.pending_state is not None
 
 
 async def _claim_member_changes(

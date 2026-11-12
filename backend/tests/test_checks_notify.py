@@ -1648,6 +1648,44 @@ async def test_new_dashboard_stays_silent_until_results_are_confirmed(
 
 
 @pytest.mark.asyncio
+async def test_new_dashboard_mails_when_a_member_reports_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6008: a finished run that reports ``unknown`` is a failure, not a wait.
+
+    Sensor B has one healthy result that still waits for confirmation
+    (``retry_times: 2``), so it keeps the new Dashboard silent. Sensor A
+    (``retry_times: 0``) then finishes runs that report ``unknown`` (as a
+    timeout or a run error does). That alerts at once, and only once.
+    """
+    fake = _install_transport(monkeypatch)
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **kw: fired.append(kw))
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="unknown", evaluated=False)
+    sid_b = await _seed_sensor(
+        name="sensor-b", last_state="unknown", evaluated=False, retry_times=2
+    )
+    dash = await _seed_dashboard(
+        name="new-board", sensor_ids=[sid_a, sid_b], notify_min_state="degraded"
+    )
+
+    start = datetime.now(UTC) - timedelta(minutes=5)
+    await _record(sid_b, "ok", start)
+    await _evaluate(sid_b)
+    assert fake.calls == []
+    assert await _rollup_memo(dash) is None
+
+    for tick in range(1, 3):
+        await _record(sid_a, "unknown", start + timedelta(seconds=tick * 10))
+        await _evaluate(sid_a)
+    assert len(fake.calls) == 1
+    assert "ok -> degraded" in fake.calls[0]["subject"]
+    assert len(fired) == 1
+    assert await _rollup_memo(dash) == "degraded"
+
+
+@pytest.mark.asyncio
 async def test_new_dashboard_with_a_failing_member_still_mails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -27,9 +27,13 @@ and `unknown` rolls up to `degraded`. So the first check run of a new
 Dashboard can look `degraded` only because its other Sensors have not
 run, or because their results are not confirmed yet (a Sensor with
 `retry_times` keeps its old state until enough equal results came in).
-While the state is `degraded` or `critical` and no member really reports
-`degraded` or `critical`, MEHO records no state for the Dashboard and
-sends nothing: no mail, no investigation, no broadcast event. This holds
+While the state is `degraded` or `critical` and every failing member is
+only waiting for its first confirmed result, MEHO records no state for
+the Dashboard and sends nothing: no mail, no investigation, no broadcast
+event. A member waits when it never ran, or when its results still wait
+for confirmation. A member that ran and reports `unknown` (a timeout or
+a run error, with no result waiting for confirmation) is a real failure,
+not a wait. This holds
 for every check run in the wait, not only the first one. The first `ok`
 state is then recorded, also without a mail or event. The first real
 failure after that is a normal change from `ok` and alerts. When a

@@ -392,11 +392,21 @@ the runs in a row where the dispatcher answered `connector_auth_failed`
 `SENSOR_AUTH_FAILURE_PARK_THRESHOLD` (default 3): the runner sets
 `status='paused'` with `status_reason='auth_failed:ConnectorAuthError'` and
 stops calling the target. Any other result sets the count to 0. The count,
-the pause and the result commit in one transaction. With
-`CHECKS_AGENT_EVENTS` on, the pause also writes a `check.sensor.parked`
-event (reason `target_credential_stale`, `checks/events.py`) that an event
-trigger can match. A resume re-arms the Sensor: if the credential is still
-stale, it is paused again after the same number of refused logins.
+the pause and the result commit in one transaction. After the commit, the
+runner mails a warning (reason `target_credential_stale`,
+`checks/park_notify.py`) to the `notify_email` of every Dashboard that holds
+the Sensor. The mail uses the checks mail path: the recipient allowlist, the
+`last_mail_*` columns of the Dashboard and the alert-mail audit row (see
+`checks-notifications.md`). It does not depend on `CHECKS_AGENT_EVENTS`.
+With `CHECKS_AGENT_EVENTS` on, the pause also writes a `check.sensor.parked`
+event (same reason, `checks/events.py`) that an event trigger can match. A
+resume re-arms the Sensor: if the credential is still stale, it is paused
+again after the same number of refused logins.
+
+A claimed evaluation can wait for a free slot (at most 16 run at once). Right
+before it calls the target, it reads the Sensor's status again. A Sensor that
+was paused or deleted in the meantime is not run, and no result is written
+(log event `sensor_evaluation_skipped_not_active`).
 
 **Edit** (`PATCH /api/v1/sensors/{id}` → `checks/sensor_edit.edit_sensor`)
 changes a Sensor in place, so its id, its `sensor_results` history and its

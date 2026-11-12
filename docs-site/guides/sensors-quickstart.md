@@ -180,8 +180,9 @@ cadence that no longer parses (`status_reason` is `invalid_cadence:<error>`).
 The second is a target that refuses the login several times in a row
 (`status_reason` is `auth_failed:ConnectorAuthError`). By default this is 3
 times; set `SENSOR_AUTH_FAILURE_PARK_THRESHOLD` to change it. This stops a
-stale credential from being tried on every run. Fix the credential, then
-resume the sensor. A sensor that reads `critical` or `unknown` for other
+stale credential from being tried on every run. MEHO then mails a warning to
+the mail recipients (`--notify-email`) of every dashboard that holds the
+sensor. Fix the credential, then resume the sensor. A sensor that reads `critical` or `unknown` for other
 reasons stays `active`. To remove a sensor and its history, delete it:
 
 ```bash

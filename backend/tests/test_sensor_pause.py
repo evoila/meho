@@ -12,12 +12,15 @@ What these tests check:
   another tenant gets 404.
 * After N refused logins in a row the runner pauses the Sensor and stops
   calling the target. Any other result sets the count back to 0.
-* The pause writes a ``check.sensor.parked`` event when events are on.
+* The pause writes a ``check.sensor.parked`` event when events are on, and
+  always mails the recipients of the Dashboards that hold the Sensor.
+* A pause stops an evaluation that is still waiting for a free slot.
 * The MCP tools do the same as the route.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -29,11 +32,23 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.checks import notify, runner
 from meho_backplane.checks.auth_park import AUTH_PARK_REASON
+from meho_backplane.checks.mail_result import ALERT_MAIL_OP_ID
 from meho_backplane.checks.runner import run_one_sensor_tick
+from meho_backplane.checks.sensor_pause import set_sensor_status
+from meho_backplane.connectors.mail.transport import MailSendResult
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EventOutbox, Sensor, SensorResult
+from meho_backplane.db.models import (
+    AuditLog,
+    CheckDashboard,
+    CheckDashboardSensor,
+    EventOutbox,
+    Sensor,
+    SensorResult,
+    SensorStatus,
+)
 from meho_backplane.main import app
 from meho_backplane.mcp.tools import sensor_pause as mcp_sensors
 from meho_backplane.settings import get_settings
@@ -373,6 +388,128 @@ async def test_pause_after_refused_logins_writes_no_event_when_events_are_off(
     async with get_sessionmaker()() as session:
         rows = (await session.scalars(select(EventOutbox))).all()
     assert rows == []
+
+
+async def _add_dashboard(sensor_id: uuid.UUID, notify_email: str | None) -> uuid.UUID:
+    row = await _get_sensor(sensor_id)
+    dashboard_id = uuid.uuid4()
+    async with get_sessionmaker()() as session:
+        session.add(
+            CheckDashboard(
+                id=dashboard_id,
+                tenant_id=row.tenant_id,
+                name=f"board-{dashboard_id.hex[:6]}",
+                notify_email=notify_email,
+                notify_min_state="critical",
+                created_by_sub="op-admin",
+            )
+        )
+        await session.flush()
+        session.add(CheckDashboardSensor(dashboard_id=dashboard_id, sensor_id=sensor_id))
+        await session.commit()
+    return dashboard_id
+
+
+@pytest.mark.asyncio
+async def test_pause_after_refused_logins_mails_the_dashboard_recipients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Agent events stay off: the mail does not depend on them.
+    monkeypatch.setenv("SENSOR_AUTH_FAILURE_PARK_THRESHOLD", "1")
+    monkeypatch.setenv("MAIL_RECIPIENT_ALLOWLIST", "example.com")
+    get_settings.cache_clear()
+    assert get_settings().checks_agent_events is False
+    sent: list[dict[str, Any]] = []
+
+    async def _send_email(*, to: list[str], subject: str, body: str) -> MailSendResult:
+        sent.append({"to": to, "subject": subject, "body": body})
+        return MailSendResult(sent=True)
+
+    async def _dispatch(**_kwargs: Any) -> OperationResult:
+        return _auth_failed_result()
+
+    monkeypatch.setattr("meho_backplane.checks.park_notify.send_email", _send_email)
+    monkeypatch.setattr("meho_backplane.checks.runner.dispatch", _dispatch)
+    sensor_id = await _create_interval_sensor()
+    with_mail = await _add_dashboard(sensor_id, "oncall@example.com, blocked@other.test")
+    await _add_dashboard(sensor_id, None)
+
+    assert (await _tick(sensor_id)).status == "paused"
+    await notify._await_pending_notifications()
+
+    assert len(sent) == 1
+    assert sent[0]["to"] == ["oncall@example.com"]
+    assert "target_credential_stale" in sent[0]["subject"]
+    assert f"meho sensor resume {sensor_id}" in sent[0]["body"]
+    async with get_sessionmaker()() as session:
+        board = await session.get(CheckDashboard, with_mail)
+        assert board is not None
+        assert board.last_mail_sent is True
+        audit = (
+            await session.scalars(select(AuditLog).where(AuditLog.path == ALERT_MAIL_OP_ID))
+        ).all()
+    assert len(audit) == 1
+    assert audit[0].payload["sensor"]["reason"] == "target_credential_stale"
+    assert audit[0].payload["refused"] == ["blocked@other.test"]
+
+
+@pytest.mark.asyncio
+async def test_no_mail_while_the_count_is_below_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAIL_RECIPIENT_ALLOWLIST", "example.com")
+    get_settings.cache_clear()
+    sent: list[list[str]] = []
+
+    async def _send_email(*, to: list[str], subject: str, body: str) -> MailSendResult:
+        sent.append(to)
+        return MailSendResult(sent=True)
+
+    async def _dispatch(**_kwargs: Any) -> OperationResult:
+        return _auth_failed_result()
+
+    monkeypatch.setattr("meho_backplane.checks.park_notify.send_email", _send_email)
+    monkeypatch.setattr("meho_backplane.checks.runner.dispatch", _dispatch)
+    sensor_id = await _create_interval_sensor()
+    await _add_dashboard(sensor_id, "oncall@example.com")
+    await _tick(sensor_id)
+    await _tick(sensor_id)
+    await notify._await_pending_notifications()
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_pause_while_waiting_for_a_slot_stops_the_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    async def _dispatch(**_kwargs: Any) -> OperationResult:
+        calls.append(1)
+        return _ok_result({"count": 1})
+
+    monkeypatch.setattr("meho_backplane.checks.runner.dispatch", _dispatch)
+    sensor_id = await _create_interval_sensor()
+    row = await _get_sensor(sensor_id)
+    before = (row.last_state, row.last_evaluated_at)
+
+    # Hold every evaluation slot, so the claimed evaluation has to wait.
+    slots = asyncio.Semaphore(1)
+    await slots.acquire()
+    monkeypatch.setattr(runner, "_EVAL_SEMAPHORE", slots)
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+    assert await run_one_sensor_tick() == 1
+    await asyncio.sleep(0)
+
+    paused = await set_sensor_status(row.tenant_id, sensor_id, SensorStatus.PAUSED)
+    assert paused is not None
+    slots.release()
+    await _drain_in_flight()
+
+    assert calls == []
+    row = await _get_sensor(sensor_id)
+    assert row.status == "paused"
+    assert (row.last_state, row.last_evaluated_at) == before
 
 
 # ---------------------------------------------------------------------------

@@ -116,6 +116,23 @@ hold only letters, digits and `.`, `_`, `+` and `-`
 (`connectors/mail/allowlist.py`). MEHO refuses any other recipient
 before it connects to the mail server.
 
+## The sensor paused mail
+
+When the runner pauses a Sensor because its target refused the login several
+times in a row (`docs/codebase/sensor.md`, "Pause after refused logins"),
+`checks/park_notify.py` mails a warning. Reason: `target_credential_stale`.
+
+- It goes to the `notify_email` of every Dashboard that holds the Sensor,
+  one mail per Dashboard. A Dashboard without `notify_email` gets none; when
+  no Dashboard has one, MEHO logs `checks_park_mail_no_recipient`.
+- `notify_min_state`, flap suppression and acknowledgements do not apply:
+  the pause is not a state edge, and it happens once per pause.
+- It uses this module's recipient check (`_allowed_recipients`) and task set,
+  so the shutdown and the test drain cover it. Each attempt is recorded with
+  `record_mail_result` (the `last_mail_*` columns and the audit row; the
+  audit row's `sensor` field carries `status: paused` and the reason).
+- It does not depend on `CHECKS_AGENT_EVENTS`. It never raises.
+
 ## The notify rule
 
 ```

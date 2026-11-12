@@ -137,6 +137,7 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -153,6 +154,7 @@ from meho_backplane.checks.auth_park import (
 from meho_backplane.checks.evaluate import evaluate_assertion
 from meho_backplane.checks.events import publish_sensor_changed, publish_sensor_parked
 from meho_backplane.checks.investigate import investigate_on_transition, is_worsening
+from meho_backplane.checks.park_notify import ParkNotice, schedule_sensor_parked_notification
 from meho_backplane.checks.repository import (
     accelerate_sensor_next_fire,
     advance_sensor_next_fire,
@@ -164,7 +166,7 @@ from meho_backplane.checks.watchdog import note_tick_completed, reset_watchdog_s
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Sensor
+from meho_backplane.db.models import Sensor, SensorStatus
 from meho_backplane.metrics import note_loop_tick
 from meho_backplane.op_classes import is_safe_write
 from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
@@ -563,11 +565,12 @@ async def _count_auth_outcome(
     row: Sensor | None,
     outcome: AssertionOutcome,
     evaluated_at: datetime,
-) -> None:
+) -> ParkNotice | None:
     """Count a refused login. Pause the Sensor at the limit.
 
     Runs in the open transaction of :func:`_persist_outcome`, so the count,
-    the pause and the event commit together with the result.
+    the pause and the event commit together with the result. Returns the
+    warning mail to send once that transaction commits, or ``None``.
     """
     settings = get_settings()
     parked = await count_auth_outcome(
@@ -577,7 +580,7 @@ async def _count_auth_outcome(
         threshold=settings.sensor_auth_failure_park_threshold,
     )
     if not parked or row is None:
-        return
+        return None
     _log().warning("sensor_paused", sensor_id=str(snap.id), reason=AUTH_PARK_REASON)
     if settings.checks_agent_events:
         await publish_sensor_parked(
@@ -590,6 +593,15 @@ async def _count_auth_outcome(
             op_id=row.op_id,
             parked_at=evaluated_at,
         )
+    return ParkNotice(
+        tenant_id=snap.tenant_id,
+        sensor_id=row.id,
+        sensor_name=row.name,
+        target=row.target,
+        connector_id=row.connector_id,
+        op_id=row.op_id,
+        parked_at=evaluated_at,
+    )
 
 
 async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> None:
@@ -648,7 +660,7 @@ async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> 
         # a missing row means it was deleted mid-evaluation -- nothing to
         # accelerate).
         row = await session.get(Sensor, snap.id)
-        await _count_auth_outcome(session, snap, row, outcome, evaluated_at)
+        park_notice = await _count_auth_outcome(session, snap, row, outcome, evaluated_at)
         if row is not None and row.pending_state is not None:
             await accelerate_sensor_next_fire(
                 session,
@@ -673,11 +685,25 @@ async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> 
                 evaluated_at=evaluated_at,
             )
         await session.commit()
+    if park_notice is not None:
+        schedule_sensor_parked_notification(park_notice)
     await investigate_on_transition(
         sensor_id=snap.id,
         tenant_id=snap.tenant_id,
         acknowledgement_expired=recorded.acknowledgement_ended == "expired",
     )
+
+
+async def _still_active(sensor_id: uuid.UUID) -> bool:
+    """True when the Sensor still exists and is ``active``.
+
+    A claimed evaluation can wait for a free slot. In that time an operator
+    may pause the Sensor (or delete it), so the check runs right before the
+    call to the target.
+    """
+    async with get_sessionmaker()() as session:
+        status = await session.scalar(select(Sensor.status).where(Sensor.id == sensor_id))
+    return status == SensorStatus.ACTIVE.value
 
 
 async def _evaluate_and_record(snap: _SensorSnapshot) -> None:
@@ -691,6 +717,13 @@ async def _evaluate_and_record(snap: _SensorSnapshot) -> None:
     """
     try:
         async with _eval_semaphore():
+            if not await _still_active(snap.id):
+                _log().info(
+                    "sensor_evaluation_skipped_not_active",
+                    sensor_id=str(snap.id),
+                    sensor_name=snap.name,
+                )
+                return
             outcome = await _run_evaluation(snap)
         await _persist_outcome(snap, outcome)
         _log().info(

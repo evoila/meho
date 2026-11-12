@@ -210,6 +210,8 @@ def _review_op(
         tags=list(op.tags),
         needs_reingest=op.needs_reingest,
         tenant_enabled=(tenant_settings or {}).get(op.op_id),
+        category=policy.category if policy else None,
+        labels=dict(policy.labels) if policy else {},
     )
 
 

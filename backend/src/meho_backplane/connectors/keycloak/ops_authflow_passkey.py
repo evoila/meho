@@ -86,6 +86,7 @@ __all__ = [
     "PASSKEY_FLOW_ALIAS",
     "KeycloakPasskeyFlowError",
     "keycloak_authflow_ensure_passkey_code_skip",
+    "passkey_copy_difference",
 ]
 
 BUILT_IN_BROWSER_FLOW = "browser"
@@ -420,6 +421,56 @@ async def _move_after_user_configured(
         )
 
 
+async def _condition_in_place(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    realm: str,
+    rows: list[dict[str, Any]],
+    sub: int,
+) -> bool:
+    """``True`` when the step is right after the user check, required, with the passkey config."""
+    names = [_name(rows[child]) for child in _children(rows, sub)]
+    in_place = _USER_CONFIGURED in names and names[names.index(_USER_CONFIGURED) + 1 :][:1] == [
+        _CONDITION
+    ]
+    return in_place and await _step_is_there(connector, operator, target, realm, rows, sub)
+
+
+async def passkey_copy_difference(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    realm: str,
+) -> str | None:
+    """How flow ``browser with passkeys`` differs from what this op makes, or ``None``.
+
+    Read only. The flow must be the built-in ``browser`` flow, step for step
+    and setting for setting, plus the condition step: required, with the
+    passkey settings, right after ``conditional-user-configured``. The flow
+    can be edited, so its name alone proves nothing.
+    """
+    source = await _read_steps(connector, operator, target, realm, BUILT_IN_BROWSER_FLOW)
+    rows = await _read_steps(connector, operator, target, realm, PASSKEY_FLOW_ALIAS)
+    try:
+        sub = _code_subflow(rows)
+    except KeycloakPasskeyFlowError:
+        return "it has more than one conditional sub-flow with the one-time code"
+    difference = _copy_difference(
+        await _with_configs(connector, operator, target, realm, source),
+        await _with_configs(connector, operator, target, realm, rows),
+        sub,
+    )
+    if difference is not None or sub is None:
+        return difference
+    if not await _condition_in_place(connector, operator, target, realm, rows, sub):
+        return (
+            f"its {_CONDITION!r} step is not required with the passkey settings right "
+            f"after {_USER_CONFIGURED!r}"
+        )
+    return None
+
+
 async def _check_copy(
     connector: KeycloakConnector,
     operator: Operator,
@@ -429,15 +480,7 @@ async def _check_copy(
     """Read the copy again: the step must be required, configured, after the user check."""
     rows = await _read_steps(connector, operator, target, realm, PASSKEY_FLOW_ALIAS)
     sub = _code_subflow(rows)
-    names = [_name(rows[child]) for child in _children(rows, sub)] if sub is not None else []
-    in_place = _USER_CONFIGURED in names and names[names.index(_USER_CONFIGURED) + 1 :][:1] == [
-        _CONDITION
-    ]
-    if (
-        sub is None
-        or not in_place
-        or not await _step_is_there(connector, operator, target, realm, rows, sub)
-    ):
+    if sub is None or not await _condition_in_place(connector, operator, target, realm, rows, sub):
         raise KeycloakPasskeyFlowError(
             "check_failed",
             f"flow {PASSKEY_FLOW_ALIAS!r} does not read back with the condition step right "

@@ -38,14 +38,16 @@ change worked (the new password is accepted, the old one refused) without a
 `curl` call outside MEHO.
 `keycloak.authflow.ensure_approval_flow` and the read
 `keycloak.identity_provider.list` (read surface **eleven**) set up the
-approval sign-in flow, and `keycloak.authflow.ensure_passkey_code_skip`
-changes the browser sign-in flow for passkeys. Three more safe reads show the
+approval sign-in flow, `keycloak.authflow.ensure_passkey_code_skip`
+changes the browser sign-in flow for passkeys, and
+`keycloak.authflow.ensure_approval_touch` gives the console client the
+login flow with the passkey touch level. Three more safe reads show the
 login setup: `keycloak.auth_flow.step.list`, `keycloak.required_action.list`
 and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
 `keycloak.user.sessions`, show one user's state after a logout or a password
-reset (read surface **sixteen**). In total the connector registers 39
-operations: 16 `safe` reads and 23 writes that wait for
-approval (6 `caution`, 13 `dangerous`, 4 `destructive`).
+reset (read surface **sixteen**). In total the connector registers 40
+operations: 16 `safe` reads and 24 writes that wait for
+approval (7 `caution`, 13 `dangerous`, 4 `destructive`).
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -67,7 +69,8 @@ fresh target with no asserted version still resolves.
   `group_create`, `group_update_attributes`, `group_member_add`,
   `group_member_remove`, `user_delete`, `group_delete`, `client_delete`,
   `user_logout`, `user_disable`, `user_enable`, `realm_delete`, `user_check_login`,
-  `authflow_ensure_approval_flow`, `authflow_ensure_passkey_code_skip`),
+  `authflow_ensure_approval_flow`, `authflow_ensure_passkey_code_skip`,
+  `authflow_ensure_approval_touch`),
   the `_get_admin_json` / `_get_admin_list` GET
   helpers (object vs array responses), and the `_write_admin` mutating
   helper (POST/PUT/**DELETE**) plus the `_find_client_uuid` /
@@ -372,6 +375,7 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.realm.delete` | destructive | `DELETE /admin/realms/{realm}` |
 | `keycloak.authflow.ensure_passkey_code_skip` | caution | `POST .../authentication/flows/browser/copy`, then `PUT .../realms/{realm}` |
 | `keycloak.authflow.ensure_approval_flow` | caution | `.../authentication/flows` and the client `PUT` (see "Approval sign-in flow and identity providers") |
+| `keycloak.authflow.ensure_approval_touch` | caution | `.../authentication/flows`, step settings, the realm `PUT`, the client's mapper and `PUT` (see "Console touch flow") |
 | `keycloak.user.check_login` | caution | `POST /realms/{realm}/protocol/openid-connect/token` (see "Login test") |
 
 Five more writes are `dangerous` because they can change who gets which
@@ -964,12 +968,87 @@ browser login of the realm will use it, and the way back:
 `keycloak.realm.update` with `{"browserFlow": "browser"}`. The op is pinned
 as a plain `write` in `connectors/keycloak/op_classes.py`.
 
+### Console touch flow (#6213)
+
+`keycloak.authflow.ensure_approval_touch` (`ops_authflow_touch.py`, the
+flow shape and metadata in `ops_authflow_touch_schemas.py`) — risk level
+`caution`, approval required, group `authflow_write`, params `client_id`
+(only `meho-web`; the schema refuses another client) and `replace_custom_login` (default `false`). It gives a running realm what the chart's realm
+file gives a new one: the login flow `meho approval touch` with level 1
+(the normal login) and level 3 (`acr_values=meho-touch`, a passkey every
+time; level 2 is kept for the approval sign-in, `meho-approve`). On the target's managed realm:
+
+1. Find the client. Missing: stop with `client_not_found`, nothing
+   written. The realm's passkey policy must ask for user verification
+   (`webAuthnPolicyPasswordlessUserVerificationRequirement` is
+   `required`); otherwise a touch could pass without a PIN or fingerprint,
+   so the op stops with `verification_not_required`, nothing written.
+2. Find the flow. Missing: check that the Keycloak has every step
+   (`GET .../authentication/authenticator-providers`; Keycloak 26.4 added
+   `conditional-credential`), else stop with `missing_step` before any
+   write. Then make it (`POST .../flows`), add each step and
+   sub-flow in order, read the steps back, set each requirement (a new
+   step starts `DISABLED`; steps are matched by place, because the level
+   condition is in the flow twice), and give the four steps with
+   settings their config (`POST .../executions/{id}/config`). Read it
+   again: steps, requirements and every setting must match
+   (`check_failed` otherwise). There with the same shape and settings:
+   nothing written. There with another shape: stop with `other_steps`.
+3. Map `meho-touch` to level 3 in the realm attribute `acr.loa.map`,
+   next to the names already there (full realm `PUT` with
+   `merge_representation`, read back). Mapped to another level: stop
+   with `loa_conflict` before the bind.
+4. Add the `amr` mapper (`oidc-amr-mapper`) to the client unless it has
+   one. A mapper there that leaves the claim out of the ID token, the
+   access token or the introspection gets those settings turned on (a
+   `PUT` of that mapper, read back; `check_failed` otherwise).
+5. When the realm's browser flow has a company login default on its
+   `identity-provider-redirector` step, give the touch flow's redirector
+   the same `defaultProvider` (new config alias
+   `meho-company-login-redirect-touch`, the name `core/company_login.py`
+   uses, or a `PUT` of the config that is there; read back). Without it
+   the console login stops going straight to the company login until the
+   next chart upgrade. When the realm's flow has no default, a default on
+   the touch flow is removed (`DELETE` of its config, read back), as
+   `core/company_login.py` does.
+6. Bind the flow as the client's browser flow (full client `PUT`, read
+   back). This is the last write. Level 1 is a copy of Keycloak's
+   default login, so the op binds only when the realm's browser flow is
+   `browser` with the default steps, requirements and settings, or
+   `browser with passkeys` with the steps and settings of that `browser`
+   plus the passkey step, and the client has no browser flow of its own.
+   Both flows can be edited, so the op reads them. The default shapes
+   are in `ops_authflow_default_login.py` (the Go helper has the same
+   list in `cli/internal/cmd/admin/keycloak/defaultlogin.go`): Keycloak
+   26.0 to 26.2, 26.3 and newer, with or without the passkey condition,
+   WebAuthn, recovery codes and the organization step. The company
+   login default on the redirect step is allowed; it is MEHO's own
+   setting. The shapes with the organization step count only while the
+   realm's `organizationsEnabled` is false or missing: level 1 has no
+   organization step. Otherwise it
+   makes the flow, does not bind it, and returns `bound: false` with
+   `not_bound_reason`. With `replace_custom_login: true` it binds anyway;
+   `previous_browser_flow_id` names the flow it replaced. A client bound
+   to the touch flow already stays bound and returns `bound: true`, also
+   on a later run without `replace_custom_login`.
+
+The result is `{realm, flow_alias, flow_id, flow_created, flow_steps,
+loa_map_changed, amr_mapper_added, amr_mapper_fixed, redirect_default_copied, client_id, client_uuid,
+bound, not_bound_reason, browser_flow_id, previous_browser_flow_id, binding_changed}`. Errors
+raise `KeycloakTouchFlowError` with a stable `code`. A test keeps the
+op's flow equal to the realm file's. The approval card names the realm,
+the client, the new flow, who is affected, and the way back:
+`keycloak.client.update` with `{"authenticationFlowBindingOverrides":
+{"browser": ""}}`. The op is pinned as a plain `write` in
+`connectors/keycloak/op_classes.py`.
+
 ### Park-time approval preview (#1857)
 
-Sixteen of the write ops register bespoke `proposed_effect` preview builders
+Seventeen of the write ops register bespoke `proposed_effect` preview builders
 (twelve in `connectors/keycloak/ops_write_preview.py`, one in
 `ops_login_check.py`, one in `ops_authflow.py`, one in
-`ops_authflow_passkey.py`, one in `ops_write_realm_smtp.py`), wired onto the per-op hook
+`ops_authflow_passkey.py`, one in `ops_authflow_touch.py`, one in
+`ops_write_realm_smtp.py`), wired onto the per-op hook
 (`operations/_preview.py`, #1437) by an import side-effect in the package
 `__init__`. They give the approval reviewer a resource-centric view at park
 time — secrets scrubbed via the same `redact_secret_fields` the read ops
@@ -991,6 +1070,7 @@ use:
 | `keycloak.user.check_login` | `{resource, username, realm, client_id, password_source, password_secret_ref[, password_secret_mount, password_secret_key]}` (registered in `ops_login_check.py`) |
 | `keycloak.authflow.ensure_approval_flow` | `{resource, realm, flow, client_id, client_lookup_needs_one_of, roles_needed, rights_check}` (registered in `ops_authflow.py`) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back, roles_needed, rights_check}` (registered in `ops_authflow_passkey.py`) |
+| `keycloak.authflow.ensure_approval_touch` | `{resource, realm, client_id, new_flow, affects, way_back}` (registered in `ops_authflow_touch.py`) |
 | `keycloak.realm.update` | `{resource, realm, representation[, smtp_password_source, smtp_password_secret_ref]}` (registered in `ops_write_realm_smtp.py`) |
 
 The group builders surface `attribute_keys` (which attributes change,

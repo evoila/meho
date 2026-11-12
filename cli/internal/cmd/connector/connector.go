@@ -99,6 +99,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newReviewCmd())
 	cmd.AddCommand(newEditGroupCmd())
 	cmd.AddCommand(newEditOpCmd())
+	cmd.AddCommand(newClassifyCmd())
 	cmd.AddCommand(newOverridesCmd())
 	cmd.AddCommand(newRemoveOverrideCmd())
 	cmd.AddCommand(newEnableCmd())

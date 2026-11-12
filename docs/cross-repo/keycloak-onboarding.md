@@ -126,7 +126,7 @@ approves it through the queue.
 | `authflow_write` | `keycloak.authflow.ensure_approval_flow` | `.../authentication/flows` and `PUT .../clients/{id}` | caution |
 | `authflow_write` | `keycloak.authflow.ensure_passkey_code_skip` | `.../authentication/flows` and `PUT /admin/realms/{realm}` | caution |
 
-Twenty-one write ops. The group column is the registered group key: use it
+Twenty-two write ops. The group column is the registered group key: use it
 as the `group` argument of `search_operations` (for example
 `group="realm_write"` finds `keycloak.realm.create`).
 

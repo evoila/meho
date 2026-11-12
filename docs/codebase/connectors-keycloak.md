@@ -37,13 +37,13 @@ only `accepted`, `refused` or `error`, so an operator can prove a password
 change worked (the new password is accepted, the old one refused) without a
 `curl` call outside MEHO.
 `keycloak.authflow.ensure_approval_flow` and the read
-`keycloak.identity_provider.list` (read surface **eleven**) set up the
+`keycloak.identity_provider.list` set up the
 approval sign-in flow, and `keycloak.authflow.ensure_passkey_code_skip`
 changes the browser sign-in flow for passkeys. Three more safe reads show the
 login setup: `keycloak.auth_flow.step.list`, `keycloak.required_action.list`
 and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
 `keycloak.user.sessions`, show one user's state after a logout or a password
-reset (read surface **sixteen**). In total the connector registers 41
+reset. In total the connector registers 41
 operations: 17 `safe` reads and 24 writes that wait for
 approval (6 `caution`, 14 `dangerous`, 4 `destructive`).
 `keycloak.user.required_actions.update` makes a user set up a one-time code
@@ -642,6 +642,7 @@ longer sign in to any app that uses this realm.
   because `.disable` and `.enable` are not write suffixes).
 - The result is `{id, username, enabled, unrequested_changes, read_back_checked}`
   and carries no credential.
+
 ### One-time code set-up
 
 Two ops in `ops_user_required_actions.py`. The usual use is to make users
@@ -660,6 +661,11 @@ login.
   - After approval, the op uses the user id shown on the approval card.
     It does not look the username up again. A card without a user id is
     refused, and nothing is written.
+  - A request with both `id` and `username` must name one user: the
+    username stored in Keycloak for that id must match (case does not
+    count). If not, the request is refused before it waits for approval
+    (a park check), and again when the approved request runs. Nothing is
+    written.
   - Each name in `add` must be an enabled required action of the realm
     (`GET .../authentication/required-actions`). An unknown or disabled
     name is refused before any write, and the error lists the allowed
@@ -669,8 +675,14 @@ login.
     required_actions, unrequested_changes, read_back_checked}`.
   - The approval card shows `{resource, username, id, realm, add, remove,
     current_available[, current_required_actions,
-    resulting_required_actions]}`. When the user cannot be read at park
-    time, the card still shows the request.
+    resulting_required_actions][, warning]}`. When the user could be
+    read, the card and the answer show the username stored in Keycloak.
+    When the user cannot be read at park time, the card still shows the
+    request.
+  - When the realm is the one MEHO's own sign-in uses and `add` has a
+    passkey set-up (`webauthn-register` or
+    `webauthn-register-passwordless`), the card's `warning` says: "this
+    lets the next sign-in to this account add a new passkey".
   - Two writers at the same time can overwrite each other: Keycloak has no
     version check on a user.
 - `keycloak.user.otp_status` (safe read, group `user`). Params: `username`
@@ -680,12 +692,12 @@ login.
   user's credentials (one request per user, eight at a time) and keeps
   only whether a credential of type `otp` exists. Answer: `{rows: [{id,
   username, enabled, required_actions, has_otp, otp_setup_pending}], total,
-  unknown, truncated}`. `has_otp` is `null` (unknown) when the credentials
-  of that user could not be read. `truncated` is `true` when more users
+  unknown, truncated, skipped_no_id}`. `has_otp` is `null` (unknown) when
+  the credentials of that user could not be read. `skipped_no_id` counts
+  the user rows left out because Keycloak gave them no id. `truncated` is `true` when more users
   exist than `max`. A user list answer that is not a list is an error,
   not an empty list. No credential value, label or other credential field
   is ever returned.
-
 
 ### Login test
 

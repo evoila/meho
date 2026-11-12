@@ -15,7 +15,13 @@ An import is a change of rights:
   call, and no standing grant and no run approval covers it;
 * every request carries the rights-change mark, so the person who asked
   can never approve it, and the approver is another admin of the tenant;
-* a person needs the ``tenant_admin`` role to ask.
+* a person needs the ``tenant_admin`` role to ask;
+* only a person asks (no agent, service login or hosted agent run), and
+  only a platform admin asks for ``scope: install``
+  (:func:`policy_apply_requester_refusal`). The policy gate checks this on
+  every path (``call_operation``, the REST dispatch route, the CLI), before
+  the plan is built. The approval card records who asked
+  (:func:`record_policy_apply_requester`), and the run checks it again.
 
 When it runs (after the approval) it plans again
 (:func:`~meho_backplane.policy.service.apply_policy`). When the stored
@@ -32,8 +38,13 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.operator import PrincipalKind, is_human_principal
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.operations.secondary_target_policy import approved_requester_sub
+from meho_backplane.operations.secondary_target_policy import (
+    approved_requester_sub,
+    approved_requester_subject,
+)
 from meho_backplane.operations.typed_register import (
     register_typed_operation,
     remove_built_in_connector_rows,
@@ -53,6 +64,8 @@ __all__ = [
     "SWITCH_OFF_IMPORT",
     "build_policy_apply_preview",
     "policy_apply",
+    "policy_apply_requester_refusal",
+    "record_policy_apply_requester",
     "register_policy_apply_operation",
 ]
 
@@ -68,6 +81,17 @@ SWITCH_OFF_IMPORT: Final[str] = (
 #: Why an install-wide import did not run.
 INSTALL_NEEDS_PLATFORM_ADMIN: Final[str] = (
     "The install's policy changes only when a platform admin approves it."
+)
+
+#: Why an import was refused: an agent, a service login or a hosted agent run asked.
+IMPORT_NEEDS_PERSON: Final[str] = (
+    "Only a person can ask for a policy import. Use `meho policy import` or "
+    "POST /api/v1/policy/import with your own login."
+)
+
+#: Why an install-wide import was refused: the person who asked is not a platform admin.
+INSTALL_ASK_NEEDS_PLATFORM_ADMIN: Final[str] = (
+    "Only a platform admin can ask to import the install's policy."
 )
 
 #: Why an import did not run: the login that asked for it ran it.
@@ -157,6 +181,46 @@ _LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
 }
 
 
+def policy_apply_requester_refusal(operator: Operator, params: dict[str, Any]) -> str | None:
+    """Why *operator* may not ask for this import, or ``None`` when it may.
+
+    The policy gate runs it on every path, before the call waits and before
+    its plan is built (``register_requester_check``).
+    """
+    if not is_human_principal(operator) or resolve_actor_sub() is not None:
+        return IMPORT_NEEDS_PERSON
+    if params.get("scope") == "install" and not operator.platform_admin:
+        return INSTALL_ASK_NEEDS_PLATFORM_ADMIN
+    return None
+
+
+async def record_policy_apply_requester(ctx: PreviewContext) -> dict[str, Any]:
+    """Who asked, stored on the approval card, so the run can check them again."""
+    operator = ctx.operator
+    return {
+        "requester": {
+            "sub": operator.sub,
+            "principal_kind": operator.principal_kind.value,
+            "platform_admin": operator.platform_admin,
+            "act": resolve_actor_sub(),
+        }
+    }
+
+
+def _requester_refusal_at_run(scope: str) -> str | None:
+    """Check the card's record of who asked again; no record is a refusal."""
+    requester = approved_requester_subject()
+    if (
+        requester is None
+        or requester.get("principal_kind") != PrincipalKind.USER.value
+        or requester.get("act") is not None
+    ):
+        return IMPORT_NEEDS_PERSON
+    if scope == "install" and requester.get("platform_admin") is not True:
+        return INSTALL_ASK_NEEDS_PLATFORM_ADMIN
+    return None
+
+
 async def policy_apply(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Import the file in *params* for the operator's tenant, or for the install.
 
@@ -165,7 +229,9 @@ async def policy_apply(operator: Operator, target: Any, params: dict[str, Any]) 
 
     Only the admin who approved runs it. A run by the login that asked
     (for example its re-run of a failed approved request) writes nothing,
-    so the history never names the importer as the approver.
+    so the history never names the importer as the approver. The person
+    who asked is checked again from the request: a person, and for
+    ``scope: install`` a platform admin.
     """
     if not classification_enabled():
         raise ValueError(SWITCH_OFF_IMPORT)
@@ -173,6 +239,9 @@ async def policy_apply(operator: Operator, target: Any, params: dict[str, Any]) 
     if importer is None or importer == operator.sub:
         raise ValueError(IMPORT_NEEDS_SECOND_ADMIN)
     scope = params["scope"]
+    refusal = _requester_refusal_at_run(scope)
+    if refusal is not None:
+        raise ValueError(refusal)
     if scope == "install" and not operator.platform_admin:
         raise ValueError(INSTALL_NEEDS_PLATFORM_ADMIN)
     async with get_sessionmaker()() as session, session.begin():
@@ -189,8 +258,14 @@ async def policy_apply(operator: Operator, target: Any, params: dict[str, Any]) 
 
 
 async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """The plan on the approval card: what the file adds, changes and removes."""
+    """The plan on the approval card: what the file adds, changes and removes.
+
+    Builds no plan for a caller who may not ask for the import.
+    """
     params = ctx.params
+    refusal = policy_apply_requester_refusal(ctx.operator, params)
+    if refusal is not None:
+        raise ValueError(refusal)
     async with get_sessionmaker()() as session:
         plan = await build_plan(
             session,

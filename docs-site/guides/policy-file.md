@@ -9,7 +9,9 @@ You keep the policy as one file, `policy: v1`. You can:
 
 - **validate** a file and see every mistake,
 - see a **diff**: what an import would change (a dry run),
-- **import** a file. A second admin must approve the import,
+- **import** a file. A second admin must approve the import. Only a
+  person can ask for an import, never an agent. Only a platform admin can
+  ask to import the install's policy,
 - **export** the stored policy as a file,
 - read the **history**: the last 20 imported files.
 
@@ -77,7 +79,8 @@ platform admin may do that.
    the web console or on the command line.
 4. When it is approved, MEHO checks again. If the stored policy changed in
    the meantime, the import does not run: run the diff again and import
-   again.
+   again. An approved import that failed cannot run again. Import the file
+   again, and a second admin approves the new request.
 5. The import **replaces the whole policy**. An entry that is not in the
    file is removed.
 

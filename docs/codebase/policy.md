@@ -88,7 +88,12 @@ every tenant yet; that needs a decision first.
   operations it matches) and `changes` (how many of those get other
   values). `operations_changed` counts all operations whose values change.
   `based_on` is the SHA-256 of the meaning of the stored policy (key order,
-  comments and empty keys do not count).
+  comments and empty keys do not count). It covers only the stored policy
+  of the import's own scope. A tenant import does not notice a change to
+  the install's policy, or to the category and labels of a single
+  operation (`operation_policy_override`), made after the plan. The run
+  plans again, so the floors and conflict checks still use the policy of
+  that moment; only the diff the approver saw can be out of date.
 - The same file twice, or a file with the same meaning, is "No change.":
   nothing waits, and no version is written.
 - An import is a change of rights. `POST /api/v1/policy/import` calls the
@@ -98,7 +103,20 @@ every tenant yet; that needs a decision first.
   carries the rights-change mark: the importer can never approve it;
   another admin must ([approvals.md](approvals.md)). The params are the
   scope, the file, its SHA-256 and `based_on`. The approval card shows the
-  plan (a preview builder).
+  plan (a preview builder) and who asked (a permission preflight).
+- Only a person asks for an import, and only a platform admin asks for
+  `scope: install`. The import route checks this at the door. For every
+  other path to `policy.apply` (`call_operation`, the REST dispatch route,
+  `meho call`), the operation registers a requester check
+  (`register_requester_check` in `operations/role_floors.py`). The policy
+  gate runs it first, for every kind of login, so an agent, a service
+  login, a hosted agent run, or a tenant admin asking for `scope: install`
+  is refused before the request waits and before any plan is built. The
+  preview builder refuses the same callers too.
+- When it runs, `policy_apply` checks the requester again from the
+  request: the approval card's record must say a person asked, with no
+  agent acting for them, and for `scope: install` a platform admin. A
+  request without that record does not run.
 - When it runs after the approval, `apply_policy` checks the SHA-256 of
   the file and plans again. If the stored policy changed after the plan:
   "The policy changed after this import was planned. Run the preview

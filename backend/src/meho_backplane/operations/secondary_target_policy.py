@@ -60,6 +60,7 @@ if TYPE_CHECKING:
 __all__ = [
     "SecondaryTargetWrite",
     "approved_requester_sub",
+    "approved_requester_subject",
     "bind_approved_requester",
     "requester_policy_preflight",
     "secondary_target_refusal",
@@ -208,6 +209,18 @@ def approved_requester_sub() -> str | None:
     """
     requester = _approved_requester_var.get()
     return None if requester is None else requester.sub
+
+
+def approved_requester_subject() -> dict[str, Any] | None:
+    """The card's record of the bound requester, else ``None``.
+
+    ``None`` also when the card has no record, or its ``sub`` does not
+    match the row. ``act`` comes from the row, not from the card.
+    """
+    requester = _approved_requester_var.get()
+    if requester is None or requester.subject is None:
+        return None
+    return {**requester.subject, "act": requester.act}
 
 
 def _requester_operator(requester: _Requester, subject: Mapping[str, Any]) -> Operator:

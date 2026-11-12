@@ -47,7 +47,7 @@ from meho_backplane.op_classes import is_root_shell
 from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.operations.caller_address import has_caller_address
-from meho_backplane.operations.role_floors import role_floor_denial
+from meho_backplane.operations.role_floors import requester_check_denial, role_floor_denial
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.settings import get_settings
 
@@ -914,6 +914,28 @@ async def _non_agent_verdict(
     return PermissionVerdict.NEEDS_APPROVAL, gate_reason
 
 
+def _requester_denial(
+    operator: Operator, descriptor: EndpointDescriptor, params: dict[str, Any] | None
+) -> str | None:
+    """Why *operator* may not ask for this call at all, or ``None``.
+
+    The op's requester check
+    (:func:`~meho_backplane.operations.role_floors.register_requester_check`)
+    holds for every kind of login, so a refused call is ``DENY`` before any
+    approval request or preview is built.
+    """
+    denial = requester_check_denial(descriptor.op_id, operator, params or {})
+    if denial is not None:
+        _log.info(
+            "policy_gate_requester_denied",
+            operator_sub=operator.sub,
+            principal_kind=operator.principal_kind.value,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+        )
+    return denial
+
+
 async def policy_gate(
     *,
     operator: Operator,
@@ -983,15 +1005,15 @@ async def policy_gate(
     marked as requiring approval is never auto-executed by an agent
     regardless of its ``safety_level``.
 
-    The function is **async** — it opens its own DB session to load the
-    caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
-    mirroring the same pattern :func:`audit_safe` uses.
-
     ``preview_hash`` and ``params`` (#4622) matter only to the
     service-principal grant consult in sandbox mode (a ``destructive``
     delete must present its own preview hash and a valid blast radius
     first). ``decide_only`` (#4923, #5492) returns the verdict and writes
-    nothing: a grant that would clear the call is reported but not used."""
+    nothing: a grant that would clear the call is reported but not used.
+    The op's requester check (:func:`_requester_denial`) reads *params* too."""
+    requester_denial = _requester_denial(operator, descriptor, params)
+    if requester_denial is not None:
+        return PermissionVerdict.DENY, requester_denial
     actor_sub = resolve_actor_sub()
     if actor_sub is not None:
         return await _direct_run_verdict(

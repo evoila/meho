@@ -15,6 +15,10 @@
 * When the stored policy changed after the plan, the approved import does
   not run.
 * After a failed run, the importer's own re-run writes nothing.
+* ``policy.apply`` through ``dispatch`` (``call_operation``, the REST
+  dispatch route, the CLI) refuses an agent, a hosted agent run, and an
+  install-wide import from someone who is not a platform admin: no request
+  waits and no plan is built. The run checks the recorded requester again.
 
 Drives the production ``meho_backplane.main:app``. DB is the autouse
 per-test SQLite + ``alembic upgrade head``.
@@ -32,10 +36,13 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.policy import apply as policy_apply_module
 from meho_backplane.connectors.policy.apply import (
+    IMPORT_NEEDS_PERSON,
     IMPORT_NEEDS_SECOND_ADMIN,
+    INSTALL_ASK_NEEDS_PLATFORM_ADMIN,
     POLICY_APPLY_OP_ID,
     SWITCH_OFF_IMPORT,
     register_policy_apply_operation,
@@ -49,6 +56,7 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.operations.approval_rerun import rerun_failed_request
+from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.grant_approval import is_rights_change_op
 from meho_backplane.operations.role_floors import role_floor_for
 from meho_backplane.operations.typed_register import register_typed_operation
@@ -142,12 +150,15 @@ def _post(client: TestClient, path: str, token: str, content: str, **params: str
     )
 
 
-def _admin(sub: str) -> Operator:
+def _admin(
+    sub: str, *, kind: PrincipalKind = PrincipalKind.USER, platform_admin: bool = False
+) -> Operator:
     return Operator(
         sub=sub,
         tenant_id=_TENANT,
         tenant_role=TenantRole.TENANT_ADMIN,
-        principal_kind=PrincipalKind.USER,
+        principal_kind=kind,
+        platform_admin=platform_admin,
         raw_jwt="header.payload.signature",
     )
 
@@ -425,3 +436,104 @@ async def test_the_same_rules_in_another_order_do_not_wait(
     assert await _requests() == []
     async with get_sessionmaker()() as session:
         assert (await session.execute(select(PolicyRevision))).scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# policy.apply through dispatch: who may ask, checked again at the run
+# ---------------------------------------------------------------------------
+
+
+async def _dispatch_apply(operator: Operator, scope: str = "tenant") -> Any:
+    return await dispatch(
+        operator=operator,
+        connector_id="policy-registry-1.x",
+        op_id=POLICY_APPLY_OP_ID,
+        target=None,
+        params={"scope": scope, "file": _FILE, "file_sha256": "0" * 64, "based_on": "0" * 64},
+    )
+
+
+@pytest.fixture
+def no_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fails(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("no plan is built for a refused requester")
+
+    monkeypatch.setattr(policy_apply_module, "build_plan", _fails)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch", "no_plan")
+@pytest.mark.parametrize(
+    ("kind", "scope", "reason"),
+    [
+        (PrincipalKind.AGENT, "tenant", IMPORT_NEEDS_PERSON),
+        (PrincipalKind.SERVICE, "tenant", IMPORT_NEEDS_PERSON),
+        (PrincipalKind.USER, "install", INSTALL_ASK_NEEDS_PLATFORM_ADMIN),
+    ],
+)
+async def test_dispatch_refuses_a_requester_who_may_not_ask(
+    embedding: AsyncMock, kind: PrincipalKind, scope: str, reason: str
+) -> None:
+    await _setup(embedding)
+    result = await _dispatch_apply(_admin("caller", kind=kind), scope)
+    assert result.status == "denied", result
+    assert reason in str(result.error)
+    assert await _requests() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch", "no_plan")
+async def test_dispatch_refuses_a_hosted_agent_run(embedding: AsyncMock) -> None:
+    await _setup(embedding)
+    with actor_delegation("agent:helper"):
+        result = await _dispatch_apply(_admin("admin-a"))
+    assert result.status == "denied", result
+    assert IMPORT_NEEDS_PERSON in str(result.error)
+    assert await _requests() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch")
+async def test_a_platform_admin_imports_the_install_policy(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await _setup(embedding)
+    key = make_rsa_keypair("kid-pol-install-run")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _post(client, "import", _token(key, platform_admin=True), _FILE, scope="install")
+    assert resp.status_code == 202, resp.text
+    (request,) = await _requests()
+    record = request.proposed_effect["permission_preflight"]["requester"]  # type: ignore[index]
+    assert record["platform_admin"] is True and record["principal_kind"] == "user"
+    result = await _approve(request.id, _admin("admin-b", platform_admin=True))
+    assert result.status == "ok", result
+    assert result.result["applied"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch")
+@pytest.mark.parametrize(
+    "record",
+    [None, {"sub": "admin-a", "principal_kind": "agent", "platform_admin": False, "act": None}],
+)
+async def test_the_run_checks_the_recorded_requester_again(
+    client: TestClient, embedding: AsyncMock, record: dict[str, Any] | None
+) -> None:
+    await _setup(embedding)
+    key = make_rsa_keypair("kid-pol-record")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        body = _post(client, "import", _token(key), _FILE).json()
+    request_id = uuid.UUID(body["approval_request_id"])
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+        assert row is not None
+        effect = dict(row.proposed_effect)
+        effect["permission_preflight"] = None if record is None else {"requester": record}
+        row.proposed_effect = effect
+        await session.commit()
+    result = await _approve(request_id, _admin("admin-b"))
+    assert result.status != "ok"
+    assert IMPORT_NEEDS_PERSON in str(result.error) + str(result.extras)
+    assert await _stored() is None

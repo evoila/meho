@@ -129,7 +129,11 @@ func newPreviewCmd() *cobra.Command {
 			"typed/composite op is the exception — it previews a param-bound " +
 			"request tuple). An approval-gated op that writes a credential " +
 			"(for example `vault.kv.put`) is not previewable and stays " +
-			"`status=\"unavailable\"`, so its secret params never surface.\n\n" +
+			"`status=\"unavailable\"`, so its secret params never surface. " +
+			"With the backplane switch `PREVIEW_TYPED_WRITES` on (off by " +
+			"default), every typed/composite write previews, also one that " +
+			"waits for approval only for some callers, and a credential write " +
+			"with its own safe preview shows only that plan, never the params.\n\n" +
 			"When the real call would be refused because the target's version " +
 			"is outside what the connector's catalog supports, and no other " +
 			"catalog of the same connector serves it, the preview is refused " +

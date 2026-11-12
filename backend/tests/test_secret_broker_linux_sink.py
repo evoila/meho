@@ -19,6 +19,7 @@ import getpass
 import json
 import logging
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -37,6 +38,7 @@ import meho_backplane.connectors.secret  # noqa: F401 -- registers the linux kin
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.linux import LinuxSshConnector
 from meho_backplane.connectors.linux.secret_endpoint import (
+    _OWNER_WRITE_SCRIPT,
     LinuxSecretRefError,
     LinuxSecretSinkEndpoint,
     LinuxSecretSinkError,
@@ -54,7 +56,7 @@ from meho_backplane.connectors.secret.endpoints import (
 from meho_backplane.connectors.secret.move_preview import build_secret_move_preview
 from meho_backplane.connectors.secret.ops import register_secret_broker_operations
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import ApprovalRequest, AuditLog
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import PreviewContext
@@ -112,16 +114,20 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 def test_linux_kind_is_registered() -> None:
     assert "linux" in SECRET_ENDPOINT_REGISTRY
-    spec = parse_secret_ref("linux:seat-host/etc/app/key#app")
+    spec = parse_secret_ref("linux:seat-host/home/app/.config/key#app")
     assert isinstance(SECRET_ENDPOINT_REGISTRY[spec.kind](spec.ref), LinuxSecretSinkEndpoint)
 
 
 @pytest.mark.parametrize(
     "ref",
-    ["seat-host/etc/app/key#app", "seat-host//etc/app/key#app", "seat-host/etc//app/./key#app"],
+    [
+        "seat-host/home/app/.config/key#app",
+        "seat-host//home/app/.config/key#app",
+        "seat-host/home//app/./.config/key#app",
+    ],
 )
 def test_ref_parses_with_one_or_two_slashes(ref: str) -> None:
-    assert parse_linux_secret_ref(ref) == ("seat-host", "/etc/app/key", "app")
+    assert parse_linux_secret_ref(ref) == ("seat-host", "/home/app/.config/key", "app")
 
 
 def test_ref_in_the_owner_home_passes_the_lexical_check() -> None:
@@ -130,7 +136,6 @@ def test_ref_in_the_owner_home_passes_the_lexical_check() -> None:
         "/home/agent/.config/meho/key",
         "agent",
     )
-    assert parse_linux_secret_ref("seat-host/root/.config/key#root")[1] == "/root/.config/key"
     # A home in another place passes too; the host then says where the home is.
     assert parse_linux_secret_ref("seat-host/data/app/key#app")[1] == "/data/app/key"
 
@@ -138,22 +143,25 @@ def test_ref_in_the_owner_home_passes_the_lexical_check() -> None:
 @pytest.mark.parametrize(
     "ref",
     [
-        "seat-host/etc/app/key",  # no owner
-        "seat-host/etc/app/key#",  # empty owner
-        "seat-host/etc/app/key#Bad Owner",  # bad owner
-        "seat-host/etc/app/key#a;b",  # shell character in owner
+        "seat-host/home/app/key",  # no owner
+        "seat-host/home/app/key#",  # empty owner
+        "seat-host/home/app/key#Bad Owner",  # bad owner
+        "seat-host/home/app/key#a;b",  # shell character in owner
+        "seat-host/home/root/key#root",  # owner root
         "seat-host#app",  # no path
         "seat-host/#app",  # empty path
-        "/etc/app/key#app",  # no target
-        "seat-host/etc/../root/key#app",  # traversal
-        "seat-host/home/agent/../../etc/key#agent",  # traversal
-        "seat-host/etc/app/#app",  # a directory
-        "seat-host/proc/sys/x#app",  # outside every allowed place
+        "/home/app/key#app",  # no target
+        "seat-host/home/app/../../etc/key#app",  # traversal
+        "seat-host/home/app/#app",  # a directory
+        "seat-host/proc/sys/x#app",  # never a home
         "seat-host/boot/x#app",
         "seat-host/usr/bin/x#app",
         "seat-host/tmp/x#app",
-        "seat-host/etc/a\\nb#app",  # backslash
         "seat-host/dev/x#app",
+        "seat-host/home/app/a\\nb#app",  # backslash
+        "seat-host/home/app/a\tb#app",  # tab
+        "seat-host/home/app/a\x1bb#app",  # ESC
+        "seat-host/home/app/a\u200fb#app",  # right-to-left mark
     ],
 )
 def test_bad_refs_are_refused_before_any_ssh(ref: str) -> None:
@@ -166,40 +174,33 @@ def test_bad_refs_are_refused_before_any_ssh(ref: str) -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        # Scheduled commands.
-        "/etc/crontab",
-        "/etc/cron.d/meho",
-        "/etc/cron.daily/meho",
-        # Sudo rules.
-        "/etc/sudoers",
-        "/etc/sudoers.d/meho",
-        # Services.
-        "/etc/systemd/system/meho.service",
-        # Login shells.
-        "/etc/profile",
-        "/etc/profile.d/meho.sh",
-        # The loader.
-        "/etc/ld.so.preload",
-        "/etc/ld.so.conf.d/meho.conf",
-        # Login rules and SSH.
-        "/etc/pam.d/sshd",
-        "/etc/ssh/sshd_config",
-        "/etc/ssh/sshd_config.d/meho.conf",
-        # The user and group files.
-        "/etc/passwd",
-        "/etc/shadow",
-        "/etc/group",
-        # SSH login keys, in any folder.
-        "/home/agent/.ssh/authorized_keys",
-        "/root/.ssh/authorized_keys",
-        "/srv/app/.ssh/authorized_keys2",
-        # Shell start files.
+        # SSH: the folder anywhere in the path, and key files in any folder.
+        "/home/agent/.ssh/config",
+        "/home/agent/.ssh/sub/key",
+        "/home/agent/app/.ssh/key",
+        "/home/agent/.ssh",
+        "/home/agent/keys/authorized_keys",
+        "/home/agent/authorized_keys2",
+        # User services and programs started at login.
+        "/home/agent/.config/systemd/user/meho.service",
+        "/home/agent/.config/autostart/meho.desktop",
+        # Shell start and end files.
         "/home/agent/.bashrc",
         "/home/agent/.bash_profile",
         "/home/agent/.bash_login",
+        "/home/agent/.bash_logout",
         "/home/agent/.profile",
         "/home/agent/.zshrc",
-        "/root/.bashrc",
+        "/home/agent/.zshenv",
+        "/home/agent/.zprofile",
+        "/home/agent/.zlogin",
+        "/home/agent/.zlogout",
+        # Login settings, mail forwarding and remote login files.
+        "/home/agent/.pam_environment",
+        "/home/agent/.forward",
+        "/home/agent/.rhosts",
+        "/home/agent/.shosts",
+        "/home/agent/.k5login",
     ],
 )
 def test_places_the_system_runs_are_refused_before_any_ssh(path: str) -> None:
@@ -209,20 +210,55 @@ def test_places_the_system_runs_are_refused_before_any_ssh(path: str) -> None:
 
 @pytest.mark.parametrize(
     "path",
-    ["/etc/app/key", "/etc/ssh-app/key", "/home/agent/.config/meho/key", "/home/agent/bashrc"],
+    [
+        "/home/agent/.config/meho/key",
+        "/home/agent/bashrc",
+        "/home/agent/.bashrc.bak",
+        "/home/agent/.ssh-notes/key",
+        "/home/agent/ssh/key",
+        "/home/agent/.config/systemd-notes/key",
+        "/home/agent/systemd/key",
+        "/home/agent/.config/autostarted/key",
+    ],
 )
 def test_places_next_to_the_refused_ones_stay_allowed(path: str) -> None:
     assert parse_linux_secret_ref(f"seat-host{path}#agent")[1] == path
 
 
-@pytest.mark.parametrize("ref", ["seat-host/usr/local/x#app", "seat-host/var/lib/app/x#app"])
-def test_write_roots_inside_never_roots_stay_allowed(ref: str) -> None:
-    assert parse_linux_secret_ref(ref)[2] == "app"
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc/app/key",
+        "/var/lib/app/key",
+        "/run/app/key",
+        "/opt/app/key",
+        "/srv/app/key",
+        "/usr/local/app/key",
+        "/etc/ssh/sshd_config",
+        "/etc/sudoers.d/meho",
+    ],
+)
+def test_places_outside_a_home_are_refused_before_any_ssh(path: str) -> None:
+    with pytest.raises(LinuxSecretRefError, match="outside the owner's home"):
+        parse_linux_secret_ref(f"seat-host{path}#app")
+
+
+def test_the_owner_root_is_refused_before_any_ssh() -> None:
+    with pytest.raises(LinuxSecretRefError, match="'root'"):
+        parse_linux_secret_ref("seat-host/home/root/.config/key#root")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "ref", ["seat-host/etc/../root/key#app", "seat-host/tmp/key#app", "seat-host/proc/x#app"]
+    "ref",
+    [
+        "seat-host/etc/../root/key#app",
+        "seat-host/tmp/key#app",
+        "seat-host/proc/x#app",
+        "seat-host/etc/app/key#app",
+        "seat-host/home/app/.ssh/key#app",
+        "seat-host/home/app/key#root",
+    ],
 )
 async def test_a_refused_path_opens_no_ssh_connection(ref: str) -> None:
     connect = AsyncMock()
@@ -237,7 +273,7 @@ async def test_a_refused_path_opens_no_ssh_connection(ref: str) -> None:
 
 @pytest.mark.asyncio
 async def test_reading_a_linux_ref_fails_without_a_value() -> None:
-    endpoint = LinuxSecretSinkEndpoint("seat-host/etc/app/key#app")
+    endpoint = LinuxSecretSinkEndpoint("seat-host/home/app/key#app")
     with pytest.raises(NotImplementedError) as excinfo:
         await endpoint.read_secret(_OPERATOR)
     assert "write-only" in str(excinfo.value)
@@ -247,10 +283,6 @@ async def test_reading_a_linux_ref_fails_without_a_value() -> None:
 # ---------------------------------------------------------------------------
 # The root script, run locally
 # ---------------------------------------------------------------------------
-
-
-#: The owner's user id as the fake ``id`` and ``stat`` report it.
-_FAKE_OWNER_UID = "99999"
 
 
 def _fake_tool(fake_bin: Path, name: str, body: str) -> None:
@@ -263,7 +295,7 @@ def _run_script(
     script: str,
     *,
     home: Path | None = None,
-    owner_dirs: tuple[Path, ...] = (),
+    owner_uid: str = "99999",
     realpath: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run *script* with the local bash.
@@ -271,9 +303,8 @@ def _run_script(
     A fake ``getent`` answers with *home*. A fake ``runuser`` writes its owner
     argument to ``runuser.log`` next to the home, then runs the command (the
     test user already is the owner). The test user plays root. A fake ``id``
-    gives the owner the user id :data:`_FAKE_OWNER_UID`, and a fake ``stat``
-    reports that id for the folders in *owner_dirs*. *realpath*, when set, is
-    the body of a fake ``realpath``.
+    gives a known owner the user id *owner_uid* and fails for an unknown one.
+    *realpath*, when set, is the body of a fake ``realpath``.
     """
     env = dict(os.environ)
     if home is not None:
@@ -283,19 +314,13 @@ def _run_script(
         _fake_tool(
             fake_bin, "runuser", f'echo "$2" >> "{fake_bin}/runuser.log"\nshift 3\nexec "$@"\n'
         )
+        real_id = shutil.which("id")
         _fake_tool(
             fake_bin,
             "id",
-            f'[ "$1" = -u ] && [ "$2" = -- ] && {{ echo {_FAKE_OWNER_UID}; exit 0; }}\n'
-            f'exec {shutil.which("id")} "$@"\n',
-        )
-        (fake_bin / "owner-dirs").write_text("".join(f"{d}\n" for d in owner_dirs))
-        _fake_tool(
-            fake_bin,
-            "stat",
-            f'out=$({shutil.which("stat")} "$@") || exit 1\n'
-            f'if grep -qxF -- "$4" "{fake_bin}/owner-dirs"; then '
-            f'echo "{_FAKE_OWNER_UID} ${{out#* }}"; else echo "$out"; fi\n',
+            f'[ "$1" = -u ] && [ "$2" = -- ] && {{ {real_id} -u -- "$3" >/dev/null || exit 1; '
+            f"echo {owner_uid}; exit 0; }}\n"
+            f'exec {real_id} "$@"\n',
         )
         if realpath is not None:
             _fake_tool(fake_bin, "realpath", realpath)
@@ -393,18 +418,39 @@ def test_script_writes_inside_the_home_as_the_owner(tmp_path: Path) -> None:
     assert log.read_text().split() == [owner]
 
 
-@_NEEDS_LINUX
-def test_script_has_no_root_step_for_a_home_path() -> None:
+def test_script_writes_only_as_the_owner() -> None:
     script = build_secret_sink_script("/home/seat/key", "seat", b"v")
-    owner_branch, _, root_part = script.partition("exit 0\nfi")
-    home_part = owner_branch.split('if [ "$inhome" = 1 ]; then')[1]
-    assert "runuser -u" in home_part
-    # The caller's path is used as given: no link is resolved for the home path.
-    assert 'meho-sink "$path"' in home_part
-    assert "mkdir -m" not in home_part
-    assert "chown" not in home_part
-    # Root-only steps come after the owner branch has exited.
-    assert "mkdir -m 0700" in root_part
+    assert script.count("runuser -u") == 1
+    # The caller's path is used as given: no link is resolved for it.
+    assert 'meho-sink "$path"' in script
+    # Root makes no folder, no temp file, and hands nothing over.
+    assert "chown" not in script
+    assert "mkdir -m" not in script
+    assert 'mktemp "$dir' not in script.replace(shlex.quote(_OWNER_WRITE_SCRIPT), "")
+
+
+@_NEEDS_LINUX
+def test_script_refuses_an_owner_with_user_id_0(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "seat"
+    home.mkdir(parents=True)
+    target = home / "key"
+    proc = _run_script(
+        build_secret_sink_script(str(target), getpass.getuser(), b"v"), home=home, owner_uid="0"
+    )
+    assert proc.returncode == 5
+    assert "===MEHO_SINK_ERR:root-owner===" in proc.stderr
+    assert not target.exists()
+    assert _runuser_log(home) == []
+
+
+@_NEEDS_LINUX
+def test_home_lookup_refuses_an_owner_with_user_id_0(tmp_path: Path) -> None:
+    home = tmp_path / "data" / "seat"
+    home.mkdir(parents=True)
+    proc = _run_script(build_home_lookup_script(getpass.getuser()), home=home, owner_uid="0")
+    assert proc.returncode == 5
+    assert "===MEHO_SINK_ERR:root-owner===" in proc.stderr
+    assert "MEHO_SINK_HOME" not in proc.stdout
 
 
 @_NEEDS_LINUX
@@ -433,52 +479,9 @@ def test_script_refuses_an_unknown_owner(tmp_path: Path) -> None:
     assert not (home / "key").exists()
 
 
-def _write_root(tmp_path: Path) -> tuple[Path, Path]:
-    """A write root that belongs to "root" (the test user), and an unrelated home."""
-    root = tmp_path / "etc"
-    root.mkdir()
-    root.chmod(0o755)
-    home = tmp_path / "home" / "seat"
-    home.mkdir(parents=True)
-    return root, home
-
-
 def _runuser_log(home: Path) -> list[str]:
     log = home.parent / f"{home.name}-bin" / "runuser.log"
     return log.read_text().split() if log.exists() else []
-
-
-@_NEEDS_LINUX
-def test_write_root_refuses_a_link_into_a_root_only_folder(tmp_path: Path) -> None:
-    root, home = _write_root(tmp_path)
-    secret = root / "secret"
-    secret.mkdir(mode=0o700)
-    app = root / "app"
-    app.mkdir(mode=0o700)
-    (app / "link").symlink_to(secret)
-    script = build_secret_sink_script(
-        str(app / "link" / "key"), getpass.getuser(), b"v", roots=(str(root),)
-    )
-    proc = _run_script(script, home=home, owner_dirs=(app,))
-    assert proc.returncode == 6
-    assert "===MEHO_SINK_ERR:link===" in proc.stderr
-    assert list(secret.iterdir()) == []
-    assert _runuser_log(home) == []
-
-
-@_NEEDS_LINUX
-def test_write_root_refuses_a_link_in_the_final_name(tmp_path: Path) -> None:
-    root, home = _write_root(tmp_path)
-    victim = root / "victim"
-    victim.write_text("keep")
-    (root / "key").symlink_to(victim)
-    script = build_secret_sink_script(
-        str(root / "key"), getpass.getuser(), b"v", roots=(str(root),)
-    )
-    proc = _run_script(script, home=home)
-    assert proc.returncode == 6
-    assert "===MEHO_SINK_ERR:link===" in proc.stderr
-    assert victim.read_text() == "keep"
 
 
 @_NEEDS_LINUX
@@ -486,112 +489,19 @@ def test_write_root_refuses_a_link_in_the_final_name(tmp_path: Path) -> None:
 def test_a_link_from_the_home_into_a_root_only_folder_writes_nothing_as_root(
     tmp_path: Path,
 ) -> None:
-    root, home = _write_root(tmp_path)
-    secret = root / "secret"
+    home = tmp_path / "home" / "seat"
+    home.mkdir(parents=True)
+    secret = tmp_path / "root-only"
     secret.mkdir(mode=0o500)
     (home / "link").symlink_to(secret)
     owner = getpass.getuser()
-    script = build_secret_sink_script(str(home / "link" / "key"), owner, b"v", roots=(str(root),))
+    script = build_secret_sink_script(str(home / "link" / "key"), owner, b"v")
     proc = _run_script(script, home=home)
     # Only the owner step ran. It could not write there, so nothing was written.
     assert proc.returncode == 4
     assert _runuser_log(home) == [owner]
     assert list(secret.iterdir()) == []
     secret.chmod(0o700)
-
-
-@_NEEDS_LINUX
-def test_write_root_new_folders_are_made_by_root_then_written_as_the_owner(
-    tmp_path: Path,
-) -> None:
-    root, home = _write_root(tmp_path)
-    target = root / "app" / "sub" / "key"
-    owner = getpass.getuser()
-    script = build_secret_sink_script(str(target), owner, b"v", roots=(str(root),))
-    proc = _run_script(script, home=home)
-    assert proc.returncode == 0, proc.stderr
-    assert target.read_bytes() == b"v"
-    assert _mode(target) == 0o600
-    assert _mode(target.parent) == 0o700
-    assert _mode(target.parent.parent) == 0o700
-    # Root hands the new folders to the owner, so the write runs as the owner.
-    assert _runuser_log(home) == [owner]
-
-
-@_NEEDS_LINUX
-def test_write_root_folder_of_root_is_written_by_root(tmp_path: Path) -> None:
-    root, home = _write_root(tmp_path)
-    (root / "app").mkdir(mode=0o755)
-    target = root / "app" / "key"
-    script = build_secret_sink_script(str(target), getpass.getuser(), b"v", roots=(str(root),))
-    proc = _run_script(script, home=home)
-    assert proc.returncode == 0, proc.stderr
-    assert target.read_bytes() == b"v"
-    assert _mode(target) == 0o600
-    assert _runuser_log(home) == []
-
-
-@_NEEDS_LINUX
-@pytest.mark.parametrize("sub", ["key", "sub/key"])
-def test_write_root_folder_of_the_owner_is_written_as_the_owner(tmp_path: Path, sub: str) -> None:
-    root, home = _write_root(tmp_path)
-    app = root / "app"
-    app.mkdir(mode=0o700)
-    target = app / sub
-    owner = getpass.getuser()
-    script = build_secret_sink_script(str(target), owner, b"v", roots=(str(root),))
-    proc = _run_script(script, home=home, owner_dirs=(app,))
-    assert proc.returncode == 0, proc.stderr
-    assert target.read_bytes() == b"v"
-    # The owner controls the folder, so the write runs as the owner.
-    assert _runuser_log(home) == [owner]
-
-
-@_NEEDS_LINUX
-def test_write_root_refuses_a_root_folder_inside_a_folder_of_the_owner(tmp_path: Path) -> None:
-    root, home = _write_root(tmp_path)
-    app = root / "app"
-    (app / "sub").mkdir(parents=True, mode=0o755)
-    app.chmod(0o755)
-    target = app / "sub" / "key"
-    script = build_secret_sink_script(str(target), getpass.getuser(), b"v", roots=(str(root),))
-    proc = _run_script(script, home=home, owner_dirs=(app,))
-    assert proc.returncode == 6
-    assert "===MEHO_SINK_ERR:place===" in proc.stderr
-    assert not target.exists()
-    assert _runuser_log(home) == []
-
-
-@_NEEDS_LINUX
-def test_write_root_refuses_a_folder_that_others_can_write(tmp_path: Path) -> None:
-    root, home = _write_root(tmp_path)
-    app = root / "app"
-    app.mkdir()
-    app.chmod(0o777)
-    target = app / "key"
-    script = build_secret_sink_script(str(target), getpass.getuser(), b"v", roots=(str(root),))
-    proc = _run_script(script, home=home)
-    assert proc.returncode == 6
-    assert "===MEHO_SINK_ERR:place===" in proc.stderr
-    assert not target.exists()
-    assert _runuser_log(home) == []
-
-
-@_NEEDS_LINUX
-def test_write_root_second_write_through_two_folders_of_the_owner(tmp_path: Path) -> None:
-    root, home = _write_root(tmp_path)
-    target = root / "app" / "sub" / "key"
-    owner = getpass.getuser()
-    first = build_secret_sink_script(str(target), owner, b"one", roots=(str(root),))
-    assert _run_script(first, home=home).returncode == 0
-    # The first run gave both new folders to the owner. The next run must
-    # still work, and write as the owner.
-    owner_dirs = (root / "app", root / "app" / "sub")
-    second = build_secret_sink_script(str(target), owner, b"two", roots=(str(root),))
-    proc = _run_script(second, home=home, owner_dirs=owner_dirs)
-    assert proc.returncode == 0, proc.stderr
-    assert target.read_bytes() == b"two"
-    assert _runuser_log(home) == [owner, owner]
 
 
 #: A ``realpath`` that does not work on the host.
@@ -619,10 +529,11 @@ def test_script_stops_when_realpath_does_not_work(tmp_path: Path) -> None:
 @_NEEDS_LINUX
 def test_an_empty_real_home_does_not_match_every_path(tmp_path: Path) -> None:
     # With an empty real home, the pattern "$realhome"/* would be "/*".
-    root, home = _write_root(tmp_path)
-    target = root / "app" / "key"
+    home = tmp_path / "home" / "seat"
+    home.mkdir(parents=True)
+    target = tmp_path / "other" / "key"
     proc = _run_script(
-        build_secret_sink_script(str(target), "root", b"v", roots=(str(tmp_path / "other"),)),
+        build_secret_sink_script(str(target), getpass.getuser(), b"v"),
         home=home,
         realpath=_EMPTY_REALPATH,
     )
@@ -636,7 +547,9 @@ def test_an_empty_real_home_does_not_match_every_path(tmp_path: Path) -> None:
 def test_home_lookup_stops_when_realpath_does_not_work(tmp_path: Path) -> None:
     home = tmp_path / "data" / "seat"
     home.mkdir(parents=True)
-    proc = _run_script(build_home_lookup_script("seat"), home=home, realpath=_BROKEN_REALPATH)
+    proc = _run_script(
+        build_home_lookup_script(getpass.getuser()), home=home, realpath=_BROKEN_REALPATH
+    )
     assert proc.returncode == 7
     assert "===MEHO_SINK_ERR:realpath===" in proc.stderr
     assert "MEHO_SINK_HOME" not in proc.stdout
@@ -646,13 +559,13 @@ def test_home_lookup_stops_when_realpath_does_not_work(tmp_path: Path) -> None:
 def test_home_lookup_prints_the_home_from_the_host(tmp_path: Path) -> None:
     home = tmp_path / "data" / "seat"
     home.mkdir(parents=True)
-    proc = _run_script(build_home_lookup_script("seat"), home=home)
+    proc = _run_script(build_home_lookup_script(getpass.getuser()), home=home)
     assert proc.returncode == 0, proc.stderr
     assert f"===MEHO_SINK_HOME:{home}===" in proc.stdout.splitlines()
 
 
 def test_script_carries_the_value_as_base64_only() -> None:
-    script = build_secret_sink_script("/etc/app/key", "app", _SENTINEL.encode())
+    script = build_secret_sink_script("/home/app/key", "app", _SENTINEL.encode())
     assert _SENTINEL not in script
     assert base64.b64encode(_SENTINEL.encode()).decode() in script
 
@@ -753,7 +666,7 @@ async def test_a_failed_write_raises_an_error_without_the_value(stderr: str, rea
 @pytest.mark.asyncio
 async def test_a_missing_ok_marker_is_a_failure_even_with_exit_zero() -> None:
     wire = _Wire(stdout="", exit_status=0)
-    endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}/etc/app/key#app")
+    endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}/home/seat/key#seat")
     p1, p2, p3, p4 = _patch_wire(wire)
     with p1, p2, p3, p4, pytest.raises(LinuxSecretSinkError):
         await endpoint.write_secret(_OPERATOR, SecretMaterial(_SENTINEL))
@@ -826,7 +739,7 @@ async def test_an_owner_without_a_home_stops_before_the_secret_is_sent() -> None
 @pytest.mark.asyncio
 async def test_a_target_of_another_kind_is_refused_before_credentials_or_ssh() -> None:
     wire = _Wire(stdout="===MEHO_SINK_OK===\n")
-    endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}/etc/app/key#app")
+    endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}/home/seat/key#seat")
     p1, p2, p3, p4 = _patch_wire(wire)
     other = types.SimpleNamespace(**{**vars(_STUB_TARGET), "product": "vcenter"})
     p3 = patch(
@@ -841,16 +754,6 @@ async def test_a_target_of_another_kind_is_refused_before_credentials_or_ssh() -
     connector._connect.assert_not_awaited()
     assert wire.commands == []
     assert _SENTINEL not in str(excinfo.value)
-
-
-@pytest.mark.asyncio
-async def test_a_write_root_path_needs_no_home_lookup() -> None:
-    wire = _Wire(stdout="===MEHO_SINK_OK===\n")
-    endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}/etc/app/key#app")
-    p1, p2, p3, p4 = _patch_wire(wire)
-    with p1, p2, p3, p4:
-        await endpoint.write_secret(_OPERATOR, SecretMaterial(_SENTINEL))
-    assert len(wire.commands) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -946,9 +849,45 @@ async def test_the_approval_preview_shows_only_refs() -> None:
 @pytest.mark.asyncio
 async def test_a_move_from_a_linux_ref_fails_without_a_value(move_env: None) -> None:
     params = {
-        "from": f"linux:{_TARGET_NAME}/etc/app/key#app",
+        "from": f"linux:{_TARGET_NAME}/home/app/key#app",
         "to": f"vault:tenants/{_TENANT_ID}/x#y",
     }
     result = await _dispatch_move(params)
     assert result.status != "ok"
     assert "write-only" in json.dumps(result.model_dump(mode="json"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "to",
+    [
+        f"linux:{_TARGET_NAME}/etc/app/key#app",
+        f"linux:{_TARGET_NAME}/home/app/.ssh/key#app",
+        f"linux:{_TARGET_NAME}/home/root/key#root",
+    ],
+)
+async def test_a_refused_linux_place_makes_no_approval_card(to: str, move_env: None) -> None:
+    params = {"from": f"vault:tenants/{_TENANT_ID}/seat#client_secret", "to": to}
+    ctx = PreviewContext(
+        descriptor=MagicMock(),
+        connector_instance=None,
+        operator=_OPERATOR,
+        connector_id="secret-broker-1.x",
+        target=None,
+        params=params,
+    )
+    assert await build_secret_move_preview(ctx) is None
+
+    result = await dispatch(
+        operator=_OPERATOR,
+        connector_id="secret-broker-1.x",
+        op_id="secret.move",
+        target=None,
+        params=params,
+    )
+    assert result.status != "ok"
+    assert result.extras["error_code"] == "invalid_params"
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        approvals = (await session.execute(select(ApprovalRequest))).scalars().all()
+    assert approvals == []

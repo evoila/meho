@@ -3329,8 +3329,10 @@ advance:</p>
 <code>confirm</code> verify asks you to confirm; an <code>operation_call</code> verify
 dispatches its op and checks the result against <code>expect</code>. The run only
 advances when verify passes. A failing verify marks the step <code>failed</code>.
-A failed step cannot be retried: abort the run, fix the cause, and
-start a new run. Over MCP the same call is
+To try a failed step again, fix the cause and run
+<code>meho runbook next --retry</code> (over MCP: <code>"retry": true</code>). The step's
+<code>verify</code> runs again. If it passes, the run goes on. Every attempt stays
+on record. You can also abort the run instead. Over MCP the same call is
 <code>meho_runbook_next {"run_id": "…", "last_verified": true}</code>. For a
 <code>confirm</code> step, also send
 <code>"verify_response": {"type": "confirm", "answer": "yes"}</code>; any other
@@ -3353,9 +3355,9 @@ state (run-level only — never step contents) with <code>meho runbook runs</cod
 </thead>
 <tbody>
 <tr>
-<td><code>next</code> refuses: "previous step … is in 'failed' state; abort the run"</td>
-<td>The step's <code>verify</code> did not pass (a <code>confirm</code> you did not answer <code>yes</code>, or an <code>operation_call</code> whose result didn't match <code>expect</code>). A failed step cannot be retried.</td>
-<td>Abort the run, fix the underlying condition, and start a new run.</td>
+<td><code>next</code> refuses: "previous step … is in 'failed' state; retry the step (retry=true) or abort the run"</td>
+<td>The step's <code>verify</code> did not pass (a <code>confirm</code> you did not answer <code>yes</code>, or an <code>operation_call</code> whose result didn't match <code>expect</code>).</td>
+<td>Fix the underlying condition, then run <code>meho runbook next --retry</code>. Or abort the run.</td>
 </tr>
 <tr>
 <td>The step's operation returns <code>awaiting_approval</code> instead of running</td>

@@ -63,6 +63,12 @@ from fastapi import status as http_status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.agents.grant_sets import (
+    PERSON_ONLY_REMEDIATION,
+    StartingGrantsError,
+    audit_fields,
+    writes_rows,
+)
 from meho_backplane.agents.schemas import (
     AgentDefinitionCreate,
     AgentDefinitionRead,
@@ -74,7 +80,7 @@ from meho_backplane.agents.service import (
     AgentIdentityRefInvalidError,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import ensure_human_principal, require_role
 
 __all__ = ["router"]
 
@@ -179,13 +185,20 @@ async def create_agent(
     ``agent_already_exists`` (the per-tenant name natural-key contract
     the ``agent_definition_tenant_name_idx`` unique index enforces).
     The system prompt / toolset content is never bound to the audit row;
-    only the agent name is.
+    only the agent name and the starting grant pick are. A missing pick
+    (while the switch is not ``off`` and the agent has no grant) or an
+    unknown target name returns 422 and writes nothing. A pick that adds
+    grants is for a person only, the same rule as the grant routes: an
+    agent, service or runner login gets 403 ``human_principal_required``.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_AGENT_OP_IDS["create"],
         audit_op_class="write",
         audit_agent_name=body.name,
+        **audit_fields(body.starting_grants),
     )
+    if writes_rows(body.starting_grants):
+        ensure_human_principal(operator, remediation=PERSON_ONLY_REMEDIATION)
     service = AgentDefinitionService()
     try:
         return await service.create(
@@ -207,6 +220,11 @@ async def create_agent(
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="identity_ref_unknown",
+        ) from exc
+    except StartingGrantsError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
         ) from exc
 
 

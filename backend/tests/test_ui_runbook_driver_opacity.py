@@ -701,12 +701,47 @@ def test_next_confirm_no_renders_failed_dead_end_banner() -> None:
 
     assert response.status_code == 200, response.text
     body = response.text
-    # Dead-end banner present; Abort still available; Advance withheld.
+    # Failed banner present; Abort and retry available; Advance withheld.
     assert "failed its verify" in body
     assert "Abort" in body
-    assert f'hx-post="/ui/runbooks/runs/{run_id}/next"' not in body
+    assert "Try this step again" in body
+    assert ">Advance</button>" not in body
     # Run stays in_progress (the step is failed, but the run is not terminal).
     assert _run_row(run_id).state == "in_progress"
+
+
+def test_retry_button_runs_the_failed_step_again() -> None:
+    """After a failed step, "Try this step again" (retry=1) advances the run."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="drain", body=_two_step_body())
+    run_id = _start_run(tenant_id=_TENANT_A, slug="drain", assigned_to=_OPERATOR_SUB)
+
+    session_id, jwks = _role_session(TenantRole.OPERATOR)
+    token = mint_csrf_token(str(session_id))
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        client.post(
+            f"/ui/runbooks/runs/{run_id}/next",
+            data={"verify_type": "confirm", "answer": "no"},
+            **_csrf_kwargs(token),
+        )
+        # Without retry the failed step still refuses.
+        refused = client.post(
+            f"/ui/runbooks/runs/{run_id}/next",
+            data={"verify_type": "confirm", "answer": "yes"},
+            **_csrf_kwargs(token),
+        )
+        retried = client.post(
+            f"/ui/runbooks/runs/{run_id}/next",
+            data={"verify_type": "confirm", "answer": "yes", "retry": "1"},
+            **_csrf_kwargs(token),
+        )
+
+    assert "failed its verify" in refused.text
+    assert retried.status_code == 200, retried.text
+    assert "step 2 of 2" in retried.text
+    assert "failed its verify" not in retried.text
 
 
 def test_next_confirm_yes_advances_to_step_two() -> None:

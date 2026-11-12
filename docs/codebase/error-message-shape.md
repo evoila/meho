@@ -304,6 +304,14 @@ text from the error result, in one shared place.
   attribute on the error it raises; `result_connector_error` copies it
   to `extras.remediation`, and it stays. `vcfa.provider.api_token.create`
   uses this to say whether the minted token was revoked.
+- **Own message.** A connector can show the whole `exception_message`
+  when the message is a fixed sentence it wrote itself, with no vendor
+  text, no value from the call and no secret. It adds
+  `ConnectorOwnMessage` (in `connectors/base.py`) as a base class of the
+  error type. `result_connector_error` then sets
+  `extras.message_source = "meho"` and the rule keeps that one field.
+  Every other vendor field stays hidden. `LinuxWriteOwnMessageError`
+  (no sudo credential in the target's secret) is the first use.
 - **Retries are unchanged.** The rule works on the built result, not on
   the raised error. So the new login and one retry after HTTP 401, and
   the 403 and 429 results, work as before.

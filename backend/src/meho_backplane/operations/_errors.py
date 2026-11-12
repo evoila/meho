@@ -46,7 +46,11 @@ import httpx
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
-from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
+from meho_backplane.connectors.base import (
+    ConnectorOwnMessage,
+    ConnectorResourceNotFoundError,
+    ConnectorUpstreamError,
+)
 from meho_backplane.operations.deny_reasons import (
     AGENT_NO_GRANT,
     AGENT_STEPS_NOT_DECLARED,
@@ -147,6 +151,12 @@ _TEXT_WITHHELD: str = "<diagnostic text withheld: redaction unavailable>"
 #: dispatcher finds the vendor's part by these markers when it hides the
 #: vendor's text of an operation that sends a secret (#4854,
 #: :mod:`meho_backplane.operations._vendor_text`).
+#: ``extras`` key and value that say: the ``exception_message`` is a sentence
+#: MEHO or a connector wrote itself (the error type has the
+#: :class:`~meho_backplane.connectors.base.ConnectorOwnMessage` mark).
+MESSAGE_SOURCE_KEY: Final = "message_source"
+MESSAGE_SOURCE_MEHO: Final = "meho"
+
 UPSTREAM_SAID: Final = " Upstream said: "
 VAULT_SAID: Final = " Vault said: "
 
@@ -1521,6 +1531,8 @@ def result_connector_error(
         "exception_class": type(exc).__name__,
         "exception_message": msg,
     }
+    if isinstance(exc, ConnectorOwnMessage):
+        extras[MESSAGE_SOURCE_KEY] = MESSAGE_SOURCE_MEHO
     if isinstance(exc, httpx.HTTPStatusError):
         extras["http_status"] = exc.response.status_code
         extras["upstream_message"] = _http_upstream_message(exc.response)

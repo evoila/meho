@@ -1368,6 +1368,45 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#the-passkey-touch-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The passkey touch level
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The passkey touch level">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#on-your-own-keycloak" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        On your own Keycloak
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#add-the-touch-level-to-a-running-realm-through-meho" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Add the touch level to a running realm through MEHO
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3411,6 +3450,45 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#the-passkey-touch-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The passkey touch level
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The passkey touch level">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#on-your-own-keycloak" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        On your own Keycloak
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#add-the-touch-level-to-a-running-realm-through-meho" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Add the touch level to a running realm through MEHO
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3779,6 +3857,11 @@ the end, then return to the trail.</p>
 <td><code>meho-web</code></td>
 <td>Confidential client, authorization-code + PKCE</td>
 <td>The MEHO web UI. Redirect URI <code>https://&lt;host&gt;/ui/auth/callback</code>.</td>
+</tr>
+<tr>
+<td><code>meho approval touch</code></td>
+<td>Login flow, bound to <code>meho-web</code>, with two levels</td>
+<td>Level 1 is the normal console login. Level 3 (<code>meho-touch</code>) asks for a passkey touch every time. See <a href="#the-passkey-touch-level">The passkey touch level</a>.</td>
 </tr>
 <tr>
 <td><code>meho-admin</code>, <code>meho-check-runner</code></td>
@@ -4207,6 +4290,221 @@ company login, for example), list the realm's identity providers:</p>
 on the login page, and <code>redirect_flows</code>: the login flows that send people
 straight to it. The approval flow must not be in <code>redirect_flows</code>. The
 list never shows the provider's secret.</p>
+<h3 id="the-passkey-touch-level">The passkey touch level<a class="headerlink" href="#the-passkey-touch-level" title="Permanent link">&para;</a></h3>
+<p>MEHO can ask a person to touch their passkey (Face ID, Touch ID, Windows
+Hello or a hardware key) right before a dangerous or destructive
+approval. Keycloak checks the touch. MEHO stores no passkeys. This
+section sets up the Keycloak part. MEHO asks for the touch only when the
+setting <code>APPROVAL_PRESENCE_TOUCH</code> is on; it is off by default, and then
+nothing changes for anyone.</p>
+<p>What the realm has:</p>
+<ul>
+<li><strong>A level for the touch.</strong> The realm maps the name <code>meho-touch</code> to
+  level 3 (realm settings, <strong>ACR to LoA Mapping</strong>). The normal login is
+  level 1, and its <code>acr</code> stays <code>1</code>. Level 2 is kept for the approval
+  sign-in (<code>meho-approve</code>). A higher level also counts where a lower
+  one is asked for.</li>
+<li><strong>A login flow with two levels</strong>, <code>meho approval touch</code>, bound as the
+  browser flow of <code>meho-web</code> only. The CLI, MCP and approval sign-in
+  clients keep their own flows.</li>
+<li>Level 1 has the steps of Keycloak's own browser flow: the login
+    cookie, the company login, the password form (which also takes a
+    passkey), and the one-time code when the person has one and did not
+    use a passkey. So the normal console login looks the same as
+    before. Level 1 skips the one-time code after a passkey with user
+    verification (a PIN or a fingerprint). These are the steps of
+    Keycloak's own browser flow, not a copy of your realm's current one.
+    So the helper and the operation below first compare your realm's
+    <code>browser</code> flow with Keycloak's default: its steps, their
+    requirements and their settings. When something differs (for
+    example the one-time code is required for everyone), they make the
+    flow but do not bind it, and they name the difference.
+    Level 1 has no organization step. So when the realm has
+    organizations turned on, they also do not bind the flow.</li>
+<li>Level 3 asks for a passkey with user verification (<strong>WebAuthn
+    Passwordless Authenticator</strong>). Its condition has <strong>Max Age</strong> 0, so a
+    touch counts for one login only. Every request for the touch asks
+    for a new touch, also when the person is still signed in.</li>
+<li><strong>An <code>amr</code> mapper on <code>meho-web</code>.</strong> The passkey step has the
+  reference value <code>hwk</code> and a maximum age of 120 seconds. Keycloak puts
+  a step into <code>amr</code> only when its maximum age is set.</li>
+</ul>
+<p>How MEHO asks for the touch:</p>
+<ul>
+<li>It sends <code>acr_values=meho-touch</code> and a <code>nonce</code> (a value that names
+  the one request) in the console's sign-in request. It does not send
+  <code>max_age=0</code>: that asks for the password again, not for the passkey.</li>
+<li>Keycloak answers with an ID token that has <code>acr=meho-touch</code>, the
+  same <code>nonce</code>, and a fresh <code>auth_time</code>.</li>
+<li>MEHO checks <code>acr</code>, the <code>nonce</code> and <code>auth_time</code>. It never accepts a
+  touch on <code>amr</code> alone: <code>amr</code> can still name the passkey on a normal
+  login shortly after a touch.</li>
+</ul>
+<p>The flow, step by step (<code>meho approval touch</code>, type <strong>Basic flow</strong>):</p>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Requirement</th>
+<th>Settings</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cookie</td>
+<td>Alternative</td>
+<td></td>
+</tr>
+<tr>
+<td>Sub-flow <code>meho approval touch - levels</code></td>
+<td>Alternative</td>
+<td></td>
+</tr>
+<tr>
+<td>&nbsp;&nbsp;Sub-flow <code>meho approval touch - level 1</code></td>
+<td>Conditional</td>
+<td></td>
+</tr>
+<tr>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;Condition - Level of Authentication</td>
+<td>Required</td>
+<td>Level 1, Max Age 36000</td>
+</tr>
+<tr>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;Sub-flow <code>meho approval touch - sign-in</code></td>
+<td>Required</td>
+<td></td>
+</tr>
+<tr>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Identity Provider Redirector</td>
+<td>Alternative</td>
+<td></td>
+</tr>
+<tr>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Sub-flow <code>meho approval touch - password</code></td>
+<td>Alternative</td>
+<td></td>
+</tr>
+<tr>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Username Password Form</td>
+<td>Required</td>
+<td></td>
+</tr>
+<tr>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Sub-flow <code>meho approval touch - one-time code</code></td>
+<td>Conditional</td>
+<td></td>
+</tr>
+<tr>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Condition - user configured</td>
+<td>Required</td>
+<td></td>
+</tr>
+<tr>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Condition - credential</td>
+<td>Required</td>
+<td>Credentials <code>webauthn-passwordless</code>, Included off</td>
+</tr>
+<tr>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;OTP Form</td>
+<td>Required</td>
+<td></td>
+</tr>
+<tr>
+<td>&nbsp;&nbsp;Sub-flow <code>meho approval touch - level 3</code></td>
+<td>Conditional</td>
+<td></td>
+</tr>
+<tr>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;Condition - Level of Authentication</td>
+<td>Required</td>
+<td>Level 3, Max Age 0</td>
+</tr>
+<tr>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;WebAuthn Passwordless Authenticator</td>
+<td>Required</td>
+<td>Authentication reference <code>hwk</code>, max age 120</td>
+</tr>
+</tbody>
+</table>
+<h4 id="on-your-own-keycloak">On your own Keycloak<a class="headerlink" href="#on-your-own-keycloak" title="Permanent link">&para;</a></h4>
+<p>The flow needs Keycloak 26.4 or newer: older versions have no
+<strong>Condition - credential</strong> step. On an older Keycloak the helper and
+the operation below say so and change nothing.</p>
+<p><code>meho admin keycloak bootstrap-clients</code> makes the flow with its
+settings and maps <code>meho-touch</code> to level 3. When the realm has the
+console client (<code>--web-client-id</code>, default <code>meho-web</code>), it also adds the
+<code>amr</code> mapper to it, gives the flow the company login default of the
+realm's browser flow, and binds the flow as its browser flow. The helper
+does not make the console client. Without it, the helper says so; bind
+the flow by hand after you make the client.</p>
+<p>The helper and the operation below bind the flow only when the realm's
+<strong>Webauthn Passwordless Policy</strong> asks for user verification
+(<strong>Required</strong>, see the table at the end of this page). Otherwise a touch
+could pass without a PIN or a fingerprint. Set the policy and run again.</p>
+<p>By hand, in the Keycloak admin console:</p>
+<ol>
+<li><strong>Realm settings → General → ACR to LoA Mapping</strong>: add <code>meho-touch</code>
+   with level <code>3</code>.</li>
+<li><strong>Authentication → Create flow</strong>: name <code>meho approval touch</code>, type
+   <strong>Basic flow</strong>. Add the steps and sub-flows of the table above, in
+   that order. Set each requirement, and the settings with the gear
+   icon of the step.</li>
+<li><strong>Clients → <code>meho-web</code> → Client scopes → <code>meho-web-dedicated</code> →
+   Add mapper → By configuration → Authentication Method Reference
+   (AMR)</strong>: name <code>amr</code>, add to ID token and access token on.</li>
+<li><strong>Clients → <code>meho-web</code> → Advanced → Authentication flow overrides</strong>:
+   set <strong>Browser Flow</strong> to <code>meho approval touch</code>.</li>
+</ol>
+<p>If your company login sends people straight to it (the <strong>Default
+Identity Provider</strong> of the Identity Provider Redirector), set the same
+default on the redirector of <code>meho approval touch</code> too. The built-in
+Keycloak does this for you when its company login has <code>autoRedirect</code>
+on.</p>
+<h4 id="add-the-touch-level-to-a-running-realm-through-meho">Add the touch level to a running realm through MEHO<a class="headerlink" href="#add-the-touch-level-to-a-running-realm-through-meho" title="Permanent link">&para;</a></h4>
+<p>Keycloak reads the chart's realm file only when it makes the realm.
+The chart's setup step does not add this flow to a realm that runs
+already, because its steps need settings. Use the operation
+<code>keycloak.authflow.ensure_approval_touch</code> instead. It waits for
+approval.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>keycloak-admin-26.x<span class="w"> </span>keycloak.authflow.ensure_approval_touch<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--target<span class="w"> </span>&lt;keycloak-target&gt;
+</code></pre></div>
+<ul>
+<li>The flow is missing: MEHO makes it with its settings, maps
+  <code>meho-touch</code> to level 3, adds the <code>amr</code> mapper to <code>meho-web</code>, and
+  binds the flow. The binding is the last change.</li>
+<li>Everything is there: MEHO changes nothing, and every change flag in
+  the result is <code>false</code>. So the call is safe to run twice.</li>
+<li>The flow is there with other steps or other settings: MEHO stops,
+  changes nothing, and names the first difference. Fix the flow by
+  hand, or delete it and run again.</li>
+<li>The realm maps <code>meho-touch</code> to another level: MEHO stops before it
+  binds the flow.</li>
+<li>The realm's passkey policy does not ask for user verification: MEHO
+  stops and changes nothing.</li>
+<li><code>meho-web</code> has an <code>amr</code> mapper that does not write into the ID token:
+  MEHO turns its token settings on before it binds the flow.</li>
+<li>The realm's browser flow sends people straight to the company login:
+  MEHO gives the touch flow the same company login default before it
+  binds the flow. So the console still goes straight to the company
+  login. When the realm's flow no longer has that default, MEHO removes
+  it from the touch flow too.</li>
+<li>The realm uses its own browser flow (not <code>browser</code> or <code>browser with
+  passkeys</code>), or <code>meho-web</code> already has a browser flow of its own: MEHO
+  makes the flow but does not bind it, so the normal login keeps its
+  steps. The result has <code>bound: false</code> and says why in
+  <code>not_bound_reason</code>. <code>meho admin keycloak bootstrap-clients</code> does the
+  same. To bind the flow anyway, check that the console may lose the
+  steps of that login, then call the operation with
+  <code>--params '{"replace_custom_login": true}'</code>. The result names the old flow in
+  <code>previous_browser_flow_id</code>.</li>
+<li><code>meho-web</code> is missing, or the Keycloak is older than 26.4: MEHO
+  stops before it changes anything.</li>
+</ul>
+<p>The way back: <code>keycloak.client.update</code> on <code>meho-web</code> with
+<code>{"authenticationFlowBindingOverrides": {"browser": ""}}</code>. The console
+then uses the realm's browser flow again.</p>
 <h2 id="step-3-add-the-protocol-mappers">Step 3 — Add the protocol mappers<a class="headerlink" href="#step-3-add-the-protocol-mappers" title="Permanent link">&para;</a></h2>
 <p>Tokens minted by <code>meho-cli</code> must carry the same claim shape the
 backplane validates — otherwise tokens are issued cleanly and then

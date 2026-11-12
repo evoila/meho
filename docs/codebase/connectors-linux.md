@@ -234,8 +234,8 @@ prints dates and day counts only, never the hash. The op never reads
 - **Input.** `user` is checked against `^[A-Za-z_][A-Za-z0-9_-]{0,31}$`
   before any command is built. A space, `;`, `$(`, a quote or a leading `-`
   is refused with a `ValueError` and never reaches the host.
-- **Who runs it.** When the login of the target is the same user, `chage`
-  runs directly. Any other login reads through sudo, the same way as
+- **Who runs it.** When the login of the target is root or the same user,
+  `chage` runs directly, so a host without sudo still answers. Any other login reads through sudo, the same way as
   `linux.firewall.show` (an empty sudo password when the secret holds none).
 - **Output.** `last_change`, `expires`, `inactive`, `account_expires` are ISO
   dates, `never`, or (`last_change`, `expires`) `password must be changed`.

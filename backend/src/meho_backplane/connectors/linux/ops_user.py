@@ -11,9 +11,9 @@ left until the password expires, so a Sensor can warn before an SSH password
 login is forced to change the password.
 
 The user name is checked against a strict POSIX name pattern before any
-command is built, so nothing else can reach the command line. A login that
-reads its own account runs ``chage`` directly. Any other login reads through
-sudo, through the shared sudo path
+command is built, so nothing else can reach the command line. A root login,
+or a login that reads its own account, runs ``chage`` directly. Any other
+login reads through sudo, through the shared sudo path
 (:mod:`~meho_backplane.connectors.linux._sudo`), like ``linux.firewall.show``.
 A read that fails raises :class:`LinuxPasswordStatusError`; it never answers
 with an empty or made-up status. The error text holds no output of the host,
@@ -201,7 +201,7 @@ async def linux_user_password_status(
     cmd = build_password_status_command(user)
     secret = await connector._resolve_secret(target, operator)
     login = strip_credential_value(secret.get("username", "root"))
-    if login == user:
+    if login in ("root", user):
         proc = await connector._run_command(target, cmd, operator=operator)
     else:
         # No password in the secret: send an empty one. sudo does not read it
@@ -249,8 +249,8 @@ _USER_PASSWORD_STATUS_OP = LinuxOp(
     description=(
         "Runs chage -l for one local user. Returns the password dates, the day "
         "counts, days_until_expiry (null when it never expires) and expired. "
-        "Never returns a password or hash. A login that is not the user reads "
-        "through sudo. A missing user or a failed read is an error."
+        "Never returns a password or hash. A login that is neither root nor the "
+        "user reads through sudo. A missing user or a failed read is an error."
     ),
     parameter_schema={
         "type": "object",

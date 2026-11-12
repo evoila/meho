@@ -198,6 +198,21 @@ async def test_login_user_reads_own_account_without_sudo() -> None:
 
 
 @pytest.mark.asyncio
+async def test_root_login_reads_another_user_without_sudo() -> None:
+    connector = _connector({"username": "root", "password": _SUDO_CANARY})
+    sudo = AsyncMock()
+    with (
+        patch("meho_backplane.connectors.linux.ops_user.run_remote_bash_with_sudo", sudo),
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as plain,
+    ):
+        plain.return_value = _proc(stdout=_chage("Oct 01, 2026", "never"))
+        result = await connector.user_password_status(_TARGET, {"user": "svc-deploy"})
+    assert result["user"] == "svc-deploy"
+    assert plain.await_args.args[1] == "LC_ALL=C chage -l -- svc-deploy"
+    sudo.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_other_user_reads_through_sudo_and_no_secret_is_returned() -> None:
     connector = _connector({"username": "ops", "sudo_password": _SUDO_CANARY})
     sudo = AsyncMock(return_value=_proc(stdout=_chage("Oct 01, 2026", "Dec 30, 2026")))

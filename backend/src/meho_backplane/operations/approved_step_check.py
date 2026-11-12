@@ -24,8 +24,9 @@ An approved call runs in one of two ways:
 So the result is the same whichever path runs the call. The agent login's
 grant name and role come from the record the park stores on the approval
 card (:func:`requester_record`). A card with no record (a request made
-while the switch was ``off``) cannot be checked: the run is refused, and
-the agent must ask again.
+while the switch was ``off``) cannot be checked. When the operation has
+steps to check, the run is refused, and the agent must ask again. A call
+with no steps to check runs as before.
 
 Only ``on`` checks again. ``observe`` already logged its "would deny" lines
 when the call was made, so it writes nothing more here. ``off`` changes
@@ -41,7 +42,11 @@ import structlog
 from meho_backplane.auth.delegation import ACTOR_SUB_KEY
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import EndpointDescriptor
-from meho_backplane.operations._preview_steps import agent_acts, agent_step_refusal
+from meho_backplane.operations._preview_steps import (
+    agent_acts,
+    agent_step_refusal,
+    has_steps_to_check,
+)
 from meho_backplane.operations.composite import COMPOSITE_DEPTH_TOP_LEVEL, composite_depth_var
 from meho_backplane.operations.deny_reasons import POLICY_DENIED
 from meho_backplane.operations.secondary_target_policy import (
@@ -83,6 +88,8 @@ async def approved_step_refusal(
         return None
     principal, act = requester
     if principal is None:
+        if not has_steps_to_check(descriptor):
+            return None
         return (
             f"{POLICY_DENIED}: the agent's grants for the steps of {descriptor.op_id!r} "
             "cannot be checked: the approval request has no record of the agent. "

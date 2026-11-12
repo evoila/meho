@@ -64,7 +64,7 @@ from meho_backplane.operations.governed_subops import governed_subops_for, steps
 from meho_backplane.operations.op_policy import apply_step_classification
 from meho_backplane.settings import get_settings
 
-__all__ = ["agent_acts", "agent_step_refusal", "preview_step_verdict"]
+__all__ = ["agent_acts", "agent_step_refusal", "has_steps_to_check", "preview_step_verdict"]
 
 _log = structlog.get_logger(__name__)
 
@@ -178,6 +178,14 @@ def _undeclared_write_composite(descriptor: EndpointDescriptor) -> bool:
         and descriptor_op_class(descriptor) in WRITE_OP_CLASSES
         and not steps_declared(descriptor.op_id)
     )
+
+
+def has_steps_to_check(descriptor: EndpointDescriptor) -> bool:
+    """True when :func:`agent_step_refusal` has something to check for this operation.
+
+    That is a listed write step, or a multi-step write that lists no steps.
+    """
+    return bool(_write_steps(descriptor.op_id)) or _undeclared_write_composite(descriptor)
 
 
 def _steps_not_declared_refusal(operator: Operator, descriptor: EndpointDescriptor) -> str | None:

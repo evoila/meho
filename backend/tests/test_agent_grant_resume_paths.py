@@ -63,7 +63,8 @@ __all__ = ["_required_settings_env", "_reset_state", "stub_embedding_service"]
 
 #: A multi-step operation that always waits for approval, for every login.
 _OP = "vault.kv.multi_approved"
-_PERSON = "person-1"
+#: A single-step operation that always waits for approval: it lists no steps.
+_SINGLE_OP = "vault.kv.single_approved"
 
 
 def _reviewer() -> Operator:
@@ -103,12 +104,30 @@ async def _register(stub: AsyncMock) -> None:
     )
 
 
-async def _park(operator: Operator, actor: str | None = None) -> uuid.UUID:
+async def _register_single(stub: AsyncMock) -> None:
+    """A single-step operation next to :data:`_OP`; it lists no steps."""
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=_SINGLE_OP,
+        handler=_multi_step_handler,
+        summary="Single-step op.",
+        description="Writes once.",
+        parameter_schema={"type": "object"},
+        safety_level="safe",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub,
+    )
+
+
+async def _park(operator: Operator, actor: str | None = None, op_id: str = _OP) -> uuid.UUID:
     """The call waits for approval; a person approves it. Returns the request id."""
     target = await _seed_vault_target()
     with structlog.contextvars.bound_contextvars(**{ACTOR_SUB_KEY: actor}):
         parked = await dispatch(
-            operator=operator, connector_id="vault-1.x", op_id=_OP, target=target, params={}
+            operator=operator, connector_id="vault-1.x", op_id=op_id, target=target, params={}
         )
     assert parked.status == "awaiting_approval", parked
     request_id = uuid.UUID(parked.extras["approval_request_id"])
@@ -210,6 +229,24 @@ async def test_agent_call_with_no_record_on_the_card_is_refused_when_on(
     assert result.extras["reason_code"] == POLICY_DENIED
     assert "The agent must ask again" in result.error
     assert _MULTI_RUNS == []
+
+
+async def test_single_step_call_with_no_record_on_the_card_runs_when_on(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    """No steps to check, so a card without a record does not stop the call."""
+    await _register(stub_embedding_service)
+    await _register_single(stub_embedding_service)
+    await _grant(_SINGLE_OP, "needs-approval")
+    request_id = await _park(_operator(), op_id=_SINGLE_OP)
+    preflight = ((await _request(request_id)).proposed_effect or {}).get("permission_preflight")
+    assert (preflight or {}).get("requester") is None
+    _switch(monkeypatch, "on")
+
+    result = await _resume(request_id, _reviewer())
+
+    assert result.status == "ok", result.error
+    assert len(_MULTI_RUNS) == 1
 
 
 # --- A hosted agent run: both orders of the race ----------------------------------

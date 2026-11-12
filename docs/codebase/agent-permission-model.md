@@ -324,8 +324,9 @@ claim for audit parent-linkage (#3446), is never matched against this table).
      the approval card (`permission_preflight.requester`: sub, kind,
      client id, role, actor) when an agent asks and the switch is not
      `off`. A card with no record (made while the switch was `off`)
-     cannot be checked: the run is refused with `policy_denied` and the
-     agent must ask again. A refusal writes one `denied` audit row, the
+     cannot be checked. When the operation has steps to check, the run
+     is refused with `policy_denied` and the agent must ask again. A
+     call with no steps to check runs as before. A refusal writes one `denied` audit row, the
      approval request ends as a failed run with the reason, and the
      person who runs it sees the reason in the answer. People and
      service logins that asked are not checked again. With `observe`

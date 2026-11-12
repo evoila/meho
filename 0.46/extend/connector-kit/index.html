@@ -3570,6 +3570,20 @@ only <code>safe</code> operations, so a sensor cannot use a marked operation.</p
 <p><strong>A preview for a change.</strong> Register a preview with
 <code>kit.register_preview_builder</code>. It shows the person who approves what the
 change will do. Every <code>destructive</code> operation needs one.</p>
+<p><strong>A multi-step operation.</strong> The kit has no names for multi-step
+operations yet. A package that registers one with MEHO's own modules must
+declare the steps of each multi-step operation that changes something:
+call <code>register_governed_subops</code> with every step the operation may run,
+or <code>declare_no_governed_subops</code> when it makes its change without a step
+that MEHO checks on its own (both in
+<code>meho_backplane.operations.governed_subops</code>). MEHO checks an agent's
+grants for each listed step before the call starts. When an operation
+declares neither, MEHO refuses an agent's call of it with
+<code>agent_steps_not_declared</code> once <code>AGENT_GRANT_REQUIRED</code> is <code>on</code>. Check
+this in your package's own CI: after your operations are registered,
+<code>composites_without_declared_steps(op_ids)</code> from the same module must
+return an empty list for the ids of your multi-step operations that
+change something.</p>
 <p>What MEHO does for you, so you do not:</p>
 <ul>
 <li>the policy check and the approval wait

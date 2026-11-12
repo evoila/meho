@@ -165,8 +165,47 @@ it. For this, its account `meho-admin` needs the realm-management role
 `manage-realm`. A new install gets the role from the realm file.
 
 An install whose first start was older, and had the company login off,
-may lack the role. Then the Job stops, and its log names the role and
-this section:
+may lack the role. What you see depends on when MEHO finds out.
+
+**Before the upgrade (the usual case).** Before an upgrade changes
+anything, a short Job checks that `meho-admin` has the role. Without it,
+the upgrade stops, and the version that runs now keeps running. Helm's
+error names the Job, and so the role:
+
+```text
+Error: UPGRADE FAILED: pre-upgrade hooks failed: ... job <release>-check-manage-realm failed ...
+```
+
+The Job's log says what to do. The failed Job stays until the next
+upgrade, so you can read it at any time:
+
+```bash
+kubectl -n <namespace> logs job/<release>-check-manage-realm
+```
+
+```text
+core_bootstrap_failed: meho-admin lacks the realm-management role manage-realm, so the bootstrap Job would stop after the upgrade. The upgrade stops now and changes nothing. ...
+```
+
+When the check cannot reach Keycloak, or cannot read the roles, its log
+says `role check: unknown (...)`, and the upgrade goes on. Then the
+bootstrap Job checks again after the upgrade.
+
+**After the upgrade.** When the bootstrap Job still stops, the new
+version already runs. Without `helm upgrade --atomic` (for example with
+the Helm job of RKE2 or k3s), the release then ends as `failed`, and
+Helm says only:
+
+```text
+post-upgrade hooks failed: ... job <release>-core-bootstrap failed ...
+```
+
+The reason is in the Job's log. The failed Job stays until the next
+install or upgrade:
+
+```bash
+kubectl -n <namespace> logs job/<release>-core-bootstrap
+```
 
 ```text
 core_bootstrap_failed: login flow meho approval sign-in: meho-admin may not read or change login flows, ...
@@ -175,7 +214,8 @@ core_bootstrap_failed: login flow meho approval sign-in: meho-admin may not read
 With `helm upgrade --atomic`, Helm rolls the release back when the Job
 stops, so the old version keeps running until you add the role.
 
-Give `meho-admin` the role once, then run the upgrade again:
+In both cases, give `meho-admin` the role once, then run the upgrade
+again:
 
 1. Log in to the Keycloak admin console as the console admin
    ([The console admin](keycloak-realm.md#the-console-admin)) and pick

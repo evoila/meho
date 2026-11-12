@@ -1,0 +1,91 @@
+{{- if .Values.coreKeycloak.enabled }}
+{{- /*
+Before an upgrade, check that `meho-admin` has the realm-management role
+`manage-realm` on the built-in Keycloak (#6336). The `bootstrap` Job needs
+the role and runs only after the upgrade, when the new version already runs.
+This pre-upgrade Job runs before the upgrade changes anything. When the role
+is missing, it fails, and Helm stops the upgrade with the old version still
+running. The Job name names the role, so Helm's error names it too; the Job
+log names the fix. When the check cannot tell (Keycloak does not answer, or
+this is the first upgrade with the built-in Keycloak), it lets the upgrade
+go on. Details: docs/codebase/core-bootstrap.md.
+*/}}
+{{- /* Cut the release name first, so the name keeps the role: 44 + len("-check-manage-realm") = 63. */}}
+{{- $name := printf "%s-check-manage-realm" (.Release.Name | trunc 44 | trimSuffix "-") }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core-keycloak-role-check
+  annotations:
+    # After the secrets Job (-30) and before the database Jobs (-25, -10),
+    # so a stop here leaves the old version as it was.
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-28"
+    # A failed Job stays, with its log, until the next upgrade.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  # No `ttlSecondsAfterFinished`: the log of a failed check must stay.
+  # No retry: a second run gives the same answer.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        # The labels of the bootstrap Job's pod: the Keycloak NetworkPolicy
+        # admits them. Not `meho.selectorLabels`.
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: core-bootstrap
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "meho.core.hookName" . }}
+      # The check talks to Keycloak only, never to the Kubernetes API.
+      automountServiceAccountToken: false
+      {{- with include "meho.core.imagePullSecrets" . }}
+      imagePullSecrets:
+        {{- . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
+      containers:
+        - name: role-check
+          # The backplane image, with the same digest pin as the Deployment.
+          image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "meho_backplane.core.bootstrap", "keycloak-role-check"]
+          terminationMessagePolicy: FallbackToLogsOnError
+          env:
+            - name: MEHO_CORE_KEYCLOAK_PLAN
+              value: {{ include "meho.core.keycloakPlan" . | quote }}
+            # The secrets Job (-30) makes it. Optional, so a missing Secret
+            # means "cannot tell" and not a pod that never starts.
+            - name: MEHO_REALM_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-core-keycloak-admin" .Release.Name }}
+                  key: client_secret
+                  optional: true
+          resources:
+            {{- toYaml .Values.migrationJob.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -23,6 +23,10 @@ Module layout
   /ui/agents/runs/{handle}``. The full run state; the status panel polls
   while the run is non-terminal and renders statically once terminal.
   Operator-readable.
+* :mod:`~meho_backplane.ui.routes.agents.runs.events` -- ``GET
+  /ui/agents/runs/{handle}/events``. The run's saved events as a live
+  Server-Sent Events stream: the events so far, then each new one, until
+  the run ends. The run console follows a run with it. Operator-readable.
 * :mod:`~meho_backplane.ui.routes.agents.runs.views` -- row-to-view
   projection + status-badge + UTC coercion shared by both handlers.
 * :mod:`~meho_backplane.ui.routes.agents.runs.operator` -- the read-path
@@ -59,6 +63,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from meho_backplane.ui.routes.agents.runs.detail import build_runs_detail_router
+from meho_backplane.ui.routes.agents.runs.events import build_run_events_router
 from meho_backplane.ui.routes.agents.runs.list_view import build_runs_list_router
 
 __all__ = ["build_runs_router"]
@@ -81,4 +86,5 @@ def build_runs_router() -> APIRouter:
     router = APIRouter()
     router.include_router(build_runs_list_router())
     router.include_router(build_runs_detail_router())
+    router.include_router(build_run_events_router())
     return router

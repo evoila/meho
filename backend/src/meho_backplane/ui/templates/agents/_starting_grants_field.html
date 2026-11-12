@@ -1,0 +1,75 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The starting grant pick (#6192). Included by the register-principal
+  modal and by the create-agent form. Three choices; none is selected at
+  first. While AGENT_GRANT_REQUIRED is not "off" (``grants_required``)
+  the choice is required. For "read-targets" the person ticks targets
+  from the tenant's list.
+
+  Context (from
+  :func:`~meho_backplane.ui.routes.agents.starting_grants.pick_context`):
+    * ``grant_set_choices``  -- the three choices (value, label, help).
+    * ``grant_target_names`` -- the tenant's target names.
+    * ``grants_required``    -- whether the choice is required.
+    * ``pick_for_definition`` -- set by the create-agent form; adds a
+      hint that the pick is needed only for an agent with no grants.
+    * ``errors`` / ``values`` -- as in the surrounding form; the keys are
+      ``starting_grants`` and ``starting_grant_targets``.
+-#}
+{%- set picked = values.starting_grants if values and values.starting_grants else "" -%}
+{%- set picked_targets = values.starting_grant_targets if values and values.starting_grant_targets else [] -%}
+<fieldset class="flex flex-col gap-1" data-field="starting_grants" aria-describedby="starting-grants-hint">
+  <legend class="text-sm font-medium">
+    Starting grants
+    {% if not grants_required %}<span class="opacity-60 font-normal">(optional)</span>{% endif %}
+  </legend>
+  <span id="starting-grants-hint" class="text-xs opacity-60">
+    What this agent may run. You can change its grants later.
+    {% if pick_for_definition is defined and pick_for_definition %}MEHO needs this pick when the agent has no grants yet.{% endif %}
+  </span>
+  {% for choice in grant_set_choices %}
+    <label class="flex items-start gap-2 cursor-pointer">
+      <input
+        type="radio"
+        name="starting_grants"
+        value="{{ choice.value }}"
+        class="radio radio-sm mt-1"
+        {% if grants_required %}required{% endif %}
+        {% if picked == choice.value %}checked{% endif %}
+        data-grant-set="{{ choice.value }}"
+      />
+      <span class="flex flex-col">
+        <span class="text-sm">{{ choice.label }}</span>
+        <span class="text-xs opacity-60">{{ choice.help }}</span>
+      </span>
+    </label>
+  {% endfor %}
+  <div class="ml-6 flex flex-col gap-1" data-grant-targets>
+    <span class="text-xs font-medium">Targets for "Read some targets"</span>
+    {% if grant_target_names %}
+      <div class="max-h-40 overflow-y-auto flex flex-col gap-1 border border-base-300 rounded p-2">
+        {% for target_name in grant_target_names %}
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              name="starting_grant_targets"
+              value="{{ target_name }}"
+              class="checkbox checkbox-xs"
+              {% if target_name in picked_targets %}checked{% endif %}
+            />
+            <span class="text-sm font-mono">{{ target_name }}</span>
+          </label>
+        {% endfor %}
+      </div>
+    {% else %}
+      <span class="text-xs opacity-60" data-no-targets>This tenant has no targets yet.</span>
+    {% endif %}
+  </div>
+  {% if errors and 'starting_grants' in errors %}
+    <span class="text-xs text-error" role="alert" data-error-for="starting_grants">
+      {{ errors['starting_grants'] }}
+    </span>
+  {% endif %}
+</fieldset>

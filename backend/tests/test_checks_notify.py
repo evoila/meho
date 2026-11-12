@@ -71,6 +71,7 @@ from meho_backplane.checks.notify import (
     notify_dashboard_transition,
     notify_finding,
 )
+from meho_backplane.checks.repository import record_sensor_result
 from meho_backplane.connectors.mail.transport import MailSendResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
@@ -277,6 +278,7 @@ async def _seed_sensor(
     for_seconds: int = 0,
     state_since: datetime | None = None,
     evaluated: bool = True,
+    retry_times: int = 0,
 ) -> UUID:
     now = datetime.now(UTC)
     sensor_id = uuid4()
@@ -305,6 +307,7 @@ async def _seed_sensor(
                 last_evidence={"observed": 7, "bound": 10},
                 last_evaluated_at=now - timedelta(seconds=30) if evaluated else None,
                 state_since=state_since or now - timedelta(hours=1),
+                retry_times=retry_times,
                 identity_sub="__sensor__",
                 created_by_sub="op-admin",
             )
@@ -1555,19 +1558,93 @@ async def test_new_dashboard_waiting_for_members_sends_nothing(
     )
 
     await _evaluate(sid_a)
+    await _evaluate(sid_a)
 
     assert fake.calls == []
     assert fired == []
     assert published == []
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        row = await session.get(CheckDashboard, dash)
-        assert row is not None
-        assert row.last_rollup_state == "ok", "the first state is recorded"
+    assert await _rollup_memo(dash) is None, "no state is recorded while waiting"
 
     await _set_sensor_state(sid_b, "ok")
     await _evaluate(sid_b)
     assert fake.calls == []
+    assert fired == []
+    assert published == []
+    assert await _rollup_memo(dash) == "ok"
+
+
+async def _rollup_memo(dashboard_id: UUID) -> str | None:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await session.get(CheckDashboard, dashboard_id)
+        assert row is not None
+        return row.last_rollup_state
+
+
+async def _record(sensor_id: UUID, state: str, evaluated_at: datetime) -> None:
+    """Persist one result through the confirmation gate, as the runner does."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        await record_sensor_result(
+            session,
+            sensor_id=sensor_id,
+            state=state,  # type: ignore[arg-type]
+            value=7,
+            evidence={"observed": 7, "bound": 10},
+            evaluated_at=evaluated_at,
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_new_dashboard_stays_silent_until_results_are_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6008: unconfirmed healthy results keep a new Dashboard silent.
+
+    Both Sensors need three equal results (``retry_times: 2``) before a state
+    counts. Until then they count as ``unknown`` and the Dashboard folds to
+    ``degraded``. The hook runs after every result. Nothing is sent at any
+    point: no mail, no investigation, no event. A real failure afterwards
+    still mails.
+    """
+    fake = _install_transport(monkeypatch)
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **kw: fired.append(kw))
+    published: list[Any] = []
+
+    async def _record_publish(*args: Any, **kwargs: Any) -> None:
+        published.append(args)
+
+    monkeypatch.setattr(inv, "_publish_dashboard_event", _record_publish)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(
+        name="sensor-a", last_state="unknown", evaluated=False, retry_times=2
+    )
+    sid_b = await _seed_sensor(
+        name="sensor-b", last_state="unknown", evaluated=False, retry_times=2
+    )
+    dash = await _seed_dashboard(
+        name="new-board", sensor_ids=[sid_a, sid_b], notify_min_state="degraded"
+    )
+
+    start = datetime.now(UTC) - timedelta(minutes=5)
+    for tick in range(3):
+        for sid in (sid_a, sid_b):
+            await _record(sid, "ok", start + timedelta(seconds=tick * 10))
+            await _evaluate(sid)
+            assert fake.calls == []
+            assert fired == []
+            assert published == []
+        if tick < 2:
+            assert await _rollup_memo(dash) is None
+    assert await _rollup_memo(dash) == "ok"
+
+    for tick in range(3, 6):
+        await _record(sid_a, "critical", start + timedelta(seconds=tick * 10))
+        await _evaluate(sid_a)
+    assert len(fake.calls) == 1
+    assert "ok -> critical" in fake.calls[0]["subject"]
 
 
 @pytest.mark.asyncio

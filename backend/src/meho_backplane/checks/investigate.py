@@ -538,13 +538,13 @@ async def _claim_dashboard_transition(
         ]
         claimed = False
         dashboard_edge = current != previous_memo
-        # #6008: a first fold that is red only for lack of reports records "ok", silently.
-        silent_first = _is_unconfirmed_first_state(previous_memo, current, evaluations)
-        if dashboard_edge:
+        # #6008: no claim while a new Dashboard waits for members; its first ok is silent.
+        waiting = _is_waiting_first_state(previous_memo, current, evaluations)
+        silent_first = previous_memo is None and current == "ok"
+        if dashboard_edge and not waiting:
             # Compare-and-swap: fires once per edge; rowcount is the atomic claim token.
-            new_memo = "ok" if silent_first else current
             claimed = await _claim_rollup_transition(
-                session, dashboard_id, expected=previous_memo, new=new_memo
+                session, dashboard_id, expected=previous_memo, new=current
             )
         changes: list[MemberChange] = []
         if claimed or not dashboard_edge:
@@ -578,17 +578,18 @@ async def _claim_dashboard_transition(
     return _DashboardClaims(transition=transition, member_notices=member_notices)
 
 
-def _is_unconfirmed_first_state(
+def _is_waiting_first_state(
     previous_memo: str | None,
     current: str,
     evaluations: list[_MemberRow],
 ) -> bool:
-    """True for a new Dashboard whose first non-green fold has no failing member.
+    """True for a new Dashboard whose non-green fold has no failing member.
 
     A Dashboard with no memo yet and a ``degraded`` / ``critical`` fold, where
     no member actually reports ``degraded`` / ``critical`` (members that never
-    ran, or are overdue, count as ``unknown`` and fold to ``degraded``), is only
-    waiting for its first results. It must not mail or investigate.
+    ran, or whose results are not confirmed yet, count as ``unknown`` and fold
+    to ``degraded``), is only waiting for its first results. The memo stays
+    ``NULL`` so every later evaluation in the wait is judged the same way.
     """
     if previous_memo is not None or current not in ("degraded", "critical"):
         return False

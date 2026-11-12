@@ -25,12 +25,16 @@ every later problem on it). See "The new problem mail" below.
 recorded state. Members that have not reported yet count as `unknown`,
 and `unknown` rolls up to `degraded`. So the first check run of a new
 Dashboard can look `degraded` only because its other Sensors have not
-run. When the first state is `degraded` or `critical` and no member
-really reports `degraded` or `critical`, MEHO records `ok` as the first
-state and sends nothing: no mail, no investigation, no broadcast. The
-first real failure is then a normal change from `ok` and alerts. When a
-member already really fails on the first state, the alert goes out at
-once, as before.
+run, or because their results are not confirmed yet (a Sensor with
+`retry_times` keeps its old state until enough equal results came in).
+While the state is `degraded` or `critical` and no member really reports
+`degraded` or `critical`, MEHO records no state for the Dashboard and
+sends nothing: no mail, no investigation, no broadcast event. This holds
+for every check run in the wait, not only the first one. The first `ok`
+state is then recorded, also without a mail or event. The first real
+failure after that is a normal change from `ok` and alerts. When a
+member already really fails while the Dashboard has no state yet, the
+alert goes out at once, as before.
 
 The notifier is the second, independent consumer of #2507's transition
 claim. The first is the diagnose-only investigator

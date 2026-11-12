@@ -2530,6 +2530,13 @@ class Settings(BaseModel):
     #: Only the outcome changes, never the hits or their order. Set via
     #: ``SEARCH_CLEAR_LEAD``.
     search_clear_lead: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Wider ``preview_operation`` for typed writes (#5074), behind a switch
+    #: that is off by default. When on, a typed write previews also when it
+    #: does not carry ``requires_approval``, and a credential write with its
+    #: own preview builder shows that plan (never a copy of the params).
+    #: Off: the same answers, hashes and tool texts as before. Set via
+    #: ``PREVIEW_TYPED_WRITES``.
+    preview_typed_writes: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3552,6 +3559,9 @@ def get_settings() -> Settings:
         ),
         search_clear_lead=parse_bool_env(
             os.environ.get("SEARCH_CLEAR_LEAD"),
+        ),
+        preview_typed_writes=parse_bool_env(
+            os.environ.get("PREVIEW_TYPED_WRITES"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

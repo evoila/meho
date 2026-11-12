@@ -262,6 +262,14 @@ _HOSTED_ON_MERGE_GROUP_ALLOWED: dict[tuple[str, str], str] = {
         "docs-site.yml",
         "deploy",
     ): "runs only for tag pushes and main pushes; a merge-queue branch is neither",
+    ("chart.yml", "helm-test"): (
+        "kind installs need more CPU than the own heavy-queue pool has today; "
+        "back to an own pool when the second runner pool exists (#6026)"
+    ),
+    ("chart.yml", "helm-test-byo"): (
+        "kind installs need more CPU than the own heavy-queue pool has today; "
+        "back to an own pool when the second runner pool exists (#6026)"
+    ),
 }
 
 

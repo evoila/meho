@@ -61,6 +61,7 @@ import tempfile as _tempfile
 import threading as _threading
 import types
 import zlib
+from collections.abc import AsyncIterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from unittest.mock import patch
@@ -1030,6 +1031,79 @@ async def test_post_json_rejects_compression_bomb_by_decoded_size(
                 json={"provider": "Local"},
             )
     await conn.aclose()
+
+
+class _CountingChunkStream(httpx.AsyncByteStream):
+    """Send a body in fixed chunks, with no Content-Length, and count the reads."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+        self.sent = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self.chunks:
+            self.sent += 1
+            yield chunk
+
+
+def _split(data: bytes, size: int) -> list[bytes]:
+    return [data[i : i + size] for i in range(0, len(data), size)]
+
+
+@pytest.mark.asyncio
+async def test_capped_read_counts_wire_chunks_that_decode_to_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bytes after the end of a gzip stream decode to nothing but still count.
+
+    The decoded body is only ``{}``, so the decoded ceiling never fires. The
+    wire ceiling must stop the read once the raw bytes pass the cap, before
+    the rest of the padding is read.
+    """
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
+    wire = gzip.compress(b"{}") + b"\0" * 5000
+    stream = _CountingChunkStream(_split(wire, 256))
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/items").respond(
+            200,
+            stream=stream,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+        )
+        async with httpx.AsyncClient(base_url="https://vcenter.example.com") as client:
+            with pytest.raises(ResponseTooLargeError):
+                await http_adapter._read_capped_json_response(client, "GET", "/api/items")
+
+    assert stream.sent == 1024 // 256 + 1
+    assert stream.sent < len(stream.chunks)
+
+
+@pytest.mark.asyncio
+async def test_capped_read_stops_a_chunked_compression_bomb_early(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bomb sent in several chunks is refused before its last chunk is read.
+
+    The decoded total passes the cap after a few chunks, so the rest of the
+    body is never read and never decoded.
+    """
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 64 * 1024)
+    wire = zlib.compress(b"z" * (16 * 1024 * 1024))
+    assert len(wire) < 64 * 1024  # passes the wire ceiling
+    stream = _CountingChunkStream(_split(wire, 64))
+    assert len(stream.chunks) > 100
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/items").respond(
+            200,
+            stream=stream,
+            headers={"content-type": "application/json", "content-encoding": "deflate"},
+        )
+        async with httpx.AsyncClient(base_url="https://vcenter.example.com") as client:
+            with pytest.raises(ResponseTooLargeError):
+                await http_adapter._read_capped_json_response(client, "GET", "/api/items")
+
+    assert stream.sent < len(stream.chunks) // 4
 
 
 @pytest.mark.asyncio

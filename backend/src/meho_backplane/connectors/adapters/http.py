@@ -85,6 +85,7 @@ import asyncio
 import hashlib
 import os
 import ssl
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -398,6 +399,36 @@ def _reject_oversize_content_length(resp: httpx.Response) -> None:
         )
 
 
+def _body_over_cap_error() -> ResponseTooLargeError:
+    return ResponseTooLargeError(
+        f"vendor response body exceeded the {_MAX_RESPONSE_BYTES}-byte response-body cap"
+    )
+
+
+class _WireCappedStream(httpx.AsyncByteStream):
+    """Count the raw wire bytes of a response and stop past the cap.
+
+    It sits under :meth:`~httpx.Response.aiter_bytes`, so every raw chunk is
+    counted before httpx decodes it. A check in the decoded loop would miss
+    a chunk that decodes to no output (for example padding after the end of
+    a gzip stream), because ``aiter_bytes`` yields nothing for it.
+    """
+
+    def __init__(self, inner: httpx.AsyncByteStream) -> None:
+        self._inner = inner
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        total = 0
+        async for chunk in self._inner:
+            total += len(chunk)
+            if total > _MAX_RESPONSE_BYTES:
+                raise _body_over_cap_error()
+            yield chunk
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
 async def _read_capped_json_response(
     client: httpx.AsyncClient,
     method: str,
@@ -430,8 +461,9 @@ async def _read_capped_json_response(
 
     The cap has two ceilings, both :data:`_MAX_RESPONSE_BYTES`. The first
     bounds the compressed transfer: ``Content-Length`` and
-    :attr:`~httpx.Response.num_bytes_downloaded` count the bytes on the
-    wire. The second bounds the decoded body: the loop iterates
+    :class:`_WireCappedStream` count the bytes on the wire. The stream
+    wrapper checks every raw chunk before it is decoded, also a chunk that
+    decodes to no output. The second bounds the decoded body: the loop iterates
     :meth:`~httpx.Response.aiter_bytes`, which decodes ``Content-Encoding``
     chunk by chunk, and stops as soon as the decoded total passes the cap.
     So a small compressed body that expands a great deal (a compression
@@ -466,15 +498,15 @@ async def _read_capped_json_response(
         # resource (for example a large file), not of anything read here.
         if method.upper() != "HEAD":
             _reject_oversize_content_length(resp)
+        if not isinstance(resp.stream, httpx.AsyncByteStream):
+            raise RuntimeError("an async client returned a sync response stream")
+        resp.stream = _WireCappedStream(resp.stream)
         chunks: list[bytes] = []
         total = 0
         async for chunk in resp.aiter_bytes():
             total += len(chunk)
-            if total > _MAX_RESPONSE_BYTES or resp.num_bytes_downloaded > _MAX_RESPONSE_BYTES:
-                raise ResponseTooLargeError(
-                    f"vendor response body exceeded the "
-                    f"{_MAX_RESPONSE_BYTES}-byte response-body cap"
-                )
+            if total > _MAX_RESPONSE_BYTES:
+                raise _body_over_cap_error()
             chunks.append(chunk)
         out_headers = resp.headers.copy()
         # An empty body (a HEAD answer) has nothing decoded, so its headers

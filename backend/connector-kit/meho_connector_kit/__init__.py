@@ -43,7 +43,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
     is_acceptable_auth_model,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
-from meho_backplane.connectors.base import Connector, ConnectorUpstreamError
+from meho_backplane.connectors.base import Connector, ConnectorOwnMessage, ConnectorUpstreamError
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -138,6 +138,7 @@ __all__ = [
     "AuthModel",
     "Connector",
     "ConnectorAuthError",
+    "ConnectorOwnMessage",
     "ConnectorUpstreamError",
     "CredentialsReadError",
     "EmbeddingService",

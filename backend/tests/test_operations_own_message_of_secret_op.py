@@ -11,6 +11,7 @@ plain error type and every vendor field stay hidden as before.
 
 from __future__ import annotations
 
+import meho_connector_kit as kit
 import pytest
 
 from meho_backplane.connectors.base import ConnectorOwnMessage
@@ -41,6 +42,21 @@ def test_own_message_of_a_secret_op_is_shown() -> None:
     assert out.extras["exception_message"] == _OWN_TEXT
     assert out.extras["exception_class"] == "_OwnMessageError"
     assert VENDOR_TEXT_WITHHELD not in out.model_dump_json()
+
+
+def test_kit_mark_keeps_own_message_and_hides_vendor_fields() -> None:
+    class _PackageError(kit.ConnectorOwnMessage, RuntimeError):
+        pass
+
+    first = result_connector_error(_OP, _PackageError(_OWN_TEXT), 1.0)
+    built = first.model_copy(update={"extras": {**first.extras, "upstream_message": _VENDOR_TEXT}})
+
+    out = withhold_vendor_text(built, op_id=_OP, tags=_SECRET_TAGS)
+
+    assert kit.ConnectorOwnMessage is ConnectorOwnMessage
+    assert out.extras["exception_message"] == _OWN_TEXT
+    assert out.extras["upstream_message"] == VENDOR_TEXT_WITHHELD
+    assert "quokka" not in out.model_dump_json()
 
 
 def test_vendor_message_of_a_secret_op_stays_hidden() -> None:

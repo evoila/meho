@@ -307,7 +307,8 @@ text from the error result, in one shared place.
 - **Own message.** A connector can show the whole `exception_message`
   when the message is a fixed sentence it wrote itself, with no vendor
   text, no value from the call and no secret. It adds
-  `ConnectorOwnMessage` (in `connectors/base.py`) as a base class of the
+  `ConnectorOwnMessage` (in `connectors/base.py`; a connector package
+  imports it from the connector kit) as a base class of the
   error type. `result_connector_error` then sets
   `extras.message_source = "meho"` and the rule keeps that one field.
   Every other vendor field stays hidden. `LinuxWriteOwnMessageError`

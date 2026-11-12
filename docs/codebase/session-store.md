@@ -258,9 +258,10 @@ the outbox.
 3. **Whole lines.** While a session is open, each file is cut after its
    last newline, like the server does.
 4. **Receipt.** `meho-receipt.json` in the session folder holds, per
-   file, the bytes sent (`offset`) and their SHA-256 hash, the state and
-   MEHO's answer. The same files and state as the receipt: nothing is
-   sent. A failed upload writes no receipt, so the next run tries again.
+   file, the bytes sent (`offset`) and their SHA-256 hash, the state,
+   the backplane URL, the tenant (the `Meho-Tenant` value, or none) and
+   MEHO's answer. The same files, state, backplane and tenant as the
+   receipt: nothing is sent. A failed upload writes no receipt, so the next run tries again.
    The receipt is written to a temporary file and renamed.
 5. **Secret check** (`secretcheck.go`). It follows the server's check:
    known secrets are replaced, JSON lines are parsed and each string is
@@ -269,7 +270,13 @@ the outbox.
    private key with no `END` line), the session is held back and `push`
    names the file and the reason, never the value. Go's `regexp` has no
    look-around, so a leading character is matched and kept instead. It
-   also finds GitHub tokens and AWS access keys.
+   also finds GitHub tokens and AWS access keys. Secrets in links
+   (`urlsecret.go`) and BIND key secrets (`bindsecret.go`) are found by
+   code, ported from the server's `url_secret.py` and `bind_secret.py`.
+   A BIND secret in quotes that does not end on its line holds the
+   session back, because the check reads one line at a time.
+   A session that cannot be read or packed counts as failed, and `push`
+   exits non-zero, like for a failed upload.
 6. **Upload.** All checked files go in one gzip tar archive to `POST
    /api/v1/sessions`, with the person's `meho login` token (refreshed on
    a `401`).

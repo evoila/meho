@@ -148,13 +148,16 @@ meho sessions push
   the laptop and is never sent. An empty allowlist sends nothing.
 - Before a session leaves the laptop, a **secret check** replaces known
   secrets with `[REDACTED:<pattern>]`: private keys, bearer tokens,
-  `Authorization` headers, JWTs, secrets in links, `password=...` style
-  pairs, GitHub tokens and AWS access keys. MEHO checks every upload
-  again.
+  `Authorization` headers, JWTs, secrets in links (the user part before
+  `@`, and query values such as `token=` or `sig=`, also when the name is
+  written with `%` codes), BIND key secrets (`secret "...";`),
+  `password=...` style pairs, GitHub tokens and AWS access keys. MEHO
+  checks every upload again.
 - When the check is not sure, the session **stays in the outbox**, and
   `push` says why. This happens when a file is not UTF-8 text, when a
   name that looks like a secret still has a value (for example
-  `"password": "..."`), or when a private key has no `END` line.
+  `"password": "..."`), when a private key has no `END` line, or when a
+  BIND secret in quotes goes on to the next line.
 - The upload goes to the MEHO of your `meho login`, with your normal
   login. It needs no extra key. MEHO stores it in your tenant.
 - `push` sends the transcript `<session-id>.jsonl` and the files of the
@@ -173,8 +176,8 @@ is one of `sent`, `already sent`, `not on allowlist`, `held back`,
 
 After each upload, `push` writes a receipt next to the session:
 `<outbox>/<session-id>/meho-receipt.json`. It holds the session id, the
-time, MEHO's answer, and for each file how many bytes were sent and
-their SHA-256 hash.
+time, the MEHO address and tenant it was sent to, MEHO's answer, and for
+each file how many bytes were sent and their SHA-256 hash.
 
 An admin sees the uploaded session in `meho sessions list`.
 
@@ -183,8 +186,12 @@ An admin sees the uploaded session in `meho sessions list`.
 `push` is safe to run twice:
 
 - A session with a receipt that matches its files is not sent again.
+  The receipt counts only for the MEHO address and tenant it names: with
+  another `--backplane`, another login or another tenant, `push` sends
+  the session again.
 - A failed upload writes no receipt. The next run sends the session
-  again. MEHO stores an upload whole or not at all, and the same bytes
+  again. When a session fails (it cannot be read or packed, or the
+  upload fails), `push` ends with an error. MEHO stores an upload whole or not at all, and the same bytes
   sent twice change nothing.
 - A session that is **still open** grows at the end. While a session is
   open, `push` sends only complete lines. When the files have grown since

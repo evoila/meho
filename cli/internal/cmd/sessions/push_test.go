@@ -16,6 +16,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/evoila/meho/cli/internal/api"
+	"github.com/evoila/meho/cli/internal/auth"
 )
 
 const (
@@ -27,6 +31,7 @@ const (
 type fakeUpload struct {
 	Fields map[string]string
 	Files  map[string]string
+	Tenant string
 }
 
 type fakeServer struct {
@@ -60,6 +65,7 @@ func (f *fakeServer) handler(t *testing.T) http.HandlerFunc {
 		for k, v := range r.MultipartForm.Value {
 			up.Fields[k] = v[0]
 		}
+		up.Tenant = r.Header.Get(api.TenantHeader)
 		file, _, err := r.FormFile("archive")
 		if err != nil {
 			t.Errorf("archive: %v", err)
@@ -425,5 +431,111 @@ func TestGzipTarIsReadable(t *testing.T) {
 	files := untar(t, bytes.NewReader(data))
 	if files["a.jsonl"] != "x\n" || len(files) != 2 {
 		t.Fatalf("files = %v", files)
+	}
+}
+
+// pushTo runs push against url, with tenant as the chosen tenant ("" for none).
+func pushTo(t *testing.T, url, tenant string) (pushReport, error) {
+	t.Helper()
+	cmd, stdout, stderr := newCmd(t, "")
+	cmd.SetContext(api.WithTenant(cmd.Context(), tenant))
+	err := runPush(cmd, pushOptions{JSONOut: true, BackplaneOverride: url})
+	var report pushReport
+	if derr := json.Unmarshal(stdout.Bytes(), &report); derr != nil {
+		t.Fatalf("decode report: %v; stdout=%s stderr=%s", derr, stdout.String(), stderr.String())
+	}
+	return report, err
+}
+
+func TestPushSendsAgainToAnotherBackplane(t *testing.T) {
+	fake, srv, outbox := setup(t, opsFolder)
+	other := &fakeServer{}
+	otherSrv := httptest.NewServer(other.handler(t))
+	t.Cleanup(otherSrv.Close)
+	store, err := auth.NewFileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, user := auth.KeyForBackplane(otherSrv.URL)
+	if err := store.Save(service, user, auth.StoredToken{
+		BackplaneURL: otherSrv.URL, AccessToken: "eyJ.test.token", TokenType: "Bearer",
+		Expiry: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dir := writeSession(t, outbox, "s20", userLine(opsFolder, "hello"), endedMarkerFile)
+	if _, err := pushTo(t, srv.URL, ""); err != nil {
+		t.Fatalf("first push: %v", err)
+	}
+	report, err := pushTo(t, otherSrv.URL, "")
+	if err != nil {
+		t.Fatalf("push to the other backplane: %v", err)
+	}
+	if fake.count() != 1 || other.count() != 1 || report.Sessions[0].Result != resultSent {
+		t.Fatalf("uploads %d / %d; report=%+v", fake.count(), other.count(), report)
+	}
+	if r := loadReceipt(dir); r == nil || r.Backplane != otherSrv.URL {
+		t.Fatalf("receipt = %+v", r)
+	}
+}
+
+func TestPushSendsAgainToAnotherTenant(t *testing.T) {
+	fake, srv, outbox := setup(t, opsFolder)
+	dir := writeSession(t, outbox, "s21", userLine(opsFolder, "hello"), endedMarkerFile)
+	if _, err := pushTo(t, srv.URL, "tenant-a"); err != nil {
+		t.Fatalf("first push: %v", err)
+	}
+	report, err := pushTo(t, srv.URL, "tenant-a")
+	if err != nil || report.Sessions[0].Result != resultAlreadySent {
+		t.Fatalf("same tenant: %+v, %v", report, err)
+	}
+	report, err = pushTo(t, srv.URL, "tenant-b")
+	if err != nil {
+		t.Fatalf("push to another tenant: %v", err)
+	}
+	if fake.count() != 2 || report.Sessions[0].Result != resultSent || fake.uploads[1].Tenant != "tenant-b" {
+		t.Fatalf("uploads %d; report=%+v", fake.count(), report)
+	}
+	if r := loadReceipt(dir); r == nil || r.Tenant != "tenant-b" {
+		t.Fatalf("receipt = %+v", r)
+	}
+}
+
+func TestPushFailsWhenASessionCannotBeRead(t *testing.T) {
+	fake, srv, outbox := setup(t, opsFolder)
+	dir := writeSession(t, outbox, "s22", userLine(opsFolder, "hello"), endedMarkerFile)
+	transcript := filepath.Join(dir, "s22.jsonl")
+	if err := os.Chmod(transcript, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(transcript, 0o600) })
+	if f, err := os.Open(transcript); err == nil {
+		_ = f.Close()
+		t.Skip("this user can read a file with no permissions")
+	}
+	for _, dryRun := range []bool{false, true} {
+		report, err := push(t, srv, dryRun)
+		if err == nil {
+			t.Fatalf("dry run %v: an unreadable session must end with an error", dryRun)
+		}
+		if report.Sessions[0].Result != resultFailed || fake.count() != 0 {
+			t.Fatalf("dry run %v: row = %+v", dryRun, report.Sessions[0])
+		}
+	}
+}
+
+func TestPushKeepsBINDAndURLSecretsOnTheLaptop(t *testing.T) {
+	fake, srv, outbox := setup(t, opsFolder)
+	text := `secret "bWFkZVVwU2VjcmV0VmFsdWU=";` + " https://madeUpUser77@example.com/x " +
+		"https://example.com/f?%74oken=madeUpValue78"
+	writeSession(t, outbox, "s23", userLine(opsFolder, text), endedMarkerFile)
+	if _, err := push(t, srv, false); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	sent := fake.uploads[0].Files["s23.jsonl"]
+	for _, secret := range []string{"bWFkZVVwU2VjcmV0VmFsdWU=", "madeUpUser77", "madeUpValue78"} {
+		if strings.Contains(sent, secret) {
+			t.Fatalf("%s left the laptop: %s", secret, sent)
+		}
 	}
 }

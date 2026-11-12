@@ -283,6 +283,7 @@ type receipt struct {
 	Project   string                      `json:"project"`
 	State     string                      `json:"state"`
 	Backplane string                      `json:"backplane"`
+	Tenant    string                      `json:"tenant,omitempty"`
 	SentAt    time.Time                   `json:"sent_at"`
 	Files     map[string]receiptFileState `json:"files"`
 	Server    json.RawMessage             `json:"server"`
@@ -326,9 +327,10 @@ func writeReceipt(dir string, r receipt) error {
 }
 
 // sameAsReceipt says whether the receipt already covers these file states
-// and this state: then there is nothing new to send.
-func sameAsReceipt(r *receipt, states map[string]receiptFileState, state string) bool {
-	if r == nil || r.State != state || len(r.Files) != len(states) {
+// and this state at this destination: then there is nothing new to send.
+func sameAsReceipt(r *receipt, dest destination, states map[string]receiptFileState, state string) bool {
+	if r == nil || dest.Backplane == "" || r.Backplane != dest.Backplane || r.Tenant != dest.Tenant ||
+		r.State != state || len(r.Files) != len(states) {
 		return false
 	}
 	for path, st := range states {

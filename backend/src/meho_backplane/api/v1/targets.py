@@ -199,6 +199,10 @@ from meho_backplane.targets.secret_field_map import (
     check_secret_field_map_sources,
     merge_secret_field_map,
 )
+from meho_backplane.targets.ssrf_guard import (
+    TargetDestinationBlockedError,
+    assert_public_destination,
+)
 from meho_backplane.targets.vault_login_extras import enforce_vault_login_extras_platform_admin
 
 __all__ = [
@@ -1719,6 +1723,23 @@ async def _drop_kept_logins_on_connection_change(
         _drop_again_after_commit(session, t)
 
 
+def _screen_sent_destination(updates: dict[str, Any], t: TargetORM) -> None:
+    """Run the SSRF guard on a sent ``host`` / ``fqdn`` with the effective port.
+
+    The effective port is the one in the PATCH, else the stored one. The
+    schema already screened a body that carries its own port; this covers
+    the body without a port, where only the stored row knows it.
+    """
+    if updates.get("port") is not None:
+        return
+    for key in ("host", "fqdn"):
+        if updates.get(key) is not None:
+            try:
+                assert_public_destination(updates[key], t.port)
+            except TargetDestinationBlockedError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 def _validate_update_body_fields(
     updates: dict[str, Any],
     t: TargetORM,
@@ -1754,6 +1775,7 @@ def _validate_update_body_fields(
       :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
     effective_product = _apply_product_patch(updates, t.product)
+    _screen_sent_destination(updates, t)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:
         _enforce_secret_ref_tenant_scope(updates["secret_ref"], operator, t.name)

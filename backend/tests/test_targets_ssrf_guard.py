@@ -45,8 +45,10 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from fastapi import HTTPException
 from pydantic import ValidationError
 
+from meho_backplane.api.v1.targets import _screen_sent_destination
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.adapters.http import (
     HttpConnector,
@@ -130,12 +132,23 @@ def test_target_create_rejects_non_public_host_literal(
     assert "not a public address" in str(excinfo.value)
 
 
+def _screened_update(**fields: Any) -> TargetUpdate:
+    """Build a PATCH body, then run the route's screen with a stored row (no port).
+
+    With no port in the body the schema leaves the screen to the route, which
+    knows the stored port.
+    """
+    body = TargetUpdate(**fields)
+    _screen_sent_destination(body.model_dump(exclude_unset=True), types.SimpleNamespace(port=None))  # type: ignore[arg-type]
+    return body
+
+
 @pytest.mark.parametrize("host", _NON_PUBLIC_HOSTS)
 def test_target_update_rejects_non_public_host_literal(
     _guard_live: pytest.MonkeyPatch, host: str
 ) -> None:
-    with pytest.raises(ValidationError) as excinfo:
-        TargetUpdate(host=host)
+    with pytest.raises((ValidationError, HTTPException)) as excinfo:
+        _screened_update(host=host)
     assert "not a public address" in str(excinfo.value)
 
 
@@ -210,8 +223,8 @@ def test_target_create_rejects_host_with_url_structure(
 def test_target_update_rejects_host_with_url_structure(
     _guard_live: pytest.MonkeyPatch, host: str
 ) -> None:
-    with pytest.raises(ValidationError):
-        TargetUpdate(host=host)
+    with pytest.raises((ValidationError, HTTPException)):
+        _screened_update(host=host)
 
 
 def test_target_create_rejects_fqdn_with_url_structure(

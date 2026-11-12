@@ -18,8 +18,10 @@ from typing import Any
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
+from meho_backplane.api.v1.targets import _screen_sent_destination
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
 from meho_backplane.connectors.adapters.http import (
     HttpConnector,
@@ -27,7 +29,7 @@ from meho_backplane.connectors.adapters.http import (
     _pin_target_addresses,
     _target_dial_port,
 )
-from meho_backplane.targets.schemas import TargetCreate
+from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 from meho_backplane.targets.ssrf_guard import (
     TARGET_SSRF_ALLOWLIST_ENV,
     TargetDestinationBlockedError,
@@ -145,6 +147,37 @@ def test_target_create_checks_the_embedded_port(_guard_live: pytest.MonkeyPatch)
     assert created.host == f"{_HOST}:8443"
     with pytest.raises(ValidationError):
         TargetCreate(name="t1", product="vcenter", host=f"{_HOST}:9443")
+
+
+def test_create_uses_the_target_port_for_a_port_entry(_guard_live: pytest.MonkeyPatch) -> None:
+    _allow(_guard_live, f"{_HOST}:8443")
+    created = TargetCreate(name="t1", product="vcenter", host=_HOST, port=8443)
+    assert created.port == 8443
+    with pytest.raises(ValidationError):
+        TargetCreate(name="t1", product="vcenter", host=_HOST, port=9443)
+    with pytest.raises(ValidationError):
+        TargetCreate(name="t1", product="vcenter", host=_HOST)
+    with pytest.raises(ValidationError):
+        TargetCreate(name="t1", product="vcenter", host="other.lab.internal", port=8443, fqdn=_HOST)
+
+
+def test_update_with_a_body_port_uses_that_port(_guard_live: pytest.MonkeyPatch) -> None:
+    _allow(_guard_live, f"{_HOST}:8443")
+    assert TargetUpdate(host=_HOST, port=8443).host == _HOST
+    with pytest.raises(ValidationError):
+        TargetUpdate(host=_HOST, port=9443)
+
+
+def test_update_without_a_body_port_uses_the_stored_port(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    _allow(_guard_live, f"{_HOST}:8443")
+    body = TargetUpdate(host=_HOST)  # the schema defers: the stored port is unknown here
+    updates = body.model_dump(exclude_unset=True)
+    _screen_sent_destination(updates, types.SimpleNamespace(port=8443))  # type: ignore[arg-type]
+    with pytest.raises(HTTPException) as excinfo:
+        _screen_sent_destination(updates, types.SimpleNamespace(port=9443))  # type: ignore[arg-type]
+    assert excinfo.value.status_code == 422
 
 
 # --- connect time -----------------------------------------------------------

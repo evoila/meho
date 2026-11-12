@@ -667,7 +667,9 @@ each lives inline in
   fully on. A scoped opt-in is the intended posture, never a global
   off-switch. An entry can end in a port, e.g. `"harbor.lab.internal:8443"`
   or `"192.168.7.10:8443"`. Such an entry admits that host on that port
-  only. A plain entry admits every port.
+  only, when the target is created or changed and when it is dialed. A
+  plain entry admits every port. Port entries do not cover corpus sources,
+  secret hand-off or Kubernetes connections: for those, use a plain entry.
 - **`netdiag.pingGroupRange`** → the `net.ipv4.ping_group_range` pod sysctl
   for unprivileged ICMP-echo ping. Default-off (empty) ships no sysctl:
   `net.trace` / `net.path_mtu` still work, but `net.ping` degrades

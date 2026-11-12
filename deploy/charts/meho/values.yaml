@@ -616,6 +616,10 @@ config:
   # A host name or IP entry may end in a port (`vcenter.lab.internal:8443`,
   # `[fd00::5]:8443`): it then admits that host on that port only, while
   # a plain entry admits every port.
+  # Port entries apply to target registration and to target connections
+  # (HTTP, Postgres, MSSQL, MongoDB, SSH). They do not cover corpus
+  # sources, secret hand-off or Kubernetes connections: for those, use a
+  # plain entry.
   #
   # Default `""` keeps the guard fully on (default-deny) — a genuine
   # no-op render. MEHO is on-prem: registering appliances on private

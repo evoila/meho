@@ -417,6 +417,16 @@ synthetic status code `202` (`approval_queue.py`). The audit-query read path
 (`audit_query/query.py`) derives `pending` from `status_code == 202` and offers
 a `result_status="pending"` filter, so a waiting call is not counted as `ok`.
 
+### Shadow mode of the policy evaluator
+
+With the `POLICY_ENGINE_SHADOW` switch on (off by default), the policy
+evaluator (`policy/evaluate.py`) works out its own verdict after
+`policy_gate` and logs `policy_shadow_mismatch` when it differs. The
+verdict of `policy_gate` is still the one that counts. For an agent the
+evaluator reads the matching grant through `matched_grant` (the same row
+match as `resolve_verdict`, before any ceiling) and applies the ceilings
+itself. See [policy-evaluator.md](policy-evaluator.md).
+
 ## Dependencies
 
 - `meho_backplane/auth/operator.py` — `Operator`, `TenantRole`, `PrincipalKind`

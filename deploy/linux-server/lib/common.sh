@@ -26,6 +26,10 @@ readonly MEHO_PLACE_VALUES=/etc/meho/values-place.yaml
 readonly MEHO_INSTALL_RECORD=/etc/meho/install.json
 readonly MEHO_FIRST_LOGIN_FILE=/var/lib/meho/first-login-passwords
 readonly MEHO_UNSEAL_KEY_FILE=/var/lib/meho/unseal-key
+# The CA of the console certificate. It is not secret: browsers and laptops
+# need it to trust the console. It lives with the state of this machine, so
+# the appliance's cleaning step removes it with the rest of /var/lib/meho.
+readonly MEHO_CONSOLE_CA_FILE=/var/lib/meho/console-ca.crt
 readonly MEHO_CLI_PATH=/usr/local/bin/meho
 readonly RKE2_CONFIG_FILE=/etc/rancher/rke2/config.yaml
 readonly RKE2_KUBECONFIG=/etc/rancher/rke2/rke2.yaml

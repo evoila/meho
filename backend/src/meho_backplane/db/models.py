@@ -2243,6 +2243,35 @@ class TenantPolicy(Base):
     )
 
 
+class PolicyRevision(Base):
+    """One imported policy file (``meho policy import``), after a second admin approved it.
+
+    ``tenant_id`` is the tenant, or ``NULL`` for the install's policy.
+    ``file_text`` is the file as sent, ``document`` the stored policy after
+    the import, and ``diff`` what the import changed. The service only adds
+    rows; when a scope has more than 20, the oldest go
+    (:mod:`meho_backplane.policy.service`).
+    """
+
+    __tablename__ = "policy_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    imported_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    approved_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    file_text: Mapped[str] = mapped_column(Text, nullable=False)
+    document: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    diff: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+
+    __table_args__ = (Index("policy_revision_tenant_ts_idx", "tenant_id", "ts"),)
+
+
 class TenantOperationSetting(Base):
     """One tenant's own on/off choice for one built-in operation (#5029).
 

@@ -212,6 +212,72 @@ check (the event is sent also when the group is known noise). Every other
 claimed edge publishes one event in `_process_transition`. The investigator
 call itself is unchanged. Payloads: `docs/codebase/events.md`, "Check events".
 
+## Two paths: the old path and the event trigger (#6183)
+
+With `CHECKS_AGENT_EVENTS` on, the investigator can run on one of two paths.
+With the switch off, only the old path exists and nothing below applies.
+
+**The old path** is the code in this module. `_investigate_group` finds the
+agent by the name in `CHECKS_INVESTIGATOR_AGENT`, starts it, waits for the
+answer and then stores and mails the finding.
+
+**The trigger path** uses no special code. A person makes an ordinary event
+trigger (kind `event`) for any agent, with a filter on the
+`check.dashboard.changed` event. See `examples/checks-investigator/` for the
+agent, its grants and the trigger. The event drain starts the agent. The agent
+needs no memory or mail rights, because MEHO stores and mails the finding:
+
+- `events/drain.py` `_dispatch_event`: after the triggers fire, when the event
+  is `agent_run.completed`, the drain calls
+  `checks/findings.py` `record_finding_for_event`.
+- That function acts only for a run that a Dashboard event trigger really
+  started. It reads the stored run, not the event payload, and checks:
+  - the run **succeeded**, is in the tenant, and a trigger started it. A direct
+    run, or a run that another agent started, never counts, even with the
+    same run key;
+  - the run key `event:<trigger id>:c:<key>` names an event trigger of the same
+    tenant and agent, and no cron or one-off trigger of the tenant carries that
+    run key;
+  - a `check.dashboard.changed` event with a cause group gives exactly this run
+    key for that trigger (made the way the event matcher makes it) and passes
+    the trigger's filter. The Dashboard and the group key come from this event.
+    So a long key that the run key holds only as a hash still works. The
+    step searches only the tenant's Dashboard events with the run key's
+    coalesce key (for a hashed key: every event with a key over 200
+    characters), so other events never hide the cause.
+
+  The Dashboard must be in the run's tenant. The run's answer is parsed with
+  `parse_finding`. Any other answer shape writes nothing.
+- A finding is written to the memory entry `checks-noise-<group key>` (the same
+  entry the old path writes) and mailed to the Dashboard's `notify_email`.
+- The drain marks the `agent_run.completed` event processed only after this
+  step, so a restart can deliver it again. The memory entry keeps the run id.
+  When it holds the finding of this run, or of a run that ended at the same
+  time or later, the step stores and mails nothing. So a second delivery never
+  sends a second mail and never replaces a newer finding.
+- It never raises into the drain loop.
+
+**No double runs.** When an *active* `kind=event` trigger exists in the tenant
+for the agent named in `CHECKS_INVESTIGATOR_AGENT`, `_investigate_group` skips
+its own start and logs `checks_investigation_skipped_trigger_owns`. The event
+is still published, and the trigger path does the work. A trigger for another
+agent does not stop the old path.
+
+**Known noise** works on both paths. The finding step writes the same memory
+entry, so the next event for that group has `known_noise: true`. The example
+trigger filters on `known_noise: false`, so it does not start.
+
+**Move from the old path to the trigger:**
+
+1. Create the agent, its grants and the trigger from `examples/checks-investigator/`.
+   Use the agent name from `CHECKS_INVESTIGATOR_AGENT`, or set the setting to
+   your agent name.
+2. From then on the old path steps aside. To go back, pause or cancel the
+   trigger.
+
+The code for the finding (`ChecksFinding`, `parse_finding`, `persist_finding`,
+`finding_notice`) is in `checks/findings.py`, so both paths use one copy.
+
 ## Agent-name convention (opt-in per tenant)
 
 The wiring is **off** until a tenant creates an *enabled* agent definition

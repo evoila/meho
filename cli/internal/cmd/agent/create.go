@@ -13,6 +13,7 @@ import (
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
+	"github.com/evoila/meho/cli/internal/startinggrants"
 )
 
 // newCreateCmd returns the `meho agent create` command.
@@ -20,6 +21,7 @@ import (
 //	meho agent create <name> \
 //	  --identity-ref R --model-tier T --system-prompt P --turn-budget N \
 //	  [--toolset @file|@-|<json>] [--output-schema @file|@-|<json>] \
+//	  [--grants none|read-everything|read-targets [--target <name> ...]] \
 //	  [--disabled] [--json] [--backplane <url>]
 //
 // Role: tenant_admin. A duplicate (tenant, name) returns 409.
@@ -32,6 +34,7 @@ func newCreateCmd() *cobra.Command {
 		toolset           string
 		outputSchema      string
 		disabled          bool
+		grants            startinggrants.Flags
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -47,7 +50,15 @@ func newCreateCmd() *cobra.Command {
 			"each must be a JSON object. --disabled creates the definition " +
 			"parked (enabled defaults to true).\n\n" +
 			"A duplicate (same tenant + name) returns 409 with detail " +
-			"agent_already_exists.",
+			"agent_already_exists.\n\n" +
+			"--grants picks the first grants of the agent that --identity-ref " +
+			"names: none, read-everything, or read-targets with one --target " +
+			"<name> per target. Only safe operations run at once; everything " +
+			"else waits for a person's approval. MEHO needs the pick when that " +
+			"agent has no grant yet. The CLI never picks for you: when MEHO " +
+			"needs a pick and --grants is missing, it prints the three choices " +
+			"and creates nothing. With --grants, the CLI shows the agent's " +
+			"grants after creation (--json adds them as \"grants\").",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -61,6 +72,7 @@ func newCreateCmd() *cobra.Command {
 				ToolsetArg:        toolset,
 				OutputSchemaArg:   outputSchema,
 				Disabled:          disabled,
+				Grants:            grants,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -80,6 +92,7 @@ func newCreateCmd() *cobra.Command {
 		"optional structured-output JSON Schema as a JSON object: inline JSON, @<path>, or @-")
 	cmd.Flags().BoolVar(&disabled, "disabled", false,
 		"create the definition parked (enabled=false; default is enabled)")
+	startinggrants.AddFlags(cmd, &grants)
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw AgentDefinitionRead JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -100,6 +113,7 @@ type createOptions struct {
 	ToolsetArg        string
 	OutputSchemaArg   string
 	Disabled          bool
+	Grants            startinggrants.Flags
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -128,17 +142,22 @@ func runCreate(cmd *cobra.Command, opts createOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), opts.JSONOut)
 	}
+	pick, err := opts.Grants.Body()
+	if err != nil {
+		return output.RenderError(cmd.ErrOrStderr(), output.Usage(err.Error()), opts.JSONOut)
+	}
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
 
 	body := api.AgentDefinitionCreate{
-		Name:         opts.Name,
-		IdentityRef:  opts.IdentityRef,
-		ModelTier:    api.AgentModelTier(opts.ModelTier),
-		SystemPrompt: opts.SystemPrompt,
-		TurnBudget:   opts.TurnBudget,
+		Name:           opts.Name,
+		IdentityRef:    opts.IdentityRef,
+		ModelTier:      api.AgentModelTier(opts.ModelTier),
+		SystemPrompt:   opts.SystemPrompt,
+		TurnBudget:     opts.TurnBudget,
+		StartingGrants: pick,
 	}
 	// Toolset is `*map[string]interface{}` with `omitempty` — leaving it
 	// nil tells the backend to apply its documented default ({}).
@@ -160,15 +179,42 @@ func runCreate(cmd *cobra.Command, opts createOptions) error {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if resp.StatusCode() != http.StatusCreated {
+		if pickErr := startinggrants.RequestError(resp.StatusCode(), resp.Body); pickErr != nil {
+			return output.RenderError(cmd.ErrOrStderr(), pickErr, opts.JSONOut)
+		}
 		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
 	entry := resp.JSON201
+	if pick == nil {
+		if opts.JSONOut {
+			return output.PrintJSON(cmd.OutOrStdout(), entry)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "created agent definition %q\n", entry.Name)
+		printDefinitionSummary(cmd.OutOrStdout(), entry)
+		return nil
+	}
+	grants, readErr := readAgentGrants(cmd.Context(), backplaneURL, entry.IdentityRef)
 	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), entry)
+		out, err := startinggrants.WithGrants(entry, grants, readErr)
+		if err != nil {
+			return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), opts.JSONOut)
+		}
+		return output.PrintJSON(cmd.OutOrStdout(), out)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "created agent definition %q\n", entry.Name)
 	printDefinitionSummary(cmd.OutOrStdout(), entry)
+	startinggrants.PrintGrants(cmd.OutOrStdout(), entry.IdentityRef, grants, readErr)
 	return nil
+}
+
+// readAgentGrants reads the grants of the definition's agent after the
+// create, so the person sees what the pick wrote.
+func readAgentGrants(ctx context.Context, backplaneURL, principalSub string) ([]api.AgentGrantRead, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	return startinggrants.ReadGrants(ctx, authed, principalSub)
 }
 
 func postCreate(ctx context.Context, backplaneURL string, body api.AgentDefinitionCreate) (*api.CreateAgentApiV1AgentsPostResponse, error) {

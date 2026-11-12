@@ -123,10 +123,10 @@ _VPN_TAGGED_RULE = (
 )
 
 
-def _vpn_config(*, vpnid: str = "1", rules: str = "") -> str:
+def _vpn_config(*, vpnid: str = "1", rules: str = "", groups: str = "") -> str:
     """A config with one user-login OpenVPN server and the user ``vpn.guest-2``."""
     return (
-        f"<pfsense><system>{_VPN_USER}</system><filter>{rules}</filter>"
+        f"<pfsense><system>{_VPN_USER}{groups}</system><filter>{rules}</filter>"
         f"<openvpn>{_VPN_SERVER.format(vpnid=vpnid)}</openvpn></pfsense>"
     )
 
@@ -186,6 +186,22 @@ _REFUSALS: list[tuple[str, str, dict[str, Any], str]] = [
         _vpn_config(),
         {"rules": [{"name": "nobody", "source": "198.51.100.5", "destination": "192.0.2.0/24"}]},
         "refused",
+    ),
+    (
+        "pfsense.openvpn.rule.sync",
+        _vpn_config(),
+        {
+            "rules": [
+                {"name": "vpn.guest-2", "source": "198.51.100.5", "destination": "192.0.2.0/24"}
+            ]
+        },
+        "refused",
+    ),
+    (
+        "pfsense.openvpn.user.delete",
+        _vpn_config(groups="<group><name>admins</name><member>2001</member></group>"),
+        {"name": "vpn.guest-2"},
+        "protected",
     ),
     (
         "pfsense.openvpn.user.create",

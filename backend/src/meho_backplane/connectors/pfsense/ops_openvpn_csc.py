@@ -30,8 +30,7 @@ How the sync works
    (code ``refused``) that names each refused entry.
 2. In compare-only mode the call returns the plan and stops: which entries
    would be created, updated, or are already right.
-3. Otherwise the handler saves a copy of ``config.xml`` (the rollback copy,
-   mode 0600), plays back one fragment that edits only the named entries
+3. Otherwise the handler plays back one fragment that edits only the named entries
    and calls ``write_config()``, then reads ``config.xml`` again. It
    reports success only when every named entry has the wanted values and
    nothing else in the file changed.
@@ -73,7 +72,6 @@ import ipaddress
 import re
 import secrets
 from collections.abc import Callable
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 from defusedxml.ElementTree import ParseError, fromstring
@@ -111,7 +109,6 @@ __all__ = [
     "pfsense_openvpn_address_next_free",
     "pfsense_openvpn_csc_sync",
     "plan_csc_sync",
-    "save_rollback_copy",
 ]
 
 _VPNID_RE: Final = re.compile(r"^[0-9]{1,5}$")
@@ -621,28 +618,6 @@ def _verify_sync(before: str, after: str, plan: list[dict[str, Any]]) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def save_rollback_copy(
-    self: PfSenseConnector, target: Any, operator: Operator | None, label: str, op: str
-) -> str:
-    """Copy ``config.xml`` to ``/cf/conf/meho-rollback-<label>-<time>.xml`` (mode 0600).
-
-    Returns the path. Raises when the copy cannot be made or differs.
-    """
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    copy_path = f"/cf/conf/meho-rollback-{label}-{stamp}.xml"
-    saved = await self._run_command(
-        target,
-        f"umask 077 && cp /cf/conf/config.xml {copy_path} "
-        f"&& cmp -s /cf/conf/config.xml {copy_path}",
-        operator=operator,
-    )
-    if saved.exit_status != 0:
-        raise RuntimeError(
-            f"{op}: could not save the rollback copy of config.xml; nothing was changed"
-        )
-    return copy_path
-
-
 def _summary(plan: list[dict[str, Any]]) -> dict[str, int]:
     return {
         a: sum(1 for r in plan if r["action"] == a)
@@ -690,7 +665,6 @@ async def pfsense_openvpn_csc_sync(
         "verified": False,
         "counts": counts,
         "entries": [_public_row(r) for r in plan],
-        "rollback_copy": None,
         "guidance": None,
     }
     if counts["refused"]:
@@ -708,7 +682,6 @@ async def pfsense_openvpn_csc_sync(
     if compare_only:
         return result
 
-    copy_path = await save_rollback_copy(self, target, operator, "csc-sync", "openvpn.csc.sync")
     played = await _apply_playback(
         self,
         target,
@@ -720,8 +693,7 @@ async def pfsense_openvpn_csc_sync(
     if stale is not None:
         raise RuntimeError(
             "openvpn.csc.sync: the client overrides changed after the plan was made "
-            f"({stale.group(1).strip()}); nothing was written. Run the op again "
-            f"(the rollback copy {copy_path} is not needed)."
+            f"({stale.group(1).strip()}); nothing was written. Run the op again."
         )
     _verify_sync(before, await _read_config_xml(self, target, operator), plan)
     return {
@@ -729,7 +701,6 @@ async def pfsense_openvpn_csc_sync(
         "status": "synced",
         "applied": True,
         "verified": True,
-        "rollback_copy": copy_path,
     }
 
 
@@ -889,7 +860,6 @@ _CSC_SYNC_RESPONSE_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
             },
         },
-        "rollback_copy": {"type": ["string", "null"]},
         "guidance": {"type": ["string", "null"]},
     },
     "required": [
@@ -901,7 +871,6 @@ _CSC_SYNC_RESPONSE_SCHEMA: dict[str, Any] = {
         "verified",
         "counts",
         "entries",
-        "rollback_copy",
         "guidance",
     ],
     "additionalProperties": False,
@@ -963,8 +932,7 @@ OPENVPN_CSC_OPS: tuple[PfSenseOp, ...] = (
         description=(
             "Creates or extends client-specific overrides: one per user and server, with "
             "the fixed tunnel address and the pushed routes. Checks every entry before it "
-            "writes. Never deletes, never removes a route, saves a rollback copy first, "
-            "and does not restart OpenVPN."
+            "writes. Never deletes, never removes a route, and does not restart OpenVPN."
         ),
         parameter_schema={
             **_CSC_SYNC_PARAMETER_SCHEMA,
@@ -1005,7 +973,7 @@ OPENVPN_CSC_OPS: tuple[PfSenseOp, ...] = (
                 },
                 "output_shape": (
                     "``{status, compare_only, applied, verified, counts, entries, "
-                    "rollback_copy, guidance}``. ``status`` is ``compared``, ``synced``, "
+                    "guidance}``. ``status`` is ``compared``, ``synced``, "
                     "``nothing_to_do`` or, with ``compare_only``, ``refused`` (``entries`` "
                     "then says why). Without ``compare_only`` a refused entry fails the call "
                     "and the error names each refused entry."

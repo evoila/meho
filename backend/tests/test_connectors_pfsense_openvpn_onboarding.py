@@ -19,6 +19,7 @@ All fixtures are synthetic: made-up names and documentation addresses
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
@@ -50,7 +51,7 @@ from meho_backplane.connectors.pfsense.ops_openvpn_csc import (
     plan_csc_sync,
 )
 from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
-from meho_backplane.op_classes import is_root_shell
+from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
 from meho_backplane.settings import get_settings
 
 _TENANT_ID = UUID("00000000-0000-0000-0000-000000003993")
@@ -524,7 +525,7 @@ async def test_one_refused_entry_stops_the_whole_call() -> None:
     assert not any("cp /cf/conf/config.xml" in c for c in fake.commands)
 
 
-async def test_sync_writes_saves_a_rollback_copy_first_and_verifies() -> None:
+async def test_sync_writes_and_verifies_without_a_rollback_copy() -> None:
     base = _csc("old", "1", "198.51.100.5/24", "192.0.2.0/25")
     after = _after_config(
         _csc("new", "1", "198.51.100.9/24", "192.0.2.0/24"),
@@ -540,12 +541,9 @@ async def test_sync_writes_saves_a_rollback_copy_first_and_verifies() -> None:
     )
     assert out["status"] == "synced"
     assert out["applied"] is True and out["verified"] is True
-    assert re.fullmatch(r"/cf/conf/meho-rollback-csc-sync-\d{8}T\d{6}Z\.xml", out["rollback_copy"])
-    copy_index = next(i for i, c in enumerate(fake.commands) if "cp /cf/conf/config.xml" in c)
-    play_index = next(i for i, c in enumerate(fake.commands) if c.startswith("pfSsh.php"))
-    assert copy_index < play_index
-    assert "umask 077" in fake.commands[copy_index]
-    assert out["rollback_copy"] in fake.commands[copy_index]
+    # pfSense keeps its own config history: the op makes no copy of config.xml.
+    assert "rollback_copy" not in out
+    assert not any("cp /cf/conf/config.xml" in c for c in fake.commands)
 
 
 async def test_sync_is_safe_to_run_twice() -> None:
@@ -553,27 +551,6 @@ async def test_sync_is_safe_to_run_twice() -> None:
     fake = _Fake([_config(csc=base)])
     out = await _sync(fake, [_entry("old", tunnel_address="198.51.100.5", routes=["192.0.2.0/24"])])
     assert out["status"] == "nothing_to_do"
-    assert not fake.wrote
-
-
-async def test_sync_fails_when_the_rollback_copy_cannot_be_saved() -> None:
-    class _NoCopy(_Fake):
-        async def _run_command(
-            self,
-            target: Any,
-            cmd: str,
-            *,
-            operator: Any = None,
-            timeout: float = 30.0,
-            stdin: str | None = None,
-        ) -> Any:
-            if "cp /cf/conf/config.xml" in cmd:
-                return _proc("", 1)
-            return await super()._run_command(target, cmd, operator=operator)
-
-    fake = _NoCopy([_config()])
-    with pytest.raises(RuntimeError, match="rollback copy"):
-        await _sync(fake, [_entry(tunnel_address="198.51.100.9")])
     assert not fake.wrote
 
 
@@ -891,12 +868,22 @@ def test_csc_fragment_run_in_php_creates_the_section_when_missing(tmp_path: Path
 
 
 class _FakeVault:
-    """Stands in for ``vault_client_for_operator``; records every write."""
+    """Stands in for ``vault_client_for_operator``: one KV v2 secret with versions."""
 
-    def __init__(self, *, missing: bool = False, fail: bool = False) -> None:
-        self.missing = missing
+    def __init__(
+        self,
+        *,
+        data: dict[str, Any] | None = None,
+        fail: bool = False,
+        read_fails: bool = False,
+        concurrent: bool = False,
+    ) -> None:
+        self.data = data  # None: nothing is stored at the path yet
+        self.version = 0 if data is None else 3
         self.fail = fail
-        self.writes: list[tuple[str, dict[str, Any], Any, str]] = []
+        self.read_fails = read_fails
+        self.concurrent = concurrent
+        self.writes: list[tuple[dict[str, Any], int, str]] = []
         self.opened = 0
 
     def __call__(self, operator: Any, **kw: Any) -> Any:
@@ -907,20 +894,30 @@ class _FakeVault:
             fake.opened += 1
             client = MagicMock()
 
-            def patch(path: str, secret: dict[str, Any], mount_point: str) -> None:
-                if fake.fail:
-                    raise RuntimeError(f"boom {secret}")  # a message that would carry the secret
-                if fake.missing:
+            def read(path: str, mount_point: str, raise_on_deleted_version: bool) -> Any:
+                assert raise_on_deleted_version is False
+                if fake.read_fails:
+                    raise hvac.exceptions.Forbidden(f"denied at {path}")
+                if fake.data is None:
                     raise hvac.exceptions.InvalidPath()
-                fake.writes.append(("patch", secret, None, mount_point + "/" + path))
+                return {"data": {"data": dict(fake.data), "metadata": {"version": fake.version}}}
 
             def create(
                 path: str, secret: dict[str, Any], cas: int, mount_point: str
             ) -> dict[str, Any]:
-                fake.writes.append(("create", secret, cas, mount_point + "/" + path))
+                if fake.fail:
+                    raise RuntimeError(f"boom {secret}")  # a message that would carry the secret
+                if fake.concurrent:
+                    # Someone else wrote a new version since this call read the path.
+                    fake.version += 1
+                if cas != fake.version:
+                    raise hvac.exceptions.InvalidRequest("check-and-set parameter did not match")
+                fake.version += 1
+                fake.data = dict(secret)
+                fake.writes.append((dict(secret), cas, mount_point + "/" + path))
                 return {}
 
-            client.secrets.kv.v2.patch = patch
+            client.secrets.kv.v2.read_secret_version = read
             client.secrets.kv.v2.create_or_update_secret = create
             yield client
 
@@ -932,6 +929,21 @@ def vault(monkeypatch: pytest.MonkeyPatch) -> _FakeVault:
     fake = _FakeVault()
     monkeypatch.setattr(user_module, "vault_client_for_operator", fake)
     return fake
+
+
+_REAL_TARGET_SECRET_PATHS = user_module._target_secret_paths
+
+
+@pytest.fixture(autouse=True)
+def target_paths(monkeypatch: pytest.MonkeyPatch) -> set[str]:
+    """The credential paths of the targets; empty unless a test adds one."""
+    paths: set[str] = set()
+
+    async def _paths() -> set[str]:
+        return paths
+
+    monkeypatch.setattr(user_module, "_target_secret_paths", _paths)
+    return paths
 
 
 _CREATE = {"name": "guest-1", "vault_path": _VAULT_PATH}
@@ -959,21 +971,98 @@ async def test_create_stores_the_password_in_vault_and_never_returns_it(vault: _
         "field": "password",
         "stored": True,
     }
-    assert vault.writes == [("patch", {"password": _PASSWORD}, None, f"secret/{_VAULT_PATH}")]
+    assert vault.writes == [({"password": _PASSWORD}, 0, f"secret/{_VAULT_PATH}")]
     # The password is in no result and in no command sent to the firewall.
     assert _PASSWORD not in json.dumps(out)
     assert all(_PASSWORD not in c for c in fake.commands)
     assert all(_PASSWORD not in c for c in fake.staged)
 
 
-async def test_create_starts_a_new_secret_when_the_path_does_not_exist(
+async def test_create_keeps_the_other_fields_and_writes_with_the_version_it_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_vault = _FakeVault(missing=True)
+    fake_vault = _FakeVault(data={"username": "guest-1"})
     monkeypatch.setattr(user_module, "vault_client_for_operator", fake_vault)
     out = await _create(_created_fake(), {**_CREATE, "vault_field": "pw", "vault_mount": "secret"})
     assert out["status"] == "created"
-    assert fake_vault.writes == [("create", {"pw": _PASSWORD}, 0, f"secret/{_VAULT_PATH}")]
+    assert fake_vault.writes == [
+        ({"username": "guest-1", "pw": _PASSWORD}, 3, f"secret/{_VAULT_PATH}")
+    ]
+
+
+async def test_create_refuses_a_vault_field_that_already_holds_a_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_vault = _FakeVault(data={"password": "older"})
+    monkeypatch.setattr(user_module, "vault_client_for_operator", fake_vault)
+    fake = _created_fake()
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(vault_field_exists\)") as err:
+        await _create(fake)
+    assert err.value.code == "vault_field_exists"
+    assert "older" not in str(err.value)
+    assert not fake.wrote and fake_vault.writes == []
+    assert fake_vault.data == {"password": "older"}
+
+
+async def test_create_refuses_a_vault_path_that_is_a_targets_credential_path(
+    vault: _FakeVault, target_paths: set[str]
+) -> None:
+    target_paths.add(_VAULT_PATH)
+    fake = _created_fake()
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(vault_path_is_target_secret\)"):
+        await _create(fake)
+    assert not fake.wrote and vault.opened == 0
+
+
+async def test_target_secret_paths_cut_the_scheme() -> None:
+    """The real lookup reads every target row and compares Vault paths without the scheme."""
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import Target
+
+    async with get_sessionmaker()() as session:
+        session.add_all(
+            [
+                Target(
+                    tenant_id=_TENANT_ID,
+                    name=f"vpn-t{i}",
+                    host="pf.test",
+                    product="pfsense",
+                    secret_ref=ref,
+                )
+                for i, ref in enumerate(
+                    [f"vault:{_VAULT_PATH}", "gsm:proj/secret#pw", "tenants/x//y/"]
+                )
+            ]
+        )
+        await session.commit()
+    paths = await _REAL_TARGET_SECRET_PATHS()
+    assert {_VAULT_PATH, "tenants/x/y"} <= paths
+    assert "proj/secret#pw" not in paths
+
+
+async def test_create_stops_when_the_vault_path_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_vault = _FakeVault(read_fails=True)
+    monkeypatch.setattr(user_module, "vault_client_for_operator", fake_vault)
+    fake = _created_fake()
+    with pytest.raises(RuntimeError, match=r"reading the Vault path failed \(Forbidden\)") as err:
+        await _create(fake)
+    assert "denied" not in str(err.value)
+    assert not fake.wrote and fake_vault.writes == []
+
+
+async def test_a_concurrent_vault_writer_is_not_overwritten_and_the_user_is_undone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_vault = _FakeVault(data={"username": "guest-1"}, concurrent=True)
+    monkeypatch.setattr(user_module, "vault_client_for_operator", fake_vault)
+    fake = _created_fake()
+    with pytest.raises(RuntimeError, match="removed again") as err:
+        await _create(fake)
+    assert "InvalidRequest" in str(err.value) and _PASSWORD not in str(err.value)
+    assert fake_vault.writes == [] and fake_vault.data == {"username": "guest-1"}
+    assert len(fake.played) == 2  # the create, then the undo
 
 
 async def test_create_leaves_an_existing_user_alone(vault: _FakeVault) -> None:
@@ -1074,7 +1163,7 @@ async def test_create_fails_when_the_read_back_has_no_user(vault: _FakeVault) ->
     with pytest.raises(RuntimeError, match="verification failed") as err:
         await _create(fake)
     # The password was stored before the check, so nobody loses it.
-    assert vault.writes == [("patch", {"password": _PASSWORD}, None, f"secret/{_VAULT_PATH}")]
+    assert vault.writes == [({"password": _PASSWORD}, 0, f"secret/{_VAULT_PATH}")]
     assert "stored in Vault" in str(err.value) and _PASSWORD not in str(err.value)
     assert len(fake.played) == 1  # nothing undone
 
@@ -1534,6 +1623,295 @@ def test_delete_fragment_run_in_php_writes_nothing_when_its_own_guard_fails(
 
 
 # ===========================================================================
+# System names, failed or cancelled playback, and the VPN-user-only delete
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    ("printed", "code"),
+    [
+        ("MEHO_VPN_SYSTEM_NAME\n", "system_name"),
+        ("MEHO_VPN_SYSTEM_NAMES_UNREADABLE\n", "system_names_unreadable"),
+    ],
+)
+async def test_create_refuses_a_system_name_of_the_firewall(
+    vault: _FakeVault, printed: str, code: str
+) -> None:
+    fake = _Fake([_config()], playback_out=printed)
+    with pytest.raises(PfSenseRefusedError, match=rf"refused \({code}\)"):
+        await _create(fake)
+    assert len(fake.played) == 1 and vault.writes == []
+
+
+async def test_a_failed_playback_says_the_user_may_exist_without_a_stored_password(
+    vault: _FakeVault,
+) -> None:
+    fake = _Fake([_config()], playback_fails=True)
+    with pytest.raises(RuntimeError, match="may exist on the firewall now") as err:
+        await _create(fake)
+    assert "password is not stored" in str(err.value)
+    assert vault.writes == []
+
+
+class _CancelOn(_Fake):
+    """Cancels the call when a command starts with *prefix*."""
+
+    def __init__(self, prefix: str, *args: Any, **kw: Any) -> None:
+        super().__init__(*args, **kw)
+        self._prefix = prefix
+
+    async def _run_command(
+        self,
+        target: Any,
+        cmd: str,
+        *,
+        operator: Any = None,
+        timeout: float = 30.0,
+        stdin: str | None = None,
+    ) -> Any:
+        if cmd.startswith(self._prefix):
+            self.commands.append(cmd)
+            raise asyncio.CancelledError
+        return await super()._run_command(target, cmd, operator=operator)
+
+
+async def test_a_cancel_during_the_playback_says_the_user_may_exist(vault: _FakeVault) -> None:
+    fake = _CancelOn("pfSsh.php playback meho_openvpn_user_create", [_config()])
+    with pytest.raises(asyncio.CancelledError, match="may exist on the firewall now"):
+        await _create(fake)
+    assert vault.writes == []
+
+
+async def test_a_cancel_during_the_vault_write_undoes_the_user_and_cancels_again(
+    monkeypatch: pytest.MonkeyPatch, vault: _FakeVault
+) -> None:
+    async def _cancelled(*args: Any, **kw: Any) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(user_module, "_store_password", _cancelled)
+    fake = _created_fake()
+    with pytest.raises(asyncio.CancelledError, match="was removed again"):
+        await _create(fake)
+    assert len(fake.played) == 2  # the create, then the undo
+    assert any("meho_openvpn_user_undo" in c for c in fake.staged)
+
+
+async def test_an_undo_refused_for_a_system_name_says_so(vault: _FakeVault) -> None:
+    class _UndoRefused(_Fake):
+        async def _run_command(
+            self,
+            target: Any,
+            cmd: str,
+            *,
+            operator: Any = None,
+            timeout: float = 30.0,
+            stdin: str | None = None,
+        ) -> Any:
+            if cmd.startswith("pfSsh.php playback meho_openvpn_user_undo"):
+                return _proc("MEHO_VPN_SYSTEM_NAME\n")
+            return await super()._run_command(target, cmd, operator=operator)
+
+    fake = _UndoRefused([_config()], playback_out="MEHO_VPN_CREATED_UID=2000\n")
+    with pytest.raises(RuntimeError, match=r"was not removed again \(system_name\)"):
+        await _create(fake)
+
+
+@_needs_php
+@pytest.mark.parametrize("name", ["root", "nobody"])
+def test_create_fragment_run_in_php_refuses_a_system_account(tmp_path: Path, name: str) -> None:
+    before = _php_config([])
+    printed, out = _run_php(tmp_path, before, user_module.build_user_create_playback(name, "d"))
+    assert printed == "MEHO_VPN_SYSTEM_NAME\n"
+    assert out["config"] == before and out["calls"] == []
+
+
+@_needs_php
+def test_create_fragment_run_in_php_refuses_when_the_files_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    before = _php_config([])
+    fragment = user_module.build_user_create_playback("guest-1", "d").replace(
+        "'/etc/passwd'", f"'{tmp_path / 'missing'}'"
+    )
+    printed, out = _run_php(tmp_path, before, fragment)
+    assert printed == "MEHO_VPN_SYSTEM_NAMES_UNREADABLE\n"
+    assert out["config"] == before and out["calls"] == []
+
+
+@_needs_php
+@pytest.mark.parametrize("name", ["root", "nobody"])
+@pytest.mark.parametrize("undo", [False, True])
+def test_delete_and_undo_never_call_local_user_del_for_a_system_account(
+    tmp_path: Path, name: str, undo: bool
+) -> None:
+    """A local user named like a system account of another uid is never removed."""
+    users = [
+        {"name": "admin", "uid": "0", "scope": "system"},
+        {"name": name, "uid": "2003", "scope": "user"},
+    ]
+    before = _php_config([_csc_row(name, "1", "198.51.100.5/24")], users)
+    fragment = (
+        user_module.build_user_undo_playback(name, "2003")
+        if undo
+        else user_module.build_user_delete_playback(name)
+    )
+    printed, out = _run_php(tmp_path, before, fragment)
+    assert printed == "MEHO_VPN_SYSTEM_NAME\n"
+    assert out["config"] == before and out["calls"] == []
+
+
+@_needs_php
+def test_delete_fragment_run_in_php_writes_nothing_while_a_rule_has_the_address_as_source(
+    tmp_path: Path,
+) -> None:
+    users = [
+        {"name": "admin", "uid": "0", "scope": "system"},
+        {"name": "guest-1", "uid": "2000", "scope": "user"},
+    ]
+    before = _php_config([_csc_row("guest-1", "1", "198.51.100.5/24")], users)
+    before["filter"] = {
+        "rule": [
+            {"tracker": "1", "interface": "lan", "source": {"address": "198.51.100.5"}},
+            {"tracker": "2", "interface": "openvpn", "source": {"address": "198.51.100.5/32"}},
+        ]
+    }
+    fragment = user_module.build_user_delete_playback("guest-1", ["198.51.100.5"])
+    printed, out = _run_php(tmp_path, before, fragment)
+    assert printed.strip() == "MEHO_VPN_RULES_REMAIN=1"
+    assert out["config"] == before and out["calls"] == []
+
+
+async def test_delete_is_refused_when_the_fragment_finds_a_system_name() -> None:
+    fake = _Fake(
+        [_vpn_config()],
+        sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY},
+        playback_out="MEHO_VPN_SYSTEM_NAME\n",
+    )
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(system_name\)"):
+        await _delete(fake)
+
+
+def _member_of(group: str, uid: str = "2000") -> str:
+    return f"<group><name>{group}</name><member>{uid}</member></group>"
+
+
+@pytest.mark.parametrize(
+    ("users", "extra", "why"),
+    [
+        (_user("guest-1", "2000"), _member_of("admins"), "group"),
+        (
+            "<user><scope>user</scope><name>guest-1</name><uid>2000</uid>"
+            "<priv>page-all</priv></user>",
+            "",
+            "permission",
+        ),
+    ],
+)
+async def test_delete_refuses_a_user_that_is_more_than_a_vpn_user(
+    users: str, extra: str, why: str
+) -> None:
+    config = _config(users=users + extra)
+    fake = _Fake([config], sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY})
+    with pytest.raises(PfSenseRefusedError, match=rf"refused \(protected\).*{why}"):
+        await _delete(fake)
+    assert not fake.wrote
+
+
+async def test_delete_refuses_the_ssh_login_of_the_target() -> None:
+    class _LoginGuest(_Fake):
+        async def _auth_config(self, target: Any, operator: Any = None) -> dict[str, Any]:
+            return {"username": "guest-1", "client_keys": [], "known_hosts": None}
+
+    fake = _LoginGuest([_vpn_config()], sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY})
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(protected\).*SSH login"):
+        await _delete(fake)
+    assert not fake.wrote
+
+
+@pytest.mark.parametrize("force", [False, True])
+async def test_delete_is_refused_while_an_untagged_rule_has_the_users_address(
+    force: bool,
+) -> None:
+    rule = (
+        "<rule><tracker>1700000077</tracker><type>pass</type><interface>openvpn</interface>"
+        "<ipprotocol>inet</ipprotocol><source><address>203.0.113.5/32</address></source>"
+        "<destination><any></any></destination><descr>by hand</descr></rule>"
+    )
+    users = _user("guest-1", "2000")
+    csc = _csc("guest-1", "1", "198.51.100.5/24") + _csc("guest-1", "2", "203.0.113.5/24")
+    fake = _Fake([_config(users=users, csc=csc, rules=rule)], sockets={"1": _SOCK_EMPTY})
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(rules_remain\).*1700000077"):
+        await _delete(fake, force=force)
+    assert not fake.wrote
+
+
+async def test_a_deleted_user_keeps_its_password_in_vault_and_says_so() -> None:
+    fake = _Fake(
+        [_vpn_config(), _vpn_config(with_user=False)],
+        sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY},
+    )
+    out = await _delete(fake)
+    assert "password in Vault stays" in out["guidance"]
+    staged = fake.staged[0]
+    assert "'198.51.100.5'" in staged and "'203.0.113.5/32'" in staged
+
+
+async def test_the_delete_preview_shows_groups_and_permissions() -> None:
+    from meho_backplane.operations._preview import PreviewContext
+
+    users = (
+        "<user><scope>user</scope><name>guest-1</name><uid>2000</uid><priv>page-all</priv>"
+        "</user>" + _member_of("admins") + _member_of("all")
+    )
+    ctx = PreviewContext(
+        descriptor=MagicMock(),
+        connector_instance=_Fake([_config(users=users)]),
+        operator=MagicMock(),
+        target=None,
+        params={"name": "guest-1"},
+    )
+    preview = await user_module._delete_preview(ctx)
+    assert preview is not None
+    assert preview["groups"] == ["admins"] and preview["permissions"] == ["page-all"]
+    assert preview["refusal"] == "protected"
+    assert "password in Vault stays" in preview["note"]
+
+
+@pytest.mark.parametrize(
+    ("data", "is_target", "state"),
+    [
+        (None, False, "new"),
+        ({"username": "guest-1"}, False, "holds_other_fields"),
+        ({"password": "older"}, False, "field_exists"),
+        (None, True, "target_secret"),
+    ],
+)
+async def test_the_create_preview_says_whether_the_vault_path_is_new(
+    monkeypatch: pytest.MonkeyPatch,
+    target_paths: set[str],
+    data: dict[str, Any] | None,
+    is_target: bool,
+    state: str,
+) -> None:
+    from meho_backplane.operations._preview import PreviewContext
+
+    monkeypatch.setattr(user_module, "vault_client_for_operator", _FakeVault(data=data))
+    if is_target:
+        target_paths.add(_VAULT_PATH)
+    ctx = PreviewContext(
+        descriptor=MagicMock(),
+        connector_instance=_Fake([_config()]),
+        operator=_operator(),
+        target=None,
+        params=_CREATE,
+    )
+    preview = await user_module._create_preview(ctx)
+    assert preview is not None
+    assert preview["vault"]["path_state"] == state
+    assert "older" not in json.dumps(preview)
+
+
+# ===========================================================================
 # Metadata
 # ===========================================================================
 
@@ -1570,6 +1948,13 @@ def test_broadcast_classes_and_root_shell_marks() -> None:
     ):
         assert is_root_shell(op_id)
     assert not is_root_shell("pfsense.openvpn.address.next_free")
+
+
+def test_each_vpn_user_create_and_delete_needs_its_own_approval() -> None:
+    """A standing grant never covers these two ops: a person approves each call."""
+    assert needs_per_call_approval("pfsense.openvpn.user.create")
+    assert needs_per_call_approval("pfsense.openvpn.user.delete")
+    assert not needs_per_call_approval("pfsense.openvpn.csc.sync")
 
 
 def test_the_create_response_schema_has_no_password_field() -> None:

@@ -7,7 +7,11 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 """
 
-from meho_backplane.op_classes import declare_op_classes, declare_root_shell
+from meho_backplane.op_classes import (
+    declare_op_classes,
+    declare_per_call_approval,
+    declare_root_shell,
+)
 
 declare_op_classes(
     # VPN onboarding (#3993). ``.sync`` is not a write suffix. ``user.create``
@@ -49,3 +53,7 @@ declare_root_shell(
         "pfsense.openvpn.user.delete",
     )
 )
+
+# Creating or deleting a VPN user gives or takes a login. A person approves
+# each call; a standing grant never covers them.
+declare_per_call_approval(("pfsense.openvpn.user.create", "pfsense.openvpn.user.delete"))

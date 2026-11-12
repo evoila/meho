@@ -5,7 +5,8 @@
 
 * The plan: create, unchanged, not_wanted, refused; an untagged rule never counts.
 * Compare-only writes nothing; one refusal stops the call.
-* The write: rollback copy first, one playback, read-back of every new rule
+* The source of a rule must be the user's own fixed tunnel address.
+* The write: one playback, read-back of every new rule
   and of the rest of ``config.xml``; a rule change after the plan stops it.
 * Hostile and bad input is refused before any SSH call.
 * The PHP fragment run for real against stubs (needs ``php``).
@@ -17,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -67,12 +67,31 @@ def _mine(tracker: str, source: str, destination: str, name: str = "guest-1", **
 _LAN_RULE = _rule_xml("1700000001", "192.0.2.0/24", "any", interface="lan", descr="lan out")
 
 
+def _csc(name: str, address: str, vpnid: str = "1") -> str:
+    return (
+        f"<openvpn-csc><common_name>{name}</common_name><server_list>{vpnid}</server_list>"
+        f"<tunnel_network>{address}/24</tunnel_network></openvpn-csc>"
+    )
+
+
+# One server that logs users in by name, one with certificates only.
+_SERVERS = (
+    "<openvpn-server><vpnid>1</vpnid><mode>server_user</mode>"
+    "<tunnel_network>198.51.100.0/24</tunnel_network></openvpn-server>"
+    "<openvpn-server><vpnid>3</vpnid><mode>server_tls</mode>"
+    "<tunnel_network>203.0.113.0/24</tunnel_network></openvpn-server>"
+)
+
+
 def _config(
-    rules: str = "", users: str = "<user><name>guest-1</name><uid>2000</uid></user>"
+    rules: str = "",
+    users: str = "<user><name>guest-1</name><uid>2000</uid></user>",
+    csc: str = _csc("guest-1", "198.51.100.2"),
 ) -> str:
     return (
         "<pfsense><system><user><name>admin</name><uid>0</uid></user>"
-        f"{users}</system><filter>{_LAN_RULE}{rules}</filter></pfsense>"
+        f"{users}</system><filter>{_LAN_RULE}{rules}</filter>"
+        f"<openvpn>{_SERVERS}{csc}</openvpn></pfsense>"
     )
 
 
@@ -189,6 +208,35 @@ async def test_an_unknown_user_is_refused_and_nothing_is_written() -> None:
     assert not fake.played
 
 
+@pytest.mark.parametrize(
+    ("source", "csc"),
+    [
+        # Another host, a network that holds the address, and the address of another user.
+        ("198.51.100.3", _csc("guest-1", "198.51.100.2")),
+        ("198.51.100.0/24", _csc("guest-1", "198.51.100.2")),
+        ("198.51.100.9", _csc("guest-1", "198.51.100.2") + _csc("other", "198.51.100.9")),
+        # The user's address on a server that does not log users in by name.
+        ("203.0.113.2", _csc("guest-1", "203.0.113.2", vpnid="3")),
+        # The user has no fixed address at all.
+        ("198.51.100.2", ""),
+    ],
+)
+async def test_a_source_that_is_not_the_users_own_address_is_refused(source: str, csc: str) -> None:
+    fake = _Fake([_config(csc=csc)])
+    with pytest.raises(PfSenseRefusedError) as info:
+        await _sync(fake, [_want(source=source)])
+    assert info.value.code == "refused"
+    assert "source_not_user_address" in info.value.guidance
+    assert not fake.played
+    out = await _sync(_Fake([_config(csc=csc)]), [_want(source=source)], compare_only=True)
+    assert [r["reason"] for r in out["rules"]] == ["source_not_user_address"]
+
+
+async def test_the_users_own_address_as_a_32_network_is_accepted() -> None:
+    out = await _sync(_Fake([_config()]), [_want(source="198.51.100.2/32")], compare_only=True)
+    assert out["counts"]["create"] == 1 and out["counts"]["refused"] == 0
+
+
 async def test_compare_only_with_an_unknown_user_is_a_normal_answer() -> None:
     fake = _Fake([_config()])
     out = await _sync(fake, [_want(), _want(name="nobody")], compare_only=True)
@@ -237,7 +285,7 @@ def _after(*new: str) -> str:
     return _config(_mine("100000011", "198.51.100.2", "10.9.0.0/16") + "".join(new))
 
 
-async def test_sync_saves_a_rollback_copy_writes_and_verifies() -> None:
+async def test_sync_writes_and_verifies_without_a_rollback_copy() -> None:
     before = _config(_mine("100000011", "198.51.100.2", "10.9.0.0/16"))
     after = _after(
         _mine(_RID_A, "198.51.100.2", "192.0.2.0/24"),
@@ -248,14 +296,13 @@ async def test_sync_saves_a_rollback_copy_writes_and_verifies() -> None:
         fake, [_want(), _want(destination="192.0.2.80", protocol="tcp", destination_port="443")]
     )
     assert out["status"] == "synced" and out["applied"] and out["verified"]
-    assert re.fullmatch(r"/cf/conf/meho-rollback-rule-sync-\d{8}T\d{6}Z\.xml", out["rollback_copy"])
+    # pfSense keeps its own config history: the op makes no copy of config.xml.
+    assert "rollback_copy" not in out
+    assert not any("cp /cf/conf/config.xml" in c for c in fake.commands)
     created = [r["ridentifier"] for r in out["rules"] if r["action"] == "create"]
     assert created == [_RID_A, _RID_B]
     # The rule nobody asked for is reported, never removed.
     assert [r["ridentifier"] for r in out["rules"] if r["action"] == "not_wanted"] == ["100000011"]
-    copy_at = next(i for i, c in enumerate(fake.commands) if "cp /cf/conf/config.xml" in c)
-    play_at = next(i for i, c in enumerate(fake.commands) if c.startswith("pfSsh.php"))
-    assert copy_at < play_at and "umask 077" in fake.commands[copy_at]
     staged = fake.staged[0]
     assert "unset(" not in staged and staged.count("write_config(") == 1
 
@@ -290,27 +337,6 @@ async def test_sync_fails_when_something_else_changed_during_the_write() -> None
     fake = _Fake([_config(), after])
     with pytest.raises(RuntimeError, match=r"other parts of config\.xml"):
         await _sync(fake, [_want()])
-
-
-async def test_sync_fails_when_the_rollback_copy_cannot_be_saved() -> None:
-    class _NoCopy(_Fake):
-        async def _run_command(
-            self,
-            target: Any,
-            cmd: str,
-            *,
-            operator: Any = None,
-            timeout: float = 30.0,
-            stdin: str | None = None,
-        ) -> Any:
-            if "cp /cf/conf/config.xml" in cmd:
-                return _proc("", 1)
-            return await super()._run_command(target, cmd, operator=operator)
-
-    fake = _NoCopy([_config()])
-    with pytest.raises(RuntimeError, match="rollback copy"):
-        await _sync(fake, [_want()])
-    assert not fake.played
 
 
 async def test_sync_fails_when_the_config_has_no_filter_section() -> None:
@@ -524,13 +550,14 @@ async def test_the_preview_shows_the_whole_plan() -> None:
     from meho_backplane.operations._preview import PreviewContext
 
     users = "".join(f"<user><name>u{i}</name><uid>{2000 + i}</uid></user>" for i in range(60))
-    fake = _Fake([_config(users=users)])
+    csc = "".join(_csc(f"u{i}", f"198.51.100.{i + 2}") for i in range(60))
+    fake = _Fake([_config(users=users, csc=csc)])
     ctx = PreviewContext(
         descriptor=MagicMock(),
         connector_instance=fake,
         operator=MagicMock(),
         target=None,
-        params={"rules": [_want(name=f"u{i}") for i in range(60)]},
+        params={"rules": [_want(name=f"u{i}", source=f"198.51.100.{i + 2}") for i in range(60)]},
     )
     preview = await rule_module._rule_preview(ctx)
     assert preview is not None

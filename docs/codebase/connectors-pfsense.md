@@ -1070,10 +1070,16 @@ the user has no certificate). They are in the group `vpn`.
 | Op | What it does | Risk level |
 |---|---|---|
 | `pfsense.openvpn.address.next_free` | Finds the lowest address offset that is free on every user-login server. Read only. | `safe` |
-| `pfsense.openvpn.user.create` | Makes the user. The password is made on the firewall and written to Vault. | `dangerous`, approval |
+| `pfsense.openvpn.user.create` | Makes the user. The password is made on the firewall and written to Vault. | `dangerous`, approval of each call |
 | `pfsense.openvpn.csc.sync` | Creates or extends client overrides (fixed address and pushed routes). Has a compare-only mode. | `caution` |
 | `pfsense.openvpn.rule.sync` | Adds the missing tagged per-user pass rules on the OpenVPN rule tab. Has a compare-only mode. | `dangerous`, approval |
-| `pfsense.openvpn.user.delete` | Removes the user and the overrides with its name. | `dangerous`, approval |
+| `pfsense.openvpn.user.delete` | Removes a VPN user and the overrides with its name. | `dangerous`, approval of each call |
+
+`user.create` and `user.delete` give or take a login, so a person approves
+each call: a standing grant never covers them (`declare_per_call_approval` in
+`op_classes.py`). None of the five ops makes a copy of `config.xml`: pfSense
+keeps its own history of the file (Diagnostics > Backup & Restore > Config
+History).
 
 Code: `openvpn_config.py` (parsers and the rendered-file read, shared),
 `ops_openvpn_csc.py` (next free address and the override sync),
@@ -1098,9 +1104,8 @@ per-user rule sync). Checked against the pfSense
   fails the call: it raises `PfSenseRefusedError` (code `refused`) and the
   error names each refused entry and why. With `compare_only` the call
   returns the plan (`create`, `update`, `unchanged`, `refused` per entry) as a
-  normal answer and writes nothing. Otherwise it saves a rollback copy of `config.xml`
-  (`/cf/conf/meho-rollback-csc-sync-<time>.xml`, mode 0600; it is not removed
-  by MEHO), plays back one fragment, and reads `config.xml` again: success
+  normal answer and writes nothing. Otherwise it plays back one fragment, and
+  reads `config.xml` again: success
   only when the entries hold the wanted values and nothing else changed. It
   never deletes, never removes a route (routes are only added), never changes
   the address of an existing entry, and does not restart OpenVPN. The
@@ -1115,54 +1120,77 @@ per-user rule sync). Checked against the pfSense
 - **User create.** The handler checks the Vault path against the tenant path
   first. An existing user is left alone (`exists`, a normal answer: safe to
   run twice). Two users with the name fail the call (`ambiguous`, raised as
-  `PfSenseRefusedError`). The fragment makes a
-  24-character password (letters and digits, `random_int`), sets it with
-  `local_user_set_password()`, adds the user to the group `all` and prints the
-  new `uid` and the password once. When the name was taken since the first
-  read, it changes nothing and says so; the op answers `exists` and touches
-  that user in no way. The handler writes the password to Vault first (a
-  patch of one field; a new secret when the path does not exist), and only
-  then reads `config.xml` again. So a failed or surprising read-back never
-  leaves a user whose password nobody has: the error says where the password
-  is. The password is never in the answer, the approval, an error or a log.
-  When the Vault write fails, the user is removed again, by name and `uid`;
-  overrides with the name stay. The broadcast class is `credential_mint`.
-- **User delete.** A user that is already gone is a normal answer
-  (`not_found`). Every refusal below changes nothing and fails the call: it
-  raises `PfSenseRefusedError` with the reason as its code. Refused for a
-  duplicate name (`ambiguous`) and the built-in admin account (`protected`).
-  It is refused (`rules_remain`) while a firewall rule carries the
-  user's tag `meho-vpn-user:<name>`, also with `force`. Such a rule grants
-  access by tunnel address, and the delete frees that address, so
-  `pfsense.openvpn.address.next_free` could give it to the next user. Remove
-  the rules with `pfsense.filter.rule.delete` first; the error lists their
-  `ridentifier`. The fragment counts the tagged rules again
-  and changes nothing when it finds one. It asks every enabled user-login server for its connected clients
+  `PfSenseRefusedError`). Before any change on the firewall, the Vault path
+  is checked: it must not be the credential path (`secret_ref`) of any
+  target (`vault_path_is_target_secret`), and the handler reads it with the
+  caller's Vault login. When the field already holds a value, the call fails
+  (`vault_field_exists`). The approval card says whether the path is `new`,
+  `holds_other_fields`, `field_exists` or `target_secret` (no value is
+  shown). The fragment refuses a name that is in `/etc/passwd` or
+  `/etc/group` on the firewall (`system_name`), like the pfSense web page,
+  and any name when it cannot read these files (`system_names_unreadable`):
+  it changes nothing. Else it makes a 24-character password (letters and
+  digits, `random_int`), sets it with `local_user_set_password()`, adds the
+  user to the group `all` and prints the new `uid` and the password once.
+  When the name was taken since the first read, it changes nothing and says
+  so; the op answers `exists` and touches that user in no way. The handler
+  writes the password to Vault first, with `cas` set to the version it read
+  (0 for a new path). The other fields of the secret stay, and a concurrent
+  writer makes the write fail instead of being overwritten. Only then does it
+  read `config.xml` again. So a failed or surprising read-back never leaves a
+  user whose password nobody has: the error says where the password is. The
+  password is never in the answer, the approval, an error or a log. When the
+  Vault write fails or the call is cancelled during it, the user is removed
+  again, by name and `uid` (overrides with the name stay), and a cancel is
+  raised again. When the playback itself fails or is cancelled, the error
+  says that a user with this name may exist and that its password is not
+  stored. The broadcast class is `credential_mint`.
+- **User delete.** The op deletes only VPN users. A user that is already
+  gone is a normal answer (`not_found`). Every refusal below changes nothing
+  and fails the call: it raises `PfSenseRefusedError` with the reason as its
+  code. Refused for a duplicate name (`ambiguous`). Refused (`protected`)
+  for the built-in admin account, a user in any group other than `all`, a
+  user with any permission, and the user the target's SSH login uses. The
+  approval card shows the user's groups and permissions. It is refused
+  (`rules_remain`) while a firewall rule carries the user's tag
+  `meho-vpn-user:<name>`, or a rule on the OpenVPN tab has the user's fixed
+  tunnel address as its source, tagged or not; also with `force`. Such a
+  rule grants access by tunnel address, and the delete frees that address,
+  so `pfsense.openvpn.address.next_free` could give it to the next user.
+  Remove the rules with `pfsense.filter.rule.delete` first; the error lists
+  their `ridentifier`. The fragment counts these rules again and changes
+  nothing when it finds one. It also refuses a name that is a system account
+  or group of the firewall (a line in `/etc/passwd` with another `uid`, or a
+  line in `/etc/group`; `system_name`), and any name when it cannot read
+  these files (`system_names_unreadable`): `local_user_del()` would remove
+  that system account. The undo of a create has the same guard. The handler
+  asks every enabled user-login server for its connected clients
   (management socket, `status 2`). A session counts when the login name
-  (`Username` column) or the certificate name (`Common Name`) is the user, so
-  a server that also checks a certificate is covered. It refuses while the
-  user is connected
-  (`connected`) or when that cannot be read (`connection_unknown`), unless
-  `force` is true. The approval card shows the user and the overrides that go
-  with it. Read-back checks that the user and its overrides are gone and
-  everything else is unchanged.
+  (`Username` column) or the certificate name (`Common Name`) is the user,
+  so a server that also checks a certificate is covered. It refuses while
+  the user is connected (`connected`) or when that cannot be read
+  (`connection_unknown`), unless `force` is true. The approval card shows the
+  user and the overrides that go with it. Read-back checks that the user and
+  its overrides are gone and everything else is unchanged. The password in
+  Vault stays; remove it there when it is no longer needed.
 - **Per-user rule sync.** One `pass` rule per user, source and destination
   on the OpenVPN rule tab (interface `openvpn`), tagged with the description
-  `meho-vpn-user:<name>`. Only tagged rules count. A wanted rule that a
+  `meho-vpn-user:<name>`. Only tagged rules count. The source must be
+  exactly the user's own fixed tunnel address (one host): the address of a
+  client override of the user on a server that logs users in by name. Any
+  other source is `refused` (`source_not_user_address`). A wanted rule that a
   tagged rule already does is `unchanged`; else `create`. A tagged rule of a
   named user that nobody asked for is `not_wanted`: reported with its
   `ridentifier`, never removed (use `pfsense.filter.rule.delete`). An unknown
-  user is `refused` and stops the call: without `compare_only` the call
-  fails with `PfSenseRefusedError` (code `refused`) that names each refused
-  rule. With `compare_only` the plan is a normal answer and it writes
-  nothing. Otherwise it saves a rollback copy
-  (`/cf/conf/meho-rollback-rule-sync-<time>.xml`), and one fragment checks
-  that the tagged rules are still as the plan saw them, adds the new rules
-  at the bottom of the OpenVPN tab (a new `pass` rule never goes above an
-  existing `block` rule there), then `filter_rules_sort()`,
-  `write_config()` and `filter_configure()`. The read-back checks each new
-  rule and that nothing else changed. Each new rule gets a new 9-digit
-  `ridentifier`.
+  user is `refused` (`user_not_found`). A refused rule stops the call:
+  without `compare_only` the call fails with `PfSenseRefusedError` (code
+  `refused`) that names each refused rule. With `compare_only` the plan is a
+  normal answer and it writes nothing. Otherwise one fragment checks that
+  the tagged rules are still as the plan saw them, adds the new rules at the
+  bottom of the OpenVPN tab (a new `pass` rule never goes above an existing
+  `block` rule there), then `filter_rules_sort()`, `write_config()` and
+  `filter_configure()`. The read-back checks each new rule and that nothing
+  else changed. Each new rule gets a new 9-digit `ridentifier`.
 - **Not covered here.** DNS host entries for VPN clients (the web page also
   reloads the resolver) are not touched.
 

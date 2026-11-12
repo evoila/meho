@@ -49,6 +49,7 @@ __all__ = [
     "parse_openvpn_servers",
     "read_rendered_addresses",
     "used_addresses",
+    "user_addresses",
 ]
 
 #: The OpenVPN server modes where a person logs in with a local user name
@@ -246,3 +247,26 @@ def used_addresses(
             continue
         used.setdefault(address, set()).add(name)
     return used
+
+
+def user_addresses(
+    servers: list[OpenVpnServer], entries: list[CscEntry], name: str
+) -> set[ipaddress.IPv4Address]:
+    """Return the fixed tunnel addresses of user *name* on the servers that log users in by name.
+
+    An address counts when an override of *name* applies to such a server
+    and the address lies in that server's network.
+    """
+    found: set[ipaddress.IPv4Address] = set()
+    for server in servers:
+        if not server.user_auth or server.network is None:
+            continue
+        for entry in entries:
+            if (
+                entry.common_name == name
+                and entry.tunnel_interface is not None
+                and entry.applies_to(server.vpnid)
+                and entry.tunnel_interface.ip in server.network
+            ):
+                found.add(entry.tunnel_interface.ip)
+    return found

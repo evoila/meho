@@ -22,7 +22,10 @@ How the sync works
 ------------------
 
 1. Every wanted rule is checked first: the user exists, the addresses are
-   IPv4, a port needs ``tcp``, ``udp`` or ``tcp/udp``. A tagged rule of
+   IPv4, a port needs ``tcp``, ``udp`` or ``tcp/udp``. The source must be
+   exactly the user's own fixed tunnel address (one host): the address of a
+   client override of the user on a server that logs users in by name
+   (reason ``source_not_user_address`` otherwise). A tagged rule of
    the user that does the same is ``unchanged``; else the rule is
    ``create``. A tagged rule of a named user that matches no wanted rule is
    ``not_wanted``: the op reports it and leaves it (remove it with
@@ -31,8 +34,8 @@ How the sync works
    :class:`~meho_backplane.connectors.pfsense.refusal.PfSenseRefusedError`
    (code ``refused``) that names each refused rule.
 2. In compare-only mode the call returns the plan and stops.
-3. Otherwise the handler saves a rollback copy of ``config.xml`` (mode
-   0600), plays back one fragment and reads ``config.xml`` again. The
+3. Otherwise the handler plays back one fragment and reads ``config.xml``
+   again (pfSense keeps its own history of ``config.xml``). The
    fragment first checks that the tagged rules of each named user are still
    the ones the plan saw. When not, it writes nothing and prints
    ``MEHO_RULES_CHANGED``. Else it adds the new rules at the bottom of the
@@ -55,6 +58,11 @@ from typing import TYPE_CHECKING, Any, Final
 
 from defusedxml.ElementTree import ParseError, fromstring
 
+from meho_backplane.connectors.pfsense.openvpn_config import (
+    parse_csc_entries,
+    parse_openvpn_servers,
+    user_addresses,
+)
 from meho_backplane.connectors.pfsense.ops import PfSenseOp
 from meho_backplane.connectors.pfsense.ops_filter_rule import (
     _PORT_PROTOCOLS,
@@ -62,7 +70,6 @@ from meho_backplane.connectors.pfsense.ops_filter_rule import (
     _stored_rule_differences,
     parse_filter_rules_xml,
 )
-from meho_backplane.connectors.pfsense.ops_openvpn_csc import save_rollback_copy
 from meho_backplane.connectors.pfsense.ops_user_write import (
     USER_NAME_RE,
     _user_rows,
@@ -199,14 +206,24 @@ def _tagged(stored: list[dict[str, Any]], name: str) -> list[dict[str, Any]]:
 
 
 def plan_rule_sync(
-    rules: list[dict[str, Any]], stored: list[dict[str, Any]], users: set[str]
+    rules: list[dict[str, Any]],
+    stored: list[dict[str, Any]],
+    users: set[str],
+    addresses: dict[str, set[str]],
 ) -> list[dict[str, Any]]:
-    """Return one plan row per wanted rule, then one per tagged rule nobody wants."""
+    """Return one plan row per wanted rule, then one per tagged rule nobody wants.
+
+    *addresses* maps a user name to its fixed tunnel addresses; a rule whose
+    source is not one of them is refused.
+    """
     plan: list[dict[str, Any]] = []
     matched: set[int] = set()
     for rule in rules:
         if rule["name"] not in users:
             plan.append(_row(rule, "refused", reason="user_not_found"))
+            continue
+        if rule["source"] not in addresses.get(rule["name"], set()):
+            plan.append(_row(rule, "refused", reason="source_not_user_address"))
             continue
         same = [
             r
@@ -405,7 +422,13 @@ async def _plan_from_config(
     except ValueError as exc:
         raise RuntimeError(f"openvpn.rule.sync: config.xml could not be read: {exc}") from exc
     users = {r["name"] for r in _user_rows(before)}
-    return before, stored, plan_rule_sync(rules, stored, users)
+    servers = parse_openvpn_servers(before)
+    entries = parse_csc_entries(before)
+    addresses = {
+        name: {str(a) for a in user_addresses(servers, entries, name)}
+        for name in {r["name"] for r in rules}
+    }
+    return before, stored, plan_rule_sync(rules, stored, users, addresses)
 
 
 @serialized_config_write
@@ -429,7 +452,6 @@ async def pfsense_openvpn_rule_sync(
         "verified": False,
         "counts": counts,
         "rules": plan,
-        "rollback_copy": None,
         "guidance": None,
     }
     if counts["refused"]:
@@ -460,7 +482,6 @@ async def pfsense_openvpn_rule_sync(
         rule_tag(name): len(_tagged(stored, name))
         for name in dict.fromkeys(r["name"] for r in plan)
     }
-    copy_path = await save_rollback_copy(self, target, operator, "rule-sync", _OP_ID)
     played = await _apply_playback(
         self,
         target,
@@ -481,7 +502,6 @@ async def pfsense_openvpn_rule_sync(
         "applied": True,
         "verified": True,
         "rules": plan,
-        "rollback_copy": copy_path,
     }
 
 
@@ -527,7 +547,10 @@ _RULE_PARAMETER_SCHEMA: dict[str, Any] = {
         },
         "source": {
             "type": "string",
-            "description": "The user's tunnel address. " + _IPV4_DESCRIPTION,
+            "description": (
+                "The user's own fixed tunnel address (one host), as set with "
+                "pfsense.openvpn.csc.sync. Any other source is refused."
+            ),
         },
         "destination": {
             "type": "string",
@@ -611,7 +634,6 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
             },
         },
-        "rollback_copy": _NULLABLE_STRING,
         "guidance": _NULLABLE_STRING,
     },
     "required": [
@@ -623,7 +645,6 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "verified",
         "counts",
         "rules",
-        "rollback_copy",
         "guidance",
     ],
     "additionalProperties": False,
@@ -641,10 +662,10 @@ OPENVPN_RULE_OPS: tuple[PfSenseOp, ...] = (
         handler_attr="openvpn_rule_sync",
         summary="Add the missing tagged per-user VPN pass rules; can compare only.",
         description=(
-            "Keeps the pass rules of VPN users on the OpenVPN rule tab in line with a "
-            "wanted list. Each rule is tagged with its user. Adds the missing rules at the "
-            "bottom of the tab, reports tagged rules nobody asked for, and never deletes "
-            "or edits a rule. Saves a rollback copy first and reads config.xml again."
+            "Keeps the tagged pass rules of VPN users on the OpenVPN rule tab in line with "
+            "a wanted list. The source must be the user's own tunnel address. Adds the "
+            "missing rules, reports tagged rules nobody asked for, and never deletes or "
+            "edits a rule."
         ),
         parameter_schema={
             **_PARAMETER_SCHEMA,
@@ -679,8 +700,8 @@ OPENVPN_RULE_OPS: tuple[PfSenseOp, ...] = (
                 "compare_only": "Optional. true returns the plan and writes nothing.",
             },
             "output_shape": (
-                "``{status, compare_only, applied, verified, counts, rules, rollback_copy, "
-                "guidance}``. ``rules`` has one row per wanted rule (``create``, "
+                "``{status, compare_only, applied, verified, counts, rules, guidance}``. "
+                "``rules`` has one row per wanted rule (``create``, "
                 "``unchanged``, ``refused``) and one per tagged rule nobody asked for "
                 "(``not_wanted``, with its ``ridentifier``). ``status`` ``refused`` comes "
                 "only with ``compare_only``; otherwise a refused rule fails the call and "

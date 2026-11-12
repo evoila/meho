@@ -10,6 +10,7 @@ each state, and every way the read can fail. A failed read is never ``ok``.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -17,12 +18,20 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from fastapi import HTTPException
 
 from meho_backplane.api.v1.health import VaultStatus, build_health_response
 from meho_backplane.auth import approval_sign_in_flow
+from meho_backplane.auth.approval_sign_in import (
+    LEVEL_MISSING_REMEDIATION,
+    LEVEL_UNCHECKED_REMEDIATION,
+    ApprovalAuth,
+    check_fresh_approval_sign_in,
+)
 from meho_backplane.auth.approval_sign_in_flow import (
     ApprovalSignInStatus,
     read_approval_sign_in,
+    sign_in_level_in_force,
 )
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.settings import get_settings
@@ -421,6 +430,108 @@ async def test_the_answer_is_kept_for_a_short_time(monkeypatch: pytest.MonkeyPat
     assert (first.state, again.state) == ("ok", "not_bound")
 
 
+async def test_a_failed_read_is_kept_for_a_few_seconds_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One short error must not hold approvals back for a minute."""
+    now = [1000.0]
+    monkeypatch.setattr(approval_sign_in_flow.time, "monotonic", lambda: now[0])
+    with respx.mock(assert_all_called=False) as mock:
+        _mount(mock, flows=httpx.Response(500))
+        failed = await read_approval_sign_in()
+        _mount(mock)
+        now[0] += approval_sign_in_flow._KEEP_FAILED_S - 1
+        assert await read_approval_sign_in() == failed
+        now[0] += 2
+        again = await read_approval_sign_in()
+    assert approval_sign_in_flow._KEEP_FAILED_S < approval_sign_in_flow._KEEP_S
+    assert (failed.state, again.state) == ("not_checked", "ok")
+
+
+async def test_an_error_nobody_named_is_a_failed_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def broken(*_args: object) -> object:
+        raise ValueError("odd")
+
+    monkeypatch.setattr(approval_sign_in_flow, "_state", broken)
+    with respx.mock(assert_all_called=False) as mock:
+        _mount(mock)
+        status = await read_approval_sign_in()
+    assert (status.state, status.detail) == ("not_checked", "keycloak_check_error")
+
+
+# --- auto: a failed read means "refuse" -------------------------------------------
+
+
+def _approval_sign_in(acr: str) -> Operator:
+    return Operator(
+        sub="op-6281",
+        raw_jwt="<jwt>",
+        tenant_id=uuid.UUID("00000000-0000-0000-0000-000000006281"),
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.USER,
+        azp="meho-cli-approve",
+        acr=acr,
+        auth_time=int(time.time()) - 5,
+        sid="s-6281",
+    )
+
+
+async def _approve(acr: str) -> ApprovalAuth:
+    settings = get_settings()
+    level = await sign_in_level_in_force(settings)
+    return check_fresh_approval_sign_in(
+        _approval_sign_in(acr),
+        settings,
+        level_in_force=level.in_force,
+        level_check_failed=level.check_failed,
+    )
+
+
+async def _refused_detail(acr: str) -> str:
+    with pytest.raises(HTTPException) as refused:
+        await _approve(acr)
+    assert refused.value.status_code == 401
+    return str(refused.value.detail)
+
+
+async def test_auto_refuses_after_a_failed_read_and_follows_the_next_good_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeout, unreachable, then ``flow_missing``, then ``ok``, each read in turn."""
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "auto")
+    monkeypatch.setattr(approval_sign_in_flow, "_READ_TIMEOUT_S", 0.05)
+    get_settings.cache_clear()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200, json=[])
+
+    def next_read() -> None:
+        # The time a kept answer is kept is over (a frozen clock would also stop the event loop).
+        approval_sign_in_flow._kept.clear()
+
+    with respx.mock(assert_all_called=False) as mock:
+        _mount(mock)
+        mock.get(f"{_ADMIN}/authentication/flows").mock(side_effect=slow)
+        assert (await _refused_detail("1")).endswith(LEVEL_UNCHECKED_REMEDIATION)
+
+        next_read()
+        mock.get(f"{_ADMIN}/authentication/flows").mock(side_effect=httpx.ConnectError("refused"))
+        assert (await _refused_detail("1")).endswith(LEVEL_UNCHECKED_REMEDIATION)
+        assert (await _approve("meho-approve")).level_in_force == "required"
+
+        next_read()
+        _mount(mock, flows=[{"id": "flow-browser", "alias": "browser"}])
+        recorded = await _approve("1")
+        assert (recorded.level_missing, recorded.level_in_force) == (True, "observe")
+
+        next_read()
+        _mount(mock)
+        assert (await _refused_detail("1")).endswith(LEVEL_MISSING_REMEDIATION)
+        accepted = await _approve("meho-approve")
+    assert (accepted.level_missing, accepted.level_in_force) == (False, "required")
+
+
 # --- /api/v1/health carries the state --------------------------------------------
 
 
@@ -456,6 +567,8 @@ async def test_health_shows_the_state_in_the_approvals_block(
         ("auto", {}, "required", False),
         ("auto", {"clients": [_client(None)]}, "observe", True),
         ("auto", {"levels": None}, "observe", True),
+        ("auto", {"flows": httpx.Response(500)}, "required", True),
+        ("auto", {"flows": httpx.Response(403)}, "observe", True),
         ("required", {"clients": [_client(None)]}, "required", False),
         ("observe", {}, "observe", True),
         ("off", {}, "off", True),
@@ -464,6 +577,8 @@ async def test_health_shows_the_state_in_the_approvals_block(
         "auto, realm gives the level",
         "auto, client not bound",
         "auto, no level name",
+        "auto, read failed",
+        "auto, no right to read",
         "required",
         "observe",
         "off",
@@ -498,5 +613,9 @@ async def test_health_warns_whenever_the_level_is_not_required_in_practice(
     assert response.approvals.sign_in_level_in_force == in_force
     warning = response.approvals.sign_in_level_warning
     assert (warning is not None) is warned
-    if warning is not None:
+    if warning is not None and in_force == "required":
+        assert warning.startswith("MEHO could not check the approval sign-in of the realm")
+        assert response.approvals.sign_in is not None
+        assert response.approvals.sign_in.state == "not_checked"
+    elif warning is not None:
         assert warning.startswith("MEHO does not require the approval level")

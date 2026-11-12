@@ -1785,8 +1785,12 @@ async def decide_approval_request(
     approval_auth = None
     if decision == "approved":
         settings = get_settings()
+        level = await sign_in_level_in_force(settings)
         approval_auth = check_fresh_approval_sign_in(
-            operator, settings, level_in_force=await sign_in_level_in_force(settings)
+            operator,
+            settings,
+            level_in_force=level.in_force,
+            level_check_failed=level.check_failed,
         )
     request = await _capture_operator_decision(
         request_id=request_id,

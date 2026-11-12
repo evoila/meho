@@ -55,8 +55,9 @@ MEHO does with a token of the approval client that lacks the level:
 ``approval_sign_in_level_missing`` and marks the audit row, ``required``
 refuses it with the same ``401`` and one more sentence that names
 ``approvals.sign_in`` in ``/api/v1/health``. ``auto`` (the default) is
-``required`` while MEHO's check of the approval sign-in is ``ok``, else
-``observe``; the routes resolve it with
+``observe`` only while MEHO's check of the approval sign-in shows for sure
+that the realm does not give the level, else ``required`` (also when the
+check failed); the routes resolve it with
 :func:`~meho_backplane.auth.approval_sign_in_flow.sign_in_level_in_force`.
 The web interface does not use the approval client, so the level is not
 checked there.
@@ -87,6 +88,7 @@ __all__ = [
     "APPROVAL_LEVEL_ACRS",
     "FRESH_SIGN_IN_REMEDIATION",
     "LEVEL_MISSING_REMEDIATION",
+    "LEVEL_UNCHECKED_REMEDIATION",
     "WEB_FRESH_SIGN_IN_REMEDIATION",
     "ApprovalAuth",
     "TouchBinding",
@@ -126,6 +128,11 @@ FRESH_SIGN_IN_REMEDIATION: Final[str] = (
 LEVEL_MISSING_REMEDIATION: Final[str] = (
     "Your sign-in did not reach the approval level. "
     "An admin must check approvals.sign_in in /api/v1/health."
+)
+
+#: The sentence instead, when the level is required because MEHO's check of the realm failed.
+LEVEL_UNCHECKED_REMEDIATION: Final[str] = (
+    "MEHO could not check the approval sign-in of the realm. Try again in a moment."
 )
 
 #: The text the web interface shows when the console sign-in is too old.
@@ -196,7 +203,9 @@ class ApprovalAuth:
 
     ``level_missing`` is ``True`` when ``APPROVAL_SIGN_IN_LEVEL`` is
     ``observe`` and the token lacked the approval level (#6281); the audit
-    row then says so next to the ``acr`` it saw.
+    row then says so next to the ``acr`` it saw. ``level_in_force`` is what
+    MEHO did with the level for this approve (``off``, ``observe`` or
+    ``required``); the audit row records it too.
     """
 
     channel: ApprovalChannel
@@ -207,6 +216,7 @@ class ApprovalAuth:
     presence: TouchPresence | None = None
     binding: TouchBinding | None = None
     level_missing: bool = False
+    level_in_force: str | None = None
 
     def sign_in_key(self, sub: str) -> str:
         """A short hash that names one sign-in of *sub*.
@@ -235,6 +245,8 @@ class ApprovalAuth:
             payload["single_use"] = True
         if self.level_missing:
             payload["level_missing"] = True
+        if self.level_in_force is not None:
+            payload["level_in_force"] = self.level_in_force
         if self.presence is not None:
             payload["presence"] = self.presence.audit_payload()
         if self.binding is not None:
@@ -311,6 +323,7 @@ def _approval_auth(
     channel: ApprovalChannel,
     auth_time: int,
     level_missing: bool = False,
+    level_in_force: str | None = None,
 ) -> ApprovalAuth:
     """The proof for a sign-in that passed the checks."""
     one_time_code = operator.acr is not None and (
@@ -323,6 +336,7 @@ def _approval_auth(
         sid=operator.sid,
         acr=operator.acr,
         level_missing=level_missing,
+        level_in_force=level_in_force,
     )
 
 
@@ -332,6 +346,7 @@ def check_fresh_approval_sign_in(
     *,
     now: float | None = None,
     level_in_force: str | None = None,
+    level_check_failed: bool = False,
 ) -> ApprovalAuth:
     """Return the proof for a token approve, or raise the ``401`` challenge.
 
@@ -352,7 +367,9 @@ def check_fresh_approval_sign_in(
     :func:`~meho_backplane.operations.approval_queue.approve_request`. A
     token with no ``auth_time`` or no ``acr`` is refused (fail closed).
     Every refusal is the same ``401``. Only when the approval level is the
-    one missing part, the detail adds :data:`LEVEL_MISSING_REMEDIATION`.
+    one missing part, the detail adds :data:`LEVEL_MISSING_REMEDIATION`,
+    or :data:`LEVEL_UNCHECKED_REMEDIATION` when *level_check_failed* says
+    the level is required only because MEHO's check of the realm failed.
     """
     mode = level_in_force or settings.approval_sign_in_level
     approval_client = is_approval_sign_in(operator, settings)
@@ -378,7 +395,7 @@ def check_fresh_approval_sign_in(
         raise fresh_sign_in_required(
             reason="fresh_sign_in_required",
             max_age_seconds=settings.fresh_sign_in_max_age_seconds,
-            extra=LEVEL_MISSING_REMEDIATION if other_checks_pass else None,
+            extra=_level_remedy(level_check_failed) if other_checks_pass else None,
         )
     level_missing = mode == "observe" and not level
     if level_missing:
@@ -386,8 +403,18 @@ def check_fresh_approval_sign_in(
             "approval_sign_in_level_missing", operator_sub=operator.sub, acr=operator.acr
         )
     return _approval_auth(
-        operator, settings, channel="rest", auth_time=auth_time, level_missing=level_missing
+        operator,
+        settings,
+        channel="rest",
+        auth_time=auth_time,
+        level_missing=level_missing,
+        level_in_force=mode,
     )
+
+
+def _level_remedy(check_failed: bool) -> str:
+    """The sentence a refused approve adds when the approval level is the one missing part."""
+    return LEVEL_UNCHECKED_REMEDIATION if check_failed else LEVEL_MISSING_REMEDIATION
 
 
 def has_fresh_web_approval_sign_in(

@@ -710,7 +710,8 @@ config:
   # (#6281)? Rendered into `APPROVAL_SIGN_IN_LEVEL`. `"auto"` (the
   # default): refuses a sign-in without the level while MEHO's check of
   # the approval sign-in (`approvals.sign_in` in `/api/v1/health`) is
-  # `ok`, else only logs it. `"off"`: no level check. `"observe"`:
+  # `ok` or could not read the realm; only logs it while the check shows
+  # the realm does not give the level. `"off"`: no level check. `"observe"`:
   # approves as before and logs `approval_sign_in_level_missing`.
   # `"required"`: always refuses a sign-in without the level.
   approvalSignInLevel: "auto"

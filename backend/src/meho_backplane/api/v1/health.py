@@ -89,7 +89,7 @@ from pydantic import BaseModel, ConfigDict
 from meho_backplane.auth.approval_sign_in_flow import (
     ApprovalSignInStatus,
     read_approval_sign_in,
-    sign_in_level_for_state,
+    sign_in_level_for_status,
     sign_in_level_warning,
 )
 from meho_backplane.auth.delegation import resolve_actor_sub
@@ -349,9 +349,11 @@ class ApprovalsStatus(BaseModel):
     is the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,
     ``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is
     what MEHO does now with an approval sign-in that lacks the approval
-    level: ``off``, ``observe`` or ``required`` (``auto`` is ``required``
-    only while ``sign_in`` is ``ok``). ``sign_in_level_warning`` is a short
-    sentence whenever the level is not required in practice, else ``None``.
+    level: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``
+    only while ``sign_in`` shows for sure that the realm does not give the
+    level, and ``required`` when it is ``ok`` or its read failed).
+    ``sign_in_level_warning`` is a short sentence whenever the level is not
+    required in practice or the read failed, else ``None``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -995,8 +997,8 @@ def _with_sign_in(approvals: ApprovalsStatus, sign_in: ApprovalSignInStatus) -> 
     return approvals.model_copy(
         update={
             "sign_in": sign_in,
-            "sign_in_level_in_force": sign_in_level_for_state(mode, sign_in.state),
-            "sign_in_level_warning": sign_in_level_warning(mode, sign_in.state),
+            "sign_in_level_in_force": sign_in_level_for_status(mode, sign_in),
+            "sign_in_level_warning": sign_in_level_warning(mode, sign_in),
         }
     )
 

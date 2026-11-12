@@ -13,8 +13,9 @@ the higher passkey touch level ``meho-touch`` counts too.
   when the level is the one missing part;
 * ``observe``: the approve goes through, MEHO logs
   ``approval_sign_in_level_missing`` and the audit row says so;
-* ``auto`` (the default): ``required`` while MEHO's check of the approval
-  sign-in is ``ok``, else ``observe``;
+* ``auto`` (the default): ``observe`` only while MEHO's check of the
+  approval sign-in shows for sure that the realm does not give the level,
+  else ``required``; a failed check counts as ``required``;
 * ``off``: the checks as before.
 
 The requests go through the real REST route with signed tokens.
@@ -31,7 +32,10 @@ import pytest
 from structlog.testing import capture_logs
 
 from meho_backplane.auth import approval_sign_in_flow
-from meho_backplane.auth.approval_sign_in import LEVEL_MISSING_REMEDIATION
+from meho_backplane.auth.approval_sign_in import (
+    LEVEL_MISSING_REMEDIATION,
+    LEVEL_UNCHECKED_REMEDIATION,
+)
 from meho_backplane.auth.approval_sign_in_flow import ApprovalSignInStatus
 from meho_backplane.db.models import ApprovalRequestStatus
 from meho_backplane.settings import Settings, get_settings
@@ -61,11 +65,11 @@ def _set_mode(monkeypatch: pytest.MonkeyPatch, mode: str | None) -> None:
     get_settings.cache_clear()
 
 
-def _sign_in_state(monkeypatch: pytest.MonkeyPatch, state: str) -> None:
-    """Make MEHO's check of the approval sign-in answer *state*."""
+def _sign_in_state(monkeypatch: pytest.MonkeyPatch, state: str, detail: str | None = None) -> None:
+    """Make MEHO's check of the approval sign-in answer *state* (and *detail*)."""
 
     async def read(_settings: Any = None) -> ApprovalSignInStatus:
-        return ApprovalSignInStatus(state=state, client="meho-cli-approve")  # type: ignore[arg-type]
+        return ApprovalSignInStatus(state=state, client="meho-cli-approve", detail=detail)  # type: ignore[arg-type]
 
     monkeypatch.setattr(approval_sign_in_flow, "read_approval_sign_in", read)
 
@@ -163,18 +167,31 @@ async def test_auto_requires_the_level_when_the_approval_sign_in_is_ok(
     accepted = await _approve(ac, "approve", request_id, _fresh(key, acr="meho-approve"))
     assert accepted.status_code == 200, accepted.text
     assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+    assert (await _approval_auth(request_id))["level_in_force"] == "required"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["flow_missing", "flow_differs", "not_bound", "not_checked"])
-async def test_auto_only_records_the_missing_level_while_the_approval_sign_in_is_not_ok(
+@pytest.mark.parametrize(
+    ("state", "detail"),
+    [
+        ("flow_missing", None),
+        ("flow_differs", "the client meho-cli-approve allows direct grant"),
+        ("not_bound", "the client meho-cli-approve has no own browser flow"),
+        ("not_checked", "keycloak_admin_not_configured"),
+        ("not_checked", "no_right_to_read_login_flows"),
+        ("not_checked", "no_right_to_read_realm"),
+        ("not_checked", "no_right_to_read_clients"),
+    ],
+)
+async def test_auto_only_records_the_missing_level_when_the_realm_surely_does_not_give_it(
     state: str,
+    detail: str | None,
     monkeypatch: pytest.MonkeyPatch,
     _client: tuple[httpx.AsyncClient, Any],
     _fake_resume: list[uuid.UUID],
 ) -> None:
     _set_mode(monkeypatch, "auto")
-    _sign_in_state(monkeypatch, state)
+    _sign_in_state(monkeypatch, state, detail)
     ac, key = _client
     request_id = await _park()
 
@@ -182,8 +199,42 @@ async def test_auto_only_records_the_missing_level_while_the_approval_sign_in_is
         response = await _approve(ac, "decide", request_id, _fresh(key, acr="1"))
 
     assert response.status_code == 200, response.text
-    assert (await _approval_auth(request_id))["level_missing"] is True
+    recorded = await _approval_auth(request_id)
+    assert (recorded["level_missing"], recorded["level_in_force"]) == (True, "observe")
     assert [e for e in logs if e["event"] == "approval_sign_in_level_missing"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "keycloak_timeout",
+        "keycloak_unreachable",
+        "keycloak_unexpected_answer",
+        "keycloak_check_error",
+        None,
+    ],
+)
+async def test_auto_requires_the_level_when_the_check_of_the_realm_failed(
+    reason: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    _client: tuple[httpx.AsyncClient, Any],
+    _fake_resume: list[uuid.UUID],
+) -> None:
+    """A failed read means "refuse", never "allow"."""
+    _set_mode(monkeypatch, "auto")
+    _sign_in_state(monkeypatch, "not_checked", reason)
+    ac, key = _client
+    request_id = await _park()
+
+    refused = await _approve(ac, "approve", request_id, _fresh(key, acr="1"))
+    _assert_challenge(refused)
+    assert refused.json()["detail"].endswith(LEVEL_UNCHECKED_REMEDIATION)
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+
+    accepted = await _approve(ac, "approve", request_id, _fresh(key, acr="meho-approve"))
+    assert accepted.status_code == 200, accepted.text
+    assert (await _approval_auth(request_id))["level_in_force"] == "required"
 
 
 @pytest.mark.asyncio
@@ -194,9 +245,9 @@ async def test_observe_logs_and_records_the_missing_level_and_approves(
     _client: tuple[httpx.AsyncClient, Any],
     _fake_resume: list[uuid.UUID],
 ) -> None:
-    """The default (``auto``) acts so while the approval sign-in cannot be checked."""
+    """The default (``auto``) acts so while the realm has no approval flow."""
     _set_mode(monkeypatch, mode)
-    _sign_in_state(monkeypatch, "not_checked")
+    _sign_in_state(monkeypatch, "flow_missing")
     ac, key = _client
     request_id = await _park()
 
@@ -208,6 +259,7 @@ async def test_observe_logs_and_records_the_missing_level_and_approves(
     recorded = await _approval_auth(request_id)
     assert recorded["acr"] == "1"
     assert recorded["level_missing"] is True
+    assert recorded["level_in_force"] == "observe"
     missing = [e for e in logs if e["event"] == "approval_sign_in_level_missing"]
     assert len(missing) == 1
     assert missing[0]["acr"] == "1"

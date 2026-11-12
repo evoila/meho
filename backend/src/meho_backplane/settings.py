@@ -1328,9 +1328,10 @@ class Settings(BaseModel):
         as before. ``observe``: the same, and MEHO logs
         ``approval_sign_in_level_missing`` for a token without the level.
         ``required``: such a token gets the same ``401`` as an old
-        sign-in. ``auto`` (the default): ``required`` while MEHO's check
-        of the approval sign-in (``approvals.sign_in`` in
-        ``/api/v1/health``) is ``ok``, else ``observe``. Any other value
+        sign-in. ``auto`` (the default): ``observe`` only while MEHO's
+        check of the approval sign-in (``approvals.sign_in`` in
+        ``/api/v1/health``) shows for sure that the realm does not give the
+        level, else ``required``, also when the check failed. Any other value
         stops the start. Set via ``APPROVAL_SIGN_IN_LEVEL``.
     approval_allow_delegated_decision:
         Lab-class switch for **delegated** approval decisions (#3693).

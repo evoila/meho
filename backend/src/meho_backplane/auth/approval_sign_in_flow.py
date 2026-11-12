@@ -31,15 +31,23 @@ admin client and says one of:
 * ``not_checked``: the check could not run; ``detail`` is a short reason
   word: ``keycloak_admin_not_configured``, ``no_right_to_read_login_flows``,
   ``no_right_to_read_realm``, ``no_right_to_read_clients``,
-  ``keycloak_timeout``, ``keycloak_unexpected_answer`` or
-  ``keycloak_unreachable``.
+  ``keycloak_timeout``, ``keycloak_unexpected_answer``,
+  ``keycloak_unreachable`` or ``keycloak_check_error``.
 
-``APPROVAL_SIGN_IN_LEVEL=auto`` (the default) requires the approval level
-only when the state is ``ok`` (:func:`sign_in_level_in_force`).
+``APPROVAL_SIGN_IN_LEVEL=auto`` (the default) only records a missing
+approval level when MEHO knows for sure that the realm does not give it:
+the read worked and the state is ``flow_missing``, ``flow_differs`` or
+``not_bound``, or the state is ``not_checked`` because MEHO has no admin
+client (``keycloak_admin_not_configured``) or the admin client may not read
+(``no_right_*``). In every other case, also a read that failed, the level is
+required (:func:`sign_in_level_in_force`). A failure means "refuse", never
+"allow".
 
 A failed read is never ``ok``. The answer of a read is kept for
 :data:`_KEEP_S` seconds, so ``/api/v1/health`` and ``meho_status``, which
-are called often, do not log in to Keycloak on every call.
+are called often, do not log in to Keycloak on every call. A failed read
+(:func:`read_failed`) is kept only :data:`_KEEP_FAILED_S` seconds, so one
+short error does not hold approvals back for long.
 
 Reading login flows and the realm needs ``view-realm`` or ``manage-realm``
 on the admin client; the built-in realm gives ``meho-admin`` ``manage-realm``.
@@ -49,7 +57,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from urllib.parse import quote
 
 import structlog
@@ -82,9 +90,11 @@ from meho_backplane.settings import Settings, get_settings
 __all__ = [
     "ApprovalSignInState",
     "ApprovalSignInStatus",
+    "SignInLevel",
     "SignInLevelInForce",
     "read_approval_sign_in",
-    "sign_in_level_for_state",
+    "read_failed",
+    "sign_in_level_for_status",
     "sign_in_level_in_force",
     "sign_in_level_warning",
 ]
@@ -103,6 +113,22 @@ _READ_TIMEOUT_S = 5.0
 
 #: A read answer is kept this many seconds (per admin URL and client).
 _KEEP_S = 60.0
+
+#: A failed read (:func:`read_failed`) is kept only this many seconds.
+_KEEP_FAILED_S = 5.0
+
+#: The ``not_checked`` reasons that are a setup MEHO knows, not a failed read.
+_KNOWN_NOT_CHECKED = frozenset(
+    {
+        "keycloak_admin_not_configured",
+        "no_right_to_read_login_flows",
+        "no_right_to_read_realm",
+        "no_right_to_read_clients",
+    }
+)
+
+#: The states in which the read worked and the realm does not give the level.
+_NO_LEVEL_STATES = frozenset({"flow_missing", "flow_differs", "not_bound"})
 
 
 class ApprovalSignInStatus(BaseModel):
@@ -235,8 +261,10 @@ async def read_approval_sign_in(settings: Settings | None = None) -> ApprovalSig
     settings = settings or get_settings()
     key = (settings.keycloak_admin_url, settings.keycloak_cli_approve_client_id)
     kept = _kept.get(key)
-    if kept is not None and time.monotonic() - kept[0] < _KEEP_S:
-        return kept[1]
+    if kept is not None:
+        keep = _KEEP_FAILED_S if read_failed(kept[1]) else _KEEP_S
+        if time.monotonic() - kept[0] < keep:
+            return kept[1]
     status = await _read(settings)
     _kept[key] = (time.monotonic(), status)
     return status
@@ -267,36 +295,78 @@ async def _read(settings: Settings) -> ApprovalSignInStatus:
             "approval_sign_in_check_failed", error_class=type(exc).__name__
         )
         return not_checked("keycloak_unreachable")
+    # Any other error is a failed read too: refuse, never allow.
+    except Exception as exc:
+        structlog.get_logger(__name__).warning(
+            "approval_sign_in_check_failed", error_class=type(exc).__name__
+        )
+        return not_checked("keycloak_check_error")
     return ApprovalSignInStatus(state=state, client=client_id, detail=detail)
 
 
-def sign_in_level_for_state(mode: str, state: ApprovalSignInState | None) -> SignInLevelInForce:
-    """What MEHO does for *mode* (the setting) when the approval sign-in is in *state*."""
+def read_failed(status: ApprovalSignInStatus) -> bool:
+    """Whether the read of the approval sign-in failed (a timeout, an error, an odd answer).
+
+    ``not_checked`` for a setup MEHO knows (no admin client, no right to
+    read) is not a failed read.
+    """
+    return status.state == "not_checked" and status.detail not in _KNOWN_NOT_CHECKED
+
+
+def _only_records(status: ApprovalSignInStatus) -> bool:
+    """Whether ``auto`` only records: MEHO knows for sure the realm does not give the level."""
+    if status.state in _NO_LEVEL_STATES:
+        return True
+    return status.state == "not_checked" and not read_failed(status)
+
+
+def sign_in_level_for_status(mode: str, status: ApprovalSignInStatus | None) -> SignInLevelInForce:
+    """What MEHO does for *mode* (the setting) when the approval sign-in is *status*."""
     if mode == "off":
         return "off"
-    if mode == "observe" or (mode == "auto" and state != "ok"):
+    if mode == "observe" or (mode == "auto" and status is not None and _only_records(status)):
         return "observe"
     return "required"
 
 
-async def sign_in_level_in_force(settings: Settings) -> SignInLevelInForce:
+class SignInLevel(NamedTuple):
+    """What MEHO does now with a token of the approval client that lacks the level.
+
+    ``check_failed`` is ``True`` when ``auto`` requires the level only
+    because the read of the approval sign-in failed.
+    """
+
+    in_force: SignInLevelInForce
+    check_failed: bool = False
+
+
+async def sign_in_level_in_force(settings: Settings) -> SignInLevel:
     """What MEHO does now with a token of the approval client that lacks the level (#6281).
 
     ``off``, ``observe`` and ``required`` are the setting itself. ``auto``
     reads the approval sign-in (:func:`read_approval_sign_in`, kept for a
-    short time): ``required`` when its state is ``ok``, else ``observe``.
+    short time): ``observe`` only when MEHO knows for sure that the realm
+    does not give the level, else ``required``; also when the read failed.
     """
     mode = settings.approval_sign_in_level
     if mode != "auto":
-        return sign_in_level_for_state(mode, None)
-    return sign_in_level_for_state(mode, (await read_approval_sign_in(settings)).state)
+        return SignInLevel(sign_in_level_for_status(mode, None))
+    status = await read_approval_sign_in(settings)
+    return SignInLevel(sign_in_level_for_status(mode, status), check_failed=read_failed(status))
 
 
-def sign_in_level_warning(mode: str, state: ApprovalSignInState | None) -> str | None:
-    """The health warning when MEHO does not require the approval level; else ``None``."""
-    if sign_in_level_for_state(mode, state) == "required":
+def sign_in_level_warning(mode: str, status: ApprovalSignInStatus | None) -> str | None:
+    """The health warning when the level is not required in practice, or the read failed."""
+    if mode == "auto" and status is not None and read_failed(status):
+        return (
+            "MEHO could not check the approval sign-in of the realm "
+            f"(approvals.sign_in is not_checked: {status.detail}). Until a check works, "
+            "MEHO refuses an approval sign-in without the approval level."
+        )
+    if sign_in_level_for_status(mode, status) == "required":
         return None
     if mode == "auto":
+        state = status.state if status is not None else None
         return (
             "MEHO does not require the approval level: APPROVAL_SIGN_IN_LEVEL is auto and "
             f"approvals.sign_in is {state}, not ok. Fix the approval sign-in in Keycloak."

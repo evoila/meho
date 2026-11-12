@@ -982,12 +982,13 @@ the backplane's Keycloak admin client and puts the state into
 | `flow_missing` | The realm has no flow with that name. |
 | `flow_differs` | The flow has other steps; `detail` names the first difference. The realm stage and the operation never bind the client to it. |
 | `not_bound` | The flow is right, but the client is missing, has no own browser flow, or uses another flow (`detail`). |
-| `not_checked` | The read failed; `detail` is a reason word: `keycloak_admin_not_configured`, `no_right_to_read_login_flows`, `no_right_to_read_clients`, `keycloak_timeout` (5 seconds for the whole check), `keycloak_unexpected_answer` or `keycloak_unreachable`. |
+| `not_checked` | The check could not run; `detail` is a reason word. A setup MEHO knows: `keycloak_admin_not_configured`, `no_right_to_read_login_flows`, `no_right_to_read_realm`, `no_right_to_read_clients`. A failed read (`read_failed`): `keycloak_timeout` (5 seconds for the whole check), `keycloak_unexpected_answer`, `keycloak_unreachable` or `keycloak_check_error` (any other error). |
 
 A failed read is never `ok`. The answer is kept for 60 seconds per
 admin URL and client (`_KEEP_S`), because `/api/v1/health` and
 `meho_status` are called often; a fix in Keycloak shows up within a
-minute. The expected steps are the ones of
+minute. A failed read is kept only 5 seconds (`_KEEP_FAILED_S`), so one
+short error does not hold approvals back for a minute. The expected steps are the ones of
 `keycloak.authflow.ensure_approval_flow` (`approval_flow_difference` in
 `connectors/keycloak/ops_authflow.py`), so the check, the operation and the
 realm file agree. `meho doctor` turns the state into its line `approval
@@ -1018,10 +1019,14 @@ so `acr` stays `"1"`.
 default `auto`) decides what `check_fresh_approval_sign_in` does with a
 token of the approval client whose `acr` is not one of those names
 (`has_approval_level`). The routes resolve the setting first with
-`sign_in_level_in_force` (`auth/approval_sign_in_flow.py`): `auto` is
-`required` while `read_approval_sign_in` says `ok` (the answer is kept
-for a minute), else `observe`. A caller that passes no resolved value
-gets an unresolved `auto` as `required` (fail closed).
+`sign_in_level_in_force` (`auth/approval_sign_in_flow.py`). `auto` is
+`observe` only when MEHO knows for sure that the realm does not give the
+level: the read worked and the state is `flow_missing`, `flow_differs` or
+`not_bound`, or the state is `not_checked` for a setup MEHO knows (no
+admin client, no right to read). In every other case `auto` is
+`required`: when the state is `ok`, and also when the read failed. A
+failure means "refuse", never "allow". A caller that passes no resolved
+value gets an unresolved `auto` as `required` (fail closed).
 
 - `off`: accepted as before;
 - `observe`: accepted, the warning `approval_sign_in_level_missing` is
@@ -1030,14 +1035,22 @@ gets an unresolved `auto` as `required` (fail closed).
 - `required`: the same `401` as an old sign-in. When the level is the
   one missing part, the detail ends with `LEVEL_MISSING_REMEDIATION`
   ("Your sign-in did not reach the approval level. An admin must check
-  approvals.sign_in in /api/v1/health."). The refusal log
-  `approval_sign_in_not_fresh` carries `approval_level`.
+  approvals.sign_in in /api/v1/health."). When `auto` requires the
+  level only because the read failed, the detail ends with
+  `LEVEL_UNCHECKED_REMEDIATION` instead ("MEHO could not check the
+  approval sign-in of the realm. Try again in a moment."). The refusal
+  log `approval_sign_in_not_fresh` carries `approval_level`.
+
+The `approval.decision` audit row records the mode in force for the
+approve in `approval_auth.level_in_force` (`off`, `observe` or
+`required`), next to the `acr` it saw.
 
 The web path (`check_fresh_web_approval_sign_in`) does not check the
 level. `/api/v1/health` shows the value in `approvals.sign_in_level`,
 what is in force in `approvals.sign_in_level_in_force`, and
 `approvals.sign_in_level_warning` whenever the level is not required in
-practice; `meho doctor` shows the last two in its line `approval level`.
+practice, and its own warning when the read failed ("MEHO could not
+check the approval sign-in of the realm ..."); `meho doctor` shows the last two in its line `approval level`.
 `approvals.sign_in` is `ok` only when the realm really gives the level:
 the flow steps, the level step settings (`loa-condition-level` 2,
 `loa-max-age` 0), `acr.loa.map` with `meho-approve` = 2 and no other name

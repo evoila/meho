@@ -381,6 +381,10 @@ async def require_fresh_approval_sign_in(
     from meho_backplane.auth.approval_sign_in_flow import sign_in_level_in_force
 
     settings = get_settings()
+    level = await sign_in_level_in_force(settings)
     return check_fresh_approval_sign_in(
-        operator, settings, level_in_force=await sign_in_level_in_force(settings)
+        operator,
+        settings,
+        level_in_force=level.in_force,
+        level_check_failed=level.check_failed,
     )

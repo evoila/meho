@@ -305,7 +305,7 @@ on the command line or REST whose token lacks the level:
 
 | Value | What MEHO does |
 |---|---|
-| `auto` (default) | Acts as `required` while MEHO's check of the approval sign-in (`approvals.sign_in.state`) is `ok`, else as `observe`. |
+| `auto` (default) | Acts as `required` while MEHO's check of the approval sign-in (`approvals.sign_in.state`) is `ok`, and also when the check fails (a timeout, Keycloak not reachable, an odd answer): then the message is "MEHO could not check the approval sign-in of the realm. Try again in a moment." Acts as `observe` only while the check shows that the realm does not give the level (`flow_missing`, `flow_differs`, `not_bound`), or while MEHO has no admin client or no right to read the realm. |
 | `off` | Approves as before. |
 | `observe` | Approves as before, logs `approval_sign_in_level_missing`, and the audit row of the approval has `level_missing: true` next to the `acr` it saw. |
 | `required` | Refuses with the same `401` and message as an old sign-in, plus: "Your sign-in did not reach the approval level. An admin must check approvals.sign_in in /api/v1/health." `meho approvals approve` then opens a new sign-in. |
@@ -313,8 +313,10 @@ on the command line or REST whose token lacks the level:
 `/api/v1/health` shows the value in `approvals.sign_in_level`, what MEHO
 does now in `approvals.sign_in_level_in_force` (`off`, `observe` or
 `required`), and a warning in `approvals.sign_in_level_warning` whenever
-MEHO does not require the level: the value is `off` or `observe`, or it
-is `auto` and `approvals.sign_in.state` is not `ok`.
+MEHO does not require the level (the value is `off` or `observe`, or it
+is `auto` and MEHO acts as `observe`), and also when MEHO could not read
+the realm. The audit row of an approval records the mode in force in
+`level_in_force`.
 
 - With the default `auto`, MEHO requires the level as soon as the realm
   gives it. Fix what `approvals.sign_in` names until it is `ok`.

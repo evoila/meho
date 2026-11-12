@@ -81,7 +81,7 @@ from meho_backplane.agent.run import AgentRunEvent
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.models import AgentRunStatus
-from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._audit import decode_work_ref_header, work_ref_var
 from meho_backplane.operations.agent_run import (
     IllegalTransitionError,
     UnauthorizedCancellationError,
@@ -298,8 +298,12 @@ def _bound_work_ref(raw: str | None) -> Iterator[None]:
     duration of the invoker call so the run row inherits it, mirroring the
     set/reset discipline the approval-queue boundary uses. A missing /
     blank header binds nothing — the run's ``work_ref`` lands ``NULL``.
+
+    Starlette decodes header values as latin-1, so the value is turned
+    back into its bytes and decoded like the audit middleware does: a
+    non-ASCII ticket id sent as UTF-8 stays the same text on the run row.
     """
-    cleaned = raw.strip() if raw is not None else None
+    cleaned = decode_work_ref_header(raw.encode("latin-1")) if raw is not None else None
     if not cleaned:
         yield
         return

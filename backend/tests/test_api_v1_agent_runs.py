@@ -1112,3 +1112,22 @@ async def test_run_status_tokens_are_null_before_the_run_succeeds(client: TestCl
     body = poll.json()
     for field in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
         assert body[field] is None
+
+
+def test_bound_work_ref_keeps_non_ascii_header_text() -> None:
+    """A UTF-8 ``Meho-Work-Ref`` header binds the same text the client sent.
+
+    Starlette hands the route the header decoded as latin-1. The run row
+    must still carry ``Änderung-7``, so a filter by that id finds it.
+    """
+    from meho_backplane.api.v1.agent_runs import _bound_work_ref
+    from meho_backplane.operations._audit import work_ref_var
+
+    as_starlette_reads_it = "Änderung-7".encode().decode("latin-1")
+    with _bound_work_ref(as_starlette_reads_it):
+        assert work_ref_var.get() == "Änderung-7"
+    assert work_ref_var.get() is None
+    with _bound_work_ref("  gh:evoila/meho#11  "):
+        assert work_ref_var.get() == "gh:evoila/meho#11"
+    with _bound_work_ref("   "):
+        assert work_ref_var.get() is None

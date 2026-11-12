@@ -22,8 +22,8 @@ Label text can reach the agent, so it has a character rule
 (`label_text_ok` in `policy/classification.py`). A key uses only letters,
 digits and `. _ / -`. A value uses only printable characters: no line
 breaks and no control characters. A write that breaks the rule is
-refused. A stored label that breaks it (for example one written before the
-rule) is not shown.
+refused, also in the policy file import. A stored label that breaks it
+(for example one written before the rule) is not shown.
 
 ## Where the values come from
 

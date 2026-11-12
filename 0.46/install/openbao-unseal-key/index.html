@@ -3319,7 +3319,34 @@ written yet.</p>
 <p>The commands below are for an install on your own Kubernetes. Replace
 <code>&lt;namespace&gt;</code> and <code>&lt;release&gt;</code> with your Helm namespace and release name.
 Where MEHO's installer runs the cluster for you, the installer has its own
-commands for the same steps.</p>
+commands for the same steps. On a Linux server installed with MEHO's
+<code>install.sh</code>, they are:</p>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Command on the Linux server</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>From self-unseal to keyholder at boot</td>
+<td><code>sudo meho-host keyholder on</code></td>
+</tr>
+<tr>
+<td>From keyholder at boot to self-unseal</td>
+<td><code>sudo meho-host keyholder off</code></td>
+</tr>
+<tr>
+<td>Unseal by hand (keyholder at boot)</td>
+<td><code>sudo meho-host unseal</code></td>
+</tr>
+</tbody>
+</table>
+<p>Each of them asks for the unseal key with a hidden prompt. The two
+<code>keyholder</code> commands then restart OpenBao. <code>keyholder on</code> deletes the
+Secret only after you gave the key that is in it, so the key is in your
+key store before it leaves the machine.</p>
 <h2 id="which-image-and-which-cpu">Which image, and which CPU<a class="headerlink" href="#which-image-and-which-cpu" title="Permanent link">&para;</a></h2>
 <p>The chart uses the plain OpenBao image (<code>quay.io/openbao/openbao</code>). It runs
 on any x86-64 CPU, also on a VM that shows only x86-64-v2, for example with

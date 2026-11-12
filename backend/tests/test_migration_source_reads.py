@@ -290,7 +290,6 @@ def test_node_row_carries_identity_and_capacity() -> None:
     assert (row["os_image"], row["architecture"]) == ("Ubuntu 22.04.4 LTS", "amd64")
     ops = {op.op_id: op for op in KUBERNETES_OPS}
     # A real node row must pass the node-list schema it is returned under.
-    answer_row = {**row, "requested": None, "requests_error": "pod list failed: HTTP 500"}
-    jsonschema.validate({"rows": [answer_row], "total": 1}, ops["k8s.node.list"].response_schema)
+    jsonschema.validate({"rows": [row], "total": 1}, ops["k8s.node.list"].response_schema)
     namespace_row = ops["k8s.namespace.list"].response_schema["properties"]["rows"]["items"]
     assert "system_uuid" not in namespace_row["properties"]

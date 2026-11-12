@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from collections.abc import Iterator
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import jsonschema
 import pytest
@@ -13,6 +15,7 @@ from kubernetes_asyncio.client import (
     V1Container,
     V1ListMeta,
     V1Node,
+    V1NodeList,
     V1NodeStatus,
     V1ObjectMeta,
     V1Pod,
@@ -23,13 +26,40 @@ from kubernetes_asyncio.client import (
 )
 from kubernetes_asyncio.client.exceptions import ApiException
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.kubernetes._node_resources import (
+    add_node_resources,
     add_requested,
     node_resources,
     pod_requests_by_node,
+    with_node_resources,
 )
+from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
 from meho_backplane.connectors.kubernetes.ops import KUBERNETES_OPS
 from meho_backplane.connectors.kubernetes.ops_core import node_row
+from meho_backplane.settings import get_settings
+
+_NEW_FIELDS = ("capacity", "allocatable", "requested", "requests_error")
+
+
+@pytest.fixture(autouse=True)
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.delenv("K8S_NODE_LIST_RESOURCES", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def _switch_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("K8S_NODE_LIST_RESOURCES", "true")
+    get_settings.cache_clear()
+
+
+def _node_list_op() -> Any:
+    return {op.op_id: op for op in KUBERNETES_OPS}["k8s.node.list"]
 
 
 def _container(cpu: str | None = None, memory: str | None = None, **extra: object) -> V1Container:
@@ -236,20 +266,110 @@ async def test_add_requested_unreadable_quantity_marks_only_that_node() -> None:
 
 @pytest.mark.asyncio
 async def test_rows_match_the_response_schema_known_and_unknown() -> None:
-    schema = {op.op_id: op for op in KUBERNETES_OPS}["k8s.node.list"].response_schema
+    schema = with_node_resources(_node_list_op()).response_schema
+    nodes = [_node("n1"), _node("idle")]
     for call in (
         AsyncMock(
             return_value=V1PodList(items=[_pod("n1", [_container("1")])], metadata=V1ListMeta())
         ),
         AsyncMock(side_effect=ApiException(status=500)),
     ):
-        rows = _rows()
-        await add_requested(rows, call)
+        rows = [node_row(n) for n in nodes]
+        await add_node_resources(rows, nodes, call)
         jsonschema.validate({"rows": rows, "total": len(rows)}, schema)
 
 
-def test_op_text_names_the_new_fields() -> None:
-    op = {o.op_id: o for o in KUBERNETES_OPS}["k8s.node.list"]
+def test_op_text_with_the_switch_names_the_new_fields() -> None:
+    op = with_node_resources(_node_list_op())
     text = str(op.llm_instructions) + op.description
-    for word in ("capacity", "allocatable", "requested", "requests_error"):
+    for word in _NEW_FIELDS:
         assert word in text
+
+
+def test_op_text_without_the_switch_is_unchanged() -> None:
+    op = _node_list_op()
+    text = str(op.llm_instructions) + op.description + str(op.response_schema)
+    for word in ("allocatable", "requested", "requests_error"):
+        assert word not in text
+    on = with_node_resources(op)
+    # The switch only adds text; the old text stays as it is.
+    assert on.description.startswith(op.description)
+    assert on.llm_instructions["output_shape"].startswith(op.llm_instructions["output_shape"])
+    assert {k: v for k, v in on.llm_instructions.items() if k != "output_shape"} == {
+        k: v for k, v in op.llm_instructions.items() if k != "output_shape"
+    }
+
+
+async def _run_handler() -> tuple[dict[str, Any], AsyncMock]:
+    nodes = [_node("n1"), _node("idle")]
+    pods = AsyncMock(
+        return_value=V1PodList(items=[_pod("n1", [_container("1", "1Gi")])], metadata=V1ListMeta())
+    )
+    connector = KubernetesConnector(kubeconfig_loader=AsyncMock())
+    with (
+        patch.object(connector, "_get_api_client", AsyncMock(return_value=MagicMock())),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CoreV1Api") as core_v1_cls,
+    ):
+        core_v1_cls.return_value.list_node = AsyncMock(
+            return_value=V1NodeList(items=nodes, metadata=V1ListMeta())
+        )
+        core_v1_cls.return_value.list_pod_for_all_namespaces = pods
+        result = await connector.k8s_node_list(MagicMock(spec=Operator), MagicMock(), {})
+    return result, pods
+
+
+@pytest.mark.asyncio
+async def test_handler_without_the_switch_answers_as_before() -> None:
+    result, pods = await _run_handler()
+    pods.assert_not_awaited()
+    assert result["rows"] == [node_row(_node("n1")), node_row(_node("idle"))]
+    for row in result["rows"]:
+        assert not set(_NEW_FIELDS) & set(row)
+    jsonschema.validate(result, _node_list_op().response_schema)
+
+
+@pytest.mark.asyncio
+async def test_handler_with_the_switch_adds_the_new_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    result, pods = await _run_handler()
+    pods.assert_awaited()
+    first = result["rows"][0]
+    assert first["capacity"] == {"cpu": "8", "memory": "32Gi", "pods": "110"}
+    assert first["requested"] == {"cpu_millicores": 1000, "memory_bytes": 2**30, "pods": 1}
+    jsonschema.validate(result, with_node_resources(_node_list_op()).response_schema)
+
+
+async def _registered_node_list(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    from meho_backplane.operations import typed_register
+
+    register = AsyncMock()
+    monkeypatch.setattr(typed_register, "register_typed_operation", register)
+    await KubernetesConnector.register_operations()
+    calls = [c.kwargs for c in register.await_args_list if c.kwargs["op_id"] == "k8s.node.list"]
+    assert len(calls) == 1
+    return calls[0]
+
+
+@pytest.mark.asyncio
+async def test_register_without_the_switch_keeps_the_old_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    op = _node_list_op()
+    kwargs = await _registered_node_list(monkeypatch)
+    assert kwargs["description"] == op.description
+    assert kwargs["llm_instructions"] == op.llm_instructions
+    assert kwargs["response_schema"] == op.response_schema
+
+
+@pytest.mark.asyncio
+async def test_register_with_the_switch_uses_the_new_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    on = with_node_resources(_node_list_op())
+    kwargs = await _registered_node_list(monkeypatch)
+    assert kwargs["description"] == on.description
+    assert kwargs["llm_instructions"] == on.llm_instructions
+    assert kwargs["response_schema"] == on.response_schema

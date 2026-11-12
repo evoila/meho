@@ -12,24 +12,41 @@ same rule the scheduler uses.
 When the pod list cannot be read to the end, or a quantity cannot be read,
 ``requested`` is ``None`` (unknown). It is never a smaller sum that looks
 like the whole one.
+
+All of this is behind the switch ``K8S_NODE_LIST_RESOURCES``
+(:attr:`~meho_backplane.settings.Settings.k8s_node_list_resources`, off by
+default). Off: ``k8s.node.list`` answers, and is described, as before.
 """
 
 from __future__ import annotations
 
+import copy
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from math import ceil
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kubernetes_asyncio.client.exceptions import ApiException
 
+from meho_backplane.settings import get_settings
+
+if TYPE_CHECKING:
+    from meho_backplane.connectors.kubernetes.ops import KubernetesOp
+
 __all__ = [
+    "NODE_LIST_OP_ID",
     "NODE_RESOURCE_PROPERTIES",
+    "add_node_resources",
     "add_requested",
+    "node_list_resources_on",
     "node_resources",
     "pod_requests_by_node",
+    "with_node_resources",
 ]
+
+NODE_LIST_OP_ID = "k8s.node.list"
 
 _PAGE_SIZE = 500
 _MAX_PAGES = 40
@@ -87,7 +104,49 @@ NODE_RESOURCE_PROPERTIES: dict[str, Any] = {
             "null when it cannot be said (see requests_error)."
         ),
     },
+    "requests_error": {
+        "type": ["string", "null"],
+        "description": "Why requested is null (pod list failed or cut), else null.",
+    },
 }
+
+_DESCRIPTION_MORE = (
+    " Each row also has ``capacity`` / ``allocatable`` (the node's cpu, "
+    "memory and pods) and ``requested``: the sum of the requests of the "
+    "pods on it that have not ended."
+)
+
+_OUTPUT_SHAPE_MORE = (
+    " Each row also has capacity, allocatable, requested and "
+    "requests_error. ``capacity`` and ``allocatable`` are {cpu, memory, "
+    "pods} as the API writes them ('4', '16393216Ki', '110'). "
+    "``requested`` is the sum of the requests of the pods on the node that "
+    "have not ended: {cpu_millicores, memory_bytes, pods}. Free room = "
+    "allocatable minus requested (cpu '4' = 4000 millicores; 'Ki' = 1024 "
+    "bytes). ``requested`` is null when the pod list could not be read to "
+    "the end: then ``requests_error`` says why. Never treat null as zero."
+)
+
+
+def node_list_resources_on() -> bool:
+    """Return the state of the ``K8S_NODE_LIST_RESOURCES`` switch."""
+    return get_settings().k8s_node_list_resources
+
+
+def with_node_resources(op: KubernetesOp) -> KubernetesOp:
+    """Return ``k8s.node.list`` with the new fields in its text and response schema."""
+    schema = copy.deepcopy(op.response_schema or {})
+    row = schema["properties"]["rows"]["items"]
+    row["properties"].update(NODE_RESOURCE_PROPERTIES)
+    row["required"].extend(NODE_RESOURCE_PROPERTIES)
+    instructions = dict(op.llm_instructions or {})
+    instructions["output_shape"] = instructions.get("output_shape", "") + _OUTPUT_SHAPE_MORE
+    return replace(
+        op,
+        description=op.description + _DESCRIPTION_MORE,
+        response_schema=schema,
+        llm_instructions=instructions,
+    )
 
 
 def _quantity_map(values: Any) -> dict[str, str | None] | None:
@@ -249,3 +308,14 @@ async def add_requested(
         else:
             zero = {"cpu_millicores": 0, "memory_bytes": 0, "pods": 0}
             row["requested"], row["requests_error"] = sums.get(row["name"]) or zero, None
+
+
+async def add_node_resources(
+    rows: list[dict[str, Any]],
+    nodes: Sequence[Any],
+    list_pods: Callable[..., Awaitable[Any]],
+) -> None:
+    """Add ``capacity``, ``allocatable``, ``requested`` and ``requests_error`` in place."""
+    for row, node in zip(rows, nodes, strict=True):
+        row.update(node_resources(node))
+    await add_requested(rows, list_pods)

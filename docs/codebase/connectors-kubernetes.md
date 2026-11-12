@@ -48,7 +48,8 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   instances without booting an event loop.
 - **Node size and reserved room** (`_node_resources.py`) -- `capacity` and
   `allocatable` of a node (cpu, memory, pods, as the API writes them) and
-  the `requested` sum of the pods on it, added to each `k8s.node.list` row.
+  the `requested` sum of the pods on it, added to each `k8s.node.list` row
+  when the switch `K8S_NODE_LIST_RESOURCES` is on (off by default).
   It answers "how much more fits on this node?". Details in "Node capacity
   and reserved requests".
 - **Workload helpers** (`ops_workload.py`) -- pure row mappers
@@ -1524,7 +1525,7 @@ updates / soft-deletes in one transaction.
 | --------------- | ----------------- | ----------------------------------------------- |
 | `target`        | exactly 1         | `git_version` / `major` / `minor` / `platform` from `VersionApi.get_code()` (same payload `k8s.about` returns) |
 | `namespace`     | N (≥ 4 on k3s)    | Mirrors [`namespace_row`](../../backend/src/meho_backplane/connectors/kubernetes/ops_core.py): `status` / `age_seconds` / `labels` |
-| `node`          | M (≥ 1)           | Mirrors [`node_row`](../../backend/src/meho_backplane/connectors/kubernetes/ops_core.py): `status` / `roles` / `version` (kubelet) / `kernel` / `os` / `internal_ip` / `taints` / `age_seconds` / `labels` / `capacity` / `allocatable` |
+| `node`          | M (≥ 1)           | Mirrors [`node_row`](../../backend/src/meho_backplane/connectors/kubernetes/ops_core.py): `status` / `roles` / `version` (kubelet) / `kernel` / `os` / `internal_ip` / `taints` / `age_seconds` / `labels` |
 
 `EdgeHint` rows: one `belongs-to` from every namespace to the target,
 one `belongs-to` from every cluster node to the target. `cluster` is
@@ -1689,7 +1690,16 @@ The `total` key in the response envelope is the full row count
 
 ## Node capacity and reserved requests
 
-`k8s.node.list` rows carry, besides status, roles and version:
+These fields are behind the switch `K8S_NODE_LIST_RESOURCES`
+(`Settings.k8s_node_list_resources`). It is off by default, because it
+changes what the AI reads. With it off, `k8s.node.list` answers as before,
+and its description, `llm_instructions` and response schema are as before.
+With it on, `register_operations()` stores the op with the longer text and
+schema (`with_node_resources()`), and the handler adds the fields below.
+The topology rows of a node never get these fields. The switch goes on by
+default only in a later pull request, after a measured run shows it helps.
+
+With the switch on, `k8s.node.list` rows carry, besides status, roles and version:
 
 - `capacity` and `allocatable`: `{cpu, memory, pods}` as the API writes
   them (for example `"4"`, `"16393216Ki"`, `"110"`). Other resources such as

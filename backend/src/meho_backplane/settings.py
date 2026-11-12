@@ -2530,6 +2530,14 @@ class Settings(BaseModel):
     #: Only the outcome changes, never the hits or their order. Set via
     #: ``SEARCH_CLEAR_LEAD``.
     search_clear_lead: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Node size and reserved room in ``k8s.node.list`` (#4652), behind a
+    #: switch that is off by default. When on, each node row also has
+    #: ``capacity``, ``allocatable``, ``requested`` and ``requests_error``,
+    #: and the op's description, ``llm_instructions`` and response schema
+    #: name them (:mod:`meho_backplane.connectors.kubernetes._node_resources`).
+    #: The node list then also reads the pods of all namespaces. Off: the op
+    #: is as before. Set via ``K8S_NODE_LIST_RESOURCES``.
+    k8s_node_list_resources: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3552,6 +3560,9 @@ def get_settings() -> Settings:
         ),
         search_clear_lead=parse_bool_env(
             os.environ.get("SEARCH_CLEAR_LEAD"),
+        ),
+        k8s_node_list_resources=parse_bool_env(
+            os.environ.get("K8S_NODE_LIST_RESOURCES"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

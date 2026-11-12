@@ -381,18 +381,24 @@ async def check_user_guards(
     operator: Operator,
     target: KeycloakTargetLike,
     found: FoundObject,
+    *,
+    op_id: str = USER_DELETE_OP,
+    action: str = "deleting it",
 ) -> None:
-    """Refuse the user this target logs in with."""
+    """Refuse the user this target logs in with.
+
+    *op_id* and *action* only shape the message. The other user writes that
+    can lock the target out use the same check (``ops_user_login_guard``).
+    """
     username = found.name or ""
     _client_id, login_users = await _target_login_identity(
         connector, operator, target, found.realms
     )
     if username.casefold() in login_users:
         raise KeycloakDeleteRefusedError(
-            USER_DELETE_OP,
+            op_id,
             "target_login_user",
-            f"{username!r} is the user this MEHO target logs in with; deleting it "
-            "breaks the target.",
+            f"{username!r} is the user this MEHO target logs in with; {action} breaks the target.",
         )
 
 

@@ -118,6 +118,10 @@ fresh target with no asserted version still resolves.
 - `USER_REQUIRED_ACTION_OPS` + `keycloak_user_required_actions_update` +
   `keycloak_user_otp_status` (`connectors/keycloak/ops_user_required_actions.py`)
   — the one-time code ops and the approval card of the write.
+- `refuse_login_user` + `refuse_login_user_of_request`
+  (`connectors/keycloak/ops_user_login_guard.py`) — the sign-in user check
+  that `user.required_actions.update` and `user.disable` share with
+  `user.delete`.
 - `KeycloakWriteResult` (`connectors/keycloak/connector.py`) — the
   status + `Location` + `conflict` outcome of a mutating request;
   `created_uuid()` parses the new object's UUID out of `Location`.
@@ -639,6 +643,15 @@ longer sign in to any app that uses this realm.
 - Safe to run twice: setting `enabled` to the value it already has succeeds.
   A user that does not exist raises `KeycloakUserNotFoundError` and nothing
   is written.
+- **The user this target signs in with is refused.** It is the same check as
+  `keycloak.user.delete` (`check_user_guards`; see
+  `ops_user_login_guard.py`): the user name of a password login, or the
+  service-account user of a client login. It applies when the managed realm
+  is the realm the target signs in to. A disabled sign-in user would make
+  Keycloak refuse the next sign-in of MEHO. The refusal comes before
+  approval (a park check, with a reason that names no user name) and again
+  when the approved request runs. Nothing is written. `keycloak.user.enable`
+  is not checked.
 - **Disabling does not end sessions that are already open.** To cut access at
   once, run `keycloak.user.disable`, then `keycloak.user.logout`.
 - Risk level `dangerous`, approval required, group `user_write`. On the
@@ -672,21 +685,39 @@ login.
     written.
   - Each name in `add` must be an enabled required action of the realm
     (`GET .../authentication/required-actions`). An unknown or disabled
-    name is refused before any write, and the error lists the allowed
+    name is refused before approval (a park check, with no name in the
+    reason) and again before any write, and the error lists the allowed
     names. A name in both lists is refused too.
+  - The user this target signs in with is refused for every change (add
+    or remove). A required action on it, such as `UPDATE_PASSWORD`, can make
+    Keycloak refuse the next password sign-in of MEHO, and then nobody can
+    reach that Keycloak through MEHO. It is the same check as
+    `keycloak.user.delete` (`ops_user_login_guard.py`), run on the
+    username stored in Keycloak. It is before approval and when the
+    approved request runs, so a user renamed while the request waits is
+    still refused. Nothing is written.
   - When the list would not change, nothing is written (`changed: false`).
   - Answer: `{id, username, realm, changed, added, removed,
     required_actions, unrequested_changes, read_back_checked}`.
+    `required_actions` is the list read back from Keycloak after the
+    write. When the read-back fails it is `null` and `read_back_checked`
+    is `false`.
   - The approval card shows `{resource, username, id, realm, add, remove,
     current_available[, current_required_actions,
     resulting_required_actions][, warning]}`. When the user could be
     read, the card and the answer show the username stored in Keycloak.
     When the user cannot be read at park time, the card still shows the
     request.
-  - When the realm is the one MEHO's own sign-in uses and `add` has a
-    passkey set-up (`webauthn-register` or
-    `webauthn-register-passwordless`), the card's `warning` says: "this
-    lets the next sign-in to this account add a new passkey".
+  - When the realm is the one MEHO's own sign-in uses, the card's
+    `warning` has one line for each of these (joined with `; `):
+    - `add` has a passkey set-up (`webauthn-register` or
+      `webauthn-register-passwordless`): "this lets the next sign-in to
+      this account add a new passkey";
+    - `add` has `CONFIGURE_TOTP` or `CONFIGURE_RECOVERY_AUTHN_CODES`:
+      "this gives the person a new way to sign in (...)";
+    - `remove` has `CONFIGURE_TOTP`, `CONFIGURE_RECOVERY_AUTHN_CODES` or a
+      passkey set-up: "this takes a sign-in set-up step away (...): the
+      person will not be asked to set it up".
   - Two writers at the same time can overwrite each other: Keycloak has no
     version check on a user.
 - `keycloak.user.otp_status` (safe read, group `user`). Params: `username`

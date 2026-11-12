@@ -13,6 +13,10 @@ Safe to run twice: setting ``enabled`` to the value it already has is a
 success. A user that does not exist raises
 :exc:`~meho_backplane.connectors.keycloak.ops_write.KeycloakUserNotFoundError`.
 
+Disabling the user this target logs in with is refused, before approval and
+again when the approved request runs
+(:mod:`~meho_backplane.connectors.keycloak.ops_user_login_guard`).
+
 Disabling a user does **not** end sessions that are already open. To cut
 access at once, run ``keycloak.user.disable``, then ``keycloak.user.logout``.
 
@@ -28,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from meho_backplane.connectors.keycloak._paths import _USER_PATH, fill_path
+from meho_backplane.connectors.keycloak.ops_user_login_guard import refuse_login_user_of_request
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
@@ -68,6 +73,10 @@ async def _set_enabled(
             raise KeycloakUserNotFoundError(
                 f"{op_id}: no user with username={username!r} in realm {realms.managed_realm!r}"
             )
+    if not enabled:
+        await refuse_login_user_of_request(
+            connector, operator, target, params, op_id=op_id, action="disabling it"
+        )
     try:
         check = await read_merge_write(
             connector,

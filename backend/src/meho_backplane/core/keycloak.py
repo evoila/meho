@@ -91,6 +91,7 @@ from meho_backplane.core.keycloak_flows import (
     ensure_levels,
     flow_overrides,
     stage_flows,
+    stage_levels,
 )
 from meho_backplane.core.keycloak_recovery import ensure_recovery_codes
 from meho_backplane.core.secrets import (
@@ -915,12 +916,11 @@ async def finish_realm(
         for group in tenant_groups(tenant):
             await realm.ensure_group(group, drop=OLD_ACCESS_ATTRIBUTES)
     clients = realm_file.get("clients") or []
-    flow_ids = await ensure_flows(
-        admin,
-        stage_flows(realm_file.get("authenticationFlows") or [], clients),
-        realm_file.get("authenticatorConfig"),
-    )
-    await ensure_levels(admin, realm_file.get("attributes") or {}, bound_clients(clients))
+    flows = stage_flows(realm_file.get("authenticationFlows") or [], clients)
+    settings = realm_file.get("authenticatorConfig")
+    flow_ids = await ensure_flows(admin, flows, settings)
+    levels = stage_levels(realm_file.get("attributes") or {}, flows, settings)
+    await ensure_levels(admin, levels, bound_clients(clients))
     await ensure_recovery_codes(admin)
     for want in clients:
         await realm.ensure_client(want, scope_ids, flow_ids)

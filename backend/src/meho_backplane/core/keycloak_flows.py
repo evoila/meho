@@ -13,6 +13,11 @@ other steps than the file is kept as it is, the stage says so in one line,
 and no client is bound to it: a flow that is not the one of the file must
 not guard the approval sign-in.
 
+A flow with a step whose settings the realm file lacks (a step names an
+``authenticatorConfig`` alias the file does not give) is not made here: such
+a step without its settings would change how people log in. The stage says
+so in one line and binds no client to it.
+
 Reading and changing login flows needs the ``manage-realm`` role. The
 ``meho-admin`` account of the realm file has it. An install made before the
 realm file gave it to ``meho-admin`` may lack it (docs/codebase/core-bootstrap.md,
@@ -26,7 +31,8 @@ adds the settings a step lacks. A step whose settings have other values
 than the file makes the flow one with other steps (#6281).
 
 :func:`ensure_levels` adds the named sign-in levels of the realm file
-(the realm attribute ``acr.loa.map``) to the realm. Names the realm has
+(the realm attribute ``acr.loa.map``) to the realm; :func:`stage_levels`
+keeps only the names that the flows of this stage use. Names the realm has
 already are kept, so a level another part added stays (#6281). It stops
 before it writes when another name already has one of the levels, or when
 a client bound to a flow of the realm file has its own ``acr.loa.map``.
@@ -72,6 +78,7 @@ __all__ = [
     "ensure_levels",
     "flow_overrides",
     "stage_flows",
+    "stage_levels",
 ]
 
 #: The client field that binds a client to its own login flow.
@@ -330,6 +337,39 @@ async def _make_flow(
     return flow_id
 
 
+def _lacks_settings(
+    flow: Mapping[str, Any], by_alias: Mapping[str, Any], configs: _Configs
+) -> bool:
+    """Whether a step of *flow* or of a sub-flow names settings the realm file lacks."""
+    for step in flow.get("authenticationExecutions") or []:
+        name = step.get("authenticatorConfig")
+        if name and name not in configs:
+            return True
+        if step.get("authenticatorFlow") and _lacks_settings(
+            by_alias[step["flowAlias"]], by_alias, configs
+        ):
+            return True
+    return False
+
+
+def _flows_to_check(
+    flows: list[Mapping[str, Any]], by_alias: Mapping[str, Any], configs: _Configs
+) -> list[Mapping[str, Any]]:
+    """The top-level flows this stage makes and checks; it names the ones it leaves out."""
+    top = []
+    for flow in flows:
+        if not flow.get("topLevel"):
+            continue
+        if _lacks_settings(flow, by_alias, configs):
+            _say(
+                f"login flow {flow['alias']}: not checked here (the realm file lacks the "
+                "settings of its steps); no client is bound to it by this stage"
+            )
+            continue
+        top.append(flow)
+    return top
+
+
 async def ensure_flows(
     admin: Admin,
     flows: list[Mapping[str, Any]],
@@ -346,7 +386,9 @@ async def ensure_flows(
     :class:`RealmStageError` (:data:`NO_FLOW_RIGHT`) when the account may
     not read or change login flows.
     """
-    top = [flow for flow in flows if flow.get("topLevel")]
+    by_alias = {flow["alias"]: flow for flow in flows}
+    configs = {item["alias"]: item for item in settings or []}
+    top = _flows_to_check(flows, by_alias, configs)
     if not top:
         return {}
     reply = await admin.call("GET", f"{_BASE}/flows")
@@ -356,8 +398,6 @@ async def ensure_flows(
         item["alias"]: item["id"]
         for item in expect(reply, 200, what="cannot list the login flows").data
     }
-    by_alias = {flow["alias"]: flow for flow in flows}
-    configs = {item["alias"]: item for item in settings or []}
     ids: dict[str, str] = {}
     for flow in top:
         alias = flow["alias"]
@@ -478,6 +518,35 @@ def stage_flows(
             continue
         kept.append(flow)
     return kept
+
+
+def stage_levels(
+    wanted: Mapping[str, Any],
+    flows: Sequence[Mapping[str, Any]],
+    settings: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """*wanted* (the realm file's ``attributes``) with only the levels of *flows*.
+
+    The ``acr.loa.map`` keeps a name only when a level step of a top-level
+    flow of *flows* (the flows this stage makes) or of its sub-flows asks
+    for its level. So the stage names
+    ``meho-approve`` (level 2 of the approval flow), but not ``meho-touch``
+    (level 3 of the console's touch flow, which has its own explicit step).
+    """
+    configs = {item["alias"]: item.get("config") or {} for item in settings or []}
+    by_alias = {flow["alias"]: flow for flow in flows}
+    used: set[str] = set()
+    todo = [flow for flow in flows if flow.get("topLevel")]
+    while todo:
+        for step in todo.pop().get("authenticationExecutions") or []:
+            if step.get("authenticatorFlow") and step.get("flowAlias") in by_alias:
+                todo.append(by_alias[step["flowAlias"]])
+            elif step.get("authenticator") == "conditional-level-of-authentication":
+                config = configs.get(step.get("authenticatorConfig") or "", {})
+                used.add(str(config.get("loa-condition-level")))
+    levels = json.loads(wanted.get(LEVEL_MAP) or "{}")
+    kept = {name: level for name, level in levels.items() if str(level) in used}
+    return {**wanted, LEVEL_MAP: json.dumps(kept, separators=(",", ":"))}
 
 
 def flow_overrides(want: Mapping[str, Any], flow_ids: Mapping[str, str]) -> dict[str, str]:

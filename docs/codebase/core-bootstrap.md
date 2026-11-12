@@ -282,6 +282,11 @@ stage (`core/company_login.py`, `ensure_company_login`) does this, in order:
    Keycloak never shows its own login page. With `false`, that default is
    removed and the Keycloak login form shows again: the way in with the
    local accounts when the company login is down.
+   The same is done on the console's own login flow `meho approval
+   touch` (config alias `meho-company-login-redirect-touch`) when the
+   realm has it (#6213), so the console still goes straight to the
+   company login. Its output line is `auto-redirect (meho approval
+   touch): ...`.
 
 What is not done:
 
@@ -395,8 +400,9 @@ Steps of the realm stage, in order:
    one up. A missing flow is made with its steps. A step with settings in
    the file (`authenticatorConfig`) gets them; a step whose settings have
    other values makes the flow one with other steps. After the flows,
-   `ensure_levels` adds the level names of the file's `acr.loa.map`
-   (`meho-approve`: 2) to the realm and keeps the names it has (output:
+   `ensure_levels` adds the level names of the file's `acr.loa.map` that
+   the flows of this stage use (`stage_levels`: `meho-approve`: 2, not
+   `meho-touch`: 3) to the realm and keeps the names it has (output:
    `sign-in levels: set (...)` or `kept (...)`); it writes the whole
    attribute map back, because Keycloak drops realm attributes a write
    leaves out. It stops before it writes when another name already has
@@ -427,6 +433,15 @@ Steps of the realm stage, in order:
    It never goes on with an approval client that may lack its own flow. A
    fresh install gets the flow and the binding from the realm import and
    the role from the realm file.
+   The console's flow with the passkey touch level, `meho approval touch`
+   (#6213), is bound only by `meho-web`, so the stage does not make it,
+   binds no client to it, and does not add its level name `meho-touch`;
+   the step prints `not made here (no client of the realm file but
+   meho-web binds it); no client is bound to it by this stage`. A
+   running realm gets it through the operation
+   `keycloak.authflow.ensure_approval_touch`. A flow with a step whose
+   settings the realm file lacks is not made either (`not checked here
+   (the realm file lacks the settings of its steps)`).
 4. **CI login**, when on.
    Then the **company login**, when on (see "The company login").
 5. **First login.** Read `<release>-core-first-login`; make it when missing

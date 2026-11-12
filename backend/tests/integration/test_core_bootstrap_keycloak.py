@@ -1082,7 +1082,7 @@ async def test_an_older_install_gets_recovery_codes_once_meho_admin_may_change_l
 
         output = capfd.readouterr().out
         assert "login: meho-admin" in output
-        assert "not checked" not in output
+        assert "no right to read" not in output
         assert _recovery_settings(keycloak) == ("false", "DISABLED")
     finally:
         httpx.post(url, headers=_master_headers(keycloak), json=roles).raise_for_status()

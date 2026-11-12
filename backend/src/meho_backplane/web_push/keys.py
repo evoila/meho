@@ -29,6 +29,7 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "b64url_decode",
+    "b64url_encode",
     "new_private_key",
     "public_key_for",
     "push_public_key",
@@ -41,7 +42,8 @@ _PRIVATE_KEY_BYTES = 32
 _B64URL_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 
-def _b64url(data: bytes) -> str:
+def b64url_encode(data: bytes) -> str:
+    """Encode *data* as base64url without padding."""
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
@@ -63,7 +65,7 @@ def b64url_decode(text: str) -> bytes:
 def new_private_key() -> str:
     """Return a fresh push private key in the stored format."""
     key = ec.generate_private_key(ec.SECP256R1())
-    return _b64url(key.private_numbers().private_value.to_bytes(_PRIVATE_KEY_BYTES, "big"))
+    return b64url_encode(key.private_numbers().private_value.to_bytes(_PRIVATE_KEY_BYTES, "big"))
 
 
 def public_key_for(private_key: str) -> str:
@@ -85,7 +87,7 @@ def public_key_for(private_key: str) -> str:
     public = key.public_key().public_bytes(
         serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
     )
-    return _b64url(public)
+    return b64url_encode(public)
 
 
 @lru_cache(maxsize=1)

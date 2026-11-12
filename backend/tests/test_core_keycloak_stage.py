@@ -40,7 +40,12 @@ from meho_backplane.core.keycloak import (
     load_plan,
     load_realm_file,
 )
-from meho_backplane.core.keycloak_flows import NO_FLOW_RIGHT, bound_clients, stage_flows
+from meho_backplane.core.keycloak_flows import (
+    NO_FLOW_RIGHT,
+    bound_clients,
+    stage_flows,
+    stage_levels,
+)
 
 _REALM_FILE = (
     Path(__file__).resolve().parents[2]
@@ -879,10 +884,17 @@ def _level_settings(kc: FakeKeycloak) -> dict[str, str]:
     return config
 
 
+def _without_flows(realm: dict[str, Any]) -> dict[str, Any]:
+    """*realm* as a realm made before the file had login flows: no flow binds a client."""
+    del realm["authenticationFlows"]
+    del realm["authenticatorConfig"]
+    web = next(c for c in realm["clients"] if c["clientId"] == "meho-web")
+    del web["authenticationFlowBindingOverrides"]
+    return realm
+
+
 def _realm_before_the_approval_flow() -> dict[str, Any]:
-    old = _realm_as_imported()
-    del old["authenticationFlows"]
-    del old["authenticatorConfig"]
+    old = _without_flows(_realm_as_imported())
     del old["attributes"]["acr.loa.map"]
     old["clients"] = [c for c in old["clients"] if c["clientId"] != "meho-cli-approve"]
     return old
@@ -958,8 +970,7 @@ async def test_upgrade_adds_the_clients_of_the_ai_tools(capfd: pytest.CaptureFix
 async def test_upgrade_binds_an_existing_approval_client_to_its_flow(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    old = _realm_as_imported()
-    del old["authenticationFlows"]
+    old = _without_flows(_realm_as_imported())
     approve = next(c for c in old["clients"] if c["clientId"] == "meho-cli-approve")
     del approve["authenticationFlowBindingOverrides"]
     kc = FakeKeycloak(bootstrap=None)
@@ -1248,6 +1259,33 @@ def test_the_stage_makes_no_flow_for_the_console_client(
     assert "login flow free: not made here" in out
 
 
+def test_the_stage_names_only_the_levels_of_its_own_flows() -> None:
+    """The realm file names ``meho-approve`` and ``meho-touch``; the stage names only the first.
+
+    ``meho-touch`` is level 3 of the console's touch flow, and that flow
+    (with its sub-flows) is not made by the stage.
+    """
+    realm = json.loads(_REALM_FILE.read_text())
+    flows = stage_flows(realm["authenticationFlows"], realm["clients"])
+
+    levels = stage_levels(realm["attributes"], flows, realm["authenticatorConfig"])
+
+    assert json.loads(realm["attributes"]["acr.loa.map"]) == {"meho-approve": 2, "meho-touch": 3}
+    assert json.loads(levels["acr.loa.map"]) == {"meho-approve": 2}
+    assert levels["adminEventsExpiration"] == realm["attributes"]["adminEventsExpiration"]
+
+
+async def test_another_name_on_the_touch_level_does_not_stop_the_stage() -> None:
+    """Only a name on level 2 stops the stage; ``meho-touch`` on level 3 is known (#6213)."""
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(_realm_as_imported())
+    kc.realm_attributes["acr.loa.map"] = '{"gold":3}'
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    assert json.loads(kc.realm_attributes["acr.loa.map"]) == {"gold": 3, "meho-approve": 2}
+
+
 async def test_a_level_step_without_its_settings_gets_them(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
@@ -1325,7 +1363,8 @@ async def test_without_the_right_to_read_login_flows_the_stage_stops(
     assert str(stopped.value) == f"login flow {_APPROVAL_FLOW}: {NO_FLOW_RIGHT}"
     assert "manage-realm" in NO_FLOW_RIGHT
     assert "docs-site/install/upgrades.md" in NO_FLOW_RIGHT
-    assert "not checked" not in capfd.readouterr().out
+    # The stage stops; it never prints a "not checked (no right to read ...)" line and goes on.
+    assert "no right to read" not in capfd.readouterr().out
     assert _APPROVAL_FLOW not in kc.flows
 
     # The fix: give meho-admin the role once and run the upgrade again.
@@ -2110,3 +2149,45 @@ def test_main_refuses_an_unknown_stage(capfd: pytest.CaptureFixture[str]) -> Non
     assert core_bootstrap.main(["vault"]) == 2
     assert core_bootstrap.main([]) == 2
     assert "stages: keycloak" in capfd.readouterr().err
+
+
+_TOUCH_FLOW = "meho approval touch"
+
+
+async def test_upgrade_does_not_make_the_touch_flow_or_bind_the_console_to_it(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """#6213: the stage never makes the console's touch flow or binds it on meho-web.
+
+    Only ``meho-web`` binds the touch flow, so the stage leaves it out. A
+    running realm gets the flow through the Keycloak operation
+    ``keycloak.authflow.ensure_approval_touch``.
+    """
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(_realm_before_the_approval_flow())
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    assert _TOUCH_FLOW not in kc.flows
+    assert "authenticationFlowBindingOverrides" not in kc.clients["meho-web"]
+    assert not [c for c in kc.calls if _TOUCH_FLOW.replace(" ", "%20") in c[1]]
+    out = capfd.readouterr().out
+    assert (
+        f"login flow {_TOUCH_FLOW}: not made here (no client of the realm file "
+        "but meho-web binds it); no client is bound to it by this stage"
+    ) in out
+    # The approval sign-in flow is still made and bound.
+    assert kc.clients["meho-cli-approve"]["authenticationFlowBindingOverrides"] == {
+        "browser": kc.flows[_APPROVAL_FLOW]["id"]
+    }
+
+
+async def test_a_realm_with_the_touch_flow_keeps_the_console_binding() -> None:
+    """A realm made from the file keeps meho-web on the touch flow after a run."""
+    kc = _fresh()
+    bound = kc.clients["meho-web"]["authenticationFlowBindingOverrides"]
+    assert bound == {"browser": kc.flows[_TOUCH_FLOW]["id"]}
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    assert kc.clients["meho-web"]["authenticationFlowBindingOverrides"] == bound

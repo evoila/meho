@@ -268,7 +268,7 @@ func TestBootstrap_DryRunDoesNotBindAFlowWithOtherSteps(t *testing.T) {
 	flowLines := func(res *Result) []string {
 		var lines []string
 		for _, e := range res.MapperEventsLog {
-			if strings.Contains(e, "login flow") {
+			if strings.Contains(e, approvalFlowAlias) {
 				lines = append(lines, dryRunEvent(e))
 			}
 		}

@@ -41,6 +41,7 @@ from meho_backplane.operations.typed_register import (
     remove_built_in_connector_rows,
 )
 from meho_backplane.policy.store import (
+    SWITCH_OFF_REFUSAL,
     ClassificationEdit,
     classification_enabled,
     set_classification,
@@ -52,8 +53,12 @@ if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
+    "GROUP_KEY",
+    "GROUP_WHEN_TO_USE",
+    "PARAMETER_SCHEMA",
     "POLICY_CLASSIFY_OP_ID",
     "POLICY_REGISTRY_CONNECTOR_ID",
+    "SWITCH_OFF_REFUSAL",
     "policy_classify",
     "register_policy_classify_operation",
 ]
@@ -63,12 +68,6 @@ POLICY_REGISTRY_CONNECTOR_ID: Final[str] = "policy-registry-1.x"
 
 #: The op id of a classification change.
 POLICY_CLASSIFY_OP_ID: Final[str] = "policy.classify"
-
-#: What a call says while the switch is off.
-SWITCH_OFF_REFUSAL: Final[str] = (
-    "Classification is off on this MEHO. An admin turns it on with the "
-    "POLICY_CLASSIFICATION setting."
-)
 
 _PATTERN_HINT = "`*` is any text, `?` is one character, no wildcard is an exact match."
 
@@ -161,12 +160,12 @@ RESPONSE_SCHEMA: Final[dict[str, Any]] = {
     "required": ["scope", "rule_ref", "entry", "matched_operations"],
 }
 
-_GROUP_KEY = "policy"
-_GROUP_WHEN_TO_USE = (
+GROUP_KEY = "policy"
+GROUP_WHEN_TO_USE = (
     "Change how MEHO classifies operations for your tenant: the category, free "
     "labels and the always-wait mark of connectors, operation groups and operations. "
     "A category decides who may approve, so every change here is a change of rights "
-    "and waits until a second tenant admin approves it."
+    "and waits until a second tenant admin approves it. Run the dry run first."
 )
 
 _DESCRIPTION = (
@@ -238,8 +237,8 @@ async def register_policy_classify_operation(
         impl_id="policy-registry",
         op_id=POLICY_CLASSIFY_OP_ID,
         handler=policy_classify,
-        group_key=_GROUP_KEY,
-        when_to_use=_GROUP_WHEN_TO_USE,
+        group_key=GROUP_KEY,
+        when_to_use=GROUP_WHEN_TO_USE,
         summary="Set the category, labels or always-wait mark of a classification entry.",
         description=_DESCRIPTION,
         parameter_schema=PARAMETER_SCHEMA,

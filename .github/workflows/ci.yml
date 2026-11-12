@@ -3248,9 +3248,12 @@ jobs:
             echo "gh and jq are already installed"
             exit 0
           fi
-          sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
-          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
-          gh --version
+          if ! { sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y \
+            && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}" \
+            && gh --version; }; then
+            echo "::warning::Could not install ${missing[*]}. The watchdog cannot call the API and will not cancel this run."
+            exit 1
+          fi
       - name: Cancel this run once the queue has dropped its group
         env:
           GH_TOKEN: ${{ github.token }}

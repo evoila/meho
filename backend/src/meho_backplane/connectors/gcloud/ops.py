@@ -748,6 +748,7 @@ _GCLOUD_IAM_SERVICE_ACCOUNT_KEYS_LIST_OP = GcloudOp(
 def _gcloud_ops() -> tuple[GcloudOp, ...]:
     """Return the full registration tuple for all gcloud typed ops."""
     # Imported here: ops_workload_identity imports GcloudOp from this module.
+    from meho_backplane.connectors.gcloud.ops_backup_bucket import BACKUP_BUCKET_OPS
     from meho_backplane.connectors.gcloud.ops_workload_identity import WORKLOAD_IDENTITY_OPS
     from meho_backplane.connectors.gcloud.ops_workload_identity_write import (
         WORKLOAD_IDENTITY_WRITE_OPS,
@@ -765,6 +766,7 @@ def _gcloud_ops() -> tuple[GcloudOp, ...]:
         _GCLOUD_IAM_SERVICE_ACCOUNT_KEYS_LIST_OP,
         *WORKLOAD_IDENTITY_OPS,
         *WORKLOAD_IDENTITY_WRITE_OPS,
+        *BACKUP_BUCKET_OPS,
     )
 
 
@@ -782,4 +784,7 @@ def _gcloud_ops() -> tuple[GcloudOp, ...]:
 #: Four more come from :mod:`.ops_workload_identity_write`: create a pool,
 #: create an OIDC provider, replace its uploaded keys, and add one binding.
 #: All four wait for approval.
+#: Five more come from :mod:`.ops_backup_bucket`: create a bucket, change its
+#: settings, read it, add one member to its IAM policy, and create a service
+#: account. The read does not wait for approval; the four changes do.
 GCLOUD_OPS: tuple[GcloudOp, ...] = _gcloud_ops()

@@ -148,8 +148,8 @@ def build_identity_command() -> str:
         "printf 'uid=%s\\n' \"$(id -u 2>/dev/null)\"; "
         "printf 'gid=%s\\n' \"$(id -g 2>/dev/null)\"; "
         "printf 'groups=%s\\n' \"$(id -Gn 2>/dev/null)\"; "
-        "if command -v sudo >/dev/null 2>&1; then "
-        "sudo -n true </dev/null >/dev/null 2>&1; printf 'sudo_rc=%s\\n' \"$?\"; "
+        "if command -v sudo >/dev/null 2>&1; then sudo -n true </dev/null >/dev/null 2>&1; "
+        "printf 'sudo_rc=%s\\n' \"$?\"; "
         f"else printf 'sudo_rc={_NO_BINARY_EXIT}\\n'; fi"
     )
 

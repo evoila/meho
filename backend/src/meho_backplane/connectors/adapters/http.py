@@ -439,7 +439,9 @@ async def _read_capped_json_response(
     memory is bounded by the cap plus the expansion of one chunk.
 
     Because the kept bytes are already decoded, the rebuilt response drops
-    the ``Content-Encoding`` and ``Content-Length`` headers. Otherwise
+    the ``Content-Encoding`` and ``Content-Length`` headers when it has a
+    body. An empty body (a HEAD answer) keeps all headers, so callers can
+    still read ``Content-Encoding`` there. Otherwise
     httpx would decode the plain bytes a second time and raise
     :exc:`httpx.DecodingError`.
 
@@ -475,7 +477,9 @@ async def _read_capped_json_response(
                 )
             chunks.append(chunk)
         out_headers = resp.headers.copy()
-        if "content-encoding" in out_headers:
+        # An empty body (a HEAD answer) has nothing decoded, so its headers
+        # stay as the vendor sent them. Callers read Content-Encoding there.
+        if total and "content-encoding" in out_headers:
             del out_headers["content-encoding"]
             if "content-length" in out_headers:
                 del out_headers["content-length"]

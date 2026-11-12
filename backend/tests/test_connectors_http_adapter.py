@@ -1057,6 +1057,21 @@ async def test_capped_read_drops_encoding_headers_after_decoding() -> None:
     assert resp.headers["content-type"] == "application/json"
 
 
+@pytest.mark.asyncio
+async def test_capped_read_keeps_encoding_headers_on_an_empty_body() -> None:
+    """A HEAD answer has no body, so callers still see its Content-Encoding."""
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.head("/api/items").respond(
+            200,
+            headers={"content-encoding": "gzip", "content-length": "12345"},
+        )
+        async with httpx.AsyncClient(base_url="https://vcenter.example.com") as client:
+            resp = await http_adapter._read_capped_json_response(client, "HEAD", "/api/items")
+
+    assert resp.headers["content-encoding"] == "gzip"
+    assert resp.headers["content-length"] == "12345"
+
+
 # ---------------------------------------------------------------------------
 # Retry behaviour — 5xx
 # ---------------------------------------------------------------------------

@@ -14,6 +14,16 @@ T4 config writes inherit the same proof.
 Sequence
 --------
 
+Two writes on one server never overlap. The pipeline takes an
+exclusive ``flock`` on a lock file before step 1 and holds it until the
+script ends, so the snapshot, the write, the reload, the verify and a
+rollback of one apply all finish before the next apply starts. A rollback
+therefore never restores over a change that another apply made in
+between. A caller that read the file before the lock can pass
+``expected_sha256``: when the file no longer has that hash once the lock
+is held, nothing is written and :class:`AtomicApplyError` is raised with
+step ``conflict``. If the lock is not free in time, the step is ``lock``.
+
 The :func:`atomic_apply` helper runs a fixed seven-step pipeline
 inside **one** sudo-bash invocation (one ``_remote_bash_with_sudo``
 call). Bundling into a single remote bash script means the snapshot
@@ -189,6 +199,7 @@ References
 
 from __future__ import annotations
 
+import re
 import secrets
 import shlex
 from dataclasses import dataclass
@@ -213,6 +224,8 @@ __all__ = [
 # verbs so an operator switching between the two surfaces sees the
 # same vocabulary.
 AtomicApplyStep = Literal[
+    "lock",
+    "conflict",
     "snapshot",
     "stage",
     "checkconf",
@@ -280,12 +293,18 @@ class AtomicApplyResult:
 # can run ``named-checkzone`` for record writes and ``named-checkconf``
 # for config writes without per-caller branching outside the env-var
 # slot.
+_LOCK_PATH: str = "/var/lock/meho-bind9-apply.lock"
+# Longer than a normal apply (about 2 seconds), shorter than the 90 s
+# limit of the whole call, so a stuck lock fails here with a clear error.
+_LOCK_WAIT_SECONDS: int = 45
+
 _PIPELINE_TEMPLATE: str = """\
 set -e -u -o pipefail
 SNAPSHOT_PATH={snapshot_path}
 AUDIT_SLICE_PATH={audit_slice_path}
 ZONE_NAME={zone_name}
 BIND_ROOT={bind_root}
+LOCK_PATH={lock_path}
 
 rollback() {{
     if [ -f "$SNAPSHOT_PATH" ]; then
@@ -421,6 +440,40 @@ PYEOF
         rndc reload > /dev/null 2>&1 || true
     fi
 }}
+
+# Step 0: take the per-server write lock. Every apply on this server
+# waits here, so the steps below never overlap with another apply (the
+# snapshot of one apply cannot be restored over the change of another).
+# The lock is released when this script exits. Nothing has been changed
+# yet, so a failure here needs no rollback.
+mkdir -p "$(dirname "$LOCK_PATH")"
+exec 9>"$LOCK_PATH"
+if ! flock -w {lock_wait_seconds} 9; then
+    echo "===FAILED_STEP===lock"
+    echo "===FAILED_DETAIL_BEGIN==="
+    echo "another bind9 write on this server did not finish within {lock_wait_seconds} seconds"
+    echo "===FAILED_DETAIL_END==="
+    exit 8
+fi
+
+# Step 0b: refuse to write over a file that changed after the caller
+# read it. ``BIND9_EXPECTED_SHA256`` is the hash of the content the
+# caller based its change on; empty means the caller does not need the
+# check (a whole-file replace such as ``config.apply_file``).
+if [ -n "$BIND9_EXPECTED_SHA256" ]; then
+    if [ -f "$AUDIT_SLICE_PATH" ]; then
+        ACTUAL_SHA256=$(sha256sum "$AUDIT_SLICE_PATH" | cut -d' ' -f1)
+    else
+        ACTUAL_SHA256="missing"
+    fi
+    if [ "$ACTUAL_SHA256" != "$BIND9_EXPECTED_SHA256" ]; then
+        echo "===FAILED_STEP===conflict"
+        echo "===FAILED_DETAIL_BEGIN==="
+        echo "the file changed after it was read; nothing was written"
+        echo "===FAILED_DETAIL_END==="
+        exit 7
+    fi
+fi
 
 # Step 1: snapshot the bind config root. ``-C /`` so the archive
 # carries absolute paths; restoration extracts back into ``/`` cleanly.
@@ -603,6 +656,8 @@ def _build_pipeline_script(
     audit_slice_path: str,
     zone_name: str,
     bind_root: str,
+    lock_path: str = _LOCK_PATH,
+    lock_wait_seconds: int = _LOCK_WAIT_SECONDS,
 ) -> str:
     """Render the seven-step bash pipeline with safely-quoted paths.
 
@@ -620,6 +675,8 @@ def _build_pipeline_script(
         audit_slice_path=shlex.quote(audit_slice_path),
         zone_name=shlex.quote(zone_name),
         bind_root=shlex.quote(bind_root),
+        lock_path=shlex.quote(lock_path),
+        lock_wait_seconds=int(lock_wait_seconds),
     )
 
 
@@ -707,6 +764,7 @@ def _compose_full_script(
     validate_command: str,
     verify_command: str,
     pipeline_script: str,
+    expected_sha256: str | None = None,
 ) -> str:
     """Prepend env-var assignments so the pipeline script's ``$VAR`` refs resolve.
 
@@ -728,6 +786,8 @@ def _compose_full_script(
 
     if (staged_bytes is None) == (staged_tar_bytes is None):
         raise ValueError("exactly one of staged_bytes / staged_tar_bytes must be provided")
+    if expected_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise ValueError("expected_sha256 must be a 64-character lowercase hex string")
 
     file_b64 = base64.b64encode(staged_bytes).decode("ascii") if staged_bytes is not None else ""
     tar_b64 = (
@@ -740,6 +800,7 @@ def _compose_full_script(
         f"export BIND9_STAGED_TAR_B64='{tar_b64}'\n"
         f"export BIND9_VALIDATE_CMD={validate_quoted}\n"
         f"export BIND9_VERIFY_CMD={verify_quoted}\n"
+        f"export BIND9_EXPECTED_SHA256='{expected_sha256 or ''}'\n"
         f"{pipeline_script}"
     )
 
@@ -771,7 +832,7 @@ def _interpret_pipeline_result(
         # "unknown" as ``checkconf`` (the conservative default --
         # rollback-on-validation, the most paranoid step).
         step: AtomicApplyStep
-        if step_raw in ("snapshot", "stage", "checkconf", "reload", "verify"):
+        if step_raw in ("lock", "conflict", "snapshot", "stage", "checkconf", "reload", "verify"):
             step = step_raw  # type: ignore[assignment]
         else:
             step = "checkconf"
@@ -810,6 +871,7 @@ async def atomic_apply(
     validate_command: str | None = None,
     verify_command: str,
     bind_root: str = "/etc/bind",
+    expected_sha256: str | None = None,
 ) -> AtomicApplyResult:
     """Stage proposed content under *audit_slice_path* with full snapshot rollback.
 
@@ -883,6 +945,13 @@ async def atomic_apply(
         Root directory snapshotted by tar. Defaults to ``/etc/bind``;
         the only escape hatch is for tests using a temporary tree.
 
+    expected_sha256
+        Hex SHA-256 of the audit-slice file as the caller read it. When
+        set, the apply first takes the server lock, then compares this
+        with the file on disk, and raises ``AtomicApplyError`` with step
+        ``conflict`` (nothing written) when they differ. Must be a hex
+        string. ``None`` skips the check.
+
     Raises
     ------
     AtomicApplyError
@@ -918,6 +987,7 @@ async def atomic_apply(
         validate_command=effective_validate,
         verify_command=verify_command,
         pipeline_script=pipeline_script,
+        expected_sha256=expected_sha256,
     )
     proc = await connector._remote_bash_with_sudo(
         target,

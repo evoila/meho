@@ -354,6 +354,33 @@ The integration suite asserts byte-identical-tree rollback via
 `find /etc/bind -type f | xargs sha256sum | sha256sum` before / after
 each failure scenario (checkzone-fail + verify-fail both covered).
 
+### Two writes at the same time
+
+Zone writes on one server never overlap, and a write never lands on a
+file it did not read. Two parts do this:
+
+- **A lock on the server.** The script takes an exclusive `flock` on
+  `/var/lock/meho-bind9-apply.lock` before step 1 and holds it until the
+  script ends. The snapshot, the write, the reload, the verify and a
+  rollback of one apply all finish before the next apply starts. So a
+  rollback can never restore the snapshot over a change that another
+  apply made in between. The lock covers every caller of
+  `atomic_apply`: `record.add`, `record.remove`, `record.delete`,
+  `config.apply_file` and `config.apply_views`. If the lock is not free
+  within 45 seconds, nothing is written and the error step is `lock`.
+- **A check that the file did not change.** The record ops pass
+  `expected_sha256`, the hash of the zonefile text they read. Once the
+  lock is held, the script hashes the file again. If the hash differs,
+  nothing is written and the error step is `conflict`. The config apply
+  ops pass no hash: they replace the whole file on purpose.
+
+When a record op gets `conflict`, `_apply_zone_change` reads the zonefile
+again, works out the change again on the new content, and retries (up to
+6 retries). So two writes at the same time both land, and the serial goes
+up once for each. A `record.delete` that finds its record already gone on
+the new content answers `not_found`, as it does on any other read. After
+the last retry the `conflict` error is raised.
+
 ### Why one bash script vs N round-trips
 
 A 7-call pipeline would pay sudo's TTY-less-cache cost seven times,
@@ -655,6 +682,10 @@ Tests: `tests/test_connectors_dns_topology.py`.
   invocations, missing-zone errors, NXDOMAIN-as-empty-rows, and the
   path-rejection-leaks-no-content invariant through the dispatcher
   seam.
+- `backend/tests/test_connectors_bind9_write_lock.py` -- the server lock and the
+  "file changed since it was read" check, run on the real bash pipeline, and the
+  record ops redoing a change after a conflict. The real-server test for two
+  parallel adds is in `backend/tests/integration/test_connectors_bind9_container.py`.
 - `backend/tests/test_connectors_bind9_atomic.py` -- T3 unit suite.
   Covers (1) the longest-suffix `resolve_zone_for_fqdn` resolver
   including label-boundary, root-zone-excluded, ambiguous, and

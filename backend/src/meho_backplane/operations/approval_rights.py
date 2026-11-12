@@ -51,6 +51,7 @@ from meho_backplane.operations.approval_queue import (
     _check_approver_role_floor,
     _check_reviewer_role,
 )
+from meho_backplane.policy.shadow import shadow_approval
 
 __all__ = [
     "WEB_APPROVAL_HINT",
@@ -194,8 +195,13 @@ def approve_right(operator: Operator, request: ApprovalRequest) -> ApproveRight:
     Runs the checks of
     :func:`~meho_backplane.operations.approval_queue.approve_request` in
     the same order and turns each refusal into an answer. Raises nothing.
+    With the ``POLICY_ENGINE_SHADOW`` switch on, the policy evaluator
+    gives its own answer next to it and logs a difference
+    (:func:`~meho_backplane.policy.shadow.shadow_approval`).
     """
-    return _right(operator, request, check_pending=True)
+    right = _right(operator, request, check_pending=True)
+    shadow_approval(operator, request, today=right.may_approve)
+    return right
 
 
 def approve_right_any_status(operator: Operator, request: ApprovalRequest) -> ApproveRight:

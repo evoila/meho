@@ -75,11 +75,12 @@ jobs:
     # paths`. See the comment on that trigger above for why the filter
     # cannot stay there for a *required* check.
     #
-    # All three jobs here run on GitHub-hosted runners for every event.
+    # All three jobs here run on our own pool, except a fork pull request
+    # (hosted runner). Merge-queue runs never use a hosted runner (#6325).
     # They need nothing from the internal network, and a hosted runner
     # also keeps PR-controlled build metadata off the internal pool. See
     # docs/codebase/devops.md "Untrusted pull-request isolation".
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 5
     outputs:
       manifests: ${{ steps.detect.outputs.manifests }}
@@ -122,8 +123,8 @@ jobs:
     name: Python License Check
     needs: changes
     if: needs.changes.outputs.manifests == 'true'
-    # GitHub-hosted runner for every event — see the `changes` job above.
-    runs-on: ubuntu-latest
+    # Same runner rule as the `changes` job above.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -252,8 +253,8 @@ jobs:
     name: NPM License Check
     needs: changes
     if: needs.changes.outputs.manifests == 'true'
-    # GitHub-hosted runner for every event — see the `changes` job above.
-    runs-on: ubuntu-latest
+    # Same runner rule as the `changes` job above.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

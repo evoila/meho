@@ -56,9 +56,9 @@ env:
 jobs:
   compat:
     name: REST API, MCP tools and Helm values compatibility
-    # GitHub-hosted runner: the job needs only git, Python and a public
-    # download, so a fork pull request is safe here too.
-    runs-on: ubuntu-latest
+    # Own pool, except a fork pull request (hosted runner). The job needs
+    # only git, Python and a public download.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 10
     steps:
       - name: Checkout

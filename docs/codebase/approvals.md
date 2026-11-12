@@ -1692,10 +1692,37 @@ for the person who asked, not a run. The code is in
   something.
 - **The person who asked fetches the value.** `POST
   /api/v1/approvals/{id}/reveal` (`api/v1/approval_reveal.py`), the
-  console's "Show value" button (`POST /ui/vault/read/reveal`) and `meho
-  secret read --approval <id>` call `fetch_approved_reveal`. It runs the
+  console's "Show value" button (`POST /ui/vault/read/reveal`), `meho
+  secret read --approval <id>` and, with `MCP_REVEAL_FETCH` on,
+  `call_operation` with `approval_request_id` on MCP
+  ([mcp.md](mcp.md#getting-an-approved-secret-value-on-mcp-mcp_reveal_fetch-off-by-default))
+  call `fetch_approved_reveal`. It runs the
   operation through `resume_dispatch_after_approval(..., requester_fetch=True)`
   and gives the value only in that one answer.
+- **No cache keeps the answer with the value.** An answer that holds the
+  value says `Cache-Control: no-store` and `Pragma: no-cache`
+  (`no_store.py`). The dispatcher marks the answer when it puts the
+  values in (`_protect_secret_values` calls
+  `no_store.mark_answer_holds_secret`). `fetch_approved_reveal` also
+  marks every approved reveal that ran with `status: ok`, so the answer
+  with a new credential (for example a new AppRole secret ID) is marked
+  too. Each route opens
+  `no_store.answer_scope` around the run and sets the headers only when
+  the answer was marked: `POST /api/v1/approvals/{id}/reveal`, `POST
+  /api/v1/operations/call`, MCP, and the console's operation page, Vault
+  read page and "Show value" button. So these keep their usual headers: a
+  refused fetch, a run that was refused (for example the target changed)
+  or ended with an error, the stored run result
+  (`GET /api/v1/approvals/{id}/result`), the request view, and the same
+  call without `reveal_secret`. A person's `reveal_secret: true` on a
+  plain read runs at once, with no approval, and says no-store too.
+  Tests: `tests/test_approval_reveal_no_store.py`, `tests/test_ui_vault.py`,
+  `tests/test_ui_operations.py`, `tests/test_mcp_reveal_fetch.py`.
+- **A reveal call cannot run in the background.** `reveal_secret: true`
+  together with `async: true` is refused before any run starts: HTTP 422
+  `reveal_secret_with_async` on `POST /api/v1/operations/call`, and bad
+  input (reason `reveal_secret_with_async`) on MCP `call_operation`. The
+  call runs at once, or through an approval.
 - **Once, and only for a short time.** The fetch must win the one-resumer
   claim, so a second fetch is refused (`reveal_already_used`). It must
   come within `APPROVAL_REVEAL_FETCH_WINDOW_SECONDS` (default 900, 15

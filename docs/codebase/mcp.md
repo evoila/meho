@@ -1705,6 +1705,51 @@ A third switch works the other way: `MCP_SHORT_TOOL_TEXTS` (off by
 default) gives the biggest tools a short text while it is on. One session
 can also ask for these texts. See "Short tool texts" below.
 
+A fourth switch adds an input while it is on: `MCP_REVEAL_FETCH` (off by
+default). With it on, `call_operation` has the input
+`approval_request_id` and a paragraph about it, added after the short
+text, so both switches can be on. With it off, the tool is the registered
+one and a call that sends the input is refused with `-32602`. See "Getting
+an approved secret value on MCP" below.
+
+## Getting an approved secret value on MCP (`MCP_REVEAL_FETCH`, off by default)
+
+A call with `reveal_secret: true` on a secret read waits for a second
+person's approval, and the approval runs nothing. The person who asked
+then fetches the value once, within 15 minutes of the approval
+([approvals.md](approvals.md#an-approved-secret-reveal-runs-when-the-person-who-asked-fetches-it)).
+On MCP that person calls:
+
+```
+call_operation(connector_id, op_id, approval_request_id)
+```
+
+- The code is in `mcp/tools/_call_operation_reveal.py`. The
+  `call_operation` handler hands the call over when it has
+  `approval_request_id`; it writes no call record.
+- Only `connector_id`, `op_id` and `approval_request_id` may be sent.
+  Any other input is refused with `-32602` (`reveal_fetch_extra_inputs`):
+  what runs is the stored request, never new params.
+- `connector_id` and `op_id` must be the ones of the request
+  (`reveal_wrong_operation`). An agent is refused
+  (`reveal_agent_refused`). These checks run before the fetch, so a
+  refused call does not use up the one-time permission.
+- The rest is `fetch_approved_reveal`: the same person and tenant
+  (`not_request_owner`, `approval_request_not_found`), once
+  (`reveal_already_used`), within the time limit (`reveal_window_passed`).
+- A refused fetch answers `status: "denied"` (`isError: true`) with
+  `extras.error_code` and `extras.approval_request_id`. Nothing ran.
+- When the answer holds the value, it is marked
+  (`no_store.mark_answer_holds_secret`; also for an operation that makes
+  a new credential), and the `/mcp` route sends it
+  with `Cache-Control: no-store` and `Pragma: no-cache`
+  (`no_store.answer_scope`). A run that was refused or ended with an
+  error holds no value and keeps the usual headers.
+- With the switch off, a person who works through MCP gets the value on
+  the command line (`meho secret read --approval <id> --field <name>`), in
+  the console ("Show value") or with `POST /api/v1/approvals/{id}/reveal`.
+- Tests: `tests/test_mcp_reveal_fetch.py`.
+
 ## Short tool texts (`MCP_SHORT_TOOL_TEXTS`, off by default)
 
 The biggest tools on the default list have a short text. A session sees it

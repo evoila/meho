@@ -1524,6 +1524,15 @@ class Settings(BaseModel):
         stay the same. A small model keeps more of its context window for
         the job. It stays off until model tests show it helps. Env
         ``MCP_SHORT_TOOL_TEXTS``.
+    mcp_reveal_fetch:
+        Off by default. When on, ``call_operation`` on MCP takes an
+        ``approval_request_id``: the person who asked to see a secret value
+        (``reveal_secret: true``) gets it there, once, after a second person
+        approved (:mod:`meho_backplane.mcp.tools._call_operation_reveal`).
+        When off, the tool has no text about this and refuses the input; the
+        person gets the value on the command line, in the console or over
+        REST. It stays off until model tests show it helps. Env
+        ``MCP_REVEAL_FETCH``.
     policy_classification:
         Off by default. When on, each connector, operation group and
         operation can carry a category, labels and an "always wait" mark,
@@ -2437,6 +2446,7 @@ class Settings(BaseModel):
     mcp_topology_off_default_list: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
@@ -3511,6 +3521,9 @@ def get_settings() -> Settings:
         ),
         mcp_short_tool_texts=parse_bool_env(
             os.environ.get("MCP_SHORT_TOOL_TEXTS"),
+        ),
+        mcp_reveal_fetch=parse_bool_env(
+            os.environ.get("MCP_REVEAL_FETCH"),
         ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),

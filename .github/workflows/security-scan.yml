@@ -164,10 +164,10 @@ jobs:
     # does not stop unrelated merges. The weekly security scan opens an
     # issue for new advisories.
     #
-    # A GitHub-hosted runner: a fresh machine per job, no slot on our own CI
-    # pool, and safe for fork pull requests without a fork guard. trivy only
+    # A GitHub-hosted runner for pull requests (safe for forks without a
+    # fork guard). The merge queue uses our own pool (#6325). trivy only
     # reads the lock file and runs no code from the pull request.
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     # Least privilege: the job only checks out the repository.
     permissions:

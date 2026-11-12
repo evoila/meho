@@ -183,7 +183,12 @@ def test_operator_rank_health_reaches_federation_probe(
         "tenant_role": role,
         "tenants": [],
     }
-    assert body["vault"] == {"reachable": True, "read_ok": True, "detail": "version=7"}
+    assert body["vault"] == {
+        "reachable": True,
+        "read_ok": True,
+        "detail": "version=7",
+        "checked": True,
+    }
     head = ScriptDirectory.from_config(alembic_config()).get_current_head()
     assert body["db"] == {
         "migrated": True,

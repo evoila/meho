@@ -2576,6 +2576,71 @@ removals of one operation run one at a time, across all scopes, under
 a per-operation lock (see `spec-ingestion.md`, "Edits of one operation
 run one at a time").
 
+## The passkey touch level in Keycloak (#6213)
+
+A later step lets MEHO ask for a passkey touch before a `dangerous` or
+`destructive` approval (setting `APPROVAL_PRESENCE_TOUCH`, off by
+default). This section is the Keycloak part. It is inert until MEHO
+asks for the touch level; nothing in the backplane reads it yet.
+
+* **Realm file** (`deploy/charts/meho/charts/keycloak/files/meho-realm.json`):
+  the realm attribute `acr.loa.map` maps `meho-touch` to level 3 (level 2
+  is `meho-approve`, the approval sign-in level of #6281; a higher level
+  also counts where a lower one is asked for). The
+  login flow `meho approval touch` is the browser flow of `meho-web`
+  only. Its level 1 branch has the steps of Keycloak's own browser
+  flow (cookie, company login redirect, password form that also takes
+  a passkey, one-time code unless a passkey was used), so the normal
+  console login does not change. Its level 3 branch is
+  `conditional-level-of-authentication` (level 3, maximum age 0) plus
+  `webauthn-authenticator-passwordless`. The passkey step's setting has
+  `default.reference.value=hwk` and `default.reference.maxAge=120`;
+  without the maximum age Keycloak leaves `amr` empty. `meho-web` has
+  the `amr` mapper (`oidc-amr-mapper`).
+* **How MEHO asks:** `acr_values=meho-touch` and a `nonce` on the
+  console's authorization request. Not `max_age=0`: that asks for the
+  password again. The ID token then has `acr=meho-touch`, the same
+  `nonce` and a fresh `auth_time`. MEHO must check `acr`, `nonce` and
+  `auth_time`, never `amr` alone: `amr` can still name the passkey on a
+  plain login shortly after a touch.
+* **Running realms:** the chart's realm stage
+  (`core/keycloak_flows.py`) does not make a flow whose steps need
+  settings, and binds no client to it. A running realm gets the flow
+  through `keycloak.authflow.ensure_approval_touch`
+  (`connectors/keycloak/ops_authflow_touch.py`, risk level `caution`,
+  waits for approval). A customer's own Keycloak gets it from
+  `meho admin keycloak bootstrap-clients`
+  (`cli/internal/cmd/admin/keycloak/touchflow.go`). The three keep the
+  same flow; tests compare each with the realm file. The operation and
+  the CLI bind the flow only when the realm's passkey policy asks for
+  user verification (`webAuthnPolicyPasswordlessUserVerificationRequirement`
+  is `required`): otherwise a touch could pass without a PIN or a
+  fingerprint. They also turn on the token settings of an `amr` mapper
+  that leaves the claim out of the ID token. They do not bind it when
+  the realm's browser flow is not `browser` or `browser with passkeys`,
+  when `browser with passkeys` has other steps or settings than
+  `browser` plus the passkey step, or when `meho-web` has a browser flow
+  of its own: level 1 is a copy of the built-in login, so binding would
+  drop that login's steps. The operation binds it anyway with
+  `replace_custom_login: true`. A client bound to the touch flow
+  already stays bound on later runs.
+* **Company login:** the realm stage sets the redirect default of the
+  company login on the realm's browser flow and on `meho approval
+  touch` (`core/company_login.py`), so the console still goes straight
+  to the company login when `autoRedirect` is on. The operation
+  `keycloak.authflow.ensure_approval_touch` and `meho admin keycloak
+  bootstrap-clients` copy that default from the
+  realm's browser flow onto the touch flow before they bind `meho-web`,
+  so a running realm keeps the redirect before the next upgrade too.
+  When the realm's flow no longer has that default, they remove it from
+  the touch flow too.
+* **Tests:** `tests/test_core_keycloak_realm.py` (the file),
+  `tests/test_connectors_keycloak_authflow_touch.py` (the operation),
+  `tests/integration/test_core_keycloak_touch_flow.py` (a real
+  Keycloak with a software passkey: the touch, the `nonce`, a new touch
+  each time, `max_age=0` against `acr_values`, `amr` after a touch and
+  without a maximum age).
+
 ## Passkey touch: the challenge row and the binding hash (#6214)
 
 A `dangerous` or `destructive` approval can need a passkey touch (Face

@@ -10,19 +10,22 @@ has committed. It starts the sending in the background and returns at once,
 so the request never waits for a push service.
 
 * A new request (``pending``): "An approval waits" to every browser of the
-  people who may approve it in that tenant
+  people who may approve it in that tenant, by the same rule as the approve
   (:func:`~meho_backplane.web_push.recipients.subscriptions_for`).
 * A decision (``approved``, ``rejected``, ``expired``, ``withdrawn``): the
   result, with the same notification tag, so it replaces the first message
   on the device. The ``Topic`` header replaces it at the push service too
-  when the first one was not delivered yet.
+  when the first one was not delivered yet. The steps of one request are
+  sent in the order they happened: a step waits until the step before it
+  was sent, so a late first message never replaces the result.
 * The message holds the words, the tenant name, the request id and the
   address of the approvals page. Never the request's operation, parameters
   or target. It is encrypted for each browser
   (:func:`~meho_backplane.web_push.encryption.encrypt`).
-* A person gets at most one "An approval waits" message per
+* A person gets at most one "An approval waits" message per tenant per
   :data:`RATE_LIMIT_SECONDS`. The ones held back in that time become one
-  summary at its end. A decision goes out at once only to a person who got
+  summary at its end, sent only to the person's browsers of that tenant.
+  A decision goes out at once only to a person who got
   the "An approval waits" message of that request, because it replaces that
   message. For everyone else a decision counts against the same limit, so a
   burst of decisions (for example many requests expiring at once) does not
@@ -34,7 +37,7 @@ so the request never waits for a push service.
   Logs name the row id, the person, the push service and the status. Never
   the endpoint or a key.
 
-The rate limit is kept in memory, per process.
+The rate limit and the order are kept in memory, per process.
 """
 
 from __future__ import annotations
@@ -46,14 +49,14 @@ import uuid
 from collections import OrderedDict, defaultdict
 from collections.abc import Coroutine
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import httpx
 import structlog
 from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Tenant
+from meho_backplane.db.models import ApprovalRequest, Tenant
 from meho_backplane.settings import get_settings
 from meho_backplane.web_push.encryption import encrypt, vapid_authorization
 from meho_backplane.web_push.endpoints import push_service_name
@@ -64,9 +67,6 @@ from meho_backplane.web_push.recipients import (
     subscriptions_of_person,
 )
 from meho_backplane.web_push.store import delete_gone
-
-if TYPE_CHECKING:
-    from meho_backplane.db.models import ApprovalRequest
 
 __all__ = [
     "APPROVALS_PAGE",
@@ -90,7 +90,6 @@ _TTL_SECONDS = 24 * 60 * 60
 _TIMEOUT = httpx.Timeout(10.0)
 _SUMMARY_TAG = "approval-summary"
 _SUMMARY_TOPIC = "approvalsummary"
-_HIGH_RISK = frozenset({"dangerous", "destructive"})
 _DECISION_TITLES = {
     "approved": "Approval approved",
     "rejected": "Approval rejected",
@@ -99,16 +98,27 @@ _DECISION_TITLES = {
 }
 
 _TASKS: set[asyncio.Task[None]] = set()
+#: The newest send task of each request, so its next step waits for it.
+_LAST_STEP: dict[uuid.UUID, asyncio.Task[None]] = {}
 _transport: httpx.AsyncBaseTransport | None = None
+
+
+#: A person in one tenant. The rate limit and the summary count per pair.
+_Person = tuple[str, uuid.UUID]
 
 
 @dataclass(frozen=True)
 class _Step:
-    tenant_id: uuid.UUID
-    request_id: uuid.UUID
-    requester_sub: str
-    high_risk: bool
+    request: ApprovalRequest
     decision: str
+
+    @property
+    def tenant_id(self) -> uuid.UUID:
+        return self.request.tenant_id
+
+    @property
+    def request_id(self) -> uuid.UUID:
+        return self.request.id
 
 
 @dataclass(frozen=True)
@@ -124,26 +134,26 @@ class _Message:
 
 
 class _RateLimit:
-    """One message per person per window; count the held-back ones.
+    """One message per person and tenant per window; count the held-back ones.
 
-    Also remembers, per person, the requests whose "An approval waits"
+    Also remembers, per person and tenant, the requests whose "An approval waits"
     message was sent, so their decision can replace it at once. At most
     :data:`_SHOWN_LIMIT` per person; the oldest are forgotten first.
     """
 
     def __init__(self, window: float) -> None:
         self.window = window
-        self._last: dict[str, float] = {}
-        self._held: dict[str, int] = {}
-        self._shown: dict[str, OrderedDict[uuid.UUID, None]] = {}
+        self._last: dict[_Person, float] = {}
+        self._held: dict[_Person, int] = {}
+        self._shown: dict[_Person, OrderedDict[uuid.UUID, None]] = {}
 
-    def remember_shown(self, person: str, request_id: uuid.UUID) -> None:
+    def remember_shown(self, person: _Person, request_id: uuid.UUID) -> None:
         shown = self._shown.setdefault(person, OrderedDict())
         shown[request_id] = None
         while len(shown) > _SHOWN_LIMIT:
             shown.popitem(last=False)
 
-    def take_shown(self, person: str, request_id: uuid.UUID) -> bool:
+    def take_shown(self, person: _Person, request_id: uuid.UUID) -> bool:
         """``True`` (and forget it) when the person got this request's first message."""
         shown = self._shown.get(person)
         if shown is None or request_id not in shown:
@@ -153,7 +163,7 @@ class _RateLimit:
             del self._shown[person]
         return True
 
-    def admit(self, person: str) -> bool:
+    def admit(self, person: _Person) -> bool:
         now = time.monotonic()
         last = self._last.get(person)
         if last is not None and now - last < self.window:
@@ -161,16 +171,16 @@ class _RateLimit:
         self._last[person] = now
         return True
 
-    def hold(self, person: str) -> bool:
+    def hold(self, person: _Person) -> bool:
         """Count one held message; ``True`` when it is the first of the window."""
         self._held[person] = self._held.get(person, 0) + 1
         return self._held[person] == 1
 
-    def wait_seconds(self, person: str) -> float:
+    def wait_seconds(self, person: _Person) -> float:
         last = self._last.get(person, 0.0)
         return max(0.0, last + self.window - time.monotonic())
 
-    def take_held(self, person: str) -> int:
+    def take_held(self, person: _Person) -> int:
         self._last[person] = time.monotonic()
         return self._held.pop(person, 0)
 
@@ -178,10 +188,25 @@ class _RateLimit:
 _limit = _RateLimit(RATE_LIMIT_SECONDS)
 
 
-def _spawn(coro: Coroutine[Any, Any, None], *, name: str) -> None:
+def _spawn(coro: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
     task = asyncio.create_task(coro, name=name)
     _TASKS.add(task)
     task.add_done_callback(_TASKS.discard)
+    return task
+
+
+def _snapshot(tenant_id: uuid.UUID, request: ApprovalRequest) -> ApprovalRequest:
+    """A copy of the fields the approve rule reads, kept out of any session."""
+    return ApprovalRequest(
+        id=request.id,
+        tenant_id=tenant_id,
+        principal_sub=request.principal_sub,
+        op_id=request.op_id,
+        params=request.params,
+        proposed_effect=request.proposed_effect,
+        rights_change=request.rights_change,
+        status=request.status,
+    )
 
 
 def notify_approval_step(*, tenant_id: uuid.UUID, request: ApprovalRequest, decision: str) -> None:
@@ -189,23 +214,25 @@ def notify_approval_step(*, tenant_id: uuid.UUID, request: ApprovalRequest, deci
 
     Call only after the transaction with the audit row committed. Does
     nothing while the push feature is off (``WEB_PUSH_ENABLED``, or no
-    usable push key).
+    usable push key). The send starts after the send of the request's
+    step before, so the steps arrive in the order of these calls.
     """
     try:
         if push_public_key() is None:
             return
-        level = (request.proposed_effect or {}).get("safety_level")
-        step = _Step(
-            tenant_id=tenant_id,
-            request_id=request.id,
-            requester_sub=request.principal_sub,
-            high_risk=level in _HIGH_RISK,
-            decision=decision,
-        )
+        step = _Step(request=_snapshot(tenant_id, request), decision=decision)
     except Exception as exc:
         _log.warning("web_push_step_skipped", error=type(exc).__name__)
         return
-    _spawn(_send_step(step), name=f"web-push-{step.request_id}")
+    request_id = step.request_id
+    task = _spawn(_send_step(step, _LAST_STEP.get(request_id)), name=f"web-push-{request_id}")
+    _LAST_STEP[request_id] = task
+
+    def _forget(done: asyncio.Task[None]) -> None:
+        if _LAST_STEP.get(request_id) is done:
+            del _LAST_STEP[request_id]
+
+    task.add_done_callback(_forget)
 
 
 def _message_for(step: _Step, tenant_name: str) -> _Message:
@@ -218,20 +245,18 @@ def _message_for(step: _Step, tenant_name: str) -> _Message:
     )
 
 
-async def _send_step(step: _Step) -> None:
+async def _send_step(step: _Step, before: asyncio.Task[None] | None = None) -> None:
+    if before is not None:
+        # asyncio.wait never raises for the task it waits on.
+        await asyncio.wait({before})
     try:
         async with get_sessionmaker()() as db:
             name = await db.scalar(select(Tenant.name).where(Tenant.id == step.tenant_id))
-            targets = await subscriptions_for(
-                db,
-                tenant_id=step.tenant_id,
-                requester_sub=step.requester_sub,
-                high_risk=step.high_risk,
-            )
+            targets = await subscriptions_for(db, request=step.request)
         message = _message_for(step, name or str(step.tenant_id))
-        by_person: dict[str, list[PushTarget]] = defaultdict(list)
+        by_person: dict[_Person, list[PushTarget]] = defaultdict(list)
         for target in targets:
-            by_person[target.operator_sub].append(target)
+            by_person[(target.operator_sub, step.tenant_id)].append(target)
         for person, rows in by_person.items():
             # A decision for a request whose first message this person got
             # replaces that message (same tag and Topic), so it goes out at
@@ -255,14 +280,17 @@ async def _send_step(step: _Step) -> None:
         )
 
 
-async def _send_summary_later(person: str) -> None:
+async def _send_summary_later(person: _Person) -> None:
+    operator_sub, tenant_id = person
     try:
         await asyncio.sleep(_limit.wait_seconds(person))
         held = _limit.take_held(person)
         if held == 0:
             return
         async with get_sessionmaker()() as db:
-            targets = await subscriptions_of_person(db, operator_sub=person)
+            targets = await subscriptions_of_person(
+                db, operator_sub=operator_sub, tenant_id=tenant_id
+            )
         noun = "message" if held == 1 else "messages"
         message = _Message(
             title="Approvals changed",
@@ -274,7 +302,12 @@ async def _send_summary_later(person: str) -> None:
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        _log.warning("web_push_summary_failed", operator_sub=person, error=type(exc).__name__)
+        _log.warning(
+            "web_push_summary_failed",
+            operator_sub=operator_sub,
+            tenant_id=str(tenant_id),
+            error=type(exc).__name__,
+        )
 
 
 async def _deliver_all(targets: list[PushTarget], message: _Message) -> None:
@@ -338,6 +371,7 @@ def reset_for_testing(*, window: float = RATE_LIMIT_SECONDS) -> None:
     """Forget the rate limit state; use *window* seconds from now on."""
     global _limit
     _limit = _RateLimit(window)
+    _LAST_STEP.clear()
 
 
 async def wait_for_sends_for_testing() -> None:

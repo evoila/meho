@@ -28,10 +28,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from meho_backplane.web_push.keys import b64url_decode, b64url_encode
 
-__all__ = ["RECORD_SIZE", "encrypt", "vapid_authorization"]
+__all__ = ["MAX_PLAINTEXT_SIZE", "RECORD_SIZE", "encrypt", "vapid_authorization"]
 
 #: The record size in the header. One record holds the whole message.
 RECORD_SIZE = 4096
+#: The largest message that fits into one push message (RFC 8291 section 4).
+MAX_PLAINTEXT_SIZE = 3993
 _SALT_BYTES = 16
 _PRIVATE_KEY_BYTES = 32
 #: RFC 8292 allows at most 24 hours; 12 hours leaves room for clock skew.
@@ -60,7 +62,11 @@ def encrypt(
 
     *server_key* and *salt* are made fresh for each message; tests pass them
     to check the result against the example of RFC 8291, Appendix A.
+    Raises :class:`ValueError` for a message larger than
+    :data:`MAX_PLAINTEXT_SIZE`: it would not fit into one record.
     """
+    if len(plaintext) > MAX_PLAINTEXT_SIZE:
+        raise ValueError("the push message is larger than one record")
     ua_public = b64url_decode(p256dh)
     auth_secret = b64url_decode(auth)
     server_key = server_key or ec.generate_private_key(ec.SECP256R1())
@@ -95,9 +101,11 @@ def vapid_authorization(endpoint: str, *, private_key: str, subject: str | None)
     if len(raw) != _PRIVATE_KEY_BYTES:
         raise ValueError("the push key is not 32 bytes")
     key = ec.derive_private_key(int.from_bytes(raw, "big"), ec.SECP256R1())
+    # The origin of the push service, from the host only: never a user
+    # name or a port written into the endpoint.
     parts = urlsplit(endpoint)
     claims: dict[str, str | int] = {
-        "aud": f"{parts.scheme}://{parts.netloc}",
+        "aud": f"{parts.scheme}://{parts.hostname}",
         "exp": int(time.time()) + _TOKEN_LIFETIME_SECONDS,
     }
     if subject:

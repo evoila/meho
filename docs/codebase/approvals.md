@@ -3966,23 +3966,26 @@ waits for a push service, and a failed send never changes the request.
 | `approved` / `rejected` / `expired` / `withdrawn` | "Approval approved" (and so on), with the same tag, so it replaces the first message on the device |
 
 **Who gets it.** The login groups are in the login token, not in the
-database. So each subscription keeps what its person may approve in its
-tenant (`push_subscription.approve_scope`), read from their login when they
-switch the messages on, and again each time they open the account page
-(`web_push/recipients.py`):
+database. So each subscription keeps the person's login facts in its tenant:
+`tenant_role`, `approver`, `self_approver`, `platform_admin`, and when they
+were read (`facts_read_at`). MEHO reads them from the login when the person
+switches the messages on, at each console sign-in (also when they pick a
+tenant), and each time they open the account page.
 
-- `all`: a `tenant_admin` or a MEHO-SA-Operator. They get every request of
-  the tenant, also their own.
-- `lower_risk`: a MEHO-Approver. They get another person's `safe` or
-  `caution` change. Never a `dangerous` or `destructive` one, and never
-  their own request.
-- none: everyone else, also MEHO-Operators and agents. No message.
+For each request, `web_push/recipients.py` builds a person from each row's
+facts and asks `approve_right_any_status` (`operations/approval_rights.py`)
+whether that person may approve the request. That is the same rule as the
+approve: the group rule for `dangerous` and `destructive` changes, the
+own-change rules, the rule for a change of rights (only another admin), and
+the role an operation needs from its approver (for example `tenant_admin`
+for `targets.register`). It only leaves out the "still pending" check, so
+the decision message goes to the same people as the first message.
 
-Only subscriptions of the request's tenant count. This is only the list of
-who gets a message: the approve itself checks the person again, as always.
-A person who lost a group keeps getting messages until they open the
-account page again or remove the browser; the message has no request
-content.
+Only subscriptions of the request's tenant count. A row whose facts are
+more than 7 days old gets no message, because the person's groups may have
+changed since. Rows made before the facts columns (migration `0161`) get no
+message until the person signs in again. This is only the list of who gets
+a message: the approve itself checks the person again, as always.
 
 **What the message holds.** A JSON object with `title`, `body` (the tenant
 name and the request id), `tag` (`approval-<request id>`) and `url`
@@ -3997,15 +4000,21 @@ The service worker shows the notification; a click opens the approvals page
 of this MEHO, never another address.
 
 **Rate limit.** A person gets at most one "An approval waits" message per
-30 seconds (`RATE_LIMIT_SECONDS`). The messages held back in that time
-become one summary at its end: "N more approval messages. Open the
+tenant per 30 seconds (`RATE_LIMIT_SECONDS`). The messages held back in that
+time become one summary at its end, sent only to the person's browsers of
+that tenant: "N more approval messages. Open the
 approvals page." (tag `approval-summary`). A decision goes out at once only
 to a person who got the "An approval waits" message of that request, because
 it replaces that message. For everyone else a decision counts against the
 same limit, so a burst of decisions (for example many requests expiring at
 once) gives one message and one summary, not one message per request. MEHO
-remembers up to 1,000 such requests per person (the oldest are forgotten
-first). The limit is kept in memory, per process.
+remembers up to 1,000 such requests per person and tenant (the oldest are
+forgotten first). The limit is kept in memory, per process.
+
+**Order.** The steps of one request go out in the order they happened. Each
+step waits until the step before it of the same request was sent. So a
+first message that was slow can never arrive after the result and replace
+it. The order is kept in memory, per process.
 
 **Where messages go.** Only to the browser makers' push services: the
 endpoint is checked again before each send, not only when it was stored.

@@ -20,6 +20,7 @@ what the browser would show.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -29,7 +30,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -44,6 +45,7 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.connectors.targets.ops import TARGETS_REGISTER_OP_ID
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog, Tenant
 from meho_backplane.operations import approval_queue, reset_dispatcher_caches
@@ -60,7 +62,8 @@ from meho_backplane.web_push.keys import (
     reset_key_cache_for_testing,
 )
 from meho_backplane.web_push.models import PushSubscription
-from meho_backplane.web_push.recipients import approve_scope_for
+from meho_backplane.web_push.recipients import login_facts_for
+from meho_backplane.web_push.store import refresh_at_sign_in
 from tests.test_destructive_preview_binding import (
     _CONNECTOR_ID,
     _OP_ID,
@@ -186,8 +189,22 @@ async def push_service() -> AsyncIterator[_FakePushService]:
     await send_module.wait_for_sends_for_testing()
 
 
+#: The login facts a subscription keeps, by the kind of person.
+_LOGINS: dict[str, dict[str, Any]] = {
+    "admin": {"tenant_role": "tenant_admin"},
+    "sa": {"tenant_role": "operator", "self_approver": True},
+    "approver": {"tenant_role": "read_only", "approver": True},
+    "read_only": {"tenant_role": "read_only"},
+}
+
+
 async def _subscribe(
-    browser: _Browser, *, sub: str, scope: str | None, tenant_id: uuid.UUID = _TENANT
+    browser: _Browser,
+    *,
+    sub: str,
+    login: str,
+    tenant_id: uuid.UUID = _TENANT,
+    read_at: datetime | None = None,
 ) -> uuid.UUID:
     row = PushSubscription(
         operator_sub=sub,
@@ -196,7 +213,8 @@ async def _subscribe(
         p256dh=browser.p256dh,
         auth=b64url_encode(browser.auth),
         created_at=datetime.now(UTC),
-        approve_scope=scope,
+        facts_read_at=read_at or datetime.now(UTC),
+        **_LOGINS[login],
     )
     async with get_sessionmaker()() as s, s.begin():
         s.add(row)
@@ -209,27 +227,38 @@ def _request(
     level: str = "caution",
     params: dict[str, Any] | None = None,
     status: str = ApprovalRequestStatus.PENDING.value,
+    op_id: str = "POST:/vms/{vm}/power",
+    tenant_id: uuid.UUID = _TENANT,
+    rights_change: bool | None = None,
 ) -> ApprovalRequest:
     return ApprovalRequest(
         id=uuid.uuid4(),
-        tenant_id=_TENANT,
+        tenant_id=tenant_id,
         run_id=None,
         principal_sub=requester,
-        op_id="POST:/vms/{vm}/power",
+        op_id=op_id,
         connector_id="gh-rest-3",
         target_id=None,
         params_hash="0" * 64,
         params=params or {"vm": "vm-made-up-name"},
-        proposed_effect={"op_id": "POST:/vms/{vm}/power", "safety_level": level},
+        proposed_effect={"op_id": op_id, "safety_level": level},
         status=status,
+        rights_change=rights_change,
     )
 
 
 async def _step(request: ApprovalRequest, decision: str = "pending") -> None:
     await approval_queue.record_approval_step_event(
-        tenant_id=_TENANT, request=request, decision=decision, audit_id=uuid.uuid4()
+        tenant_id=request.tenant_id, request=request, decision=decision, audit_id=uuid.uuid4()
     )
     await send_module.wait_for_sends_for_testing()
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    """SQLite gives a time back without its zone; the stored times are UTC."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
 
 
 async def _rows() -> list[PushSubscription]:
@@ -251,10 +280,10 @@ async def test_a_new_request_goes_to_the_people_who_may_approve_it(
         _browser("operator"),
         _browser("elsewhere"),
     )
-    await _subscribe(admin, sub="admin", scope="all")
-    await _subscribe(approver, sub="approver", scope="lower_risk")
-    await _subscribe(operator, sub="operator", scope=None)
-    await _subscribe(elsewhere, sub="admin-b", scope="all", tenant_id=_OTHER_TENANT)
+    await _subscribe(admin, sub="admin", login="admin")
+    await _subscribe(approver, sub="approver", login="approver")
+    await _subscribe(operator, sub="operator", login="read_only")
+    await _subscribe(elsewhere, sub="admin-b", login="admin", tenant_id=_OTHER_TENANT)
 
     request = _request(level="caution")
     await _step(request)
@@ -276,8 +305,8 @@ async def test_a_high_risk_request_goes_only_to_admins_and_sa_operators(
     push_service: _FakePushService,
 ) -> None:
     admin, approver = _browser("admin"), _browser("approver")
-    await _subscribe(admin, sub="admin", scope="all")
-    await _subscribe(approver, sub="approver", scope="lower_risk")
+    await _subscribe(admin, sub="admin", login="admin")
+    await _subscribe(approver, sub="approver", login="approver")
 
     for level in ("dangerous", "destructive"):
         send_module.reset_for_testing()
@@ -291,8 +320,8 @@ async def test_own_request_reaches_only_a_person_who_may_approve_their_own(
     push_service: _FakePushService,
 ) -> None:
     sa_operator, approver = _browser("sa"), _browser("approver")
-    await _subscribe(sa_operator, sub="sa-op", scope="all")
-    await _subscribe(approver, sub="approver", scope="lower_risk")
+    await _subscribe(sa_operator, sub="sa-op", login="sa")
+    await _subscribe(approver, sub="approver", login="approver")
 
     by_sa_operator = _request(requester="sa-op")
     by_approver = _request(requester="approver")
@@ -309,7 +338,7 @@ async def test_own_request_reaches_only_a_person_who_may_approve_their_own(
 async def test_nothing_is_sent_with_the_setting_off(
     push_service: _FakePushService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await _subscribe(_browser("admin"), sub="admin", scope="all")
+    await _subscribe(_browser("admin"), sub="admin", login="admin")
     monkeypatch.setenv("WEB_PUSH_ENABLED", "false")
     get_settings.cache_clear()
     reset_key_cache_for_testing()
@@ -317,6 +346,52 @@ async def test_nothing_is_sent_with_the_setting_off(
     await _step(_request())
 
     assert push_service.requests == []
+
+
+async def test_an_admin_only_operation_reaches_only_tenant_admins(
+    push_service: _FakePushService,
+) -> None:
+    """``targets.register`` needs the ``tenant_admin`` role from the approver."""
+    admin, approver, sa_operator = _browser("admin"), _browser("approver"), _browser("sa")
+    await _subscribe(admin, sub="admin", login="admin")
+    await _subscribe(approver, sub="approver", login="approver")
+    await _subscribe(sa_operator, sub="sa-op", login="sa")
+
+    await _step(_request(op_id=TARGETS_REGISTER_OP_ID, level="caution"))
+
+    assert [m["title"] for m in push_service.to(admin)] == ["An approval waits"]
+    assert push_service.to(approver) == []
+    assert push_service.to(sa_operator) == []
+
+
+async def test_a_rights_change_reaches_only_another_admin(
+    push_service: _FakePushService,
+) -> None:
+    requester, other_admin, sa_operator = _browser("me"), _browser("other"), _browser("sa")
+    await _subscribe(requester, sub="admin", login="admin")
+    await _subscribe(other_admin, sub="admin-2", login="admin")
+    await _subscribe(sa_operator, sub="sa-op", login="sa")
+
+    await _step(_request(requester="admin", rights_change=True))
+
+    assert push_service.to(requester) == []
+    assert [m["title"] for m in push_service.to(other_admin)] == ["An approval waits"]
+    assert push_service.to(sa_operator) == []
+
+
+@pytest.mark.parametrize(
+    ("days", "sent"), [(6, True), (8, False)], ids=["read-6-days-ago", "read-8-days-ago"]
+)
+async def test_a_row_with_old_login_facts_gets_nothing(
+    push_service: _FakePushService, days: int, sent: bool
+) -> None:
+    admin = _browser("admin")
+    read_at = datetime.now(UTC) - timedelta(days=days)
+    await _subscribe(admin, sub="admin", login="admin", read_at=read_at)
+
+    await _step(_request())
+
+    assert len(push_service.to(admin)) == (1 if sent else 0)
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +412,7 @@ async def test_a_decision_replaces_the_waiting_message(
     push_service: _FakePushService, decision: str, title: str
 ) -> None:
     admin = _browser("admin")
-    await _subscribe(admin, sub="admin", scope="all")
+    await _subscribe(admin, sub="admin", login="admin")
     request = _request()
 
     # No rate-limit reset in between: a decision right after the first
@@ -358,8 +433,8 @@ async def test_a_decision_replaces_the_waiting_message(
 @pytest.mark.parametrize("status", [404, 410])
 async def test_a_gone_browser_is_removed(push_service: _FakePushService, status: int) -> None:
     gone, alive = _browser("gone"), _browser("alive")
-    await _subscribe(gone, sub="admin", scope="all")
-    await _subscribe(alive, sub="admin-2", scope="all")
+    await _subscribe(gone, sub="admin", login="admin")
+    await _subscribe(alive, sub="admin-2", login="admin")
     push_service.status[gone.endpoint] = status
 
     with capture_logs() as logs:
@@ -372,7 +447,7 @@ async def test_a_gone_browser_is_removed(push_service: _FakePushService, status:
 
 async def test_another_error_keeps_the_browser(push_service: _FakePushService) -> None:
     browser = _browser("busy")
-    await _subscribe(browser, sub="admin", scope="all")
+    await _subscribe(browser, sub="admin", login="admin")
     push_service.status[browser.endpoint] = 429
 
     await _step(_request())
@@ -384,7 +459,7 @@ async def test_the_rate_limit_holds_and_ends_with_one_summary(
     push_service: _FakePushService,
 ) -> None:
     admin = _browser("admin")
-    await _subscribe(admin, sub="admin", scope="all")
+    await _subscribe(admin, sub="admin", login="admin")
     send_module.reset_for_testing(window=0.3)
 
     started = time.monotonic()
@@ -406,7 +481,7 @@ async def test_a_burst_of_decisions_gives_one_decision_message(
     push_service: _FakePushService,
 ) -> None:
     admin = _browser("admin")
-    await _subscribe(admin, sub="admin", scope="all")
+    await _subscribe(admin, sub="admin", login="admin")
     send_module.reset_for_testing(window=0.3)
     requests = [_request() for _ in range(5)]
 
@@ -435,6 +510,66 @@ async def test_a_burst_of_decisions_gives_one_decision_message(
     assert messages[2]["body"] == "8 more approval messages. Open the approvals page."
 
 
+async def test_a_burst_in_one_tenant_gives_no_summary_in_another(
+    push_service: _FakePushService,
+) -> None:
+    """The same person, subscribed in two tenants: each tenant has its own limit."""
+    in_a, in_b = _browser("tenant-a"), _browser("tenant-b")
+    await _subscribe(in_a, sub="admin", login="admin")
+    await _subscribe(in_b, sub="admin", login="admin", tenant_id=_OTHER_TENANT)
+    send_module.reset_for_testing(window=0.3)
+
+    for _ in range(4):
+        await approval_queue.record_approval_step_event(
+            tenant_id=_TENANT, request=_request(), decision="pending", audit_id=uuid.uuid4()
+        )
+    await send_module.wait_for_sends_for_testing()
+
+    assert [m["title"] for m in push_service.to(in_a)] == [
+        "An approval waits",
+        "Approvals changed",
+    ]
+    assert push_service.to(in_b) == []
+
+    # The burst in tenant A does not hold back a request of tenant B.
+    await _step(_request(tenant_id=_OTHER_TENANT))
+    assert [m["title"] for m in push_service.to(in_b)] == ["An approval waits"]
+
+
+async def test_the_decision_arrives_after_a_delayed_waiting_message(
+    push_service: _FakePushService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    admin = _browser("admin")
+    await _subscribe(admin, sub="admin", login="admin")
+    real_subscriptions_for = send_module.subscriptions_for
+    calls = 0
+
+    async def _slow_first(db: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(0.2)
+        return await real_subscriptions_for(db, **kwargs)
+
+    monkeypatch.setattr(send_module, "subscriptions_for", _slow_first)
+    request = _request()
+
+    # The decision starts while the waiting message is still on its way.
+    await approval_queue.record_approval_step_event(
+        tenant_id=_TENANT, request=request, decision="pending", audit_id=uuid.uuid4()
+    )
+    request.status = "approved"
+    await approval_queue.record_approval_step_event(
+        tenant_id=_TENANT, request=request, decision="approved", audit_id=uuid.uuid4()
+    )
+    await send_module.wait_for_sends_for_testing()
+
+    assert [m["title"] for m in push_service.to(admin)] == [
+        "An approval waits",
+        "Approval approved",
+    ]
+
+
 def test_the_remembered_requests_stay_bounded() -> None:
     limit = send_module._RateLimit(30.0)
     ids = [uuid.uuid4() for _ in range(send_module._SHOWN_LIMIT + 1)]
@@ -457,7 +592,7 @@ def test_the_default_window_is_thirty_seconds() -> None:
 
 async def test_the_message_holds_no_request_content(push_service: _FakePushService) -> None:
     admin = _browser("admin")
-    await _subscribe(admin, sub="admin", scope="all")
+    await _subscribe(admin, sub="admin", login="admin")
     secret_value = "made-up-password-7f3a"
     request = _request(params={"vm": "vm-made-up-name", "password": secret_value})
 
@@ -478,7 +613,7 @@ async def test_an_endpoint_off_the_allowlist_gets_nothing(push_service: _FakePus
         private_key=ec.generate_private_key(ec.SECP256R1()),
         auth=os.urandom(16),
     )
-    await _subscribe(inside, sub="admin", scope="all")
+    await _subscribe(inside, sub="admin", login="admin")
 
     with capture_logs() as logs:
         await _step(_request())
@@ -490,7 +625,7 @@ async def test_an_endpoint_off_the_allowlist_gets_nothing(push_service: _FakePus
 
 async def test_a_failed_send_logs_no_endpoint_and_no_key(push_service: _FakePushService) -> None:
     browser = _browser("down")
-    await _subscribe(browser, sub="admin", scope="all")
+    await _subscribe(browser, sub="admin", login="admin")
     push_service.fail = True
 
     with capture_logs() as logs:
@@ -506,7 +641,7 @@ async def test_a_failed_send_logs_no_endpoint_and_no_key(push_service: _FakePush
 
 async def test_the_request_is_signed_with_the_push_key(push_service: _FakePushService) -> None:
     admin = _browser("admin", host="updates.push.services.mozilla.com")
-    await _subscribe(admin, sub="admin", scope="all")
+    await _subscribe(admin, sub="admin", login="admin")
 
     await _step(_request())
 
@@ -536,6 +671,25 @@ def test_vapid_token_has_no_subject_when_the_address_is_unknown() -> None:
     )
     token = header.split("t=", 1)[1].split(",", 1)[0]
     assert "sub" not in jwt.decode(token, options={"verify_signature": False})
+
+
+def test_vapid_audience_is_the_host_only() -> None:
+    header = vapid_authorization(
+        "https://user@fcm.googleapis.com:443/fcm/send/abc",
+        private_key=_PRIVATE_KEY,
+        subject=None,
+    )
+    token = header.split("t=", 1)[1].split(",", 1)[0]
+    claims = jwt.decode(token, options={"verify_signature": False})
+    assert claims["aud"] == "https://fcm.googleapis.com"
+
+
+def test_a_message_larger_than_one_record_is_refused() -> None:
+    browser = _browser("big")
+    auth = b64url_encode(browser.auth)
+    assert encrypt(b"x" * 3993, p256dh=browser.p256dh, auth=auth)
+    with pytest.raises(ValueError, match="larger than one record"):
+        encrypt(b"x" * 3994, p256dh=browser.p256dh, auth=auth)
 
 
 def test_encryption_matches_the_example_of_rfc_8291() -> None:
@@ -581,23 +735,56 @@ def _operator(**update: Any) -> Operator:
 
 
 @pytest.mark.parametrize(
-    ("update", "scope"),
+    ("update", "role"),
     [
-        ({"tenant_role": TenantRole.TENANT_ADMIN}, "all"),
-        ({"self_approver": True}, "all"),
-        ({"tenant_role": TenantRole.READ_ONLY, "approver": True}, "lower_risk"),
-        ({}, None),
-        ({"tenant_role": TenantRole.READ_ONLY}, None),
+        ({"tenant_role": TenantRole.TENANT_ADMIN}, "tenant_admin"),
+        ({"tenant_role": TenantRole.READ_ONLY, "approver": True}, "read_only"),
+        ({}, "operator"),
         ({"tenant_role": TenantRole.TENANT_ADMIN, "principal_kind": PrincipalKind.AGENT}, None),
         ({"approver": True, "principal_kind": PrincipalKind.SERVICE}, None),
+        ({"tenant_chosen": False}, None),
     ],
 )
-def test_approve_scope_follows_the_login_groups(update: dict[str, Any], scope: str | None) -> None:
-    assert approve_scope_for(_operator(**update)) == scope
+def test_login_facts_follow_the_login(update: dict[str, Any], role: str | None) -> None:
+    assert login_facts_for(_operator(**update)).tenant_role == role
 
 
-def test_approve_scope_of_no_login_is_none() -> None:
-    assert approve_scope_for(None) is None
+def test_login_facts_keep_the_flags() -> None:
+    facts = login_facts_for(_operator(approver=True, self_approver=True, platform_admin=True))
+    assert (facts.approver, facts.self_approver, facts.platform_admin) == (True, True, True)
+
+
+def test_login_facts_of_no_login_are_empty() -> None:
+    assert login_facts_for(None).tenant_role is None
+
+
+async def test_a_sign_in_reads_the_login_facts_again(push_service: _FakePushService) -> None:
+    """At a console sign-in the rows of that tenant get the new facts and time."""
+    old = datetime.now(UTC) - timedelta(days=8)
+    here, there = _browser("here"), _browser("there")
+    await _subscribe(here, sub="person", login="read_only", read_at=old)
+    await _subscribe(there, sub="person", login="read_only", tenant_id=_OTHER_TENANT, read_at=old)
+
+    await refresh_at_sign_in(_operator(tenant_role=TenantRole.TENANT_ADMIN))
+
+    rows = {row.endpoint: row for row in await _rows()}
+    assert rows[here.endpoint].tenant_role == "tenant_admin"
+    assert _utc(rows[here.endpoint].facts_read_at) > old + timedelta(days=7)
+    assert rows[there.endpoint].tenant_role == "read_only"
+    assert _utc(rows[there.endpoint].facts_read_at) == old
+
+
+async def test_a_sign_in_without_a_chosen_tenant_writes_nothing(
+    push_service: _FakePushService,
+) -> None:
+    old = datetime.now(UTC) - timedelta(days=8)
+    await _subscribe(_browser("here"), sub="person", login="read_only", read_at=old)
+
+    await refresh_at_sign_in(_operator(tenant_role=TenantRole.TENANT_ADMIN, tenant_chosen=False))
+
+    assert [(row.tenant_role, _utc(row.facts_read_at)) for row in await _rows()] == [
+        ("read_only", old)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +814,7 @@ async def test_the_message_goes_out_after_the_audit_row_committed(
     push_service: _FakePushService,
 ) -> None:
     admin = _browser("admin")
-    await _subscribe(admin, sub="admin", scope="all")
+    await _subscribe(admin, sub="admin", login="admin")
     seen_audit_rows: list[int] = []
 
     async def _check_audit(_: httpx.Request) -> None:
@@ -651,7 +838,7 @@ async def test_the_message_goes_out_after_the_audit_row_committed(
 async def test_a_failed_commit_sends_nothing(
     push_service: _FakePushService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await _subscribe(_browser("admin"), sub="admin", scope="all")
+    await _subscribe(_browser("admin"), sub="admin", login="admin")
     real_create = approval_queue.create_pending_request
 
     async def _create_then_fail_commit(session: Any, **kwargs: Any) -> ApprovalRequest:

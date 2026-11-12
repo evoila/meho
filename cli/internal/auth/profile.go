@@ -52,14 +52,16 @@ func ProfileFrom(ctx context.Context) string {
 // KeyForProfile returns the (service, user) addressing for one profile
 // on one backplane. The default profile uses the same key as
 // KeyForBackplane. A named profile adds a "#profile=<name>" suffix to
-// the user, so every profile has its own slot in the same keyring or
-// the same credentials file (mode 0600, same folder).
+// the service, so every profile has its own slot in the same keyring or
+// the same credentials file (mode 0600, same folder). The suffix is on
+// the service, not on the URL: a URL can hold a '#' itself, so a suffix
+// there could make two (URL, profile) pairs share one slot.
 func KeyForProfile(backplaneURL, profile string) (service, user string) {
 	service, user = KeyForBackplane(backplaneURL)
 	if profile == "" || profile == DefaultProfile {
 		return service, user
 	}
-	return service, user + "#profile=" + profile
+	return service + "#profile=" + profile, user
 }
 
 // KeyForContext is KeyForProfile for the profile that ctx carries.

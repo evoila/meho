@@ -58,16 +58,34 @@ func TestKeyForProfile(t *testing.T) {
 			t.Errorf("profile %q key = (%q, %q); want the pre-profile key (%q, %q)", p, svc, user, defSvc, defUser)
 		}
 	}
-	_, a := KeyForProfile(url, "initiator")
-	_, b := KeyForProfile(url, "approver")
-	if a == b || a == defUser || b == defUser {
-		t.Errorf("keys must differ: default=%q initiator=%q approver=%q", defUser, a, b)
+	a, _ := KeyForProfile(url, "initiator")
+	b, bUser := KeyForProfile(url, "approver")
+	if a == b || a == defSvc || b == defSvc {
+		t.Errorf("keys must differ: default=%q initiator=%q approver=%q", defSvc, a, b)
 	}
-	if ctxSvc, ctxUser := KeyForContext(WithProfile(context.Background(), "approver"), url); ctxSvc != defSvc || ctxUser != b {
-		t.Errorf("KeyForContext = (%q, %q); want (%q, %q)", ctxSvc, ctxUser, defSvc, b)
+	if ctxSvc, ctxUser := KeyForContext(WithProfile(context.Background(), "approver"), url); ctxSvc != b || ctxUser != bUser {
+		t.Errorf("KeyForContext = (%q, %q); want (%q, %q)", ctxSvc, ctxUser, b, bUser)
 	}
 	if _, u := KeyForContext(context.Background(), url); u != defUser {
 		t.Errorf("a context without a profile must use the default key; got %q", u)
+	}
+}
+
+// A backplane URL can hold a query and a fragment. No (URL, profile)
+// pair may share a slot with another pair, also when the URL itself
+// ends in "#profile=<name>".
+func TestKeyForProfileWithQueryOrFragmentInTheURL(t *testing.T) {
+	pairs := [][2][2]string{
+		{{"https://h?x#profile=a", DefaultProfile}, {"https://h?x", "a"}},
+		{{"https://h#profile=a", DefaultProfile}, {"https://h", "a"}},
+		{{"https://h?x#profile=a", "b"}, {"https://h?x", "a"}},
+	}
+	for _, p := range pairs {
+		s1, u1 := KeyForProfile(p[0][0], p[0][1])
+		s2, u2 := KeyForProfile(p[1][0], p[1][1])
+		if s1 == s2 && u1 == u2 {
+			t.Errorf("%v and %v share the slot (%q, %q)", p[0], p[1], s1, u1)
+		}
 	}
 }
 

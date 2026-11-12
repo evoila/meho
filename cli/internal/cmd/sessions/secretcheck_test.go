@@ -167,6 +167,34 @@ func TestCheckHoldsBackABINDSecretThatRunsOverLines(t *testing.T) {
 	}
 }
 
+func TestCheckHoldsBackAnUnfinishedBINDSecret(t *testing.T) {
+	// The closing quote is not there yet, so the finder cannot see the value.
+	cases := map[string]string{
+		"secret \"bWFkZVVwU2VjcmV0VmFsdWU=\n":                    reasonPossible,
+		"secret /* key */ \"bWFkZVVwU2VjcmV0VmFsdWU=\n":          reasonPossible,
+		"secret /* a */ /* b */\"bWFkZVVwU2VjcmV0VmFsdWU=\n":     reasonPossible,
+		"# cookie-secret /* key */ \"bWFkZVVwU2VjcmV0VmFsdWU=\n": reasonPossible,
+		"secret\n\"bWFkZVVwU2VjcmV0VmFsdWU=\n":                   reasonBindLines,
+		"secret // the key\n\"bWFkZVVwU2VjcmV0VmFsdWU=\n":        reasonBindLines,
+		"secret /* the\nkey */ \"bWFkZVVwU2VjcmV0VmFsdWU=\n":     reasonBindLines,
+	}
+	for text, reason := range cases {
+		got := checkFile([]byte(text))
+		if !slices.Contains(got.Unsure, reason) {
+			t.Errorf("%q: unsure = %v", text, got.Unsure)
+		}
+	}
+	// A comment that hides the quote, or a closed value, is no open value.
+	for _, text := range []string{
+		"secret # \"not a value\n",
+		"secret /* key */ \"bWFkZVVwU2VjcmV0VmFsdWU=\";\n",
+	} {
+		if got := checkFile([]byte(text)); len(got.Unsure) != 0 {
+			t.Errorf("%q: unsure = %v", text, got.Unsure)
+		}
+	}
+}
+
 func TestCheckIsSureAboutABINDSecretOnOneLine(t *testing.T) {
 	text := "key \"k\" {\n  secret /* key */ \"bWFkZVVwU2VjcmV0VmFsdWU=\";\n};\nthe secret is rotated\n"
 	got := checkFile([]byte(text))

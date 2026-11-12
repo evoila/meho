@@ -85,9 +85,9 @@ var (
 		`(?i)(?:^|[_-])(?:password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key` +
 			`|access[_-]?key|secret[_-]?key|private[_-]?key|token)$`)
 	notAValue = regexp.MustCompile(`^(?:\[REDACTED|\$|<|\{|\*{3})`)
-	// A BIND secret in quotes that does not end on this line. The finder
-	// reads one line at a time and cannot see the rest of the value.
-	bindOpenValue = regexp.MustCompile(`(?i)(?:^|[\s{};!/"#])(?:cookie-)?secret\s*"[A-Za-z0-9+/=\s]*$`)
+	// A quoted BIND value that runs to the end of the text: its closing
+	// quote is not there yet. See bindValueOpen.
+	bindOpenQuoted = regexp.MustCompile(`^"[A-Za-z0-9+/=\s]*$`)
 
 	keyMark = regexp.MustCompile(`-----(BEGIN|END) (?:[A-Z0-9]+ )*PRIVATE KEY-----`)
 )
@@ -162,7 +162,7 @@ func replaceKnown(text string) (string, int) {
 }
 
 func hasUnsureSecret(text string) bool {
-	if bindOpenValue.MatchString(text) {
+	if bindValueOpen(text) {
 		return true
 	}
 	for _, m := range unsureSecret.FindAllStringSubmatch(text, -1) {
@@ -321,6 +321,48 @@ func bindAcrossLines(text string) bool {
 	return false
 }
 
+// bindValueOpen says whether text ends inside the quoted value of a BIND
+// secret: the keyword, then spaces and comments, then a quote that does not
+// close. The finder needs the closing quote, so it cannot see that value
+// yet. An open session can grow the rest of it later.
+func bindValueOpen(text string) bool {
+	for _, kw := range bindKeyword.FindAllStringIndex(text, -1) {
+		start, end := kw[0], kw[1]
+		if start > 0 && !isBindBoundary(text[start-1]) || end < len(text) && !isBindBoundary(text[end]) {
+			continue
+		}
+		if bindOpenQuoted.MatchString(text[skipBindGap(text, end):]) {
+			return true
+		}
+	}
+	return false
+}
+
+// skipBindGap skips the spaces and comments after pos. An unclosed
+// comment runs to the end of the text.
+func skipBindGap(text string, pos int) int {
+	for {
+		pos = skipSpace(text, pos, len(text))
+		rest := text[pos:]
+		var gap int
+		switch {
+		case strings.HasPrefix(rest, "/*"):
+			gap = strings.Index(rest[2:], "*/")
+			if gap >= 0 {
+				gap += 4
+			}
+		case strings.HasPrefix(rest, "//"), strings.HasPrefix(rest, "#"):
+			gap = strings.IndexByte(rest, '\n')
+		default:
+			return pos
+		}
+		if gap < 0 {
+			return len(text)
+		}
+		pos += gap
+	}
+}
+
 // checkFile runs the secret check on the bytes of one file.
 func checkFile(data []byte) checkedFile {
 	if !utf8.Valid(data) {
@@ -342,7 +384,7 @@ func checkFile(data []byte) checkedFile {
 	if c.unsure {
 		unsure = append(unsure, reasonPossible)
 	}
-	if bindAcrossLines(c.plain.String()) {
+	if plain := c.plain.String(); bindAcrossLines(plain) || bindValueOpen(plain) {
 		unsure = append(unsure, reasonBindLines)
 	}
 	if c.insideKey {

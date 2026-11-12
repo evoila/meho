@@ -158,7 +158,7 @@ meho sessions push
   name that looks like a secret still has a value (for example
   `"password": "..."`), when a private key has no `END` line, or when a
   BIND secret runs over more than one line (for example `secret` on one
-  line and the value on the next).
+  line and the value on the next) or has no closing quote yet.
 - The upload goes to the MEHO of your `meho login`, with your normal
   login. It needs no extra key. MEHO stores it in your tenant.
 - `push` sends the transcript `<session-id>.jsonl` and the files of the

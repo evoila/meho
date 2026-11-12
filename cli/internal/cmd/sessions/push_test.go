@@ -628,3 +628,23 @@ func TestPushHoldsBackABINDSecretOverLinesInATextFile(t *testing.T) {
 		t.Fatalf("uploads %d; row = %+v", fake.count(), row)
 	}
 }
+
+func TestPushHoldsBackAnUnfinishedBINDSecretInAnOpenSession(t *testing.T) {
+	fake, srv, outbox := setup(t, opsFolder)
+	dir := writeSession(t, outbox, "s26", userLine(opsFolder, "hello"))
+	notes := filepath.Join(dir, "s26", "named.conf")
+	if err := os.WriteFile(notes, []byte("secret /* key */ \"bWFkZVVwU2VjcmV0VmFsdWU=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := push(t, srv, false)
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	row := report.Sessions[0]
+	if fake.count() != 0 || row.Result != resultHeldBack || !strings.Contains(row.Reason, "s26/named.conf") {
+		t.Fatalf("uploads %d; row = %+v", fake.count(), row)
+	}
+	if strings.Contains(row.Reason, "bWFkZVVw") {
+		t.Fatal("the reason shows the value")
+	}
+}

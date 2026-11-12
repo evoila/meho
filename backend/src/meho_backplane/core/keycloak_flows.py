@@ -41,7 +41,7 @@ a client bound to a flow of the realm file has its own ``acr.loa.map``.
 when a client of the realm file other than ``meho-web`` binds it. A login
 flow of the console client (such as the passkey touch flow) is never made or
 bound here; it has its own explicit step. :func:`bound_clients` names the
-clients that bind a flow.
+clients whose flow this stage binds.
 
 :func:`flow_overrides` turns a client's ``authenticationFlowBindingOverrides``
 from the realm file (flow ids of the file) into flow ids of the realm.
@@ -489,8 +489,16 @@ async def ensure_levels(
 
 
 def bound_clients(clients: Sequence[Mapping[str, Any]]) -> list[str]:
-    """The ``clientId`` of every client of the realm file that binds a login flow."""
-    return [client["clientId"] for client in clients if client.get(OVERRIDES)]
+    """The ``clientId`` of every client of the realm file whose login flow this stage binds.
+
+    ``meho-web`` is left out: the stage never binds its flow (:func:`stage_flows`),
+    so its own ``acr.loa.map`` does not stop the stage.
+    """
+    return [
+        client["clientId"]
+        for client in clients
+        if client.get(OVERRIDES) and client.get("clientId") != _WEB_CLIENT
+    ]
 
 
 def stage_flows(

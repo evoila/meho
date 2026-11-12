@@ -1227,6 +1227,19 @@ async def test_an_approval_client_with_its_own_level_map_stops_the_stage() -> No
     assert kc.realm_attributes == before
 
 
+async def test_a_console_client_with_its_own_level_map_does_not_stop_the_stage() -> None:
+    """The stage binds no flow on ``meho-web``, so its own ``acr.loa.map`` is not checked."""
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(_realm_as_imported())
+    attributes = kc.clients["meho-web"].setdefault("attributes", {})
+    attributes["acr.loa.map"] = '{"gold":1}'
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    assert json.loads(kc.realm_attributes["acr.loa.map"])["meho-approve"] == 2
+    assert kc.clients["meho-web"]["attributes"]["acr.loa.map"] == '{"gold":1}'
+
+
 def test_the_stage_makes_no_flow_for_the_console_client(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
@@ -1253,7 +1266,7 @@ def test_the_stage_makes_no_flow_for_the_console_client(
     kept = stage_flows(flows, clients)
 
     assert [flow["alias"] for flow in kept] == ["approve", "touch - level 3"]
-    assert bound_clients(clients) == ["meho-cli-approve", "meho-web"]
+    assert bound_clients(clients) == ["meho-cli-approve"]
     out = capfd.readouterr().out
     assert "login flow touch: not made here" in out
     assert "login flow free: not made here" in out

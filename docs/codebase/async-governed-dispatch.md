@@ -231,8 +231,14 @@ state. The console cannot use `POST /api/v1/operations/call` with
 - **Who reads it.** Only the person who started the run, and only a run
   with origin `direct`. Any other run id is 404.
 - **One click, one run.** While the view has `data-run-lock`,
-  `operation-run-lock.js` keeps the Run button disabled. It enables the
-  button again when a final view arrives.
+  `operation-run-lock.js` keeps the Run button disabled, and stops a
+  second request from the Run form. It enables the button again when a
+  final view arrives.
+- **Form errors show.** htmx does not swap an error answer by default.
+  `operation-run-lock.js` turns the swap on for an HTML answer with
+  status 400 into the result region, from the Run form or from the asking
+  view. The error view has no `hx-get`, so the asking stops and Run is
+  enabled again.
 - **Notice.** The running view carries `data-meho-watch-run`, so the
   "the run has ended" notice (`run-notices.js`, see
   [`approvals.md`](approvals.md)) tells the person when it ends, also after

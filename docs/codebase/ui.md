@@ -927,7 +927,9 @@ button answers at once".
   `outerHTML`) and carries `data-run-lock` and `data-meho-watch-run`. A final
   view has neither of the `hx-*` attributes, so the asking stops.
 - `ui/static/src/app/operation-run-lock.js` (loaded by `base.html`) keeps the
-  Run button disabled while the region holds a `data-run-lock` element.
+  Run button disabled while the region holds a `data-run-lock` element,
+  stops a second Run meanwhile, and lets a 400 form error (HTML) replace
+  the result view, also while the view asks again.
 - The result, error and approval link use the unchanged
   `operations/_result.html`. A call with `reveal_secret: true` still runs
   inline.

@@ -117,3 +117,62 @@ func TestCheckGrowsOnlyAtTheEnd(t *testing.T) {
 		t.Fatalf("%q is no prefix of %q", a.Content, b.Content)
 	}
 }
+
+func TestCheckReplacesBINDKeySecrets(t *testing.T) {
+	cases := []string{
+		`key "rndc-key" { algorithm hmac-sha256; secret "bWFkZVVwU2VjcmV0VmFsdWU=" ; };`,
+		`options { cookie-secret "0123456789abcdef0123456789abcdef"; };`,
+		`secret /* the key */ bWFkZVVwU2VjcmV0VmFsdWU=;`,
+		`# secret "bWFkZVVwU2VjcmV0VmFsdWU=";`,
+	}
+	for _, text := range cases {
+		got := checkFile([]byte(text + "\n"))
+		if strings.Contains(string(got.Content), "bWFkZVVwU2VjcmV0VmFsdWU=") ||
+			strings.Contains(string(got.Content), "0123456789abcdef0123456789abcdef") ||
+			!strings.Contains(string(got.Content), "[REDACTED:bind_key_secret]") || len(got.Unsure) != 0 {
+			t.Errorf("%q: got %q, unsure %v", text, got.Content, got.Unsure)
+		}
+	}
+	// The keyword in a string and plain prose are left alone.
+	for _, text := range []string{
+		`key "transfer-secret" { algorithm hmac-sha256; };`,
+		"the secret is in the vault",
+	} {
+		got := checkFile([]byte(text + "\n"))
+		if string(got.Content) != text+"\n" || len(got.Unsure) != 0 {
+			t.Errorf("%q changed: %q, unsure %v", text, got.Content, got.Unsure)
+		}
+	}
+}
+
+func TestCheckHoldsBackABINDSecretOverTwoLines(t *testing.T) {
+	got := checkFile([]byte("secret \"bWFkZVVw\n  U2VjcmV0VmFsdWU=\";\n"))
+	if len(got.Unsure) != 1 || got.Unsure[0] != reasonPossible {
+		t.Fatalf("unsure = %v", got.Unsure)
+	}
+}
+
+func TestCheckReplacesEverySecretPartOfAURL(t *testing.T) {
+	cases := map[string]string{
+		"https://madeUpToken99@example.com/repo.git":                            "madeUpToken99",
+		"https://example.com/f?%74oken=madeUpValue42":                           "madeUpValue42",
+		"https://example.com/f?accessToken=madeUpValue43":                       "madeUpValue43",
+		"https://example.com/f?a=1&amp;sig=madeUpValue44":                       "madeUpValue44",
+		"see 'https://example.com/a?sig=madeUpValue45','https://example.com/b'": "madeUpValue45",
+	}
+	for text, secret := range cases {
+		got := checkFile([]byte(text + "\n"))
+		if strings.Contains(string(got.Content), secret) || !strings.Contains(string(got.Content), "[REDACTED:url_secret]") {
+			t.Errorf("%q: got %q", text, got.Content)
+		}
+		if !strings.Contains(string(got.Content), "example.com/") {
+			t.Errorf("%q: the host is gone: %q", text, got.Content)
+		}
+	}
+	// A link with no secret part, and a scheme glued to a word, stay.
+	for _, text := range []string{"https://example.com/f?expires=60", "xhttps://a:b"} {
+		if got := checkFile([]byte(text + "\n")); string(got.Content) != text+"\n" {
+			t.Errorf("%q changed: %q", text, got.Content)
+		}
+	}
+}

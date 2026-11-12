@@ -32,9 +32,12 @@ import (
 
 // secretPattern is one known secret shape. When the regexp has a group
 // named "s", only that group is replaced, and the rest of the match stays.
+// A pattern with find is code, not a regexp: it returns the spans to
+// replace.
 type secretPattern struct {
 	name string
 	re   *regexp.Regexp
+	find func(text string) [][2]int
 	// skip says that a match is no secret (for example a marker).
 	skip func(match string) bool
 }
@@ -54,17 +57,13 @@ var (
 		{name: "bearer_token", re: regexp.MustCompile(`(?i)\bbearer\s+` + valueChars + `{8,}`)},
 		{name: "jwt", re: regexp.MustCompile(
 			`\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}`)},
-		{name: "url_secret", re: regexp.MustCompile(
-			`[A-Za-z][A-Za-z0-9+.\-]{0,31}://(?P<s>[^\s"'<>/@:]+:[^\s"'<>/@]+)@`)},
-		{name: "url_secret", re: regexp.MustCompile(
-			`(?i)[?&](?:x-amz-signature|x-amz-credential|x-amz-security-token|sig|x-goog-signature` +
-				`|x-goog-credential|signature|token|access_token|secret|password|credential|api_key|apikey)` +
-				`=(?P<s>[^&\s"'#<>]+)`)},
+		{name: "url_secret", find: urlSecretSpans},
 		{name: "password_hash", re: regexp.MustCompile(
 			`(?:^|[^A-Za-z0-9$])(?P<s>\$(?:1|2[abxy]|5|6|7|y|gy|sha1|argon2(?:id|i|d))\$` +
 				`(?:[^\s$:'"]+\$){1,4}[./A-Za-z0-9+=]{8,})`)},
 		{name: "ceph_key", re: regexp.MustCompile(
 			`(?i:key)['"]?\s*[=:]\s*['"]?AQ[A-Za-z0-9+/]{30,}={0,2}['"]?`)},
+		{name: "bind_key_secret", find: bindSecretSpans},
 		{name: "github_token", re: regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})`)},
 		{name: "aws_access_key", re: regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`)},
 		{name: "api_key", re: regexp.MustCompile(
@@ -84,6 +83,9 @@ var (
 		`(?i)(?:^|[_-])(?:password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key` +
 			`|access[_-]?key|secret[_-]?key|private[_-]?key|token)$`)
 	notAValue = regexp.MustCompile(`^(?:\[REDACTED|\$|<|\{|\*{3})`)
+	// A BIND secret in quotes that does not end on this line. The finder
+	// reads one line at a time and cannot see the rest of the value.
+	bindOpenValue = regexp.MustCompile(`(?i)(?:^|[\s{};!/"#])(?:cookie-)?secret\s*"[A-Za-z0-9+/=\s]*$`)
 
 	keyMark = regexp.MustCompile(`-----(BEGIN|END) (?:[A-Z0-9]+ )*PRIVATE KEY-----`)
 )
@@ -106,19 +108,31 @@ type checkedFile struct {
 	Unsure []string
 }
 
-func (p secretPattern) replace(text string) (string, int) {
-	matches := p.re.FindAllStringSubmatchIndex(text, -1)
-	if matches == nil {
-		return text, 0
+func (p secretPattern) spans(text string) [][2]int {
+	if p.find != nil {
+		return p.find(text)
 	}
 	group := p.re.SubexpIndex("s")
-	var out strings.Builder
-	last, count := 0, 0
-	for _, m := range matches {
+	var spans [][2]int
+	for _, m := range p.re.FindAllStringSubmatchIndex(text, -1) {
 		start, end := m[0], m[1]
 		if group > 0 && m[2*group] >= 0 {
 			start, end = m[2*group], m[2*group+1]
 		}
+		spans = append(spans, [2]int{start, end})
+	}
+	return spans
+}
+
+func (p secretPattern) replace(text string) (string, int) {
+	spans := p.spans(text)
+	if spans == nil {
+		return text, 0
+	}
+	var out strings.Builder
+	last, count := 0, 0
+	for _, sp := range spans {
+		start, end := sp[0], sp[1]
 		if p.skip != nil && p.skip(text[start:end]) {
 			continue
 		}
@@ -145,6 +159,9 @@ func replaceKnown(text string) (string, int) {
 }
 
 func hasUnsureSecret(text string) bool {
+	if bindOpenValue.MatchString(text) {
+		return true
+	}
 	for _, m := range unsureSecret.FindAllStringSubmatch(text, -1) {
 		if !notAValue.MatchString(m[1]) {
 			return true

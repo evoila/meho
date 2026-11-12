@@ -232,6 +232,12 @@ target 5.1 explicitly — the cmdlet surface is stable across Windows Server
     approver sees its redacted summary (program path, argument size,
     env-var names) at approval time instead.
 
+    With the backplane switch `PREVIEW_TYPED_WRITES` on (off by default),
+    every write previews, also one that runs without approval. A
+    credential operation then previews only when it has its own safe
+    preview, and it shows only that plan, never the params.
+    `guest.program.run` has none of its own, so it stays `unavailable`.
+
 ## Safety tiers of the write operations
 
 Every operation carries a `safety_level`, set when the connector is

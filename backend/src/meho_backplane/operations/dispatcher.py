@@ -306,6 +306,7 @@ from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundE
 from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
+from meho_backplane.no_store import mark_answer_holds_secret
 from meho_backplane.operations._audit import (
     AuditCommitError,
     audit_rejection_safe,
@@ -1086,7 +1087,9 @@ def _protect_secret_values(
     are put back as the connector returned them (:func:`reveal_hidden_values`),
     and the redaction of the other fields stays. An operation that makes a
     new credential (*secret_view* is ``None``) returns the redacted answer,
-    so the caller gets the credential it asked for.
+    so the caller gets the credential it asked for. A revealed answer is
+    marked (:func:`~meho_backplane.no_store.mark_answer_holds_secret`), so
+    the HTTP answer that carries it says ``Cache-Control: no-store``.
 
     ``raw`` -- the copy the audit row stores as ``raw_payload`` -- gets a
     keyed fingerprint in place of every value the default view hides, whether
@@ -1108,6 +1111,8 @@ def _protect_secret_values(
         caller = shown
     elif secret_view == "revealed":
         caller = reveal_hidden_values(redaction.raw, redacted, shown)
+        # The answer carries the values: no browser or proxy may keep it.
+        mark_answer_holds_secret()
     else:
         caller = redacted
     return redaction.model_copy(

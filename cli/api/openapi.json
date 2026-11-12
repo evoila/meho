@@ -9128,7 +9128,7 @@
           "agents"
         ],
         "summary": "Create Agent",
-        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name is.",
+        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name and the starting grant pick are. A missing pick\n(while the switch is not ``off`` and the agent has no grant) or an\nunknown target name returns 422 and writes nothing. A pick that adds\ngrants is for a person only, the same rule as the grant routes: an\nagent, service or runner login gets 403 ``human_principal_required``.",
         "operationId": "create_agent_api_v1_agents_post",
         "parameters": [
           {
@@ -9418,7 +9418,7 @@
           "agent-principals"
         ],
         "summary": "Register Agent Principal",
-        "description": "Register a new agent principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. Returns 409 on duplicate ``(tenant, name)``.\nReturns 503 when Keycloak admin is not configured.",
+        "description": "Register a new agent principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. Returns 409 on duplicate ``(tenant, name)``.\nReturns 503 when Keycloak admin is not configured. Returns 422 when\nthe starting grant pick is missing (``starting_grants_required``) or\nnames a target that does not resolve; nothing is created then.",
         "operationId": "register_agent_principal_api_v1_agent_principals_post",
         "parameters": [
           {
@@ -25782,6 +25782,10 @@
             "type": "boolean",
             "title": "Enabled",
             "default": true
+          },
+          "starting_grants": {
+            "$ref": "#/components/schemas/StartingGrants",
+            "nullable": true
           }
         },
         "additionalProperties": false,
@@ -26169,6 +26173,10 @@
             "type": "string",
             "nullable": true,
             "title": "Owner Sub"
+          },
+          "starting_grants": {
+            "$ref": "#/components/schemas/StartingGrants",
+            "nullable": true
           }
         },
         "additionalProperties": false,
@@ -41592,6 +41600,40 @@
         ],
         "title": "StartRunRequest",
         "description": "Request body for ``meho_runbook_start`` -- begin a new run on a template.\n\n:attr:`template_slug` references a *published* runbook template; the\nservice layer (G12.3-T3) resolves it to a pinned ``(slug, version)``\nat start time so later template edits cannot alter this run's step\nlist (per Initiative #1198 deprecation interplay rules).\n:attr:`target` is the run's subject (the host, the cluster, the\ncert thumbprint); :attr:`params` is the substitution context for\n``${run.params.X}`` and may be empty.\n\n:attr:`work_ref` is the optional opaque external change-ticket\nreference (a GitHub issue ``\"gh:evoila/meho#9\"``, a Jira key, a CR\nid) the run executes under. It is pinned on the run row at start and\nbound onto the shared ``work_ref_var`` ContextVar around each step's\ndispatch so every ``operation_call`` step's audit row inherits it\n(work_ref I3-T1 #1661). ``None`` when the run is started without a\nchange ticket."
+      },
+      "StartingGrantSet": {
+        "type": "string",
+        "enum": [
+          "none",
+          "read-everything",
+          "read-targets"
+        ],
+        "title": "StartingGrantSet",
+        "description": "The three starting grant sets a person can pick."
+      },
+      "StartingGrants": {
+        "properties": {
+          "set": {
+            "$ref": "#/components/schemas/StartingGrantSet",
+            "description": "'none': the agent runs nothing until an admin adds a grant. 'read-everything': safe operations run at once on every target; everything else waits for a person's approval. 'read-targets': the same, but only on the targets in 'targets'."
+          },
+          "targets": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Targets",
+            "description": "Target names. Only for 'read-targets', and required there."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "set"
+        ],
+        "title": "StartingGrants",
+        "description": "The first grants of a new agent, picked when it is registered or defined."
       },
       "StatusFilterValue": {
         "type": "string",

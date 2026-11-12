@@ -171,8 +171,49 @@
       </div>
 
       {# ---------- event fields ---------- #}
-      <div x-show="kind === 'event'" x-cloak class="space-y-2 rounded-box border border-base-300 p-3">
+      <div x-show="kind === 'event'" x-cloak class="space-y-2 rounded-box border border-base-300 p-3" x-data="{ startOn: 'sensor' }">
         <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Start on</span>
+          <select name="start_on" class="select select-bordered select-sm w-full" x-model="startOn" aria-label="Start on">
+            <option value="sensor">Sensor</option>
+            <option value="dashboard">Dashboard</option>
+            <option value="custom">Custom filter</option>
+          </select>
+        </label>
+        {% for pick_kind, pick_label in (("sensor", "Sensor"), ("dashboard", "Dashboard")) %}
+        <div x-show="startOn === '{{ pick_kind }}'" x-cloak class="space-y-2">
+          <label class="flex flex-col gap-1">
+            <span class="text-sm font-medium">{{ pick_label }}</span>
+            <select
+              name="check_source_ref"
+              class="select select-bordered select-sm w-full"
+              x-bind:disabled="startOn !== '{{ pick_kind }}'"
+              aria-label="{{ pick_label }}"
+            >
+              <option value="any" selected>Any {{ pick_label|lower }}</option>
+              {% for choice in check_choices[pick_kind] %}
+                <option value="{{ choice.id }}">{{ choice.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="label cursor-pointer justify-start gap-2">
+            <input
+              type="checkbox"
+              name="only_worsening"
+              value="true"
+              class="checkbox checkbox-sm"
+              x-bind:disabled="startOn !== '{{ pick_kind }}'"
+            />
+            <span class="text-sm">Only when it gets worse</span>
+          </label>
+        </div>
+        {% endfor %}
+        {% if not check_events_on %}
+        <div x-show="startOn !== 'custom'" x-cloak role="alert" class="alert alert-warning text-xs">
+          <span>{{ check_events_off_notice }}</span>
+        </div>
+        {% endif %}
+        <label class="flex flex-col gap-1" x-show="startOn === 'custom'" x-cloak>
           <span class="text-sm font-medium">Event filter <span class="opacity-60 font-normal">(JSON object)</span></span>
           <textarea
             name="event_filter"

@@ -24,7 +24,9 @@ shows each case. In short (#3325):
   rule: a grant can let `caution` and `dangerous` changes run; without
   one they wait. A person can also approve the operation list of one
   automation run once ([run-approvals.md](run-approvals.md)).
-  `destructive` always waits for a person.
+  `destructive` always waits for a person. The one exception is a test
+  install in sandbox mode: there, a delete grant made in the web console
+  can cover a delete (see "Sandbox mode" below).
 
 A person approves or rejects a waiting request on **REST, the `meho`
 command line and the web interface** only. Approve and reject have no
@@ -1113,8 +1115,11 @@ decides: not the requester, a person in a chosen tenant, and an admin
 - The park step (`create_pending_request`) sets it for a group or role
   change in MEHO's own login realm (`grant_facts`, see above). A request
   outside the login realm keeps the usual rules.
+- An operation registered with `register_rights_change_op` is a rights
+  change on every request. `policy.classify` (a change of a category,
+  labels or the "always wait" mark, see
+  [policy-classification.md](policy-classification.md)) is one.
 - Any other caller passes `rights_change=True` to `create_pending_request`.
-  The category and label edits and the policy file import use this.
 
 A request parked before the column existed has no stored mark. It counts
 through the same `is_rights_change` check, so an upgrade weakens nothing.
@@ -2506,7 +2511,8 @@ description, made stricter by operator overrides
 overrides of risk level and approval"). `lookup_descriptor` applies the
 overrides, so the approval gate, the preview and the parked request all
 use the same values. A destructive operation always waits for approval,
-whatever the overrides say.
+whatever the overrides say. The one exception is a test install in
+sandbox mode (see "Sandbox mode" below).
 
 Turning approval off for an operation is the one loosening edit. It
 needs `platform_admin`, a written reason, and a person. This holds for

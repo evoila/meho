@@ -27459,7 +27459,7 @@
           "legacy_request"
         ],
         "title": "AuditEventClass",
-        "description": "What kind of accountable event one ``audit_log`` row records (#3733).\n\nThe set is closed. The database CHECK ``ck_audit_log_event_class``\nrejects any other value, so a new class needs a code change and a\nmigration together.\n\n* :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation\n  (success or failure), or a MEHO-internal action such as a topology\n  edit, a retention sweep or a reaper.\n* :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:\n  a policy deny, a rate-limit refusal, or a park for approval.\n* :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,\n  rejected, or let an approval request expire, or its sender withdrew\n  it (#5717). The operation did not run on any of these rows.\n* :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a\n  refresh-token replay or a broken satellite effect chain.\n* :attr:`CONFIG_CHANGE` -- an operator changed the settings of\n  operations, and none of them ran. Two writers: an edit of one\n  operation with ``meho_connector_edit_op`` (turned it on or off, or\n  changed its risk level, approval rule, description or guidance,\n  #5791), and a tenant's own on or off switch with\n  ``meho_connector_tenant_setting``, for one operation or a whole\n  group (#5864). The row's ``payload[\"op_id\"]`` names the edited\n  operation; a group switch names ``payload[\"group_key\"]`` instead.\n* :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every\n  row written before migration ``0106`` reads as this class; it is never\n  guessed from ``method`` / ``path``. The REST and MCP request wrapper\n  rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;\n  with it on they write a decision or execution class, or no row\n  (#3757, :mod:`meho_backplane.audit_cutover`)."
+        "description": "What kind of accountable event one ``audit_log`` row records (#3733).\n\nThe set is closed. The database CHECK ``ck_audit_log_event_class``\nrejects any other value, so a new class needs a code change and a\nmigration together.\n\n* :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation\n  (success or failure), or a MEHO-internal action such as a topology\n  edit, a retention sweep or a reaper.\n* :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:\n  a policy deny, a rate-limit refusal, or a park for approval.\n* :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,\n  rejected, or let an approval request expire, or its sender withdrew\n  it (#5717). The operation did not run on any of these rows.\n* :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a\n  refresh-token replay or a broken satellite effect chain. The\n  ``mcp.session_open`` row of a new MCP session has this class too.\n* :attr:`CONFIG_CHANGE` -- an operator changed the settings of\n  operations, and none of them ran. Two writers: an edit of one\n  operation with ``meho_connector_edit_op`` (turned it on or off, or\n  changed its risk level, approval rule, description or guidance,\n  #5791), and a tenant's own on or off switch with\n  ``meho_connector_tenant_setting``, for one operation or a whole\n  group (#5864). The row's ``payload[\"op_id\"]`` names the edited\n  operation; a group switch names ``payload[\"group_key\"]`` instead.\n* :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every\n  row written before migration ``0106`` reads as this class; it is never\n  guessed from ``method`` / ``path``. The REST and MCP request wrapper\n  rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;\n  with it on they write a decision or execution class, or no row\n  (#3757, :mod:`meho_backplane.audit_cutover`)."
       },
       "AuditQueryRequest": {
         "properties": {
@@ -29718,6 +29718,23 @@
             "nullable": true,
             "title": "Work Ref"
           },
+          "start_on": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Start On",
+            "default": "custom"
+          },
+          "check_source_ref": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "Check Source Ref"
+          },
+          "only_worsening": {
+            "type": "boolean",
+            "title": "Only Worsening",
+            "default": false
+          },
           "session_ctx": {
             "$ref": "#/components/schemas/UISessionContext",
             "nullable": true
@@ -30533,6 +30550,43 @@
         ],
         "title": "CatalogListResponse",
         "description": "Wire envelope for ``GET /api/v1/connectors/catalog``.\n\nWrapped in ``catalog`` (not a bare list) so future paging fields can\nland non-breakingly, mirroring the ``GET /`` list shape. Used as the\nroute's ``response_model`` so the OpenAPI contract explicitly types\nthe envelope + entry fields (rather than a free-form object map)."
+      },
+      "CheckSource": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "sensor",
+              "dashboard"
+            ],
+            "title": "Kind"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Name"
+          },
+          "only_worsening": {
+            "type": "boolean",
+            "title": "Only Worsening",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "title": "CheckSource",
+        "description": "Pick a Sensor or a Dashboard as the source of an event trigger (#6182).\n\nMEHO turns it into the normal event filter at create. No *id* and no\n*name* means \"any Sensor\" or \"any Dashboard\". *id* and *name* are not\nallowed together: say which one you mean."
       },
       "ConfirmVerify": {
         "properties": {
@@ -39572,6 +39626,11 @@
             "nullable": true,
             "title": "Event Filter"
           },
+          "check_source": {
+            "$ref": "#/components/schemas/CheckSource",
+            "nullable": true,
+            "description": "Only for kind=event, and not together with event_filter. Starts the agent on a Sensor or a Dashboard change: {kind: sensor|dashboard, id or name (none = any), only_worsening}. MEHO turns it into the event filter and stores the id. Such a trigger fires only when CHECKS_AGENT_EVENTS is on."
+          },
           "timezone": {
             "type": "string",
             "maxLength": 64,
@@ -39760,6 +39819,12 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "notice": {
+            "type": "string",
+            "nullable": true,
+            "title": "Notice",
+            "description": "Set only on the create answer, when the trigger will not fire yet (a check_source trigger while CHECKS_AGENT_EVENTS is off)."
           }
         },
         "type": "object",

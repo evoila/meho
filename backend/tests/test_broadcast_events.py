@@ -49,7 +49,7 @@ def _make_event(**overrides: object) -> BroadcastEvent:
         "tenant_id": _TENANT_A,
         "principal_sub": "op-test",
         "principal_name": "Operator Test",
-        "target_name": "rdc-vcenter",
+        "target_name": "example-vcenter",
         "op_id": "vsphere.vm.list",
         "op_class": "read",
         "result_status": "ok",
@@ -669,7 +669,7 @@ class TestRedactPayload:
     def test_read_preserves_nested_params(self) -> None:
         """Nested dicts pass through verbatim — no flattening, no transformation."""
         params: dict[str, object] = {
-            "target": "rdc-vcenter",
+            "target": "example-vcenter",
             "filter": {"folder": "prod", "tags": ["pinned", "long-lived"]},
         }
         result = redact_payload("read", params, "ok")

@@ -265,7 +265,7 @@ async def test_scenario_1_tenant_a_query_never_returns_tenant_b_rows(
             mock_discovery_and_jwks(mock_router, public_jwks(key))
             resp = await client.post(
                 "/api/v1/audit/query",
-                json={"target": "rdc-vcenter"},
+                json={"target": "example-vcenter"},
                 headers=_bearer(token_a),
             )
     assert resp.status_code == 200, resp.text
@@ -331,7 +331,7 @@ async def test_scenario_1_body_tenant_id_is_rejected_422(
             mock_discovery_and_jwks(mock_router, public_jwks(key))
             resp = await client.post(
                 "/api/v1/audit/query",
-                json={"tenant_id": TENANT_B_ID, "target": "rdc-vcenter"},
+                json={"tenant_id": TENANT_B_ID, "target": "example-vcenter"},
                 headers=_bearer(token_a),
             )
     assert resp.status_code == 422, resp.text
@@ -641,7 +641,7 @@ async def test_scenario_4_who_touched_matches_query_with_target_filter(
         target_a = await seed_target(
             session,
             tenant_id=uuid.UUID(TENANT_A_ID),
-            name="rdc-vcenter",
+            name="example-vcenter",
         )
         await seed_audit_rows(
             session,
@@ -662,12 +662,12 @@ async def test_scenario_4_who_touched_matches_query_with_target_filter(
         with respx.mock as mock_router:
             mock_discovery_and_jwks(mock_router, public_jwks(key))
             who = await client.get(
-                "/api/v1/audit/who-touched/rdc-vcenter",
+                "/api/v1/audit/who-touched/example-vcenter",
                 headers=_bearer(token_a),
             )
             query = await client.post(
                 "/api/v1/audit/query",
-                json={"target": "rdc-vcenter"},
+                json={"target": "example-vcenter"},
                 headers=_bearer(token_a),
             )
     assert who.status_code == 200, who.text
@@ -863,7 +863,7 @@ async def test_scenario_6_mcp_query_audit_call_returns_expected_shape(
         target_a = await seed_target(
             session,
             tenant_id=uuid.UUID(TENANT_A_ID),
-            name="rdc-vcenter",
+            name="example-vcenter",
         )
         await seed_audit_rows(
             session,
@@ -894,7 +894,7 @@ async def test_scenario_6_mcp_query_audit_call_returns_expected_shape(
                 method="tools/call",
                 params={
                     "name": "query_audit",
-                    "arguments": {"target": "rdc-vcenter", "since": "24h"},
+                    "arguments": {"target": "example-vcenter", "since": "24h"},
                 },
             )
     # The MCP dispatcher returns the tool's dict-shape under

@@ -84,7 +84,7 @@ async def test_list_targets_returns_targets(client: TestClient) -> None:
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vsphere",
         host="10.1.0.1",
     )
@@ -103,7 +103,7 @@ async def test_list_targets_returns_targets(client: TestClient) -> None:
         )
     assert response.status_code == 200
     names = {t["name"] for t in response.json()["items"]}
-    assert "rdc-vcenter" in names
+    assert "example-vcenter" in names
     assert "rdc-vault" in names
 
 
@@ -161,7 +161,7 @@ async def test_describe_target_exact_name(client: TestClient) -> None:
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vsphere",
         host="vcenter.corp.internal",
         port=443,
@@ -170,12 +170,12 @@ async def test_describe_target_exact_name(client: TestClient) -> None:
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.get(
-            "/api/v1/targets/rdc-vcenter",
+            "/api/v1/targets/example-vcenter",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 200
     data = response.json()
-    assert data["name"] == "rdc-vcenter"
+    assert data["name"] == "example-vcenter"
     assert data["product"] == "vsphere"
     assert data["port"] == 443
     # Full Target must carry tenant_id
@@ -188,7 +188,7 @@ async def test_describe_target_alias_match(client: TestClient) -> None:
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vsphere",
         host="10.1.0.1",
         aliases=["vcenter", "vc.corp.internal"],
@@ -201,7 +201,7 @@ async def test_describe_target_alias_match(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 200
-    assert response.json()["name"] == "rdc-vcenter"
+    assert response.json()["name"] == "example-vcenter"
 
 
 def test_describe_target_not_found_returns_404(client: TestClient) -> None:
@@ -222,23 +222,23 @@ async def test_describe_target_not_found_includes_near_misses(client: TestClient
     """404 detail includes near-misses when the prefix matches."""
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
-        tenant_id=uuid.UUID(tenant_id), name="rdc-vcenter", product="vsphere", host="10.1.0.1"
+        tenant_id=uuid.UUID(tenant_id), name="example-vcenter", product="vsphere", host="10.1.0.1"
     )
     await _insert_target(
-        tenant_id=uuid.UUID(tenant_id), name="rdc-vault", product="vault", host="10.1.0.2"
+        tenant_id=uuid.UUID(tenant_id), name="example-vault", product="vault", host="10.1.0.2"
     )
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.get(
-            "/api/v1/targets/rdc-v",
+            "/api/v1/targets/example-v",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 404
     detail = response.json()["detail"]
     near_miss_names = {m["name"] for m in detail["matches"]}
-    assert "rdc-vcenter" in near_miss_names
-    assert "rdc-vault" in near_miss_names
+    assert "example-vcenter" in near_miss_names
+    assert "example-vault" in near_miss_names
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +400,7 @@ async def test_probe_resolves_v2_only_registration(client: TestClient) -> None:
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vmwarelike",
         host="vcenter.corp.internal",
     )
@@ -408,7 +408,7 @@ async def test_probe_resolves_v2_only_registration(client: TestClient) -> None:
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.post(
-            "/api/v1/targets/rdc-vcenter/probe",
+            "/api/v1/targets/example-vcenter/probe",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 200
@@ -825,13 +825,13 @@ def test_create_target_with_all_fields(client: TestClient) -> None:
         response = client.post(
             "/api/v1/targets",
             json={
-                "name": "rdc-vcenter",
+                "name": "example-vcenter",
                 "aliases": ["vcenter", "vc"],
                 "product": "vsphere",
                 "host": "vcenter.corp.internal",
                 "port": 443,
                 "fqdn": "vcenter.corp.internal",
-                "secret_ref": f"tenants/{DEFAULT_TENANT_ID}/rdc-vcenter",
+                "secret_ref": f"tenants/{DEFAULT_TENANT_ID}/example-vcenter",
                 "auth_model": "impersonation",
                 "vpn_required": True,
                 "extras": {"dc": "fra1"},
@@ -1353,7 +1353,7 @@ def test_update_target_sets_version_from_null(client: TestClient) -> None:
     """PATCH ``{"version": "9.0"}`` updates a target's version column.
 
     G0.15-T6 (#1215) acceptance criterion: ``PATCH /api/v1/targets/
-    rdc-vcenter {"version": "9.0"}`` → 200 with the row's ``version``
+    example-vcenter {"version": "9.0"}`` → 200 with the row's ``version``
     updated from null to ``"9.0"``. Closes the dogfood foot-gun where
     a fresh target with ``version=None`` had no operator-driven path
     to set the version (TargetUpdate omitted the field).
@@ -1810,7 +1810,7 @@ async def test_cross_tenant_isolation(client: TestClient) -> None:
     tenant_b = str(uuid.uuid4())
     await _insert_target(
         tenant_id=uuid.UUID(tenant_a),
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vsphere",
         host="10.1.0.1",
     )
@@ -1818,7 +1818,7 @@ async def test_cross_tenant_isolation(client: TestClient) -> None:
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.get(
-            "/api/v1/targets/rdc-vcenter",
+            "/api/v1/targets/example-vcenter",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_b)}"},
         )
     assert response.status_code == 404
@@ -2405,12 +2405,12 @@ def test_create_target_derives_per_tenant_secret_ref(client: TestClient) -> None
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.post(
             "/api/v1/targets",
-            json={"name": "rdc-vcenter", "product": "ssh", "host": "10.0.0.5"},
+            json={"name": "example-vcenter", "product": "ssh", "host": "10.0.0.5"},
             headers={"Authorization": f"Bearer {_admin_token(key)}"},
         )
     assert response.status_code == 201
     data = response.json()
-    assert data["secret_ref"] == f"tenants/{DEFAULT_TENANT_ID}/rdc-vcenter"
+    assert data["secret_ref"] == f"tenants/{DEFAULT_TENANT_ID}/example-vcenter"
     # Never the retired per-``sub`` layout.
     assert "targets/" not in data["secret_ref"]
 

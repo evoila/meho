@@ -839,7 +839,7 @@ async def test_target_id_and_name_hoisted_from_contextvars() -> None:
     target_id = uuid4()
     structlog.contextvars.bind_contextvars(
         target_id=str(target_id),
-        target_name="rdc-vcenter",
+        target_name="example-vcenter",
     )
     op = build_operator()
 
@@ -857,7 +857,7 @@ async def test_target_id_and_name_hoisted_from_contextvars() -> None:
     assert len(rows) == 1
     row = rows[0]
     assert row.target_id == target_id
-    assert row.payload["target_name"] == "rdc-vcenter"
+    assert row.payload["target_name"] == "example-vcenter"
     structlog.contextvars.clear_contextvars()
 
 

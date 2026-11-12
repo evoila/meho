@@ -1176,14 +1176,14 @@ async def test_list_targets_returns_own_tenant_rows(
     """list_targets returns the operator's tenant's targets, name-ordered."""
     client, _op = client_with_operator
     await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
-    await _seed_target(OPERATOR_TENANT_ID, "rdc-vcenter", "vmware", "vc.example")
-    await _seed_target(OPERATOR_TENANT_ID, "rdc-vault", "vault", "vault.example")
+    await _seed_target(OPERATOR_TENANT_ID, "example-vcenter", "vmware", "vc.example")
+    await _seed_target(OPERATOR_TENANT_ID, "example-vault", "vault", "vault.example")
 
     response = _list_targets_call(client, 20, {})
     body = response.json()
     assert body["result"]["isError"] is False
     payload = json.loads(body["result"]["content"][0]["text"])
-    assert [t["name"] for t in payload["targets"]] == ["rdc-vault", "rdc-vcenter"]
+    assert [t["name"] for t in payload["targets"]] == ["example-vault", "example-vcenter"]
     assert payload["next_cursor"] is None
 
 
@@ -1194,12 +1194,12 @@ async def test_list_targets_connector_id_filters_by_product(
     """connector_id is canonicalised to its product and filters the rows."""
     client, _op = client_with_operator
     await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
-    await _seed_target(OPERATOR_TENANT_ID, "rdc-vcenter", "vmware", "vc.example")
-    await _seed_target(OPERATOR_TENANT_ID, "rdc-vault", "vault", "vault.example")
+    await _seed_target(OPERATOR_TENANT_ID, "example-vcenter", "vmware", "vc.example")
+    await _seed_target(OPERATOR_TENANT_ID, "example-vault", "vault", "vault.example")
 
     response = _list_targets_call(client, 21, {"connector_id": "vmware-rest-9.0"})
     payload = json.loads(response.json()["result"]["content"][0]["text"])
-    assert [t["name"] for t in payload["targets"]] == ["rdc-vcenter"]
+    assert [t["name"] for t in payload["targets"]] == ["example-vcenter"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
@@ -1261,13 +1261,13 @@ async def test_list_targets_own_tenant_slug_is_allowed(
     """Naming one's OWN tenant explicitly (slug) is allowed for any role (#1641)."""
     client, _op = client_with_operator
     await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
-    await _seed_target(OPERATOR_TENANT_ID, "rdc-vcenter", "vmware", "vc.example")
+    await _seed_target(OPERATOR_TENANT_ID, "example-vcenter", "vmware", "vc.example")
 
     response = _list_targets_call(client, 25, {"tenant": "op-tenant"})
     body = response.json()
     assert "error" not in body, body
     payload = json.loads(body["result"]["content"][0]["text"])
-    assert [t["name"] for t in payload["targets"]] == ["rdc-vcenter"]
+    assert [t["name"] for t in payload["targets"]] == ["example-vcenter"]
 
 
 @pytest.mark.parametrize("client_with_operator", [(TenantRole.TENANT_ADMIN, True)], indirect=True)

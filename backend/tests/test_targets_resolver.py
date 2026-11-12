@@ -81,7 +81,7 @@ async def test_resolve_target_exact_name_returns_row() -> None:
     sessionmaker = get_sessionmaker()
     tenant_id = uuid.uuid4()
     target = _make_target(
-        tenant_id=tenant_id, name="rdc-vcenter", product="vsphere", host="10.1.0.1"
+        tenant_id=tenant_id, name="example-vcenter", product="vsphere", host="10.1.0.1"
     )
 
     async with sessionmaker() as session:
@@ -89,9 +89,9 @@ async def test_resolve_target_exact_name_returns_row() -> None:
         await session.commit()
 
     async with sessionmaker() as session:
-        result = await resolve_target(session, tenant_id, "rdc-vcenter")
+        result = await resolve_target(session, tenant_id, "example-vcenter")
 
-    assert result.name == "rdc-vcenter"
+    assert result.name == "example-vcenter"
     assert result.tenant_id == tenant_id
 
 
@@ -127,7 +127,7 @@ async def test_resolve_target_alias_match_returns_row() -> None:
     tenant_id = uuid.uuid4()
     target = _make_target(
         tenant_id=tenant_id,
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vsphere",
         host="10.1.0.1",
         aliases=["vcenter", "vc.corp.internal"],
@@ -140,7 +140,7 @@ async def test_resolve_target_alias_match_returns_row() -> None:
     async with sessionmaker() as session:
         result = await resolve_target(session, tenant_id, "vcenter")
 
-    assert result.name == "rdc-vcenter"
+    assert result.name == "example-vcenter"
 
 
 @pytest.mark.asyncio
@@ -150,7 +150,7 @@ async def test_resolve_target_alias_substring_does_not_match() -> None:
     tenant_id = uuid.uuid4()
     target = _make_target(
         tenant_id=tenant_id,
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vsphere",
         host="10.1.0.1",
         aliases=["vc.corp.internal"],
@@ -174,7 +174,7 @@ async def test_resolve_target_alias_tenant_boundary() -> None:
     tenant_b = uuid.uuid4()
     target = _make_target(
         tenant_id=tenant_a,
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vsphere",
         host="10.1.0.1",
         aliases=["vcenter"],
@@ -198,14 +198,16 @@ async def test_resolve_target_alias_tenant_boundary() -> None:
 async def test_resolve_target_not_found_returns_near_misses() -> None:
     """When no target matches, TargetNotFoundError.detail includes near-misses.
 
-    Two targets named ``rdc-vcenter`` + ``rdc-vault`` exist; a query
-    for ``rdc-v`` (no exact match) should return both as near-misses
-    because both names start with ``rdc-v`` (ILIKE ``rdc-v%``).
+    Two targets named ``example-vcenter`` + ``example-vault`` exist; a query
+    for ``example-v`` (no exact match) should return both as near-misses
+    because both names start with ``example-v`` (ILIKE ``example-v%``).
     """
     sessionmaker = get_sessionmaker()
     tenant_id = uuid.uuid4()
-    t1 = _make_target(tenant_id=tenant_id, name="rdc-vcenter", product="vsphere", host="10.1.0.1")
-    t2 = _make_target(tenant_id=tenant_id, name="rdc-vault", product="vault", host="10.1.0.2")
+    t1 = _make_target(
+        tenant_id=tenant_id, name="example-vcenter", product="vsphere", host="10.1.0.1"
+    )
+    t2 = _make_target(tenant_id=tenant_id, name="example-vault", product="vault", host="10.1.0.2")
 
     async with sessionmaker() as session:
         session.add(t1)
@@ -214,14 +216,14 @@ async def test_resolve_target_not_found_returns_near_misses() -> None:
 
     async with sessionmaker() as session:
         with pytest.raises(TargetNotFoundError) as exc_info:
-            await resolve_target(session, tenant_id, "rdc-v")
+            await resolve_target(session, tenant_id, "example-v")
 
     detail = exc_info.value.detail
     assert detail["error"] == "no_target"
-    assert detail["query"] == "rdc-v"
+    assert detail["query"] == "example-v"
     near_miss_names = {m["name"] for m in detail["matches"]}
-    assert "rdc-vcenter" in near_miss_names
-    assert "rdc-vault" in near_miss_names
+    assert "example-vcenter" in near_miss_names
+    assert "example-vault" in near_miss_names
 
 
 @pytest.mark.asyncio
@@ -248,8 +250,8 @@ async def test_resolve_target_not_found_near_misses_tenant_scoped() -> None:
     sessionmaker = get_sessionmaker()
     tenant_a = uuid.uuid4()
     tenant_b = uuid.uuid4()
-    # rdc-vcenter exists in tenant_a only.
-    t = _make_target(tenant_id=tenant_a, name="rdc-vcenter", product="vsphere", host="10.1.0.1")
+    # example-vcenter exists in tenant_a only.
+    t = _make_target(tenant_id=tenant_a, name="example-vcenter", product="vsphere", host="10.1.0.1")
 
     async with sessionmaker() as session:
         session.add(t)
@@ -258,7 +260,7 @@ async def test_resolve_target_not_found_near_misses_tenant_scoped() -> None:
     async with sessionmaker() as session:
         with pytest.raises(TargetNotFoundError) as exc_info:
             # tenant_b has no targets at all — near-misses must be empty.
-            await resolve_target(session, tenant_b, "rdc-x")
+            await resolve_target(session, tenant_b, "example-x")
 
     assert exc_info.value.detail["matches"] == []
 

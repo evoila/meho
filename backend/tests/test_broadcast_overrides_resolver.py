@@ -376,14 +376,14 @@ class TestScopeMatching:
                 tenant_id=tenant_id,
                 op_id_pattern="vsphere.vm.list",
                 scope_field="target_name",
-                scope_value="rdc-vcenter",
+                scope_value="example-vcenter",
                 detail="aggregate",
             )
 
         _op_class, detail, origin = await compute_effective_broadcast_detail(
             op_id="vsphere.vm.list",
             tenant_id=tenant_id,
-            raw_params={"target": "rdc-vcenter", "folder": "prod"},
+            raw_params={"target": "example-vcenter", "folder": "prod"},
             request_override=None,
         )
         assert detail == "aggregate"
@@ -525,14 +525,14 @@ class TestMostSpecificWins:
                 tenant_id=tenant_id,
                 op_id_pattern="vsphere.vm.list",
                 scope_field="target_name",
-                scope_value="rdc-vcenter",
+                scope_value="example-vcenter",
                 detail="full",
             )
 
         _op_class, detail, origin = await compute_effective_broadcast_detail(
             op_id="vsphere.vm.list",
             tenant_id=tenant_id,
-            raw_params={"target": "rdc-vcenter"},
+            raw_params={"target": "example-vcenter"},
             request_override=None,
         )
         assert detail == "full"

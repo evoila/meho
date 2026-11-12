@@ -72,8 +72,8 @@ def _operator() -> Operator:
 
 def test_tenant_secret_ref_canonical_shape() -> None:
     """The ref is ``tenants/<dashed-uuid>/<target>`` — no mount, no /data/."""
-    assert tenant_secret_ref(_TENANT, "rdc-vcenter") == (
-        f"{TENANT_SECRET_PREFIX}/{_TENANT}/rdc-vcenter"
+    assert tenant_secret_ref(_TENANT, "example-vcenter") == (
+        f"{TENANT_SECRET_PREFIX}/{_TENANT}/example-vcenter"
     )
 
 

@@ -9,7 +9,7 @@ Coverage matrix (issue #468 acceptance criteria):
   ``tools/list``.
 * AC2 — Tool description names what + when-to-call + when-NOT-to-call
   (the load-bearing agent UX contract).
-* AC3 — ``tools/call query_audit {"target": "rdc-vcenter", "since": "24h"}``
+* AC3 — ``tools/call query_audit {"target": "example-vcenter", "since": "24h"}``
   dispatches through T1 with the right filter shape; ``since`` parses to
   a tz-aware datetime at the tool boundary.
 * AC4 — Tenant scope injected from the operator's JWT, not the
@@ -233,14 +233,14 @@ def test_tools_call_since_24h_parses_to_tz_aware_datetime(
                 "method": "tools/call",
                 "params": {
                     "name": "query_audit",
-                    "arguments": {"target": "rdc-vcenter", "since": "24h"},
+                    "arguments": {"target": "example-vcenter", "since": "24h"},
                 },
             },
         )
         after = datetime.now(UTC)
     assert response.status_code == 200
     filters = mock_query.await_args.args[0]
-    assert filters.target == "rdc-vcenter"
+    assert filters.target == "example-vcenter"
     assert filters.since is not None
     assert filters.since.tzinfo is not None
     # The handler subtracts 24h from `now`; the parsed value lands in

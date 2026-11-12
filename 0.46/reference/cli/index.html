@@ -8356,6 +8356,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-sessions-push" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho sessions push
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-sessions-show" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -15771,6 +15782,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-sessions-push" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho sessions push
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-sessions-show" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -21375,7 +21397,7 @@
 <li><code>--json</code> — emit raw ServiceReadScopeRead JSON</li>
 </ul>
 <h2 id="meho-sessions"><code>meho sessions</code><a class="headerlink" href="#meho-sessions" title="Permanent link">&para;</a></h2>
-<p>List, show and delete stored agent sessions</p>
+<p>Upload, list, show and delete stored agent sessions</p>
 <div class="highlight"><pre><span></span><code>meho sessions
 </code></pre></div>
 <h3 id="meho-sessions-delete"><code>meho sessions delete</code><a class="headerlink" href="#meho-sessions-delete" title="Permanent link">&para;</a></h3>
@@ -21398,6 +21420,16 @@
 <li><code>--limit</code> — sessions per page (1 to 200)</li>
 <li><code>--project</code> — only sessions of this project</li>
 <li><code>--state</code> — only sessions in this state: open, ended or unfinished</li>
+</ul>
+<h3 id="meho-sessions-push"><code>meho sessions push</code><a class="headerlink" href="#meho-sessions-push" title="Permanent link">&para;</a></h3>
+<p>Upload the agent sessions in your local outbox (POST /api/v1/sessions)</p>
+<div class="highlight"><pre><span></span><code>meho sessions push [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL (defaults to the URL recorded by <code>meho login</code>)</li>
+<li><code>--dry-run</code> — show what would be sent, and send nothing</li>
+<li><code>--json</code> — print the result as JSON</li>
+<li><code>--outbox</code> — outbox folder (defaults to the setting, then <meho config folder>/session-outbox)</li>
 </ul>
 <h3 id="meho-sessions-show"><code>meho sessions show</code><a class="headerlink" href="#meho-sessions-show" title="Permanent link">&para;</a></h3>
 <p>Show one stored agent session (GET /api/v1/sessions/{session_id})</p>

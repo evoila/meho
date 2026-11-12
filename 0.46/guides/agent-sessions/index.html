@@ -2408,6 +2408,78 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#upload-sessions-from-a-laptop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upload sessions from a laptop
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Upload sessions from a laptop">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-is-sent-and-where-it-goes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What is sent, and where it goes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#see-what-was-sent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See what was sent
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#run-it-again-at-any-time" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run it again at any time
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fill-the-outbox" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fill the outbox
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#who-may-do-what" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3200,6 +3272,78 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#upload-sessions-from-a-laptop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upload sessions from a laptop
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Upload sessions from a laptop">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-is-sent-and-where-it-goes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What is sent, and where it goes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#see-what-was-sent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See what was sent
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#run-it-again-at-any-time" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run it again at any time
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fill-the-outbox" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fill the outbox
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#who-may-do-what" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3276,8 +3420,9 @@ to it.</p>
 <p>MEHO stores the files in S3-compatible object storage that you bring. That
 is a file store with the Amazon S3 interface, for example MinIO. MEHO
 writes one index row per session in its own database.</p>
-<p>This page shows how to turn the store on with Helm values, who may do
-what, and how long MEHO keeps a session.</p>
+<p>This page shows how to turn the store on with Helm values, how a person
+uploads sessions from a laptop, who may do what, and how long MEHO keeps
+a session.</p>
 <div class="admonition note">
 <p class="admonition-title">Prerequisites</p>
 <ul>
@@ -3423,6 +3568,156 @@ variables:</p>
 </ul>
 <p><code>meho sessions list</code> reads only MEHO's own index, so it works even
 before the store is set up.</p>
+<h2 id="upload-sessions-from-a-laptop">Upload sessions from a laptop<a class="headerlink" href="#upload-sessions-from-a-laptop" title="Permanent link">&para;</a></h2>
+<p>A person sends the agent sessions of a laptop to MEHO with one command:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>sessions<span class="w"> </span>push
+</code></pre></div>
+<h3 id="what-is-sent-and-where-it-goes">What is sent, and where it goes<a class="headerlink" href="#what-is-sent-and-where-it-goes" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>push</code> reads a local folder, the <strong>outbox</strong>. A hook of the AI app
+  copies each session into it (see <a href="#fill-the-outbox">Fill the outbox</a>).</li>
+<li>It sends only sessions that were started in a <strong>project folder on your
+  allowlist</strong>, or that you marked by hand. Every other session stays on
+  the laptop and is never sent. An empty allowlist sends nothing.</li>
+<li>Before a session leaves the laptop, a <strong>secret check</strong> replaces known
+  secrets with <code>[REDACTED:&lt;pattern&gt;]</code>: private keys, bearer tokens,
+  <code>Authorization</code> headers, JWTs, secrets in links (the user part before
+  <code>@</code>, and query values such as <code>token=</code> or <code>sig=</code>, also when the name is
+  written with <code>%</code> codes), BIND key secrets (<code>secret "...";</code>),
+  <code>password=...</code> style pairs, GitHub tokens and AWS access keys. MEHO
+  checks every upload again.</li>
+<li>When the check is not sure, the session <strong>stays in the outbox</strong>, and
+  <code>push</code> says why. This happens when a file is not UTF-8 text, when a
+  name that looks like a secret still has a value (for example
+  <code>"password": "..."</code>), when a private key has no <code>END</code> line, or when a
+  BIND secret runs over more than one line (for example <code>secret</code> on one
+  line and the value on the next) or has no closing quote yet.</li>
+<li>The upload goes to the MEHO of your <code>meho login</code>, with your normal
+  login. It needs no extra key. MEHO stores it in your tenant.</li>
+<li><code>push</code> sends the transcript <code>&lt;session-id&gt;.jsonl</code> and the files of the
+  folder <code>&lt;session-id&gt;/</code>. It sends the project folder's last name as the
+  project (for example <code>ops-runbooks</code>), the app version and the start
+  and end time from the transcript.</li>
+</ul>
+<h3 id="see-what-was-sent">See what was sent<a class="headerlink" href="#see-what-was-sent" title="Permanent link">&para;</a></h3>
+<p><code>push</code> prints one line per session: the session id, the project, the
+state, the size of the upload, the result and MEHO's answer. The result
+is one of <code>sent</code>, <code>already sent</code>, <code>not on allowlist</code>, <code>held back</code>,
+<code>nothing to send yet</code> or <code>failed</code>. <code>--json</code> prints the same as JSON.</p>
+<p><code>meho sessions push --dry-run</code> shows the same list and sends nothing.</p>
+<p>After each upload, <code>push</code> writes a receipt next to the session:
+<code>&lt;outbox&gt;/&lt;session-id&gt;/meho-receipt.json</code>. It holds the session id, the
+time, the MEHO address and tenant it was sent to, MEHO's answer, and for
+each file how many bytes were sent and their SHA-256 hash.</p>
+<p>An admin sees the uploaded session in <code>meho sessions list</code>.</p>
+<h3 id="run-it-again-at-any-time">Run it again at any time<a class="headerlink" href="#run-it-again-at-any-time" title="Permanent link">&para;</a></h3>
+<p><code>push</code> is safe to run twice:</p>
+<ul>
+<li>A session with a receipt that matches its files is not sent again.
+  The receipt counts only for the MEHO address and tenant it names: with
+  another <code>--backplane</code>, another login or another tenant, <code>push</code> sends
+  the session again.</li>
+<li>A failed upload writes no receipt. The next run sends the session
+  again. When a session fails (it cannot be read or packed, or the
+  upload fails), <code>push</code> ends with an error. MEHO stores an upload whole or not at all, and the same bytes
+  sent twice change nothing.</li>
+<li>A session that is <strong>still open</strong> grows at the end. While a session is
+  open, <code>push</code> sends only complete lines. When the files have grown since
+  the last receipt, <code>push</code> sends the session again with the same id.
+  MEHO stores only the new part, and the session stays <code>open</code> until the
+  hook marks it as ended.</li>
+</ul>
+<h3 id="settings">Settings<a class="headerlink" href="#settings" title="Permanent link">&para;</a></h3>
+<p>The settings are in <code>sessions.json</code> in the meho config folder
+(<code>$XDG_CONFIG_HOME/meho/</code> or <code>~/.config/meho/</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"outbox"</span><span class="p">:</span><span class="w"> </span><span class="s2">"~/.config/meho/session-outbox"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"projects"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="s2">"/home/&lt;user&gt;/work/ops-runbooks"</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><code>outbox</code>: the outbox folder. The default is <code>session-outbox</code> in the
+  meho config folder. <code>push --outbox &lt;folder&gt;</code> uses another folder once.</li>
+<li><code>projects</code>: the allowlist. Each entry is a folder that a session was
+  started in. A sub-folder is a different folder. Put only <strong>operations
+  projects</strong> on the list: projects where people work on running
+  systems. Never put a coding project on it. A session started in a
+  coding project's folder is not sent, even when it did some operations
+  work.</li>
+</ul>
+<p>To send one session whose project is not on the list, mark it by hand:</p>
+<div class="highlight"><pre><span></span><code>touch<span class="w"> </span>&lt;outbox&gt;/&lt;session-id&gt;/meho-send
+</code></pre></div>
+<h3 id="fill-the-outbox">Fill the outbox<a class="headerlink" href="#fill-the-outbox" title="Permanent link">&para;</a></h3>
+<p>Claude Code deletes its session files after 30 days by default. The
+outbox keeps a copy until it is uploaded. Each session gets a folder:</p>
+<table>
+<thead>
+<tr>
+<th>Path in the outbox</th>
+<th>What it is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&lt;session-id&gt;/&lt;session-id&gt;.jsonl</code></td>
+<td>The transcript. Needed.</td>
+</tr>
+<tr>
+<td><code>&lt;session-id&gt;/&lt;session-id&gt;/</code></td>
+<td>The session's folder (subagent transcripts, large tool outputs).</td>
+</tr>
+<tr>
+<td><code>&lt;session-id&gt;/meho-ended</code></td>
+<td>An empty file: the session ended. Without it, the session is still open.</td>
+</tr>
+<tr>
+<td><code>&lt;session-id&gt;/meho-send</code></td>
+<td>An empty file: you marked the session by hand.</td>
+</tr>
+<tr>
+<td><code>&lt;session-id&gt;/meho-receipt.json</code></td>
+<td>Written by <code>push</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>A Claude Code hook can fill it. A hook is a small command that Claude
+Code runs at a fixed moment. This script copies one session. It needs
+<code>jq</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="ch">#!/bin/sh</span>
+<span class="c1"># Copy a Claude Code session into the MEHO outbox.</span>
+<span class="c1"># Usage: copy-session.sh [ended]</span>
+<span class="nv">input</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span>cat<span class="k">)</span><span class="s2">"</span>
+<span class="nv">id</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span><span class="nb">printf</span><span class="w"> </span><span class="s1">'%s'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$input</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.session_id<span class="k">)</span><span class="s2">"</span>
+<span class="nv">src</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span><span class="nb">printf</span><span class="w"> </span><span class="s1">'%s'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$input</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.transcript_path<span class="k">)</span><span class="s2">"</span>
+<span class="nv">out</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/.config/meho/session-outbox/</span><span class="nv">$id</span><span class="s2">"</span>
+mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="nv">$out</span><span class="s2">"</span>
+cp<span class="w"> </span><span class="s2">"</span><span class="nv">$src</span><span class="s2">"</span><span class="w"> </span><span class="s2">"</span><span class="nv">$out</span><span class="s2">/</span><span class="nv">$id</span><span class="s2">.jsonl"</span>
+<span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span>-d<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">src</span><span class="p">%.jsonl</span><span class="si">}</span><span class="s2">"</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">  </span>mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="nv">$out</span><span class="s2">/</span><span class="nv">$id</span><span class="s2">"</span>
+<span class="w">  </span>cp<span class="w"> </span>-R<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">src</span><span class="p">%.jsonl</span><span class="si">}</span><span class="s2">/."</span><span class="w"> </span><span class="s2">"</span><span class="nv">$out</span><span class="s2">/</span><span class="nv">$id</span><span class="s2">/"</span>
+<span class="k">fi</span>
+<span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span><span class="s2">"</span><span class="nv">$1</span><span class="s2">"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"ended"</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">  </span>touch<span class="w"> </span><span class="s2">"</span><span class="nv">$out</span><span class="s2">/meho-ended"</span>
+<span class="k">fi</span>
+</code></pre></div>
+<p>Run it at the end of each session (<code>SessionEnd</code>), and after each answer
+(<code>Stop</code>) to keep a copy of sessions that stay open. In
+<code>~/.claude/settings.json</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"hooks"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">"SessionEnd"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">"hooks"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"command"</span><span class="p">,</span><span class="w"> </span><span class="nt">"command"</span><span class="p">:</span><span class="w"> </span><span class="s2">"~/bin/copy-session.sh ended"</span><span class="p">,</span><span class="w"> </span><span class="nt">"timeout"</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span><span class="p">}]}</span>
+<span class="w">    </span><span class="p">],</span>
+<span class="w">    </span><span class="nt">"Stop"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">"hooks"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"command"</span><span class="p">,</span><span class="w"> </span><span class="nt">"command"</span><span class="p">:</span><span class="w"> </span><span class="s2">"~/bin/copy-session.sh"</span><span class="p">,</span><span class="w"> </span><span class="nt">"timeout"</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span><span class="p">}]}</span>
+<span class="w">    </span><span class="p">]</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>A <code>SessionEnd</code> hook has 1.5 seconds by default; <code>timeout</code> gives it more.</p>
 <h2 id="who-may-do-what">Who may do what<a class="headerlink" href="#who-may-do-what" title="Permanent link">&para;</a></h2>
 <p>Each right maps to the lowest tenant role that has it. Only a person may
 use the session routes.</p>
@@ -3438,7 +3733,7 @@ use the session routes.</p>
 <tr>
 <td>Upload own sessions</td>
 <td><code>read_only</code></td>
-<td><code>POST /api/v1/sessions</code></td>
+<td><code>meho sessions push</code>, <code>POST /api/v1/sessions</code></td>
 </tr>
 <tr>
 <td>List sessions</td>

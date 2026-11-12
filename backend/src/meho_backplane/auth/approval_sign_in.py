@@ -372,10 +372,12 @@ def check_fresh_approval_sign_in(
     the level is required only because MEHO's check of the realm failed.
     """
     mode = level_in_force or settings.approval_sign_in_level
+    if mode not in ("off", "observe"):
+        mode = "required"
     approval_client = is_approval_sign_in(operator, settings)
     credentials = asked_for_credentials(operator)
     level = has_approval_level(operator)
-    level_refused = mode not in ("off", "observe") and not level
+    level_refused = mode == "required" and not level
     auth_time = operator.auth_time
     other_checks_pass = (
         auth_time is not None

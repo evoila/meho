@@ -203,7 +203,9 @@ async def test_approvals_default_posture_and_missing_key() -> None:
         "sign_in_level_in_force": "observe",
         "sign_in_level_warning": (
             "MEHO does not require the approval level: APPROVAL_SIGN_IN_LEVEL is auto and "
-            "approvals.sign_in is not_checked, not ok. Fix the approval sign-in in Keycloak."
+            "approvals.sign_in is not_checked, not ok. Give MEHO its Keycloak admin client "
+            "(KEYCLOAK_ADMIN_URL, KEYCLOAK_ADMIN_CLIENT_ID, KEYCLOAK_ADMIN_CLIENT_SECRET; "
+            "keycloakAdmin in the chart)."
         ),
     }
     by_name = {entry.name: entry for entry in response.features}

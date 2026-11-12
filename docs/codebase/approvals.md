@@ -1050,7 +1050,10 @@ level. `/api/v1/health` shows the value in `approvals.sign_in_level`,
 what is in force in `approvals.sign_in_level_in_force`, and
 `approvals.sign_in_level_warning` whenever the level is not required in
 practice, and its own warning when the read failed ("MEHO could not
-check the approval sign-in of the realm ..."); `meho doctor` shows the last two in its line `approval level`.
+check the approval sign-in of the realm ..."). When MEHO has no admin
+client, or the admin client may not read, the warning names that fix:
+the admin client settings, or the realm-management role `view-realm`
+(`view-clients` for `no_right_to_read_clients`). `meho doctor` shows the last two in its line `approval level`.
 `approvals.sign_in` is `ok` only when the realm really gives the level:
 the flow steps, the level step settings (`loa-condition-level` 2,
 `loa-max-age` 0), `acr.loa.map` with `meho-approve` = 2 and no other name

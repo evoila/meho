@@ -355,6 +355,20 @@ async def sign_in_level_in_force(settings: Settings) -> SignInLevel:
     return SignInLevel(sign_in_level_for_status(mode, status), check_failed=read_failed(status))
 
 
+def _sign_in_fix(status: ApprovalSignInStatus | None) -> str:
+    """The fix the health warning names for *status*."""
+    detail = status.detail if status is not None else None
+    if detail == "keycloak_admin_not_configured":
+        return (
+            "Give MEHO its Keycloak admin client (KEYCLOAK_ADMIN_URL, KEYCLOAK_ADMIN_CLIENT_ID, "
+            "KEYCLOAK_ADMIN_CLIENT_SECRET; keycloakAdmin in the chart)."
+        )
+    if detail in _KNOWN_NOT_CHECKED:
+        role = "view-clients" if detail == "no_right_to_read_clients" else "view-realm"
+        return f"Give MEHO's Keycloak admin client the realm-management role {role} ({detail})."
+    return "Fix the approval sign-in in Keycloak."
+
+
 def sign_in_level_warning(mode: str, status: ApprovalSignInStatus | None) -> str | None:
     """The health warning when the level is not required in practice, or the read failed."""
     if mode == "auto" and status is not None and read_failed(status):
@@ -369,7 +383,7 @@ def sign_in_level_warning(mode: str, status: ApprovalSignInStatus | None) -> str
         state = status.state if status is not None else None
         return (
             "MEHO does not require the approval level: APPROVAL_SIGN_IN_LEVEL is auto and "
-            f"approvals.sign_in is {state}, not ok. Fix the approval sign-in in Keycloak."
+            f"approvals.sign_in is {state}, not ok. {_sign_in_fix(status)}"
         )
     return (
         f"MEHO does not require the approval level: APPROVAL_SIGN_IN_LEVEL is {mode}. "

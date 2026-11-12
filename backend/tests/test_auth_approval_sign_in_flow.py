@@ -32,6 +32,7 @@ from meho_backplane.auth.approval_sign_in_flow import (
     ApprovalSignInStatus,
     read_approval_sign_in,
     sign_in_level_in_force,
+    sign_in_level_warning,
 )
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.settings import get_settings
@@ -530,6 +531,40 @@ async def test_auto_refuses_after_a_failed_read_and_follows_the_next_good_read(
         assert (await _refused_detail("1")).endswith(LEVEL_MISSING_REMEDIATION)
         accepted = await _approve("meho-approve")
     assert (accepted.level_missing, accepted.level_in_force) == (False, "required")
+
+
+def test_an_unresolved_auto_is_recorded_as_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller that passes no *level_in_force* under ``auto``: the audit row says ``required``."""
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "auto")
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    accepted = check_fresh_approval_sign_in(_approval_sign_in("meho-approve"), settings)
+
+    assert accepted.level_in_force == "required"
+    assert accepted.audit_payload("s")["level_in_force"] == "required"
+    with pytest.raises(HTTPException):
+        check_fresh_approval_sign_in(_approval_sign_in("1"), settings)
+
+
+@pytest.mark.parametrize(
+    ("detail", "fix"),
+    [
+        ("keycloak_admin_not_configured", "Give MEHO its Keycloak admin client"),
+        ("no_right_to_read_login_flows", "the realm-management role view-realm"),
+        ("no_right_to_read_realm", "the realm-management role view-realm"),
+        ("no_right_to_read_clients", "the realm-management role view-clients"),
+    ],
+)
+def test_the_warning_names_the_fix_when_meho_may_not_read(detail: str, fix: str) -> None:
+    """No admin client, or no right to read: the health warning names that fix."""
+    status = ApprovalSignInStatus(state="not_checked", client="meho-cli-approve", detail=detail)
+
+    warning = sign_in_level_warning("auto", status)
+
+    assert warning is not None
+    assert fix in warning
+    assert "Fix the approval sign-in in Keycloak" not in warning
 
 
 # --- /api/v1/health carries the state --------------------------------------------

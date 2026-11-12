@@ -55,11 +55,12 @@ The fields:
 * ``mcp_clients`` -- the **public** login client of each AI tool kind
   (``{"claude-code": "meho-mcp-code", "claude-desktop":
   "meho-mcp-desktop"}``). Listed only when the ``MCP_CLIENT_PER_TOOL_KIND``
-  switch is on; empty otherwise. The Claude Code plugin and the Claude
-  Desktop extension read it at start. A tool whose kind is listed signs in
-  with that client and sends the ``Meho-Tool`` header, so it keeps a saved
-  login of its own. A tool whose kind is not listed keeps the shared
-  ``meho-mcp`` client.
+  switch is on, and only the clients MEHO found in Keycloak
+  (:mod:`meho_backplane.auth.tool_clients`); empty otherwise. The Claude
+  Code plugin and the Claude Desktop extension read it at start. A tool
+  whose kind is listed signs in with that client and sends the
+  ``Meho-Tool`` header, so it keeps a saved login of its own. A tool
+  whose kind is not listed keeps the shared ``meho-mcp`` client.
 
 The ``cli_client_id`` field was added by G0.9.1-T9 after the 2026-05-21
 RDC dogfood (Signal #16) showed that the v0.3.1 endpoint (issuer +
@@ -75,18 +76,10 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 
+from meho_backplane.auth.tool_clients import MCP_TOOL_CLIENTS, listed_tool_clients
 from meho_backplane.settings import get_settings
 
 __all__ = ["MCP_TOOL_CLIENTS", "router"]
-
-#: The login client of each AI tool kind (``MCP_CLIENT_PER_TOOL_KIND``). The
-#: realm file of the built-in Keycloak and ``meho admin keycloak
-#: bootstrap-clients`` create these clients with the same settings as
-#: ``meho-mcp``. The keys are the values the tools send in ``Meho-Tool``.
-MCP_TOOL_CLIENTS: dict[str, str] = {
-    "claude-code": "meho-mcp-code",
-    "claude-desktop": "meho-mcp-desktop",
-}
 
 
 class AuthConfigResponse(BaseModel):
@@ -137,5 +130,5 @@ async def auth_config() -> AuthConfigResponse:
         audience=settings.keycloak_audience,
         cli_client_id=settings.keycloak_cli_client_id,
         cli_approve_client_id=settings.keycloak_cli_approve_client_id,
-        mcp_clients=dict(MCP_TOOL_CLIENTS) if settings.mcp_client_per_tool_kind else {},
+        mcp_clients=await listed_tool_clients(settings),
     )

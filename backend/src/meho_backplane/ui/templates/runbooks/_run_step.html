@@ -147,7 +147,7 @@
     </article>
 
     {% if step_view.failed %}
-      {#- ---------- Failed-step dead-end banner (Advance hidden) ---------- #}
+      {#- ---------- Failed-step banner (Advance hidden; retry or abort) ---------- #}
       <div role="alert" class="alert alert-error" aria-label="Step failed">
         <span aria-hidden="true">&#10007;</span>
         <div>
@@ -155,9 +155,9 @@
           <p class="text-sm">
             The verify gate for this step did not pass (you answered
             <strong>no</strong> / <strong>escalate</strong>, or an
-            operation-call verify did not match). The run cannot continue
-            past a failed step — the only forward move is to
-            <strong>Abort</strong> it below (with a reason).
+            operation-call verify did not match). Fix the cause, then use
+            <strong>Try this step again</strong>, or <strong>Abort</strong>
+            the run below (with a reason). Earlier attempts stay on record.
           </p>
         </div>
       </div>
@@ -209,6 +209,36 @@
             </button>
           </form>
         {% endif %}
+      {% endif %}
+
+      {#- Try this step again — assignee only, failed step only. Runs the
+          check of the step once more (a confirm step takes a new answer). -#}
+      {% if is_assignee and step_view.failed %}
+        <form
+          hx-post="/ui/runbooks/runs/{{ run_id }}/next"
+          hx-target="#runbook-run-step"
+          hx-swap="outerHTML"
+          hx-disabled-elt="find button[type=submit]"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          class="flex flex-wrap items-center gap-2"
+        >
+          <input type="hidden" name="verify_type" value="{{ verify.type }}" />
+          <input type="hidden" name="retry" value="1" />
+          {% if verify.type == "confirm" %}
+            <label class="form-control">
+              <select
+                name="answer"
+                class="select select-bordered select-sm"
+                aria-label="Verify answer"
+              >
+                <option value="yes" selected>Verified — yes, advance</option>
+                <option value="no">No — fail this step</option>
+                <option value="escalate">Escalate — fail and flag</option>
+              </select>
+            </label>
+          {% endif %}
+          <button type="submit" class="btn btn-primary btn-sm">Try this step again</button>
+        </form>
       {% endif %}
 
       {#- Abort — available to anyone who can act on the run (the service

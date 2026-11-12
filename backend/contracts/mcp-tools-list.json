@@ -2434,6 +2434,9 @@
           "last_verified": {
             "type": "boolean"
           },
+          "retry": {
+            "type": "boolean"
+          },
           "run_id": {
             "format": "uuid",
             "type": "string"

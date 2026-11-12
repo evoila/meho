@@ -1279,7 +1279,7 @@ add-on-family gate.
 | `meho_runbook_abort` | operator | — | Abort an in-progress runbook run. |
 | `meho_runbook_list_runs` | operator | — | List runbook runs (operators see only their own). |
 | `meho_runbook_list_templates` | operator | — | List runbook templates in the tenant. |
-| `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). |
+| `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). Optional `retry` runs a failed step's check again. |
 | `meho_runbook_show_template` | operator | — | Read a runbook template's full body. |
 | `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
 | `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). Since #5239 also the person's tenants with the role in each (`operator.tenants`); it is the one tool a session without a current tenant may call. Since #5504 also the server's time now in UTC (`server_time`, ISO 8601 to the second, for example `2026-10-31T14:34:28Z`), so an agent with no shell can write down a correct time. |
@@ -1340,7 +1340,7 @@ session (on top of the Role + Extra-gate columns).
 | `meho_runbook_publish_template` | tenant_admin | — | Publish a draft template. |
 | `meho_runbook_reassign` | tenant_admin | — | Reassign an in-progress run to another operator. |
 | `meho_scheduler_cancel` | tenant_admin | — | Cancel a scheduled trigger by id. |
-| `meho_scheduler_create` | tenant_admin | — | Create a scheduled trigger (cron / one-off / event). |
+| `meho_scheduler_create` | tenant_admin | — | Create a scheduled trigger (cron / one-off / event). While `CHECKS_AGENT_EVENTS` is on, an event trigger can take `check_source` (a Sensor or a Dashboard, optionally only when it gets worse) instead of `event_filter`; while it is off, the tool shows and accepts no `check_source`. |
 | `meho_scheduler_list` | operator | — | List scheduled triggers. |
 | `meho_sensor_create` | tenant_admin | — | Create a sensor (op + assertion + cadence + severity). |
 | `meho_sensor_delete` | tenant_admin | — | Hard-delete a sensor by id. |

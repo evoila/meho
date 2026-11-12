@@ -68,6 +68,12 @@ def _issue_ref(tracking_url: str) -> str:
     return f"[#{tracking_url.rstrip('/').rsplit('/', 1)[-1]}]({tracking_url})"
 
 
+def _tracker_text(info: MaturityInfo) -> str:
+    """The tracking link of one feature, or "no open tracker"."""
+    tracking = info.get("tracking")
+    return _issue_ref(tracking) if tracking else "no open tracker"
+
+
 def _tier_features(tier: str) -> list[tuple[str, MaturityInfo]]:
     """The registry's entries for *tier*, sorted for deterministic output."""
     return sorted((key, info) for key, info in FEATURE_MATURITY.items() if info["maturity"] == tier)
@@ -86,7 +92,7 @@ def _non_ga_section(title: str, tier: str) -> list[str]:
     ]
     for key, info in features:
         target = info.get("target_ga") or "_none committed_"
-        lines.append(f"| [{key}](#{key}) | {target} | {_issue_ref(info['tracking'])} |")
+        lines.append(f"| [{key}](#{key}) | {target} | {_tracker_text(info)} |")
     for key, info in features:
         target = info.get("target_ga")
         lines += [
@@ -96,8 +102,12 @@ def _non_ga_section(title: str, tier: str) -> list[str]:
             f"- **Tier:** {tier}",
             "- **Target GA milestone:** "
             + (target if target else "none committed — outside the 1.0 promise"),
-            "- **Gaps & promotion gate:** known gaps and the road to "
-            f"promotion are tracked in {_issue_ref(info['tracking'])}.",
+            "- **Gaps & promotion gate:** "
+            + (
+                f"known gaps and the road to promotion are tracked in {_tracker_text(info)}."
+                if info.get("tracking")
+                else "no open tracker."
+            ),
         ]
     lines.append("")
     return lines

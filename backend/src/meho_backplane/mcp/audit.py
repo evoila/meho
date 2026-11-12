@@ -55,7 +55,6 @@ unsuccessful — the same fail-closed posture the chassis
 
 from __future__ import annotations
 
-import unicodedata
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -65,7 +64,7 @@ from typing import Any
 import structlog
 
 from meho_backplane.audit import _resolve_audit_payload
-from meho_backplane.auth.client_identity import apply_client_block
+from meho_backplane.auth.client_identity import apply_client_block, clean_client_text
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.operator import Operator
@@ -79,9 +78,6 @@ __all__ = ["SESSION_OPEN_OP_ID", "write_mcp_audit_row", "write_mcp_session_open_
 #: ``payload["op_id"]`` of the one row written when an MCP session starts
 #: (#6209). ``meho audit query --op-id mcp.session_open`` finds these rows.
 SESSION_OPEN_OP_ID = "mcp.session_open"
-
-#: Longest client name, version or ``User-Agent`` kept on the session row.
-_CLIENT_TEXT_MAX_CHARS = 200
 
 
 def _resolve_uuid_contextvar(name: str) -> uuid.UUID | None:
@@ -333,29 +329,6 @@ async def write_mcp_audit_row(
     return audit_id
 
 
-#: Unicode groups removed from client texts: control (``Cc``), format
-#: (``Cf``), line and paragraph separators (``Zl`` U+2028, ``Zp`` U+2029),
-#: and lone surrogates (``Cs``).
-_DROPPED_CHAR_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
-
-
-def _clean_client_text(value: object) -> str | None:
-    """Return *value* without unsafe characters, cut to 200 characters.
-
-    The client sends these texts about itself, so they are not trusted.
-    A control character or a line separator could break a log line or a
-    terminal. A lone surrogate cannot be stored as UTF-8, so the row
-    write, and with it the ``initialize``, would fail. A value that is
-    not a string, or is empty after cleaning, gives ``None``.
-    """
-    if not isinstance(value, str):
-        return None
-    cleaned = "".join(
-        ch for ch in value if unicodedata.category(ch) not in _DROPPED_CHAR_CATEGORIES
-    )
-    return cleaned[:_CLIENT_TEXT_MAX_CHARS] or None
-
-
 async def write_mcp_session_open_row(
     *,
     operator: Operator,
@@ -386,9 +359,9 @@ async def write_mcp_session_open_row(
         duration_ms=0.0,
         payload={
             "op_id": SESSION_OPEN_OP_ID,
-            "client_name": _clean_client_text(client_info.get("name")),
-            "client_version": _clean_client_text(client_info.get("version")),
-            "user_agent": _clean_client_text(user_agent),
+            "client_name": clean_client_text(client_info.get("name")),
+            "client_version": clean_client_text(client_info.get("version")),
+            "user_agent": clean_client_text(user_agent),
             "self_declared": True,
         },
         request_id=current_request_id(),

@@ -287,6 +287,38 @@ claim for audit parent-linkage (#3446), is never matched against this table).
    MEHO checks on its own (`declare_no_governed_subops`). It fails and
    names the operation when one does neither.
 
+   Three more rules close the gaps of that check (#6298):
+
+   - **No step list.** The CI check sees only the operations of this
+     repo. A connector package can bring a multi-step operation that
+     changes something and declares nothing. With the switch `on`, an
+     agent's call of such an operation is refused before it starts, with
+     the code `agent_steps_not_declared` (`error_code` and `reason_code`).
+     The text names the agent and the operation. No approval request is
+     stored and no step runs; the audit row has the code. With `observe`
+     MEHO logs one `agent_steps_not_declared_would_deny` line (agent,
+     tenant, op id) and the call goes on. People and service logins are
+     not touched. The preview gives the same answer.
+   - **The text of a denied step** names the agent (`agent:<name>`), the
+     operation, the step and the grant pattern, and says how an admin
+     changes the grant (`meho agent grant list --principal <agent>` and
+     `meho agent grant revoke <grant-id>`, or the console). It never holds
+     the call's arguments.
+   - **A resumed call is checked again.** A call that waited for approval
+     can run much later, and an admin may have changed a grant in
+     between. When the agent's own run resumes the approved call, the
+     dispatcher runs the same step check again before the first step. A
+     refusal writes a `denied` audit row like the first check, and the
+     approval request ends as a failed run with the reason. When a
+     reviewer runs the approved call from an approvals surface, the steps
+     are checked for the reviewer, so the agent's grants do not apply
+     there.
+
+   A composite that checks a step that is not on its declared list
+   (`enforce_subop_policy`) logs one `composite_step_not_declared`
+   warning (composite op id, step op id) and goes on. The step gate still
+   checks the step; the warning shows that the up-front check missed it.
+
 4. **Apply safety-level ceiling.** A row's verdict can only tighten to the
    op's ceiling, never loosen beyond it:
 

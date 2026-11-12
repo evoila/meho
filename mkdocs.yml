@@ -111,6 +111,7 @@ nav:
       - Agent sessions: guides/agent-sessions.md
       - Audit forensics: guides/audit-forensics.md
       - The settings file: guides/settings-file.md
+      - The policy file: guides/policy-file.md
       - Flight recorder: guides/flight-recorder.md
       - Runbooks: guides/runbooks.md
       - Hosted agents: guides/hosted-agents.md

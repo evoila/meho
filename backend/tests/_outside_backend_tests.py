@@ -60,6 +60,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_chart_core_bootstrap.py",
     "tests/test_chart_core_keycloak.py",
     "tests/test_chart_core_keycloak_own_postgres.py",
+    "tests/test_chart_core_keycloak_role_check.py",
     "tests/test_chart_core_openbao.py",
     "tests/test_chart_core_postgres.py",
     "tests/test_chart_core_secrets.py",

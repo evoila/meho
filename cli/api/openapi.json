@@ -19862,6 +19862,48 @@
         }
       }
     },
+    "/ui/agents/runs/{handle}/events": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Run Events Stream",
+        "description": "Stream the run's saved events, then its new ones, as Server-Sent Events.",
+        "operationId": "run_events_stream_ui_agents_runs__handle__events_get",
+        "parameters": [
+          {
+            "name": "handle",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Handle"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/agents/create": {
       "get": {
         "tags": [
@@ -20498,7 +20540,7 @@
           "ui-agents"
         ],
         "summary": "Ui Agents Run Console",
-        "description": "``GET /ui/agents/{name}/run`` -- the run console page (operator read).",
+        "description": "``GET /ui/agents/{name}/run`` -- the run console page (operator read).\n\n``?run=<id>`` shows that run: its saved events, then the live ones.",
         "operationId": "ui_agents_run_console_ui_agents__name__run_get",
         "parameters": [
           {
@@ -20508,6 +20550,17 @@
             "schema": {
               "type": "string",
               "title": "Name"
+            }
+          },
+          {
+            "name": "run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Run"
             }
           }
         ],

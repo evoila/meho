@@ -22,6 +22,16 @@
                             each row.
     * ``csrf_token``     -- str: minted token the per-row edit forms echo.
 -#}
+{#- #6038: a link to classify the whole group, while classification is on. -#}
+{% if is_tenant_admin and ops and ops[0].category is not none %}
+  <p class="text-xs mb-1">
+    <a
+      class="link link-hover"
+      href="/ui/policy/classify?connector={{ connector_id | urlencode }}&group={{ group_key | urlencode }}"
+      data-group-classify-link="{{ group_key }}"
+    >Classify this group</a>
+  </p>
+{% endif %}
 {% if ops %}
   <ul class="divide-y divide-base-300" role="list" data-group-ops="{{ group_key }}">
     {% for op in ops %}

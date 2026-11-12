@@ -57,6 +57,7 @@ __all__ = [
     "ApproveRight",
     "ApproveRightReason",
     "approve_right",
+    "approve_right_any_status",
     "self_approval_confirmation",
 ]
 
@@ -194,6 +195,20 @@ def approve_right(operator: Operator, request: ApprovalRequest) -> ApproveRight:
     :func:`~meho_backplane.operations.approval_queue.approve_request` in
     the same order and turns each refusal into an answer. Raises nothing.
     """
+    return _right(operator, request, check_pending=True)
+
+
+def approve_right_any_status(operator: Operator, request: ApprovalRequest) -> ApproveRight:
+    """Like :func:`approve_right`, but without the "still pending" check.
+
+    The push messages (:mod:`meho_backplane.web_push.recipients`) ask who
+    may approve a request also after it was decided: its decision message
+    goes to the same people as its first message.
+    """
+    return _right(operator, request, check_pending=False)
+
+
+def _right(operator: Operator, request: ApprovalRequest, *, check_pending: bool) -> ApproveRight:
     try:
         _check_reviewer_role(operator)
     except NonHumanApprovalError:
@@ -207,7 +222,7 @@ def approve_right(operator: Operator, request: ApprovalRequest) -> ApproveRight:
             "Your role cannot decide approval requests "
             "(operator role or the approver capability required).",
         )
-    if request.status != ApprovalRequestStatus.PENDING.value:
+    if check_pending and request.status != ApprovalRequestStatus.PENDING.value:
         return _refused(
             ApproveRightReason.NOT_PENDING,
             f"This request is {request.status}. Only a pending request can be approved.",

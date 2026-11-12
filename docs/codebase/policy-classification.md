@@ -163,10 +163,74 @@ The change is the operation `policy.classify` on the connector
   switch off, nobody finds or calls it, and no new request waits for it.
   The handler also refuses a call when the switch is off.
 
+## Edit one at a time or by pattern
+
+A tenant admin edits one operation, one group, one connector, or many
+operations by pattern (for example `{"op": "k8s.deployment.*"}`). A
+pattern can match more than the admin expects, so every surface works in
+two steps. Both are in `policy/bulk.py`:
+
+1. **Dry run** (`preview_classification_edit`). It lists every operation
+   the entry matches, with its category, labels, risk level and "always
+   wait" before and after the edit, and `changes` for each. The list is
+   never cut. It also names a conflict the edit would make. It writes
+   nothing. `plan_edit` in `policy/store.py` does the work; the change
+   itself (`set_classification`) uses the same function.
+2. **Request** (`request_classification_edit`). It runs the dry run again
+   and refuses, before any request, an edit that is not valid, that
+   matches no operation, or that would make a conflict. Otherwise it calls
+   `policy.classify` through `call_operation`, so the role check, the
+   approval and the audit row are those of any other call. The answer
+   waits until another tenant admin approves it.
+
+| Surface | Dry run | Request |
+|---|---|---|
+| REST (`api/v1/policy_classification.py`) | `POST /api/v1/policy/classification/preview` | `POST /api/v1/policy/classification` (`202` with `approval_request_id`) |
+| REST, one connector | | `PATCH /api/v1/connectors/{connector_id}/classification` |
+| REST, one group or operation | | `category` / `labels` on the existing group and operation PATCH routes (`202`) |
+| CLI | `meho connector classify --op '<pattern>' --category <name>` | the same with `--apply`; `--category` / `--label` on `edit-op` and `edit-group` |
+| Console | `/ui/policy/classify` ("Show what changes"); the review drawer links to it with the match filled in | "Ask for this change" on the dry run |
+| Admin MCP tools | the operation `policy.classify_preview` | `category` / `labels` on `meho_connector_edit_op` and `meho_connector_edit_group`; `policy.classify` for a connector or a pattern |
+
+`GET /api/v1/policy/classification` lists the taxonomy and the stored
+entries of the caller's tenant and of the install.
+
+Rules every surface keeps:
+
+- `category` and `labels` on a PATCH route or an MCP edit tool wait for a
+  second admin, so they cannot ride along with fields that are stored at
+  once. A body with both is refused (`400`, MCP `-32602`,
+  `classification_mixed`).
+- The change is always for the caller's tenant. The tenant comes from the
+  login, never from the request.
+- While the switch is off, REST answers `409` (`classification_off`), the
+  list says `enabled: false`, the console page says so, and the two MCP
+  edit tools do not show the fields (`classification_for_settings`), so
+  `tools/list` is as before. The answer of `meho_connector_review` has no
+  `category` / `labels` on its ops (`drop_classification_fields`), so it
+  is as before too. The dry-run operation is not registered.
+
+`policy.classify_preview` is `safe` and runs at once (no approval). Like
+`policy.classify` it needs the `tenant_admin` role and is registered only
+while the switch is on.
+
+## The override report shows the value in force
+
+The override report (`list_overrides` in `operations/op_policy.py`, REST
+`GET /api/v1/connectors/operation-overrides`, `meho connector overrides`,
+`/ui/connectors/overrides`) works out each row with
+`effective_policy_map`, like dispatch. So with the switch on it never shows
+"approval off" for an operation that a classification entry still makes
+wait. Each row also has `category`, `labels`, `always_wait` and `rule_ref`
+(the entry that decided the values). With the switch off these stay empty
+and the report is as before.
+
 ## Known limits
 
-- The edit surfaces (REST, CLI, console, edit by pattern) and the policy
-  file import come in later changes. They use `policy.classify` or the same
+- The policy file import comes in a later change. It uses the same
   rights-change mark.
+- A connector id, group key or operation id that holds `*`, `?` or `[` is
+  read as a pattern, also on the PATCH routes. The dry run shows what it
+  matches.
 - The flight-recorder check (`test_flight_recorder_typed_spans.py`) runs
   with the switch off, so it does not list `policy-registry`.

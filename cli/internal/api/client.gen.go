@@ -3719,6 +3719,80 @@ type BodyUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost struct {
 	To MemoryScope `json:"to"`
 }
 
+// BodyUiPolicyClassifyPreviewUiPolicyClassifyPreviewPost defines model for Body_ui_policy_classify_preview_ui_policy_classify_preview_post.
+type BodyUiPolicyClassifyPreviewUiPolicyClassifyPreviewPost struct {
+	AlwaysWait *string `json:"always_wait"`
+	Category   *string `json:"category"`
+	Connector  *string `json:"connector"`
+	Group      *string `json:"group"`
+	Labels     *string `json:"labels"`
+	Op         *string `json:"op"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+}
+
+// BodyUiPolicyClassifyRequestUiPolicyClassifyRequestPost defines model for Body_ui_policy_classify_request_ui_policy_classify_request_post.
+type BodyUiPolicyClassifyRequestUiPolicyClassifyRequestPost struct {
+	AlwaysWait *string `json:"always_wait"`
+	Category   *string `json:"category"`
+	Connector  *string `json:"connector"`
+	Group      *string `json:"group"`
+	Labels     *string `json:"labels"`
+	Op         *string `json:"op"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+}
+
 // BodyUiSchedulerCreateSubmitUiSchedulerCreatePost defines model for Body_ui_scheduler_create_submit_ui_scheduler_create_post.
 type BodyUiSchedulerCreateSubmitUiSchedulerCreatePost struct {
 	AgentDefinitionId *string `json:"agent_definition_id,omitempty"`
@@ -4245,6 +4319,106 @@ type CheckSource struct {
 // CheckSourceKind defines model for CheckSource.Kind.
 type CheckSourceKind string
 
+// ClassificationEditBody One edit: the match and the values it sets. Set at least one value.
+type ClassificationEditBody struct {
+	// AlwaysWait true: every call of a matched operation waits for approval. false: back to the operation's own value, never below it.
+	AlwaysWait *bool `json:"always_wait"`
+
+	// Category A category of the taxonomy, for example network or storage.
+	Category *string `json:"category"`
+
+	// Labels Free key=value text. Replaces the labels of this entry.
+	Labels *map[string]string `json:"labels"`
+
+	// Match What an entry matches. Every field given must match.
+	Match ClassificationMatch `json:"match"`
+}
+
+// ClassificationEntryOut One stored entry. “ref“ names it, for example “tenant:classifications[0]“.
+type ClassificationEntryOut struct {
+	AlwaysWait *bool             `json:"always_wait"`
+	Category   *string           `json:"category"`
+	Labels     map[string]string `json:"labels"`
+	Match      map[string]string `json:"match"`
+	Ref        string            `json:"ref"`
+	Risk       *string           `json:"risk"`
+	Scope      string            `json:"scope"`
+}
+
+// ClassificationListResponse The taxonomy and the stored entries of the caller's tenant and of the install.
+//
+// “enabled“ is “false“ while the “POLICY_CLASSIFICATION“ switch is
+// off; then nothing is read and “entries“ is empty.
+type ClassificationListResponse struct {
+	Enabled bool                     `json:"enabled"`
+	Entries []ClassificationEntryOut `json:"entries"`
+
+	// Taxonomy The categories an entry may use, and the category of an unclassified operation.
+	Taxonomy ClassificationTaxonomyOut `json:"taxonomy"`
+}
+
+// ClassificationMatch What an entry matches. Every field given must match.
+type ClassificationMatch struct {
+	// Connector Connector id pattern, for example vault-1.x. `*` is any text, `?` is one character, no wildcard is an exact match.
+	Connector *string `json:"connector"`
+
+	// Group Operation group key pattern. `*` is any text, `?` is one character, no wildcard is an exact match.
+	Group *string `json:"group"`
+
+	// Op Operation id pattern, for example k8s.deployment.*. `*` is any text, `?` is one character, no wildcard is an exact match.
+	Op *string `json:"op"`
+}
+
+// ClassificationPreviewResponse The dry run of one edit. Lists every matched operation; nothing is written.
+//
+// “conflict“ is the reason the edit would be refused, or “null“.
+type ClassificationPreviewResponse struct {
+	ChangedOperations int                        `json:"changed_operations"`
+	Conflict          *string                    `json:"conflict"`
+	Entry             map[string]interface{}     `json:"entry"`
+	Match             map[string]string          `json:"match"`
+	MatchedOperations int                        `json:"matched_operations"`
+	Operations        []ClassificationPreviewRow `json:"operations"`
+	RuleRef           string                     `json:"rule_ref"`
+}
+
+// ClassificationPreviewRow One matched operation, with its values before and after the edit.
+type ClassificationPreviewRow struct {
+	// After The classified values of one operation, before the floors.
+	After ClassificationValues `json:"after"`
+
+	// Before The classified values of one operation, before the floors.
+	Before      ClassificationValues `json:"before"`
+	Changes     bool                 `json:"changes"`
+	ConnectorId string               `json:"connector_id"`
+	GroupKey    *string              `json:"group_key"`
+	OpId        string               `json:"op_id"`
+}
+
+// ClassificationRequestResponse The answer to an edit request: it waits until a second tenant admin approves it.
+type ClassificationRequestResponse struct {
+	ApprovalRequestId *string `json:"approval_request_id"`
+	ChangedOperations int     `json:"changed_operations"`
+	MatchedOperations int     `json:"matched_operations"`
+	Message           string  `json:"message"`
+	Status            string  `json:"status"`
+}
+
+// ClassificationTaxonomyOut The categories an entry may use, and the category of an unclassified operation.
+type ClassificationTaxonomyOut struct {
+	Categories []string `json:"categories"`
+	Default    string   `json:"default"`
+}
+
+// ClassificationValues The classified values of one operation, before the floors.
+type ClassificationValues struct {
+	AlwaysWait bool              `json:"always_wait"`
+	Category   *string           `json:"category"`
+	Labels     map[string]string `json:"labels"`
+	Risk       *string           `json:"risk"`
+	RuleRef    string            `json:"rule_ref"`
+}
+
 // ConfirmVerify Operator answers a yes/no prompt; only an affirmative advances.
 //
 // The minimal verify shape: MEHO shows :attr:`prompt` to the operator
@@ -4268,6 +4442,17 @@ type ConfirmVerifyResponse struct {
 
 // ConfirmVerifyResponseAnswer defines model for ConfirmVerifyResponse.Answer.
 type ConfirmVerifyResponseAnswer string
+
+// ConnectorClassificationBody The values for one whole connector. Set at least one.
+type ConnectorClassificationBody struct {
+	AlwaysWait *bool `json:"always_wait"`
+
+	// Category A category of the taxonomy, for example network or storage.
+	Category *string `json:"category"`
+
+	// Labels Free key=value text. Replaces the labels of this entry.
+	Labels *map[string]string `json:"labels"`
+}
 
 // ConnectorListItem One row in the “GET /api/v1/connectors“ response.
 //
@@ -4541,18 +4726,20 @@ type ConnectorReviewGroupAdvisory struct {
 // sending 4 KB of schema per op would balloon the review payload
 // for connectors with thousands of operations.
 type ConnectorReviewOp struct {
-	ClassifiedRequiresApproval *bool    `json:"classified_requires_approval"`
-	ClassifiedSafetyLevel      *string  `json:"classified_safety_level"`
-	CustomDescription          *string  `json:"custom_description"`
-	Description                *string  `json:"description"`
-	IsEnabled                  bool     `json:"is_enabled"`
-	NeedsReingest              *bool    `json:"needs_reingest,omitempty"`
-	OpId                       string   `json:"op_id"`
-	RequiresApproval           bool     `json:"requires_approval"`
-	SafetyLevel                string   `json:"safety_level"`
-	Summary                    *string  `json:"summary"`
-	Tags                       []string `json:"tags"`
-	TenantEnabled              *bool    `json:"tenant_enabled"`
+	Category                   *string            `json:"category"`
+	ClassifiedRequiresApproval *bool              `json:"classified_requires_approval"`
+	ClassifiedSafetyLevel      *string            `json:"classified_safety_level"`
+	CustomDescription          *string            `json:"custom_description"`
+	Description                *string            `json:"description"`
+	IsEnabled                  bool               `json:"is_enabled"`
+	Labels                     *map[string]string `json:"labels,omitempty"`
+	NeedsReingest              *bool              `json:"needs_reingest,omitempty"`
+	OpId                       string             `json:"op_id"`
+	RequiresApproval           bool               `json:"requires_approval"`
+	SafetyLevel                string             `json:"safety_level"`
+	Summary                    *string            `json:"summary"`
+	Tags                       []string           `json:"tags"`
+	TenantEnabled              *bool              `json:"tenant_enabled"`
 }
 
 // ConnectorReviewPayload Top-level review payload returned by :meth:`ReviewService.get_review_payload`.
@@ -5882,8 +6069,13 @@ type DroppedOpModel struct {
 // surface as a confusing 400 "at least one field must be set"
 // from the route layer).
 type EditGroupBody struct {
-	Name      *string `json:"name"`
-	WhenToUse *string `json:"when_to_use"`
+	// Category A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until another tenant admin approves it.
+	Category *string `json:"category"`
+
+	// Labels Free key=value labels. Same rules as category: a request of its own that waits for another tenant admin.
+	Labels    *map[string]string `json:"labels"`
+	Name      *string            `json:"name"`
+	WhenToUse *string            `json:"when_to_use"`
 }
 
 // EditOpBody PATCH body for “/api/v1/connectors/{id}/operations/{op_id}“.
@@ -5922,11 +6114,16 @@ type EditGroupBody struct {
 // 422 “extra_forbidden“ — same fail-loud posture as every other
 // public v1 request schema.
 type EditOpBody struct {
-	CustomDescription *string                `json:"custom_description"`
-	IsEnabled         *bool                  `json:"is_enabled"`
-	Reason            *string                `json:"reason"`
-	RequiresApproval  *bool                  `json:"requires_approval"`
-	SafetyLevel       *EditOpBodySafetyLevel `json:"safety_level"`
+	// Category A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until another tenant admin approves it.
+	Category          *string `json:"category"`
+	CustomDescription *string `json:"custom_description"`
+	IsEnabled         *bool   `json:"is_enabled"`
+
+	// Labels Free key=value labels. Same rules as category: a request of its own that waits for another tenant admin.
+	Labels           *map[string]string     `json:"labels"`
+	Reason           *string                `json:"reason"`
+	RequiresApproval *bool                  `json:"requires_approval"`
+	SafetyLevel      *EditOpBodySafetyLevel `json:"safety_level"`
 }
 
 // EditOpBodySafetyLevel defines model for EditOpBody.SafetyLevel.
@@ -8032,14 +8229,19 @@ type OperationOverrideList struct {
 //
 // “scope“ is “tenant“ (the change applies to “tenant_id“ only) or
 // “install“ (the whole install). “safety_level“ / “requires_approval“
-// are the values that apply in that scope: the classification with every
-// override there. “reason“ is the reason a platform admin gave for
+// are the values that apply in that scope: the value in code with every
+// override there, the classification entries and the floors, as at
+// dispatch. “reason“ is the reason a platform admin gave for
 // turning approval off.
 type OperationOverrideRow struct {
+	AlwaysWait       *bool                     `json:"always_wait,omitempty"`
+	Category         *string                   `json:"category"`
 	ConnectorId      string                    `json:"connector_id"`
+	Labels           *map[string]string        `json:"labels,omitempty"`
 	OpId             string                    `json:"op_id"`
 	Reason           *string                   `json:"reason"`
 	RequiresApproval *bool                     `json:"requires_approval"`
+	RuleRef          *string                   `json:"rule_ref"`
 	SafetyLevel      *string                   `json:"safety_level"`
 	Scope            OperationOverrideRowScope `json:"scope"`
 	SetAt            time.Time                 `json:"set_at"`
@@ -12708,6 +12910,11 @@ type DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchParams defines parameters for ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatch.
+type ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams defines parameters for DisableEndpointApiV1ConnectorsConnectorIdDisablePost.
 type DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -13095,6 +13302,21 @@ type GetSearchApiV1OperationsSearchGetParams struct {
 
 // GetDescriptorApiV1OperationsDescriptorIdGetParams defines parameters for GetDescriptorApiV1OperationsDescriptorIdGet.
 type GetDescriptorApiV1OperationsDescriptorIdGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListClassificationApiV1PolicyClassificationGetParams defines parameters for ListClassificationApiV1PolicyClassificationGet.
+type ListClassificationApiV1PolicyClassificationGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RequestClassificationApiV1PolicyClassificationPostParams defines parameters for RequestClassificationApiV1PolicyClassificationPost.
+type RequestClassificationApiV1PolicyClassificationPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PreviewClassificationApiV1PolicyClassificationPreviewPostParams defines parameters for PreviewClassificationApiV1PolicyClassificationPreviewPost.
+type PreviewClassificationApiV1PolicyClassificationPreviewPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -13904,6 +14126,13 @@ type OperationsSearchUiOperationsSearchGetParams struct {
 	Q           *string `form:"q,omitempty" json:"q,omitempty"`
 }
 
+// UiPolicyClassifyUiPolicyClassifyGetParams defines parameters for UiPolicyClassifyUiPolicyClassifyGet.
+type UiPolicyClassifyUiPolicyClassifyGetParams struct {
+	Connector *string `form:"connector,omitempty" json:"connector,omitempty"`
+	Group     *string `form:"group,omitempty" json:"group,omitempty"`
+	Op        *string `form:"op,omitempty" json:"op,omitempty"`
+}
+
 // RunbooksIndexUiRunbooksGetParams defines parameters for RunbooksIndexUiRunbooksGet.
 type RunbooksIndexUiRunbooksGetParams struct {
 	Status     *RunbooksIndexUiRunbooksGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
@@ -14122,6 +14351,9 @@ type PostResultsApiV1ChecksResultsPostJSONRequestBody = RunnerResultBatch
 // IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody defines body for IngestEndpointApiV1ConnectorsIngestPost for application/json ContentType.
 type IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody = IngestRequest
 
+// ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchJSONRequestBody defines body for ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatch for application/json ContentType.
+type ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchJSONRequestBody = ConnectorClassificationBody
+
 // EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody defines body for EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch for application/json ContentType.
 type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody = EditGroupBody
 
@@ -14181,6 +14413,12 @@ type PostPreviewApiV1OperationsPreviewPostJSONRequestBody = PreviewOperationBody
 
 // PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody defines body for PostResultQueryApiV1OperationsResultQueryPost for application/json ContentType.
 type PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody = ResultQueryBody
+
+// RequestClassificationApiV1PolicyClassificationPostJSONRequestBody defines body for RequestClassificationApiV1PolicyClassificationPost for application/json ContentType.
+type RequestClassificationApiV1PolicyClassificationPostJSONRequestBody = ClassificationEditBody
+
+// PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody defines body for PreviewClassificationApiV1PolicyClassificationPreviewPost for application/json ContentType.
+type PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody = ClassificationEditBody
 
 // ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody defines body for ReadDocsEndpointApiV1ReadDocsPost for application/json ContentType.
 type ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody = ReadDocsRequest
@@ -14607,6 +14845,15 @@ type OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody = 
 
 // OperationsPreviewUiOperationsPreviewPostFormdataRequestBody defines body for OperationsPreviewUiOperationsPreviewPost for application/x-www-form-urlencoded ContentType.
 type OperationsPreviewUiOperationsPreviewPostFormdataRequestBody = BodyOperationsPreviewUiOperationsPreviewPost
+
+// UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody defines body for UiPolicyClassifyUiPolicyClassifyGet for application/json ContentType.
+type UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody = UISessionContext
+
+// UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostFormdataRequestBody defines body for UiPolicyClassifyPreviewUiPolicyClassifyPreviewPost for application/x-www-form-urlencoded ContentType.
+type UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostFormdataRequestBody = BodyUiPolicyClassifyPreviewUiPolicyClassifyPreviewPost
+
+// UiPolicyClassifyRequestUiPolicyClassifyRequestPostFormdataRequestBody defines body for UiPolicyClassifyRequestUiPolicyClassifyRequestPost for application/x-www-form-urlencoded ContentType.
+type UiPolicyClassifyRequestUiPolicyClassifyRequestPostFormdataRequestBody = BodyUiPolicyClassifyRequestUiPolicyClassifyRequestPost
 
 // RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody defines body for RetrievalDiagnosticsUiRetrievalDiagnosticsPost for application/x-www-form-urlencoded ContentType.
 type RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody = BodyRetrievalDiagnosticsUiRetrievalDiagnosticsPost
@@ -16764,6 +17011,11 @@ type ClientInterface interface {
 	// DeleteEndpointApiV1ConnectorsConnectorIdDelete request
 	DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchWithBody request with any body
+	ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchWithBody(ctx context.Context, connectorId string, params *ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatch(ctx context.Context, connectorId string, params *ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchParams, body ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DisableEndpointApiV1ConnectorsConnectorIdDisablePost request
 	DisableEndpointApiV1ConnectorsConnectorIdDisablePost(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -16974,6 +17226,19 @@ type ClientInterface interface {
 
 	// GetDescriptorApiV1OperationsDescriptorIdGet request
 	GetDescriptorApiV1OperationsDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListClassificationApiV1PolicyClassificationGet request
+	ListClassificationApiV1PolicyClassificationGet(ctx context.Context, params *ListClassificationApiV1PolicyClassificationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RequestClassificationApiV1PolicyClassificationPostWithBody request with any body
+	RequestClassificationApiV1PolicyClassificationPostWithBody(ctx context.Context, params *RequestClassificationApiV1PolicyClassificationPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RequestClassificationApiV1PolicyClassificationPost(ctx context.Context, params *RequestClassificationApiV1PolicyClassificationPostParams, body RequestClassificationApiV1PolicyClassificationPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PreviewClassificationApiV1PolicyClassificationPreviewPostWithBody request with any body
+	PreviewClassificationApiV1PolicyClassificationPreviewPostWithBody(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PreviewClassificationApiV1PolicyClassificationPreviewPost(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, body PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ReadDocsEndpointApiV1ReadDocsPostWithBody request with any body
 	ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -18022,6 +18287,21 @@ type ClientInterface interface {
 
 	// UiPairingListUiPairingGet request
 	UiPairingListUiPairingGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiPolicyClassifyUiPolicyClassifyGetWithBody request with any body
+	UiPolicyClassifyUiPolicyClassifyGetWithBody(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiPolicyClassifyUiPolicyClassifyGet(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, body UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithBody request with any body
+	UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithFormdataBody(ctx context.Context, body UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithBody request with any body
+	UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithFormdataBody(ctx context.Context, body UiPolicyClassifyRequestUiPolicyClassifyRequestPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RetrievalIndexUiRetrievalGet request
 	RetrievalIndexUiRetrievalGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19470,6 +19750,30 @@ func (c *Client) DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx context.Cont
 	return c.Client.Do(req)
 }
 
+func (c *Client) ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchWithBody(ctx context.Context, connectorId string, params *ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchRequestWithBody(c.Server, connectorId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatch(ctx context.Context, connectorId string, params *ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchParams, body ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchRequest(c.Server, connectorId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) DisableEndpointApiV1ConnectorsConnectorIdDisablePost(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDisableEndpointApiV1ConnectorsConnectorIdDisablePostRequest(c.Server, connectorId, params)
 	if err != nil {
@@ -20384,6 +20688,66 @@ func (c *Client) GetSearchApiV1OperationsSearchGet(ctx context.Context, params *
 
 func (c *Client) GetDescriptorApiV1OperationsDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetDescriptorApiV1OperationsDescriptorIdGetRequest(c.Server, descriptorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListClassificationApiV1PolicyClassificationGet(ctx context.Context, params *ListClassificationApiV1PolicyClassificationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListClassificationApiV1PolicyClassificationGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RequestClassificationApiV1PolicyClassificationPostWithBody(ctx context.Context, params *RequestClassificationApiV1PolicyClassificationPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRequestClassificationApiV1PolicyClassificationPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RequestClassificationApiV1PolicyClassificationPost(ctx context.Context, params *RequestClassificationApiV1PolicyClassificationPostParams, body RequestClassificationApiV1PolicyClassificationPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRequestClassificationApiV1PolicyClassificationPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PreviewClassificationApiV1PolicyClassificationPreviewPostWithBody(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPreviewClassificationApiV1PolicyClassificationPreviewPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PreviewClassificationApiV1PolicyClassificationPreviewPost(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, body PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPreviewClassificationApiV1PolicyClassificationPreviewPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -25124,6 +25488,78 @@ func (c *Client) OperationsSearchUiOperationsSearchGet(ctx context.Context, para
 
 func (c *Client) UiPairingListUiPairingGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiPairingListUiPairingGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiPolicyClassifyUiPolicyClassifyGetWithBody(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiPolicyClassifyUiPolicyClassifyGetRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiPolicyClassifyUiPolicyClassifyGet(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, body UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiPolicyClassifyUiPolicyClassifyGetRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiPolicyClassifyPreviewUiPolicyClassifyPreviewPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithFormdataBody(ctx context.Context, body UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiPolicyClassifyPreviewUiPolicyClassifyPreviewPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiPolicyClassifyRequestUiPolicyClassifyRequestPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithFormdataBody(ctx context.Context, body UiPolicyClassifyRequestUiPolicyClassifyRequestPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiPolicyClassifyRequestUiPolicyClassifyRequestPostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -30914,6 +31350,68 @@ func NewDeleteEndpointApiV1ConnectorsConnectorIdDeleteRequest(server string, con
 	return req, nil
 }
 
+// NewClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchRequest calls the generic ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatch builder with application/json body
+func NewClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchRequest(server string, connectorId string, params *ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchParams, body ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchRequestWithBody(server, connectorId, params, "application/json", bodyReader)
+}
+
+// NewClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchRequestWithBody generates requests for ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatch with any type of body
+func NewClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchRequestWithBody(server string, connectorId string, params *ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/classification", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewDisableEndpointApiV1ConnectorsConnectorIdDisablePostRequest generates requests for DisableEndpointApiV1ConnectorsConnectorIdDisablePost
 func NewDisableEndpointApiV1ConnectorsConnectorIdDisablePostRequest(server string, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams) (*http.Request, error) {
 	var err error
@@ -34741,6 +35239,158 @@ func NewGetDescriptorApiV1OperationsDescriptorIdGetRequest(server string, descri
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListClassificationApiV1PolicyClassificationGetRequest generates requests for ListClassificationApiV1PolicyClassificationGet
+func NewListClassificationApiV1PolicyClassificationGetRequest(server string, params *ListClassificationApiV1PolicyClassificationGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/policy/classification")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRequestClassificationApiV1PolicyClassificationPostRequest calls the generic RequestClassificationApiV1PolicyClassificationPost builder with application/json body
+func NewRequestClassificationApiV1PolicyClassificationPostRequest(server string, params *RequestClassificationApiV1PolicyClassificationPostParams, body RequestClassificationApiV1PolicyClassificationPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRequestClassificationApiV1PolicyClassificationPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewRequestClassificationApiV1PolicyClassificationPostRequestWithBody generates requests for RequestClassificationApiV1PolicyClassificationPost with any type of body
+func NewRequestClassificationApiV1PolicyClassificationPostRequestWithBody(server string, params *RequestClassificationApiV1PolicyClassificationPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/policy/classification")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPreviewClassificationApiV1PolicyClassificationPreviewPostRequest calls the generic PreviewClassificationApiV1PolicyClassificationPreviewPost builder with application/json body
+func NewPreviewClassificationApiV1PolicyClassificationPreviewPostRequest(server string, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, body PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPreviewClassificationApiV1PolicyClassificationPreviewPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewPreviewClassificationApiV1PolicyClassificationPreviewPostRequestWithBody generates requests for PreviewClassificationApiV1PolicyClassificationPreviewPost with any type of body
+func NewPreviewClassificationApiV1PolicyClassificationPreviewPostRequestWithBody(server string, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/policy/classification/preview")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -49154,6 +49804,180 @@ func NewUiPairingListUiPairingGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewUiPolicyClassifyUiPolicyClassifyGetRequest calls the generic UiPolicyClassifyUiPolicyClassifyGet builder with application/json body
+func NewUiPolicyClassifyUiPolicyClassifyGetRequest(server string, params *UiPolicyClassifyUiPolicyClassifyGetParams, body UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiPolicyClassifyUiPolicyClassifyGetRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUiPolicyClassifyUiPolicyClassifyGetRequestWithBody generates requests for UiPolicyClassifyUiPolicyClassifyGet with any type of body
+func NewUiPolicyClassifyUiPolicyClassifyGetRequestWithBody(server string, params *UiPolicyClassifyUiPolicyClassifyGetParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/policy/classify")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Connector != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "connector", runtime.ParamLocationQuery, *params.Connector); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Group != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "group", runtime.ParamLocationQuery, *params.Group); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Op != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op", runtime.ParamLocationQuery, *params.Op); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiPolicyClassifyPreviewUiPolicyClassifyPreviewPostRequestWithFormdataBody calls the generic UiPolicyClassifyPreviewUiPolicyClassifyPreviewPost builder with application/x-www-form-urlencoded body
+func NewUiPolicyClassifyPreviewUiPolicyClassifyPreviewPostRequestWithFormdataBody(server string, body UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiPolicyClassifyPreviewUiPolicyClassifyPreviewPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiPolicyClassifyPreviewUiPolicyClassifyPreviewPostRequestWithBody generates requests for UiPolicyClassifyPreviewUiPolicyClassifyPreviewPost with any type of body
+func NewUiPolicyClassifyPreviewUiPolicyClassifyPreviewPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/policy/classify/preview")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiPolicyClassifyRequestUiPolicyClassifyRequestPostRequestWithFormdataBody calls the generic UiPolicyClassifyRequestUiPolicyClassifyRequestPost builder with application/x-www-form-urlencoded body
+func NewUiPolicyClassifyRequestUiPolicyClassifyRequestPostRequestWithFormdataBody(server string, body UiPolicyClassifyRequestUiPolicyClassifyRequestPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiPolicyClassifyRequestUiPolicyClassifyRequestPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiPolicyClassifyRequestUiPolicyClassifyRequestPostRequestWithBody generates requests for UiPolicyClassifyRequestUiPolicyClassifyRequestPost with any type of body
+func NewUiPolicyClassifyRequestUiPolicyClassifyRequestPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/policy/classify/request")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewRetrievalIndexUiRetrievalGetRequest generates requests for RetrievalIndexUiRetrievalGet
 func NewRetrievalIndexUiRetrievalGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -52387,6 +53211,11 @@ type ClientWithResponsesInterface interface {
 	// DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse request
 	DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error)
 
+	// ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchWithBodyWithResponse request with any body
+	ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchWithBodyWithResponse(ctx context.Context, connectorId string, params *ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse, error)
+
+	ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchWithResponse(ctx context.Context, connectorId string, params *ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchParams, body ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse, error)
+
 	// DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse request
 	DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse, error)
 
@@ -52597,6 +53426,19 @@ type ClientWithResponsesInterface interface {
 
 	// GetDescriptorApiV1OperationsDescriptorIdGetWithResponse request
 	GetDescriptorApiV1OperationsDescriptorIdGetWithResponse(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*GetDescriptorApiV1OperationsDescriptorIdGetResponse, error)
+
+	// ListClassificationApiV1PolicyClassificationGetWithResponse request
+	ListClassificationApiV1PolicyClassificationGetWithResponse(ctx context.Context, params *ListClassificationApiV1PolicyClassificationGetParams, reqEditors ...RequestEditorFn) (*ListClassificationApiV1PolicyClassificationGetResponse, error)
+
+	// RequestClassificationApiV1PolicyClassificationPostWithBodyWithResponse request with any body
+	RequestClassificationApiV1PolicyClassificationPostWithBodyWithResponse(ctx context.Context, params *RequestClassificationApiV1PolicyClassificationPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RequestClassificationApiV1PolicyClassificationPostResponse, error)
+
+	RequestClassificationApiV1PolicyClassificationPostWithResponse(ctx context.Context, params *RequestClassificationApiV1PolicyClassificationPostParams, body RequestClassificationApiV1PolicyClassificationPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RequestClassificationApiV1PolicyClassificationPostResponse, error)
+
+	// PreviewClassificationApiV1PolicyClassificationPreviewPostWithBodyWithResponse request with any body
+	PreviewClassificationApiV1PolicyClassificationPreviewPostWithBodyWithResponse(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PreviewClassificationApiV1PolicyClassificationPreviewPostResponse, error)
+
+	PreviewClassificationApiV1PolicyClassificationPreviewPostWithResponse(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, body PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PreviewClassificationApiV1PolicyClassificationPreviewPostResponse, error)
 
 	// ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse request with any body
 	ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error)
@@ -53645,6 +54487,21 @@ type ClientWithResponsesInterface interface {
 
 	// UiPairingListUiPairingGetWithResponse request
 	UiPairingListUiPairingGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiPairingListUiPairingGetResponse, error)
+
+	// UiPolicyClassifyUiPolicyClassifyGetWithBodyWithResponse request with any body
+	UiPolicyClassifyUiPolicyClassifyGetWithBodyWithResponse(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiPolicyClassifyUiPolicyClassifyGetResponse, error)
+
+	UiPolicyClassifyUiPolicyClassifyGetWithResponse(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, body UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiPolicyClassifyUiPolicyClassifyGetResponse, error)
+
+	// UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithBodyWithResponse request with any body
+	UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse, error)
+
+	UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithFormdataBodyWithResponse(ctx context.Context, body UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse, error)
+
+	// UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithBodyWithResponse request with any body
+	UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse, error)
+
+	UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithFormdataBodyWithResponse(ctx context.Context, body UiPolicyClassifyRequestUiPolicyClassifyRequestPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse, error)
 
 	// RetrievalIndexUiRetrievalGetWithResponse request
 	RetrievalIndexUiRetrievalGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*RetrievalIndexUiRetrievalGetResponse, error)
@@ -55589,6 +56446,29 @@ func (r DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse) StatusCode() int
 	return 0
 }
 
+type ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON202      *ClassificationRequestResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -55659,6 +56539,7 @@ func (r EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse) St
 type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON202      *ClassificationRequestResponse
 	JSON422      *HTTPValidationError
 }
 
@@ -55704,6 +56585,7 @@ type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse struct 
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *EditOpResponse
+	JSON202      *ClassificationRequestResponse
 	JSON422      *HTTPValidationError
 }
 
@@ -56885,6 +57767,75 @@ func (r GetDescriptorApiV1OperationsDescriptorIdGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetDescriptorApiV1OperationsDescriptorIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListClassificationApiV1PolicyClassificationGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ClassificationListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListClassificationApiV1PolicyClassificationGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListClassificationApiV1PolicyClassificationGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RequestClassificationApiV1PolicyClassificationPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON202      *ClassificationRequestResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RequestClassificationApiV1PolicyClassificationPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RequestClassificationApiV1PolicyClassificationPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PreviewClassificationApiV1PolicyClassificationPreviewPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ClassificationPreviewResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PreviewClassificationApiV1PolicyClassificationPreviewPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PreviewClassificationApiV1PolicyClassificationPreviewPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -62733,6 +63684,72 @@ func (r UiPairingListUiPairingGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiPolicyClassifyUiPolicyClassifyGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiPolicyClassifyUiPolicyClassifyGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiPolicyClassifyUiPolicyClassifyGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RetrievalIndexUiRetrievalGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -64889,6 +65906,23 @@ func (c *ClientWithResponses) DeleteEndpointApiV1ConnectorsConnectorIdDeleteWith
 	return ParseDeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse(rsp)
 }
 
+// ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchWithBodyWithResponse request with arbitrary body returning *ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse
+func (c *ClientWithResponses) ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchWithBodyWithResponse(ctx context.Context, connectorId string, params *ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse, error) {
+	rsp, err := c.ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchWithBody(ctx, connectorId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchWithResponse(ctx context.Context, connectorId string, params *ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchParams, body ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse, error) {
+	rsp, err := c.ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatch(ctx, connectorId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse(rsp)
+}
+
 // DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse request returning *DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse
 func (c *ClientWithResponses) DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse, error) {
 	rsp, err := c.DisableEndpointApiV1ConnectorsConnectorIdDisablePost(ctx, connectorId, params, reqEditors...)
@@ -65560,6 +66594,49 @@ func (c *ClientWithResponses) GetDescriptorApiV1OperationsDescriptorIdGetWithRes
 		return nil, err
 	}
 	return ParseGetDescriptorApiV1OperationsDescriptorIdGetResponse(rsp)
+}
+
+// ListClassificationApiV1PolicyClassificationGetWithResponse request returning *ListClassificationApiV1PolicyClassificationGetResponse
+func (c *ClientWithResponses) ListClassificationApiV1PolicyClassificationGetWithResponse(ctx context.Context, params *ListClassificationApiV1PolicyClassificationGetParams, reqEditors ...RequestEditorFn) (*ListClassificationApiV1PolicyClassificationGetResponse, error) {
+	rsp, err := c.ListClassificationApiV1PolicyClassificationGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListClassificationApiV1PolicyClassificationGetResponse(rsp)
+}
+
+// RequestClassificationApiV1PolicyClassificationPostWithBodyWithResponse request with arbitrary body returning *RequestClassificationApiV1PolicyClassificationPostResponse
+func (c *ClientWithResponses) RequestClassificationApiV1PolicyClassificationPostWithBodyWithResponse(ctx context.Context, params *RequestClassificationApiV1PolicyClassificationPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RequestClassificationApiV1PolicyClassificationPostResponse, error) {
+	rsp, err := c.RequestClassificationApiV1PolicyClassificationPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRequestClassificationApiV1PolicyClassificationPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RequestClassificationApiV1PolicyClassificationPostWithResponse(ctx context.Context, params *RequestClassificationApiV1PolicyClassificationPostParams, body RequestClassificationApiV1PolicyClassificationPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RequestClassificationApiV1PolicyClassificationPostResponse, error) {
+	rsp, err := c.RequestClassificationApiV1PolicyClassificationPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRequestClassificationApiV1PolicyClassificationPostResponse(rsp)
+}
+
+// PreviewClassificationApiV1PolicyClassificationPreviewPostWithBodyWithResponse request with arbitrary body returning *PreviewClassificationApiV1PolicyClassificationPreviewPostResponse
+func (c *ClientWithResponses) PreviewClassificationApiV1PolicyClassificationPreviewPostWithBodyWithResponse(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PreviewClassificationApiV1PolicyClassificationPreviewPostResponse, error) {
+	rsp, err := c.PreviewClassificationApiV1PolicyClassificationPreviewPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePreviewClassificationApiV1PolicyClassificationPreviewPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) PreviewClassificationApiV1PolicyClassificationPreviewPostWithResponse(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, body PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PreviewClassificationApiV1PolicyClassificationPreviewPostResponse, error) {
+	rsp, err := c.PreviewClassificationApiV1PolicyClassificationPreviewPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePreviewClassificationApiV1PolicyClassificationPreviewPostResponse(rsp)
 }
 
 // ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse request with arbitrary body returning *ReadDocsEndpointApiV1ReadDocsPostResponse
@@ -68980,6 +70057,57 @@ func (c *ClientWithResponses) UiPairingListUiPairingGetWithResponse(ctx context.
 	return ParseUiPairingListUiPairingGetResponse(rsp)
 }
 
+// UiPolicyClassifyUiPolicyClassifyGetWithBodyWithResponse request with arbitrary body returning *UiPolicyClassifyUiPolicyClassifyGetResponse
+func (c *ClientWithResponses) UiPolicyClassifyUiPolicyClassifyGetWithBodyWithResponse(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiPolicyClassifyUiPolicyClassifyGetResponse, error) {
+	rsp, err := c.UiPolicyClassifyUiPolicyClassifyGetWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiPolicyClassifyUiPolicyClassifyGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiPolicyClassifyUiPolicyClassifyGetWithResponse(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, body UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiPolicyClassifyUiPolicyClassifyGetResponse, error) {
+	rsp, err := c.UiPolicyClassifyUiPolicyClassifyGet(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiPolicyClassifyUiPolicyClassifyGetResponse(rsp)
+}
+
+// UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithBodyWithResponse request with arbitrary body returning *UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse
+func (c *ClientWithResponses) UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse, error) {
+	rsp, err := c.UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithFormdataBodyWithResponse(ctx context.Context, body UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse, error) {
+	rsp, err := c.UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse(rsp)
+}
+
+// UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithBodyWithResponse request with arbitrary body returning *UiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse
+func (c *ClientWithResponses) UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse, error) {
+	rsp, err := c.UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithFormdataBodyWithResponse(ctx context.Context, body UiPolicyClassifyRequestUiPolicyClassifyRequestPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse, error) {
+	rsp, err := c.UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse(rsp)
+}
+
 // RetrievalIndexUiRetrievalGetWithResponse request returning *RetrievalIndexUiRetrievalGetResponse
 func (c *ClientWithResponses) RetrievalIndexUiRetrievalGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*RetrievalIndexUiRetrievalGetResponse, error) {
 	rsp, err := c.RetrievalIndexUiRetrievalGet(ctx, reqEditors...)
@@ -72122,6 +73250,39 @@ func ParseDeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse(rsp *http.Respo
 	return response, nil
 }
 
+// ParseClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse parses an HTTP response from a ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchWithResponse call
+func ParseClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse(rsp *http.Response) (*ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ClassifyConnectorApiV1ConnectorsConnectorIdClassificationPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest ClassificationRequestResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseDisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse parses an HTTP response from a DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse call
 func ParseDisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse(rsp *http.Response) (*DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -72221,6 +73382,13 @@ func ParseEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest ClassificationRequestResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -72279,6 +73447,13 @@ func ParseEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse(rs
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest ClassificationRequestResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
@@ -73911,6 +75086,105 @@ func ParseGetDescriptorApiV1OperationsDescriptorIdGetResponse(rsp *http.Response
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest OperationDescriptor
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListClassificationApiV1PolicyClassificationGetResponse parses an HTTP response from a ListClassificationApiV1PolicyClassificationGetWithResponse call
+func ParseListClassificationApiV1PolicyClassificationGetResponse(rsp *http.Response) (*ListClassificationApiV1PolicyClassificationGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListClassificationApiV1PolicyClassificationGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ClassificationListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRequestClassificationApiV1PolicyClassificationPostResponse parses an HTTP response from a RequestClassificationApiV1PolicyClassificationPostWithResponse call
+func ParseRequestClassificationApiV1PolicyClassificationPostResponse(rsp *http.Response) (*RequestClassificationApiV1PolicyClassificationPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RequestClassificationApiV1PolicyClassificationPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest ClassificationRequestResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePreviewClassificationApiV1PolicyClassificationPreviewPostResponse parses an HTTP response from a PreviewClassificationApiV1PolicyClassificationPreviewPostWithResponse call
+func ParsePreviewClassificationApiV1PolicyClassificationPreviewPostResponse(rsp *http.Response) (*PreviewClassificationApiV1PolicyClassificationPreviewPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PreviewClassificationApiV1PolicyClassificationPreviewPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ClassificationPreviewResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -81139,6 +82413,84 @@ func ParseUiPairingListUiPairingGetResponse(rsp *http.Response) (*UiPairingListU
 	response := &UiPairingListUiPairingGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiPolicyClassifyUiPolicyClassifyGetResponse parses an HTTP response from a UiPolicyClassifyUiPolicyClassifyGetWithResponse call
+func ParseUiPolicyClassifyUiPolicyClassifyGetResponse(rsp *http.Response) (*UiPolicyClassifyUiPolicyClassifyGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiPolicyClassifyUiPolicyClassifyGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse parses an HTTP response from a UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithResponse call
+func ParseUiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse(rsp *http.Response) (*UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse parses an HTTP response from a UiPolicyClassifyRequestUiPolicyClassifyRequestPostWithResponse call
+func ParseUiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse(rsp *http.Response) (*UiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiPolicyClassifyRequestUiPolicyClassifyRequestPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

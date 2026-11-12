@@ -12,6 +12,10 @@
   view, not the live SSE run console (#1829). The panel owns the
   ``hx-trigger`` poll directive (emitted only while non-terminal), so this
   page just embeds it.
+
+  Below it, the run's saved events (``run_events``): each turn, tool call,
+  tool result and the final answer or error, in order. A run that stopped
+  without a final event shows "unfinished" and its last saved event.
 -#}
 {% extends "base.html" %}
 
@@ -43,5 +47,59 @@
 
   {# Status panel -- self-polling while non-terminal (see the fragment). #}
   {% include "agents/runs/_status_panel.html" %}
+
+  {# Saved events -- read once per page view (with an audit row). A live
+     run links to the run console, which follows the events as they are
+     saved. Every value renders through Jinja autoescape. #}
+  {% if run_events is not none %}
+  <section class="card bg-base-100 border-base-300 border shadow-sm" data-role="run-events">
+    <div class="card-body p-4 space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <h2 class="text-base font-semibold">Events</h2>
+        <span class="flex items-center gap-2 text-xs">
+          {% if run_events.state == "unfinished" %}
+            <span class="badge badge-sm badge-warning" data-role="events-state">unfinished</span>
+          {% elif run_events.state %}
+            <span class="badge badge-sm badge-outline" data-role="events-state">{{ run_events.state }}</span>
+          {% endif %}
+          {% if not run.is_terminal and run.agent_name %}
+            <a class="link" data-role="watch-live"
+               href="/ui/agents/{{ run.agent_name | urlencode }}/run?run={{ run.run_id | urlencode }}">Watch live</a>
+          {% endif %}
+        </span>
+      </div>
+      {% if run_events.state == "unfinished" %}
+        <p class="text-sm opacity-80" data-role="events-unfinished">
+          The run stopped without a final event.
+          {% if run_events.last_seq %}The last saved event is #{{ run_events.last_seq }}.{% else %}It saved no events.{% endif %}
+        </p>
+      {% endif %}
+      {% if run_events.state is none %}
+        <p class="text-sm opacity-60" data-state="no-events">This run has no saved events.</p>
+      {% elif not run_events.events %}
+        <p class="text-sm opacity-60" data-state="no-events">No events saved yet.</p>
+      {% else %}
+        <ol class="space-y-2" role="list" aria-label="Saved run events">
+          {% for event in run_events.events %}
+          <li class="rounded-box border border-base-300 bg-base-200 p-2 text-xs" data-role="run-event">
+            <div class="flex items-center gap-2">
+              <span class="font-mono opacity-60">#{{ event.seq }}</span>
+              <span class="badge badge-xs badge-outline" data-role="event-kind">{{ event.kind }}</span>
+              <span class="opacity-60">{{ event.at }}</span>
+            </div>
+            {% if event.withheld %}
+              <p class="mt-1 opacity-70">Only the person who started this run can read this event.</p>
+            {% elif event.quarantined %}
+              <p class="mt-1 opacity-70">The secret check was not sure about this event. Only a tenant admin can read it.</p>
+            {% elif event.data_json %}
+              <pre class="mt-1 whitespace-pre-wrap break-words font-mono opacity-90">{{ event.data_json }}</pre>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ol>
+      {% endif %}
+    </div>
+  </section>
+  {% endif %}
 </section>
 {% endblock %}

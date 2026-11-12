@@ -282,6 +282,11 @@ stage (`core/company_login.py`, `ensure_company_login`) does this, in order:
    Keycloak never shows its own login page. With `false`, that default is
    removed and the Keycloak login form shows again: the way in with the
    local accounts when the company login is down.
+   The same is done on the console's own login flow `meho approval
+   touch` (config alias `meho-company-login-redirect-touch`) when the
+   realm has it (#6213), so the console still goes straight to the
+   company login. Its output line is `auto-redirect (meho approval
+   touch): ...`.
 
 What is not done:
 
@@ -347,6 +352,9 @@ and groups with `manage-users`.
   `CompanyLoginPlan` (the `company_login` part of the plan, only rendered
   when on) and `ensure_company_login`.
 - `deploy/charts/meho/templates/core-bootstrap-job.yaml` — the Job.
+- `backend/src/meho_backplane/core/keycloak_role_check.py` and
+  `deploy/charts/meho/templates/core-keycloak-role-check.yaml` — the
+  role check before an upgrade (see below).
 - `deploy/charts/meho/templates/_core-bootstrap.tpl` — the plan.
 - `deploy/charts/meho/charts/keycloak/files/meho-realm.json` — the realm
   file; mounted into the Job from the subchart's ConfigMap.
@@ -359,6 +367,7 @@ Helm order (the rest of the core's hooks are in
 | Weight | Object | Phases |
 |---|---|---|
 | -40 | ServiceAccount, Role, RoleBinding `<release>-core-bootstrap` | all four |
+| -28 | Job `<release>-check-manage-realm` (`keycloak-role-check` stage) | pre-upgrade |
 | 0 | the Keycloak StatefulSet imports the realm file at its first start | install, upgrade |
 | 10 | Job `<release>-core-bootstrap` (`keycloak` stage) | post-install, post-upgrade |
 
@@ -414,6 +423,13 @@ Steps of the realm stage, in order:
    It never goes on with an approval client that may lack its own flow. A
    fresh install gets the flow and the binding from the realm import and
    the role from the realm file.
+   A flow whose steps need settings (`authenticatorConfig` in the realm
+   file) is not made here, and no client is bound to it; the step prints
+   `not checked here (its steps need settings); no client is bound to it
+   by this stage`. Today that is `meho approval touch`, the console's
+   flow with the passkey touch level (#6213): made without its settings
+   it would change the console login. A running realm gets it through
+   the operation `keycloak.authflow.ensure_approval_touch`.
 4. **CI login**, when on.
    Then the **company login**, when on (see "The company login").
 5. **First login.** Read `<release>-core-first-login`; make it when missing
@@ -438,13 +454,48 @@ Rights: `meho-admin` has `manage-clients`, `manage-realm` and
 to 5, the login flows too; with the company login on, the chart adds
 `manage-identity-providers` (see "Rights" under the company login). An
 install whose first start had an older realm file may lack `manage-realm`;
-its Job stops at step 3 until an admin adds the role once. Only the
+the check before an upgrade stops the upgrade, and an install without the
+check stops at step 3, until an admin adds the role once. Only the
 first-start account can do steps 6 and 7.
 
 The backplane uses `meho-admin` too (`KEYCLOAK_ADMIN_CLIENT_ID`). It reads
 the approval flow and the binding for `/api/v1/health`
 (`auth/approval_sign_in_flow.py`, see docs/codebase/approvals.md), which
 needs `view-realm` or `manage-realm`.
+
+### The role check before an upgrade
+
+The realm stage needs `manage-realm` and runs only after an upgrade, when
+the new version already runs (#6336). So, with the built-in Keycloak, a
+pre-upgrade Job runs `python -m meho_backplane.core.bootstrap
+keycloak-role-check` first (`core/keycloak_role_check.py`). It logs in as
+`meho-admin` and reads the effective roles of its service account in
+`realm-management` (`GET .../users/<id>/role-mappings/clients/<id>/composite`,
+which `manage-clients` and `manage-users` allow). It changes nothing.
+
+- Role there: `role check: meho-admin has manage-realm`, exit 0.
+- Role missing: exit 1 with `core_bootstrap_failed: meho-admin lacks the
+  realm-management role manage-realm, ...`. Helm stops the upgrade before
+  it changes anything. The Job name, `<release>-check-manage-realm`, is in
+  Helm's error, so the error names the role.
+- Cannot tell (no secret, Keycloak does not answer, login refused, a read
+  fails or has an odd shape): `role check: unknown (<reason>)`, exit 0.
+  The upgrade goes on, and the realm stage stops after it if the role is
+  really missing. This keeps an upgrade possible when Keycloak is down,
+  for example when the upgrade is the fix.
+
+The Job runs after the secrets Job (-30) and before every other
+pre-upgrade Job (the Keycloak database Job at -25, the migration Job at
+-10). It has no Kubernetes token, no retry (`backoffLimit: 0`) and its pod
+has the labels of the bootstrap Job's pod, which the Keycloak
+NetworkPolicy admits. The output never holds the secret.
+
+Neither this Job nor the bootstrap Job has `ttlSecondsAfterFinished`. A
+successful one is removed at once (`hook-succeeded`); a failed one stays,
+with its log, until the next install or upgrade replaces it
+(`before-hook-creation`). Helm's own error says only that the Job failed,
+so the log is where the reason is; docs-site/install/upgrades.md, "The
+bootstrap Job needs manage-realm", says where to look.
 
 ### Network rules
 

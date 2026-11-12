@@ -713,6 +713,29 @@ implementations. `NewTokenStore` picks the backend at runtime:
   `0600` and its parent directory mode `0700` via an atomic
   tmpfile-then-rename so a partial flush can never truncate
   existing credentials.
+* **Profiles.** The global `--profile` flag (or `MEHO_PROFILE`; flag
+  wins) picks a named login. `applyProfile` (`internal/cmd/profile.go`)
+  puts the name on the command context; `auth.KeyForContext` turns it
+  into the store key. The `default` profile uses the plain backplane
+  URL key, so existing logins keep working. A named profile adds
+  `#profile=<name>` to the service part of that key (the URL part
+  stays the plain URL), so every profile has its own slot in the same
+  keyring or the same credentials file. The suffix is not on the URL
+  because a URL can hold a `#` itself; then two (URL, profile) pairs
+  could share one slot. A profile with no
+  login is not found; it never falls back to another profile.
+  `applyProfile` also calls `output.SetLoginProfile`, and
+  `RenderError` turns each `meho login` in an error hint into
+  `meho --profile <name> login`, so following the hint fills the right
+  profile. For the default profile the hint stays `meho login`, except
+  when `MEHO_PROFILE` names another profile: then a plain `meho login`
+  would fill that one, so the hint says `meho --profile default login`.
+  `meho doctor` checks the profile on the context in both its offline
+  and its online layer, so it never sends another profile's token. It
+  reports a named profile as `Profile: <name>` (JSON: `profile`), and
+  its hints follow the same rule. All profiles share the saved
+  backplane URL; `meho login` prints one line when it replaces that URL
+  (`printBackplaneChange`).
 
 The escape hatch (`MEHO_KEYRING_DISABLE=1`) is documented for
 shared dev hosts where the local keyring belongs to a different
@@ -1076,8 +1099,9 @@ versions:
   The CLI and the backplane share release tags, so the backplane's
   version names the CLI release to install.
 - No warning when the comparison makes no sense: a `dev` CLI build, a
-  backplane without `chart_version`, or a main-branch backplane build
-  (date-based `0.1.<YYYYMMDD>-<sha>` chart version).
+  backplane without `chart_version`, or any version that is not a plain
+  `X.Y.Z` release (a release candidate, or a main-branch build such as
+  `0.1.<YYYYMMDD>-<sha>` or `0.1.0-main-<sha>`).
 - The check is best effort. A missing route, a timeout, or a bad body
   prints nothing and never changes the exit code. stdout is not
   touched, so `meho status --json` stays one JSON document.

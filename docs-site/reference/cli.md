@@ -16,6 +16,7 @@ Every command accepts the global flags below.
 ## Global flags
 
 - `--config` — path to the meho config file (default: `$XDG_CONFIG_HOME/meho/config.json`).
+- `--profile` — named login to use (default: `$MEHO_PROFILE`, else `default`). Each profile keeps its own login, so one person can hold several identities side by side. `meho login <url> --profile <name>` stores the login under that name. The flag wins over `$MEHO_PROFILE`.
 - `--verbose`, `-v` — enable verbose output.
 - `--work-ref` — external change-ticket reference (`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Five commands have their own `--work-ref` flag that tags the run with the reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the header. List commands filter by reference with `--filter-work-ref`.
 
@@ -124,6 +125,7 @@ meho admin keycloak bootstrap-clients [flags]
 - `--skip-user-provisioning` — skip the admin user step (use when people come from a directory or another login system); the five role groups are still created
 - `--tenant-id` — tenant UUID written as the `tenant_id` attribute on the five MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant
 - `--tenant-name` — the first tenant's short name (lowercase letters, digits, dashes), written into the `meho_tenant` attribute of the five MEHO role groups
+- `--web-client-id` — the console's client_id; when the realm has it, it gets the login flow with the passkey touch level
 
 ## `meho agent`
 
@@ -190,11 +192,13 @@ meho agent create <name> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--disabled` — create the definition parked (enabled=false; default is enabled)
+- `--grants` — the agent's first grants: none, read-everything or read-targets. none: no grant; with AGENT_GRANT_REQUIRED=on the agent runs nothing until an admin adds a grant. read-everything: safe operations run at once on every target; everything else waits for a person's approval. read-targets: safe operations run at once on the targets you name with --target; with AGENT_GRANT_REQUIRED=on, only there. Note: with AGENT_GRANT_REQUIRED off (the default) or observe, the agent can also run safe operations that no grant covers, on any target
 - `--identity-ref` — reference to the agent principal whose permissions bound the toolset
 - `--json` — emit raw AgentDefinitionRead JSON instead of the human summary
 - `--model-tier` — logical model tier: standard | fast | deep
 - `--output-schema` — optional structured-output JSON Schema as a JSON object: inline JSON, @<path>, or @-
 - `--system-prompt` — the agent's standing rules, the same for every run; the task for one run goes in the --input flag of meho agent run (guide: https://evoila.github.io/meho/latest/guides/hosted-agents/)
+- `--target` — a target name for --grants read-targets; repeat the flag for more targets
 - `--toolset` — allowed-tools spec as a JSON object: inline JSON, @<path>, or @- (default {}); fields and tool names: https://evoila.github.io/meho/latest/guides/hosted-agents/
 - `--turn-budget` — max model turns the runtime allows (1..1000)
 
@@ -425,8 +429,10 @@ meho agent-principal register <name> [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--grants` — the agent's first grants: none, read-everything or read-targets. none: no grant; with AGENT_GRANT_REQUIRED=on the agent runs nothing until an admin adds a grant. read-everything: safe operations run at once on every target; everything else waits for a person's approval. read-targets: safe operations run at once on the targets you name with --target; with AGENT_GRANT_REQUIRED=on, only there. Note: with AGENT_GRANT_REQUIRED off (the default) or observe, the agent can also run safe operations that no grant covers, on any target
 - `--json` — emit raw AgentPrincipalRead JSON instead of the human summary
 - `--owner-sub` — OIDC sub of the kill-switch owner (defaults to the caller's sub)
+- `--target` — a target name for --grants read-targets; repeat the flag for more targets
 
 ### `meho agent-principal revoke`
 
@@ -1305,6 +1311,25 @@ meho connector catalog list [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 
+### `meho connector classify`
+
+Set the category, labels or "always wait" of operations, one at a time or by pattern
+
+```
+meho connector classify [flags]
+```
+
+- `--always-wait` — every call of a matched operation waits for approval
+- `--apply` — ask for the change (without it: dry run only)
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--category` — a category of the taxonomy, for example network
+- `--connector` — connector id pattern, for example vault-1.x
+- `--group` — operation group key pattern
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--label` — a key=value label (repeat for more); replaces the labels of this entry
+- `--no-always-wait` — back to the operation's own approval value (never below it)
+- `--op` — operation id pattern, for example 'k8s.deployment.*'
+
 ### `meho connector delete`
 
 Remove a connector from your tenant (its operations and groups; the built-in copy stays)
@@ -1338,7 +1363,9 @@ meho connector edit-group <connector_id> <group_key> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--category` — a category of the taxonomy, for example network
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--label` — a key=value label (repeat for more); replaces the labels of this entry
 - `--name` — replacement display name; supports `@<path>` to read from a file
 - `--when-to-use` — replacement when_to_use text; supports `@<path>` to read from a file
 
@@ -1351,10 +1378,12 @@ meho connector edit-op <connector_id> <op_id> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--category` — a category of the taxonomy, for example network
 - `--custom-description` — replacement custom_description; supports `@<path>` to read from a file
 - `--disable` — set is_enabled=false on this op
 - `--enable` — set is_enabled=true on this op
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--label` — a key=value label (repeat for more); replaces the labels of this entry
 - `--no-requires-approval` — clear the requires_approval flag
 - `--reason` — why you make this change; written to the audit row and required to turn approval off
 - `--requires-approval` — mark the op as requiring an approval workflow
@@ -4129,6 +4158,76 @@ meho pfsense version [flags]
 - `--json` — emit the full OperationResult envelope as JSON instead of the human render
 - `--target` — target slug to dispatch against (required)
 
+## `meho policy`
+
+Manage the policy file (validate / diff / import / export / history)
+
+```
+meho policy
+```
+
+### `meho policy diff`
+
+Show what importing a policy file would change (dry run)
+
+```
+meho policy diff FILE [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
+### `meho policy export`
+
+Write the stored policy as a policy file
+
+```
+meho policy export [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--output`, `-o` — write the file here instead of stdout
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
+### `meho policy history`
+
+List the imported policy files, newest first
+
+```
+meho policy history [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--limit` — how many entries to show (1 to 20)
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
+### `meho policy import`
+
+Ask to import a policy file; a second admin must approve it
+
+```
+meho policy import FILE [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
+### `meho policy validate`
+
+Check a policy file and list every mistake
+
+```
+meho policy validate FILE [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — print the server's answer as JSON
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
 ## `meho promote`
 
 Promote one memory to a strictly broader scope (POST /api/v1/memory/{scope}/{slug}/promote)
@@ -4972,7 +5071,7 @@ meho service-principals read-scope show <principal-sub> [flags]
 
 ## `meho sessions`
 
-List, show and delete stored agent sessions
+Upload, list, show and delete stored agent sessions
 
 ```
 meho sessions
@@ -5004,6 +5103,19 @@ meho sessions list [flags]
 - `--limit` — sessions per page (1 to 200)
 - `--project` — only sessions of this project
 - `--state` — only sessions in this state: open, ended or unfinished
+
+### `meho sessions push`
+
+Upload the agent sessions in your local outbox (POST /api/v1/sessions)
+
+```
+meho sessions push [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by `meho login`)
+- `--dry-run` — show what would be sent, and send nothing
+- `--json` — print the result as JSON
+- `--outbox` — outbox folder (defaults to the setting, then <meho config folder>/session-outbox)
 
 ### `meho sessions show`
 

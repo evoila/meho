@@ -37,6 +37,7 @@ from meho_backplane.mcp.short_texts import (
     with_short_text,
 )
 from meho_backplane.mcp.tools import _short_tool_texts as texts
+from meho_backplane.mcp.tools._connector_classification import classification_for_settings
 from meho_backplane.mcp.tools._kb_similar_text import similar_check_for_settings
 from meho_backplane.mcp.tools._operation_recall import recall_schema_for_settings
 from meho_backplane.settings import get_settings
@@ -64,7 +65,7 @@ SHORT_TEXTS: dict[str, ShortText] = {
     "meho_broadcast_watch": texts.BROADCAST_WATCH_SHORT,
 }
 
-#: The two other switches, both off and both on.
+#: The other switches, all off and all on.
 _OTHER_SWITCHES = [pytest.param(False, id="other-switches-off"), pytest.param(True, id="on")]
 
 
@@ -72,6 +73,7 @@ def _set_switches(monkeypatch: pytest.MonkeyPatch, *, short: bool, others: bool)
     monkeypatch.setenv("MCP_SHORT_TOOL_TEXTS", "true" if short else "false")
     monkeypatch.setenv("KB_SIMILAR_CHECK", "true" if others else "false")
     monkeypatch.setenv("TEAM_KNOWLEDGE_RECALL", "true" if others else "false")
+    monkeypatch.setenv("POLICY_CLASSIFICATION", "true" if others else "false")
     get_settings.cache_clear()
 
 
@@ -103,6 +105,8 @@ def _before(name: str) -> dict[str, Any]:
         definition = similar_check_for_settings(definition)
     if name in {"call_operation", "preview_operation"}:
         definition = recall_schema_for_settings(definition)
+    if name in {"meho_connector_edit_op", "meho_connector_edit_group"}:
+        definition = classification_for_settings(definition, _operator())
     return definition.to_wire()
 
 

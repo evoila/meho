@@ -9,8 +9,10 @@ stack against a fake Keycloak (respx). No running Keycloak and no Vault.
 
 What is proven, for each op:
 
-* an account without a role the run needs is refused before any approval
-  request exists; the text names the role and the account;
+* an account without ``manage-realm`` is refused before any approval
+  request exists; the text names the role and the account. A missing
+  ``manage-clients`` does not refuse: a Keycloak permission on the one
+  client can replace it, so the card says MEHO could not check it;
 * when the roles cannot be read, the call waits for approval and the card
   says so in one line; a 403 at the run stops with a text that names the
   roles;
@@ -228,12 +230,35 @@ async def test_account_without_manage_realm_is_refused_before_any_approval_reque
     assert token not in json.dumps(result)
 
 
-async def test_flow_op_without_manage_clients_is_refused(kc: KeycloakConnector) -> None:
+async def test_flow_op_without_manage_clients_still_waits(kc: KeycloakConnector) -> None:
+    # A Keycloak permission to manage only the one client can replace
+    # manage-clients, and the token does not show it. So no refusal.
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
-        _mount(mock, _token_with(["manage-realm", "view-clients"]))
+        admin = _mount(mock, _token_with(["manage-realm", "view-clients"]))
+        result = await _dispatch(_FLOW_OP)
+
+    assert result["status"] == "awaiting_approval", result
+    assert admin.call_count == 0
+    effect = await _effect(result)
+    preflight = effect["permission_preflight"]
+    assert preflight["will_be_denied"] is False
+    assert preflight["granted"] == ["manage-realm"]
+    assert "reason" not in preflight
+    check = effect["preview"]["rights_check"]
+    assert check.startswith(
+        f"MEHO checked the account {_ACCOUNT!r}: it has the role(s) manage-realm"
+    )
+    assert "lacks the role(s) manage-clients" in check
+    assert "could not check that permission" in check
+
+
+async def test_flow_op_without_both_roles_names_only_manage_realm(kc: KeycloakConnector) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount(mock, _token_with(["view-realm"]))
         result = await _dispatch(_FLOW_OP)
     assert result["status"] == "denied", result
-    assert "lacks the role(s) manage-clients" in result["extras"]["reason"]
+    assert "lacks the role(s) manage-realm of" in result["extras"]["reason"]
+    assert "manage-clients" not in result["extras"]["reason"]
     assert await _approval_count() == 0
 
 

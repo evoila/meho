@@ -842,10 +842,16 @@ So the check reads `resource_access.<admin client>.roles` of the connector's
 own admin token. It needs no extra request and no extra right. The token is
 never shown or stored.
 
-- **A role is missing:** the permission preflight sets `will_be_denied`.
+- **`manage-realm` is missing:** the permission preflight sets `will_be_denied`.
   MEHO refuses the call before an approval request exists
   (`write_capability_denied`). `reason` names the account and the missing
   role; `doc_ref` points here.
+- **`manage-clients` is missing:** the call still waits for approval. A
+  Keycloak permission to manage only the one client (fine-grained admin
+  permissions) gives the same right, and the token does not show it. So
+  its lack does not prove that Keycloak refuses the run
+  (`register_rights_check(..., per_object=...)`). The card says the
+  account lacks the role and MEHO could not check that permission.
 - **The roles cannot be read** (the token is not a JWT, it has no
   `resource_access` claim, as with a lightweight access token, or the
   account signs in to a third realm): the call still waits for approval.

@@ -27,6 +27,11 @@ it signs in to ``master``. So the check reads ``resource_access.<admin
 client>.roles`` of the connector's own admin token: no extra request and no
 extra right. The token is only read here; it is never shown or stored.
 
+A role in *per_object* (``manage-clients`` for the client binding) does
+not prove a denial when it is missing: a Keycloak permission on the one
+client can give the same right, and that is not in the token. So such a
+role never refuses the call. The card says MEHO could not check it.
+
 When the roles cannot be read (the token is not a JWT, it has no
 ``resource_access`` claim, as with a lightweight access token, or the
 account signs in to a third realm), the call still waits for approval. The
@@ -175,10 +180,17 @@ def _account(rights: AccountRights) -> str:
     return repr(rights.account) if rights.account else "of the target"
 
 
-def _lacks_text(roles: tuple[str, ...], rights: AccountRights) -> str:
+def _denying(
+    roles: tuple[str, ...], per_object: tuple[str, ...], rights: AccountRights
+) -> list[str]:
+    """The missing roles whose lack proves that Keycloak refuses the run."""
+    return [role for role in _missing(roles, rights) if role not in per_object]
+
+
+def _lacks_text(denying: list[str], rights: AccountRights) -> str:
     """Short: the account and the roles it lacks (fits the 256-character reason)."""
     return (
-        f"the account {_account(rights)} lacks the role(s) {', '.join(_missing(roles, rights))} "
+        f"the account {_account(rights)} lacks the role(s) {', '.join(denying)} "
         f"of the client {rights.client!r} in the realm {rights.admin_realm!r}"
     )
 
@@ -208,7 +220,9 @@ def _live_connector(ctx: PreviewContext) -> KeycloakConnector | None:
     return connector if isinstance(connector, KeycloakConnector) else None
 
 
-def _preflight(op_id: str, roles: tuple[str, ...]) -> PermissionPreflight:
+def _preflight(
+    op_id: str, roles: tuple[str, ...], per_object: tuple[str, ...]
+) -> PermissionPreflight:
     async def check(ctx: PreviewContext) -> dict[str, Any] | None:
         connector = _live_connector(ctx)
         if connector is None:
@@ -216,7 +230,8 @@ def _preflight(op_id: str, roles: tuple[str, ...]) -> PermissionPreflight:
         rights = await read_account_rights(connector, ctx.operator, ctx.target)
         if rights.roles is None:
             return None
-        denied = bool(_missing(roles, rights))
+        denying = _denying(roles, per_object, rights)
+        denied = bool(denying)
         result: dict[str, Any] = {
             "check": "keycloak.admin_token_roles",
             "path": f"{rights.admin_realm}/{rights.client}",
@@ -226,7 +241,7 @@ def _preflight(op_id: str, roles: tuple[str, ...]) -> PermissionPreflight:
             "will_be_denied": denied,
         }
         if denied:
-            result["reason"] = _lacks_text(roles, rights)
+            result["reason"] = _lacks_text(denying, rights)
             result["remediation"] = (
                 f"Give the account the role(s) in Keycloak, then call {op_id} again."
             )
@@ -236,7 +251,20 @@ def _preflight(op_id: str, roles: tuple[str, ...]) -> PermissionPreflight:
     return check
 
 
-def _card(roles: tuple[str, ...], builder: PreviewBuilder) -> PreviewBuilder:
+def _not_checked_text(roles: tuple[str, ...], not_checked: list[str], rights: AccountRights) -> str:
+    checked = [role for role in roles if role not in not_checked]
+    text = f"MEHO checked the account {_account(rights)}"
+    if checked:
+        text += f": it has the role(s) {', '.join(checked)} of the client {rights.client!r}"
+    return (
+        f"{text}. It lacks the role(s) {', '.join(not_checked)}, but a Keycloak permission "
+        "on the one object can give the same right. MEHO could not check that permission."
+    )
+
+
+def _card(
+    roles: tuple[str, ...], per_object: tuple[str, ...], builder: PreviewBuilder
+) -> PreviewBuilder:
     async def build(ctx: PreviewContext) -> dict[str, Any] | None:
         preview = dict(await builder(ctx) or {})
         connector = _live_connector(ctx)
@@ -248,8 +276,10 @@ def _card(roles: tuple[str, ...], builder: PreviewBuilder) -> PreviewBuilder:
         preview["roles_needed"] = list(roles)
         if rights is None or rights.roles is None:
             preview["rights_check"] = NO_RIGHTS_CHECK
-        elif _missing(roles, rights):
+        elif _denying(roles, per_object, rights):
             preview["rights_check"] = rights_text(ctx.descriptor.op_id, roles, rights)
+        elif not_checked := _missing(roles, rights):
+            preview["rights_check"] = _not_checked_text(roles, not_checked, rights)
         else:
             preview["rights_check"] = (
                 f"MEHO checked the account {_account(rights)}: it has the role(s) "
@@ -260,14 +290,21 @@ def _card(roles: tuple[str, ...], builder: PreviewBuilder) -> PreviewBuilder:
     return build
 
 
-def register_rights_check(op_id: str, roles: tuple[str, ...], builder: PreviewBuilder) -> None:
+def register_rights_check(
+    op_id: str,
+    roles: tuple[str, ...],
+    builder: PreviewBuilder,
+    *,
+    per_object: tuple[str, ...] = (),
+) -> None:
     """Register the check before the wait and the approval card of a login flow op.
 
     *builder* makes the rest of the card; the roles and the check line are
-    added to it.
+    added to it. A role in *per_object* can be replaced by a Keycloak
+    permission on one object, so its lack never refuses the call.
     """
-    register_permission_preflight(op_id, _preflight(op_id, roles))
-    register_preview_builder(op_id, _card(roles, builder))
+    register_permission_preflight(op_id, _preflight(op_id, roles, per_object))
+    register_preview_builder(op_id, _card(roles, per_object, builder))
 
 
 def names_missing_rights(op_id: str, roles: tuple[str, ...]) -> Callable[[Handler], Handler]:

@@ -274,10 +274,12 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_flow \
   names the first difference. Fix the flow by hand, then run it again.
 - `meho-cli-approve` is missing: MEHO stops before it changes anything.
   Create the client first.
-- The target's account lacks the realm-management role `manage-realm` or
-  `manage-clients`: MEHO refuses the call before it waits for approval,
-  and names the role and the account. Give the account the role, then
-  run it again.
+- The target's account lacks the realm-management role `manage-realm`:
+  MEHO refuses the call before it waits for approval, and names the role
+  and the account. Give the account the role, then run it again.
+- The account lacks `manage-clients`: the call still waits for approval.
+  A Keycloak permission to manage only `meho-cli-approve` gives the same
+  right, and MEHO cannot see it. The approval card says so.
 
 MEHO reads the client back after the change. `browser_flow_id` in the
 result is the flow the client now uses. Its other settings stay as they

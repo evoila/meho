@@ -86,6 +86,8 @@ _FLOW_DESCRIPTION = (
 _CODE_FLOW_DESCRIPTION = "Asks for the one-time code when the person has set one up."
 #: The realm-management roles the run needs: the flow, then the client binding.
 _ROLES = ("manage-realm", "manage-clients")
+#: A Keycloak permission on the one client can replace ``manage-clients``.
+_PER_CLIENT = ("manage-clients",)
 
 
 @dataclass(frozen=True)
@@ -532,4 +534,6 @@ async def _approval_flow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-register_rights_check(ENSURE_APPROVAL_FLOW_OP_ID, _ROLES, _approval_flow_preview)
+register_rights_check(
+    ENSURE_APPROVAL_FLOW_OP_ID, _ROLES, _approval_flow_preview, per_object=_PER_CLIENT
+)

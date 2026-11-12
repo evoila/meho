@@ -25,7 +25,7 @@ type tarEntry struct {
 	typeflag byte
 }
 
-func gzipTar(t *testing.T, entries ...tarEntry) []byte {
+func testArchive(t *testing.T, entries ...tarEntry) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
@@ -57,10 +57,10 @@ func gzipTar(t *testing.T, entries ...tarEntry) []byte {
 	return buf.Bytes()
 }
 
-// fakeUpload is one stored upload: the archive the server holds, the file
+// storedUpload is one stored upload: the archive the server holds, the file
 // rows of the upload (offset and added count the uploaded bytes), and
 // whether only an admin may open it.
-type fakeUpload struct {
+type storedUpload struct {
 	archive     []byte
 	rows        map[string][2]int
 	quarantined bool
@@ -68,7 +68,7 @@ type fakeUpload struct {
 
 // fakeSessionServer serves `show` and the upload downloads of session abc.
 // admin decides whether a quarantined upload is sent or refused.
-func fakeSessionServer(t *testing.T, uploads []fakeUpload, admin bool) (*httptest.Server, map[int]int) {
+func fakeSessionServer(t *testing.T, uploads []storedUpload, admin bool) (*httptest.Server, map[int]int) {
 	t.Helper()
 	downloads := map[int]int{}
 	mux := http.NewServeMux()
@@ -115,14 +115,14 @@ func fakeSessionServer(t *testing.T, uploads []fakeUpload, admin bool) (*httptes
 // threeUploads is a session uploaded three times. The second tail of the
 // transcript is shorter after the check than it was uploaded: a secret was
 // replaced, so offsets count uploaded bytes and the tails are joined as stored.
-func threeUploads(t *testing.T, quarantineSecond bool) []fakeUpload {
-	return []fakeUpload{
+func threeUploads(t *testing.T, quarantineSecond bool) []storedUpload {
+	return []storedUpload{
 		{
-			archive: gzipTar(t, tarEntry{name: "abc.jsonl", body: "line one\n"}),
+			archive: testArchive(t, tarEntry{name: "abc.jsonl", body: "line one\n"}),
 			rows:    map[string][2]int{"abc.jsonl": {0, 9}},
 		},
 		{
-			archive: gzipTar(t,
+			archive: testArchive(t,
 				tarEntry{name: "abc", typeflag: tar.TypeDir},
 				tarEntry{name: "abc.jsonl", body: "[REDACTED:x]\n"},
 				tarEntry{name: "abc/subagents/agent-1.jsonl", body: "sub one\n"}),
@@ -130,7 +130,7 @@ func threeUploads(t *testing.T, quarantineSecond bool) []fakeUpload {
 			quarantined: quarantineSecond,
 		},
 		{
-			archive: gzipTar(t, tarEntry{name: "abc.jsonl", body: "line three\n"}),
+			archive: testArchive(t, tarEntry{name: "abc.jsonl", body: "line three\n"}),
 			rows:    map[string][2]int{"abc.jsonl": {49, 11}},
 		},
 	}
@@ -225,7 +225,7 @@ func TestGetStopsOnAnUnsafeArchiveBeforeAnyFileIsWritten(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			uploads := threeUploads(t, false)
-			uploads[2] = fakeUpload{archive: gzipTar(t, entry), rows: map[string][2]int{entry.name: {0, 2}}}
+			uploads[2] = storedUpload{archive: testArchive(t, entry), rows: map[string][2]int{entry.name: {0, 2}}}
 			srv, _ := fakeSessionServer(t, uploads, false)
 			folder := t.TempDir()
 
@@ -251,7 +251,7 @@ func TestGetWritesALongUnicodePathTheServerAccepts(t *testing.T) {
 		t.Fatalf("path has %d characters and %d bytes", chars, len(long))
 	}
 	uploads := threeUploads(t, false)
-	uploads[2] = fakeUpload{archive: gzipTar(t, tarEntry{name: long, body: "x\n"}), rows: map[string][2]int{long: {0, 2}}}
+	uploads[2] = storedUpload{archive: testArchive(t, tarEntry{name: long, body: "x\n"}), rows: map[string][2]int{long: {0, 2}}}
 	srv, _ := fakeSessionServer(t, uploads, false)
 	folder := t.TempDir()
 
@@ -268,8 +268,8 @@ func TestGetRefusesAHoleOrAChangedArchive(t *testing.T) {
 	hole := threeUploads(t, false)
 	hole[2].rows = map[string][2]int{"abc.jsonl": {50, 11}}
 	extra := threeUploads(t, false)
-	extra[0].archive = gzipTar(t, tarEntry{name: "abc.jsonl", body: "line one\n"}, tarEntry{name: "other", body: "x"})
-	for name, uploads := range map[string][]fakeUpload{"hole": hole, "file not in the row": extra} {
+	extra[0].archive = testArchive(t, tarEntry{name: "abc.jsonl", body: "line one\n"}, tarEntry{name: "other", body: "x"})
+	for name, uploads := range map[string][]storedUpload{"hole": hole, "file not in the row": extra} {
 		t.Run(name, func(t *testing.T) {
 			srv, _ := fakeSessionServer(t, uploads, false)
 			folder := t.TempDir()

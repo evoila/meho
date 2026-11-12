@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 
 	"github.com/spf13/cobra"
@@ -20,9 +19,6 @@ import (
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// sessionIDPattern is the session id rule of the server (SESSION_ID_PATTERN).
-var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 func newGetCmd() *cobra.Command {
 	var (

@@ -5,18 +5,21 @@
 
 The run is ``ok`` when MEHO ran the script. The script's own exit code is
 the result its requester cares about, so the run summary carries it, and
-the console card and the MCP row show it.
+the console card shows it. The MCP row shows it only with the switch
+``MCP_APPROVAL_EXIT_CODE`` on (off by default).
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
 from meho_backplane.mcp.tools.approvals import _row_to_dict
 from meho_backplane.operations.approval_outcome import resume_outcome_from_envelope
+from meho_backplane.settings import get_settings
 from meho_backplane.ui.routes.approvals.render import project_run_envelope
 from meho_backplane.ui.templating import get_templates
 
@@ -81,7 +84,7 @@ def test_console_card_stays_plain_success_for_exit_zero_or_none(code: int | None
     assert "approval-run-exit-code" not in html
 
 
-def test_mcp_row_carries_the_exit_code() -> None:
+def _mcp_row() -> dict[str, Any]:
     from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 
     row = ApprovalRequest(
@@ -93,4 +96,37 @@ def test_mcp_row_carries_the_exit_code() -> None:
         status=ApprovalRequestStatus.APPROVED.value,
         resume_result=_envelope({"stdout": "x", "exit_code": 3}),
     )
-    assert _row_to_dict(row)["resume_outcome"]["exit_code"] == 3
+    return _row_to_dict(row)
+
+
+@pytest.fixture
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.delenv("MCP_APPROVAL_EXIT_CODE", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.mark.usefixtures("_settings_env")
+def test_mcp_row_is_unchanged_with_the_switch_off() -> None:
+    assert get_settings().mcp_approval_exit_code is False
+    assert set(_mcp_row()["resume_outcome"]) == {
+        "resumed_at",
+        "result_status",
+        "error_code",
+        "audit_id",
+        "guidance",
+        "execution_outcome",
+    }
+
+
+@pytest.mark.usefixtures("_settings_env")
+def test_mcp_row_carries_the_exit_code_with_the_switch_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCP_APPROVAL_EXIT_CODE", "true")
+    get_settings.cache_clear()
+    assert _mcp_row()["resume_outcome"]["exit_code"] == 3

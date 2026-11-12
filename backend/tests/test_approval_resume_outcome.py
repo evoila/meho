@@ -82,11 +82,17 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
     monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
     monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    monkeypatch.delenv("MCP_APPROVAL_EXIT_CODE", raising=False)
     get_settings.cache_clear()
     clear_jwks_cache()
     yield
     get_settings.cache_clear()
     clear_jwks_cache()
+
+
+def _without_exit_code(outcome: dict[str, Any]) -> dict[str, Any]:
+    """The REST summary as MCP sends it with ``MCP_APPROVAL_EXIT_CODE`` off."""
+    return {key: value for key, value in outcome.items() if key != "exit_code"}
 
 
 def _operator(sub: str) -> Operator:
@@ -243,7 +249,7 @@ async def test_failed_resume_shows_on_show_and_list(monkeypatch: pytest.MonkeyPa
         stored = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
     mcp_row = _row_to_dict(stored)
     assert mcp_row["result_state"] == "failed"
-    assert mcp_row["resume_outcome"] == outcome
+    assert mcp_row["resume_outcome"] == _without_exit_code(outcome)
 
 
 @pytest.mark.asyncio
@@ -520,7 +526,7 @@ async def test_result_stored_before_the_stamp_shows_no_guidance_on_show_list_and
 
     async with get_sessionmaker()() as s:
         stored = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
-    assert _row_to_dict(stored)["resume_outcome"] == outcome
+    assert _row_to_dict(stored)["resume_outcome"] == _without_exit_code(outcome)
     # The body text is still there for the owner-only /result read.
     assert stored.resume_result is not None
     assert "vc.example" in stored.resume_result["result"]["guidance"]
@@ -554,6 +560,6 @@ async def test_result_unknown_resume_shows_the_guidance_on_show_list_and_mcp(
 
     async with get_sessionmaker()() as s:
         stored = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
-    assert _row_to_dict(stored)["resume_outcome"] == outcome
+    assert _row_to_dict(stored)["resume_outcome"] == _without_exit_code(outcome)
     assert stored.resume_result is not None
     assert stored.resume_result["extras"]["approval_guidance"] == _GUIDANCE

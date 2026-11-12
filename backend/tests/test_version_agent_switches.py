@@ -41,6 +41,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "checks_agent_events",
         "jsonflux_answer_ready",
         "kb_similar_check",
+        "mcp_approval_exit_code",
         "mcp_reveal_fetch",
         "mcp_short_tool_texts",
         "mcp_topology_off_default_list",

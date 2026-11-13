@@ -4850,7 +4850,7 @@ meho secret read <mount> <path> | read --approval <id> [flags]
 
 ## `meho sensor`
 
-Manage deterministic-check sensors (list / create / edit / delete / results / ack)
+Manage deterministic-check sensors (list / create / edit / pause / resume / delete / results / ack)
 
 ```
 meho sensor
@@ -4948,6 +4948,18 @@ meho sensor list [flags]
 - `--status` — filter by sensor status: active | paused
 - `--tenant` — target tenant UUID (platform_admin only; operator role is locked to its own tenant)
 
+### `meho sensor pause`
+
+Pause one sensor (tenant_admin)
+
+```
+meho sensor pause <sensor_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw Sensor JSON instead of the human summary
+- `--tenant` — target tenant UUID (platform_admin cross-tenant change)
+
 ### `meho sensor results`
 
 Show a sensor's per-tick evidence history (trend query)
@@ -4963,6 +4975,18 @@ meho sensor results <sensor_id> [flags]
 - `--limit` — max rows per page (1..500, server default 100 when omitted)
 - `--state` — filter by state: ok | degraded | critical | unknown | skip
 - `--to` — inclusive upper bound on evaluated_at (RFC 3339, e.g. 2026-08-02T00:00:00Z)
+
+### `meho sensor resume`
+
+Resume a paused sensor (tenant_admin)
+
+```
+meho sensor resume <sensor_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw Sensor JSON instead of the human summary
+- `--tenant` — target tenant UUID (platform_admin cross-tenant change)
 
 ## `meho service-principals`
 

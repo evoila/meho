@@ -128,6 +128,7 @@ to make the binding visible in ``pyproject.toml``.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -157,6 +158,10 @@ __all__ = [
 ResolutionLabel = str  # one of "no_connector" / "ambiguous_connector"
 
 _log = structlog.get_logger(__name__)
+
+# The leading release number of a version string, such as ``13.16`` in
+# ``13.16 (Debian 13.16-1.pgdg120+1)``.
+_LEADING_VERSION = re.compile(r"\s*v?(\d+(?:\.\d+)*)")
 
 
 # N818: the Error-suffix naming convention is intentionally violated —
@@ -638,11 +643,23 @@ def _version_in_range(version: Version | None, spec_str: str | None) -> bool:
 
 
 def _parse_version(version: str | None) -> Version | None:
-    """*version* as a :class:`Version`; ``None`` when unknown or not parseable."""
+    """*version* as a :class:`Version`; ``None`` when unknown or not parseable.
+
+    A version with build text after the number, such as PostgreSQL's
+    ``13.16 (Debian 13.16-1.pgdg120+1)``, is read by its leading number, so
+    the range check sees ``13.16`` and not an unknown version.
+    """
     if version is None:
         return None
     try:
         return Version(version)
+    except InvalidVersion:
+        pass
+    leading = _LEADING_VERSION.match(version)
+    if leading is None:
+        return None
+    try:
+        return Version(leading.group(1))
     except InvalidVersion:
         return None
 

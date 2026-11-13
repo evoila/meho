@@ -295,7 +295,7 @@ def test_supported_version_range_follows_vendor_support() -> None:
         assert Version(version) in spec, version
 
 
-@pytest.mark.parametrize("version", ["5.0.31", "6", "9"])
+@pytest.mark.parametrize("version", ["5.0.31", "6", "9", "6.0.19-rc1 build"])
 def test_resolver_does_not_pick_mongodb_outside_the_range(version: str) -> None:
     """AC: a target with a detected version outside the range is not picked.
 

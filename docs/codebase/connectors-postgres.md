@@ -262,3 +262,6 @@ detected as PostgreSQL 13 or 14 is not picked; the error names the range.
 `strict_version_range = True` makes the fallback registration `("postgres",
 "", "")` check the range too. It still serves a target whose version is not
 known yet, and a probe still finds the connector.
+The probe stores `server_version` as PostgreSQL reports it, which can carry
+the distribution's build text (`13.16 (Debian 13.16-1.pgdg120+1)`). The
+resolver checks the range against the leading number (`13.16`).

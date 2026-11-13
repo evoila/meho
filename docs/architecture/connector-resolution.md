@@ -98,6 +98,11 @@ connector of the product. A probe (`resolve_connector(target,
 for_probe=True)`) skips this check, so a target can be probed again
 after its system was upgraded.
 
+The resolver reads a version with build text after the number by its
+leading number. PostgreSQL reports versions such as
+`13.16 (Debian 13.16-1.pgdg120+1)`; the range check sees `13.16`, also
+for a detected version that is already stored.
+
 ### Step 0b — hand-rolled class beats profiled connector beats auto-shim
 
 Candidates are ranked by tier (`shim_kind` in

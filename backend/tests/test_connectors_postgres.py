@@ -297,7 +297,16 @@ def test_supported_version_range_follows_vendor_support() -> None:
         assert Version(version) in spec, version
 
 
-@pytest.mark.parametrize("version", ["13", "14.12", "19"])
+@pytest.mark.parametrize(
+    "version",
+    [
+        "13",
+        "14.12",
+        "19",
+        "13.16 (Debian 13.16-1.pgdg120+1)",
+        "14.13 (Ubuntu 14.13-0ubuntu0.22.04.1)",
+    ],
+)
 def test_resolver_does_not_pick_postgres_outside_the_range(version: str) -> None:
     """AC: a target with a detected version outside the range is not picked.
 
@@ -313,7 +322,7 @@ def test_resolver_does_not_pick_postgres_outside_the_range(version: str) -> None
     assert resolve_connector(target, for_probe=True) is PostgresConnector
 
 
-@pytest.mark.parametrize("version", ["15", "18.1"])
+@pytest.mark.parametrize("version", ["15", "18.1", "16.4 (Debian 16.4-1.pgdg120+2)"])
 def test_resolver_picks_postgres_inside_the_range(version: str) -> None:
     """A detected version inside the range still resolves."""
     target = _PgTarget()
@@ -322,13 +331,18 @@ def test_resolver_picks_postgres_inside_the_range(version: str) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["13", "13.16 (Debian 13.16-1.pgdg120+1)"])
 async def test_dispatch_on_old_postgres_returns_no_connector_naming_the_range(
-    _stub_embedding: AsyncMock, session: AsyncSession
+    _stub_embedding: AsyncMock, session: AsyncSession, version: str
 ) -> None:
-    """AC: a call on a PostgreSQL 13 target is refused; the error names the range."""
+    """AC: a call on a PostgreSQL 13 target is refused; the error names the range.
+
+    The version as the probe stores it, with the distribution's build text,
+    is refused too.
+    """
     await PostgresConnector.register_operations()
     target = _PgTarget(secret_ref=None)
-    target.fingerprint = type("_FP", (), {"version": "13"})()
+    target.fingerprint = type("_FP", (), {"version": version})()
     result = await dispatch(
         operator=_make_operator(),
         connector_id=_CONNECTOR_ID,

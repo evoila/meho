@@ -13,14 +13,16 @@
 # the lines are still there when the runner is killed for memory. The file
 # itself is lost with the container.
 #
-# A line has the time, the memory in use, the limit, and the process that
-# holds the most memory. Above 85 % of the limit it adds one more line: the
-# test that each pytest worker runs at that moment. The workers write that
-# test name to a progress file (see tests/conftest.py,
-# MEHO_CI_PROGRESS_DIR). Without progress files the line says so.
+# A line has the time, the memory in use, the limit, and the pytest worker
+# that holds the most memory. Above 85 % of the limit it adds one line for
+# each worker: its memory and the test it runs at that moment. Each worker
+# writes its process id and its running test to a progress file (see
+# tests/conftest.py, MEHO_CI_PROGRESS_DIR), so only those processes count:
+# a bigger process that is not a pytest worker is never named. Without
+# progress files the line says so.
 #
 # It never fails the job. Settings (for tests): MEMORY_CG_DIR, RUNNER_TEMP,
-# MEMORY_LOG_EVERY, MEMORY_PROGRESS_DIR, MEMORY_WARN_PERCENT.
+# MEMORY_LOG_EVERY, MEMORY_PROGRESS_DIR, MEMORY_WARN_PERCENT, MEMORY_PROC_DIR.
 set -u
 
 cg="${MEMORY_CG_DIR:-/sys/fs/cgroup}"
@@ -28,32 +30,69 @@ tmp="${RUNNER_TEMP:-/tmp}"
 every="${MEMORY_LOG_EVERY:-15}"
 progress_dir="${MEMORY_PROGRESS_DIR:-${MEHO_CI_PROGRESS_DIR:-${tmp}/pytest-progress}}"
 warn_percent="${MEMORY_WARN_PERCENT:-85}"
+proc="${MEMORY_PROC_DIR:-/proc}"
 
 mib() { echo "$(( $1 / 1048576 ))"; }
 
-# The process with the most memory: "<name> pid <pid> <MiB> MiB".
-top_process() {
-  local rss pid name
-  if command -v ps >/dev/null 2>&1; then
-    read -r rss pid name < <(ps -eo rss=,pid=,comm= --sort=-rss 2>/dev/null | head -n 1)
-  fi
-  if [ -z "${rss:-}" ]; then
-    echo "unknown"
-    return
-  fi
-  echo "${name} pid ${pid} $(( rss / 1024 )) MiB"
+# The memory of a process in MiB, from /proc/<pid>/status. Empty when the
+# process has ended.
+rss_mib() {
+  local key value rest
+  [ -r "${proc}/$1/status" ] || return 0
+  while read -r key value rest; do
+    if [ "${key}" = "VmRSS:" ]; then
+      echo "$(( value / 1024 ))"
+      return 0
+    fi
+  done < "${proc}/$1/status" 2>/dev/null
 }
 
-# One line for each worker: the test it runs now.
+# Read the progress files. Sets workers: one "<name> <pid> <MiB> <test>"
+# line for each file; MiB is "-" when the process has ended.
+read_workers() {
+  local f pid test mib
+  workers=""
+  [ -d "${progress_dir}" ] || return 0
+  for f in "${progress_dir}"/*.txt; do
+    [ -r "${f}" ] || continue
+    pid=""
+    test=""
+    read -r pid test < "${f}"
+    case "${pid}" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    mib="$(rss_mib "${pid}")"
+    workers+="$(basename "${f}" .txt) ${pid} ${mib:--} ${test}"$'\n'
+  done
+}
+
+# The pytest worker with the most memory: "<name> pid <pid> <MiB> MiB".
+largest_worker() {
+  local name pid mib test best="" best_mib=-1
+  while read -r name pid mib test; do
+    [ -n "${name}" ] || continue
+    case "${mib}" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [ "${mib}" -gt "${best_mib}" ]; then
+      best_mib=${mib}
+      best="${name} pid ${pid} ${mib} MiB"
+    fi
+  done <<< "${workers}"
+  echo "${best:-unknown}"
+}
+
+# One line for each worker: its memory and the test it runs now.
 worker_tests() {
-  local f found=0
-  if [ -d "${progress_dir}" ]; then
-    for f in "${progress_dir}"/*.txt; do
-      [ -r "${f}" ] || continue
-      found=1
-      echo "[memory]   $(basename "${f}" .txt) runs: $(head -n 1 "${f}")"
-    done
-  fi
+  local name pid mib test found=0
+  while read -r name pid mib test; do
+    [ -n "${name}" ] || continue
+    found=1
+    case "${mib}" in
+      ''|*[!0-9]*) echo "[memory]   ${name} pid ${pid} (ended) ran: ${test}" ;;
+      *) echo "[memory]   ${name} pid ${pid} ${mib} MiB runs: ${test}" ;;
+    esac
+  done <<< "${workers}"
   if [ "${found}" -eq 0 ]; then
     echo "[memory]   no worker progress files in ${progress_dir}, so the running tests are unknown"
   fi
@@ -63,18 +102,19 @@ worker_tests() {
 print_line() {
   local used="$1" limit="$2" stamp percent=""
   stamp="$(date -u +%H:%M:%S)"
+  read_workers
   case "${limit}" in
     ''|*[!0-9]*) limit="" ;;
   esac
   if [ -n "${limit}" ] && [ "${limit}" -gt 0 ]; then
     percent=$(( used * 100 / limit ))
-    echo "[memory] ${stamp} in use $(mib "${used}") MiB of $(mib "${limit}") MiB (${percent}%); top process: $(top_process)"
+    echo "[memory] ${stamp} in use $(mib "${used}") MiB of $(mib "${limit}") MiB (${percent}%); largest pytest worker: $(largest_worker)"
     if [ "${percent}" -ge "${warn_percent}" ]; then
       echo "[memory] ${stamp} above ${warn_percent}% of the limit. Tests running now:"
       worker_tests
     fi
   else
-    echo "[memory] ${stamp} in use $(mib "${used}") MiB, no limit known; top process: $(top_process)"
+    echo "[memory] ${stamp} in use $(mib "${used}") MiB, no limit known; largest pytest worker: $(largest_worker)"
   fi
 }
 

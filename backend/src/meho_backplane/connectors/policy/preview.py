@@ -53,8 +53,18 @@ _VALUES_SCHEMA: Final[dict[str, Any]] = {
         "risk": {"type": ["string", "null"], "description": "null when no entry sets one."},
         "always_wait": {"type": "boolean"},
         "rule_ref": {"type": "string", "description": "The entry that decided the values."},
+        "in_force": {
+            "type": ["object", "null"],
+            "description": (
+                "What applies with these values: the risk level and whether a call waits, "
+                "after the code's value, the overrides and the minimum-level rules. null "
+                "when the operation is gone."
+            ),
+            "properties": {"risk": {"type": "string"}, "waits": {"type": "boolean"}},
+            "required": ["risk", "waits"],
+        },
     },
-    "required": ["category", "labels", "risk", "always_wait", "rule_ref"],
+    "required": ["category", "labels", "risk", "always_wait", "rule_ref", "in_force"],
 }
 
 RESPONSE_SCHEMA: Final[dict[str, Any]] = {

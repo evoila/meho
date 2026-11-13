@@ -420,6 +420,7 @@ from meho_backplane.operations._secret_values import (
     split_reveal_secret,
 )
 from meho_backplane.operations._target_connector_match import refuse_target_connector_mismatch
+from meho_backplane.operations._target_version_range import refuse_version_outside_range
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
     InvalidOpSchemaError,
@@ -3837,6 +3838,17 @@ async def _dispatch_now(
     )
     if mismatch is not None:
         return mismatch
+    # A target whose known version is outside the range of the connector
+    # picked for it (through the fallback entry) is refused the same way.
+    outside = await refuse_version_outside_range(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+    )
+    if outside is not None:
+        return outside
 
     # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility

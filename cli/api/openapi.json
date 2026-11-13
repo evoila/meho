@@ -5975,7 +5975,7 @@
           "connectors"
         ],
         "summary": "Classify Connector",
-        "description": "Ask to set the category, labels or \"always wait\" of one whole connector.\n\nIts groups and operations take these values unless they have their own.\nWaits until another tenant admin approves it.",
+        "description": "Ask to set the category, labels or \"always wait\" of one whole connector.\n\nIts groups and operations take these values unless they have their own.\nWaits until another tenant admin approves it. A connector id with\n``*``, ``?`` or ``[`` is refused with ``400``: this route edits one\nconnector, never a pattern.",
         "operationId": "classify_connector_api_v1_connectors__connector_id__classification_patch",
         "parameters": [
           {
@@ -17396,17 +17396,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UISessionContext",
-                "nullable": true,
-                "title": "Session Ctx"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -29268,7 +29257,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 512,
             "title": "Work Ref",
             "default": ""
           },
@@ -29536,7 +29524,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 512,
             "title": "Work Ref",
             "default": ""
           }
@@ -29843,7 +29830,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -30504,10 +30490,6 @@
             "maxLength": 5,
             "nullable": true,
             "title": "Always Wait"
-          },
-          "session_ctx": {
-            "$ref": "#/components/schemas/UISessionContext",
-            "nullable": true
           }
         },
         "type": "object",
@@ -30550,10 +30532,6 @@
             "maxLength": 5,
             "nullable": true,
             "title": "Always Wait"
-          },
-          "session_ctx": {
-            "$ref": "#/components/schemas/UISessionContext",
-            "nullable": true
           }
         },
         "type": "object",
@@ -30608,7 +30586,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -30901,8 +30878,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
-            "minLength": 1,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -31237,7 +31212,6 @@
           },
           "work_ref": {
             "type": "string",
-            "minLength": 1,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -31572,6 +31546,25 @@
         "title": "ClassificationEntryOut",
         "description": "One stored entry. ``ref`` names it, for example ``tenant:classifications[0]``."
       },
+      "ClassificationInForce": {
+        "properties": {
+          "risk": {
+            "type": "string",
+            "title": "Risk"
+          },
+          "waits": {
+            "type": "boolean",
+            "title": "Waits"
+          }
+        },
+        "type": "object",
+        "required": [
+          "risk",
+          "waits"
+        ],
+        "title": "ClassificationInForce",
+        "description": "What applies to one operation: the code's value, overrides, classification, floors.\n\nA floor (a minimum-level rule in the code) can keep a wait or a level\nthat the classification alone would not set."
+      },
       "ClassificationListResponse": {
         "properties": {
           "enabled": {
@@ -31803,6 +31796,14 @@
           "rule_ref": {
             "type": "string",
             "title": "Rule Ref"
+          },
+          "in_force": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ClassificationInForce"
+              }
+            ],
+            "nullable": true
           }
         },
         "type": "object",
@@ -31811,10 +31812,11 @@
           "labels",
           "risk",
           "always_wait",
-          "rule_ref"
+          "rule_ref",
+          "in_force"
         ],
         "title": "ClassificationValues",
-        "description": "The classified values of one operation, before the floors."
+        "description": "The classified values of one operation, before the floors, and what is in force.\n\n``in_force`` is ``null`` when the operation's row is gone."
       },
       "ConfirmVerify": {
         "properties": {
@@ -40243,8 +40245,6 @@
         "properties": {
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
-            "minLength": 1,
             "title": "Work Ref",
             "description": "The run reference. Calls of the run send it in the Meho-Work-Ref header."
           },
@@ -41164,7 +41164,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
           }

@@ -1,0 +1,37 @@
+# The "small team" policy file: MEHO's default policy.
+#
+# MEHO behaves like this file when no policy file is imported. Importing it
+# on a fresh install answers "No change." Start from it and add your own
+# entries. Import it for the whole install:
+#
+#   meho policy diff --scope install small-team.yaml
+#   meho policy import --scope install small-team.yaml
+#
+# The same file ships inside MEHO
+# (backend/src/meho_backplane/policy/profiles/small-team.yaml).
+# A test keeps the two copies the same.
+policy: v1
+description: >-
+  Small team: MEHO's default policy. Every operation has the category
+  "other", and every operation keeps the risk level and the approval
+  rule it has in MEHO's code.
+taxonomy:
+  # The category of an operation that no entry below classifies.
+  default: other
+  categories:
+    - network
+    - storage
+    - compute
+    - identity
+    - secrets
+    - other
+# No entries: every operation keeps its values from MEHO's code.
+# Examples of entries you can add:
+#
+#   - match: {connector: "<connector-id-pattern>"}
+#     category: network
+#   - match: {connector: "<connector-id>", group: "<group-key>"}
+#     labels: {team: "<team-name>"}
+#   - match: {op: "<op-id-pattern>"}
+#     always_wait: true
+classifications: []

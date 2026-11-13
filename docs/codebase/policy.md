@@ -47,6 +47,32 @@ classifications:
 - Later changes add `bindings` and `routing`. Until then they are unknown
   keys.
 
+## The shipped "small team" file
+
+`deploy/policy-profiles/small-team.yaml` is MEHO's default policy. The
+same file is packaged at
+`backend/src/meho_backplane/policy/profiles/small-team.yaml` (listed in the
+wheel `artifacts` in `backend/pyproject.toml`), so MEHO has it without a
+network. It holds the built-in taxonomy (`DEFAULT_TAXONOMY` in
+`policy/classification.py`) and no classification entries.
+
+Until a policy for the whole install is stored, the install's policy is
+this file (`builtin_install_document` in `policy/service.py`):
+
+- `build_plan` compares an install file against it, so importing the file
+  on a fresh install is "No change.", and `based_on` is its SHA-256;
+- `export_policy` for `scope: install` writes it;
+- a tenant import checks against its taxonomy.
+
+The runtime (`policy/store.py`) does not read the file: with no stored
+install policy it uses `DEFAULT_TAXONOMY` and no entries, which is the
+same. `backend/tests/test_policy_small_team_parity.py` keeps the two
+copies equal, keeps the file's taxonomy equal to `DEFAULT_TAXONOMY`, and
+checks that storing the file changes no operation: for every registered
+operation the risk level, the wait, the category and the answer (run,
+wait or deny) for each kind of caller stay the same. Later changes that
+add `bindings` and `routing` extend the file.
+
 ## Checks
 
 The parser (`policy/document.py`) uses the strict YAML loader of the
@@ -176,5 +202,7 @@ Code: `backend/src/meho_backplane/api/v1/policy.py`,
 `backend/tests/test_policy_document.py` (parser, floors, plan, apply,
 versions), `backend/tests/test_api_v1_policy.py` (routes, waiting import,
 approval by a second admin),
+`backend/tests/test_policy_small_team_parity.py` (the "small team" file:
+round trip and no change over every operation),
 `backend/tests/migrations/test_migration_0163_add_policy_revision.py`,
 `cli/internal/cmd/policy/file_test.go`.

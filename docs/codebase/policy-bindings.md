@@ -12,6 +12,10 @@ default; Helm `config.policy.approverRouting`). With the switch off, MEHO
 reads no binding and the login works as before. The file still accepts and
 checks a `bindings` section with the switch off.
 
+The bindings come in with the policy file, and every policy command
+(`validate`, `diff`, `import`, `export`) needs the switch
+`POLICY_CLASSIFICATION` too. So to use bindings, turn on both switches.
+
 Code: `backend/src/meho_backplane/policy/bindings.py`.
 
 ## Overview
@@ -43,6 +47,11 @@ another case.
   User Attribute mapper (Multivalued and Aggregate on) copies the values of
   all the person's groups into the token claim `meho_groups`. The match is
   exact.
+- The `groups` claim must be a list of texts. A `groups` claim of another
+  shape (one text, a map, a list with a number in it), or a `meho_groups`
+  claim that is not a text or a list of texts, matches no binding at all,
+  the same rule as for self-approval today: anything unclear gives no
+  kind. MEHO logs `policy_bindings_malformed_groups_claim`.
 - `kind` is one of the five group kinds.
 - `categories` is a list of categories of the taxonomy, or `["*"]` for
   every category.
@@ -72,7 +81,11 @@ another case.
    tenant is chosen (a status answer). Otherwise it reads the tenant's
    stored policy (`tenant_policy`, one row). The bindings of that file
    count. When the file has no bindings, or the tenant has no stored
-   policy, the shipped bindings count.
+   policy, the shipped bindings count, but only for a login without a
+   tenant list (`meho_tenants`). The `groups` claim is not per tenant: it
+   lists the person's groups of every tenant. So for a login with a
+   tenant list, the list entry of the current tenant keeps deciding the
+   kind, exactly as with the switch off.
 5. `bind` matches the login:
    - No binding matches: the login keeps the kind MEHO works out today
      (from the token's `tenant_role`, `approver` and the self-approval
@@ -95,6 +108,11 @@ another case.
      categories of all these bindings together. `"*"` means every
      category. A machine login never gets either flag. A token with a bad
      `meho_tenants` claim never gets `self_approver`.
+   - The one exception to the two-kinds rule: when only shipped bindings
+     match, and they give `Operators` and `SA-Operators` (a person in an
+     operator group and in a renamed self-approval group), the login gets
+     `SA-Operators`. Today such a person is an operator who may approve
+     their own changes.
 6. A stored `bindings` section that cannot be read (changed outside MEHO)
    gives the login the kind with the fewest rights of its base level
    (`Readers`, `Operators` or `Admins`), no category and no flag. MEHO logs
@@ -104,15 +122,34 @@ another case.
 
 `shipped_binding_documents` makes them from the two login settings:
 
-- each group of `JWT_ROLE_GROUPS` whose name ends with a group kind (for
-  example `MEHO-Operators`) gets that kind;
+- each group of `JWT_ROLE_GROUPS` gets the kind its name **ends with**
+  (`MEHO-Operators` and `Corp-SA-Operators` give `Operators` and
+  `SA-Operators`; upper and lower case do not count). A group whose name
+  ends with no kind gets no shipped binding;
 - the group of `JWT_SELF_APPROVER_GROUP` gets `SA-Operators`;
 - each is matched by its top-level full path (`/MEHO-Operators`) and gets
   every category.
 
+A site that renamed its groups must check that each name in
+`JWT_ROLE_GROUPS` ends with the kind the group gives (for example
+`Corp-Readers`, not `Corp-Read-Only`). Run `meho policy export` with both
+switches on and read its `bindings`: each group must have the kind you
+expect. A group with a name like `Corp-Read-Only` is missing there; write
+its binding in the file yourself.
+
+They count only for a login without a tenant list (step 4 above). The
+shipped realm sends a tenant list, so there the shipped bindings change
+nothing; they are for a site with the older mappers.
+
 `meho policy export` writes them into a tenant's file when the tenant has
 no stored bindings and the switch is on. After an import, the file holds
 the bindings.
+
+The import diff (and `meho policy diff`) compares the file with the
+**stored** bindings, not with the shipped ones. So the first import of an
+exported file lists the shipped bindings as `added`, although they were
+already in effect. A file without `bindings` removes every stored binding,
+and the shipped bindings are back in effect.
 
 ## The import checks
 
@@ -134,8 +171,31 @@ kind, `"*"` next to other categories, and the same match twice.
 
 A binding edit is a change of rights: bindings change only through the
 policy import, and the import carries the rights-change mark, so another
-admin must approve it ([policy.md](policy.md)). The import diff has a
-`bindings` section with `added`, `changed` and `removed`.
+admin must approve it ([policy.md](policy.md)). So two admins of the
+tenant decide the stored bindings: one imports, a second one approves. The
+import diff has a `bindings` section with `added`, `changed` and
+`removed`.
+
+A stored binding matches a group path or attribute value of the whole
+Keycloak realm, not only the groups of its tenant. Who is in a group is
+decided in Keycloak, by whoever manages that group. When a binding names a
+group of another tenant (for example `/MEHO-lab-b-Operators/Network`),
+the people in that group get the kind in this tenant too, if they work in
+this tenant at all and have the base level of the kind here. The other
+tenant's admins then decide, with their group changes, who gets the kind
+here. So bind only groups that your tenant manages, and use paths and
+attribute values with the tenant's name in them.
+
+## Other places that read the kind
+
+- A delegated agent run (`delegated_operator` in `auth/delegation.py`)
+  clears `bound_kind` and `bound_categories`, next to the `approver` and
+  self-approval flags.
+- The audit rows of an approval (`_write_audit_row` in
+  `operations/approval_queue.py`) carry `bound_kind` in their payload when
+  the bindings gave the person who acted on the row a kind. On a decision
+  row this says that the approver's right came from a binding, the way
+  `tenant_role_source` says it for a platform admin.
 
 ## Dependencies
 
@@ -150,10 +210,7 @@ admin must approve it ([policy.md](policy.md)). The import diff has a
 - No code reads `bound_categories` yet. Approver routing by category uses
   it in a later change.
 - The shipped realm sends short group names (`Full group path` off). Then
-  only `attribute` bindings match, and the shipped bindings match nothing,
-  so every login keeps today's kind.
-- A tenant admin can bind any group path or attribute value. Use values
-  that belong to the tenant, for example with the tenant's name in them.
+  only `attribute` bindings match until a site turns full paths on.
 
 ## References
 
@@ -161,4 +218,8 @@ admin must approve it ([policy.md](policy.md)). The import diff has a
 - `docs/decisions/login-role-groups.md`: the five groups and the mappers.
 - Login setup: `docs-site/install/keycloak-realm.md` and
   `docs/cross-repo/keycloak-tenant-claims.md`.
-- Tests: `backend/tests/test_policy_bindings.py`.
+- Tests: `backend/tests/test_policy_bindings.py`,
+  `backend/tests/test_policy_bindings_parity.py` (the switch on without
+  stored bindings changes no login) and
+  `backend/tests/integration/test_keycloak_policy_bindings_e2e.py` (the
+  claims of a real Keycloak with full paths and the `meho-groups` mapper).

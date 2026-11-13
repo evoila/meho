@@ -383,7 +383,10 @@ def test_parse_dig_answer_handles_each_supported_record_type(
 
 def test_parse_dig_answer_yields_multiple_rows_for_multi_member_rrset() -> None:
     """An MX rrset with two priorities -> two rows."""
-    output = "example.test.\t3600\tIN\tMX\t10 mail.example.test.\nexample.test.\t3600\tIN\tMX\t20 mail2.example.test.\n"
+    output = (
+        "example.test.\t3600\tIN\tMX\t10 mail.example.test.\n"
+        "example.test.\t3600\tIN\tMX\t20 mail2.example.test.\n"
+    )
     rows = parse_dig_answer(output)
     assert len(rows) == 2
     assert {row["rdata"] for row in rows} == {

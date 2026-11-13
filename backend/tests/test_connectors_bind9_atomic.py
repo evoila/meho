@@ -2310,7 +2310,8 @@ class TestRemoteCommandExitStatus:
                 {
                     "fqdn": "api.example.test",
                     "ip": "198.51.100.99",
-                    "zone": "example.test",  # explicit -- goes through resolve_zonefile_path_for_zone
+                    # explicit -- goes through resolve_zonefile_path_for_zone
+                    "zone": "example.test",
                 },
             )
         assert exc_info.value.exit_status == 2

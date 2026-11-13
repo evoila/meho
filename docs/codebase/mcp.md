@@ -1557,7 +1557,7 @@ Five synthetic connectors follow this mould (natural key
 | `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |
 | `targets-registry-1.x` | `targets.probe` | (dispatch-only; a `safe` op that detects a target's product and version and stores them, the same code as `POST /api/v1/targets/{name}/probe`) | #5653 |
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
-| `spaces-records-1.x` | `spaces.assign`, `spaces.unassign`, `spaces.reassign`, `spaces.member.disable`, `spaces.overview` | (dispatch-only; the four writes are `caution` + `requires_approval` and need `tenant_admin`; the overview is a `safe` read) | #4933 |
+| `spaces-records-1.x` | `spaces.assign`, `spaces.unassign`, `spaces.reassign`, `spaces.member.disable`, `spaces.overview`, `spaces.drift` | (dispatch-only; the four writes are `caution` + `requires_approval` and need `tenant_admin`; the overview and the drift check are `safe` reads) | #4933 |
 | `inventory-1.x` | `inventory.export` | (dispatch-only; a `safe` read that turns stored or inline inventories into a file in a named format) | #5218 |
 
 **Per-op role floor.** `targets.register`, `targets.update`, the four `spaces.*` writes and the five `topology.*`

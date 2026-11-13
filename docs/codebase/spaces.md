@@ -4,7 +4,7 @@
 
 A space is an area inside one tenant that belongs to one person or a small
 team. It lists its members and the systems assigned to it. This page covers
-the three tables, the history rule and the six operations. Routes come in
+the three tables, the history rule and the seven operations. Routes come in
 later Tasks of the same Initiative.
 
 The words:
@@ -50,7 +50,7 @@ key, not the name.
 ## Operations
 
 The built-in connector `spaces-records-1.x` (code in
-`backend/src/meho_backplane/connectors/spaces/`) has six operations. They
+`backend/src/meho_backplane/connectors/spaces/`) has seven operations. They
 are typed operations, like the ones of `audit-integrity-1.x`.
 
 | Operation | What it does | Risk level |
@@ -61,6 +61,7 @@ are typed operations, like the ones of `audit-integrity-1.x`.
 | `spaces.member.disable` | "Leave a lab": ends one person's membership in one space (a new row with state `disabled` starts). Nothing is deleted. It never calls the Keycloak connector; the company account is a separate step. | `caution` |
 | `spaces.import` | Loads a site's ownership records from a manifest (see below). | `caution` |
 | `spaces.overview` | Per space: owner, members, assigned systems. Per target: product, version, when it was detected, and health. Reads stored data only. | `safe` |
+| `spaces.drift` | Lists where the ownership record and the live targets disagree (see "Nightly drift check"). Reads stored data only. | `safe` |
 
 - The five writes need a reason, and they only work in the caller's tenant.
   A person needs the `tenant_admin` role (the operation's role floor), and
@@ -144,10 +145,39 @@ and subject. Example with made-up names:
   `labs_written` inline; a long conflict list comes back behind a result
   handle.
 
+## Nightly drift check
+
+`spaces.drift` compares the current assignments of the tenant with the live
+data MEHO already stores: targets and their last probe, and the topology
+graph. It makes no vendor call, writes nothing and repairs nothing. A person
+decides each repair (`spaces.assign`, `spaces.unassign`, `spaces.reassign`).
+
+Five kinds of drift. Each is a list in the answer, and a count in `counts`:
+
+| Kind | A row is listed when |
+|---|---|
+| `unassigned_targets` | a live target has no current target assignment |
+| `missing_targets` | a current target assignment points to a target that is deleted or unknown |
+| `unreachable_targets` | an assigned target's last probe said `reachable: false`. A target never probed is not listed. |
+| `missing_objects` | a current machine assignment has a vendor object id that is the name of no live topology node of the tenant |
+| `state_mismatch` | the assignment's space is disabled (`space_disabled`), or its target has another name than at assignment (`target_renamed`, with `current_name`) |
+
+- `total_count` adds the five counts. The check reads it.
+- `missing_objects` trusts the topology refresh. A target whose topology was
+  never refreshed makes its machines show as missing, so refresh first.
+- The lists come back behind a result handle when long; `total_count` stays
+  in the answer.
+- The template `drift_sensor_template()`
+  (`connectors/spaces/drift_template.py`) is a ready `POST /api/v1/sensors`
+  body. It runs at 02:00 UTC every night and goes `degraded` when
+  `total_count` is above 0. Its arguments set the bounds: `degraded_above`
+  (default 0) and an optional `critical_above` (then severity is `critical`).
+  Send it with `meho` or the sensors API; it only reports.
+
 ## Dependencies
 
 - The setting `SPACES_ENABLED` (off by default) turns spaces on. The tables
-  exist either way and are empty. With the setting off, all six operations
+  exist either way and are empty. With the setting off, all seven operations
   answer "Spaces are off" and nothing else changes for an install.
 
 ## Known issues
@@ -156,5 +186,5 @@ and subject. Example with made-up names:
 
 ## References
 
-- Tests: `backend/tests/test_spaces_ops.py`, `backend/tests/test_spaces_import.py`, `backend/tests/test_spaces_store.py`,
+- Tests: `backend/tests/test_spaces_ops.py`, `backend/tests/test_spaces_import.py`, `backend/tests/test_spaces_drift.py`, `backend/tests/test_spaces_store.py`,
   `backend/tests/migrations/test_migration_0156_create_spaces_tables.py`.

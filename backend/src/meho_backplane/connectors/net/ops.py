@@ -79,6 +79,26 @@ __all__ = [
 ]
 
 
+#: Added to a ``timeout`` result. An address can pass the allow list and
+#: still be unreachable, for example when the backplane only reaches the
+#: estate through NAT alias addresses.
+_TIMEOUT_HINT = (
+    "No route from the backplane is a possible cause. The address is "
+    "allowed, but the backplane may not be able to reach it. Check that "
+    "the address is one the backplane really reaches (for example a NAT "
+    "alias), not only the address the estate uses inside."
+)
+
+_HINT_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "description": (
+        "Present only when reason is 'timeout'. Says that no route from "
+        "the backplane is a possible cause, so a timeout is not read as "
+        "an outage of the probed service."
+    ),
+}
+
+
 #: Default connect timeout when the caller omits ``timeout_seconds``.
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 5.0
 #: Hard ceiling on the connect timeout — a probe must not become a way
@@ -142,6 +162,7 @@ _NET_TCP_CHECK_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "host": {"type": "string", "description": "The probed host (audit-visible)."},
         "port": {"type": "integer", "description": "The probed port (audit-visible)."},
+        "hint": _HINT_SCHEMA,
     },
     "required": ["connected", "reason", "latency_ms", "host", "port"],
     "additionalProperties": False,
@@ -200,13 +221,16 @@ def _clamp_timeout(raw: Any) -> float:
 
 def _refusal(host: str, port: int, reason: str) -> dict[str, Any]:
     """Build the structured failure payload shared by every failed probe."""
-    return {
+    payload: dict[str, Any] = {
         "connected": False,
         "reason": reason,
         "latency_ms": None,
         "host": host,
         "port": port,
     }
+    if reason == "timeout":
+        payload["hint"] = _TIMEOUT_HINT
+    return payload
 
 
 async def net_tcp_check(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -380,6 +404,7 @@ _NET_DNS_LOOKUP_RESPONSE_SCHEMA: dict[str, Any] = {
                 "fails the dispatch with connector_probe_refused."
             ),
         },
+        "hint": _HINT_SCHEMA,
     },
     "required": [
         "resolved",
@@ -435,7 +460,7 @@ _NET_DNS_LOOKUP_LLM_INSTRUCTIONS: dict[str, Any] = {
 
 def _dns_refusal(name: str, record_type: str, resolver: str, reason: str) -> dict[str, Any]:
     """Build the structured failure payload shared by every failed lookup."""
-    return {
+    payload: dict[str, Any] = {
         "resolved": False,
         "name": name,
         "type": record_type,
@@ -445,6 +470,9 @@ def _dns_refusal(name: str, record_type: str, resolver: str, reason: str) -> dic
         "authenticated_data": None,
         "reason": reason,
     }
+    if reason == "timeout":
+        payload["hint"] = _TIMEOUT_HINT
+    return payload
 
 
 def _as_ip_literal(value: str) -> str | None:

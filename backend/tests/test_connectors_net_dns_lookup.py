@@ -373,6 +373,7 @@ async def test_timeout_maps_to_timeout_reason(monkeypatch: pytest.MonkeyPatch) -
 
     assert result["resolved"] is False
     assert result["reason"] == "timeout"
+    assert "no route from the backplane is a possible cause" in result["hint"].lower()
 
 
 # ---------------------------------------------------------------------------

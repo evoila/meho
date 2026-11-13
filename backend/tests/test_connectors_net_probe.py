@@ -346,13 +346,47 @@ async def test_handler_maps_connect_exceptions_to_reason_codes(
     monkeypatch.setattr(net_ops.asyncio, "open_connection", _raise)
 
     result = await net_tcp_check(_make_operator(), None, {"host": "203.0.113.5", "port": 9999})
-    assert result == {
+    expected: dict[str, object] = {
         "connected": False,
         "reason": expected_reason,
         "latency_ms": None,
         "host": "203.0.113.5",
         "port": 9999,
     }
+    if expected_reason == "timeout":
+        expected["hint"] = net_ops._TIMEOUT_HINT
+    assert result == expected
+
+
+async def test_timeout_on_allowed_address_carries_no_route_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout on an allowed address says no route is a possible cause."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "203.0.113.5")
+
+    async def _raise(*_a: object, **_kw: object) -> object:
+        raise TimeoutError()
+
+    monkeypatch.setattr(net_ops.asyncio, "open_connection", _raise)
+
+    result = await net_tcp_check(_make_operator(), None, {"host": "203.0.113.5", "port": 443})
+
+    assert result["reason"] == "timeout"
+    assert "no route from the backplane is a possible cause" in result["hint"].lower()
+
+
+async def test_refused_connect_has_no_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a timeout carries the hint: a refusal proves there is a route."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "203.0.113.5")
+
+    async def _raise(*_a: object, **_kw: object) -> object:
+        raise ConnectionRefusedError()
+
+    monkeypatch.setattr(net_ops.asyncio, "open_connection", _raise)
+
+    result = await net_tcp_check(_make_operator(), None, {"host": "203.0.113.5", "port": 443})
+
+    assert "hint" not in result
 
 
 # ---------------------------------------------------------------------------

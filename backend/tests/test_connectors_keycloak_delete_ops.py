@@ -369,7 +369,7 @@ async def test_user_delete_already_gone_by_name(kc: KeycloakConnector) -> None:
     assert result["result"] == {
         "realm": _REALM,
         "id": None,
-        "username": "event-guest",
+        "requested_username": "event-guest",
         "deleted": False,
         "already_absent": True,
     }

@@ -169,7 +169,10 @@ DELETE_WRITE_OPS: tuple[KeycloakOp, ...] = (
                 "id": "The user's internal UUID (from keycloak.user.list).",
                 "username": "The exact username, when you do not have the id.",
             },
-            "output_shape": "``{realm, id, username, deleted, already_absent}``.",
+            "output_shape": (
+                "``{realm, id, username, deleted, already_absent}``. For a user that "
+                "does not exist, the sent name is ``requested_username``, not ``username``."
+            ),
         },
     ),
     KeycloakOp(

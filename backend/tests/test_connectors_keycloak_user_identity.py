@@ -45,7 +45,7 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.operations.dispatcher import set_default_reducer
-from meho_backplane.operations.meta_tools import call_operation
+from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
@@ -60,7 +60,6 @@ _USER_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _USER_PATH = f"/admin/realms/{_REALM}/users/{_USER_UUID}"
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000006357")
 _DISABLE = "keycloak.user.disable"
-_ENABLE = "keycloak.user.enable"
 
 
 def _user(enabled: bool) -> dict[str, Any]:
@@ -170,7 +169,6 @@ def _mount_token(mock: respx.MockRouter) -> None:
 # ---------------------------------------------------------------------------
 
 _GROUP_UUID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-_OTHER_UUID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 _USERS_PATH = f"/admin/realms/{_REALM}/users"
 _USER_OP_PARAMS: dict[str, dict[str, Any]] = {
     "keycloak.user.disable": {},
@@ -276,6 +274,59 @@ async def test_user_delete_refuses_an_id_and_a_username_of_different_users(
         result = await _run("keycloak.user.delete", {"id": _USER_UUID, "username": "someone-else"})
     assert result["status"] != "ok"
     assert "belong to different users" in str(result)
+    assert not deletes.called
+
+
+async def test_user_delete_refuses_different_users_before_approval(
+    kc: KeycloakConnector,
+) -> None:
+    args = _call_args("keycloak.user.delete", {"id": _USER_UUID, "username": "someone-else"})
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        # The preview refuses a mismatch too, so take a valid hash while the names match.
+        user_read = _mount_user(mock, {**_user(True), "username": "someone-else"})
+        mock.get(f"{_USER_PATH}/groups").respond(200, json=[])
+        deletes = mock.delete(url__regex=r".*").respond(204)
+        preview = await preview_operation(_operator(), args)
+        assert preview["status"] == "ok", preview
+        user_read.respond(200, json=_user(True))
+        call = await call_operation(_operator(), {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "denied", call
+    assert call["extras"]["error_code"] == "refused_before_approval"
+    assert "belong to different users" in call["error"]
+    assert not deletes.called
+    assert await _stored_requests() == []
+
+
+async def test_user_delete_of_an_absent_user_shows_the_sent_name_only_as_requested(
+    kc: KeycloakConnector,
+) -> None:
+    params = {"id": _USER_UUID, "username": "event-guest"}
+    args = _call_args("keycloak.user.delete", params)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_USER_PATH).respond(404)
+        deletes = mock.delete(url__regex=r".*").respond(204)
+        preview = await preview_operation(_operator(), args)
+        call = await call_operation(_operator(), {**args, "preview_hash": preview["preview_hash"]})
+        assert call["status"] == "awaiting_approval", call
+        request_id = uuid.UUID(call["extras"]["approval_request_id"])
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, request_id)
+            assert row is not None
+            card = row.proposed_effect["preview"]["blast_radius"]["object"]
+        result = await _run("keycloak.user.delete", params)
+    assert "username" not in card
+    assert card["requested_username"] == "event-guest"
+    assert card["present"] is False
+    assert result["status"] == "ok", result
+    assert result["result"] == {
+        "realm": _REALM,
+        "id": _USER_UUID,
+        "requested_username": "event-guest",
+        "deleted": False,
+        "already_absent": True,
+    }
     assert not deletes.called
 
 

@@ -148,14 +148,29 @@ def _blast_radius(
     }
 
 
+def _user_name_fields(found: FoundObject, params: dict[str, Any]) -> dict[str, Any]:
+    """The user's name for the card and the result of a user delete.
+
+    ``username`` is the name stored in Keycloak. When the user does not exist,
+    the name the caller sent is shown only as ``requested_username``.
+    """
+    if found.name is not None:
+        return {"username": found.name}
+    requested = params.get("username")
+    if isinstance(requested, str) and requested.strip():
+        return {"requested_username": requested.strip()}
+    return {}
+
+
 async def user_blast_radius(
     connector: KeycloakConnector,
     operator: Operator,
     target: KeycloakTargetLike,
     found: FoundObject,
+    params: dict[str, Any],
 ) -> dict[str, Any]:
     """Card for a user delete: user name, enabled or not, and its groups."""
-    obj: dict[str, Any] = {"kind": "keycloak_user", "username": found.name}
+    obj: dict[str, Any] = {"kind": "keycloak_user", **_user_name_fields(found, params)}
     if found.rep is not None and found.object_id is not None:
         rows = await connector._get_admin_list(
             target,
@@ -285,7 +300,7 @@ async def keycloak_user_delete(
 ) -> dict[str, Any]:
     """Delete one user (``DELETE .../users/{id}``). Op-id: ``keycloak.user.delete``."""
     found = await find_user(self, operator, target, params)
-    result = {"realm": found.realm, "id": found.object_id, "username": found.name}
+    result = {"realm": found.realm, "id": found.object_id, **_user_name_fields(found, params)}
     if not found.present or found.object_id is None:
         return _absent(result)
     await check_user_guards(self, operator, target, found)

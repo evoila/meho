@@ -551,7 +551,7 @@ async def _user_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     found = await find_user(connector, ctx.operator, ctx.target, ctx.params)
     if found.present:
         await check_user_guards(connector, ctx.operator, ctx.target, found)
-    return await user_blast_radius(connector, ctx.operator, ctx.target, found)
+    return await user_blast_radius(connector, ctx.operator, ctx.target, found, ctx.params)
 
 
 async def _group_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -629,6 +629,7 @@ def _register_keycloak_preview_builders() -> None:
     register_user_write(
         "keycloak.group.member.remove", _group_membership_preview("remove"), id_key="user_id"
     )
+    register_park_check("keycloak.user.delete", refuse_other_user_check("keycloak.user.delete"))
     register_preview_builder("keycloak.user.delete", _user_delete_preview)
     register_preview_builder("keycloak.group.delete", _group_delete_preview)
     register_preview_builder("keycloak.client.delete", _client_delete_preview)

@@ -120,7 +120,8 @@ class FoundObject:
     ``rep`` is the object's current representation, or ``None`` when it does
     not exist. ``object_id`` is its internal id (``None`` when a name matched
     nothing). ``name`` is the human name to report: the stored one when the
-    object exists, else the name the caller passed.
+    object exists, else the name the caller passed. For a user it is only the
+    stored username (``None`` when the user does not exist).
     """
 
     realms: RealmConfig
@@ -252,10 +253,11 @@ async def find_user(
         )
     else:
         raise ValueError(f"{USER_DELETE_OP} requires either 'id' (UUID) or 'username'")
+    # Only the stored username: a name the caller sent is never shown as the user's.
     return FoundObject(
         realms=realms,
         object_id=str_field(rep, "id") or user_id,
-        name=str_field(rep, "username") or username,
+        name=str_field(rep, "username"),
         rep=rep,
     )
 

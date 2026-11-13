@@ -711,15 +711,20 @@ Every Keycloak user write shares one helper,
   count). If not, the request is refused before it waits for approval (a
   park check), and no approval request is stored. The same check runs
   again when the approved request runs, so a user who was renamed in
-  between is refused. Nothing is written. `user.delete` does the same in
-  its lookup (`find_user`), so its card and its run refuse too.
+  between is refused. Nothing is written. `user.delete` uses the same park
+  check, and its lookup (`find_user`) refuses a mismatch when it runs.
 - The approval card shows the username stored in Keycloak for the user id
   (`username`, `user_available: true`). A name the caller sent is never
   shown as the user's name: when the user cannot be read, the card has no
   `username`. It shows the sent value as `requested_username` and
   `user_available: false`.
+- `user.delete` keeps its own card (the delete's `blast_radius` block). Its
+  `username` is only the stored name. For a user that does not exist, the
+  card and the result show the sent name as `requested_username`, and the
+  run still answers `already_absent: true`.
 - After approval, the op acts on the user id shown on the card. It does not
-  look the username up again. A card without a user id is refused.
+  look the username up again. A card without a user id is refused. (Not
+  `user.delete`: it finds the user again and checks its guards again.)
 - The result shows the stored username (`group.member.*` results now carry
   `username` too).
 - With only an id, or only a username, the call works as before. Each run

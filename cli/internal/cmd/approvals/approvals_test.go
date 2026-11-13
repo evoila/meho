@@ -1892,3 +1892,31 @@ func TestRejectSendsNoAsyncField(t *testing.T) {
 		t.Errorf("a reject runs nothing and sends no async field; got %s", raw)
 	}
 }
+
+// TestPrintDecisionShowsTheExitCode: a run that ended ok but whose script
+// exited non-zero says so. Exit 0 prints the code without a warning.
+func TestPrintDecisionShowsTheExitCode(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		want string
+	}{
+		{3, "Exit code:    3 (the script ran, but it failed)"},
+		{0, "Exit code:    0\n"},
+	} {
+		d := newApprovalView(t, "approved", "T-test")
+		executed := api.ApprovalResultStateExecuted
+		resultStatus := "ok"
+		code := tc.code
+		d.ResultState = &executed
+		d.ResumeOutcome = &api.ApprovalResumeOutcomeView{ResultStatus: &resultStatus, ExitCode: &code}
+		var buf bytes.Buffer
+		printDecision(&buf, stubID, &d, nil)
+		out := buf.String()
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("exit %d render missing %q in:\n%s", tc.code, tc.want, out)
+		}
+		if tc.code == 0 && strings.Contains(out, "failed") {
+			t.Errorf("exit 0 printed a failure:\n%s", out)
+		}
+	}
+}

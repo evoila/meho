@@ -1533,6 +1533,13 @@ class Settings(BaseModel):
         person gets the value on the command line, in the console or over
         REST. It stays off until model tests show it helps. Env
         ``MCP_REVEAL_FETCH``.
+    mcp_approval_exit_code:
+        Off by default. When on, the ``resume_outcome`` of an approval on the
+        MCP tools ``meho_approvals_list`` and ``meho_approvals_get`` also has
+        ``exit_code``: the exit code of an approved script run. When off, the
+        MCP answer is the same as before. REST, the command line and the
+        console always show it. It stays off until model tests show it helps.
+        Env ``MCP_APPROVAL_EXIT_CODE``.
     policy_classification:
         Off by default. When on, each connector, operation group and
         operation can carry a category, labels and an "always wait" mark,
@@ -2458,6 +2465,7 @@ class Settings(BaseModel):
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = False
     policy_engine_shadow: bool = False
     #: Absolute URL of the external vendor-document corpus search
@@ -3554,6 +3562,9 @@ def get_settings() -> Settings:
         ),
         mcp_reveal_fetch=parse_bool_env(
             os.environ.get("MCP_REVEAL_FETCH"),
+        ),
+        mcp_approval_exit_code=parse_bool_env(
+            os.environ.get("MCP_APPROVAL_EXIT_CODE"),
         ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),

@@ -94,7 +94,7 @@ Three kinds ship today. A move may be **same-kind** (`vault` → `vault`) or
 | --- | --- | --- | --- |
 | `vault` | source **and** sink | `<path>#<field>` — a KV-v2 path with a required `#<field>` fragment selecting one field | `vault:secret/db/prod#password` |
 | `keycloak` | sink **only** | `<target>/<realm>/<username>#password` — `#password` is the only writable field | `keycloak:kc/meho/operator-a#password` |
-| `linux` | sink **only** | `<target>/<absolute path>#<owner>` — a file in the home of `<owner>` (never `root`) on a host of a `linux-ssh` target, mode 0600, written as `<owner>` | `linux:app-host/home/app/.config/app/key#app` |
+| `linux` | sink **only** | `<target>/<absolute path>#<owner>` — a file in the home of `<owner>` (a normal user: never `root`, never a system user) on a host of a `linux-ssh` target, mode 0600, written as `<owner>` | `linux:app-host/home/app/.config/app/key#app` |
 
 **vault** (`vault:` —
 [`vault_endpoint.py`](../../backend/src/meho_backplane/connectors/secret/vault_endpoint.py)).

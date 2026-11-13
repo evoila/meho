@@ -12,8 +12,9 @@ Kind ``"linux"`` is a **write-only** store for ``secret.move``. The ref is::
 * ``<absolute path>`` -- where the file goes. It must be inside the home
   directory of ``<owner>``. ``linux:seat-host/home/app/.config/app/key#app``
   and ``linux:seat-host//home/app/.config/app/key#app`` name the same path.
-* ``<owner>`` -- the Linux user who will own the file. Never ``root``, and
-  never a user with user id 0.
+* ``<owner>`` -- the Linux user who will own the file. A normal user: never
+  ``root``, and never a user whose user id is below the host's first normal
+  user id (``UID_MIN`` in ``/etc/login.defs``; 1000 when the file gives none).
 
 What the adapter does
 =====================
@@ -39,15 +40,19 @@ place that is never a home (:data:`_NOT_A_HOME`: ``/etc``, ``/run``,
 ``/usr``, ``/var/lib``, ``/opt``, ``/srv`` and the system folders). Inside a
 home it refuses a place the system runs or reads for logins
 (:data:`_SYSTEM_RUNS`): a ``.ssh`` folder, ``.config/systemd``,
-``.config/autostart``, SSH key files and shell start files. A home under
-``/var`` (for example ``/var/www``) is allowed.
+``.config/autostart``, SSH key files and shell start files. Names are
+compared in lower case. A normal user's home under ``/var`` (for example
+``/var/home/app``) is allowed.
 
 MEHO then reads the owner's home from the host (``getent passwd``) with a
 short script that carries no secret. That script refuses an owner with user
-id 0. MEHO refuses a path outside the home before the secret is sent. The
-script that writes the file checks the owner and the home again. Both scripts
-first check that ``realpath -m`` works on the host, and stop with the reason
-``realpath`` when it does not.
+id 0 (reason ``root-owner``), a system user (reason ``system-owner``: a user
+id below the first normal user id) and a home that does not exist (reason
+``no-home``). A system user's home is often a folder that others read or
+share, such as a web root or a mail spool. MEHO refuses a path outside the
+home before the secret is sent. The script that writes the file checks the
+owner and the home again. Both scripts first check that ``realpath -m`` works
+on the host, and stop with the reason ``realpath`` when it does not.
 
 How the value travels
 =====================
@@ -99,6 +104,8 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
+#: Exit code of both scripts when the owner's home does not exist.
+_NO_HOME_EXIT = 8
 #: Linux user name: lower-case letters, digits, ``_`` and ``-``, as ``useradd``
 #: allows by default. It goes into a shell script, so the set is narrow.
 _OWNER_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
@@ -110,7 +117,7 @@ _OWNER_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 #: temp file and the rename are then made in the folder it already stands in,
 #: so a link made later cannot move the write.
 _OWNER_WRITE_SCRIPT = (
-    'set -u; umask 077; cd -P -- "$1" || exit 6; here=$(pwd -P); rel=$2; '
+    'set -u; umask 077; [ -d "$1" ] || exit 8; cd -P -- "$1" || exit 6; here=$(pwd -P); rel=$2; '
     "name=${rel##*/}; parts=(); "
     'case "$rel" in */*) IFS=/ read -r -a parts <<< "${rel%/*}";; esac; '
     'for p in ${parts[@]+"${parts[@]}"}; do '
@@ -130,11 +137,17 @@ _SINK_ERR_PREFIX = "===MEHO_SINK_ERR:"
 _REALPATH_CHECK = (
     f'realpath -m -- / >/dev/null 2>&1 || {{ echo "{_SINK_ERR_PREFIX}realpath===" >&2; exit 7; }}'
 )
-#: Both scripts check the owner: a known user whose user id is not 0.
+#: Both scripts check the owner: a known normal user. User id 0 is refused as
+#: ``root-owner``, a user id below the host's first normal user id (``UID_MIN``
+#: in ``/etc/login.defs``, 1000 when the file gives none) as ``system-owner``.
 _OWNER_CHECK = (
     'ouid="$(id -u -- "$owner" 2>/dev/null)" '
     f'|| {{ echo "{_SINK_ERR_PREFIX}owner===" >&2; exit 5; }}\n'
-    f'[ "$ouid" != 0 ] || {{ echo "{_SINK_ERR_PREFIX}root-owner===" >&2; exit 5; }}'
+    f'[ "$ouid" != 0 ] || {{ echo "{_SINK_ERR_PREFIX}root-owner===" >&2; exit 5; }}\n'
+    'uid_min="$(awk \'$1 == "UID_MIN" {print $2}\' /etc/login.defs 2>/dev/null | tail -n 1)"\n'
+    'case "$uid_min" in ""|*[!0-9]*) uid_min=1000;; esac\n'
+    'case "$ouid" in ""|*[!0-9]*) ouid=0;; esac\n'
+    f'[ "$ouid" -ge "$uid_min" ] || {{ echo "{_SINK_ERR_PREFIX}system-owner===" >&2; exit 5; }}'
 )
 _ERR_MARKER = re.compile(r"===MEHO_SINK_ERR:([a-z-]+)===")
 _HOME_MARKER = re.compile(r"^===MEHO_SINK_HOME:(.*)===$", re.MULTILINE)
@@ -190,9 +203,20 @@ _NOT_A_HOME: tuple[str, ...] = (
 #:   the path: SSH (``.ssh``), user services (``.config/systemd``) and
 #:   programs started at login (``.config/autostart``).
 #: * ``names`` -- file names refused in any folder: SSH login keys, shell
-#:   start and end files, login settings and mail forwarding.
+#:   start and end files, desktop session start files, login settings, mail
+#:   forwarding and mail filters.
+#:
+#: Names are lower case, and the path is compared in lower case.
 _SYSTEM_RUNS: dict[str, tuple[tuple[str, ...], ...]] = {
-    "folders": ((".ssh",), (".config", "systemd"), (".config", "autostart")),
+    "folders": (
+        (".ssh",),
+        (".config", "systemd"),
+        (".config", "autostart"),
+        (".config", "fish"),
+        (".config", "environment.d"),
+        (".config", "plasma-workspace"),
+        (".local", "share", "systemd"),
+    ),
     "names": (
         ("authorized_keys",),
         ("authorized_keys2",),
@@ -211,13 +235,30 @@ _SYSTEM_RUNS: dict[str, tuple[tuple[str, ...], ...]] = {
         (".rhosts",),
         (".shosts",),
         (".k5login",),
+        (".bash_aliases",),
+        (".cshrc",),
+        (".tcshrc",),
+        (".login",),
+        (".logout",),
+        (".kshrc",),
+        (".mkshrc",),
+        (".xprofile",),
+        (".xinitrc",),
+        (".xsession",),
+        (".xsessionrc",),
+        (".procmailrc",),
+        (".mailfilter",),
+        (".qmail",),
     ),
 }
 
 
 def _system_runs(path: str) -> bool:
-    """``True`` when *path* (normalised, absolute) is in :data:`_SYSTEM_RUNS`."""
-    parts = path.split("/")
+    """``True`` when *path* (normalised, absolute) is in :data:`_SYSTEM_RUNS`.
+
+    The comparison is in lower case.
+    """
+    parts = path.lower().split("/")
     if (parts[-1],) in _SYSTEM_RUNS["names"]:
         return True
     return any(
@@ -269,7 +310,9 @@ def build_home_lookup_script(owner: str) -> str:
 
     It prints the home as ``getent passwd`` gives it and with links resolved,
     each on a :data:`_HOME_MARKER` line. It stops with the ``owner`` marker
-    for an unknown owner, and with ``root-owner`` for an owner with user id 0.
+    for an unknown owner, ``root-owner`` for an owner with user id 0,
+    ``system-owner`` for a system user and ``no-home`` for a home that does
+    not exist.
     """
     err = _SINK_ERR_PREFIX
     return (
@@ -277,6 +320,7 @@ def build_home_lookup_script(owner: str) -> str:
         f"{_OWNER_CHECK}\n"
         'home="$(getent passwd "$owner" | cut -d: -f6)"\n'
         f'[ -n "$home" ] || {{ echo "{err}owner===" >&2; exit 5; }}\n'
+        f'[ -d "$home" ] || {{ echo "{err}no-home===" >&2; exit {_NO_HOME_EXIT}; }}\n'
         'printf \'===MEHO_SINK_HOME:%s===\\n\' "$home" "$(realpath -m -- "$home")"\n'
     )
 
@@ -332,14 +376,15 @@ def parse_linux_secret_ref(ref: str) -> tuple[str, str, str]:
 def build_secret_sink_script(path: str, owner: str, value: bytes) -> str:
     """Render the bash script that writes *value* to *path* as *owner*.
 
-    It runs with sudo, but root only checks: the owner is known and not user
-    id 0, and *path* is inside the owner's home (as the caller wrote it, and
-    with the home's links resolved). Then the owner makes the folders and the
-    file (``runuser -u``) and refuses a link in any folder of the path.
-    *path* and *owner* are already checked by
-    :func:`parse_linux_secret_ref`; both are ``shlex.quote``d anyway. The value
-    is base64-carried. The script stops with a marker and a non-zero exit when
-    a check or the write fails. It prints :data:`_SINK_OK` at the end.
+    It runs with sudo, but root only checks: the owner is a known normal user
+    (not user id 0, not a system user), and *path* is inside the owner's home
+    (as the caller wrote it, and with the home's links resolved). Then the
+    owner makes the folders and the file (``runuser -u``), and refuses a home
+    that does not exist and a link in any folder of the path. *path* and
+    *owner* are already checked by :func:`parse_linux_secret_ref`; both are
+    ``shlex.quote``d anyway. The value is base64-carried. The script stops
+    with a marker and a non-zero exit when a check or the write fails. It
+    prints :data:`_SINK_OK` at the end.
     """
     q_path = shlex.quote(path)
     q_owner = shlex.quote(owner)
@@ -370,6 +415,7 @@ def build_secret_sink_script(path: str, owner: str, value: bytes) -> str:
         'rel=${path#"$base"/}',
         f'printf %s {q_b64} | runuser -u "$owner" -- bash -c {q_inner} meho-sink "$base" "$rel"',
         "rc=$?",
+        f'[ "$rc" != {_NO_HOME_EXIT} ] || {{ echo "{err}no-home===" >&2; exit {_NO_HOME_EXIT}; }}',
         f'[ "$rc" != 6 ] || {{ echo "{err}link===" >&2; exit 6; }}',
         f'[ "$rc" = 0 ] || {{ echo "{err}write===" >&2; exit 4; }}',
         f'echo "{_SINK_OK}"',

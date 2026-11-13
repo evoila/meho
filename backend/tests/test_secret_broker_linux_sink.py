@@ -201,6 +201,33 @@ def test_bad_refs_are_refused_before_any_ssh(ref: str) -> None:
         "/home/agent/.rhosts",
         "/home/agent/.shosts",
         "/home/agent/.k5login",
+        # More shell start and end files.
+        "/home/agent/.bash_aliases",
+        "/home/agent/.cshrc",
+        "/home/agent/.tcshrc",
+        "/home/agent/.login",
+        "/home/agent/.logout",
+        "/home/agent/.kshrc",
+        "/home/agent/.mkshrc",
+        # Desktop session start files.
+        "/home/agent/.xprofile",
+        "/home/agent/.xinitrc",
+        "/home/agent/.xsession",
+        "/home/agent/.xsessionrc",
+        # Mail filters.
+        "/home/agent/.procmailrc",
+        "/home/agent/.mailfilter",
+        "/home/agent/.qmail",
+        # Folders a shell, the login or the desktop reads at start.
+        "/home/agent/.config/fish/config.fish",
+        "/home/agent/.config/environment.d/meho.conf",
+        "/home/agent/.local/share/systemd/user/meho.service",
+        "/home/agent/.config/plasma-workspace/env/meho.sh",
+        # Names are compared in lower case.
+        "/home/agent/.BashRC",
+        "/home/agent/.SSH/key",
+        "/home/agent/.Config/Fish/config.fish",
+        "/home/agent/.local/Share/SystemD/user/meho.service",
     ],
 )
 def test_places_the_system_runs_are_refused_before_any_ssh(path: str) -> None:
@@ -219,6 +246,10 @@ def test_places_the_system_runs_are_refused_before_any_ssh(path: str) -> None:
         "/home/agent/.config/systemd-notes/key",
         "/home/agent/systemd/key",
         "/home/agent/.config/autostarted/key",
+        "/home/agent/.config/fish-notes/key",
+        "/home/agent/.local/share/meho/key",
+        "/home/agent/.login-notes",
+        "/home/agent/.qmail.bak",
     ],
 )
 def test_places_next_to_the_refused_ones_stay_allowed(path: str) -> None:
@@ -514,6 +545,53 @@ def test_home_lookup_refuses_an_owner_with_user_id_0(tmp_path: Path) -> None:
 
 
 @_NEEDS_LINUX
+def test_script_refuses_a_system_user_as_owner(tmp_path: Path) -> None:
+    home = tmp_path / "var" / "www"
+    home.mkdir(parents=True)
+    target = home / "key"
+    proc = _run_script(
+        build_secret_sink_script(str(target), getpass.getuser(), b"v"), home=home, owner_uid="33"
+    )
+    assert proc.returncode == 5
+    assert "===MEHO_SINK_ERR:system-owner===" in proc.stderr
+    assert not target.exists()
+    assert _runuser_log(home) == []
+
+
+@_NEEDS_LINUX
+def test_home_lookup_refuses_a_system_user_as_owner(tmp_path: Path) -> None:
+    home = tmp_path / "var" / "www"
+    home.mkdir(parents=True)
+    proc = _run_script(build_home_lookup_script(getpass.getuser()), home=home, owner_uid="33")
+    assert proc.returncode == 5
+    assert "===MEHO_SINK_ERR:system-owner===" in proc.stderr
+    assert "MEHO_SINK_HOME" not in proc.stdout
+
+
+@_NEEDS_LINUX
+def test_script_refuses_a_home_that_does_not_exist(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "seat"
+    home.parent.mkdir()
+    proc = _run_script(
+        build_secret_sink_script(str(home / "a" / "key"), getpass.getuser(), b"v"), home=home
+    )
+    assert proc.returncode == 8
+    assert "===MEHO_SINK_ERR:no-home===" in proc.stderr
+    assert "link" not in proc.stderr
+    assert not home.exists()
+
+
+@_NEEDS_LINUX
+def test_home_lookup_refuses_a_home_that_does_not_exist(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "seat"
+    home.parent.mkdir()
+    proc = _run_script(build_home_lookup_script(getpass.getuser()), home=home)
+    assert proc.returncode == 8
+    assert "===MEHO_SINK_ERR:no-home===" in proc.stderr
+    assert "MEHO_SINK_HOME" not in proc.stdout
+
+
+@_NEEDS_LINUX
 def test_script_does_not_follow_a_link_in_the_final_name(tmp_path: Path) -> None:
     home = tmp_path / "home" / "seat"
     home.mkdir(parents=True)
@@ -758,7 +836,7 @@ async def test_a_home_outside_slash_home_is_allowed() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("home", ["/var/www", "/var/home/app"])
+@pytest.mark.parametrize("home", ["/var/home/app", "/var/users/app"])
 async def test_a_home_under_var_is_allowed(home: str) -> None:
     wire = _Wire(stdout="===MEHO_SINK_OK===\n", home=home)
     endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}{home}/.config/key#app")
@@ -770,11 +848,11 @@ async def test_a_home_under_var_is_allowed(home: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/var/log/key", "/var/www2/key", "/var/key"])
+@pytest.mark.parametrize("path", ["/var/log/key", "/var/home/app2/key", "/var/key"])
 async def test_a_var_path_outside_the_home_is_refused_before_the_secret_is_sent(
     path: str,
 ) -> None:
-    wire = _Wire(stdout="===MEHO_SINK_OK===\n", home="/var/www")
+    wire = _Wire(stdout="===MEHO_SINK_OK===\n", home="/var/home/app")
     endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}{path}#app")
     p1, p2, p3, p4 = _patch_wire(wire)
     with p1, p2, p3, p4, pytest.raises(LinuxSecretRefError):

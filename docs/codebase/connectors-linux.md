@@ -571,13 +571,15 @@ know it. It is the wrong tool for a secret. The secret broker has a `linux`
 store for this (write side only): `secret.move --to
 'linux:<target>/<absolute path>#<owner>'`. It writes only inside the home
 directory of `<owner>` (MEHO reads it from the host), and only as the owner:
-`<owner>` is never `root`. The file gets mode 0600, and a missing parent
+`<owner>` is a normal user, never `root` and never a system user (a user id
+below the host's first normal user id). The file gets mode 0600, and a missing parent
 directory gets mode 0700. The value goes over the SSH channel's standard
 input through the same sudo helper as `file.write`, and never appears in a
 result, an audit row, a preview, a log line or an error. It refuses places
 outside a home (`/etc`, `/run`, `/usr`, `/var/lib`, `/opt`, `/srv` and the
 system folders), places in a home that the system runs or reads for logins
-(for example a `.ssh` folder, `.config/systemd` or `.bashrc`), a link in
+(for example a `.ssh` folder, `.config/systemd` or `.bashrc`, compared in
+lower case), a home that does not exist, a link in
 any folder of the path below the home, and a target that is not a
 `linux-ssh` target. A person approves each move. The ref
 grammar and the full rules are in

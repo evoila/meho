@@ -410,8 +410,9 @@ linux:<target>/<absolute path>#<owner>
   of another kind before it reads any credential or opens SSH.
 - `<absolute path>` is the file. One slash or two after the target both work.
 - `<owner>` is the Linux user who will own the file. A user name only:
-  lower-case letters, digits, `_` and `-`. Never `root`, and never a user
-  with user id 0.
+  lower-case letters, digits, `_` and `-`. A normal user: never `root`,
+  never a user with user id 0, and never a system user (a user id below the
+  host's first normal user id).
 - A ref has no spaces, because the `secret.move` parameter schema refuses
   them.
 
@@ -438,27 +439,40 @@ What MEHO does on the host:
     printable (for example a tab, ESC or a right-to-left mark);
   - a place that is never a home: `/etc`, `/run`, `/usr` (also
     `/usr/local`), `/var/lib`, `/opt`, `/srv`, `/proc`, `/sys`, `/dev`,
-    `/boot`, `/bin`, `/sbin`, `/lib*` and `/tmp`. A home under `/var` (for
-    example `/var/www`) is allowed;
+    `/boot`, `/bin`, `/sbin`, `/lib*` and `/tmp`. A normal user's home under
+    `/var` (for example `/var/home/app`) is allowed;
   - a place inside a home that the system runs or reads for logins
-    (`_SYSTEM_RUNS` in the code): a `.ssh` folder anywhere in the path,
-    `.config/systemd`, `.config/autostart`, and the file names
-    `authorized_keys`, `authorized_keys2`, `.bashrc`, `.bash_profile`,
-    `.bash_login`, `.bash_logout`, `.profile`, `.zshrc`, `.zshenv`,
-    `.zprofile`, `.zlogin`, `.zlogout`, `.pam_environment`, `.forward`,
-    `.rhosts`, `.shosts`, `.k5login`.
+    (`_SYSTEM_RUNS` in the code): a `.ssh` folder anywhere in the path, the
+    folders `.config/systemd`, `.config/autostart`, `.config/fish`,
+    `.config/environment.d`, `.config/plasma-workspace` and
+    `.local/share/systemd`, and the file names `authorized_keys`,
+    `authorized_keys2`, `.bashrc`, `.bash_profile`, `.bash_login`,
+    `.bash_logout`, `.bash_aliases`, `.profile`, `.zshrc`, `.zshenv`,
+    `.zprofile`, `.zlogin`, `.zlogout`, `.cshrc`, `.tcshrc`, `.login`,
+    `.logout`, `.kshrc`, `.mkshrc`, `.xprofile`, `.xinitrc`, `.xsession`,
+    `.xsessionrc`, `.pam_environment`, `.forward`, `.procmailrc`,
+    `.mailfilter`, `.qmail`, `.rhosts`, `.shosts`, `.k5login`. Names are
+    compared in lower case, so `.BashRC` is refused too.
 - `secret.move` runs the same checks before the call can wait for approval.
   A refused place makes no approval card: the call fails with
   `invalid_params`.
 - Both scripts on the host first check that `realpath -m` works. When it
   does not, they stop with the reason `realpath` and write nothing.
 - MEHO then asks the host for the owner's home (`getent passwd`). This short
-  script carries no secret, and stops with the reason `root-owner` for an
-  owner with user id 0. When the path is not inside the home, MEHO stops
-  before it sends the secret. So a home in any place works, for example
+  script carries no secret. It stops with:
+  - the reason `root-owner` for an owner with user id 0;
+  - the reason `system-owner` for an owner whose user id is below the
+    host's first normal user id (`UID_MIN` in `/etc/login.defs`; 1000 when
+    the file gives none). A system user's home is often a folder that others
+    read or share, for example a web root or a mail spool, so a secret
+    written there would not stay with one user;
+  - the reason `no-home` when the home does not exist.
+
+  When the path is not inside the home, MEHO stops before it sends the
+  secret. So a normal user's home in any place works, for example
   `/data/app`.
 - The script that writes the file checks the owner and the home again, with
-  the path as the caller wrote it.
+  the path as the caller wrote it. It uses the same reasons.
 - The value travels only inside the SSH channel (standard input), through
   the same sudo helper as `linux.file.write`. During the write the helper
   keeps the script in a temp file of mode 0600 on the host, and removes the

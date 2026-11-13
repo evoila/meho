@@ -60,9 +60,9 @@ func newLogsTailCmd() *cobra.Command {
 			"OperationResult envelope including the raw stdout.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho holodeck logs tail dhcp --target holorouter-hetzner-dc\n" +
-			"  meho holodeck logs tail frr --lines 500 --target holorouter-hetzner-dc\n" +
-			"  meho holodeck logs tail dns --target holorouter-hetzner-dc --json | jq .result",
+		Example: "  meho holodeck logs tail dhcp --target my-router\n" +
+			"  meho holodeck logs tail frr --lines 500 --target my-router\n" +
+			"  meho holodeck logs tail dns --target my-router --json | jq .result",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

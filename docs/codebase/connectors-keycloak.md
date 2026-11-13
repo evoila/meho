@@ -893,6 +893,77 @@ Both ops read lists with `get_admin_list_strict`: a body that is not a JSON
 array raises `KeycloakUnexpectedResponseError`, so a failed read never looks
 like an empty list.
 
+### Rights of the login flow ops
+
+A change of a login flow needs the role `manage-realm` of the realm's
+admin client. Each `keycloak.authflow.ensure_*` op checks the roles of the
+target's account before the call waits for approval
+(`ops_authflow_rights.py`):
+
+| op_id | roles the run needs |
+|---|---|
+| `keycloak.authflow.ensure_approval_flow` | `manage-realm` (the flow), `manage-clients` (the client binding) |
+| `keycloak.authflow.ensure_passkey_code_skip` | `manage-realm` (the flow copy and the realm's browser flow) |
+| `keycloak.authflow.ensure_approval_touch` | `manage-realm` (the flow and the realm's level map), `manage-clients` (the client's `amr` mapper and the client binding) |
+
+`ensure_approval_flow` and `ensure_approval_touch` also find the client
+first. Keycloak lets any one of `query-clients`, `view-clients` or
+`manage-clients` do that. The card lists them as
+`client_lookup_needs_one_of`. A 403 at this lookup names these roles in
+`extras.remediation` and says that nothing was changed.
+
+The admin client is `realm-management` when the account signs in to the
+managed realm, and `<realm>-realm` when it signs in to `master`. The admin
+roles of the account are in the connector's own admin token, and Keycloak
+checks an Admin REST API call mainly with these roles. So the check reads
+`resource_access.<admin client>.roles` of that token. It needs no extra
+request and no extra right. The token is never shown or stored. When the
+token has `resource_access` but no entry for the admin client, the roles
+count as not checked, not as "no roles". The card and the check of one
+request share one read, so a wrong password makes one failed sign-in.
+
+- **`manage-realm` is missing:** the permission preflight sets `will_be_denied`.
+  MEHO refuses the call before an approval request exists
+  (`write_capability_denied`). `reason` names the account and the missing
+  role; `doc_ref` points here.
+- **`manage-clients` is missing:** the call still waits for approval. A
+  Keycloak permission to manage only the one client (fine-grained admin
+  permissions) gives the same right, and the token does not show it. So
+  its lack does not prove that Keycloak refuses the run
+  (`register_rights_check(..., per_object=...)`). The card says the
+  account lacks the role and MEHO could not check that permission.
+- **The roles cannot be read** (the token is not a JWT, it has no
+  `resource_access` claim or no entry for the admin client, as with a
+  lightweight access token, or the account signs in to a third realm): the
+  call still waits for approval. The card says "MEHO could not check the
+  rights of the target's account".
+- **A 403 at the run:** the op stops with `KeycloakMissingRightsError`.
+  The result has `error_code` `connector_error` (not `connector_http_403`),
+  `http_status` 403 and `exception_class` `KeycloakMissingRightsError`.
+  `extras.remediation` names the roles the op needs, the admin client and
+  the account, and the missing roles when they could be read.
+- **A 403 when `ensure_approval_flow` binds the client** (the account has
+  `manage-realm` but may not change the client): the run stops half-way.
+  The error says what the run changed: the flow alias, its id and
+  `flow_created`. The flow stays in the realm; a second run after the fix
+  finds it and only binds it.
+- **A 403 at a step of `ensure_approval_touch`** after the flow exists (the
+  realm's level map, the client's `amr` mapper, the company login default,
+  the client binding): the run stops half-way. The error names the refused
+  step. `extras.remediation` also says what the run changed before: the
+  flow (alias, id, `flow_created`), the level map and the mapper. These
+  changes stay; a second run after the fix keeps them.
+
+After a refusal (before the wait, or a 403 at the run), MEHO drops the
+admin token it keeps, so the next call signs in again. The next step also
+says that Keycloak can keep the old roles in MEHO's sign-in token for a few
+minutes.
+
+The approval card of the three ops lists the roles (`roles_needed`) and the
+result of the check (`rights_check`). A preview (`preview_operation`) does
+not talk to Keycloak; its card says "MEHO checks the rights of the target's
+account when the call is made."
+
 ### Login setup reads (`ops_flow_reads.py`)
 
 Three `safe` reads, group `login_setup`, for the checks before one-time codes
@@ -1049,10 +1120,11 @@ the client, the new flow, who is affected, and the way back:
 
 ### Park-time approval preview (#1857)
 
-Sixteen of the write ops register bespoke `proposed_effect` preview builders
+Seventeen of the write ops register bespoke `proposed_effect` preview builders
 (twelve in `connectors/keycloak/ops_write_preview.py`, one in
-`ops_login_check.py`, one in `ops_authflow_passkey.py`, one in
-`ops_authflow_touch.py`, one in `ops_write_realm_smtp.py`), wired onto the per-op hook
+`ops_login_check.py`, one in `ops_authflow.py`, one in
+`ops_authflow_passkey.py`, one in `ops_authflow_touch.py`, one in
+`ops_write_realm_smtp.py`), wired onto the per-op hook
 (`operations/_preview.py`, #1437) by an import side-effect in the package
 `__init__`. They give the approval reviewer a resource-centric view at park
 time — secrets scrubbed via the same `redact_secret_fields` the read ops
@@ -1073,8 +1145,9 @@ use:
 | `keycloak.realm.delete` | `{blast_radius}` — realm, enabled or not, user / client / group counts; never the realm body |
 | `keycloak.user.required_actions.update` | `{resource, username, id, realm, add, remove, current_available[, current_required_actions, resulting_required_actions]}` (registered in `ops_user_required_actions.py`) |
 | `keycloak.user.check_login` | `{resource, username, realm, client_id, password_source, password_secret_ref[, password_secret_mount, password_secret_key]}` (registered in `ops_login_check.py`) |
-| `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back}` (registered in `ops_authflow_passkey.py`) |
-| `keycloak.authflow.ensure_approval_touch` | `{resource, realm, client_id, new_flow, affects, way_back}` (registered in `ops_authflow_touch.py`) |
+| `keycloak.authflow.ensure_approval_flow` | `{resource, realm, flow, client_id, client_lookup_needs_one_of, roles_needed, rights_check}` (registered in `ops_authflow.py`) |
+| `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back, roles_needed, rights_check}` (registered in `ops_authflow_passkey.py`) |
+| `keycloak.authflow.ensure_approval_touch` | `{resource, realm, client_id, new_flow, affects, way_back, client_lookup_needs_one_of, roles_needed, rights_check}` (registered in `ops_authflow_touch.py`) |
 | `keycloak.realm.update` | `{resource, realm, representation[, smtp_password_source, smtp_password_secret_ref]}` (registered in `ops_write_realm_smtp.py`) |
 
 The group builders surface `attribute_keys` (which attributes change,
@@ -1094,7 +1167,7 @@ bespoke builders are at least as strict as the generic echo they bypass: a
 anywhere in an `additionalProperties` representation) is scrubbed too, so no
 cleartext secret reaches the durable `proposed_effect` row. A Vault-sourced
 password (`password_secret_ref`) is a path, not a secret, so it is surfaced
-as `password_source: "vault"` + the ref. The other seven write ops fall
+as `password_source: "vault"` + the ref. The other write ops fall
 through to the generic params-echo
 default. Most builders are pure (no connector I/O) and so fail-soft by
 construction. The four delete builders are not: they read the object live

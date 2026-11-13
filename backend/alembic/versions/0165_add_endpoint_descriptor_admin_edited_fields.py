@@ -3,8 +3,8 @@
 
 """Remember which fields an admin edited on an operation.
 
-Revision ID: 0164
-Revises: 0163
+Revision ID: 0165
+Revises: 0164
 Create Date: 2026-11-13
 
 Adds one nullable JSON column, ``endpoint_descriptor.admin_edited_fields``:
@@ -21,8 +21,8 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
 # revision identifiers, used by Alembic.
-revision: str = "0164"
-down_revision: str | None = "0163"
+revision: str = "0165"
+down_revision: str | None = "0164"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -1342,7 +1342,7 @@ Typed and composite operations are registered from code at every start
 
 An admin edit (`ReviewService.edit_op`) of `custom_description` or
 `llm_instructions` adds the field name to the row's
-`endpoint_descriptor.admin_edited_fields` (migration `0164`, a JSON list;
+`endpoint_descriptor.admin_edited_fields` (migration `0165`, a JSON list;
 NULL means no edit). At the next start the registration keeps the stored
 value of each listed field and does not write the value from code. The
 embedding text is built from the kept description, so search still finds
@@ -1350,7 +1350,7 @@ the operation by the admin's words. Clearing `custom_description` also
 counts as an edit: the field stays empty. Ingested operations ignore the
 list: a new ingest writes them as before.
 
-**Upgrade.** An edit made before migration `0164` has no mark. The next
+**Upgrade.** An edit made before migration `0165` has no mark. The next
 start writes the value from code, so edit it once more to make it stick.
 
 ### Each tenant turns built-in operations on or off (#5029)

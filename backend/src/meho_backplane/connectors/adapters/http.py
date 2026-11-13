@@ -85,10 +85,12 @@ import asyncio
 import hashlib
 import os
 import ssl
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 import structlog
+from httpx._decoders import SUPPORTED_DECODERS
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from meho_backplane.auth.operator import Operator
@@ -394,8 +396,76 @@ def _reject_oversize_content_length(resp: httpx.Response) -> None:
     if length > _MAX_RESPONSE_BYTES:
         raise ResponseTooLargeError(
             f"vendor response Content-Length {length} exceeds the "
-            f"{_MAX_RESPONSE_BYTES}-byte response-body cap"
+            f"{_MAX_RESPONSE_BYTES}-byte response-body cap on bytes on the wire"
         )
+
+
+def _body_over_cap_error(ceiling: str) -> ResponseTooLargeError:
+    return ResponseTooLargeError(
+        f"vendor response body exceeded the {_MAX_RESPONSE_BYTES}-byte "
+        f"response-body cap on {ceiling}"
+    )
+
+
+def _content_codings(resp: httpx.Response) -> list[str]:
+    """Return the ``Content-Encoding`` values of a response, without ``identity``."""
+    codings = (
+        value.strip().lower()
+        for value in resp.headers.get_list("content-encoding", split_commas=True)
+    )
+    return [coding for coding in codings if coding not in ("", "identity")]
+
+
+def _reject_stacked_content_codings(codings: list[str]) -> None:
+    """Refuse a response that names more than one content coding.
+
+    httpx decodes every layer of one wire chunk in a single step, before the
+    decoded-size check can run, so MEHO accepts at most one coding.
+    """
+    if len(codings) > 1:
+        raise ResponseTooLargeError(
+            f"vendor response names {len(codings)} content codings "
+            f"({', '.join(codings)}); MEHO accepts at most one"
+        )
+
+
+def _rebuilt_headers(resp: httpx.Response, codings: list[str], body_size: int) -> httpx.Headers:
+    """Copy the headers, without the encoding headers when the body was decoded.
+
+    Only a non-empty body under one coding that httpx knows was decoded. An
+    empty body (a HEAD answer) and a coding httpx does not know keep all
+    headers, so the caller still sees the ``Content-Encoding`` of the body.
+    """
+    headers = resp.headers.copy()
+    if body_size and len(codings) == 1 and codings[0] in SUPPORTED_DECODERS:
+        del headers["content-encoding"]
+        if "content-length" in headers:
+            del headers["content-length"]
+    return headers
+
+
+class _WireCappedStream(httpx.AsyncByteStream):
+    """Count the raw wire bytes of a response and stop past the cap.
+
+    It sits under :meth:`~httpx.Response.aiter_bytes`, so every raw chunk is
+    counted before httpx decodes it. A check in the decoded loop would miss
+    a chunk that decodes to no output (for example padding after the end of
+    a gzip stream), because ``aiter_bytes`` yields nothing for it.
+    """
+
+    def __init__(self, inner: httpx.AsyncByteStream) -> None:
+        self._inner = inner
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        total = 0
+        async for chunk in self._inner:
+            total += len(chunk)
+            if total > _MAX_RESPONSE_BYTES:
+                raise _body_over_cap_error("bytes on the wire")
+            yield chunk
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
 
 
 async def _read_capped_json_response(
@@ -420,24 +490,34 @@ async def _read_capped_json_response(
     (:meth:`httpx.AsyncClient.stream` -> the pooled
     :class:`_SameOriginRedirectClient`'s ``send`` override, so the
     same-origin redirect and destination-pinning transport behaviour is
-    unchanged) and enforces a two-part cap: a ``Content-Length`` fast-reject
-    up front, then a running byte total across
-    :meth:`~httpx.Response.aiter_raw` chunks that aborts the moment the
-    body would exceed :data:`_MAX_RESPONSE_BYTES`. At most the cap (plus one
-    trailing chunk) is ever held in memory, and an over-cap body raises
-    :exc:`ResponseTooLargeError` before :func:`json_payload_or_empty` can
-    parse it.
+    unchanged). An over-cap body raises :exc:`ResponseTooLargeError` before
+    :func:`json_payload_or_empty` can parse it.
 
-    The cap iterates :meth:`~httpx.Response.aiter_raw` — the raw wire bytes,
-    still carrying whatever ``Content-Encoding`` the vendor applied — rather
-    than :meth:`~httpx.Response.aiter_bytes`, which yields already-decoded
-    bytes. Buffering the raw bytes keeps them consistent with the retained
-    ``Content-Encoding`` header, so the re-materialised response decodes
-    exactly once on first access (a plaintext body under a ``gzip`` header
-    would otherwise make httpx attempt a second decode and raise
-    :exc:`httpx.DecodingError`). The running total therefore counts
-    compressed transfer bytes, matching the ``Content-Length`` fast-reject
-    above, which measures that same compressed length.
+    The cap has two ceilings, both :data:`_MAX_RESPONSE_BYTES`. The first
+    bounds the compressed transfer: ``Content-Length`` and
+    :class:`_WireCappedStream` count the bytes on the wire. The stream
+    wrapper checks every raw chunk before it is decoded, also a chunk that
+    decodes to no output. The second bounds the decoded body: the loop iterates
+    :meth:`~httpx.Response.aiter_bytes`, which decodes ``Content-Encoding``
+    chunk by chunk, and stops as soon as the decoded total passes the cap.
+    So a small compressed body that expands a great deal (a compression
+    bomb) is refused too. The error message names the ceiling that was
+    passed.
+
+    httpx decodes one wire chunk in a single step. A wire chunk is at most
+    64 KiB (the read size of httpcore), and gzip or deflate expands it at
+    most about 1032 times, so one chunk of one coding decodes to at most
+    about 64 MiB. Memory is bounded by the cap plus that one chunk. A
+    response that names more than one coding is refused before its body is
+    read, because httpx would decode all layers of a chunk in that one
+    step. MEHO accepts at most one coding.
+
+    Because the kept bytes are already decoded, the rebuilt response drops
+    the ``Content-Encoding`` and ``Content-Length`` headers when the body
+    was really decoded. An empty body (a HEAD answer) and a coding that
+    httpx does not know keep all headers, so callers can still read
+    ``Content-Encoding`` there. Otherwise httpx would decode the plain bytes
+    a second time and raise :exc:`httpx.DecodingError`.
 
     An under-cap body is joined and re-materialised into a fully-read
     :class:`httpx.Response` carrying the original status, headers, request,
@@ -458,21 +538,23 @@ async def _read_capped_json_response(
     ) as resp:
         # A HEAD answer has no body: its Content-Length is the size of the
         # resource (for example a large file), not of anything read here.
+        codings = _content_codings(resp)
         if method.upper() != "HEAD":
             _reject_oversize_content_length(resp)
+            _reject_stacked_content_codings(codings)
+        if not isinstance(resp.stream, httpx.AsyncByteStream):
+            raise RuntimeError("an async client returned a sync response stream")
+        resp.stream = _WireCappedStream(resp.stream)
         chunks: list[bytes] = []
         total = 0
-        async for chunk in resp.aiter_raw():
+        async for chunk in resp.aiter_bytes():
             total += len(chunk)
             if total > _MAX_RESPONSE_BYTES:
-                raise ResponseTooLargeError(
-                    f"vendor response body exceeded the "
-                    f"{_MAX_RESPONSE_BYTES}-byte response-body cap"
-                )
+                raise _body_over_cap_error("decoded bytes")
             chunks.append(chunk)
         return httpx.Response(
             status_code=resp.status_code,
-            headers=resp.headers,
+            headers=_rebuilt_headers(resp, codings, total),
             content=b"".join(chunks),
             request=resp.request,
             extensions=resp.extensions,

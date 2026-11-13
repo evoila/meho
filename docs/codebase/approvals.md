@@ -1211,7 +1211,7 @@ works out who may approve it and stores it on the request:
   requester may approve their own change is today's rule (below).
 - `approver_rule` (text): the routing entry that set them
   (`tenant:routing[0]`, `install:routing[2]`), or `default`.
-- Migration `0164` adds both columns, nullable.
+- Migration `0165` adds both columns, nullable.
 
 How the kinds are found:
 
@@ -1254,7 +1254,7 @@ console sign, the REST fields `may_approve` / `may_approve_reason`, the
 "may approve" compares the evaluator with today's answer before routing.
 
 **Old requests and the switch.** A request without stored kinds (made while
-the switch was off, or before migration `0164`) keeps today's rule. With
+the switch was off, or before migration `0165`) keeps today's rule. With
 the switch off, MEHO stores nothing and checks no stored kinds, so turning
 the switch off brings back today's rule for every waiting request too. A
 stored value that is not a list of kinds lets nobody approve (fail
@@ -1278,7 +1278,7 @@ moment a person approves it ([run-approvals.md](run-approvals.md)).
 
 Tests: `tests/test_policy_routing.py`, `tests/test_run_approvals_routing.py`,
 `tests/test_ui_approvals_routing.py`,
-`tests/migrations/test_migration_0164_add_approval_request_approver_roles.py`.
+`tests/migrations/test_migration_0165_add_approval_request_approver_roles.py`.
 
 **Not yet:** a team is a group kind. Bindings that give a login group
 categories, and notifications only to the people who may approve, come

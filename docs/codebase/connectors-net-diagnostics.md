@@ -378,6 +378,26 @@ transitively via httpx and is now declared a direct dependency in
 `backend/pyproject.toml` so the requirement is explicit (same pattern as
 `dnspython` / `cryptography`).
 
+### Private or demo CA — the CA pin of a registered target
+
+A service with a private or demo CA fails the default TLS check and reads
+`tls_error`. For an `https` URL the probe now looks for a registered
+target of the **same tenant** whose `host` or `fqdn` equals the probed
+host (or the host name in `host_header`), ignoring case, and that has a
+`tls_ca_pin`. Soft-deleted targets never match. The code is in
+`connectors/net/http_probe_trust.py`.
+
+- The agent supplies no certificate and there is no "skip verification"
+  switch. Only a pin an operator registered on a target is used. The
+  certificate chain and host name checks stay on.
+- The pin is used for the first host only. `_walk_redirects` sends a hop
+  to another host through the default-trust client. A redirect to the
+  same host keeps the pin.
+- No target lookup runs for a plain-http URL or for a host the allowlist
+  refuses.
+- The result carries `trust` (`default` or `pinned`) and `trust_target`
+  (the target name, or null). `net.http_probe` stays `safe`.
+
 ### Vhost-routed probes by IP — `host_header` (#2896)
 
 A **strict-vhost appliance** (VCFA and friends) vhost-routes: it answers

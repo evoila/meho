@@ -99,9 +99,9 @@ func TestRunAskOmitsAbsentRefinements(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("runAsk: %v; stderr=%s", err, stderr.String())
 	}
-	for _, key := range []string{"product", "version", "limit"} {
-		if v, ok := (*got)[key]; ok && v != nil {
-			t.Errorf("expected %s absent; got %v", key, v)
+	for _, key := range []string{"product", "version", "limit", "target"} {
+		if v, ok := (*got)[key]; ok {
+			t.Errorf("expected key %s absent from the wire body; got %v", key, v)
 		}
 	}
 }

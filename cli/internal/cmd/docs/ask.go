@@ -4,6 +4,7 @@
 package docs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -106,7 +107,7 @@ func validateAsk(opts askOptions) string {
 	case strings.TrimSpace(opts.Question) == "":
 		return "ask requires a non-empty <question> argument"
 	case len(opts.Collections) == 0:
-		return "ask requires --collection (the mandatory binary scope)"
+		return "ask requires --collection: choose one document collection"
 	case len(opts.Collections) > 1:
 		return "ask takes exactly one --collection: an answer comes from one collection only"
 	case opts.Collections[0] == allCollectionsSentinel:
@@ -148,24 +149,27 @@ func runAsk(cmd *cobra.Command, opts askOptions) error {
 	return nil
 }
 
+// askRequest is the POST body. The generated api.AskDocsRequest has no
+// omitempty on product, version and target, so it would send them as null.
+// This type leaves out every refinement that is not set.
+type askRequest struct {
+	Query      string `json:"query"`
+	Collection string `json:"collection"`
+	Product    string `json:"product,omitempty"`
+	Version    string `json:"version,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+}
+
 // buildAskBody assembles the POST body. product, version and limit land on
 // the wire only when set.
-func buildAskBody(opts askOptions) api.AskDocsRequest {
-	collection := opts.Collections[0]
-	body := api.AskDocsRequest{Query: opts.Question, Collection: &collection}
-	if opts.Product != "" {
-		product := opts.Product
-		body.Product = &product
+func buildAskBody(opts askOptions) askRequest {
+	return askRequest{
+		Query:      opts.Question,
+		Collection: opts.Collections[0],
+		Product:    opts.Product,
+		Version:    opts.Version,
+		Limit:      opts.Limit,
 	}
-	if opts.Version != "" {
-		version := opts.Version
-		body.Version = &version
-	}
-	if opts.Limit > 0 {
-		limit := opts.Limit
-		body.Limit = &limit
-	}
-	return body
 }
 
 func askDocs(
@@ -177,13 +181,17 @@ func askDocs(
 	if err != nil {
 		return nil, err
 	}
-	reqBody := buildAskBody(opts)
+	raw, err := json.Marshal(buildAskBody(opts))
+	if err != nil {
+		return nil, fmt.Errorf("marshal ask request: %w", err)
+	}
 	return retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.AskDocsEndpointApiV1AskDocsPostResponse, error) {
-			return authed.AskDocsEndpointApiV1AskDocsPostWithResponse(
+			return authed.AskDocsEndpointApiV1AskDocsPostWithBodyWithResponse(
 				ctx,
 				&api.AskDocsEndpointApiV1AskDocsPostParams{},
-				reqBody,
+				"application/json",
+				bytes.NewReader(raw),
 			)
 		},
 		func(r *api.AskDocsEndpointApiV1AskDocsPostResponse) int { return r.StatusCode() },

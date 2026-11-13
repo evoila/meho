@@ -28,6 +28,11 @@ What the op does, on the target's managed realm:
    The client is read, the one key is put on top, and the full client is
    written back, so no other client setting changes. Then the client is read
    again; the result reports the browser flow id that was read back.
+   When Keycloak refuses this with HTTP 403, the error says what the run
+   changed before: the flow alias, its id and ``flow_created``.
+
+A 403 at the client lookup names the roles that let an account find a
+client (``query-clients``, ``view-clients`` or ``manage-clients``).
 
 Safe to run twice: a second run finds the flow and the binding and writes
 nothing. Risk level ``caution`` with approval: the op changes how people sign
@@ -39,6 +44,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 from meho_backplane.connectors.keycloak._paths import (
     _AUTH_FLOW_ADD_STEP_PATH,
     _AUTH_FLOW_ADD_SUBFLOW_PATH,
@@ -47,12 +54,20 @@ from meho_backplane.connectors.keycloak._paths import (
     _CLIENT_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.ops_authflow_rights import (
+    CLIENT_LOOKUP_ROLES,
+    find_client_uuid,
+    missing_rights_error,
+    names_missing_rights,
+    register_rights_check,
+)
 from meho_backplane.connectors.keycloak.ops_read import KeycloakOp
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import merge_representation
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.operations._preview import PreviewContext
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -79,6 +94,10 @@ _FLOW_DESCRIPTION = (
     "the one-time code when the person has set one up."
 )
 _CODE_FLOW_DESCRIPTION = "Asks for the one-time code when the person has set one up."
+#: The realm-management roles the run needs: the flow, then the client binding.
+_ROLES = ("manage-realm", "manage-clients")
+#: A Keycloak permission on the one client can replace ``manage-clients``.
+_PER_CLIENT = ("manage-clients",)
 
 
 @dataclass(frozen=True)
@@ -313,6 +332,24 @@ async def _bind(
     }
 
 
+def _bind_refused_text(flow_id: str, *, created: bool, client_id: str | None = None) -> str:
+    """Say what the run changed before Keycloak refused the client binding.
+
+    Without *client_id* the text is short enough for the error message.
+    """
+    state = "made" if created else "already there"
+    text = (
+        f"{ENSURE_APPROVAL_FLOW_OP_ID} stopped half-way: the flow {APPROVAL_FLOW_ALIAS!r} "
+        f"(id {flow_id!r}, flow_created={str(created).lower()}) is {state}; "
+        "Keycloak refused (HTTP 403) to bind it to the client"
+    )
+    if client_id is None:
+        return f"{text}. See extras.remediation."
+    after = "The flow stays in the realm." if created else "MEHO changed nothing."
+    return f"{text} {client_id!r}. {after}"
+
+
+@names_missing_rights(ENSURE_APPROVAL_FLOW_OP_ID, _ROLES)
 async def keycloak_authflow_ensure_approval_flow(
     self: KeycloakConnector,
     operator: Operator,
@@ -323,7 +360,15 @@ async def keycloak_authflow_ensure_approval_flow(
     realm = resolve_realm_config(target).managed_realm
     realm_segment = quote_segment(realm)
     client_id = str(params.get("client_id") or _DEFAULT_CLIENT_ID).strip()
-    client_uuid = await self._find_client_uuid(target, realm_segment, client_id, operator=operator)
+    client_uuid = await find_client_uuid(
+        self,
+        operator,
+        target,
+        realm_segment,
+        client_id,
+        op_id=ENSURE_APPROVAL_FLOW_OP_ID,
+        roles=_ROLES,
+    )
     if client_uuid is None:
         raise KeycloakApprovalFlowError(
             "client_not_found", f"no client {client_id!r} in realm {realm!r}; nothing was changed"
@@ -358,7 +403,21 @@ async def keycloak_authflow_ensure_approval_flow(
     client_path = fill_path(
         _CLIENT_PATH, {"realm": realm_segment, "client-uuid": quote_segment(client_uuid)}
     )
-    binding = await _bind(self, operator, target, client_path, flow_id)
+    try:
+        binding = await _bind(self, operator, target, client_path, flow_id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            raise
+        raise await missing_rights_error(
+            self,
+            operator,
+            target,
+            exc,
+            op_id=ENSURE_APPROVAL_FLOW_OP_ID,
+            roles=_ROLES,
+            message=_bind_refused_text(flow_id, created=created),
+            done=_bind_refused_text(flow_id, created=created, client_id=client_id),
+        ) from exc
     return {
         "realm": realm,
         "flow_alias": APPROVAL_FLOW_ALIAS,
@@ -508,4 +567,24 @@ APPROVAL_FLOW_OPS: tuple[KeycloakOp, ...] = (
             ),
         },
     ),
+)
+
+
+async def _approval_flow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Card for the op: the realm, the flow and the client it binds."""
+    try:
+        realm: str | None = resolve_realm_config(ctx.target).managed_realm
+    except Exception:
+        realm = None
+    return {
+        "resource": "client_browser_flow",
+        "realm": realm,
+        "flow": APPROVAL_FLOW_ALIAS,
+        "client_id": str(ctx.params.get("client_id") or _DEFAULT_CLIENT_ID).strip(),
+        "client_lookup_needs_one_of": list(CLIENT_LOOKUP_ROLES),
+    }
+
+
+register_rights_check(
+    ENSURE_APPROVAL_FLOW_OP_ID, _ROLES, _approval_flow_preview, per_object=_PER_CLIENT
 )

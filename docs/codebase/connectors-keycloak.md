@@ -1290,14 +1290,18 @@ A Keycloak target with no managed realm is refused like this:
   from the secret store and no request is sent. The error text says how to
   set the realm.
 - **Probe and fingerprint.** `meho targets probe` answers
-  `reachable: false` with the same text. This is how to find such a target.
+  `reachable: false` with the same text.
+- **Doctor.** `meho doctor` lists every Keycloak target that names no
+  managed realm, as a warning with the fix (`cli/internal/cmd/doctor_keycloak_realm.go`).
+  A realm of only spaces counts as no realm, here and everywhere else.
 - **Create and update.** `POST /api/v1/targets` and `PATCH` (also
   `meho targets add`, `meho targets update`, `meho targets import` and the
   `targets.register` and `targets.update` operations) answer HTTP 422 with
   the same text. An update is checked on the target as it will be after the
   write: sending `extras` without `managed_realm`, or changing the product to
   `keycloak` on a target without one, is refused. The check lives in
-  `targets/required_extras.py`.
+  `targets/required_extras.py`. The console create form has a
+  "Managed realm" field; for a Keycloak target it is required.
 
 To set the realm on an existing target (`--extra` replaces the whole
 `extras` map, so repeat the keys you keep):

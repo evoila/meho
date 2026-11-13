@@ -437,6 +437,8 @@ type mcpStub struct {
 	// signIn is approvals.sign_in in the meho_status answer; nil leaves
 	// the approvals block out, as an older backplane does.
 	signIn map[string]any
+	// keycloakTargets maps the name of each Keycloak target to its extras.
+	keycloakTargets map[string]map[string]any
 }
 
 func (s *mcpStub) handler(t *testing.T) http.Handler {
@@ -445,6 +447,25 @@ func (s *mcpStub) handler(t *testing.T) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(s.liveStatus)
 		_, _ = w.Write([]byte(`{"operator":{"sub":"alice-sub","name":"Alice","email":null,"tenant_id":"00000000-0000-0000-0000-000000000001","tenant_role":"operator"},"db":{"migrated":true}}`))
+	})
+	mux.HandleFunc("GET /api/v1/targets", func(w http.ResponseWriter, r *http.Request) {
+		items := []any{}
+		if r.URL.Query().Get("product") == "keycloak" {
+			for name := range s.keycloakTargets {
+				items = append(items, map[string]any{"name": name, "product": "keycloak"})
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "next_cursor": nil})
+	})
+	mux.HandleFunc("GET /api/v1/targets/{name}", func(w http.ResponseWriter, r *http.Request) {
+		extras, ok := s.keycloakTargets[r.PathValue("name")]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": r.PathValue("name"), "product": "keycloak", "extras": extras})
 	})
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -551,6 +572,41 @@ func TestDoctor_AuthenticatedLayer(t *testing.T) {
 		}
 		if r.Surface == nil || len(r.Surface.Gap) != 0 || strings.Join(r.Surface.HiddenByServer, ",") != "search_docs" {
 			t.Errorf("surface = %+v", r.Surface)
+		}
+	})
+
+	t.Run("keycloak targets without a managed realm", func(t *testing.T) {
+		xdg := withTempXDG(t)
+		stub := &mcpStub{liveStatus: 200, tools: []string{"meho_status"}, listed: []string{"meho_status"},
+			keycloakTargets: map[string]map[string]any{
+				"kc-ok":    {"managed_realm": "example"},
+				"kc-none":  {"admin_realm": "master"},
+				"kc-blank": {"managed_realm": "  "},
+			}}
+		srv := httptest.NewServer(stub.handler(t))
+		defer srv.Close()
+		seedCreds(t, xdg, srv.URL, auth.StoredToken{BackplaneURL: srv.URL, AccessToken: jwtMarker, Expiry: time.Now().Add(time.Hour)})
+
+		c := findCheck(t, runAuthed(t, srv.URL, onlineDeps(t)), keycloakRealmCheckName)
+		if c.Status != doctorWarn || !strings.Contains(c.Detail, "kc-blank, kc-none") || strings.Contains(c.Detail, "kc-ok") {
+			t.Errorf("missing realms not reported: %+v", c)
+		}
+		if !strings.Contains(c.Hint, "meho targets update <name> --extra managed_realm=<realm>") {
+			t.Errorf("hint has no fix: %q", c.Hint)
+		}
+	})
+
+	t.Run("keycloak targets with a managed realm", func(t *testing.T) {
+		xdg := withTempXDG(t)
+		stub := &mcpStub{liveStatus: 200, tools: []string{"meho_status"}, listed: []string{"meho_status"},
+			keycloakTargets: map[string]map[string]any{"kc-ok": {"managed_realm": "example"}}}
+		srv := httptest.NewServer(stub.handler(t))
+		defer srv.Close()
+		seedCreds(t, xdg, srv.URL, auth.StoredToken{BackplaneURL: srv.URL, AccessToken: jwtMarker, Expiry: time.Now().Add(time.Hour)})
+
+		c := findCheck(t, runAuthed(t, srv.URL, onlineDeps(t)), keycloakRealmCheckName)
+		if c.Status != doctorOK {
+			t.Errorf("status = %+v", c)
 		}
 	})
 

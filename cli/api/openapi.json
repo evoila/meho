@@ -44255,11 +44255,7 @@
             "title": "Model"
           },
           "price": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/ModelPrice"
-              }
-            ],
+            "$ref": "#/components/schemas/ModelPrice",
             "nullable": true
           }
         },

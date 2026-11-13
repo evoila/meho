@@ -11771,8 +11771,10 @@ type TenantMailRecipientPolicyUpdate struct {
 // (“openai:qwen3“) or the model name alone (“qwen3“). “price“ sets the
 // price; “null“ removes it. Both keys are required.
 type TenantModelPriceUpdate struct {
-	Model string      `json:"model"`
-	Price *ModelPrice `json:"price"`
+	Model string `json:"model"`
+
+	// Price Price of one model, in USD per million tokens.
+	Price ModelPrice `json:"price"`
 }
 
 // TenantModelPrices The tenant's prices for agent models MEHO does not know (#5853).

@@ -1530,9 +1530,10 @@ jobs:
     #     `changes` is in `needs`) and BRANCHES:
     #       * docs_only == 'true'  → accept success|skipped (fast path).
     #       * else (full run)      → require STRICT success (a skipped lint /
-    #                                shard here is anomalous — these jobs' only
-    #                                skip paths are fork-PR or docs-only, and we
-    #                                are in neither — so treat it as failure and
+    #                                shard here is anomalous — lint skips only
+    #                                for a docs-only or no-backend diff, and the
+    #                                shards also skip on a fork PR; we are in
+    #                                none of these — so treat it as failure and
     #                                fail CLOSED). This is STRICTER than the
     #                                pre-#3252 gate. A fork PR takes its own
     #                                branch first (#4835, property 2).
@@ -1562,20 +1563,30 @@ jobs:
           IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        # needs.<job>.result is one of success / failure / cancelled / skipped.
-        # For the matrix job, needs.python-unit-shard.result is the AGGREGATE:
-        # success only if every leg succeeded, otherwise failure/cancelled.
+          # Job results and outputs reach the script only through env:, as
+          # data. On a fork pull request the change detector runs code from
+          # the pull request, so its outputs are never part of the script text.
+          # needs.<job>.result is one of success / failure / cancelled / skipped.
+          # For the matrix job, needs.python-unit-shard.result is the AGGREGATE:
+          # success only if every leg succeeded, otherwise failure/cancelled.
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CHANGES_DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          CHANGES_BACKEND_PYTHON: ${{ needs.changes.outputs.backend_python }}
+          CHANGES_SINGLE_CONNECTOR: ${{ needs.changes.outputs.single_connector }}
+          LINT_RESULT: ${{ needs.python-lint.result }}
+          SHARDS_RESULT: ${{ needs.python-unit-shard.result }}
+          OUTSIDE_RESULT: ${{ needs.python-outside-backend.result }}
         run: |
-          detect='${{ needs.changes.result }}'
-          docs_only='${{ needs.changes.outputs.docs_only }}'
-          lint='${{ needs.python-lint.result }}'
-          shards='${{ needs.python-unit-shard.result }}'
-          backend_python='${{ needs.changes.outputs.backend_python }}'
-          outside='${{ needs.python-outside-backend.result }}'
+          detect="${CHANGES_RESULT}"
+          docs_only="${CHANGES_DOCS_ONLY}"
+          lint="${LINT_RESULT}"
+          shards="${SHARDS_RESULT}"
+          backend_python="${CHANGES_BACKEND_PYTHON}"
+          outside="${OUTSIDE_RESULT}"
           echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
           echo "python-lint (ruff + ruff format + mypy): ${lint}"
           echo "python-unit-shard (aggregate of all 6 shard legs, or the one connector leg): ${shards}"
-          echo "single_connector='${{ needs.changes.outputs.single_connector }}' (empty = six shards)"
+          echo "single_connector='${CHANGES_SINGLE_CONNECTOR}' (empty = six shards)"
           echo "python-outside-backend (tests that read outside backend/): ${outside}"
 
           # The detect job MUST have succeeded for its docs_only classification
@@ -1590,8 +1601,9 @@ jobs:
 
           fail=0
           if [ "${IS_FORK_PR}" = "true" ]; then
-            # FORK PR (#4835) — the shards and the outside-backend tests use
-            # our own pool, so they skip on a fork PR. Lint must pass when the
+            # FORK PR (#4835) — the shards use our own pool, so they skip on a
+            # fork PR. The outside-backend job runs on a hosted runner, but its
+            # own `if:` skips it on a fork PR. Lint must pass when the
             # diff has backend code; it may skip only for a docs-only or
             # no-backend diff. A red or cancelled job still fails the lane. A
             # green lane here is NOT a test pass.
@@ -1609,14 +1621,22 @@ jobs:
                 *) fail=1 ;;
               esac
             done
-            if [ "${fail}" -eq 0 ]; then
+            if [ "${fail}" -eq 0 ] && [ "${docs_only}" = "true" ]; then
+              {
+                echo "### Pull request from a fork: docs only"
+                echo
+                echo "- This pull request changes only docs, so the unit tests were skipped. No unit test is needed for it."
+                echo "- Maintainer: first look at the changed files. This result counts only when the pull request changes nothing under \`.github/\`, \`scripts/ci/\` and \`backend/tests/_unit_*.py\`. See \"Pull requests from forks\" in CONTRIBUTING.md."
+              } >> "${GITHUB_STEP_SUMMARY}"
+              echo "Unit lane GREEN for a docs-only fork pull request. The unit tests were skipped because only docs changed. See the step summary."
+            elif [ "${fail}" -eq 0 ]; then
               {
                 echo "### Pull request from a fork: the unit tests did not run"
                 echo
                 echo "- The unit test shards run on our own runners. A fork pull request cannot use them, so they were skipped. A skipped job shows as green. Green here does **not** mean the tests passed."
                 echo "- Lint and type check (ruff + mypy): ${lint}."
                 echo "- The merge queue runs the full test matrix before this code lands on \`main\`."
-                echo "- Maintainer: read the change first. Then push the exact commit you read, by its full SHA, to a branch in this repository, open a draft pull request from it to \`main\`, and link its CI run in the review. A pushed branch alone starts no CI. See \"Pull requests from forks\" in CONTRIBUTING.md."
+                echo "- Maintainer: read the change first, and take the commands from CONTRIBUTING.md, not from this summary. This result counts only when the pull request changes nothing under \`.github/\`, \`scripts/ci/\` and \`backend/tests/_unit_*.py\`. Then push the exact commit you read, by its full SHA, to a branch in this repository, open a draft pull request from it to \`main\`, and link its CI run in the review. A pushed branch alone starts no CI. See \"Pull requests from forks\" in CONTRIBUTING.md."
                 echo
                 echo '```bash'
                 echo "git fetch origin pull/${PR_NUMBER}/head"
@@ -2725,11 +2745,16 @@ jobs:
       - name: Assert every integration shard passed
         # needs.python-integration-shard.result is the AGGREGATE of the
         # matrix: success only if every leg succeeded.
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CHANGES_DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          CHANGES_BACKEND_PYTHON: ${{ needs.changes.outputs.backend_python }}
+          SHARDS_RESULT: ${{ needs.python-integration-shard.result }}
         run: |
-          detect='${{ needs.changes.result }}'
-          docs_only='${{ needs.changes.outputs.docs_only }}'
-          backend_python='${{ needs.changes.outputs.backend_python }}'
-          shards='${{ needs.python-integration-shard.result }}'
+          detect="${CHANGES_RESULT}"
+          docs_only="${CHANGES_DOCS_ONLY}"
+          backend_python="${CHANGES_BACKEND_PYTHON}"
+          shards="${SHARDS_RESULT}"
           echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
           echo "python-integration-shard (aggregate of all 4 shard legs): ${shards}"
 

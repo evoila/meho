@@ -2219,15 +2219,19 @@ shape (deterministic file-level matrix + fan-in):
 - **`python-unit-lane`** — the **fan-in** carrying the exact
   branch-protection required context `Python (ruff + mypy + pytest)`. It
   `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`
-  and, via `if: always()
-  && <fork guard>`, runs regardless of upstream results, then inspects
+  and, via `if: always()`, runs regardless of upstream results, then inspects
   `needs.*.result`. `always()` is load-bearing: a plain `needs:` gate would
   be *skipped* when a shard fails, and a skipped required check counts as
   Success (#2140) — i.e. a red shard would let the PR merge. A hung shard
   hits its own `timeout-minutes` → `cancelled` leg → aggregate
-  `cancelled`/`failure` → the gate FAILS (not open). On a fork PR the fork
-  guard skips this job (and the shards), reporting the required context as
-  Success exactly as the old single job did. Since #3252 the step first
+  `cancelled`/`failure` → the gate FAILS (not open). The job runs on a fork
+  PR too (#4835). There the shards skip, because they use our own pool.
+  The job passes when lint passed, or when lint skipped for a docs-only or
+  no-backend diff. A failed or cancelled lint or shard, a lint that did not
+  run for a diff with backend code, or a failed detector fails it. When it
+  passes, its step summary says that the unit tests did not run and gives
+  the maintainer the commands to start a full run on the exact commit (see
+  [Fork-PR guard](#fork-pr-guard)). Since #3252 the step first
   fails CLOSED if the `changes` detector did not itself succeed, then
   branches on `needs.changes.outputs.docs_only` (and, since #5296,
   `backend_python`): on the **docs-only fast
@@ -2738,9 +2742,10 @@ the test map, and sysmon cannot record that (see
 
 ### Fork-PR guard
 
-Every job that runs on a pull request carries the same `if:` guard the
-publish workflows use (the fan-in jobs wrap it in `always() && ...`;
-`merge-queue-watchdog` runs only on `merge_group`):
+Every job that runs on a pull request, except the six hosted jobs named
+below, carries the same `if:` guard the publish workflows use (the integration fan-in wraps
+it in `always() && ...`; `merge-queue-watchdog` runs only on
+`merge_group`):
 
 ```yaml
 if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -2752,14 +2757,19 @@ arbitrary code from a forked PR (`go test`, `pytest`, `helm template`
 with custom values) is never allowed to execute on it. The OR
 short-circuits on `push` events so main-branch CI is unaffected.
 
-The six jobs that moved to GitHub-hosted runners (#4626, step 1) keep the
-same guard. On a hosted runner the guard no longer protects internal
-infrastructure. It stays because the `python-unit-lane` fan-in expects
-`python-lint`, the shards and itself to skip together on a fork PR, and
-because one identical guard on every `ci.yml` job keeps the
-`test_ci_fork_runner_isolation.py` invariant simple to reason about. A
-fork PR still gets every `ci.yml` required context reported as
-success-by-skip, exactly as before.
+The six jobs that moved to GitHub-hosted runners (#4626, step 1) have no
+guard since #4835: `changes`, `python-lint`, `go-lint-test`,
+`cli-api-snapshot-freshness`, `helm-lint-template` and the fan-in
+`python-unit-lane`. On a pull request they run on GitHub-hosted runners
+with a read-only token and no secret, so a fork pull request runs them.
+The unit shards still skip on a fork PR. The `python-unit-lane` fan-in
+then passes when lint passed, or when lint skipped for a docs-only or
+no-backend diff, and its step summary says that the unit tests did not
+run. `test_ci_fork_runner_isolation.py` pins both sides:
+the six jobs have no guard, and every job on our own pool keeps it.
+`CONTRIBUTING.md`, "Pull requests from forks", has the maintainer steps
+to get a full CI run: push the exact commit the maintainer read, by its
+full SHA, to a branch here and open a draft pull request from it.
 
 This guard is `ci.yml`'s arm of the repo-wide untrusted-PR isolation
 model — the full inventory, the disposable-runner routing pattern, and
@@ -2877,7 +2887,7 @@ their isolation posture:
 
 | Workflow | Runs untrusted PR code? | Isolation mechanism |
 | --- | --- | --- |
-| `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
+| `ci.yml` | yes (build/test/lint) | fork guard on every job that can use an own pool (skip on fork PR). Six jobs run on a fork PR (#4835): `changes`, `python-lint`, `go-lint-test`, `cli-api-snapshot-freshness`, `helm-lint-template` and the fan-in `python-unit-lane`. They use hosted runners on a pull request and read no secret. The fan-in says in its step summary that the unit shards did not run. `CONTRIBUTING.md`, "Pull requests from forks", has the maintainer steps |
 | `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job, which runs on GitHub-hosted `ubuntu-latest` for pull requests and on `meho-runners-ci` only for `main` and tag pushes |
 | `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-latest`; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |

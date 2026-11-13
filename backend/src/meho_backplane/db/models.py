@@ -2060,6 +2060,14 @@ class EndpointDescriptor(Base):
     )
     custom_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     custom_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # #5321: the fields an admin edited on a typed or composite op
+    # (``custom_description``, ``llm_instructions``). Typed registration
+    # at every start leaves these fields as they are. NULL means none.
+    admin_edited_fields: Mapped[list[str] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
     # #5037: the connector package that wrote this row at start. NULL means
     # the op is built into MEHO (or ingested). When the package is not
     # installed, discovery hides the row and dispatch refuses it with

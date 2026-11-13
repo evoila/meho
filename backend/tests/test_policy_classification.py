@@ -755,11 +755,11 @@ async def test_policy_classify_registers_as_a_waiting_rights_change(
     assert role_floor_for(POLICY_CLASSIFY_OP_ID) == TenantRole.TENANT_ADMIN
     assert is_rights_change_op(POLICY_CLASSIFY_OP_ID)
 
-    result = await policy_classify(
-        _admin(), None, {"match": {"connector": "vault-*"}, "category": "secrets"}
-    )
-    assert result["scope"] == "tenant"
-    assert result["rule_ref"] == "tenant:classifications[0]"
+    # Outside an approved request nothing runs: only a second admin's approval runs it.
+    with pytest.raises(ValueError, match="second admin"):
+        await policy_classify(
+            _admin(), None, {"match": {"connector": "vault-*"}, "category": "secrets"}
+        )
 
 
 def test_a_classify_request_needs_another_admin() -> None:

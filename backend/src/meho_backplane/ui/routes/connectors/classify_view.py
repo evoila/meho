@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Form, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
@@ -45,10 +45,24 @@ from meho_backplane.ui.routes.connectors.operator import resolve_operator_or_403
 from meho_backplane.ui.routes.connectors.review_drawer import _set_csrf_cookie
 from meho_backplane.ui.templating import get_templates
 
-__all__ = ["build_classify_router", "parse_labels"]
+__all__ = ["CLASSIFY_NEEDS_ADMIN", "build_classify_router", "parse_labels"]
+
+#: The 403 text of the page for a person who is not a tenant admin.
+CLASSIFY_NEEDS_ADMIN = "Classifying operations needs the tenant_admin role."
+
+
+async def _classify_admin_or_403(request: Request) -> Operator:
+    """A tenant admin, else ``403`` with this page's own text."""
+    try:
+        return await resolve_operator_or_403(request)
+    except HTTPException as exc:
+        if exc.status_code != 403:
+            raise
+        raise HTTPException(status_code=403, detail=CLASSIFY_NEEDS_ADMIN) from exc
+
 
 _require_operator_dep = Depends(require_ui_operator)
-_require_admin_dep = Depends(resolve_operator_or_403)
+_require_admin_dep = Depends(_classify_admin_or_403)
 _MATCH_MAX = 200
 _LABELS_MAX = 32 * 320
 

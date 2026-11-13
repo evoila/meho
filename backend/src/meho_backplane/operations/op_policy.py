@@ -107,6 +107,7 @@ __all__ = [
     "hidden_classification_fields",
     "list_overrides",
     "load_overrides",
+    "policy_in_force",
     "register_policy_repair_op",
     "remove_override",
 ]
@@ -374,6 +375,21 @@ def _with_classification(policy: EffectivePolicy, classified: Classification) ->
         rule_ref=classified.rule_ref,
         always_wait=classified.always_wait,
     )
+
+
+def policy_in_force(
+    row: EndpointDescriptor,
+    overrides: Iterable[OperationPolicyOverride],
+    classified: Classification,
+) -> EffectivePolicy:
+    """The policy of *row* with *classified* in place of its stored classification.
+
+    The same order as :func:`effective_policy_map`: the code's value, the
+    overrides, the classification, then the floors. The dry run of a
+    classification edit shows it for the values before and after.
+    """
+    base = effective_policy(row.safety_level, row.requires_approval, overrides)
+    return _with_floors(row, _with_classification(base, classified))
 
 
 def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectivePolicy:

@@ -1459,7 +1459,7 @@ async def probe_and_store_fingerprint(
     lists. The caller owns the transaction: this function only
     ``flush``-es.
     """
-    cls, label, exception_message = resolve_connector_or_label(t)
+    cls, label, exception_message = resolve_connector_or_label(t, for_probe=True)
     if label == "no_connector":
         raise HTTPException(
             status_code=501,

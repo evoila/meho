@@ -187,7 +187,7 @@ async def _plan_users(
                     lab.name,
                     "conflict",
                     "ended_in_meho",
-                    "MEHO ended this membership. The import does not bring it back.",
+                    "MEHO record is newer: membership ended. MEHO: ended. Import: member.",
                 )
             )
         elif member is None:
@@ -201,7 +201,7 @@ async def _plan_users(
                     lab.name,
                     "conflict",
                     "disabled_in_meho",
-                    "Left this lab in MEHO.",
+                    "MEHO record is newer: person left the lab. MEHO: disabled. Import: active.",
                 )
             )
         else:
@@ -239,7 +239,10 @@ def _target_conflict(
     if ctx.target_lab_count[ref] > 1:
         return "target_in_two_labs", "Two labs list it."
     if target_id not in owned and target_id in ended:
-        return "ended_in_meho", "MEHO ended its assignment. The import does not bring it back."
+        return (
+            "ended_in_meho",
+            "MEHO record is newer: assignment ended. MEHO: ended. Import: assigned.",
+        )
     return None
 
 
@@ -250,6 +253,15 @@ async def _plan_targets(
     actions: list[_Action] = []
     owned, ended = await _target_history(session, ctx)
     seen: set[str] = set()
+    space_names = dict(
+        (
+            await session.execute(
+                select(Space.id, Space.name).where(Space.tenant_id == ctx.tenant_id)
+            )
+        )
+        .tuples()
+        .all()
+    )
     for ref in lab.targets:
         if ref in seen:
             rows.append(Row("assignment", ref, lab.name, "unchanged", "duplicate", "Listed twice."))
@@ -272,7 +284,9 @@ async def _plan_targets(
                     lab.name,
                     "conflict",
                     "assigned_elsewhere_in_meho",
-                    "MEHO assigns it to another space now.",
+                    "MEHO record is newer: moved to another space. "
+                    f"MEHO: {space_names.get(owned[target_id], 'another space')}. "
+                    f"Import: {lab.name}.",
                 )
             )
     return rows, actions
@@ -288,22 +302,39 @@ async def _plan_space(
             _Action("set_member", {"key": owner, "role": "owner"}),
         ]
     if space.state != "active":
-        return _blocked(lab, "space_disabled", "The space is disabled in MEHO.")
+        return _blocked(
+            lab,
+            "space_disabled",
+            "MEHO record is newer: space disabled. MEHO: disabled. Import: active.",
+        )
     if (space.owner_issuer, space.owner_sub) != owner:
-        return _blocked(lab, "owner_differs_in_meho", "MEHO has another owner for this space.")
+        return _blocked(
+            lab,
+            "owner_differs_in_meho",
+            "MEHO record is newer: another owner. "
+            f"MEHO: {_who((space.owner_issuer, space.owner_sub))}. Import: {_who(owner)}.",
+        )
     history = await store.list_members(
         session, tenant_id=ctx.tenant_id, space_id=space.id, include_history=True
     )
     owner_rows = [m for m in history if (m.member_issuer, m.member_sub) == owner]
     mine = next((m for m in owner_rows if m.valid_to is None), None)
     if mine is None and owner_rows:
-        return _blocked(lab, "owner_ended_in_meho", "MEHO ended the owner's membership.")
+        return _blocked(
+            lab,
+            "owner_ended_in_meho",
+            "MEHO record is newer: owner membership ended. MEHO: ended. Import: owner.",
+        )
     if mine is None or (mine.state == "active" and mine.role != "owner"):
         return Row("space", lab.name, lab.name, "changed"), [
             _Action("set_member", {"key": owner, "role": "owner"})
         ]
     if mine.state == "disabled":
-        return _blocked(lab, "owner_disabled_in_meho", "The owner left this lab in MEHO.")
+        return _blocked(
+            lab,
+            "owner_disabled_in_meho",
+            "MEHO record is newer: owner left the lab. MEHO: disabled. Import: active.",
+        )
     return Row("space", lab.name, lab.name, "unchanged"), []
 
 

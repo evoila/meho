@@ -3,7 +3,7 @@
 
 """Integration smoke test for :class:`PostgresConnector` against a real Postgres.
 
-Boots a stock ``postgres:16-alpine`` container and exercises the connector's
+Boots a stock ``postgres`` container (16, 17 and 18 in CI) and exercises the connector's
 :meth:`fingerprint`, curated read ops, and -- critically -- the
 **server-enforced** half of the double read-only guarantee end-to-end over the
 real asyncpg wire path:
@@ -35,6 +35,7 @@ meaningful.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -108,6 +109,21 @@ _READER_USER = "meho_reader"
 _READER_PASSWORD = "reader-test-password"
 
 
+#: The PostgreSQL images the module runs against. The connector's range is
+#: ``>=15,<19``; CI covers 16, 17 and 18. ``MEHO_TEST_POSTGRES_IMAGE`` runs one image.
+_PG_IMAGES = (
+    [os.environ["MEHO_TEST_POSTGRES_IMAGE"]]
+    if os.environ.get("MEHO_TEST_POSTGRES_IMAGE")
+    else ["postgres:16-alpine", "postgres:17-alpine", "postgres:18-alpine"]
+)
+
+
+def _major_of_image(image: str) -> str | None:
+    """The major version in an image tag (``postgres:17-alpine`` -> ``17``), else None."""
+    match = re.search(r":(\d+)", image)
+    return match.group(1) if match else None
+
+
 @dataclass
 class _Container:
     host: str
@@ -115,15 +131,16 @@ class _Container:
     user: str
     password: str
     dbname: str
+    major: str | None = None
 
 
-@pytest.fixture(scope="module")
-def pg_container() -> Iterator[_Container]:
+@pytest.fixture(scope="module", params=_PG_IMAGES)
+def pg_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
     """Boot a stock Postgres, create a populated + ANALYZEd table, yield coords."""
     from docker.errors import APIError as _DockerAPIError
     from testcontainers.postgres import PostgresContainer
 
-    image = os.environ.get("MEHO_TEST_POSTGRES_IMAGE", "postgres:16-alpine")
+    image: str = request.param
     pg = PostgresContainer(image)
     try:
         pg.start()
@@ -139,6 +156,7 @@ def pg_container() -> Iterator[_Container]:
             user=pg.username,
             password=pg.password,
             dbname=pg.dbname,
+            major=_major_of_image(image),
         )
         import asyncio
 
@@ -194,7 +212,9 @@ async def test_fingerprint_returns_identity_fields(pg_container: _Container, _va
 
     assert fp.reachable is True, fp.extras
     assert fp.vendor == "postgresql"
-    assert fp.version is not None and fp.version.startswith("16")
+    assert fp.version is not None
+    if pg_container.major is not None:
+        assert fp.version.startswith(pg_container.major)
     assert fp.extras["in_recovery"] is False
     assert fp.extras["encoding"]  # e.g. "UTF8"
     assert fp.extras["data_checksums"] in {"on", "off"}

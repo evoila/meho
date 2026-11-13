@@ -38,6 +38,8 @@ from uuid import UUID
 
 import pytest
 import structlog
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 from pymongo.errors import (
     ConnectionFailure,
     OperationFailure,
@@ -277,6 +279,31 @@ def test_mongodb_resolves_versioned_and_wildcard_and_appears_in_registry() -> No
     fresh = _MongoTarget()
     fresh.fingerprint = type("_FP", (), {"version": None})()
     assert resolve_connector(fresh) is MongoDbConnector
+
+
+def test_supported_version_range_follows_vendor_support() -> None:
+    """AC: the range is 7 and 8, the releases the vendor still supports.
+
+    5 and 6 are out of vendor support, and 9 is not tested yet.
+    """
+    version_range = MongoDbConnector.supported_version_range
+    assert version_range is not None
+    spec = SpecifierSet(version_range)
+    for version in ("5", "6", "9"):
+        assert Version(version) not in spec, version
+    for version in ("7", "7.0.14", "8", "8.0.3"):
+        assert Version(version) in spec, version
+
+
+def test_connector_fit_names_the_range_for_an_old_mongodb() -> None:
+    """AC: a target on MongoDB 6 is not served; the warning names the range."""
+    from meho_backplane.checks.connector_fit import connector_fit
+
+    target = _MongoTarget()
+    target.fingerprint = type("_FP", (), {"version": "6"})()
+    fit = connector_fit("mongodb-wire-7", target)
+    assert fit.warning is not None
+    assert MongoDbConnector.supported_version_range in fit.warning
 
 
 def test_every_op_is_safe_read_only_with_closed_schema() -> None:

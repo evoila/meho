@@ -32,12 +32,12 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `keycloak-admin-26.x` | `keycloak` | — | >=26.0,<27.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-keycloak.md) |
 | `linux-ssh-1.x` | `linux` | — | Any Linux host that runs systemd fits. A rule for the distribution applies, not a range. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-linux.md) |
 | `loki-api-3.x` | `loki` | — | >=2.9,<4.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-loki.md) |
-| `mongodb-wire-7` | `mongodb` | — | >=5,<9 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-mongodb.md) |
+| `mongodb-wire-7` | `mongodb` | — | >=7,<9 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-mongodb.md) |
 | `msad-ssh-2022.x` | `msad` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-msad.md) |
 | `mssql-tds-2022.x` | `mssql` | — | >=13,<17 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-mssql.md) |
 | `pfsense-ssh-2.7` | `pfsense` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-pfsense.md) |
 | `phpipam-rest-1.x` | `phpipam` | Lists phpIPAM subnets and free addresses, and reserves or releases an IP address. | The phpIPAM API reports no version. The connector is built from the 1.8.2 API reference. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-phpipam.md) |
-| `postgres-wire-16` | `postgres` | — | >=13,<18 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-postgres.md) |
+| `postgres-wire-16` | `postgres` | — | >=15,<19 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-postgres.md) |
 | `prometheus-api-2.x` | `prometheus` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-prometheus.md) |
 | `proxmox-api-8.x` | `proxmox` | — | >=7.0,<9.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-proxmox.md) |
 | `rabbitmq-management-3.x` | `rabbitmq` | — | >=3.8,<5.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rabbitmq.md) |

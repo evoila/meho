@@ -125,7 +125,7 @@ class MongoDbConnector(Connector):
     product = "mongodb"
     version = "7"
     impl_id = "mongodb-wire"
-    supported_version_range = ">=5,<9"
+    supported_version_range = ">=7,<9"
     priority = 1
 
     # ------------------------------------------------------------------

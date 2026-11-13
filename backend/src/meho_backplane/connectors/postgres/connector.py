@@ -126,18 +126,16 @@ class PostgresConnector(Connector):
 
     Registry v2 triple ``("postgres", "16", "postgres-wire")``. ``priority`` is
     ``1`` so a future ``GenericRestConnector`` auto-shim registering the same
-    product loses the resolver tie-break. ``supported_version_range`` starts at
-    PostgreSQL 13 (12 is EOL as of 2024-11): the catalog + statistics views this
-    connector reads are stable across 13-17, and ``pg_stat_wal_receiver`` (read
-    by ``postgres.replication``) only gained the ``written_lsn`` / ``flushed_lsn``
-    columns -- which replaced 12's single ``received_lsn`` -- in 13, so
-    advertising 12 would parse-error that op on a 12 standby.
+    product loses the resolver tie-break. ``supported_version_range`` is the PostgreSQL releases the
+    vendor still supports (15 to 18); CI runs the container tests on 16, 17 and
+    18. The catalog + statistics views this connector reads are stable across
+    them.
     """
 
     product = "postgres"
     version = "16"
     impl_id = "postgres-wire"
-    supported_version_range = ">=13,<18"
+    supported_version_range = ">=15,<19"
     priority = 1
 
     # ------------------------------------------------------------------

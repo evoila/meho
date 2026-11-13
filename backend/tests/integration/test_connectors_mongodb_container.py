@@ -31,6 +31,7 @@ meaningful.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -90,21 +91,37 @@ def _operator() -> Operator:
     )
 
 
+#: The MongoDB images the module runs against. The connector's range is
+#: ``>=7,<9``; CI covers 7 and 8. ``MEHO_TEST_MONGODB_IMAGE`` runs one image.
+_MONGO_IMAGES = (
+    [os.environ["MEHO_TEST_MONGODB_IMAGE"]]
+    if os.environ.get("MEHO_TEST_MONGODB_IMAGE")
+    else ["mongo:7", "mongo:8"]
+)
+
+
+def _major_of_image(image: str) -> str | None:
+    """The major version in an image tag (``mongo:8`` -> ``8``), else None."""
+    match = re.search(r":(\d+)", image)
+    return match.group(1) if match else None
+
+
 @dataclass
 class _Container:
     host: str
     port: int
     user: str
     password: str
+    major: str | None = None
 
 
-@pytest.fixture(scope="module")
-def mongo_container() -> Iterator[_Container]:
+@pytest.fixture(scope="module", params=_MONGO_IMAGES)
+def mongo_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
     """Boot a stock Mongo (root auth), seed a collection + TTL index, yield coords."""
     from docker.errors import APIError as _DockerAPIError
     from testcontainers.mongodb import MongoDbContainer
 
-    image = os.environ.get("MEHO_TEST_MONGODB_IMAGE", "mongo:7")
+    image: str = request.param
     mongo = MongoDbContainer(image)
     try:
         mongo.start()
@@ -119,6 +136,7 @@ def mongo_container() -> Iterator[_Container]:
             port=int(mongo.get_exposed_port(27017)),
             user=mongo.username,
             password=mongo.password,
+            major=_major_of_image(image),
         )
         _seed(coords)
         yield coords
@@ -161,7 +179,9 @@ async def test_fingerprint_returns_identity_fields(
 
     assert fp.reachable is True, fp.extras
     assert fp.vendor == "mongodb"
-    assert fp.version is not None and fp.version.startswith("7")
+    assert fp.version is not None
+    if mongo_container.major is not None:
+        assert fp.version.startswith(mongo_container.major)
     assert fp.edition in {"community", "enterprise"}
     assert isinstance(fp.extras["max_wire_version"], int)
     assert fp.extras["auth_mode"] == "scram"

@@ -27,7 +27,7 @@ Source: `backend/src/meho_backplane/connectors/postgres/`.
 
 - **`PostgresConnector`** (`connector.py`) — `Connector` subclass. Class
   attributes: `product="postgres"`, `version="16"`, `impl_id="postgres-wire"`,
-  `supported_version_range=">=13,<18"`, `priority=1` (outranks a
+  `supported_version_range=">=15,<19"`, `priority=1` (outranks a
   `GenericRestConnector` auto-shim). Owns the connect/close lifecycle
   (`_connection` async context manager), `fingerprint`, `probe`, the eight op
   handlers, `register_operations`, and the `execute` dispatcher shim.
@@ -254,3 +254,10 @@ operator-less probe path resolves here), `tcp_unreachable` (`OSError`), and
 - Sibling read-only connector: `docs/codebase/connectors-loki.md`.
 - Task #2236; Initiative #2228 (data-tier + hypervisor connector coverage);
   establishes the DB-connector shape for mongodb (#2237).
+
+## Supported versions
+
+The range is `>=15,<19`: the PostgreSQL releases the vendor still supports.
+CI runs the container tests on PostgreSQL 16, 17 and 18
+(`backend/tests/integration/test_connectors_postgres_container.py`). A target
+detected as PostgreSQL 13 or 14 is not picked; the error names the range.

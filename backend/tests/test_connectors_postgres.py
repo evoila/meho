@@ -282,23 +282,30 @@ def test_postgres_resolves_versioned_and_wildcard_and_appears_in_registry() -> N
     assert resolve_connector(fresh) is PostgresConnector
 
 
-def test_supported_version_range_excludes_eol_postgres_12() -> None:
-    """AC: the advertised range starts at 13, not the EOL 12.
+def test_supported_version_range_follows_vendor_support() -> None:
+    """AC: the range is 15 to 18, the releases the vendor still supports.
 
-    ``postgres.replication`` reads ``pg_stat_wal_receiver.written_lsn`` /
-    ``flushed_lsn`` -- the columns that replaced 12's single ``received_lsn`` in
-    PostgreSQL 13 (https://www.postgresql.org/docs/13/monitoring-stats.html) --
-    so advertising the (EOL) 12 would parse-error that op on a 12 standby.
-    Matched with the same ``SpecifierSet`` the resolver applies, 12 must fall
-    outside the range while the written_lsn/flushed_lsn-bearing releases stay in.
+    Matched with the same ``SpecifierSet`` the resolver applies. 13 and 14 are
+    out of vendor support, and 19 is not tested yet.
     """
     version_range = PostgresConnector.supported_version_range
     assert version_range is not None
     spec = SpecifierSet(version_range)
-    assert Version("12") not in spec
-    assert Version("13") in spec
-    assert Version("17") in spec
-    assert Version("18") not in spec
+    for version in ("12", "13", "14", "19"):
+        assert Version(version) not in spec, version
+    for version in ("15", "16", "17", "18"):
+        assert Version(version) in spec, version
+
+
+def test_connector_fit_names_the_range_for_an_old_postgres() -> None:
+    """AC: a target on PostgreSQL 13 is not served; the warning names the range."""
+    from meho_backplane.checks.connector_fit import connector_fit
+
+    target = _PgTarget()
+    target.fingerprint = type("_FP", (), {"version": "13"})()
+    fit = connector_fit("postgres-wire-16", target)
+    assert fit.warning is not None
+    assert PostgresConnector.supported_version_range in fit.warning
 
 
 def test_every_op_is_safe_read_only_with_closed_schema() -> None:

@@ -13,7 +13,7 @@ at **three layers** — create/update, a connect-time pre-check, and the
 socket boundary itself — and is overridable only through an explicit,
 operator-configured allowlist env var.
 
-The socket-boundary layer (evoila-bosnia/meho-internal#275) is what
+The socket-boundary layer is what
 makes the guard robust against a resolver whose answer changes *between*
 the screen and the connect (DNS rebinding, split-horizon flip). Screening
 a hostname and then handing the *name* to httpx leaves httpx free to
@@ -205,9 +205,7 @@ private-range example.
 
 ## References
 
-- Task: evoila-bosnia/meho-internal#153 (parent backlog #101, goal #87)
-- Socket-boundary pinning: evoila-bosnia/meho-internal#275 (F13, the
-  2026-09-06 security review) — bind SSRF destination checks to the
+- Socket-boundary pinning: binds the SSRF destination check to the
   actual HTTP connection.
 - OWASP SSRF Prevention Cheat Sheet:
   <https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html>

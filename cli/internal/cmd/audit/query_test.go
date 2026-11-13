@@ -103,7 +103,7 @@ func TestBuildAuditQueryRequestEmptyOptsWireShape(t *testing.T) {
 func TestBuildAuditQueryRequestEveryFlagLandsOnWire(t *testing.T) {
 	opts := queryOptions{
 		Target:        "vcenter-lab",
-		Principal:     "damir",
+		Principal:     "operator-a",
 		OpID:          "vsphere.vm.*",
 		OpClass:       "write",
 		ResultStatus:  "ok",
@@ -127,7 +127,7 @@ func TestBuildAuditQueryRequestEveryFlagLandsOnWire(t *testing.T) {
 	wire := string(raw)
 	for _, want := range []string{
 		`"target":"vcenter-lab"`,
-		`"principal":"damir"`,
+		`"principal":"operator-a"`,
 		`"op_id":"vsphere.vm.*"`,
 		`"op_class":"write"`,
 		`"result_status":"ok"`,
@@ -226,7 +226,7 @@ func TestRunQueryHappyPathTable(t *testing.T) {
 			Rows: []api.AuditEntry{{
 				Id:           mustUUID(t, "00000000-0000-0000-0000-000000000001"),
 				Ts:           mustTS(t, "2026-05-13T15:42:11Z"),
-				PrincipalSub: "damir",
+				PrincipalSub: "operator-a",
 				TargetName:   &tname,
 				Method:       "GET",
 				Path:         "/api/v1/vsphere/vm/list",
@@ -252,7 +252,7 @@ func TestRunQueryHappyPathTable(t *testing.T) {
 	for _, want := range []string{
 		"AUDIT_ID", "TIME", "TENANT", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS",
 		"00000000-0000-0000-0000-000000000001",
-		"damir", "vcenter-lab", "vsphere.vm.list", "read", "ok",
+		"operator-a", "vcenter-lab", "vsphere.vm.list", "read", "ok",
 		"NEXT: --cursor=opaque-next-cursor",
 	} {
 		if !strings.Contains(out, want) {
@@ -311,7 +311,7 @@ func TestRunQueryJSONPreservesPayloadIntegerPrecision(t *testing.T) {
 		// through json.Marshal's float path; the operator-side
 		// guarantee is "the bytes the backend wrote, unchanged".
 		_, _ = w.Write([]byte(`{"rows":[{"id":"00000000-0000-0000-0000-000000000001",` +
-			`"ts":"2026-05-13T15:42:11Z","tenant_id":null,"principal_sub":"damir",` +
+			`"ts":"2026-05-13T15:42:11Z","tenant_id":null,"principal_sub":"operator-a",` +
 			`"principal_name":null,"target_id":null,"target_name":null,` +
 			`"method":"GET","path":"/x","status_code":200,"request_id":null,` +
 			`"duration_ms":null,"payload":{"hit_count":9007199254740993},` +
@@ -506,7 +506,7 @@ func TestRunQueryJSONCarriesTenant(t *testing.T) {
 		_, _ = w.Write([]byte(`{"rows":[{"id":"00000000-0000-0000-0000-000000000001",` +
 			`"ts":"2026-05-13T15:42:11Z",` +
 			`"tenant_id":"22222222-2222-2222-2222-222222222222","tenant_name":"team-a",` +
-			`"principal_sub":"damir","principal_name":null,"target_id":null,"target_name":null,` +
+			`"principal_sub":"operator-a","principal_name":null,"target_id":null,"target_name":null,` +
 			`"method":"GET","path":"/x","status_code":200,"request_id":null,` +
 			`"duration_ms":null,"payload":{},"op_id":"x.y","op_class":"read",` +
 			`"result_status":"ok","parent_audit_id":null,"agent_session_id":null,` +

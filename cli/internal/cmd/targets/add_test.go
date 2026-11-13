@@ -29,7 +29,7 @@ const createdTargetJSON = `{
   "name": "vault-lab",
   "aliases": [],
   "product": "vault",
-  "host": "vault.evba.lab",
+  "host": "vault.example.test",
   "port": null,
   "fqdn": null,
   "auth_model": "shared_service_account",
@@ -134,7 +134,7 @@ func TestAddMissingRequiredFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"missing product", []string{"vault-lab", "--host", "vault.evba.lab"}, "product"},
+		{"missing product", []string{"vault-lab", "--host", "vault.example.test"}, "product"},
 		{"missing host", []string{"vault-lab", "--product", "vault"}, "host"},
 	}
 	for _, c := range cases {
@@ -182,13 +182,13 @@ func TestAddSuccessRendersTargetAndOmitsTenantID(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	stdout, stderr, err := runAddCmd(t, srv.URL,
-		"vault-lab", "--product", "vault", "--host", "vault.evba.lab")
+		"vault-lab", "--product", "vault", "--host", "vault.example.test")
 	if err != nil {
 		t.Fatalf("add: %v\nstderr=%s", err, stderr.String())
 	}
 
 	// Required fields present, tenant_id absent.
-	if gotBody["name"] != "vault-lab" || gotBody["product"] != "vault" || gotBody["host"] != "vault.evba.lab" {
+	if gotBody["name"] != "vault-lab" || gotBody["product"] != "vault" || gotBody["host"] != "vault.example.test" {
 		t.Errorf("request body missing required fields: %v", gotBody)
 	}
 	if _, leaked := gotBody["tenant_id"]; leaked {
@@ -205,7 +205,7 @@ func TestAddSuccessRendersTargetAndOmitsTenantID(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"vault-lab", "vault", "vault.evba.lab", "shared_service_account"} {
+	for _, want := range []string{"vault-lab", "vault", "vault.example.test", "shared_service_account"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout should render created-target field %q:\n%s", want, out)
 		}
@@ -297,7 +297,7 @@ func TestAddSetOptionalsMapToSnakeCaseFields(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	_, stderr, err := runAddCmd(t, srv.URL,
-		"vault-lab", "--product", "vault", "--host", "vault.evba.lab",
+		"vault-lab", "--product", "vault", "--host", "vault.example.test",
 		"--alias", "vault-a", "--alias", "vault-b",
 		"--version", "1.x", "--port", "8200", "--fqdn", "vault.corp",
 		"--secret-ref", "tenants/22222222-2222-2222-2222-222222222222/vault-lab",
@@ -357,7 +357,7 @@ func TestAddServer422SurfacesBodyVerbatim(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	_, stderr, err := runAddCmd(t, srv.URL,
-		"vault-lab", "--product", "nope", "--host", "vault.evba.lab")
+		"vault-lab", "--product", "nope", "--host", "vault.example.test")
 	if err == nil {
 		t.Fatalf("expected a non-nil error on 422")
 	}

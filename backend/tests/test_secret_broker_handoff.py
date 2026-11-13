@@ -26,7 +26,7 @@ import json
 import secrets
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import httpx
@@ -667,6 +667,39 @@ async def test_import_refuses_a_handoff_with_a_broken_key(
 
     assert _VALUE not in str(excinfo.value)
     assert instances.store_b.writes == []
+
+
+async def test_import_writes_only_to_a_vault_place(
+    instances: _Instances, store_target: None
+) -> None:
+    exported = await _export_on_a(instances)
+    instances.on_b()
+    linux_sink = "linux:seat-host/home/agent/.config/meho/key#agent"
+    run_remote = AsyncMock()
+
+    with (
+        patch(
+            "meho_backplane.connectors.linux.secret_endpoint.run_remote_bash_with_sudo",
+            run_remote,
+        ),
+        pytest.raises(SecretHandoffRefusedError, match="only to a 'vault:' place") as excinfo,
+    ):
+        await secret_handoff_import(
+            _operator(_TENANT_B),
+            None,
+            {
+                "handoff_token": exported["handoff_token"],
+                "store": _STORE_TARGET,
+                "to": linux_sink,
+            },
+        )
+    assert "still usable" in str(excinfo.value)
+    assert exported["handoff_token"] not in str(excinfo.value)
+    # The handoff was not used, and no SSH ran.
+    assert instances.store_a.unwrap_calls == 0
+    assert instances.remote_calls == []
+    assert exported["handoff_token"] in instances.store_a.handoffs
+    run_remote.assert_not_awaited()
 
 
 async def test_import_refuses_a_store_target_that_is_not_vault(instances: _Instances) -> None:

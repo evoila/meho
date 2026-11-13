@@ -39,22 +39,34 @@ the row. (For a credential-class op the preview is suppressed to ``None``;
 ``secret.move`` carries no value to suppress, so surfacing the refs is
 both safe and the point.) ``build_proposed_effect`` wraps the returned
 dict as ``{"op_class": "other", "preview": <this dict>}``.
+
+A ``linux:`` sink the path check refuses
+========================================
+
+The run would refuse such a sink, so the call never waits for approval:
+:func:`check_secret_move_sink` is the op's params check
+(:func:`~meho_backplane.operations._validate.register_params_check`). The
+dispatcher and ``preview_operation`` refuse the call as ``invalid_params``
+before the policy gate, so no approval card is made. The builder declines
+for such a sink too.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.connectors.linux.secret_endpoint import parse_linux_secret_ref
 from meho_backplane.connectors.secret.endpoints import parse_secret_ref
 from meho_backplane.operations._preview import (
     PreviewContext,
     register_preview_builder,
 )
+from meho_backplane.operations._validate import params_problem, register_params_check
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.secret.endpoints import SecretRef
 
-__all__ = ["build_secret_move_preview"]
+__all__ = ["build_secret_move_preview", "check_secret_move_sink"]
 
 
 def _ref_summary(spec: SecretRef) -> dict[str, str]:
@@ -66,6 +78,40 @@ def _ref_summary(spec: SecretRef) -> dict[str, str]:
     a value.
     """
     return {"kind": spec.kind, "ref": spec.ref}
+
+
+def _linux_sink_refusal(raw_to: str) -> str | None:
+    """The path check's reason when *raw_to* is a ``linux:`` place it refuses."""
+    try:
+        sink = parse_secret_ref(raw_to)
+    except ValueError:
+        return None  # the run reports a malformed ref itself
+    if sink.kind != "linux":
+        return None
+    try:
+        parse_linux_secret_ref(sink.ref)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def check_secret_move_sink(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Params check of ``secret.move``: refuse a ``linux:`` sink the run would refuse.
+
+    No I/O: the path check reads only the ref. The reason names the ref's
+    parts (target, path, owner), never a value.
+    """
+    raw_to = params.get("to")
+    if not isinstance(raw_to, str):
+        return None
+    reason = _linux_sink_refusal(raw_to)
+    if reason is None:
+        return None
+    return params_problem(
+        "to",
+        "a 'linux:' place inside the home of an owner that is not root",
+        reason,
+    )
 
 
 async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -87,6 +133,8 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
         sink = parse_secret_ref(raw_to)
     except ValueError:
         return None
+    if _linux_sink_refusal(raw_to) is not None:
+        return None
 
     summary: dict[str, Any] = {
         "action": "secret.move",
@@ -100,8 +148,9 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
 
 
 def _register_secret_move_preview_builder() -> None:
-    """Wire the ``secret.move`` park-time preview builder. Import-time."""
+    """Wire the ``secret.move`` preview builder and params check. Import-time."""
     register_preview_builder("secret.move", build_secret_move_preview)
+    register_params_check("secret.move", check_secret_move_sink)
 
 
 _register_secret_move_preview_builder()

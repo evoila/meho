@@ -1344,6 +1344,11 @@ async def _write_audit_row(
         payload["principal_name"] = principal_name
     # #5239: the role of a platform admin without a group in this tenant.
     payload.update(tenant_role_source_payload(operator))
+    # The group kind the policy file's bindings gave the person who acted on
+    # this row (POLICY_APPROVER_ROUTING), so a decision row says where the
+    # approver's right came from.
+    if operator.bound_kind is not None:
+        payload["bound_kind"] = operator.bound_kind.value
     # The login client of the person who acted on this row (the requester on
     # a "request" row, the reviewer on a "decision" row), when
     # AUDIT_CLIENT_IDENTITY is on.

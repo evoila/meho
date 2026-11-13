@@ -50,7 +50,7 @@ from starlette.requests import Request
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.delegation import actor_delegation
-from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, RoleGroup, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.operations._audit import work_ref_var
@@ -759,6 +759,38 @@ async def test_platform_admin_decision_row_names_the_role_source(session: AsyncS
         by_path = {row.path: row.payload for row in rows}
     assert by_path["approval.decision"]["tenant_role_source"] == "platform_admin"
     assert "tenant_role_source" not in by_path["approval.request"]
+
+
+@pytest.mark.asyncio
+async def test_a_decision_row_names_the_bound_kind_of_the_approver(session: AsyncSession) -> None:
+    """The approver's right came from a binding of the policy file."""
+    requester = _make_operator(sub="requester-sub")
+    reviewer = _make_operator(sub="reviewer-sub", role=TenantRole.READ_ONLY).model_copy(
+        update={"approver": True, "bound_kind": RoleGroup.APPROVERS}
+    )
+    params: dict[str, Any] = {}
+    pending = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        await approve_request(s2, pending.id, operator=reviewer, params=params)
+        await s2.commit()
+
+    async with get_sessionmaker()() as fresh:
+        rows = (
+            await fresh.execute(select(AuditLog).where(AuditLog.method == "APPROVAL"))
+        ).scalars()
+        by_path = {row.path: row.payload for row in rows}
+    assert by_path["approval.decision"]["bound_kind"] == "Approvers"
+    assert "bound_kind" not in by_path["approval.request"]
 
 
 @pytest.mark.asyncio

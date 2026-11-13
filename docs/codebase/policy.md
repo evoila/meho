@@ -97,13 +97,15 @@ is one sentence that names the entry:
 - **Routing and the role floor** (`policy/validate.py`,
   `_routing_floor_mistakes`): only Admins approve an operation that needs
   the `tenant_admin` role (for example `targets.register`). For each known
-  operation with that floor, the entries are checked in their order: an
-  entry that fits it (by its category, connector, and a `risk` at or above
-  its level) and does not ask Admins is a mistake ("`routing[N]` fits
+  operation with that floor, the check works like the run: for each risk
+  level the operation can wait at (its level and every level above), the
+  first entry that fits wins (by its category, its connector, and a
+  `risk` that is that level, or no `risk`). Only that entry is checked.
+  When it does not ask Admins, that is a mistake ("`routing[N]` fits
   `OP` of connector `C`, but only MEHO-Admins may approve it and the entry
-  does not ask them. It would wait until it expires."). An entry without
-  `risk` that fits ends the check for that operation, because it always
-  wins.
+  does not ask them. It would wait until it expires."). So an earlier
+  entry with `risk: caution` that asks Admins covers the `caution` level,
+  and a later entry is not checked at that level.
 
 At most 50 mistakes are listed, then one line says how many more there
 are.

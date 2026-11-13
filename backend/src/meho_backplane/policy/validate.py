@@ -200,36 +200,48 @@ def _routing_floor_mistakes(
     Only Admins may approve an operation with the ``tenant_admin`` role
     floor (for example ``targets.register``), at every risk level. Routing
     only narrows, so an entry without Admins would leave such a change with
-    nobody to approve it. The entries are checked in their order: an entry
-    without ``risk`` that fits the operation is the one that wins, so the
-    entries after it are not checked for that operation. An entry with
-    ``risk`` may fit when its level is at or above the operation's level.
+    nobody to approve it. The check works like the run: for each risk level
+    the operation can wait at, the first entry that fits that level wins,
+    and only that entry is checked. An entry with ``risk`` fits only that
+    level; an entry without ``risk`` fits every level.
     """
     mistakes: list[str] = []
     for op in ops:
         if role_floor_for(op.coords.op_id) is None:
             continue
         classified = classify(op.coords, entries, taxonomy)
-        lowest = _lowest_level(op, classified.risk)
-        for index, raw in enumerate(raw_routes):
-            match = raw.get("match") or {}
-            connector, risk = match.get("connector"), match.get("risk")
-            if match.get("category") is not None and match["category"] != classified.category:
+        for level in RISK_LEVELS[_lowest_level(op, classified.risk) :]:
+            winner = _first_route(raw_routes, op, classified.category, level)
+            if winner is None:
                 continue
-            if connector is not None and not fnmatchcase(op.coords.connector_id, connector):
-                continue
-            if risk is not None and RISK_LEVELS.index(risk) < lowest:
-                continue
-            kinds = today_kinds(risk or RISK_LEVELS[lowest], op.coords.op_id)
-            if not {str(kind) for kind in raw.get("approvers") or []} & set(kinds):
-                mistakes.append(
+            index, approvers = winner
+            kinds = today_kinds(level, op.coords.op_id)
+            if not approvers & set(kinds):
+                sentence = (
                     f"`routing[{index}]` fits `{op.coords.op_id}` of connector "
                     f"`{op.coords.connector_id}`, but only {group_names(kinds)} may approve "
                     "it and the entry does not ask them. It would wait until it expires."
                 )
-            if risk is None:
-                break
+                if sentence not in mistakes:
+                    mistakes.append(sentence)
     return mistakes
+
+
+def _first_route(
+    raw_routes: Sequence[dict[str, Any]], op: KnownOp, category: str | None, level: str
+) -> tuple[int, set[str]] | None:
+    """The index and approvers of the first routing entry that fits *op* at *level*."""
+    for index, raw in enumerate(raw_routes):
+        match = raw.get("match") or {}
+        if match.get("category") is not None and match["category"] != category:
+            continue
+        connector = match.get("connector")
+        if connector is not None and not fnmatchcase(op.coords.connector_id, connector):
+            continue
+        if match.get("risk") is not None and match["risk"] != level:
+            continue
+        return index, {str(kind) for kind in raw.get("approvers") or []}
+    return None
 
 
 def _install_wait_warnings(entries: Sequence[ClassificationEntry]) -> list[str]:

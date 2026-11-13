@@ -441,6 +441,28 @@ def test_an_earlier_entry_that_always_fits_shadows_a_later_one() -> None:
     assert mistakes == []
 
 
+def test_an_earlier_entry_with_a_risk_level_shadows_a_later_one_at_that_level() -> None:
+    mistakes = _check_with_floored_op(
+        [
+            {"match": {"connector": "targets-*", "risk": "caution"}, "approvers": ["Admins"]},
+            {"match": {"risk": "caution"}, "approvers": ["SA-Operators"]},
+        ]
+    )
+
+    assert mistakes == []
+
+
+def test_a_later_entry_is_checked_at_the_levels_an_earlier_one_does_not_fit() -> None:
+    mistakes = _check_with_floored_op(
+        [
+            {"match": {"connector": "targets-*", "risk": "caution"}, "approvers": ["Admins"]},
+            {"match": {"connector": "targets-*"}, "approvers": ["SA-Operators"]},
+        ]
+    )
+
+    assert len(mistakes) == 1 and mistakes[0].startswith("`routing[1]` fits `targets.register`")
+
+
 def test_the_diff_names_added_changed_and_removed_routing_entries() -> None:
     before = [
         {"match": {"category": "network"}, "approvers": ["Admins"]},

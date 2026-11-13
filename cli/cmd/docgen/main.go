@@ -159,13 +159,18 @@ func render(root *cobra.Command) string {
 		"identities side by side. `meho login <url> --profile <name>` stores the login " +
 		"under that name. The flag wins over `$MEHO_PROFILE`.\n")
 	sb.WriteString("- `--verbose`, `-v` — enable verbose output.\n")
-	sb.WriteString("- `--work-ref` — external change-ticket reference " +
-		"(`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the " +
+	sb.WriteString("- `--work-ref` — external change-ticket reference, any ticket id on one " +
+		"line (for example `gh:evoila/meho#13` or `CHG0012345`; default: `$MEHO_WORK_REF`). " +
+		"The CLI sends it as the " +
 		"`Meho-Work-Ref` header on every backplane request, so the audit rows carry it. " +
 		"Five commands have their own `--work-ref` flag that tags the run with the " +
 		"reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, " +
 		"and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the " +
-		"header. List commands filter by reference with `--filter-work-ref`.\n\n")
+		"header. List commands filter by reference with `--filter-work-ref`. " +
+		"The backplane cleans every ticket id with one rule: it removes white space at both " +
+		"ends, refuses an empty value, control characters (also a tab inside the id) and " +
+		"invisible characters, allows at most 256 characters, and stores the text in " +
+		"Unicode form NFC.\n\n")
 	sb.WriteString("## Current tenant\n\n")
 	sb.WriteString("One login can be in several tenants. MEHO then works in one current " +
 		"tenant, and every command sends it in the `Meho-Tenant` header. Choose it with " +

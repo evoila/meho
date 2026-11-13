@@ -15,15 +15,19 @@ import (
 
 func TestValidWorkRef(t *testing.T) {
 	for ref, want := range map[string]bool{
-		"gh:evoila/meho#13":     true,
-		"gh:owner/repo.name#1":  true,
-		"":                      false,
-		"JIRA-12":               false,
-		"gh:evoila/meho":        false,
-		"gh:evoila/meho#0":      false,
-		"gh:evoila meho/x#1":    false,
-		"gh:evoila/meho#13 x":   false,
-		"github:evoila/meho#13": false,
+		"gh:evoila/meho#13":    true,
+		"gh:owner/repo.name#1": true,
+		"CHG0012345":           true,
+		"OPS-123":              true,
+		"INC 42 / step\t2":     true,
+		"Änderung-7":           true,
+		"":                     false,
+		"   ":                  false,
+		"OPS-123\n":            false,
+		"OPS-123\nX-Other: 1":  false,
+		"CHG1\r2":              false,
+		"CHG\x001":             false,
+		"CHG\x7f1":             false,
 	} {
 		if got := ValidWorkRef(ref); got != want {
 			t.Errorf("ValidWorkRef(%q) = %v; want %v", ref, got, want)

@@ -96,6 +96,12 @@ AGENT_MODEL_BACKENDS: Final[tuple[str, ...]] = ("anthropic", "openai", "bedrock"
 #: keeps it and logs what ``on`` would refuse; ``on`` refuses the call.
 AGENT_GRANT_REQUIRED_MODES: Final[tuple[str, ...]] = ("off", "observe", "on")
 
+#: The values ``APPROVAL_SIGN_IN_LEVEL`` accepts (#6281). ``off`` keeps the
+#: checks of an approval sign-in as before; ``observe`` also logs a token
+#: without the approval level; ``required`` refuses it; ``auto`` (the
+#: default) refuses it when the realm gives the level, else observes.
+APPROVAL_SIGN_IN_LEVEL_MODES: Final[tuple[str, ...]] = ("off", "observe", "auto", "required")
+
 #: Truthy spellings accepted by :func:`_parse_bool`. Anything else
 #: (including the empty string and "disabled") is treated as ``False``
 #: so a misconfigured env var never silently enables a guarded surface.
@@ -1314,6 +1320,19 @@ class Settings(BaseModel):
         on the command line or REST counts as a fresh sign-in. An ``acr``
         alone never replaces a recent ``auth_time``. Comma-separated, via
         ``APPROVAL_ONE_TIME_CODE_ACR_VALUES``.
+    approval_sign_in_level:
+        Whether an approve on the command line or REST needs the approval
+        level in the token's ``acr`` claim (#6281). Only the approval
+        sign-in flow of the realm gives the level ``meho-approve``; the
+        passkey touch level ``meho-touch`` counts too. ``off``: the checks
+        as before. ``observe``: the same, and MEHO logs
+        ``approval_sign_in_level_missing`` for a token without the level.
+        ``required``: such a token gets the same ``401`` as an old
+        sign-in. ``auto`` (the default): ``observe`` only while MEHO's
+        check of the approval sign-in (``approvals.sign_in`` in
+        ``/api/v1/health``) shows for sure that the realm does not give the
+        level, else ``required``, also when the check failed. Any other value
+        stops the start. Set via ``APPROVAL_SIGN_IN_LEVEL``.
     approval_allow_delegated_decision:
         Lab-class switch for **delegated** approval decisions (#3693).
         A delegated decision is an approve or reject whose ``reason``
@@ -1533,6 +1552,13 @@ class Settings(BaseModel):
         person gets the value on the command line, in the console or over
         REST. It stays off until model tests show it helps. Env
         ``MCP_REVEAL_FETCH``.
+    mcp_approval_exit_code:
+        Off by default. When on, the ``resume_outcome`` of an approval on the
+        MCP tools ``meho_approvals_list`` and ``meho_approvals_get`` also has
+        ``exit_code``: the exit code of an approved script run. When off, the
+        MCP answer is the same as before. REST, the command line and the
+        console always show it. It stays off until model tests show it helps.
+        Env ``MCP_APPROVAL_EXIT_CODE``.
     policy_classification:
         Off by default. When on, each connector, operation group and
         operation can carry a category, labels and an "always wait" mark,
@@ -1951,6 +1977,9 @@ class Settings(BaseModel):
     approval_presence_touch_valid_seconds: int = Field(default=120, ge=30, le=600)
     # #3979 -- the acr values that mean a one-time code step. Empty = off.
     approval_one_time_code_acr_values: tuple[str, ...] = ()
+    # #6281 -- does an approve on the command line or REST need the
+    # approval level in ``acr``? off | observe | auto | required.
+    approval_sign_in_level: str = "auto"
     # #4622 -- sandbox mode: a standing grant may also cover deletes, only
     # on an instance for disposable test systems. Both read at boot only.
     sandbox_mode: bool = False
@@ -2283,6 +2312,9 @@ class Settings(BaseModel):
     # evaluator (or the test path without a runner) can opt out.
     sensor_runner_enabled: bool = True
     sensor_runner_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    # A Sensor whose target refuses the login this many times in a row is
+    # paused, so a stale credential is not tried on every tick.
+    sensor_auth_failure_park_threshold: int = Field(default=3, ge=1, le=1000)
     # #2763 — evaluation-loop watchdog. A stall is "no completed runner tick
     # for stall_after_ticks x tick_interval_seconds" (default 6 x 10 s = 60 s);
     # the threshold scales with the tick grid so a deployment that slows the
@@ -2455,6 +2487,7 @@ class Settings(BaseModel):
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = False
     policy_engine_shadow: bool = False
     #: Absolute URL of the external vendor-document corpus search
@@ -2539,6 +2572,14 @@ class Settings(BaseModel):
     #: Only the outcome changes, never the hits or their order. Set via
     #: ``SEARCH_CLEAR_LEAD``.
     search_clear_lead: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Node size and reserved room in ``k8s.node.list`` (#4652), behind a
+    #: switch that is off by default. When on, each node row also has
+    #: ``capacity``, ``allocatable``, ``requested`` and ``requests_error``,
+    #: and the op's description, ``llm_instructions`` and response schema
+    #: name them (:mod:`meho_backplane.connectors.kubernetes._node_resources`).
+    #: The node list then also reads the pods of all namespaces. Off: the op
+    #: is as before. Set via ``K8S_NODE_LIST_RESOURCES``.
+    k8s_node_list_resources: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Wider ``preview_operation`` for typed writes (#5074), behind a switch
     #: that is off by default. When on, a typed write previews also when it
     #: does not carry ``requires_approval``, and a credential write with its
@@ -2677,6 +2718,19 @@ class Settings(BaseModel):
         if value not in AGENT_GRANT_REQUIRED_MODES:
             allowed = ", ".join(AGENT_GRANT_REQUIRED_MODES)
             raise ValueError(f"AGENT_GRANT_REQUIRED must be one of: {allowed}. Got: {value!r}")
+        return value
+
+    @field_validator("approval_sign_in_level")
+    @classmethod
+    def _approval_sign_in_level_must_be_known(cls, value: str) -> str:
+        """Stop the start when ``APPROVAL_SIGN_IN_LEVEL`` is not off, observe, auto or required.
+
+        A typo must not turn the approval level check off, so an unknown
+        value fails at startup.
+        """
+        if value not in APPROVAL_SIGN_IN_LEVEL_MODES:
+            allowed = ", ".join(APPROVAL_SIGN_IN_LEVEL_MODES)
+            raise ValueError(f"APPROVAL_SIGN_IN_LEVEL must be one of: {allowed}. Got: {value!r}")
         return value
 
     @field_validator("result_cache_redis_url")
@@ -3295,6 +3349,9 @@ def get_settings() -> Settings:
             for chunk in os.environ.get("APPROVAL_ONE_TIME_CODE_ACR_VALUES", "").split(",")
             if chunk.strip()
         ),
+        # #6281 -- does an approve need the approval level in acr?
+        approval_sign_in_level=os.environ.get("APPROVAL_SIGN_IN_LEVEL", "").strip().lower()
+        or "auto",
         # #4622 -- sandbox mode is off unless both settings are set; the
         # boot guards in ``meho_backplane.sandbox_mode`` check them.
         sandbox_mode=parse_bool_env(
@@ -3478,6 +3535,9 @@ def get_settings() -> Settings:
         sensor_runner_tick_interval_seconds=int(
             os.environ.get("SENSOR_RUNNER_TICK_INTERVAL_SECONDS", "10"),
         ),
+        sensor_auth_failure_park_threshold=int(
+            os.environ.get("SENSOR_AUTH_FAILURE_PARK_THRESHOLD", "3"),
+        ),
         sensor_runner_enabled=parse_bool_env(
             os.environ.get("SENSOR_RUNNER_ENABLED", "true"),
         ),
@@ -3541,6 +3601,9 @@ def get_settings() -> Settings:
         mcp_reveal_fetch=parse_bool_env(
             os.environ.get("MCP_REVEAL_FETCH"),
         ),
+        mcp_approval_exit_code=parse_bool_env(
+            os.environ.get("MCP_APPROVAL_EXIT_CODE"),
+        ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),
         ),
@@ -3571,6 +3634,9 @@ def get_settings() -> Settings:
         ),
         search_clear_lead=parse_bool_env(
             os.environ.get("SEARCH_CLEAR_LEAD"),
+        ),
+        k8s_node_list_resources=parse_bool_env(
+            os.environ.get("K8S_NODE_LIST_RESOURCES"),
         ),
         preview_typed_writes=parse_bool_env(
             os.environ.get("PREVIEW_TYPED_WRITES"),

@@ -169,7 +169,7 @@ func TestTouchFlow_IsTheFlowOfTheRealmFile(t *testing.T) {
 		t.Errorf("realm file flow =\n%s\nbootstrap flow =\n%s",
 			strings.Join(got, "\n"), strings.Join(wantTouchFlowLines(), "\n"))
 	}
-	if got := realm.Attributes[loaMapKey]; got != `{"meho-touch":3}` {
+	if got := realm.Attributes[loaMapKey]; got != `{"meho-approve":2,"meho-touch":3}` {
 		t.Errorf("realm file %s = %q", loaMapKey, got)
 	}
 }
@@ -270,8 +270,8 @@ func TestBootstrap_TouchFlowWithOtherSettingsIsNotBound(t *testing.T) {
 	if got := fake.clients[console.ID].AuthenticationFlowBindingOverrides["browser"]; got != "" {
 		t.Errorf("the console is bound to %q, want no browser flow", got)
 	}
-	if fake.calls["PUT /realm"] != 0 {
-		t.Error("the realm was changed")
+	if _, ok := touchLevels(t, fake)[touchACR]; ok {
+		t.Error("the realm got the touch level")
 	}
 	if !slices.ContainsFunc(res.MapperEventsLog, func(e string) bool {
 		return strings.HasPrefix(e, `[skip] login flow "meho approval touch" has another shape (step 14`) &&
@@ -281,24 +281,25 @@ func TestBootstrap_TouchFlowWithOtherSettingsIsNotBound(t *testing.T) {
 	}
 }
 
-// A realm that maps meho-touch to another level is not changed, and the
-// console client is not bound.
+// A realm that maps meho-touch to another level keeps that level, and
+// the console client is not bound. (Level 2 is the approval level: a
+// realm that gives it to meho-touch stops the bootstrap.)
 func TestBootstrap_TouchLevelTakenIsNotChanged(t *testing.T) {
 	fake := newFakeKeycloak()
-	fake.realm["attributes"].(map[string]any)[loaMapKey] = `{"meho-touch":2}`
+	fake.realm["attributes"].(map[string]any)[loaMapKey] = `{"meho-touch":4}`
 	console := seedConsoleClient(fake)
 
 	res, _, err := runBootstrapOnce(t, fake, fullOpts())
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	if fake.calls["PUT /realm"] != 0 {
-		t.Error("the realm was changed")
+	if got := touchLevels(t, fake)[touchACR]; got != 4.0 {
+		t.Errorf("meho-touch level = %v, want 4", got)
 	}
 	if got := fake.clients[console.ID].AuthenticationFlowBindingOverrides["browser"]; got != "" {
 		t.Errorf("the console is bound to %q, want no browser flow", got)
 	}
-	want := "[skip] realm maps meho-touch to level 2, not 3; the console client is not bound"
+	want := "[skip] realm maps meho-touch to level 4, not 3; the console client is not bound"
 	if !slices.Contains(res.MapperEventsLog, want) {
 		t.Errorf("events miss %q: %v", want, res.MapperEventsLog)
 	}
@@ -345,8 +346,8 @@ func TestBootstrap_TouchFlowNeedsEveryStep(t *testing.T) {
 	if _, ok := fake.flows[touchFlowAlias]; ok {
 		t.Error("the touch flow was made")
 	}
-	if fake.calls["PUT /realm"] != 0 || len(fake.clients[console.ID].AuthenticationFlowBindingOverrides) != 1 {
-		t.Error("the realm or the console client was changed")
+	if _, ok := touchLevels(t, fake)[touchACR]; ok || len(fake.clients[console.ID].AuthenticationFlowBindingOverrides) != 1 {
+		t.Error("the realm got the touch level or the console client was changed")
 	}
 	want := `[skip] login flow "meho approval touch" not made: this Keycloak has no step conditional-credential ` +
 		`(Keycloak 26.4 or newer has it); the console client is not bound`
@@ -375,8 +376,8 @@ func TestBootstrap_TouchFlowNeedsUserVerification(t *testing.T) {
 			if _, ok := fake.flows[touchFlowAlias]; ok {
 				t.Error("the touch flow was made")
 			}
-			if fake.calls["PUT /realm"] != 0 || len(fake.clients[console.ID].AuthenticationFlowBindingOverrides) != 1 {
-				t.Error("the realm or the console client was changed")
+			if _, ok := touchLevels(t, fake)[touchACR]; ok || len(fake.clients[console.ID].AuthenticationFlowBindingOverrides) != 1 {
+				t.Error("the realm got the touch level or the console client was changed")
 			}
 			if hasAMRMapper(fake, console.ID) {
 				t.Error("the console client got the amr mapper")

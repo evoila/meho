@@ -1112,3 +1112,95 @@ async def test_run_status_tokens_are_null_before_the_run_succeeds(client: TestCl
     body = poll.json()
     for field in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
         assert body[field] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/v1/agents/triage/run", "/api/v1/agents/triage/run/events"])
+async def test_utf8_work_ref_header_lands_on_run_row_as_sent(client: TestClient, path: str) -> None:
+    """A ticket id sent as UTF-8 in ``Meho-Work-Ref`` is stored as the same text.
+
+    Both REST run routes read the header through ``Header()``. A filter by
+    ``Änderung-7`` must find the run.
+    """
+    await _seed_definition()
+    _install_invoker("triaged: ok")
+    key = make_rsa_keypair("kid-utf8")
+    headers = {"Authorization": f"Bearer {_token(key)}"}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            path,
+            json={"input": "go"},
+            headers={**headers, "Meho-Work-Ref": "Änderung-7".encode()},
+        )
+        assert resp.status_code == 200, resp.text
+        filtered = client.get(
+            "/api/v1/agents/runs", params={"work_ref": "Änderung-7"}, headers=headers
+        )
+    assert filtered.status_code == 200, filtered.text
+    assert [row["work_ref"] for row in filtered.json()] == ["Änderung-7"]
+
+
+def test_header_work_ref_keeps_non_ascii_header_text() -> None:
+    """A UTF-8 header value that Starlette read as latin-1 gets its text back."""
+    from meho_backplane.api.v1.agent_runs import _header_work_ref
+    from meho_backplane.work_ref import WorkRefError
+
+    assert _header_work_ref("Änderung-7".encode().decode("latin-1")) == "Änderung-7"
+    assert _header_work_ref("  gh:evoila/meho#11  ") == "gh:evoila/meho#11"
+    assert _header_work_ref(None) is None
+    with pytest.raises(WorkRefError, match="empty"):
+        _header_work_ref("   ")
+
+
+@pytest.mark.parametrize("ticket", ["Zadanie-Łódź", "Задача-12", "Änderung-7", "gh:evoila/meho#11"])
+def test_bound_work_ref_binds_text_as_it_is(ticket: str) -> None:
+    """``_bound_work_ref`` takes normal text, also letters outside latin-1."""
+    from meho_backplane.api.v1.agent_runs import _bound_work_ref
+    from meho_backplane.operations._audit import work_ref_var
+
+    with _bound_work_ref(f"  {ticket}  "):
+        assert work_ref_var.get() == ticket
+    assert work_ref_var.get() is None
+    with _bound_work_ref("   "):
+        assert work_ref_var.get() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ticket", ["Zadanie-Łódź", "Задача-12", "変更-7"])
+async def test_console_run_stores_ticket_id_unchanged(client: TestClient, ticket: str) -> None:
+    """A console run with a ticket id outside latin-1 runs and stores that id.
+
+    The console takes the id from a form field as normal text. Its stream
+    starts the run with ``_start_run``, which binds the id with
+    ``_bound_work_ref``. The run must finish, and its row must carry
+    exactly the typed text.
+    """
+    from meho_backplane.auth.operator import Operator
+    from meho_backplane.operations._audit import work_ref_var
+    from meho_backplane.ui.routes.agents.run import _start_run
+
+    await _seed_definition()
+    _install_invoker("console answer")
+    operator = Operator(
+        sub="op-user",
+        name="Console Operator",
+        email=None,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.OPERATOR,
+    )
+    run_id = await _start_run(operator, name="triage", input_="go", work_ref=ticket)
+    assert work_ref_var.get() is None
+
+    # Wait for the background run to end, so no task is left running.
+    row: AgentRun | None = None
+    for _ in range(100):
+        async with get_sessionmaker()() as session:
+            row = await session.get(AgentRun, run_id)
+        if row is not None and row.status == "succeeded":
+            break
+        await asyncio.sleep(0.02)
+    assert row is not None
+    assert row.status == "succeeded"
+    assert row.work_ref == ticket

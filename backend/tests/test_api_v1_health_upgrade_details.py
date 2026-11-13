@@ -46,6 +46,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", raising=False)
     monkeypatch.delenv("APPROVAL_ALLOW_SELF_APPROVAL", raising=False)
     monkeypatch.delenv("APPROVAL_ALLOW_DELEGATED_DECISION", raising=False)
+    monkeypatch.delenv("APPROVAL_SIGN_IN_LEVEL", raising=False)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -194,10 +195,18 @@ async def test_approvals_default_posture_and_missing_key() -> None:
         "delegated_decision_posture": "production_own_hand_only",
         "sign_in": {
             "state": "not_checked",
-            "flow": "meho approval sign-in",
+            "flow": "meho approval sign-in level",
             "client": "meho-cli-approve",
             "detail": "keycloak_admin_not_configured",
         },
+        "sign_in_level": "auto",
+        "sign_in_level_in_force": "observe",
+        "sign_in_level_warning": (
+            "MEHO does not require the approval level: APPROVAL_SIGN_IN_LEVEL is auto and "
+            "approvals.sign_in is not_checked, not ok. Give MEHO its Keycloak admin client "
+            "(KEYCLOAK_ADMIN_URL, KEYCLOAK_ADMIN_CLIENT_ID, KEYCLOAK_ADMIN_CLIENT_SECRET; "
+            "keycloakAdmin in the chart)."
+        ),
     }
     by_name = {entry.name: entry for entry in response.features}
     assert set(by_name) == {
@@ -222,6 +231,7 @@ async def test_approvals_follow_the_settings_and_never_carry_the_key(
     monkeypatch.setenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", key)
     monkeypatch.setenv("APPROVAL_ALLOW_SELF_APPROVAL", "true")
     monkeypatch.setenv("APPROVAL_ALLOW_DELEGATED_DECISION", "true")
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "required")
     get_settings.cache_clear()
 
     response = await build_health_response(_operator())
@@ -232,10 +242,13 @@ async def test_approvals_follow_the_settings_and_never_carry_the_key(
         "delegated_decision_posture": "lab_class_delegation_allowed",
         "sign_in": {
             "state": "not_checked",
-            "flow": "meho approval sign-in",
+            "flow": "meho approval sign-in level",
             "client": "meho-cli-approve",
             "detail": "keycloak_admin_not_configured",
         },
+        "sign_in_level": "required",
+        "sign_in_level_in_force": "required",
+        "sign_in_level_warning": None,
     }
     by_name = {entry.name: entry for entry in response.features}
     assert by_name["approval_custody"].configured is True

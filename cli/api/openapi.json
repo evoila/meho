@@ -6617,7 +6617,7 @@
           "knowledge"
         ],
         "summary": "Import Kb Pages",
-        "description": "Import knowledge pages sent in the request into the caller's tenant (#5728).\n\nThe team wiki's CI job calls this after each merge, with the\n``kb_import_only`` login. A ``tenant_admin`` may call it too. Every\npage gets one row in the answer: ``create``, ``update``,\n``unchanged`` or ``skip`` with the reason. ``dry_run`` writes\nnothing. The rules are in :mod:`meho_backplane.kb.page_import`.\n\nBinds ``audit_op_id=\"kb.import\"`` + ``audit_op_class=\"write\"`` and\nthe four counters. The page texts are never in the audit payload.",
+        "description": "Import knowledge pages sent in the request into the caller's tenant (#5728).\n\nThe tenant wiki's CI job calls this after each merge, with the\n``kb_import_only`` login. A ``tenant_admin`` may call it too. Every\npage gets one row in the answer: ``create``, ``update``,\n``unchanged`` or ``skip`` with the reason. ``dry_run`` writes\nnothing. The rules are in :mod:`meho_backplane.kb.page_import`.\n\nBinds ``audit_op_id=\"kb.import\"`` + ``audit_op_class=\"write\"`` and\nthe four counters. The page texts are never in the audit payload.",
         "operationId": "import_kb_pages_api_v1_kb_import_post",
         "parameters": [
           {
@@ -6671,7 +6671,7 @@
           "knowledge"
         ],
         "summary": "Export Kb Pages",
-        "description": "Return the caller's confirmed and candidate generic entries as Markdown pages (#5730).\n\nThe team wiki's CI job calls this with the ``kb_export_only`` login,\nwrites the pages into the wiki and opens a merge request there. An\noperator may call it too (``meho kb export``). MEHO writes nothing.\nThe rules are in :mod:`meho_backplane.kb.page_export`.\n\nBinds ``audit_op_id=\"kb.export\"`` + ``audit_op_class=\"read\"`` and\nthe three counters. The page texts are never in the audit payload.",
+        "description": "Return the caller's confirmed and candidate generic entries as Markdown pages (#5730).\n\nThe tenant wiki's CI job calls this with the ``kb_export_only`` login,\nwrites the pages into the wiki and opens a merge request there. An\noperator may call it too (``meho kb export``). MEHO writes nothing.\nThe rules are in :mod:`meho_backplane.kb.page_export`.\n\nBinds ``audit_op_id=\"kb.export\"`` + ``audit_op_class=\"read\"`` and\nthe three counters. The page texts are never in the audit payload.",
         "operationId": "export_kb_pages_api_v1_kb_export_post",
         "parameters": [
           {
@@ -11690,7 +11690,7 @@
           "sensors"
         ],
         "summary": "Edit Sensor",
-        "description": "Change some fields of one sensor; keep its id, history and dashboards.\n\n``tenant_admin`` only. Only the fields in the body change. The changed\nsensor is checked like a new one: an invalid result is 422\n``sensor_edit_invalid``, an unknown or non-safe operation is 422, and a\nname that is taken is 409. A cross-tenant / absent id is 404\n``sensor_not_found``. After the change the sensor is due at once, so the\nrunner checks it on its next tick. The audit row of the request carries\n``before`` and ``after`` with the changed fields (secret-named values\nhidden).",
+        "description": "Change some fields of one sensor; keep its id, history and dashboards.\n\n``tenant_admin`` only. Only the fields in the body change. The changed\nsensor is checked like a new one: an invalid result is 422\n``sensor_edit_invalid``, an unknown or non-safe operation is 422, and a\nname that is taken is 409. A cross-tenant / absent id is 404\n``sensor_not_found``. After the change the sensor is due at once, so the\nrunner checks it on its next tick. The audit row of the request carries\n``before`` and ``after`` with the changed fields (secret-named values\nhidden).\n\n``status`` (``paused`` or ``active``), sent alone, pauses or resumes the\nsensor. A paused sensor is not run and keeps its id, history and\ndashboards. Pause and resume are safe to send twice.",
         "operationId": "edit_sensor_api_v1_sensors__sensor_id__patch",
         "parameters": [
           {
@@ -27567,6 +27567,11 @@
             "type": "string",
             "nullable": true,
             "title": "Execution Outcome"
+          },
+          "exit_code": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Exit Code"
           }
         },
         "type": "object",
@@ -27649,7 +27654,7 @@
           "flow": {
             "type": "string",
             "title": "Flow",
-            "default": "meho approval sign-in"
+            "default": "meho approval sign-in level"
           },
           "client": {
             "type": "string",
@@ -27686,6 +27691,21 @@
           "sign_in": {
             "$ref": "#/components/schemas/ApprovalSignInStatus",
             "nullable": true
+          },
+          "sign_in_level": {
+            "type": "string",
+            "nullable": true,
+            "title": "Sign In Level"
+          },
+          "sign_in_level_in_force": {
+            "type": "string",
+            "nullable": true,
+            "title": "Sign In Level In Force"
+          },
+          "sign_in_level_warning": {
+            "type": "string",
+            "nullable": true,
+            "title": "Sign In Level Warning"
           }
         },
         "type": "object",
@@ -27695,7 +27715,7 @@
           "delegated_decision_posture"
         ],
         "title": "ApprovalsStatus",
-        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`)."
+        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``\nis the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,\n``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is\nwhat MEHO does now with an approval sign-in that lacks the approval\nlevel: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``\nonly while ``sign_in`` shows for sure that the realm does not give the\nlevel, and ``required`` when it is ``ok`` or its read failed).\n``sign_in_level_warning`` is a short sentence whenever the level is not\nrequired in practice or the read failed, else ``None``."
       },
       "ApproveRequestBody": {
         "properties": {
@@ -27836,6 +27856,15 @@
             },
             "type": "array",
             "title": "Citations"
+          },
+          "answer_source": {
+            "type": "string",
+            "enum": [
+              "local",
+              "upstream"
+            ],
+            "nullable": true,
+            "title": "Answer Source"
           }
         },
         "type": "object",
@@ -27844,7 +27873,7 @@
           "citations"
         ],
         "title": "AskDocsResponse",
-        "description": "Successful response shape for ``/api/v1/ask_docs``.\n\n``answer`` is the grounded, cited answer -- composed strictly from the\nretrieved chunks (no claim without a citation) or, on an empty\nretrieval, the deterministic\n:data:`~meho_backplane.docs_search.NO_GROUNDED_ANSWER` string. Frozen so\nan accidental post-construction mutation surfaces as a pydantic error\nrather than a silently-altered response.\n\n``citations`` is the subset of retrieved chunks the answer relied on,\neach serialised with its resolved navigable ``link`` (#1919) -- the\n**same** citation shape the MCP ``ask_docs`` tool returns, so a client\nconsuming either face resolves citations identically. The list entries\nare the raw :class:`~meho_backplane.docs_search.DocsChunk` fields plus a\n``link`` member; modelled as ``list[dict]`` (not a typed model) because\nthe ``link`` shape is produced by the shared\n:func:`~meho_backplane.docs_search.citation_link_payload` helper, kept as\nthe single source of truth for the citation-link contract."
+        "description": "Successful response shape for ``/api/v1/ask_docs``.\n\n``answer`` is the grounded, cited answer -- composed strictly from the\nretrieved chunks (no claim without a citation) or, on an empty\nretrieval, the deterministic\n:data:`~meho_backplane.docs_search.NO_GROUNDED_ANSWER` string. Frozen so\nan accidental post-construction mutation surfaces as a pydantic error\nrather than a silently-altered response.\n\n``citations`` is the subset of retrieved chunks the answer relied on,\neach serialised with its resolved navigable ``link`` (#1919) -- the\n**same** citation shape the MCP ``ask_docs`` tool returns, so a client\nconsuming either face resolves citations identically. The list entries\nare the raw :class:`~meho_backplane.docs_search.DocsChunk` fields plus a\n``link`` member; modelled as ``list[dict]`` (not a typed model) because\nthe ``link`` shape is produced by the shared\n:func:`~meho_backplane.docs_search.citation_link_payload` helper, kept as\nthe single source of truth for the citation-link contract.\n\n``answer_source`` names the path that wrote the answer: ``local`` (the\nbackplane's own pipeline) or ``upstream`` (the collection backend's answer\nendpoint). It names a path, never document content."
       },
       "AssertionSpec": {
         "properties": {
@@ -29239,7 +29268,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 512,
             "title": "Work Ref",
             "default": ""
           },
@@ -29507,7 +29535,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 512,
             "title": "Work Ref",
             "default": ""
           }
@@ -29814,7 +29841,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -30579,7 +30605,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -30872,8 +30897,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
-            "minLength": 1,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -31208,7 +31231,6 @@
           },
           "work_ref": {
             "type": "string",
-            "minLength": 1,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -40156,7 +40178,7 @@
           "wiki": {
             "$ref": "#/components/schemas/KbWikiSearch",
             "nullable": true,
-            "description": "Only with source='kb' on a tenant that keeps its lessons in a team wiki: the wiki's hits, or why the wiki was not searched. Null otherwise."
+            "description": "Only with source='kb' on a tenant that keeps its lessons in a tenant wiki: the wiki's hits, or why the wiki was not searched. Null otherwise."
           }
         },
         "type": "object",
@@ -40214,8 +40236,6 @@
         "properties": {
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
-            "minLength": 1,
             "title": "Work Ref",
             "description": "The run reference. Calls of the run send it in the Meho-Work-Ref header."
           },
@@ -41135,7 +41155,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
           }
@@ -42105,12 +42124,21 @@
           "severity": {
             "$ref": "#/components/schemas/SensorSeverity",
             "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "paused"
+            ],
+            "nullable": true,
+            "title": "Status"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "SensorUpdate",
-        "description": "Request body for ``PATCH /api/v1/sensors/{sensor_id}``.\n\nEvery field is optional. A field that is left out, or sent as ``null``,\nkeeps its value. At least one field must be set.\n\nTo change the cadence kind, send ``cadence_kind`` with its matching\nfield: ``interval_seconds`` for ``interval``, ``cron_expr`` (and\noptionally ``timezone``) for ``cron``. The field of the old kind is\ncleared."
+        "description": "Request body for ``PATCH /api/v1/sensors/{sensor_id}``.\n\nEvery field is optional. A field that is left out, or sent as ``null``,\nkeeps its value. At least one field must be set.\n\nTo change the cadence kind, send ``cadence_kind`` with its matching\nfield: ``interval_seconds`` for ``interval``, ``cron_expr`` (and\noptionally ``timezone``) for ``cron``. The field of the old kind is\ncleared.\n\n``status`` (``paused`` or ``active``) pauses or resumes the Sensor. It is\nsent alone, without other fields."
       },
       "ServiceGrantCreate": {
         "properties": {

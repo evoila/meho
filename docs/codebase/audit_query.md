@@ -129,7 +129,15 @@ to the database:
 - `operator_sub`, `actor_sub` and `work_ref` have an index, so each must
   also stay under `INDEX_TEXT_MAX_BYTES`;
 - every key and text in `payload`, built by the same function the writer
-  uses (the `client` block and the caller's name included).
+  uses (the `client` block and the caller's name included). The caller's
+  name is the token's name, or the client id of a machine login, as the
+  writer stores it;
+- every number in `payload`: NaN and Infinity cannot be stored as JSON, so
+  they are refused too.
+
+When the check itself fails (for example on a payload nested too deep to
+walk), the call is refused with `audit_row_invalid` and the field
+`payload`.
 
 On a problem the call is refused with `audit_row_invalid`. `extras.field`
 names the value (never its content). A payload value is named by its path,
@@ -138,8 +146,9 @@ its position (`payload.<key 1>`), so the refusal never holds the bad text. Nothi
 approval request is made and no row is written. All ways into the
 dispatcher pass through this one check. `audit_commit_failed` stays for a
 database that is not reachable after the call, and for what is known only
-after the call (`raw_payload`, `redaction_manifest`, the registered agent
-name). The module lists how each text and JSON column is covered, and
+after the call (`raw_payload`, `redaction_manifest`). The registered agent
+name is known before the call, but it is in the database, and the check
+sends no statement there, so it does not check that name. The module lists how each text and JSON column is covered, and
 `tests/test_audit_row_precheck.py` fails when a new column is in no list.
 
 ### Loose rows: the standing check (#4670)

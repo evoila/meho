@@ -29,6 +29,11 @@ phases the parent Initiative names:
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
    Invalid -> structured ``invalid_params`` error. So for a guarded op a
    target the catalogs cannot serve is reported before bad params.
+   Then check that the audit row of the call can be stored
+   (:func:`~meho_backplane.operations.audit_row_precheck.audit_row_problem`,
+   values only, no database statement). A row that can never be stored ->
+   structured ``audit_row_invalid`` error naming the field; nothing is sent
+   to the target and no approval request is made.
 4. Policy gate (G11.2-T3 + T4;
    :func:`~meho_backplane.operations._validate.policy_gate`). **Agent**
    principals resolve a three-state
@@ -88,6 +93,9 @@ Detail payloads land in ``extras``. Codes:
 * ``unknown_connector`` -- the ``connector_id`` matches no connector the
   caller can see (#4031), the same test the discovery meta-tools use.
 * ``invalid_params`` -- params failed JSON Schema validation.
+* ``audit_row_invalid`` -- the audit row of the call can never be stored
+  (for example a NUL character in the ticket id). Refused before the call;
+  ``extras["field"]`` names the value, never its content.
 * ``invalid_op_schema`` -- the **stored** ``parameter_schema`` itself is
   broken: it carries a ``$ref`` the validator cannot resolve within the
   stored schema document (a descriptor ingested before #3095's

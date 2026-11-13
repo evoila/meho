@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""MEHO checks that the audit row of a call can be stored before it sends the call.
+"""MEHO checks the audit row of a call before it sends the call.
 
-A value that the audit table refuses (a NUL character, a text that cannot be
-encoded, a text too long for its index) used to show up only after the call
-to the target: the caller got ``audit_commit_failed`` and the target may
-already hold the change. Now the call is refused first, with
-``audit_row_invalid`` naming the field.
+A value the audit table cannot store is refused with ``audit_row_invalid``,
+which names the field.
 
 The tests cover each way into the dispatcher (a direct call, a step of a
 multi-step operation, a call resumed after approval, and ``call_operation``).
@@ -332,6 +329,64 @@ def test_a_bad_value_under_a_bad_key_keeps_the_safe_path(monkeypatch: pytest.Mon
     problem = audit_row_problem(operator=_operator(), descriptor=_descriptor(), params_hash="ab")
     assert problem is not None
     assert problem.field == "payload.good[0].<key 0>"
+
+
+@pytest.mark.parametrize("number", [float("nan"), float("inf"), float("-inf")])
+def test_a_number_json_cannot_hold_is_named_with_its_path(
+    monkeypatch: pytest.MonkeyPatch, number: float
+) -> None:
+    monkeypatch.setattr(
+        audit_row_precheck,
+        "_build_audit_payload",
+        lambda *_args: {"params_hash": "ab", "cost": {"usd": number}},
+    )
+    problem = audit_row_problem(operator=_operator(), descriptor=_descriptor(), params_hash="ab")
+    assert problem is not None
+    assert problem.field == "payload.cost.usd"
+
+
+def test_a_normal_number_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        audit_row_precheck,
+        "_build_audit_payload",
+        lambda *_args: {"params_hash": "ab", "cost": {"usd": 0.25}},
+    )
+    assert (
+        audit_row_problem(operator=_operator(), descriptor=_descriptor(), params_hash="ab") is None
+    )
+
+
+def test_a_payload_too_deep_to_check_is_refused_as_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deep: dict[str, Any] = {"leaf": "ok"}
+    for _ in range(2000):
+        deep = {"inner": deep}
+    monkeypatch.setattr(audit_row_precheck, "_build_audit_payload", lambda *_args: deep)
+    problem = audit_row_problem(operator=_operator(), descriptor=_descriptor(), params_hash="ab")
+    assert problem is not None
+    assert problem.field == "payload"
+
+
+def test_a_check_that_raises_refuses_the_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(*_args: Any) -> dict[str, Any]:
+        raise ValueError("secret-value")
+
+    monkeypatch.setattr(audit_row_precheck, "_build_audit_payload", _boom)
+    problem = audit_row_problem(operator=_operator(), descriptor=_descriptor(), params_hash="ab")
+    assert problem is not None
+    assert problem.field == "payload"
+    assert "secret-value" not in problem.reason
+
+
+def test_the_client_id_counts_only_for_a_machine_login() -> None:
+    bad_client = "client\x00id"
+    person = _operator().model_copy(update={"name": None, "client_id": bad_client})
+    assert audit_row_problem(operator=person, descriptor=_descriptor(), params_hash="ab") is None
+    service = person.model_copy(update={"principal_kind": PrincipalKind.SERVICE})
+    problem = audit_row_problem(operator=service, descriptor=_descriptor(), params_hash="ab")
+    assert problem is not None
+    assert problem.field == "payload.principal_name"
 
 
 def test_a_long_text_is_allowed_where_no_index_holds_it() -> None:

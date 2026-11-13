@@ -1926,7 +1926,7 @@ retrieval:
 # Kubernetes Secrets *by name* (e.g. `postgres.credentialsSecret`) and
 # leaves the sync mechanism to the consumer's GitOps repo. This matches
 # Goal #11's cross-repo convention where
-# `evoila-bosnia/claude-rdc-hetzner-dc` owns the ExternalSecret manifests.
+# the consumer's own GitOps repository owns the ExternalSecret manifests.
 #
 # Flipping `enabled: true` makes the chart render ExternalSecret CRs for
 # `postgres.credentialsSecret` and (when `eso.keycloak.enabled: true`) the

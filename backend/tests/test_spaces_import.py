@@ -540,3 +540,81 @@ async def test_import_does_not_bring_back_an_ended_membership(world: _World) -> 
     assert _codes(again)[("space", "lab-ok")] == "owner_ended_in_meho"
     assert again["labs_written"] == 0
     assert await _count(SpaceMember) == before
+
+
+def _details(answer: dict[str, Any]) -> dict[tuple[str, str], str]:
+    return {(c["kind"], c["ref"]): c["detail"] for c in answer["conflicts"]}
+
+
+@pytest.mark.asyncio
+async def test_newer_meho_record_conflicts_show_both_values(world: _World) -> None:
+    params = _params(_manifest(), only=["lab-ok"])
+    await spaces_import(_operator(world.tenant), None, params)
+    async with get_sessionmaker()() as session, session.begin():
+        space = (await session.scalars(select(Space))).one()
+        await store.set_member(
+            session,
+            tenant_id=world.tenant,
+            space_id=space.id,
+            member_issuer=_ISSUER,
+            member_sub="bob",
+            role="member",
+            state="disabled",
+            changed_by="admin-1",
+            reason="left",
+        )
+        old = (await session.scalars(select(ResourceAssignment))).one()
+        other = await store.create_space(
+            session,
+            tenant_id=world.tenant,
+            name="lab-new-home",
+            kind="team",
+            owner_issuer=_ISSUER,
+            owner_sub="cy",
+            created_by="admin-1",
+        )
+        await store.reassign(
+            session,
+            tenant_id=world.tenant,
+            assignment_id=old.id,
+            to_space_id=other.id,
+            changed_by="admin-1",
+            reason="moved",
+        )
+    before = (await _count(SpaceMember), await _count(ResourceAssignment))
+    answer = await spaces_import(_operator(world.tenant), None, params)
+    details = _details(answer)
+    member = details[("member", f"bob ({_ISSUER})")]
+    assert "MEHO record is newer" in member
+    assert "MEHO: disabled" in member and "Import: active" in member
+    moved = details[("assignment", "demo-t1")]
+    assert "MEHO record is newer" in moved
+    assert "MEHO: lab-new-home" in moved and "Import: lab-ok" in moved
+    assert (await _count(SpaceMember), await _count(ResourceAssignment)) == before
+    again = await spaces_import(_operator(world.tenant), None, params)
+    assert again["counts"] == answer["counts"]
+    assert (await _count(SpaceMember), await _count(ResourceAssignment)) == before
+
+
+@pytest.mark.asyncio
+async def test_a_moved_owner_stays_and_the_conflict_shows_both_owners(world: _World) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        await store.create_space(
+            session,
+            tenant_id=world.tenant,
+            name="lab-ok",
+            kind="team",
+            owner_issuer=_ISSUER,
+            owner_sub="cy",
+            created_by="admin-1",
+        )
+    answer = await spaces_import(
+        _operator(world.tenant), None, _params(_manifest(), only=["lab-ok"])
+    )
+    detail = _details(answer)[("space", "lab-ok")]
+    assert "MEHO record is newer" in detail
+    assert f"MEHO: cy ({_ISSUER})" in detail and f"Import: ann ({_ISSUER})" in detail
+    async with get_sessionmaker()() as session:
+        space = (await session.scalars(select(Space))).one()
+    assert space.owner_sub == "cy"
+    assert await _count(ResourceAssignment) == 0

@@ -7,9 +7,8 @@
 #
 # Runs the assertions documented in docs/acceptance/install.md against a
 # freshly-installed MEHO instance. Designed to be invoked as the LAST
-# step of the consumer's `install.sh` (the wrapper lives on
-# `claude-rdc-hetzner-dc/manifests/meho/install.sh` per Goal #11
-# cross-repo deps). The verifier's exit code IS the cold-deploy's exit
+# step of the consumer's `install.sh` (the wrapper lives in
+# the consumer's own deploy repository). The verifier's exit code IS the cold-deploy's exit
 # code:
 #
 #   0  → every required check passed
@@ -26,12 +25,12 @@
 #
 #   # LAST action in install.sh:
 #   bash scripts/acceptance/install-verify.sh \
-#     --host meho.evba.lab \
+#     --host meho.example.test \
 #     --expected-git-sha "$TAG" \
 #     --namespace meho
 #
 # Flags:
-#   --host <hostname>          Ingress hostname (default: meho.evba.lab).
+#   --host <hostname>          Ingress hostname. Required.
 #                              The verifier hits https://<hostname>/...
 #                              for the public-surface probes.
 #   --expected-git-sha <sha>   The git SHA the operator passed to
@@ -122,12 +121,12 @@ cold-deploy's exit code:
 
 Usage:
   bash scripts/acceptance/install-verify.sh \
-    --host meho.evba.lab \
+    --host meho.example.test \
     --expected-git-sha "$TAG" \
     --namespace meho
 
 Flags:
-  --host <hostname>          Ingress hostname (default: meho.evba.lab).
+  --host <hostname>          Ingress hostname. Required.
   --expected-git-sha <sha>   The git SHA the operator passed to
                              install.sh --tag. Required.
   --namespace <ns>           Kubernetes namespace (default: meho).
@@ -155,7 +154,7 @@ HELP
 }
 
 # --- Defaults ----------------------------------------------------------
-HOST="meho.evba.lab"
+HOST=""
 EXPECTED_GIT_SHA=""
 NAMESPACE="meho"
 RELEASE="meho"
@@ -193,6 +192,11 @@ while [[ $# -gt 0 ]]; do
         *) echo "install-verify.sh: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+if [[ -z "$HOST" ]]; then
+    echo "install-verify.sh: --host is required" >&2
+    exit 2
+fi
 
 if [[ -z "$EXPECTED_GIT_SHA" ]]; then
     echo "install-verify.sh: --expected-git-sha is required" >&2

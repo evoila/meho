@@ -122,7 +122,7 @@ async def test_the_writer_stores_the_text_with_a_marker(
         result_status="ok",
         duration_ms=1.0,
         raw_payload=answer,
-        redaction_manifest=[{"rule": "r", "sample": next(iter(answer.values()))}],
+        redaction_manifest=[{"rule": "r", "sample": answer}],
     )
     rows = await _rows(audit_id)
     assert len(rows) == 1

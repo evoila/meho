@@ -1,0 +1,97 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Where a Run from the operations page is now (#5111).
+
+  Swapped into ``#operations-run-result-region`` by the Run button
+  (``POST /ui/operations/call``) and again by ``GET /ui/operations/runs/{id}``
+  each time the dialog asks. While ``run.polling`` is true the wrapper asks
+  again every ``poll_seconds`` seconds and is swapped in place
+  (``outerHTML``); a final state drops the ``hx-*`` attributes, so the asking
+  stops.
+
+  ``data-run-lock`` keeps the Run button disabled while the run goes on
+  (``operation-run-lock.js``), so one click is one run.
+  ``data-meho-watch-run`` marks a run that is not over, so ``run-notices.js``
+  shows the "the run has ended" notice later, on any page.
+  ``data-meho-run-seen`` marks an end shown in an open dialog, so no notice
+  follows.
+
+  A stored result, a form error and the link to a waiting approval use the
+  same view as before: ``operations/_result.html``.
+
+  Context:
+    run           -- dict: state / polling / run_id / op_id / connector_id
+                     (see ``run_view.run_view``)
+    poll_seconds  -- int: how often to ask again
+    envelope, error_message, connector_id, op_id, chain -- see ``_result.html``
+-#}
+{% from "_icons.html" import icon %}
+<div
+  id="operations-run-state-{{ run.run_id }}"
+  data-testid="operations-run-state"
+  data-run-state="{{ 'form_error' if error_message else run.state }}"
+  {% if run.polling %}
+  hx-get="/ui/operations/runs/{{ run.run_id }}"
+  hx-trigger="every {{ poll_seconds }}s"
+  hx-target="this"
+  hx-swap="outerHTML"
+  data-run-lock
+  data-meho-watch-run="{{ run.run_id }}"
+  {% else %}
+  data-meho-run-seen="{{ run.run_id }}"
+  {% endif %}
+>
+  {% if error_message or run.state == "finished" %}
+    {% include "operations/_result.html" %}
+  {% elif run.state == "running" %}
+    <div role="status" class="alert alert-info items-start" data-run-status="running">
+      <span class="loading loading-spinner loading-md shrink-0" aria-hidden="true"></span>
+      <div class="min-w-0">
+        <h4 class="text-sm font-semibold">The operation is running.</h4>
+        <p class="text-xs [overflow-wrap:anywhere]">
+          <span class="font-mono">{{ run.op_id }}</span> runs in the background.
+          The result shows here when it ends. You can close this window.
+          Closing does not stop the operation, and a notice tells you when it ends.
+        </p>
+      </div>
+    </div>
+  {% elif run.state == "uncertain" %}
+    <div role="alert" class="alert alert-warning items-start" data-run-status="uncertain">
+      {{ icon("ban", class="size-5 shrink-0") }}
+      <div class="min-w-0">
+        <h4 class="text-sm font-semibold">The outcome is unknown</h4>
+        <p class="text-xs [overflow-wrap:anywhere]">
+          MEHO does not know if <span class="font-mono">{{ run.op_id }}</span>
+          changed anything. Do not run it again. Check the target first.
+        </p>
+      </div>
+    </div>
+  {% elif run.state == "cancelled" %}
+    <div role="alert" class="alert alert-info items-start" data-run-status="cancelled">
+      {{ icon("ban", class="size-5 shrink-0") }}
+      <div class="min-w-0">
+        <h4 class="text-sm font-semibold">The run was cancelled</h4>
+        <p class="text-xs [overflow-wrap:anywhere]">
+          The run of <span class="font-mono">{{ run.op_id }}</span> was cancelled
+          and stored no result. Its audit row, if any, says what was sent.
+        </p>
+      </div>
+    </div>
+  {% else %}
+    {#- ``failed`` (the run crashed or was lost) and ``no_result`` (it ended
+        with no stored result): never "running" forever, and never "done". -#}
+    <div role="alert" class="alert alert-warning items-start" data-run-status="{{ run.state }}">
+      {{ icon("ban", class="size-5 shrink-0") }}
+      <div class="min-w-0">
+        <h4 class="text-sm font-semibold">The run ended without a result</h4>
+        <p class="text-xs [overflow-wrap:anywhere]">
+          The run of <span class="font-mono">{{ run.op_id }}</span> ended and
+          MEHO stored no result. MEHO does not know if the change happened.
+          Check the audit log before you run it again.
+        </p>
+      </div>
+    </div>
+  {% endif %}
+</div>

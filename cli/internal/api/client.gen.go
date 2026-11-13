@@ -18509,6 +18509,9 @@ type ClientInterface interface {
 	// OperationsRunUiOperationsRunDescriptorIdGet request
 	OperationsRunUiOperationsRunDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// OperationsRunStateUiOperationsRunsRunIdGet request
+	OperationsRunStateUiOperationsRunsRunIdGet(ctx context.Context, runId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// OperationsSearchUiOperationsSearchGet request
 	OperationsSearchUiOperationsSearchGet(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -25751,6 +25754,18 @@ func (c *Client) OperationsPreviewUiOperationsPreviewPostWithFormdataBody(ctx co
 
 func (c *Client) OperationsRunUiOperationsRunDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewOperationsRunUiOperationsRunDescriptorIdGetRequest(c.Server, descriptorId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) OperationsRunStateUiOperationsRunsRunIdGet(ctx context.Context, runId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOperationsRunStateUiOperationsRunsRunIdGetRequest(c.Server, runId)
 	if err != nil {
 		return nil, err
 	}
@@ -50347,6 +50362,40 @@ func NewOperationsRunUiOperationsRunDescriptorIdGetRequest(server string, descri
 	return req, nil
 }
 
+// NewOperationsRunStateUiOperationsRunsRunIdGetRequest generates requests for OperationsRunStateUiOperationsRunsRunIdGet
+func NewOperationsRunStateUiOperationsRunsRunIdGetRequest(server string, runId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "run_id", runtime.ParamLocationPath, runId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/operations/runs/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewOperationsSearchUiOperationsSearchGetRequest generates requests for OperationsSearchUiOperationsSearchGet
 func NewOperationsSearchUiOperationsSearchGetRequest(server string, params *OperationsSearchUiOperationsSearchGetParams) (*http.Request, error) {
 	var err error
@@ -55131,6 +55180,9 @@ type ClientWithResponsesInterface interface {
 
 	// OperationsRunUiOperationsRunDescriptorIdGetWithResponse request
 	OperationsRunUiOperationsRunDescriptorIdGetWithResponse(ctx context.Context, descriptorId openapi_types.UUID, reqEditors ...RequestEditorFn) (*OperationsRunUiOperationsRunDescriptorIdGetResponse, error)
+
+	// OperationsRunStateUiOperationsRunsRunIdGetWithResponse request
+	OperationsRunStateUiOperationsRunsRunIdGetWithResponse(ctx context.Context, runId openapi_types.UUID, reqEditors ...RequestEditorFn) (*OperationsRunStateUiOperationsRunsRunIdGetResponse, error)
 
 	// OperationsSearchUiOperationsSearchGetWithResponse request
 	OperationsSearchUiOperationsSearchGetWithResponse(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*OperationsSearchUiOperationsSearchGetResponse, error)
@@ -64406,6 +64458,28 @@ func (r OperationsRunUiOperationsRunDescriptorIdGetResponse) StatusCode() int {
 	return 0
 }
 
+type OperationsRunStateUiOperationsRunsRunIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r OperationsRunStateUiOperationsRunsRunIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r OperationsRunStateUiOperationsRunsRunIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type OperationsSearchUiOperationsSearchGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -70847,6 +70921,15 @@ func (c *ClientWithResponses) OperationsRunUiOperationsRunDescriptorIdGetWithRes
 		return nil, err
 	}
 	return ParseOperationsRunUiOperationsRunDescriptorIdGetResponse(rsp)
+}
+
+// OperationsRunStateUiOperationsRunsRunIdGetWithResponse request returning *OperationsRunStateUiOperationsRunsRunIdGetResponse
+func (c *ClientWithResponses) OperationsRunStateUiOperationsRunsRunIdGetWithResponse(ctx context.Context, runId openapi_types.UUID, reqEditors ...RequestEditorFn) (*OperationsRunStateUiOperationsRunsRunIdGetResponse, error) {
+	rsp, err := c.OperationsRunStateUiOperationsRunsRunIdGet(ctx, runId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOperationsRunStateUiOperationsRunsRunIdGetResponse(rsp)
 }
 
 // OperationsSearchUiOperationsSearchGetWithResponse request returning *OperationsSearchUiOperationsSearchGetResponse
@@ -83334,6 +83417,32 @@ func ParseOperationsRunUiOperationsRunDescriptorIdGetResponse(rsp *http.Response
 	}
 
 	response := &OperationsRunUiOperationsRunDescriptorIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseOperationsRunStateUiOperationsRunsRunIdGetResponse parses an HTTP response from a OperationsRunStateUiOperationsRunsRunIdGetWithResponse call
+func ParseOperationsRunStateUiOperationsRunsRunIdGetResponse(rsp *http.Response) (*OperationsRunStateUiOperationsRunsRunIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &OperationsRunStateUiOperationsRunsRunIdGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

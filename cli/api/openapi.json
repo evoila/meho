@@ -24058,13 +24058,57 @@
         }
       }
     },
+    "/ui/operations/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "ui-operations"
+        ],
+        "summary": "Operations Run State",
+        "description": "Where a Run from this page is now (#5111): the dialog asks this until it ends.\n\nReads the stored run, so it works on every MEHO server process. Only\nthe person who started a run reads it, and only a run started from\nthis page. Any other id is 404, so no id is confirmed.",
+        "operationId": "operations_run_state_ui_operations_runs__run_id__get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/operations/call": {
       "post": {
         "tags": [
           "ui-operations"
         ],
         "summary": "Operations Call",
-        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403\nbefore anything is dispatched or queued, like on REST); calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.\n\n``preview_hash`` comes from the run window's preview step. A\n``destructive`` op needs it, or MEHO refuses to store the approval\nrequest (#5015).",
+        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403\nbefore anything is dispatched or queued, like on REST); calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.\n\nBackground run (#5111): the call starts as a background run and the\nroute answers within about a second, however long the operation\ntakes. A quick run shows its result at once; a long one shows\n\"running\", and the dialog asks ``GET /ui/operations/runs/{run_id}``\nuntil it ends. A call with ``reveal_secret: true`` cannot run in\nthe background (its answer would be stored), so it runs inline.\n\n``preview_hash`` comes from the run window's preview step. A\n``destructive`` op needs it, or MEHO refuses to store the approval\nrequest (#5015).",
         "operationId": "operations_call_ui_operations_call_post",
         "requestBody": {
           "content": {

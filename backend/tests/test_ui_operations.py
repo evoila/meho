@@ -871,7 +871,10 @@ def test_operations_ui_drawer_renders_preview_form_for_ingested_op() -> None:
 def _patch_call_operation(
     monkeypatch: pytest.MonkeyPatch, envelope: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    """Patch the route module's ``call_operation`` to return *envelope*.
+    """Patch the dispatcher's ``call_operation`` to return *envelope*.
+
+    The Run button starts a background run (#5111), which calls it from
+    :mod:`meho_backplane.operations.meta_tools`.
 
     Records the ``arguments`` dict each call receives so a test can assert the
     BFF threaded the form fields (connector_id / op_id / target / params /
@@ -887,7 +890,7 @@ def _patch_call_operation(
         return envelope
 
     monkeypatch.setattr(
-        "meho_backplane.ui.routes.operations.routes.call_operation",
+        "meho_backplane.operations.meta_tools.call_operation",
         _fake_call_operation,
     )
     return received
@@ -961,9 +964,12 @@ def test_operations_ui_run_call_says_no_store_only_when_it_reveals(
             mark_answer_holds_secret()
         return {"status": "ok", "op_id": "GET:/user", "result": {}, "extras": {}}
 
+    # A reveal call runs inline in the route; any other call runs in the
+    # background run, which calls the dispatcher itself (#5111).
     monkeypatch.setattr(
         "meho_backplane.ui.routes.operations.routes.call_operation", _fake_call_operation
     )
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.call_operation", _fake_call_operation)
     client, mock, csrf = _client_with_role_and_csrf(
         tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
     )

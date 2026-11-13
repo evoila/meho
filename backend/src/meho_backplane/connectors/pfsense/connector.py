@@ -109,6 +109,18 @@ _KERNEL_RE: re.Pattern[str] = re.compile(
 )
 
 
+def _release_number(version: str | None) -> str | None:
+    """Drop the ``-RELEASE`` suffix so the resolver can compare the version.
+
+    The resolver reads the fingerprint version as a PEP 440 version, and
+    ``2.7.2-RELEASE`` is not one. The full ``/etc/version`` line stays in
+    ``build``.
+    """
+    if version is None:
+        return None
+    return version.removesuffix("-RELEASE")
+
+
 def parse_pfsense_version(content: str) -> dict[str, str | None]:
     """Parse ``/etc/version`` content into version, build, and kernel fields.
 
@@ -315,12 +327,13 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
 
 
 class PfSenseConnector(SshConnector):
-    """pfSense 2.7 connector built on the :class:`SshConnector` adapter.
+    """pfSense connector built on the :class:`SshConnector` adapter.
 
     Registry v2 triple: ``("pfsense", "2.7", "pfsense-ssh")``. The
-    ``2.7`` version targets the pfSense CE 2.7.x release series
-    (FreeBSD 14.1 base, as of 2.7.2). A future ``("pfsense", "3.0",
-    ...)`` entry can ship alongside without disturbing 2.7.x targets.
+    ``2.7`` label is kept so the connector id does not change. The
+    declared range ``>=2.7,<2.10`` covers pfSense CE 2.7.x to 2.9.x. A
+    future ``("pfsense", "3.0", ...)`` entry can ship alongside without
+    disturbing these targets.
 
     **Auth: key-only.** The base :class:`SshConnector` supports a
     password fallback; this override removes it. pfSense's ``admin``
@@ -336,6 +349,7 @@ class PfSenseConnector(SshConnector):
     product = "pfsense"
     version = "2.7"
     impl_id = "pfsense-ssh"
+    supported_version_range = ">=2.7,<2.10"
 
     def __init__(self) -> None:
         super().__init__()
@@ -466,7 +480,7 @@ class PfSenseConnector(SshConnector):
         return FingerprintResult(
             vendor="netgate",
             product="pfsense",
-            version=parsed["version"],
+            version=_release_number(parsed["version"]),
             build=parsed["build"],
             reachable=True,
             probed_at=probed_at,

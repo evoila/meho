@@ -440,7 +440,8 @@ def test_three_faces_return_the_same_upstream_answer_and_citations() -> None:
     # REST: the mapped answer and citations, in the response shape of today.
     assert rest_body["answer"] == _EXPECTED_ANSWER
     assert [c["chunk_id"] for c in rest_body["citations"]] == _EXPECTED_CITATION_IDS
-    assert set(rest_body) == {"answer", "citations"}
+    assert set(rest_body) == {"answer", "citations", "answer_source"}
+    assert rest_body["answer_source"] == "upstream"
     # MCP: the same answer (wrapped) and the same citations.
     assert mcp_payload["answer"] == wrap_untrusted_text(rest_body["answer"])
     assert [c["chunk_id"] for c in mcp_payload["citations"]] == _EXPECTED_CITATION_IDS

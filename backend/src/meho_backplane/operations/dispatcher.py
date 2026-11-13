@@ -29,6 +29,11 @@ phases the parent Initiative names:
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
    Invalid -> structured ``invalid_params`` error. So for a guarded op a
    target the catalogs cannot serve is reported before bad params.
+   Then check that the audit row of the call can be stored
+   (:func:`~meho_backplane.operations.audit_row_precheck.audit_row_problem`,
+   values only, no database statement). A row that can never be stored ->
+   structured ``audit_row_invalid`` error naming the field; nothing is sent
+   to the target and no approval request is made.
 4. Policy gate (G11.2-T3 + T4;
    :func:`~meho_backplane.operations._validate.policy_gate`). **Agent**
    principals resolve a three-state
@@ -88,6 +93,9 @@ Detail payloads land in ``extras``. Codes:
 * ``unknown_connector`` -- the ``connector_id`` matches no connector the
   caller can see (#4031), the same test the discovery meta-tools use.
 * ``invalid_params`` -- params failed JSON Schema validation.
+* ``audit_row_invalid`` -- the audit row of the call can never be stored
+  (for example a NUL character in the ticket id). Refused before the call;
+  ``extras["field"]`` names the value, never its content.
 * ``invalid_op_schema`` -- the **stored** ``parameter_schema`` itself is
   broken: it carries a ``$ref`` the validator cannot resolve within the
   stored schema document (a descriptor ingested before #3095's
@@ -332,6 +340,7 @@ from meho_backplane.operations._errors import (
     result_ambiguous_connector,
     result_announce_required,
     result_audit_commit_failed,
+    result_audit_row_invalid,
     result_awaiting_approval,
     result_blast_radius_required,
     result_composite_terminal_error,
@@ -411,6 +420,7 @@ from meho_backplane.operations._secret_values import (
     split_reveal_secret,
 )
 from meho_backplane.operations._target_connector_match import refuse_target_connector_mismatch
+from meho_backplane.operations._target_version_range import refuse_version_outside_range
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
     InvalidOpSchemaError,
@@ -428,6 +438,7 @@ from meho_backplane.operations._vendor_text import (
     withhold_vendor_text,
 )
 from meho_backplane.operations.approved_step_check import approved_step_refusal
+from meho_backplane.operations.audit_row_precheck import audit_row_problem
 from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
@@ -3827,6 +3838,17 @@ async def _dispatch_now(
     )
     if mismatch is not None:
         return mismatch
+    # A target whose known version is outside the range of the connector
+    # picked for it (through the fallback entry) is refused the same way.
+    outside = await refuse_version_outside_range(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+    )
+    if outside is not None:
+        return outside
 
     # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility
@@ -3863,6 +3885,24 @@ async def _dispatch_now(
     params_error = _params_error(descriptor, op_id, params, started)
     if params_error is not None:
         return params_error
+
+    # --- Step 3.4: the audit row must be storable ---------------------------
+    # Refuse a call whose audit row can never be stored, before anything is
+    # sent to the target and before an approval request is made. Every path
+    # (direct, a step of a multi-step operation, a call resumed after
+    # approval, runbook, scheduler, agent) comes through here.
+    audit_problem = audit_row_problem(
+        operator=operator, descriptor=descriptor, params_hash=params_hash
+    )
+    if audit_problem is not None:
+        _log.warning(
+            "dispatch_refused_audit_row_invalid",
+            op_id=op_id,
+            field=audit_problem.field,
+        )
+        return result_audit_row_invalid(
+            op_id, audit_problem.field, audit_problem.reason, _elapsed_ms(started)
+        )
 
     # --- Step 3.5: dispatch limits (#3500) --------------------------------
     # Per-principal rate limit + per-principal concurrent-op cap, enforced

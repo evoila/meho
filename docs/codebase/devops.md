@@ -2770,6 +2770,9 @@ the six jobs have no guard, and every job on our own pool keeps it.
 `CONTRIBUTING.md`, "Pull requests from forks", has the maintainer steps
 to get a full CI run: push the exact commit the maintainer read, by its
 full SHA, to a branch here and open a draft pull request from it.
+Job results and change detector outputs reach a `run:` script only
+through `env:`, never as `${{ ... }}` text in the script. The same test
+file pins this for `ci.yml`.
 
 This guard is `ci.yml`'s arm of the repo-wide untrusted-PR isolation
 model — the full inventory, the disposable-runner routing pattern, and

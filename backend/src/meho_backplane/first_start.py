@@ -494,7 +494,7 @@ async def _probe_one(target: Target, operator: Operator | None) -> ProbeOutcome:
 
     if operator is None and target.secret_ref:
         return "needs_person"
-    cls, label, _message = resolve_connector_or_label(target)
+    cls, label, _message = resolve_connector_or_label(target, for_probe=True)
     if label is not None or cls is None:
         return "down"
     try:

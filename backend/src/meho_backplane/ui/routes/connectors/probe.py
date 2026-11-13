@@ -116,7 +116,7 @@ async def _do_probe(
 ) -> HTMLResponse:
     """Re-run the connector probe and return the refreshed card or alert."""
     target = await resolve_target(db_session, session_ctx.tenant_id, target_name)
-    cls, label, message = resolve_connector_or_label(target)
+    cls, label, message = resolve_connector_or_label(target, for_probe=True)
     if label == "no_connector":
         return _render_alert(
             request,

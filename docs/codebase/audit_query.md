@@ -114,6 +114,43 @@ stays `pending` after the request is approved, rejected or expired. Use
 (`meho approvals list`, or the console's approvals page). Decision record:
 [`docs/decisions/composite-audit-when-a-step-waits.md`](../decisions/composite-audit-when-a-step-waits.md).
 
+### A row that cannot be stored is refused before the call
+
+The dispatcher writes the row of a call after the call. If that write
+fails, the target may already hold the change (`audit_commit_failed`). So
+before it sends a call, the dispatcher checks the part of the row it
+already knows. `operations/audit_row_precheck.py` does this
+(`audit_row_problem`). It checks the values only and sends no statement
+to the database:
+
+- the text columns `operator_sub`, `actor_sub`, `path`, `step_id` and
+  `work_ref`: each text can be encoded as UTF-8 and holds no NUL
+  character;
+- `operator_sub`, `actor_sub` and `work_ref` have an index, so each must
+  also stay under `INDEX_TEXT_MAX_BYTES`;
+- every key and text in `payload`, built by the same function the writer
+  uses (the `client` block and the caller's name included). The caller's
+  name is the token's name, or the client id of a machine login, as the
+  writer stores it;
+- every number in `payload`: NaN and Infinity cannot be stored as JSON, so
+  they are refused too.
+
+When the check itself fails (for example on a payload nested too deep to
+walk), the call is refused with `audit_row_invalid` and the field
+`payload`.
+
+On a problem the call is refused with `audit_row_invalid`. `extras.field`
+names the value (never its content). A payload value is named by its path,
+for example `payload.principal_name`. A key that cannot be stored is named by
+its position (`payload.<key 1>`), so the refusal never holds the bad text. Nothing is sent to the target, no
+approval request is made and no row is written. All ways into the
+dispatcher pass through this one check. `audit_commit_failed` stays for a
+database that is not reachable after the call, and for what is known only
+after the call (`raw_payload`, `redaction_manifest`). The registered agent
+name is known before the call, but it is in the database, and the check
+sends no statement there, so it does not check that name. The module lists how each text and JSON column is covered, and
+`tests/test_audit_row_precheck.py` fails when a new column is in no list.
+
 ### Loose rows: the standing check (#4670)
 
 A **loose row** is an audit record whose `parent_audit_id` names a row
@@ -371,6 +408,51 @@ query_audit(filters, tenant_id, session)
   └─ next_cursor = encode_cursor(CursorPosition(ts=last.ts, id=last.id))
                    if has_more else None
 ```
+
+## One rule for a ticket id (work ref)
+
+Every door cleans a ticket id with `normalize_work_ref` in
+`meho_backplane/work_ref.py`, so one ticket id is the same text
+wherever it enters MEHO. An audit search (`filter-work-ref`) then finds
+every row of one ticket, and a run approval covers exactly the calls of
+that ticket, whichever door they came through.
+
+The doors: the `Meho-Work-Ref` header (the audit middleware, also for
+`/mcp`), the `call_operation` body and MCP input, the MCP agent run and
+announce inputs, the REST announce body, a runbook start, a scheduler
+trigger, a run approval request, and the console forms.
+
+The rule:
+
+- White space at both ends is removed.
+- An empty value is refused.
+- A control character (also NUL, a line break and a tab), an invisible
+  format character (zero-width and direction marks), a line or paragraph
+  separator and a lone surrogate are refused.
+- The text is at most 256 characters, counted after NFC.
+- The text is stored in Unicode form NFC.
+
+A value that breaks the rule is refused with a message that names the
+rule. The check runs before anything else happens with the request:
+before the policy gate, before an operation is sent and before a row is
+written. Nothing is cut or changed without a word, apart from the strip
+and NFC.
+
+- A call without a ticket sends no `Meho-Work-Ref` header. A header that
+  is sent but empty or blank is refused with HTTP 400, like any other
+  bad value.
+- No door checks the length before the rule does. A ticket id sent in
+  NFD form, or with spaces at the ends, can be longer than 256 code
+  points and still be taken. The body size limit of the server bounds
+  the raw input.
+- A 422 answer for a bad body names the rule. When the refused input
+  cannot be encoded as UTF-8 (a lone surrogate written as `\ud800` in
+  JSON), the answer shows it as backslash escapes
+  (`api/request_validation.py`).
+
+Rows stored before this rule are not changed. A ticket id stored before
+this release may carry white space at the ends, so an exact-match filter
+or a run approval made for the cleaned text does not match such a row.
 
 ## Per-session replay (G8.2-T3 #1011)
 

@@ -240,23 +240,36 @@ func printClassificationPreview(w io.Writer, preview *api.ClassificationPreviewR
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "CONNECTOR\tGROUP\tOPERATION\tCATEGORY\tLABELS\tALWAYS WAIT")
+	fmt.Fprintln(tw, "CONNECTOR\tGROUP\tOPERATION\tCATEGORY\tLABELS\tALWAYS WAIT\tIN FORCE")
 	for _, row := range preview.Operations {
 		group := ""
 		if row.GroupKey != nil {
 			group = *row.GroupKey
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s -> %s\t%s -> %s\t%t -> %t\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s -> %s\t%s -> %s\t%t -> %t\t%s -> %s\n",
 			row.ConnectorId, group, row.OpId,
 			valueOr(row.Before.Category, "-"), valueOr(row.After.Category, "-"),
 			labelText(row.Before.Labels), labelText(row.After.Labels),
 			row.Before.AlwaysWait, row.After.AlwaysWait,
+			inForceText(row.Before.InForce), inForceText(row.After.InForce),
 		)
 	}
 	_ = tw.Flush()
 	if preview.Conflict == nil && preview.MatchedOperations > 0 {
 		fmt.Fprintln(w, "Run the same command with --apply to ask for the change.")
 	}
+}
+
+// inForceText is what applies with the values: the code's value, the
+// overrides and the minimum-level rules included. "-" when the operation is gone.
+func inForceText(inForce *api.ClassificationInForce) string {
+	if inForce == nil {
+		return "-"
+	}
+	if inForce.Waits {
+		return inForce.Risk + ", waits"
+	}
+	return inForce.Risk + ", runs at once"
 }
 
 func valueOr(value *string, fallback string) string {

@@ -509,6 +509,29 @@ def test_run_post_returns_transcript_with_stream_token() -> None:
     assert session_id.hex not in body
 
 
+def test_run_post_counts_work_ref_length_after_nfc() -> None:
+    """A ticket id of 130 composed letters sent in NFD form (260 code points) is taken."""
+    import unicodedata
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    reset_agent_invoker_for_testing(_FakeInvoker())
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            "/ui/agents/a1/run",
+            data={"input": "go", "work_ref": unicodedata.normalize("NFD", "\u00c4" * 130)},
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "/ui/agents/a1/run/stream?token=" in response.text
+
+
 def test_run_transcript_stop_dialog_opts_out_of_autopen() -> None:
     """The Stop-confirm dialog must not auto-open when the transcript swaps in.
 

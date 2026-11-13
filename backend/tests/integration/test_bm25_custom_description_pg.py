@@ -70,6 +70,10 @@ def no_embedding(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     service = AsyncMock()
     service.encode_one.return_value = [0.1] * 384
     monkeypatch.setattr("meho_backplane.operations._search.get_embedding_service", lambda: service)
+    # An edit rebuilds the row's search vector (#5321); here only keywords rank.
+    monkeypatch.setattr(
+        "meho_backplane.operations.ingest.service.refresh_op_embedding", AsyncMock()
+    )
     reset_dispatcher_caches()
     yield
     reset_dispatcher_caches()

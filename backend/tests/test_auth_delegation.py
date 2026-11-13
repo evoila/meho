@@ -24,7 +24,7 @@ from meho_backplane.auth.delegation import (
     delegated_operator,
     resolve_actor_sub,
 )
-from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, RoleGroup, TenantRole
 
 
 def setup_function() -> None:
@@ -133,6 +133,16 @@ def test_delegated_operator_clears_the_approval_and_platform_flags() -> None:
         False,
     )
     assert narrowed.may_self_approve is False
+
+
+def test_delegated_operator_clears_the_bound_kind_and_categories() -> None:
+    """A binding of the policy file gave the caller a kind; the agent run has none."""
+    caller = _caller(TenantRole.OPERATOR).model_copy(
+        update={"bound_kind": RoleGroup.SA_OPERATORS, "bound_categories": frozenset({"network"})}
+    )
+    narrowed = delegated_operator(caller)
+    assert narrowed.bound_kind is None
+    assert narrowed.bound_categories == frozenset()
 
 
 def test_delegated_operator_keeps_the_caller_as_the_subject() -> None:

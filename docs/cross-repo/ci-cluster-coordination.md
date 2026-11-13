@@ -38,7 +38,7 @@ the consumer:
    `RDC_DISPATCH_TOKEN` PAT was not renewed. The consumer rolls forward by
    tracking new GHCR tags / GitHub Releases instead.
 
-Both edges cross the ci-cluster cluster boundary, and both need the
+Both edges cross the CI cluster boundary, and both need the
 consumer side to provision auth + RBAC for the `evoila/meho` GitHub
 Actions identity before Task #50 / #51 can land green. This tracker
 documents exactly what to provision and how either side verifies the
@@ -354,8 +354,8 @@ gh run list --repo <consumer-org>/<consumer-repo> \
 ```
 
 The companion script
-[`scripts/cross-repo/verify-rke2-access.sh`](../../scripts/cross-repo/verify-rke2-access.sh)
-automates the kubectl portion (`KUBECONFIG=… ./verify-rke2-access.sh`),
+[`scripts/cross-repo/verify-ci-cluster-access.sh`](../../scripts/cross-repo/verify-ci-cluster-access.sh)
+automates the kubectl portion (`KUBECONFIG=… ./verify-ci-cluster-access.sh`),
 prints a pass/fail line per check, and exits non-zero on any
 unexpected outcome. Run it from either side of the handshake before
 declaring the contract closed.

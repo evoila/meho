@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Register the six ``spaces.*`` typed operations.
+"""Register the seven ``spaces.*`` typed operations.
 
 Natural key ``(product="spaces", version="1.x", impl_id="spaces-records")``,
 so the wire connector id is ``spaces-records-1.x``.
@@ -19,8 +19,10 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.connectors.spaces import drift_schemas as ds
 from meho_backplane.connectors.spaces import import_op
 from meho_backplane.connectors.spaces import schemas as s
+from meho_backplane.connectors.spaces.drift import spaces_drift
 from meho_backplane.connectors.spaces.overview import spaces_overview
 from meho_backplane.connectors.spaces.writes import (
     spaces_assign,
@@ -128,6 +130,20 @@ _SPECS: tuple[_Spec, ...] = (
         ["spaces", "read", "ownership", "health"],
         "safe",
     ),
+    (
+        "spaces.drift",
+        spaces_drift,
+        "List where the ownership record and the live targets disagree.",
+        "Reads stored data only: targets, their last probe, the topology and the "
+        "current assignments. Lists unassigned, missing and unreachable targets, "
+        "missing machines and state mismatches. Makes no vendor call and repairs "
+        "nothing.",
+        ds.DRIFT_PARAMETERS,
+        ds.DRIFT_RESPONSE,
+        ds.DRIFT_GUIDANCE,
+        ["spaces", "read", "ownership", "health"],
+        "safe",
+    ),
 )
 
 for _spec in _SPECS:
@@ -141,7 +157,7 @@ async def register_spaces_operations(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert the six ``spaces.*`` typed operations. Safe to run twice."""
+    """Upsert the seven ``spaces.*`` typed operations. Safe to run twice."""
     for op_id, handler, summary, description, params, response, guidance, tags, safety in _SPECS:
         await register_typed_operation(
             product="spaces",

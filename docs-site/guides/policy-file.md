@@ -72,6 +72,9 @@ routing:
   person's `dangerous` or `destructive` change.
 - MEHO refuses an entry that asks a group that may approve none of its
   changes, and an entry that leaves a risk level that nobody may approve.
+- Only Admins approve an operation that needs the admin role, for example
+  registering a target. MEHO refuses an entry that fits such an operation
+  and does not ask Admins.
 - A change of rights (for example a policy import) is not routed. Another
   admin approves it, as today.
 

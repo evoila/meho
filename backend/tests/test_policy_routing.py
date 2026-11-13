@@ -36,7 +36,7 @@ from meho_backplane.operations.approval_queue import (
     create_pending_request,
 )
 from meho_backplane.operations.approval_rights import ApproveRightReason, approve_right
-from meho_backplane.policy.classification import DEFAULT_TAXONOMY
+from meho_backplane.policy.classification import DEFAULT_TAXONOMY, OpCoordinates
 from meho_backplane.policy.document import (
     GROUP_KINDS,
     canonical_sha256,
@@ -54,7 +54,7 @@ from meho_backplane.policy.routing import (
     who_can_approve,
 )
 from meho_backplane.policy.service import _routing_diff, export_policy
-from meho_backplane.policy.validate import check_document
+from meho_backplane.policy.validate import KnownOp, check_document
 from meho_backplane.settings import get_settings
 from tests.test_api_v1_approvals_fresh_sign_in import (
     _TENANT_A,
@@ -311,10 +311,14 @@ def test_a_change_nobody_may_approve_is_a_mistake() -> None:
     )
 
     assert mistakes == [
-        "A dangerous change in category network can wait, but no role may approve it. "
-        "It would wait until it expires.",
-        "A destructive change in category network can wait, but no role may approve it. "
-        "It would wait until it expires.",
+        (
+            "A dangerous change in category network can wait, but no role may approve it. "
+            "It would wait until it expires."
+        ),
+        (
+            "A destructive change in category network can wait, but no role may approve it. "
+            "It would wait until it expires."
+        ),
     ]
 
 
@@ -331,8 +335,10 @@ def test_an_entry_for_one_risk_level_is_checked_on_that_level_only() -> None:
     assert fine == []
     assert wrong == [
         "`routing[0]` asks `Approvers`, but `Approvers` has no `approve` rule for these changes.",
-        "A destructive change matched by `routing[0]` can wait, but no role may approve it. "
-        "It would wait until it expires.",
+        (
+            "A destructive change matched by `routing[0]` can wait, but no role may approve it. "
+            "It would wait until it expires."
+        ),
     ]
 
 
@@ -358,6 +364,81 @@ def test_check_document_runs_the_routing_checks() -> None:
     mistakes, _ = check_document(document, scope="tenant", install_document=None, ops=[])
 
     assert "`routing[0]` asks `Readers`" in mistakes[0]
+
+
+def _floored_op(level: str = "caution") -> KnownOp:
+    """``targets.register``: only Admins may approve it (the ``tenant_admin`` role floor)."""
+    return KnownOp(
+        coords=OpCoordinates("targets-registry-1.x", "targets", "targets.register"),
+        safety_level=level,
+        shows_secret=False,
+        caller_address=False,
+    )
+
+
+def _check_with_floored_op(routing: list[dict[str, Any]], **kwargs: Any) -> list[str]:
+    document = {"classifications": kwargs.pop("classifications", []), "routing": routing}
+    mistakes, _ = check_document(
+        document, scope="install", install_document=None, ops=[_floored_op(**kwargs)]
+    )
+    return mistakes
+
+
+def test_routing_an_admin_only_operation_to_other_kinds_is_a_mistake() -> None:
+    mistakes = _check_with_floored_op(
+        [{"match": {"risk": "caution"}, "approvers": ["SA-Operators"]}]
+    )
+
+    assert mistakes == [
+        (
+            "`routing[0]` fits `targets.register` of connector `targets-registry-1.x`, but only "
+            "MEHO-Admins may approve it and the entry does not ask them. It would wait until it "
+            "expires."
+        )
+    ]
+
+
+def test_routing_an_admin_only_operation_by_its_category_is_checked() -> None:
+    classifications = [{"match": {"connector": "targets-*"}, "category": "identity"}]
+
+    wrong = _check_with_floored_op(
+        [{"match": {"category": "identity"}, "approvers": ["SA-Operators"]}],
+        classifications=classifications,
+    )
+    other_category = _check_with_floored_op(
+        [{"match": {"category": "network"}, "approvers": ["SA-Operators"]}],
+        classifications=classifications,
+    )
+
+    assert len(wrong) == 1 and "`routing[0]` fits `targets.register`" in wrong[0]
+    assert other_category == []
+
+
+def test_an_entry_that_asks_admins_or_does_not_fit_the_operation_is_fine() -> None:
+    with_admins = _check_with_floored_op(
+        [{"match": {"connector": "targets-*"}, "approvers": ["SA-Operators", "Admins"]}]
+    )
+    other_connector = _check_with_floored_op(
+        [{"match": {"connector": "nsx-*"}, "approvers": ["SA-Operators"]}]
+    )
+    lower_risk = _check_with_floored_op(
+        [{"match": {"risk": "caution"}, "approvers": ["SA-Operators"]}], level="dangerous"
+    )
+
+    assert with_admins == []
+    assert other_connector == []
+    assert lower_risk == []
+
+
+def test_an_earlier_entry_that_always_fits_shadows_a_later_one() -> None:
+    mistakes = _check_with_floored_op(
+        [
+            {"match": {"connector": "targets-*"}, "approvers": ["Admins"]},
+            {"match": {"risk": "caution"}, "approvers": ["SA-Operators"]},
+        ]
+    )
+
+    assert mistakes == []
 
 
 def test_the_diff_names_added_changed_and_removed_routing_entries() -> None:

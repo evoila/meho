@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from typing import Any, Final
 from uuid import UUID
 
@@ -37,6 +38,7 @@ from sqlalchemy.orm import aliased
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.credential_read import has_credential_read_floor
+from meho_backplane.operations.role_floors import role_floor_for
 from meho_backplane.policy.classification import (
     RISK_LEVELS,
     ClassificationConflictError,
@@ -45,10 +47,11 @@ from meho_backplane.policy.classification import (
     Scope,
     Taxonomy,
     check_no_conflict,
+    classify,
     entries_from_document,
     taxonomy_from_documents,
 )
-from meho_backplane.policy.routing import routing_mistakes
+from meho_backplane.policy.routing import group_names, routing_mistakes, today_kinds
 
 __all__ = ["MAX_MISTAKES", "KnownOp", "check_document", "load_known_ops"]
 
@@ -178,6 +181,57 @@ def _floor_mistakes(entries: Sequence[ClassificationEntry], ops: Sequence[KnownO
     return mistakes
 
 
+def _lowest_level(op: KnownOp, classified_risk: str | None) -> int:
+    """The index in :data:`RISK_LEVELS` of the lowest level *op* can wait at."""
+    levels = [
+        RISK_LEVELS.index(lvl) for lvl in (op.safety_level, classified_risk) if lvl in RISK_LEVELS
+    ]
+    return max(levels, default=0)
+
+
+def _routing_floor_mistakes(
+    raw_routes: Sequence[dict[str, Any]],
+    ops: Sequence[KnownOp],
+    entries: Sequence[ClassificationEntry],
+    taxonomy: Taxonomy,
+) -> list[str]:
+    """A routing entry that sends an operation with a role floor to kinds that may not approve it.
+
+    Only Admins may approve an operation with the ``tenant_admin`` role
+    floor (for example ``targets.register``), at every risk level. Routing
+    only narrows, so an entry without Admins would leave such a change with
+    nobody to approve it. The entries are checked in their order: an entry
+    without ``risk`` that fits the operation is the one that wins, so the
+    entries after it are not checked for that operation. An entry with
+    ``risk`` may fit when its level is at or above the operation's level.
+    """
+    mistakes: list[str] = []
+    for op in ops:
+        if role_floor_for(op.coords.op_id) is None:
+            continue
+        classified = classify(op.coords, entries, taxonomy)
+        lowest = _lowest_level(op, classified.risk)
+        for index, raw in enumerate(raw_routes):
+            match = raw.get("match") or {}
+            connector, risk = match.get("connector"), match.get("risk")
+            if match.get("category") is not None and match["category"] != classified.category:
+                continue
+            if connector is not None and not fnmatchcase(op.coords.connector_id, connector):
+                continue
+            if risk is not None and RISK_LEVELS.index(risk) < lowest:
+                continue
+            kinds = today_kinds(risk or RISK_LEVELS[lowest], op.coords.op_id)
+            if not {str(kind) for kind in raw.get("approvers") or []} & set(kinds):
+                mistakes.append(
+                    f"`routing[{index}]` fits `{op.coords.op_id}` of connector "
+                    f"`{op.coords.connector_id}`, but only {group_names(kinds)} may approve "
+                    "it and the entry does not ask them. It would wait until it expires."
+                )
+            if risk is None:
+                break
+    return mistakes
+
+
 def _install_wait_warnings(entries: Sequence[ClassificationEntry]) -> list[str]:
     return [
         f"`classifications[{index}]` makes operations always wait for the whole install. "
@@ -231,5 +285,12 @@ def check_document(
             )
         except ClassificationConflictError as exc:
             mistakes.append(str(exc))
+        if not mistakes:
+            mistakes = _routing_floor_mistakes(
+                list(document.get("routing") or []),
+                ops,
+                [*base, *entries, *other_entries],
+                taxonomy,
+            )
     warnings = _install_wait_warnings(entries) if scope == "install" else []
     return _capped(mistakes), warnings

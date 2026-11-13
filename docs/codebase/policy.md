@@ -93,9 +93,17 @@ is one sentence that names the entry:
   but no role may approve it. It would wait until it expires."). An entry
   without `risk` is checked on all four risk levels. Readers never
   approve; Operators and Approvers approve only `safe` and `caution`
-  changes of other people. An operation that needs the `tenant_admin` role
-  is approved only by Admins whatever the file says; this is not checked
-  at import.
+  changes of other people.
+- **Routing and the role floor** (`policy/validate.py`,
+  `_routing_floor_mistakes`): only Admins approve an operation that needs
+  the `tenant_admin` role (for example `targets.register`). For each known
+  operation with that floor, the entries are checked in their order: an
+  entry that fits it (by its category, connector, and a `risk` at or above
+  its level) and does not ask Admins is a mistake ("`routing[N]` fits
+  `OP` of connector `C`, but only MEHO-Admins may approve it and the entry
+  does not ask them. It would wait until it expires."). An entry without
+  `risk` that fits ends the check for that operation, because it always
+  wins.
 
 At most 50 mistakes are listed, then one line says how many more there
 are.

@@ -28,7 +28,7 @@ func newK8sCmd() *cobra.Command {
 // command.
 //
 // Maps to op_id `holodeck.k8s.exec`. Forwards a **read-only**
-// `kubectl` command to the K8s cluster bundled on the HoloRouter
+// `kubectl` command to the K8s cluster bundled on the Holodeck router
 // appliance.
 //
 // SAFETY-CRITICAL: the CLI passes the operator-supplied command
@@ -65,7 +65,7 @@ func newK8sExecCmd() *cobra.Command {
 		Short: "Run a read-only kubectl command on the in-appliance K8s cluster",
 		Long: "exec dispatches holodeck.k8s.exec, forwarding the supplied\n" +
 			"kubectl command verbatim to the in-appliance K8s cluster on\n" +
-			"the HoloRouter appliance via plain SSH (no pwsh indirection).\n\n" +
+			"the Holodeck router appliance via plain SSH (no pwsh indirection).\n\n" +
 			"Read-only: only `get`, `describe`, `logs`, `top`, `explain`,\n" +
 			"`api-resources`, `api-versions`, `cluster-info`, and `version`\n" +
 			"verbs are accepted by the backend. Mutating verbs (create,\n" +
@@ -85,9 +85,9 @@ func newK8sExecCmd() *cobra.Command {
 			"quoting form.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied (safety reject or kubectl\n" +
 			"failure), 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho holodeck k8s exec 'kubectl get pods -A' --target holorouter-hetzner-dc\n" +
-			"  meho holodeck k8s exec 'kubectl describe node holorouter-node-1' --target holorouter-hetzner-dc\n" +
-			"  meho holodeck k8s exec 'kubectl logs -n kube-system <pod>' --target holorouter-hetzner-dc --json",
+		Example: "  meho holodeck k8s exec 'kubectl get pods -A' --target my-router\n" +
+			"  meho holodeck k8s exec 'kubectl describe node router-node-1' --target my-router\n" +
+			"  meho holodeck k8s exec 'kubectl logs -n kube-system <pod>' --target my-router --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

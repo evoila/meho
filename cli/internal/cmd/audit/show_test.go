@@ -64,7 +64,7 @@ func TestRunShowHappyPath(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(api.AuditEntry{
 			Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 			Ts:           mustTS(t, "2026-05-13T15:42:11Z"),
-			PrincipalSub: "damir",
+			PrincipalSub: "operator-a",
 			TargetName:   &tname,
 			Method:       "GET",
 			Path:         "/api/v1/vsphere/vm/list",
@@ -90,7 +90,7 @@ func TestRunShowHappyPath(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"id:", "11111111-1111-1111-1111-111111111111",
-		"principal_sub:", "damir",
+		"principal_sub:", "operator-a",
 		"target_name:", "vcenter-lab",
 		"op_id:", "vsphere.vm.list",
 		"op_class:", "read",
@@ -171,7 +171,7 @@ func TestRunShowJSONVerbatim(t *testing.T) {
 		// Hand-encode so the integer isn't normalised through
 		// json.Marshal's float path.
 		_, _ = w.Write([]byte(`{"id":"11111111-1111-1111-1111-111111111111",` +
-			`"ts":"2026-05-13T15:42:11Z","tenant_id":null,"principal_sub":"damir",` +
+			`"ts":"2026-05-13T15:42:11Z","tenant_id":null,"principal_sub":"operator-a",` +
 			`"principal_name":null,"target_id":null,"target_name":null,` +
 			`"method":"GET","path":"/x","status_code":200,"request_id":null,` +
 			`"duration_ms":null,"payload":{"hit_count":9007199254740993},` +
@@ -205,7 +205,7 @@ func TestPrintEntrySummaryShowsDashForNullFields(t *testing.T) {
 	printEntrySummary(&buf, &api.AuditEntry{
 		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
-		PrincipalSub: "damir",
+		PrincipalSub: "operator-a",
 		Method:       "GET",
 		Path:         "/x",
 		StatusCode:   200,
@@ -284,7 +284,7 @@ func TestPrintEntrySummaryShowsActor(t *testing.T) {
 	printEntrySummary(&buf, &api.AuditEntry{
 		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
-		PrincipalSub: "damir",
+		PrincipalSub: "operator-a",
 		ActorSub:     &actor,
 		ActorName:    &name,
 		OpId:         "x.y",
@@ -332,7 +332,7 @@ func TestPrintEntrySummaryShowsVia(t *testing.T) {
 			printEntrySummary(&buf, &api.AuditEntry{
 				Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 				Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
-				PrincipalSub: "damir",
+				PrincipalSub: "operator-a",
 				OpId:         "x.y",
 				ResultStatus: "ok",
 				Payload:      tc.payload,
@@ -355,7 +355,7 @@ func TestPrintEntrySummaryShowsVia(t *testing.T) {
 // lowercase-hyphenated strings; optional strings render verbatim.
 func TestPrintEntrySummaryRendersUUIDsAndOptionals(t *testing.T) {
 	var buf bytes.Buffer
-	pname := "Damir"
+	pname := "Operator A"
 	tname := "vcenter-lab"
 	tenantName := "team-a"
 	dur := "12.3"
@@ -364,7 +364,7 @@ func TestPrintEntrySummaryRendersUUIDsAndOptionals(t *testing.T) {
 		Ts:               mustTS(t, "2026-05-13T00:00:00Z"),
 		TenantId:         mustUUIDPtr(t, "22222222-2222-2222-2222-222222222222"),
 		TenantName:       &tenantName,
-		PrincipalSub:     "damir",
+		PrincipalSub:     "operator-a",
 		PrincipalName:    &pname,
 		TargetId:         mustUUIDPtr(t, "33333333-3333-3333-3333-333333333333"),
 		TargetName:       &tname,
@@ -385,7 +385,7 @@ func TestPrintEntrySummaryRendersUUIDsAndOptionals(t *testing.T) {
 	for _, want := range []string{
 		"tenant_id:         22222222-2222-2222-2222-222222222222",
 		"tenant_name:       team-a",
-		"principal_name:    Damir",
+		"principal_name:    Operator A",
 		"target_id:         33333333-3333-3333-3333-333333333333",
 		"target_name:       vcenter-lab",
 		"request_id:        44444444-4444-4444-4444-444444444444",

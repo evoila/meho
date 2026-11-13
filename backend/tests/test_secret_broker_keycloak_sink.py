@@ -70,7 +70,7 @@ _SENTINEL = "vault-sourced-password-DO-NOT-LEAK-keycloak-sink"
 _KC_HOST = "keycloak-secret-sink.test.invalid"
 _KC_BASE_URL = f"https://{_KC_HOST}"
 _ADMIN_TOKEN = "kc-admin-token-secret-sink"
-_TARGET_NAME = "rdc-keycloak-secret-sink"
+_TARGET_NAME = "example-keycloak-secret-sink"
 _REALM = "example-realm"
 _USERNAME = "operator-a"
 _USER_UUID = "44444444-4444-4444-4444-444444444444"
@@ -138,7 +138,7 @@ async def _seed_keycloak_target() -> None:
             host=_KC_HOST,
             port=443,
             fqdn=None,
-            secret_ref="rdc-hetzner-dc/keycloak/admin",
+            secret_ref="example/keycloak/admin",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},

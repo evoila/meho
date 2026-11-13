@@ -117,11 +117,11 @@ def _register_fake() -> None:
     )
 
 
-async def _seed_tenant_and_target(slug: str = "rdc-internal") -> tuple[uuid.UUID, Target]:
+async def _seed_tenant_and_target(slug: str = "example-tenant") -> tuple[uuid.UUID, Target]:
     """Insert one tenant + one target for it; return ``(tenant_id, target)``.
 
-    Look-up-then-insert on the tenant -- migration ``0018`` seeds the
-    ``rdc-internal`` tenant into the per-worker schema template
+    Look-up-then-insert on the tenant -- migration ``0018`` seeds
+    a tenant into the per-worker schema template
     (:func:`tests.conftest._schema_template_db`); a plain INSERT would
     trip ``UNIQUE constraint failed: tenant.slug``.
     """
@@ -743,7 +743,7 @@ async def test_refresh_forwards_operator_to_k8s_style_discover_topology() -> Non
         impl_id="",
         cls=_OperatorAwareConnector,
     )
-    tenant_id, target = await _seed_tenant_and_target("rdc-internal")
+    tenant_id, target = await _seed_tenant_and_target("example-tenant")
     target.product = "k8s-test-populator"
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -780,7 +780,7 @@ async def test_refresh_with_k8s_style_populator_is_idempotent_on_recall() -> Non
         impl_id="",
         cls=_OperatorAwareConnector,
     )
-    tenant_id, target = await _seed_tenant_and_target("rdc-internal")
+    tenant_id, target = await _seed_tenant_and_target("example-tenant")
     target.product = "k8s-test-populator"
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:

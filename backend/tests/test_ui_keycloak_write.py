@@ -82,7 +82,7 @@ from tests._oidc_jwt_helpers import public_jwks as _public_jwks
 _BACKPLANE_URL = "https://meho.test"
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _OP_OPERATOR = "op-operator"
-_TARGET_NAME = "rdc-keycloak"
+_TARGET_NAME = "example-keycloak"
 _CLIENT_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _APPROVAL_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 

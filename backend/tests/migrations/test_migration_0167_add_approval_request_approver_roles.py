@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0166_add_approval_request_approver_roles``.
+"""Behavioural tests for ``0167_add_approval_request_approver_roles``.
 
 The migration only adds two nullable columns to ``approval_request``;
 ``downgrade()`` removes them again. Every step targets this migration's own
-revision (``0166``) and its ``down_revision`` (``0165``), never ``head``.
+revision (``0167``) and its ``down_revision`` (``0166``), never ``head``.
 """
 
 from __future__ import annotations
@@ -23,14 +23,14 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0166"
-_DOWN_REVISION = "0165"
+_REVISION = "0167"
+_DOWN_REVISION = "0166"
 _NEW = {"approver_roles", "approver_rule"}
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0166.db"
+    db_path = tmp_path / "migration_0167.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

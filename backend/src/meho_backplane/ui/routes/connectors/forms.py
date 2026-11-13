@@ -91,6 +91,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.registry import registered_product_tokens
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.db.models import GraphNode
+from meho_backplane.targets.required_extras import KEYCLOAK_PRODUCT, has_managed_realm
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 from meho_backplane.ui.auth.middleware import UISessionContext
@@ -303,6 +304,7 @@ async def submit_create(
     vpn_required: bool,
     aliases_raw: str | None,
     notes: str | None,
+    managed_realm: str | None = None,
 ) -> HTMLResponse:
     """Build a :class:`TargetCreate` and delegate to the REST create handler.
 
@@ -315,7 +317,7 @@ async def submit_create(
     passed straight to :func:`~meho_backplane.api.v1.targets.create_target`
     so the product-registry check, the duplicate-name 409, the audit
     binding, and the broadcast hook all fire exactly as they do on the
-    REST surface.
+    REST surface. A Keycloak target also needs ``extras["managed_realm"]``.
     """
     raw_values = {
         "name": name,
@@ -327,7 +329,19 @@ async def submit_create(
         "vpn_required": vpn_required,
         "aliases": aliases_raw or "",
         "notes": notes or "",
+        "managed_realm": managed_realm or "",
     }
+    is_keycloak = product.strip().lower() == KEYCLOAK_PRODUCT
+    if is_keycloak and not has_managed_realm({"managed_realm": managed_realm}):
+        realm_error = {"managed_realm": "A Keycloak target must name the realm MEHO manages."}
+        session_id = str(session_ctx.session_id)
+        return _render_form_with_errors(
+            request,
+            csrf_session_id=session_id,
+            mode="create",
+            values=raw_values,
+            errors=realm_error,
+        )
     # #2872: pass ``secret_ref`` only when the operator actually typed one.
     # A blank field must stay *omitted* so ``create_target`` derives the
     # #1723 per-tenant default; passing ``secret_ref=None`` explicitly would
@@ -351,6 +365,8 @@ async def submit_create(
         }
         if secret_ref and secret_ref.strip():
             create_data["secret_ref"] = secret_ref
+        if is_keycloak and managed_realm:
+            create_data["extras"] = {"managed_realm": managed_realm.strip()}
         body = TargetCreate.model_validate(create_data)
     except (ValidationError, ValueError) as exc:
         return _render_form_with_errors(
@@ -551,8 +567,9 @@ def _render_form_with_errors(
     *,
     csrf_session_id: str,
     mode: str,
-    exc: ValidationError | ValueError,
     values: dict[str, object],
+    exc: ValidationError | ValueError | None = None,
+    errors: dict[str, str] | None = None,
 ) -> HTMLResponse:
     """Re-render the modal form fragment carrying per-field errors + 422.
 
@@ -564,9 +581,9 @@ def _render_form_with_errors(
     matches the status the REST ``POST /api/v1/targets`` returns for the
     same Pydantic failure.
     """
-    if isinstance(exc, ValidationError):
+    if errors is None and isinstance(exc, ValidationError):
         errors = _validation_errors_by_field(exc)
-    else:
+    elif errors is None:
         # A bare ValueError comes only from the port coercion; attribute
         # it to the port field so the message lands under the right input.
         errors = {"port": "port must be a whole number between 1 and 65535"}

@@ -530,6 +530,90 @@ def test_create_submit_rejects_empty_name_with_field_error() -> None:
     assert 'data-error-for="name"' in response.text
 
 
+def _post_keycloak_create(name: str, managed_realm: str | None) -> Any:
+    register_connector_v2(product="keycloak", version="1.0", impl_id="keycloak", cls=_FakeConnector)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    data = {
+        "name": name,
+        "product": "keycloak",
+        "host": "kc.example.test",
+        "auth_model": "shared_service_account",
+    }
+    if managed_realm is not None:
+        data["managed_realm"] = managed_realm
+    try:
+        return client.post("/ui/connectors/create", headers=_form_headers(csrf), data=data)
+    finally:
+        mock.stop()
+
+
+def test_create_modal_has_a_managed_realm_field() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/connectors/create")
+    finally:
+        mock.stop()
+    assert response.status_code == 200
+    assert 'name="managed_realm"' in response.text
+
+
+def test_create_submit_keycloak_with_a_realm_persists_it() -> None:
+    response = _post_keycloak_create("kc-ok", "  example ")
+    assert response.status_code == 204, response.text
+    row = _load_target(_TENANT_A, "kc-ok")
+    assert row is not None
+    assert row.extras == {"managed_realm": "example"}
+
+
+@pytest.mark.parametrize("managed_realm", [None, "", "   "])
+def test_create_submit_keycloak_without_a_realm_shows_a_field_error(
+    managed_realm: str | None,
+) -> None:
+    response = _post_keycloak_create("kc-missing", managed_realm)
+    assert response.status_code == 422, response.text
+    assert 'id="connectors-create-modal"' in response.text
+    assert 'data-error-for="managed_realm"' in response.text
+    assert 'value="kc-missing"' in response.text
+    assert _load_target(_TENANT_A, "kc-missing") is None
+
+
+def test_create_submit_other_product_ignores_the_realm_field() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.post(
+            "/ui/connectors/create",
+            headers=_form_headers(csrf),
+            data={
+                "name": "plain",
+                "product": _PRODUCT,
+                "host": "plain.example.test",
+                "auth_model": "shared_service_account",
+                "managed_realm": "example",
+            },
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 204, response.text
+    row = _load_target(_TENANT_A, "plain")
+    assert row is not None
+    assert row.extras == {}
+
+
 def test_create_submit_rejects_operator_role_with_403() -> None:
     """An operator (non-admin) create POST is rejected with 403."""
     _seed_tenant(_TENANT_A, "tenant-a")

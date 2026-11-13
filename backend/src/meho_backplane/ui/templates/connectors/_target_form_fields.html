@@ -180,6 +180,25 @@
   </label>
 </div>
 
+{% if mode == "create" %}
+<label class="flex flex-col gap-1">
+  <span class="text-sm font-medium">Managed realm <span class="opacity-60">(Keycloak only)</span></span>
+  <input
+    type="text"
+    name="managed_realm"
+    maxlength="200"
+    value="{{ field_value('managed_realm') }}"
+    class="input input-bordered input-sm font-mono w-full {{ error_class('managed_realm', 'input-error') }}"
+    aria-label="Managed realm"
+    aria-describedby="target-managed-realm-hint"
+  />
+  <span id="target-managed-realm-hint" class="text-xs opacity-60">
+    The Keycloak realm MEHO manages on this target. Required for a Keycloak target.
+  </span>
+  {{ error_for('managed_realm') }}
+</label>
+{% endif %}
+
 <label class="flex flex-col gap-1">
   <span class="text-sm font-medium">Notes <span class="opacity-60">(optional)</span></span>
   <textarea

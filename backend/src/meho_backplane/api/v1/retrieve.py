@@ -227,7 +227,7 @@ class RetrieveResponse(BaseModel):
     wiki: KbWikiSearch | None = Field(
         default=None,
         description=(
-            "Only with source='kb' on a tenant that keeps its lessons in a team "
+            "Only with source='kb' on a tenant that keeps its lessons in a tenant "
             "wiki: the wiki's hits, or why the wiki was not searched. Null otherwise."
         ),
     )

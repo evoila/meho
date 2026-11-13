@@ -60,7 +60,7 @@ self-describing about authorship without an audit-log join; see
 * ``POST /api/v1/kb/export`` -- the confirmed, generic entries as
   Markdown pages, plus the pages to remove (#5730). No body. Returns
   :class:`~meho_backplane.kb.page_export.KbExportResult`. Caller: an
-  ``operator``, or a login with the ``kb_export_only`` claim (the team
+  ``operator``, or a login with the ``kb_export_only`` claim (the tenant
   wiki's CI job), which may reach this route and nothing else. It is a
   ``POST`` because ``GET /api/v1/kb/export`` would hide an entry with
   the slug ``export``; it writes nothing.

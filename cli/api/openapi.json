@@ -40156,7 +40156,7 @@
           "wiki": {
             "$ref": "#/components/schemas/KbWikiSearch",
             "nullable": true,
-            "description": "Only with source='kb' on a tenant that keeps its lessons in a team wiki: the wiki's hits, or why the wiki was not searched. Null otherwise."
+            "description": "Only with source='kb' on a tenant that keeps its lessons in a tenant wiki: the wiki's hits, or why the wiki was not searched. Null otherwise."
           }
         },
         "type": "object",

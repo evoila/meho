@@ -21,6 +21,10 @@ import, and do a few steps by hand. MEHO has no command for it.
     - **People.** The export has no users, so it has no group members.
     - **The directory connection.** The export file has it, but the
       partial import does not read it. You add it again by hand.
+    - **The identity provider mappers.** The export file has them,
+      under `identityProviderMappers`, but the partial import does not
+      read them. A mapper puts people from an identity provider into
+      their group. You add each one again by hand.
 
     Keycloak itself says the admin console export is not a backup, and
     not meant to move a whole realm. Here you use it only for the
@@ -61,6 +65,9 @@ In the Keycloak admin console of the **old** install, open realm
    off: the new install makes its own clients.
 4. Click **Export**. Keycloak saves the file `realm-export.json`.
 
+On a realm with many groups, the export can make Keycloak slow for a
+short time. Do it at a quiet time.
+
 The file has no secrets, but it shows how your login is built. Keep it
 in a safe place, and delete it when you are done.
 
@@ -77,11 +84,27 @@ In the Keycloak admin console of the **new** install, open realm
    as they are.
 5. For a resource that already exists, pick **Skip**. Then the groups and
    the login the new install made stay as they are. Keycloak adds only
-   what is missing.
+   what is missing. Note: when a group already exists, Keycloak skips
+   it with its sub-groups. Add a missing sub-group by hand.
 6. Click **Import**.
 
 Check in **Groups** that every group of the old install is there,
 with its attributes.
+
+Then add the identity provider mappers again. The partial import did
+not bring them, so people from these identity providers get no group,
+and MEHO refuses their login. For each identity provider you imported:
+
+1. In the **old** admin console, open **Identity providers**, open the
+   identity provider and click the **Mappers** tab. Note each mapper:
+   its name, its type and its values. You can also read them in the
+   export file, under `identityProviderMappers`. Each entry there
+   names its identity provider in `identityProviderAlias`.
+2. In the **new** admin console, open the same identity provider,
+   click **Mappers**, and add each mapper with the same values.
+
+An identity provider that the Helm values set up needs nothing here:
+the new install made its mappers.
 
 ## 3. Add the directory connection again
 

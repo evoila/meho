@@ -169,7 +169,9 @@ Operators move it by hand. The public page
 2. Import it into the new install with Keycloak's partial import: only
    groups and identity providers, and **Skip** for what exists. The new
    install keeps its own clients, roles and the login its Helm values
-   set up.
+   set up. Then add the mappers of each imported identity provider again
+   by hand: partial import does not read `identityProviderMappers`, and
+   without its group mapper an identity provider's people get no group.
 3. Add the LDAP connection and its group mapper again by hand. Partial
    import does not read user federation.
 4. Type the secrets again: each imported identity provider's client

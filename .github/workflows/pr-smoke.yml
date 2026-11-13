@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-# Per-PR ephemeral cluster deploy + smoke + teardown (Task #50, G2.7-T2).
+# Per-PR ephemeral cluster deploy + smoke + teardown.
 #
 # Every PR against `main` builds a PR-tagged backplane image, deploys the
 # Helm chart into a fresh `meho-ci-<pr-number>` namespace on the
-# consumer-operated `rke2-infra` Kubernetes cluster (claude-rdc-hetzner-dc),
-# runs the smoke script in `scripts/ci/pr-smoke.sh`, and tears the namespace
-# down regardless of smoke outcome. Goal #11 DoD bullet 4 ("5 consecutive
-# merged PRs in evoila/meho have green per-PR ephemeral-cluster smoke")
-# becomes verifiable only once this workflow is green for the chosen window.
+# consumer-operated CI Kubernetes cluster, runs the smoke script in
+# `scripts/ci/pr-smoke.sh`, and tears the namespace down regardless of
+# smoke outcome.
 #
 # # Cross-repo dependency (BLOCKING for green runs)
 #
@@ -17,9 +15,8 @@
 # consumer side, not in this repo. The contract — auth options (OIDC trust
 # preferred, kubeconfig fallback), RBAC verb set, namespace-pattern scoping,
 # verification commands — lives in
-# `docs/cross-repo/rke2-infra-coordination.md`. The consumer-side tracker is
-# evoila-bosnia/meho-internal#53 (G2.7-T5); until its Section "Status" table
-# flips to all-done, this workflow will be SKIPPED at job level by the
+# `docs/cross-repo/ci-cluster-coordination.md`. Until the consumer side
+# has finished that setup, this workflow is SKIPPED at job level by the
 # "auth available" gate below. That is the desired behaviour: the workflow
 # is shipped now so the CI plumbing is ready, but it does not fail PRs
 # while the consumer-side auth is still being provisioned. Once auth
@@ -39,12 +36,12 @@
 # See https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
 # for the canonical `pull_request_target` hardening pattern this follows.
 #
-# # Auth modes (matches docs/cross-repo/rke2-infra-coordination.md Section 1)
+# # Auth modes (matches docs/cross-repo/ci-cluster-coordination.md Section 1)
 #
 # Option A (preferred, no long-lived secret): the consumer configures
-# rke2-infra's kube-apiserver to trust GitHub Actions' OIDC issuer. The
+# the CI cluster's kube-apiserver to trust GitHub Actions' OIDC issuer. The
 # `permissions: id-token: write` block below lets this workflow mint an
-# OIDC ID token bound to audience `rke2-infra.evba.lab`; the
+# OIDC ID token bound to the audience set in the repository variable `RKE2_OIDC_AUDIENCE`; the
 # `Configure kubectl (OIDC)` step exchanges that token for a kubeconfig
 # context. Selected when secret `RKE2_CA_CERT` is provisioned (the CA
 # bundle is the only consumer-side artefact OIDC mode needs).
@@ -95,7 +92,7 @@ permissions:
   packages: write        # push ghcr.io/evoila/meho:pr-<n>-<sha> via GITHUB_TOKEN
                          # (same scope image.yml grants; without it, the
                          # docker/build-push-action push step 403s every run)
-  id-token: write        # OIDC token mint for Option A (rke2-infra trust)
+  id-token: write        # OIDC token mint for Option A (CI cluster trust)
   pull-requests: write   # post smoke-result comment
 
 concurrency:
@@ -108,7 +105,7 @@ concurrency:
 
 jobs:
   smoke:
-    name: Build, deploy to rke2-infra, smoke, teardown
+    name: Build, deploy to the CI cluster, smoke, teardown
     # Two gates conjoined at the job level. Order matters:
     #
     #   1. Fork-PR guard. `pull_request_target`'s `pull_request` payload
@@ -124,7 +121,7 @@ jobs:
     #      So we cannot test `secrets.RDC_KUBECONFIG != ''` here; the
     #      single repository-scoped variable `vars.RKE2_SMOKE_ENABLED` is
     #      the documented gate. Maintainers flip the variable to `true`
-    #      after the consumer-side auth (Task #53) lands; until then the
+    #      after the consumer-side auth lands; until then the
     #      job is `skipped`, not `failure`. The "Build kubeconfig" step
     #      below still inspects `env.RKE2_CA_CERT` / `env.RDC_KUBECONFIG`
     #      to pick the auth mode at step level (where `secrets.*` IS
@@ -134,7 +131,7 @@ jobs:
       (vars.RKE2_SMOKE_ENABLED == 'true')
     runs-on: meho-runners-ci
     environment: rke2-ci  # consumer-side env-scoped approval + secret store
-    timeout-minutes: 12   # 8min smoke budget (Task #50 AC #5) + headroom for cold buildx cache
+    timeout-minutes: 12   # 8min smoke budget + headroom for cold buildx cache
     env:
       # Surfaced at job level so step-level `if:` expressions can branch on
       # auth mode. GitHub Actions docs: "Using secrets in a workflow" —
@@ -143,7 +140,9 @@ jobs:
       RKE2_CA_CERT: ${{ secrets.RKE2_CA_CERT }}
       RDC_KUBECONFIG: ${{ secrets.RDC_KUBECONFIG }}
       RKE2_API_SERVER: ${{ vars.RKE2_API_SERVER }}
-      OIDC_AUDIENCE: ${{ vars.RKE2_OIDC_AUDIENCE || 'rke2-infra.evba.lab' }}
+      # Repository variable RKE2_OIDC_AUDIENCE: the audience the cluster API server trusts.
+      # No default: the OIDC step fails with a clear message when it is not set.
+      OIDC_AUDIENCE: ${{ vars.RKE2_OIDC_AUDIENCE }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       # PR head SHA, not branch ref: fork-PR-target hardening pattern
       # forbids checkout `ref:` from accepting a moving label the PR
@@ -197,7 +196,7 @@ jobs:
         # amd64-only here: the per-PR feedback loop optimises for time, not
         # for proving multi-arch — `image.yml`'s main-push job covers the
         # arm64 invariant (Initiative #31 DoD bullet on multi-arch). 5-min
-        # arm64 emulation on every PR is wasted budget against Task #50
+        # arm64 emulation on every PR is wasted budget
         # AC #5's <8min wall-clock.
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
@@ -239,15 +238,15 @@ jobs:
       - name: Install kubectl
         uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e  # v5.2.0
         with:
-          version: 'v1.28.15'  # tracks rke2-infra's K8s minor (>=1.28 per Chart.yaml kubeVersion)
+          version: 'v1.28.15'  # tracks the CI cluster's K8s minor (>=1.28 per Chart.yaml kubeVersion)
 
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
 
       - name: Configure kubectl (OIDC mode)
-        # Option A path (docs/cross-repo/rke2-infra-coordination.md §1A).
+        # Option A path (docs/cross-repo/ci-cluster-coordination.md §1A).
         # Runs only when the consumer provisioned the CA cert for
-        # rke2-infra's API server AND the API server URL var is set.
+        # the CI cluster's API server AND the API server URL var is set.
         # When this step is skipped, the kubeconfig step below picks up
         # Option B fallback.
         if: env.RKE2_CA_CERT != '' && env.RKE2_API_SERVER != ''
@@ -258,9 +257,13 @@ jobs:
             // `core.getIDToken(audience)` is the documented Actions toolkit
             // call (https://docs.github.com/en/actions/concepts/security/openid-connect)
             // — uses ACTIONS_ID_TOKEN_REQUEST_URL / _TOKEN under the hood.
-            // Audience matches the rke2-infra apiserver's `--oidc-client-id`
+            // Audience matches the CI cluster apiserver's `--oidc-client-id`
             // or AuthenticationConfiguration `audiences:` entry.
             const audience = process.env.OIDC_AUDIENCE;
+            if (!audience) {
+              core.setFailed('Repository variable RKE2_OIDC_AUDIENCE is not set. Set it to the audience the cluster API server trusts.');
+              return;
+            }
             const token = await core.getIDToken(audience);
             // Treat the token as a secret so it's redacted from logs even
             // if a downstream step accidentally echoes it.
@@ -281,7 +284,7 @@ jobs:
             # Option A — OIDC token + CA cert from consumer.
             CA_FILE="$(mktemp)"
             printf '%s' "$RKE2_CA_CERT" > "$CA_FILE"
-            kubectl config set-cluster rke2-infra \
+            kubectl config set-cluster ci-cluster \
               --server="$RKE2_API_SERVER" \
               --certificate-authority="$CA_FILE" \
               --embed-certs=true \
@@ -290,7 +293,7 @@ jobs:
               --token="$K8S_BEARER_TOKEN" \
               --kubeconfig="$HOME/.kube/config"
             kubectl config set-context gha \
-              --cluster=rke2-infra --user=gha-oidc --namespace="$NS" \
+              --cluster=ci-cluster --user=gha-oidc --namespace="$NS" \
               --kubeconfig="$HOME/.kube/config"
             kubectl config use-context gha --kubeconfig="$HOME/.kube/config"
             rm -f "$CA_FILE"
@@ -319,7 +322,7 @@ jobs:
           # umask during the probe — brief but real leak window on a
           # shared self-hosted runner.
           chmod 0600 "$HOME/.kube/config"
-          # Sanity check: surface the identity rke2-infra sees in the
+          # Sanity check: surface the identity the CI cluster sees in the
           # workflow log so an RBAC denial later is debuggable.
           kubectl auth whoami || kubectl get --raw='/api' >/dev/null
 
@@ -361,7 +364,7 @@ jobs:
         # ephemeral Service and asserts the public operator surfaces
         # (/healthz 200, /version git_sha non-empty, /api/v1/health 401
         # unauthenticated). Separate from the operator-facing
-        # claude-rdc-hetzner-dc/manifests/meho/smoke.sh which exercises
+        # smoke script of the consumer repository, which exercises
         # the full federation chain with real credentials.
         run: bash scripts/ci/pr-smoke.sh "$NS"
 
@@ -404,14 +407,14 @@ jobs:
               ? [
                   `### pr-smoke: PASS`,
                   ``,
-                  `Smoke against ephemeral namespace \`${ns}\` on rke2-infra completed green.`,
+                  `Smoke against ephemeral namespace \`${ns}\` on the CI cluster completed green.`,
                   ``,
                   `[Workflow run](${runUrl})`,
                 ]
               : [
                   `### pr-smoke: ${status.toUpperCase()}`,
                   ``,
-                  `Smoke against ephemeral namespace \`${ns}\` on rke2-infra did not complete green.`,
+                  `Smoke against ephemeral namespace \`${ns}\` on the CI cluster did not complete green.`,
                   ``,
                   `[Workflow run logs](${runUrl})`,
                 ];

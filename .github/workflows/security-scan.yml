@@ -71,47 +71,36 @@ permissions:
 jobs:
   semgrep:
     name: Semgrep SAST
-    # Fork-PR guard (F06, meho-internal#268): never execute PR-controlled
-    # code from a fork on the internal `meho-runners-ci` pool. Unlike the
-    # other PR workflows, this job runs inside a container pulled from
-    # the internal Harbor proxy (harbor.evba.lab, see below), which a
-    # disposable GitHub-hosted runner cannot reach — so untrusted fork
-    # PRs are skipped here rather than relocated. The required `Semgrep
-    # SAST` context still runs for real on the trusted merge_group
-    # (queue-admission) and push refs. Same stance as ci.yml.
+    # Fork-PR guard: never execute PR-controlled code from a fork on the
+    # internal `meho-runners-ci` pool. Unlike the other PR workflows, this
+    # job can run inside a container pulled from the image proxy of the CI
+    # cluster (see below), which a disposable GitHub-hosted runner cannot
+    # reach. So untrusted fork PRs are skipped here rather than relocated.
+    # The required `Semgrep SAST` context still runs for real on the
+    # trusted merge_group (queue-admission) and push refs. Same stance as
+    # ci.yml.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: meho-runners-ci
     timeout-minutes: 15
-    # Pulled through the in-cluster Harbor proxy cache
-    # (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` is public,
-    # anonymous consumer auth — no `credentials:` block needed).
-    # Harbor preserves Docker Hub's namespace, so the `semgrep/semgrep`
-    # path appears verbatim under the cache prefix. The cache itself
-    # authenticates upstream against Docker Hub via the credential
-    # provisioned by claude-rdc-hetzner-dc#472, so cache-miss fetches
-    # don't share MEHO's anonymous bucket either.
+    # The image is pulled through the image proxy cache of the CI cluster
+    # when the repository variable CI_IMAGE_PROXY (`<host>/<project>`) is
+    # set. The project is public with anonymous access, so no
+    # `credentials:` block is needed. The proxy keeps Docker Hub's
+    # namespace, so the `semgrep/semgrep` path appears verbatim under the
+    # prefix. Without the variable the job pulls from Docker Hub directly.
     #
-    # The earlier iteration of this workflow (evoila/meho#447 + #507)
-    # used GHA `container.credentials:` with the `evoila` org-level
-    # `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` secrets to authenticate
-    # directly against Docker Hub. That mechanism cannot coexist with
-    # the cache prefix: GHA's runner interprets `credentials:` as
-    # "log into the registry hosting this image", which is now
-    # `harbor.evba.lab`, not `docker.io` — and Docker Hub creds don't
-    # authenticate to Harbor (which is anonymous anyway). The
-    # `credentials:` block is therefore removed in the same edit as
-    # the prefix swap; the org-level secrets stay provisioned
-    # (Harbor's upstream uses them via #472), and `ci.yml`'s pytest
-    # job still uses them via `docker/login-action`.
+    # `container.credentials:` cannot coexist with the proxy prefix: GitHub
+    # reads it as "log in to the registry that hosts this image", which is
+    # the proxy and not Docker Hub. The ci.yml pytest jobs still use the
+    # Docker Hub secrets through `docker/login-action`.
     #
-    # If Harbor is ever unreachable (cluster outage, cert rotation,
-    # etc.), this job fails fast at "Initialize containers" with a
-    # clear connection error — that's the intended loud-failure
-    # signal, not a silent fall-back to docker.io.
+    # If the proxy is unreachable, this job fails fast at "Initialize
+    # containers" with a clear connection error. That is the intended loud
+    # failure, not a silent fall-back to Docker Hub.
     #
     # Bump cadence: monthly review or on advisory.
     container:
-      image: harbor.evba.lab/dockerhub-proxy/semgrep/semgrep:1.160.0
+      image: ${{ vars.CI_IMAGE_PROXY && format('{0}/semgrep/semgrep:1.160.0', vars.CI_IMAGE_PROXY) || 'semgrep/semgrep:1.160.0' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 

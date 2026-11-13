@@ -1,24 +1,18 @@
 name: meho-runners smoke
-# Verifies the meho-runners-ci self-hosted runner pool can:
-#   1. Pick up + run a job (original scope, claude-rdc-hetzner-dc#262 +
-#      claude-rdc-hetzner-dc#610 for the rke2-ci-side pool).
-#   2. Pull Docker Hub images through the Harbor pull-through cache at
-#      harbor.evba.lab/dockerhub-proxy via the explicit project-prefixed
-#      URL form (the Harbor-supported pull pattern — see
-#      evoila-bosnia/meho-internal#75 + MEHO.HelmCharts#20 for the
-#      "transparent-mirror doesn't work with Harbor" finding).
+# Checks that the meho-runners-ci self-hosted runner pool can:
+#   1. Pick up and run a job.
+#   2. Pull Docker Hub images through the image proxy cache of the CI
+#      cluster. The pull uses the explicit project-prefixed form, which is
+#      the pull pattern the proxy supports (it does not mirror docker.io
+#      transparently).
 #
-# Runs on every push to main + workflow_dispatch on the
-# meho-runners-ci pool (rke2-ci cluster; chart
-# gha-runner-scale-set@0.14.1). The matrix-over-both-pools shape from
-# #714 collapsed to single-pool when #715 cut the real CI workflows
-# over to meho-runners-ci; the rke2-meho-side `meho-runners` pool
-# retires in claude-rdc-hetzner-dc#611.
+# The proxy address comes from the repository variable CI_IMAGE_PROXY, in
+# the form `<host>/<project>`. Without it the job is skipped. The optional
+# variable CI_PROXY_CA_NAME holds the common name of the private CA that
+# signs the proxy certificate. Without it the CA check is skipped.
 #
-# After a week of green runs, the cleanup follow-up on the meho-internal#67
-# Initiative rewrites the workflows that currently pull `library/<image>`
-# to use the `harbor.evba.lab/dockerhub-proxy/library/<image>` form, and
-# retires the tactical Docker Hub auth shims on security-scan.yml + ci.yml.
+# Runs on every push to main and on workflow_dispatch, on the
+# meho-runners-ci pool.
 on:
   push:
     branches: [main]
@@ -36,15 +30,30 @@ env:
   # Pinned image used for the smoke pull. Bump deliberately as part of an
   # alpine upgrade ticket; the smoke is verifying the cache pipeline, not
   # the image content.
-  SMOKE_IMAGE_PROJECT_PREFIXED: harbor.evba.lab/dockerhub-proxy/library/alpine:3.20
-  HARBOR_REPO_PATH: dockerhub-proxy/library/alpine
-  HARBOR_API_URL: https://harbor.evba.lab/api/v2.0
+  # Repository variable CI_IMAGE_PROXY: `<host>/<project>` of the image proxy.
+  CI_IMAGE_PROXY: ${{ vars.CI_IMAGE_PROXY }}
+  # Repository variable CI_PROXY_CA_NAME: common name of the private CA.
+  CI_PROXY_CA_NAME: ${{ vars.CI_PROXY_CA_NAME }}
 
 jobs:
   smoke:
+    # Skip cleanly when the repository variable is not set.
+    if: vars.CI_IMAGE_PROXY != ''
     runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
+      - name: Derive the proxy values
+        run: |
+          set -euo pipefail
+          PROXY_HOST="${CI_IMAGE_PROXY%%/*}"
+          PROXY_PROJECT="${CI_IMAGE_PROXY#*/}"
+          {
+            echo "PROXY_HOST=${PROXY_HOST}"
+            echo "SMOKE_IMAGE_PROJECT_PREFIXED=${CI_IMAGE_PROXY}/library/alpine:3.20"
+            echo "PROXY_REPO_PATH=${PROXY_PROJECT}/library/alpine"
+            echo "PROXY_API_URL=https://${PROXY_HOST}/api/v2.0"
+          } >> "$GITHUB_ENV"
+
       - name: Identify the runner
         run: |
           echo "host: $(hostname)"
@@ -60,7 +69,7 @@ jobs:
       - name: Assert Docker daemon is reachable
         # The dind sidecar shares /var/run/docker.sock via emptyDir; runner
         # container has DOCKER_HOST=unix:///var/run/docker.sock. If the
-        # hand-rolled template.spec in MEHO.HelmCharts / rdc-gitops regressed,
+        # runner pod template regressed,
         # this prints docker daemon version OR fails loudly.
         run: |
           set -euo pipefail
@@ -69,54 +78,43 @@ jobs:
           echo "== docker info ServerVersion =="
           docker info --format '{{.ServerVersion}}'
 
-      - name: Assert internal CA trust is wired (proves the OS-trust mount works)
-        # AC #3 of meho-internal#75 (dind side) + meho-internal#80 (runner
-        # side). The CA cert is mounted at
-        # /usr/local/share/ca-certificates/rdc-internal-ca.crt in BOTH
-        # containers; each one's `command:` override runs
-        # update-ca-certificates before exec-ing its entrypoint:
-        #   - dind sidecar (#75): rebuilds /etc/ssl/certs/ca-certificates.crt
-        #     so containerd (dockerd v25+ delegates pulls to it) TLS-verifies
-        #     `docker pull harbor.evba.lab/dockerhub-proxy/<image>`.
-        #   - runner container (#80): same, so host-level shell steps in
-        #     THIS container (curl/gh against harbor.evba.lab — see the
-        #     "Assert Harbor's cache shows the artifact" step below) verify
-        #     natively. The grep below now passes directly in the runner.
-        # See MEHO.HelmCharts workloads/meho-runners/README.md
-        # ("Runner-side trust differs from dind") for the full asymmetry.
+      - name: Assert private CA trust is wired (proves the OS-trust mount works)
+        # Skipped when CI_PROXY_CA_NAME is not set.
+        # The CA certificate is mounted into both the Docker daemon sidecar
+        # and the runner container. Each one runs update-ca-certificates
+        # before it starts, so the daemon can verify the proxy certificate
+        # on pulls, and shell steps in this container (curl against the
+        # proxy, see the "Assert the proxy cache shows the artifact" step)
+        # verify it natively.
         #
-        # Fail-mode: TLS error means the CA mount or update-ca-certificates
-        # step regressed (likely a chart upgrade that overwrote the
-        # hand-rolled command: in MEHO.HelmCharts / rdc-gitops values.yaml).
+        # Failure mode: a TLS error means the CA mount or the
+        # update-ca-certificates step regressed (likely a chart upgrade
+        # that overwrote the runner pod template).
+        if: env.CI_PROXY_CA_NAME != ''
         run: |
           set -euo pipefail
-          # Just grep the bundle for our CA's CN. Empirically verified
-          # 2026-05-15 that update-ca-certificates concatenates our PEM into
-          # /etc/ssl/certs/ca-certificates.crt with the CN preserved.
-          if ! grep -q "rdc-hetzner-dc Internal Root CA" \
+          # Just grep the bundle for the CA's common name.
+          if ! grep -q "$CI_PROXY_CA_NAME" \
                  /etc/ssl/certs/ca-certificates.crt 2>/dev/null \
                && ! docker run --rm \
+                     -e PROXY_HOST="$PROXY_HOST" \
                      alpine:3.20 \
                      sh -c 'apk add --quiet openssl >/dev/null 2>&1; \
-                            openssl s_client -connect harbor.evba.lab:443 \
-                              -servername harbor.evba.lab -verify_return_error \
+                            openssl s_client -connect "$PROXY_HOST:443" \
+                              -servername "$PROXY_HOST" -verify_return_error \
                               </dev/null 2>&1 | grep -q "Verify return code: 0"'; then
-            # As of meho-internal#80 the runner container's bundle DOES
-            # carry the internal CA (the chart mounts it + runs
-            # update-ca-certificates here too), so the grep above normally
-            # passes directly. This dind-side openssl fallback is retained
-            # only as defence-in-depth: if it is reached, the runner-side
-            # CA wiring regressed (chart drift) — the pull step below still
-            # exercises dockerd's TLS path as a last-resort signal.
-            echo "Note: runner-side CA bundle check did not match; relying on the pull step below for TLS validation (investigate meho-runners-ci's runner-container CA mount — meho-internal#80)."
+            # The runner container's bundle normally carries the CA, so the
+            # grep above passes directly. The fallback is only an extra
+            # check: if it is reached, the runner-side CA wiring regressed.
+            # The pull step below still exercises the daemon's TLS path.
+            echo "Note: runner-side CA bundle check did not match; relying on the pull step below for TLS validation (investigate the CA mount of the runner container)."
           fi
-          echo "✓ Bundle check complete."
+          echo "Bundle check complete."
 
-      - name: Pull library/alpine:3.20 via the Harbor cache (explicit-prefix form)
-        # AC #4 of meho-internal#75. We use the explicit project-prefixed
-        # URL form because Harbor proxy-cache requires the project name in
-        # the URL path (Harbor doesn't support transparent docker.io
-        # mirroring — see MEHO.HelmCharts#20 for the diagnosis).
+      - name: Pull library/alpine:3.20 via the proxy cache (explicit-prefix form)
+        # We use the explicit project-prefixed URL form because the proxy
+        # cache needs the project name in the URL path (it does not mirror
+        # docker.io transparently).
         #
         # Strips any prior local copy first so this is a real pull, not a
         # no-op resolve.
@@ -141,41 +139,36 @@ jobs:
           docker run --rm "$SMOKE_IMAGE_PROJECT_PREFIXED" \
             sh -c 'echo "alpine version:"; cat /etc/alpine-release'
 
-      - name: Assert Harbor's cache shows the artifact
+      - name: Assert the proxy cache shows the artifact
         # The load-bearing assertion: the pull above wasn't just successful
         # at the docker-client level (which can happen via silent fall-back
-        # to docker.io for short-name pulls), but actually populated Harbor.
-        # We query the Harbor API anonymously — the `dockerhub-proxy`
-        # project is public, so artifact listing requires no auth.
+        # to docker.io for short-name pulls), but actually filled the proxy
+        # cache. We query the proxy API anonymously. The project is public,
+        # so artifact listing requires no auth.
         #
-        # This `curl` runs in the RUNNER container (not the dind sidecar).
-        # It verifies harbor.evba.lab's TLS using the runner container's OS
-        # trust store, which carries the rdc-hetzner-dc Internal Root CA as
-        # of meho-internal#80 (the chart mounts the CA + runs
-        # update-ca-certificates in the runner container too — mirroring
-        # what #75 did for dind). Verification stays ON: NO `-k` /
-        # `--insecure` / `--cacert` — proving TLS to Harbor works is the
-        # whole point of this step. A `curl: (60) SSL certificate problem`
-        # here means the runner-side CA wiring regressed in
-        # MEHO.HelmCharts / rdc-gitops (see that repo's runner-smoke
-        # debugging notes).
+        # This `curl` runs in the RUNNER container (not the Docker daemon
+        # sidecar). It verifies the proxy TLS with the runner container's
+        # OS trust store. Verification stays ON: no `-k` / `--insecure` /
+        # `--cacert`. Proving TLS to the proxy works is the whole point of
+        # this step. A `curl: (60) SSL certificate problem` here means the
+        # runner-side CA wiring regressed.
         run: |
           set -euo pipefail
-          ARTIFACTS_URL="$HARBOR_API_URL/projects/${HARBOR_REPO_PATH%%/*}/repositories/$(echo "${HARBOR_REPO_PATH#*/}" | sed 's|/|%2F|g')/artifacts"
+          ARTIFACTS_URL="$PROXY_API_URL/projects/${PROXY_REPO_PATH%%/*}/repositories/$(echo "${PROXY_REPO_PATH#*/}" | sed 's|/|%2F|g')/artifacts"
           echo "Probing: $ARTIFACTS_URL"
-          # The Harbor API returns a JSON array; jq counts how many
-          # artifacts the repo holds. We assert >=1 (an actual cache fill).
+          # The API returns a JSON array; jq counts how many artifacts the
+          # repo holds. We assert >=1 (an actual cache fill).
           COUNT=$(curl -fsS --retry 3 --retry-all-errors "$ARTIFACTS_URL" | jq 'length')
-          echo "artifacts in Harbor cache for $HARBOR_REPO_PATH: $COUNT"
+          echo "artifacts in the proxy cache for $PROXY_REPO_PATH: $COUNT"
           if [ "$COUNT" -lt 1 ]; then
             echo
-            echo "❌ FAIL: Harbor's $HARBOR_REPO_PATH repo is empty after a"
-            echo "         successful docker pull. That means the pull went to"
-            echo "         docker.io directly (TLS error against Harbor, or"
-            echo "         the project-prefix path regressed). Check:"
-            echo "         - kubectl exec <pod> -c dind -- docker info"
-            echo "         - kubectl logs <pod> -c dind | grep -iE 'harbor|tls|x509'"
-            echo "         - the hand-rolled template.spec in MEHO.HelmCharts / rdc-gitops"
+            echo "FAIL: the proxy repo $PROXY_REPO_PATH is empty after a"
+            echo "      successful docker pull. That means the pull went to"
+            echo "      docker.io directly (TLS error against the proxy, or"
+            echo "      the project-prefix path regressed). Check:"
+            echo "      - kubectl exec <pod> -c dind -- docker info"
+            echo "      - kubectl logs <pod> -c dind | grep -iE 'tls|x509'"
+            echo "      - the runner pod template of the CI cluster"
             exit 1
           fi
-          echo "✓ Cache populated."
+          echo "Cache populated."

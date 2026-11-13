@@ -4646,6 +4646,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#meho-docs-ask" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho docs ask
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-docs-collections" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -12094,6 +12105,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#meho-docs-ask" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho docs ask
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-docs-collections" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -19099,6 +19121,18 @@
 <p>Search the meho-docs vendor-document add-on</p>
 <div class="highlight"><pre><span></span><code>meho docs
 </code></pre></div>
+<h3 id="meho-docs-ask"><code>meho docs ask</code><a class="headerlink" href="#meho-docs-ask" title="Permanent link">&para;</a></h3>
+<p>Ask one vendor-document collection a question (cited answer)</p>
+<div class="highlight"><pre><span></span><code>meho docs ask &lt;question&gt; [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--collection</code> — collection key to ask (required; exactly one)</li>
+<li><code>--json</code> — emit the raw AskDocsResponse JSON (answer, citations, answer_source)</li>
+<li><code>--limit</code> — max chunks to ground the answer on (1..50, server default 10 when omitted)</li>
+<li><code>--product</code> — optional vendor-product refinement</li>
+<li><code>--version</code> — optional product-version refinement</li>
+</ul>
 <h3 id="meho-docs-collections"><code>meho docs collections</code><a class="headerlink" href="#meho-docs-collections" title="Permanent link">&para;</a></h3>
 <p>List, create, update, delete, and probe / toggle doc collections</p>
 <div class="highlight"><pre><span></span><code>meho docs collections

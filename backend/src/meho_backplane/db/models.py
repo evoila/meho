@@ -7248,12 +7248,12 @@ class ApprovalRequest(Base):
       them, next to today's checks. NULL when the
       ``POLICY_APPROVER_ROUTING`` switch was off, for a change of rights,
       and on rows saved before this column: today's rule decides. Added by
-      migration ``0165``.
+      migration ``0166``.
 
     * ``approver_rule`` -- Text nullable. The routing entry that set
       ``approver_roles`` (``tenant:routing[0]``, ``install:routing[2]``),
       or ``default`` when no entry fits and today's rule set them. NULL
-      when ``approver_roles`` is NULL. Added by migration ``0165``.
+      when ``approver_roles`` is NULL. Added by migration ``0166``.
 
     * ``reveal_secret`` -- Boolean NOT NULL DEFAULT ``false``. The requester
       asked for the hidden values of the answer (``reveal_secret: true``;
@@ -7500,7 +7500,7 @@ class ApprovalRequest(Base):
     # See the class docstring. Added by migration ``0153``.
     rights_change: Mapped[bool | None] = mapped_column(sa.Boolean(), nullable=True, default=None)
     # The login group kinds that may approve the request, and the routing
-    # entry that set them. See the class docstring. Added by migration ``0165``.
+    # entry that set them. See the class docstring. Added by migration ``0166``.
     approver_roles: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
     approver_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # An operator checked the target of an approved run whose outcome MEHO

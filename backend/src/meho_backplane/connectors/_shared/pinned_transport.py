@@ -152,12 +152,21 @@ class _PinnedAsyncBackend(httpcore.AsyncNetworkBackend):
         await self._inner.sleep(seconds)
 
 
+def _port_required(host: str) -> Sequence[str] | None:
+    """The base resolver of :class:`_PortPinnedAsyncBackend`; never used.
+
+    That backend always checks with the port. If this is ever called, it
+    refuses instead of letting the host through unchecked.
+    """
+    raise RuntimeError("the port-pinned transport must check the host with its port")
+
+
 class _PortPinnedAsyncBackend(_PinnedAsyncBackend):
     """:class:`_PinnedAsyncBackend` whose resolver also gets the dialed port."""
 
     def __init__(self, resolver: PortPinnedResolver, inner: httpcore.AsyncNetworkBackend) -> None:
+        super().__init__(_port_required, inner)
         self._port_resolver = resolver
-        self._inner = inner
 
     def _screen(self, host: str, port: int) -> Sequence[str] | None:
         return self._port_resolver(host, port)

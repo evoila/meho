@@ -76,10 +76,16 @@ def switch_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The query embedding has no rows to compare with; only keywords rank."""
+    """The query embedding has no rows to compare with; only keywords rank.
+
+    An edit rebuilds the row's search vector (#5321); here it keeps none.
+    """
     service = AsyncMock()
     service.encode_one.return_value = [0.1] * 384
     monkeypatch.setattr("meho_backplane.operations._search.get_embedding_service", lambda: service)
+    monkeypatch.setattr(
+        "meho_backplane.operations.ingest.service.refresh_op_embedding", AsyncMock()
+    )
 
 
 def _operator(role: TenantRole = TenantRole.TENANT_ADMIN) -> Operator:

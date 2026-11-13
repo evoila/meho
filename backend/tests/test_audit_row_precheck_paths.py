@@ -24,7 +24,7 @@ import pytest
 from pydantic import SecretStr
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from meho_backplane.agent.invocation import AgentInvoker
 from meho_backplane.agent.run import PydanticAgentRun
@@ -39,6 +39,7 @@ from meho_backplane.db.models import (
     AgentPermission,
     AgentPrincipal,
     AuditLog,
+    RunbookRun,
     ScheduledTriggerKind,
     Target,
     Tenant,
@@ -169,7 +170,11 @@ async def _dispatch_rows() -> list[AuditLog]:
 async def test_a_runbook_step_is_refused_before_the_call(
     demo_op: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The run's ticket id is too long for its index: the step call is refused."""
+    """A run stored before the ticket id rule has a ticket id too long for its index.
+
+    The start door now refuses such a ticket id, so the test writes it
+    straight into the stored run row, as an older row would hold it.
+    """
     results: list[dict[str, Any]] = []
     real_call_operation = run_service_module.call_operation
 
@@ -206,8 +211,13 @@ async def test_a_runbook_step_is_refused_before_the_call(
     start = await runs.start_run(
         TENANT_ID,
         "op-runbook",
-        StartRunRequest(template_slug="one-call", target="box", params={}, work_ref=TOO_LONG),
+        StartRunRequest(template_slug="one-call", target="box", params={}),
     )
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(RunbookRun).where(RunbookRun.run_id == start.run_id).values(work_ref=TOO_LONG)
+        )
+        await session.commit()
 
     # The refused call fails the step, so the run does not go on.
     with pytest.raises(PreviousStepFailedError):

@@ -3807,33 +3807,6 @@ type BodyUiPolicyClassifyPreviewUiPolicyClassifyPreviewPost struct {
 	Group      *string `json:"group"`
 	Labels     *string `json:"labels"`
 	Op         *string `json:"op"`
-
-	// SessionCtx Per-request session identity exposed on ``request.state``.
-	//
-	// Frozen so a route handler that stashes the context on a logger
-	// or forwards it to a service layer cannot accidentally mutate
-	// fields downstream. The shape mirrors :class:`Operator` for the
-	// fields T5 (#866) needs to render an authenticated page header;
-	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
-	// the session-cookie path does not load them today (the encrypted
-	// row carries only the access token, not the decoded claims).
-	//
-	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
-	// from a same-request lookup against the ``tenant`` table (keyed on
-	// :attr:`tenant_id`). The fields are surfaced into every UI template
-	// by the chassis context processor so the page header's tenant chip
-	// renders the operator-readable name without each route having to
-	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
-	// tenant row was deleted between session-creation and the request
-	// (an ops anomaly; the operator still authenticates fine, the chip
-	// just falls back to the tenant UUID).
-	//
-	// ``tenant_id`` is the session's current tenant (#5240).
-	// ``tenant_chosen`` is ``False`` while a person with several tenants
-	// has not picked one; the middleware then lets the request reach only
-	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
-	// a switch.
-	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 }
 
 // BodyUiPolicyClassifyRequestUiPolicyClassifyRequestPost defines model for Body_ui_policy_classify_request_ui_policy_classify_request_post.
@@ -3844,33 +3817,6 @@ type BodyUiPolicyClassifyRequestUiPolicyClassifyRequestPost struct {
 	Group      *string `json:"group"`
 	Labels     *string `json:"labels"`
 	Op         *string `json:"op"`
-
-	// SessionCtx Per-request session identity exposed on ``request.state``.
-	//
-	// Frozen so a route handler that stashes the context on a logger
-	// or forwards it to a service layer cannot accidentally mutate
-	// fields downstream. The shape mirrors :class:`Operator` for the
-	// fields T5 (#866) needs to render an authenticated page header;
-	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
-	// the session-cookie path does not load them today (the encrypted
-	// row carries only the access token, not the decoded claims).
-	//
-	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
-	// from a same-request lookup against the ``tenant`` table (keyed on
-	// :attr:`tenant_id`). The fields are surfaced into every UI template
-	// by the chassis context processor so the page header's tenant chip
-	// renders the operator-readable name without each route having to
-	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
-	// tenant row was deleted between session-creation and the request
-	// (an ops anomaly; the operator still authenticates fine, the chip
-	// just falls back to the tenant UUID).
-	//
-	// ``tenant_id`` is the session's current tenant (#5240).
-	// ``tenant_chosen`` is ``False`` while a person with several tenants
-	// has not picked one; the middleware then lets the request reach only
-	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
-	// a switch.
-	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 }
 
 // BodyUiSchedulerCreateSubmitUiSchedulerCreatePost defines model for Body_ui_scheduler_create_submit_ui_scheduler_create_post.
@@ -4425,6 +4371,15 @@ type ClassificationEntryOut struct {
 	Scope      string            `json:"scope"`
 }
 
+// ClassificationInForce What applies to one operation: the code's value, overrides, classification, floors.
+//
+// A floor (a minimum-level rule in the code) can keep a wait or a level
+// that the classification alone would not set.
+type ClassificationInForce struct {
+	Risk  string `json:"risk"`
+	Waits bool   `json:"waits"`
+}
+
 // ClassificationListResponse The taxonomy and the stored entries of the caller's tenant and of the install.
 //
 // “enabled“ is “false“ while the “POLICY_CLASSIFICATION“ switch is
@@ -4464,10 +4419,14 @@ type ClassificationPreviewResponse struct {
 
 // ClassificationPreviewRow One matched operation, with its values before and after the edit.
 type ClassificationPreviewRow struct {
-	// After The classified values of one operation, before the floors.
+	// After The classified values of one operation, before the floors, and what is in force.
+	//
+	// ``in_force`` is ``null`` when the operation's row is gone.
 	After ClassificationValues `json:"after"`
 
-	// Before The classified values of one operation, before the floors.
+	// Before The classified values of one operation, before the floors, and what is in force.
+	//
+	// ``in_force`` is ``null`` when the operation's row is gone.
 	Before      ClassificationValues `json:"before"`
 	Changes     bool                 `json:"changes"`
 	ConnectorId string               `json:"connector_id"`
@@ -4490,13 +4449,16 @@ type ClassificationTaxonomyOut struct {
 	Default    string   `json:"default"`
 }
 
-// ClassificationValues The classified values of one operation, before the floors.
+// ClassificationValues The classified values of one operation, before the floors, and what is in force.
+//
+// “in_force“ is “null“ when the operation's row is gone.
 type ClassificationValues struct {
-	AlwaysWait bool              `json:"always_wait"`
-	Category   *string           `json:"category"`
-	Labels     map[string]string `json:"labels"`
-	Risk       *string           `json:"risk"`
-	RuleRef    string            `json:"rule_ref"`
+	AlwaysWait bool                   `json:"always_wait"`
+	Category   *string                `json:"category"`
+	InForce    *ClassificationInForce `json:"in_force"`
+	Labels     map[string]string      `json:"labels"`
+	Risk       *string                `json:"risk"`
+	RuleRef    string                 `json:"rule_ref"`
 }
 
 // ConfirmVerify Operator answers a yes/no prompt; only an affirmative advances.
@@ -15062,9 +15024,6 @@ type OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody = 
 // OperationsPreviewUiOperationsPreviewPostFormdataRequestBody defines body for OperationsPreviewUiOperationsPreviewPost for application/x-www-form-urlencoded ContentType.
 type OperationsPreviewUiOperationsPreviewPostFormdataRequestBody = BodyOperationsPreviewUiOperationsPreviewPost
 
-// UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody defines body for UiPolicyClassifyUiPolicyClassifyGet for application/json ContentType.
-type UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody = UISessionContext
-
 // UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostFormdataRequestBody defines body for UiPolicyClassifyPreviewUiPolicyClassifyPreviewPost for application/x-www-form-urlencoded ContentType.
 type UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostFormdataRequestBody = BodyUiPolicyClassifyPreviewUiPolicyClassifyPreviewPost
 
@@ -18519,10 +18478,8 @@ type ClientInterface interface {
 	// UiPairingListUiPairingGet request
 	UiPairingListUiPairingGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiPolicyClassifyUiPolicyClassifyGetWithBody request with any body
-	UiPolicyClassifyUiPolicyClassifyGetWithBody(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	UiPolicyClassifyUiPolicyClassifyGet(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, body UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiPolicyClassifyUiPolicyClassifyGet request
+	UiPolicyClassifyUiPolicyClassifyGet(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithBody request with any body
 	UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -25789,20 +25746,8 @@ func (c *Client) UiPairingListUiPairingGet(ctx context.Context, reqEditors ...Re
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiPolicyClassifyUiPolicyClassifyGetWithBody(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiPolicyClassifyUiPolicyClassifyGetRequestWithBody(c.Server, params, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) UiPolicyClassifyUiPolicyClassifyGet(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, body UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiPolicyClassifyUiPolicyClassifyGetRequest(c.Server, params, body)
+func (c *Client) UiPolicyClassifyUiPolicyClassifyGet(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiPolicyClassifyUiPolicyClassifyGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -50443,19 +50388,8 @@ func NewUiPairingListUiPairingGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
-// NewUiPolicyClassifyUiPolicyClassifyGetRequest calls the generic UiPolicyClassifyUiPolicyClassifyGet builder with application/json body
-func NewUiPolicyClassifyUiPolicyClassifyGetRequest(server string, params *UiPolicyClassifyUiPolicyClassifyGetParams, body UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewUiPolicyClassifyUiPolicyClassifyGetRequestWithBody(server, params, "application/json", bodyReader)
-}
-
-// NewUiPolicyClassifyUiPolicyClassifyGetRequestWithBody generates requests for UiPolicyClassifyUiPolicyClassifyGet with any type of body
-func NewUiPolicyClassifyUiPolicyClassifyGetRequestWithBody(server string, params *UiPolicyClassifyUiPolicyClassifyGetParams, contentType string, body io.Reader) (*http.Request, error) {
+// NewUiPolicyClassifyUiPolicyClassifyGetRequest generates requests for UiPolicyClassifyUiPolicyClassifyGet
+func NewUiPolicyClassifyUiPolicyClassifyGetRequest(server string, params *UiPolicyClassifyUiPolicyClassifyGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -50527,12 +50461,10 @@ func NewUiPolicyClassifyUiPolicyClassifyGetRequestWithBody(server string, params
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
-	req, err := http.NewRequest("GET", queryURL.String(), body)
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
-
-	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -55142,10 +55074,8 @@ type ClientWithResponsesInterface interface {
 	// UiPairingListUiPairingGetWithResponse request
 	UiPairingListUiPairingGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiPairingListUiPairingGetResponse, error)
 
-	// UiPolicyClassifyUiPolicyClassifyGetWithBodyWithResponse request with any body
-	UiPolicyClassifyUiPolicyClassifyGetWithBodyWithResponse(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiPolicyClassifyUiPolicyClassifyGetResponse, error)
-
-	UiPolicyClassifyUiPolicyClassifyGetWithResponse(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, body UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiPolicyClassifyUiPolicyClassifyGetResponse, error)
+	// UiPolicyClassifyUiPolicyClassifyGetWithResponse request
+	UiPolicyClassifyUiPolicyClassifyGetWithResponse(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, reqEditors ...RequestEditorFn) (*UiPolicyClassifyUiPolicyClassifyGetResponse, error)
 
 	// UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithBodyWithResponse request with any body
 	UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiPolicyClassifyPreviewUiPolicyClassifyPreviewPostResponse, error)
@@ -70871,17 +70801,9 @@ func (c *ClientWithResponses) UiPairingListUiPairingGetWithResponse(ctx context.
 	return ParseUiPairingListUiPairingGetResponse(rsp)
 }
 
-// UiPolicyClassifyUiPolicyClassifyGetWithBodyWithResponse request with arbitrary body returning *UiPolicyClassifyUiPolicyClassifyGetResponse
-func (c *ClientWithResponses) UiPolicyClassifyUiPolicyClassifyGetWithBodyWithResponse(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiPolicyClassifyUiPolicyClassifyGetResponse, error) {
-	rsp, err := c.UiPolicyClassifyUiPolicyClassifyGetWithBody(ctx, params, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseUiPolicyClassifyUiPolicyClassifyGetResponse(rsp)
-}
-
-func (c *ClientWithResponses) UiPolicyClassifyUiPolicyClassifyGetWithResponse(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, body UiPolicyClassifyUiPolicyClassifyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiPolicyClassifyUiPolicyClassifyGetResponse, error) {
-	rsp, err := c.UiPolicyClassifyUiPolicyClassifyGet(ctx, params, body, reqEditors...)
+// UiPolicyClassifyUiPolicyClassifyGetWithResponse request returning *UiPolicyClassifyUiPolicyClassifyGetResponse
+func (c *ClientWithResponses) UiPolicyClassifyUiPolicyClassifyGetWithResponse(ctx context.Context, params *UiPolicyClassifyUiPolicyClassifyGetParams, reqEditors ...RequestEditorFn) (*UiPolicyClassifyUiPolicyClassifyGetResponse, error) {
+	rsp, err := c.UiPolicyClassifyUiPolicyClassifyGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}

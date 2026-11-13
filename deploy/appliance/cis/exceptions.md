@@ -2,7 +2,7 @@
 
 Rules of the CIS Ubuntu Linux 24.04 LTS Benchmark v1.0.0, Level 1 - Server,
 that apply to the appliance but fail on the build's scan or on an appliance
-after first start. Each has one sentence on why. Damir Topic approves the
+after first start. Each has one sentence on why. The release owner approves the
 whole list once per release, with the release's security sheet (ADR 0009
 decision 2); a release does not ship without that approval
 (`docs/RELEASING.md`, pre-flight).

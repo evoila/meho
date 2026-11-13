@@ -65,7 +65,7 @@ func TestRunMyRecentSendsParamsToWire(t *testing.T) {
 			Items: []api.AuditEntry{{
 				Id:           mustUUID(t, "00000000-0000-0000-0000-000000000001"),
 				Ts:           mustTS(t, "2026-05-15T09:00:00Z"),
-				PrincipalSub: "damir",
+				PrincipalSub: "operator-a",
 				Method:       "POST",
 				Path:         "/api/v1/retrieve",
 				StatusCode:   200,
@@ -92,7 +92,7 @@ func TestRunMyRecentSendsParamsToWire(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"AUDIT_ID", "00000000-0000-0000-0000-000000000001",
-		"TIME", "damir", "meho.retrieval.query", "audit_query",
+		"TIME", "operator-a", "meho.retrieval.query", "audit_query",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q in %s", want, out)

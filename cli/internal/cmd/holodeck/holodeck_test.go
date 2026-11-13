@@ -244,7 +244,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "holodeck.about", "holorouter-hetzner-dc", nil)
+	r, err := dispatchOp(context.Background(), srv.URL, "holodeck.about", "my-router", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 				return
 			}
 			tgt, _ := raw["target"].(map[string]any)
-			if tgt == nil || tgt["name"] != "holorouter-hetzner-dc" {
+			if tgt == nil || tgt["name"] != "my-router" {
 				t.Errorf("target should wrap slug as {name: ...}; got %v", raw["target"])
 			}
 			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: "holodeck.about"})
@@ -275,7 +275,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "holodeck.about", "holorouter-hetzner-dc", nil); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "holodeck.about", "my-router", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -499,7 +499,7 @@ func TestK8sExecForwardsCommandVerbatim(t *testing.T) {
 			primeToken(t, srv.URL)
 
 			params := map[string]any{"command": tc.cmd}
-			if _, err := dispatchOp(context.Background(), srv.URL, "holodeck.k8s.exec", "holorouter-test", params); err != nil {
+			if _, err := dispatchOp(context.Background(), srv.URL, "holodeck.k8s.exec", "router-test", params); err != nil {
 				t.Fatalf("dispatchOp: %v", err)
 			}
 

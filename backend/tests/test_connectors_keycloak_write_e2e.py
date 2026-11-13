@@ -360,6 +360,7 @@ async def test_role_mapping_assign_resolves_username_and_role(
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         mock.get("/admin/realms/evba/users").respond(200, json=[_EXISTING_USER])
+        mock.get(f"/admin/realms/evba/users/{_USER_UUID}").respond(200, json=_EXISTING_USER)
         mock.get("/admin/realms/evba/roles/tenant_admin").respond(200, json=_REALM_ROLE)
         post_route = mock.post(
             f"/admin/realms/evba/users/{_USER_UUID}/role-mappings/realm"
@@ -470,6 +471,7 @@ async def test_user_reset_password_resolves_username_and_no_leak(
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         mock.get("/admin/realms/evba/users").respond(200, json=[_EXISTING_USER])
+        mock.get(f"/admin/realms/evba/users/{_USER_UUID}").respond(200, json=_EXISTING_USER)
         put_route = mock.put(f"/admin/realms/evba/users/{_USER_UUID}/reset-password").respond(204)
         result = await _dispatch(
             "keycloak.user.reset_password",

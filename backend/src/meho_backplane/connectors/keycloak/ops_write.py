@@ -129,6 +129,7 @@ from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
     inline_smtp_password_reason,
     with_smtp_password,
 )
+from meho_backplane.connectors.keycloak.ops_write_user_identity import read_user_for_write
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 
 if TYPE_CHECKING:
@@ -601,19 +602,10 @@ async def keycloak_user_reset_password(
     value-free confirmation; the response never carries the password.
     """
     realms = resolve_realm_config(target)
-    uuid = _opt_str(params.get("id"))
-    username = _opt_str(params.get("username"))
-    if uuid is None:
-        if username is None:
-            raise ValueError(
-                "keycloak.user.reset_password requires either 'id' (UUID) or 'username'"
-            )
-        uuid = await self._find_user_uuid(target, realms.managed_realm, username, operator=operator)
-        if uuid is None:
-            raise KeycloakUserNotFoundError(
-                f"keycloak.user.reset_password: no user with username={username!r} in realm "
-                f"{realms.managed_realm!r}"
-            )
+    user = await read_user_for_write(
+        self, operator, target, params, op_id="keycloak.user.reset_password"
+    )
+    uuid = user.uuid
     password = await _read_password_from_vault(operator, target, params)
     credential = {"type": "password", "value": password, "temporary": _temporary_flag(params)}
     await self._write_admin(
@@ -627,7 +619,7 @@ async def keycloak_user_reset_password(
         json=credential,
         idempotent_conflict=False,
     )
-    return {"id": uuid, "username": username, "password_reset": True}
+    return {"id": uuid, "username": user.username, "password_reset": True}
 
 
 async def keycloak_user_logout(
@@ -645,17 +637,8 @@ async def keycloak_user_logout(
     :exc:`KeycloakUserNotFoundError`. The op reads and returns no credential.
     """
     realms = resolve_realm_config(target)
-    uuid = _opt_str(params.get("id"))
-    username = _opt_str(params.get("username"))
-    if uuid is None:
-        if username is None:
-            raise ValueError("keycloak.user.logout requires either 'id' (UUID) or 'username'")
-        uuid = await self._find_user_uuid(target, realms.managed_realm, username, operator=operator)
-        if uuid is None:
-            raise KeycloakUserNotFoundError(
-                f"keycloak.user.logout: no user with username={username!r} in realm "
-                f"{realms.managed_realm!r}"
-            )
+    user = await read_user_for_write(self, operator, target, params, op_id="keycloak.user.logout")
+    uuid = user.uuid
     try:
         await self._write_admin(
             target,
@@ -673,7 +656,7 @@ async def keycloak_user_logout(
                 f"keycloak.user.logout: no user with id={uuid!r} in realm {realms.managed_realm!r}"
             ) from exc
         raise
-    return {"id": uuid, "username": username, "logged_out": True}
+    return {"id": uuid, "username": user.username, "logged_out": True}
 
 
 # ---------------------------------------------------------------------------
@@ -701,19 +684,10 @@ async def keycloak_role_mapping_assign(
     holds the names of the roles Keycloak returned.
     """
     realms = resolve_realm_config(target)
-    uuid = _opt_str(params.get("id"))
-    username = _opt_str(params.get("username"))
-    if uuid is None:
-        if username is None:
-            raise ValueError(
-                "keycloak.role_mapping.assign requires either 'id' (UUID) or 'username'"
-            )
-        uuid = await self._find_user_uuid(target, realms.managed_realm, username, operator=operator)
-        if uuid is None:
-            raise KeycloakUserNotFoundError(
-                f"keycloak.role_mapping.assign: no user with username={username!r} in realm "
-                f"{realms.managed_realm!r}"
-            )
+    user = await read_user_for_write(
+        self, operator, target, params, op_id="keycloak.role_mapping.assign"
+    )
+    uuid = user.uuid
     role_names = [str(r).strip() for r in params["roles"] if str(r).strip()]
     role_reprs: list[dict[str, Any]] = []
     for name in role_names:
@@ -737,7 +711,7 @@ async def keycloak_role_mapping_assign(
     )
     return {
         "id": uuid,
-        "username": username,
+        "username": user.username,
         "assigned_roles": [role["name"] for role in role_reprs],
     }
 

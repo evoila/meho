@@ -203,6 +203,12 @@ def _single_match(
 # ---------------------------------------------------------------------------
 
 
+def _same_username(asked: str, user: dict[str, Any]) -> bool:
+    """Whether *asked* is the username stored for *user* (case does not count)."""
+    stored = str_field(user, "username")
+    return stored is not None and stored.casefold() == asked.casefold()
+
+
 async def find_user(
     connector: KeycloakConnector,
     operator: Operator,
@@ -217,6 +223,11 @@ async def find_user(
     if user_id is not None:
         path = fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(user_id)})
         rep = await get_or_none(connector, target, path, operator)
+        if rep is not None and username is not None and not _same_username(username, rep):
+            raise ValueError(
+                f"{USER_DELETE_OP}: 'id' and 'username' belong to different users. "
+                "Nothing was changed. Send the request with one user."
+            )
     elif username is not None:
         rows = await connector._get_admin_list(
             target,

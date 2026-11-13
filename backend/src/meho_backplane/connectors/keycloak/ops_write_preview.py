@@ -146,9 +146,16 @@ from meho_backplane.connectors.keycloak.ops_write_realm_delete import (
     realm_blast_radius,
     realm_name_param,
 )
+from meho_backplane.connectors.keycloak.ops_write_user_identity import (
+    refuse_other_user_check,
+    register_user_write,
+    with_stored_user,
+)
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
+    PreviewBuilder,
     PreviewContext,
     register_preview_builder,
 )
@@ -289,6 +296,30 @@ async def _user_reset_password_preview(ctx: PreviewContext) -> dict[str, Any] | 
         if value is not None:
             preview[key] = value
     return preview
+
+
+def _user_enabled_preview(enabled: bool) -> PreviewBuilder:
+    """Build the card for ``keycloak.user.disable`` / ``keycloak.user.enable``."""
+
+    async def _builder(ctx: PreviewContext) -> dict[str, Any] | None:
+        return {
+            "resource": "user_enabled",
+            "enabled": enabled,
+            "id": _opt_str(ctx.params.get("id")),
+            "realm": _managed_realm(ctx),
+        }
+
+    return _builder
+
+
+async def _user_logout_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Card for ``keycloak.user.logout``: which user loses every open session."""
+    return {
+        "resource": "user_sessions",
+        "action": "logout",
+        "id": _opt_str(ctx.params.get("id")),
+        "realm": _managed_realm(ctx),
+    }
 
 
 def _attribute_keys(ctx: PreviewContext) -> list[str]:
@@ -566,21 +597,38 @@ def _register_keycloak_preview_builders() -> None:
     register_preview_builder("keycloak.realm.create", _realm_create_preview)
     register_preview_builder("keycloak.user.create", _user_create_preview)
     register_grant_ops()
+    register_park_check(
+        "keycloak.role_mapping.assign", refuse_other_user_check("keycloak.role_mapping.assign")
+    )
     register_preview_builder(
         "keycloak.role_mapping.assign",
-        with_grant_facts("keycloak.role_mapping.assign", _role_mapping_assign_preview),
+        with_grant_facts(
+            "keycloak.role_mapping.assign", with_stored_user(_role_mapping_assign_preview)
+        ),
     )
-    register_preview_builder("keycloak.user.reset_password", _user_reset_password_preview)
+    register_user_write("keycloak.user.reset_password", _user_reset_password_preview)
+    register_user_write("keycloak.user.disable", _user_enabled_preview(False))
+    register_user_write("keycloak.user.enable", _user_enabled_preview(True))
+    register_user_write("keycloak.user.logout", _user_logout_preview)
     register_preview_builder("keycloak.group.create", _group_create_preview)
     register_preview_builder(
         "keycloak.group.update_attributes",
         with_grant_facts("keycloak.group.update_attributes", _group_update_attributes_preview),
     )
+    register_park_check(
+        "keycloak.group.member.add",
+        refuse_other_user_check("keycloak.group.member.add", "user_id"),
+    )
     register_preview_builder(
         "keycloak.group.member.add",
-        with_grant_facts("keycloak.group.member.add", _group_membership_preview("add")),
+        with_grant_facts(
+            "keycloak.group.member.add",
+            with_stored_user(_group_membership_preview("add"), id_key="user_id"),
+        ),
     )
-    register_preview_builder("keycloak.group.member.remove", _group_membership_preview("remove"))
+    register_user_write(
+        "keycloak.group.member.remove", _group_membership_preview("remove"), id_key="user_id"
+    )
     register_preview_builder("keycloak.user.delete", _user_delete_preview)
     register_preview_builder("keycloak.group.delete", _group_delete_preview)
     register_preview_builder("keycloak.client.delete", _client_delete_preview)

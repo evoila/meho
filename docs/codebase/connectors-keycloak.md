@@ -664,8 +664,9 @@ for example at the end of an event or when someone leaves.
 - It reads and returns no credential. It does not change the password (that
   is `user.reset_password`). It signs out one user only; the realm-wide
   `POST .../logout-all` is not offered.
-- Risk level `caution`, approval required, group `user_write`. No bespoke
-  approval card: the generic params echo shows the `id` / `username`. On the
+- Risk level `caution`, approval required, group `user_write`. The approval
+  card shows the user as Keycloak stores it (see "One user, as Keycloak
+  stores it"). On the
   broadcast feed it is a plain `write` (pinned in
   `broadcast/events.py::_WRITE_OPS`, because `.logout` is not a write suffix).
 - CLI: `meho keycloak user logout (--id|--username)`.
@@ -692,6 +693,34 @@ longer sign in to any app that uses this realm.
   because `.disable` and `.enable` are not write suffixes).
 - The result is `{id, username, enabled, unrequested_changes, read_back_checked}`
   and carries no credential.
+
+### One user, as Keycloak stores it
+
+Every Keycloak user write shares one helper,
+`connectors/keycloak/ops_write_user_identity.py`. It covers
+`user.disable`, `user.enable`, `user.logout`, `user.reset_password`,
+`user.delete`, `user.required_actions.update`, `role_mapping.assign`,
+`group.member.add` and `group.member.remove` (these two name the user as
+`user_id`).
+
+- A request with both an id and a `username` must name one user. The
+  username stored in Keycloak for that id must match (case does not
+  count). If not, the request is refused before it waits for approval (a
+  park check), and no approval request is stored. The same check runs
+  again when the approved request runs, so a user who was renamed in
+  between is refused. Nothing is written. `user.delete` does the same in
+  its lookup (`find_user`), so its card and its run refuse too.
+- The approval card shows the username stored in Keycloak for the user id
+  (`username`, `user_available: true`). A name the caller sent is never
+  shown as the user's name: when the user cannot be read, the card has no
+  `username`. It shows the sent value as `requested_username` and
+  `user_available: false`.
+- After approval, the op acts on the user id shown on the card. It does not
+  look the username up again. A card without a user id is refused.
+- The result shows the stored username (`group.member.*` results now carry
+  `username` too).
+- With only an id, or only a username, the call works as before. Each run
+  now reads the user once before the write.
 
 ### One-time code set-up
 

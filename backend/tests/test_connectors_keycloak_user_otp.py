@@ -622,7 +622,9 @@ async def test_card_still_shows_the_request_when_the_user_cannot_be_read(
             pending = await session.get(ApprovalRequest, request_id)
             assert pending is not None
             preview = pending.proposed_effect["preview"]
-    assert preview["username"] == "event-guest"
+    # The user could not be read, so the sent name is not shown as the user's name.
+    assert preview["username"] is None
+    assert preview["requested_username"] == "event-guest"
     assert preview["remove"] == ["CONFIGURE_TOTP"]
     assert preview["current_available"] is False
 

@@ -212,7 +212,7 @@ func printPlan(w io.Writer, answer planAnswer, validateOnly bool) {
 
 // printDiff prints each section's added, changed and removed items.
 func printDiff(w io.Writer, diff map[string]any) {
-	for _, section := range []string{"description", "taxonomy", "classifications"} {
+	for _, section := range []string{"description", "taxonomy", "classifications", "bindings"} {
 		parts, _ := diff[section].(map[string]any)
 		for _, kind := range []string{"added", "changed", "removed"} {
 			items, _ := parts[kind].([]any)

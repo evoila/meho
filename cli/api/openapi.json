@@ -38732,7 +38732,7 @@
           "based_on"
         ],
         "title": "PolicyImportResponse",
-        "description": "The preview and the import answer.\n\n``diff`` has the sections ``description``, ``taxonomy`` and\n``classifications``, each with ``added``, ``changed`` (``before`` and\n``after``) and ``removed``. Each classification entry also says how many\noperations it ``matches`` and how many of those it ``changes``.\n``operations_changed`` counts the operations whose values change. ``diff``\nis ``null`` when the file has mistakes. ``based_on`` is the SHA-256 of\nthe stored policy the plan was made against. On an import that waits,\n``approval_request_id`` names the request."
+        "description": "The preview and the import answer.\n\n``diff`` has the sections ``description``, ``taxonomy``,\n``classifications`` and ``bindings``, each with ``added``, ``changed``\n(``before`` and ``after``) and ``removed``. Each classification entry also says how many\noperations it ``matches`` and how many of those it ``changes``.\n``operations_changed`` counts the operations whose values change. ``diff``\nis ``null`` when the file has mistakes. ``based_on`` is the SHA-256 of\nthe stored policy the plan was made against. On an import that waits,\n``approval_request_id`` names the request."
       },
       "PolicyRevisionView": {
         "properties": {

@@ -539,6 +539,11 @@
               "type": "string",
               "enum": ["true", "false"],
               "description": "Run the policy evaluator next to today's checks and log every difference. It decides nothing. Rendered into `POLICY_ENGINE_SHADOW`. Default `\"false\"`: the evaluator does not run. See `docs/codebase/policy-evaluator.md`."
+            },
+            "approverRouting": {
+              "type": "string",
+              "enum": ["true", "false"],
+              "description": "The bindings of the tenant's policy file give login groups, matched by full path or group attribute, a group kind and categories. Rendered into `POLICY_APPROVER_ROUTING`. Default `\"false\"`: MEHO reads no binding. See `docs/codebase/policy-bindings.md`."
             }
           }
         },

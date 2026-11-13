@@ -539,11 +539,16 @@ def _policy_block(settings: Settings) -> dict[str, Any]:
     evaluator runs next to today's checks and logs every difference
     (:mod:`meho_backplane.policy.shadow`). It decides nothing. Off by
     default.
+
+    ``approver_routing`` is the ``POLICY_APPROVER_ROUTING`` switch: the
+    ``bindings`` of the policy file give login groups a group kind and
+    categories (:mod:`meho_backplane.policy.bindings`). Off by default.
     """
     return {
         "configured": True,
         "classification": settings.policy_classification,
         "engine_shadow": settings.policy_engine_shadow,
+        "approver_routing": settings.policy_approver_routing,
         "missing_env": [],
     }
 
@@ -601,7 +606,8 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
           "mcp":            {"configured": true,   "protocol_version": "...",
                              "short_tool_texts": <bool>, "missing_env": []},
           "policy":         {"configured": true, "classification": <bool>,
-                             "engine_shadow": <bool>, "missing_env": []}
+                             "engine_shadow": <bool>, "approver_routing": <bool>,
+                             "missing_env": []}
         }
     """
     block: dict[str, dict[str, Any]] = {

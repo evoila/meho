@@ -21,6 +21,7 @@ revision is written.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import PolicyRevision, TenantPolicy
+from meho_backplane.policy.bindings import routing_enabled, shipped_binding_documents
 from meho_backplane.policy.classification import (
     Classification,
     ClassificationEntry,
@@ -51,6 +53,7 @@ from meho_backplane.policy.document import (
 )
 from meho_backplane.policy.store import _lock_tenant_policy, _override_entries_for
 from meho_backplane.policy.validate import KnownOp, check_document, load_known_ops
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "KEEP_REVISIONS",
@@ -203,6 +206,28 @@ def _taxonomy_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, A
     }
 
 
+def _binding_key(binding: dict[str, Any]) -> str:
+    key = [binding.get("principal") or "person", binding.get("match") or {}]
+    return json.dumps(key, sort_keys=True)
+
+
+def _bindings_diff(
+    before: list[dict[str, Any]], after: list[dict[str, Any]]
+) -> dict[str, list[dict[str, Any]]]:
+    """Added, changed and removed bindings, by login kind and ``match``."""
+    old = {_binding_key(b): b for b in before}
+    new = {_binding_key(b): b for b in after}
+    return {
+        "added": [{"entry": b} for k, b in new.items() if k not in old],
+        "changed": [
+            {"before": old[k], "after": b}
+            for k, b in new.items()
+            if k in old and normalise_document(old[k]) != normalise_document(b)
+        ],
+        "removed": [{"entry": b} for k, b in old.items() if k not in new],
+    }
+
+
 def _description_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     old, new = before.get("description"), after.get("description")
     if old == new:
@@ -266,6 +291,9 @@ def _build_diff(
             scope=scope,
             ops=ops,
             changed=changed,
+        ),
+        "bindings": _bindings_diff(
+            list(old.get("bindings") or []), list(after.get("bindings") or [])
         ),
         "operations_changed": len(changed),
     }
@@ -332,7 +360,7 @@ async def build_plan(
 def _summary(diff: dict[str, Any]) -> dict[str, int]:
     return {
         f"{section}_{kind}": len(diff[section][kind])
-        for section in ("description", "taxonomy", "classifications")
+        for section in ("description", "taxonomy", "classifications", "bindings")
         for kind in ("added", "changed", "removed")
     }
 
@@ -428,7 +456,13 @@ class _NoAliasDumper(yaml.SafeDumper):  # type: ignore[misc]  # yaml has no stub
 
 
 async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.UUID | None) -> str:
-    """The stored policy of *scope* as a ``policy: v1`` file."""
+    """The stored policy of *scope* as a ``policy: v1`` file.
+
+    A tenant's file holds its stored bindings. When it has none and the
+    ``POLICY_APPROVER_ROUTING`` switch is on, it holds the shipped bindings
+    (:func:`~meho_backplane.policy.bindings.shipped_binding_documents`),
+    the ones that are in effect.
+    """
     stored = await _stored_row(session, scope, tenant_id)
     document = normalise_document(stored.document if stored is not None else None)
     out: dict[str, Any] = {"policy": POLICY_VERSION}
@@ -436,6 +470,10 @@ async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.
         if key in document:
             out[key] = document[key]
     out["classifications"] = list(document.get("classifications") or [])
+    if document.get("bindings"):
+        out["bindings"] = list(document["bindings"])
+    elif scope == "tenant" and routing_enabled():
+        out["bindings"] = shipped_binding_documents(get_settings())
     text: str = yaml.dump(
         out, Dumper=_NoAliasDumper, sort_keys=False, allow_unicode=True, default_flow_style=False
     )

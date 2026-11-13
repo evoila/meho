@@ -8705,9 +8705,9 @@ type PermissionVerdict string
 
 // PolicyImportResponse The preview and the import answer.
 //
-// “diff“ has the sections “description“, “taxonomy“ and
-// “classifications“, each with “added“, “changed“ (“before“ and
-// “after“) and “removed“. Each classification entry also says how many
+// “diff“ has the sections “description“, “taxonomy“,
+// “classifications“ and “bindings“, each with “added“, “changed“
+// (“before“ and “after“) and “removed“. Each classification entry also says how many
 // operations it “matches“ and how many of those it “changes“.
 // “operations_changed“ counts the operations whose values change. “diff“
 // is “null“ when the file has mistakes. “based_on“ is the SHA-256 of

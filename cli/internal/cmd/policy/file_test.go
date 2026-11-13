@@ -122,7 +122,9 @@ func TestDiffIsAPreviewAndPrintsCounts(t *testing.T) {
 		`"description":{"added":[],"changed":[],"removed":[]},`+
 		`"taxonomy":{"added":["team-net"],"changed":[],"removed":[]},`+
 		`"classifications":{"added":[{"entry":{"match":{"op":"k8s.*"}},"matches":3,"changes":2}],`+
-		`"changed":[],"removed":[]},"operations_changed":2}}`, &got)
+		`"changed":[],"removed":[]},`+
+		`"bindings":{"added":[],"changed":[],"removed":[{"entry":{"kind":"Operators"}}]},`+
+		`"operations_changed":2}}`, &got)
 	stdout, stderr, err := run(t, "diff", writeFile(t), "--scope", "install", "--backplane", srv.URL)
 	if err != nil {
 		t.Fatalf("diff: %v; stderr=%s", err, stderr)
@@ -134,6 +136,7 @@ func TestDiffIsAPreviewAndPrintsCounts(t *testing.T) {
 	for _, want := range []string{
 		"+ taxonomy: team-net",
 		"+ classifications: changes=2 entry={\"match\":{\"op\":\"k8s.*\"}} matches=3",
+		"- bindings: entry={\"kind\":\"Operators\"}",
 		"Operations whose values change: 2",
 	} {
 		if !strings.Contains(stdout, want) {

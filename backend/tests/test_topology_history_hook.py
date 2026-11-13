@@ -165,11 +165,11 @@ def _register_fake() -> None:
     )
 
 
-async def _seed_tenant_and_target(slug: str = "rdc-internal") -> tuple[uuid.UUID, Target]:
+async def _seed_tenant_and_target(slug: str = "example-tenant") -> tuple[uuid.UUID, Target]:
     """Insert one tenant + one target for it.
 
-    Look-up-then-insert on the tenant -- migration ``0018`` seeds the
-    ``rdc-internal`` tenant into the per-worker schema template
+    Look-up-then-insert on the tenant -- migration ``0018`` seeds
+    a tenant into the per-worker schema template
     (:func:`tests.conftest._schema_template_db`); a plain INSERT would
     trip ``UNIQUE constraint failed: tenant.slug``.
     """
@@ -377,7 +377,7 @@ async def test_annotate_one_edge_emits_one_edge_history_row_with_shared_audit_id
             NodeRef(name="sa-foo", kind="principal"),
             "authenticates-via",
             NodeRef(name="role-bar", kind="vault-role"),
-            note="rdc-vault hashicorp policy v3",
+            note="example-vault hashicorp policy v3",
         )
 
     edge_history = await _all_edge_history(tenant_id)

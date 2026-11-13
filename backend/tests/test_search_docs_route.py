@@ -359,19 +359,19 @@ def test_search_docs_source_url_never_leaks_gs_backend(client: TestClient) -> No
         chunk_id="kb-1",
         document_id="broadcom-kb-414551",
         content="scaling maximums",
-        source_url="gs://meho-knowledge-vmware-corpus/kb/broadcom-kb/articles/41/414551.html",
+        source_url="gs://example-corpus/kb/broadcom-kb/articles/41/414551.html",
         score=0.9,
     )
     community = CorpusChunk(
         chunk_id="com-1",
         content="community post",
-        source_url="gs://meho-knowledge-vmware-corpus/community/williamlam/blog/post.md",
+        source_url="gs://example-corpus/community/example-author/blog/post.md",
         score=0.8,
     )
     unknown = CorpusChunk(
         chunk_id="unk-1",
         content="opaque object",
-        source_url="gs://meho-knowledge-vmware-corpus/misc/blob.bin",
+        source_url="gs://example-corpus/misc/blob.bin",
         score=0.7,
     )
     fake_corpus = _mock_corpus(kb, community, unknown)
@@ -393,7 +393,7 @@ def test_search_docs_source_url_never_leaks_gs_backend(client: TestClient) -> No
     for url in source_urls:
         assert url is not None
         assert not url.startswith("gs://")
-        assert "meho-knowledge-vmware-corpus" not in url
+        assert "example-corpus" not in url
     # KB -> canonical portal URL; community / unknown -> opaque meho refs.
     assert source_urls[0] == "https://knowledge.broadcom.com/external/article/414551"
     assert source_urls[1] == "meho://docs/vmware/com-1"

@@ -2330,7 +2330,7 @@ type AuditEntry struct {
 // migration together.
 //
 //   - :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation
-//     (success or failure), or a MEHO-internal action such as a topology
+//     (success or failure), or an internal action such as a topology
 //     edit, a retention sweep or a reaper.
 //   - :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
 //     a policy deny, a rate-limit refusal, or a park for approval.
@@ -2376,7 +2376,7 @@ type AuditQueryRequest struct {
 	// migration together.
 	//
 	// * :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation
-	//   (success or failure), or a MEHO-internal action such as a topology
+	//   (success or failure), or an internal action such as a topology
 	//   edit, a retention sweep or a reaper.
 	// * :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
 	//   a policy deny, a rate-limit refusal, or a park for approval.
@@ -10408,7 +10408,7 @@ type SearchDocsRequest struct {
 // relevance-judged: a query that retrieves topically-irrelevant chunks at
 // high scores still reports “grounded=True“. Distinguishing that case
 // needs a calibrated per-collection score floor, deferred as the Option-A
-// follow-on (evoila-bosnia/meho-internal#133); it will refine
+// follow-on; it will refine
 // “retrieval_is_grounded“ in one place for both surfaces.
 type SearchDocsResponse struct {
 	Chunks   []DocsChunk `json:"chunks"`
@@ -10868,7 +10868,7 @@ type ServiceGrantCreate struct {
 	// TargetId Target UUID the grant is scoped to, or null for a targetless op or a selector grant. Mutually exclusive with target_product / target_name_pattern.
 	TargetId *openapi_types.UUID `json:"target_id"`
 
-	// TargetNamePattern Target selector (#3349): match any dispatch whose target name matches this fnmatch glob (e.g. 'esx-dc*'). Requires target_id to be null. This glob is the explicit any-target request — it is never implied by a null target_id.
+	// TargetNamePattern Target selector (#3349): match any dispatch whose target name matches this fnmatch glob (e.g. 'esx-site*'). Requires target_id to be null. This glob is the explicit any-target request — it is never implied by a null target_id.
 	TargetNamePattern *string `json:"target_name_pattern"`
 
 	// TargetProduct Target selector (#3349): match any dispatch whose target product equals this exact value (e.g. 'gh'). Requires target_id to be null.

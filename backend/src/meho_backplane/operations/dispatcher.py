@@ -693,7 +693,7 @@ async def _resolve_connector_instance(
     :func:`~meho_backplane.connectors.resolve_connector_or_label`
     helper so the dispatcher and the ``/api/v1/targets/{name}/probe``
     route reach the same yes/no/ambiguous answer for the same target
-    (consumer feedback signal 19, ``claude-rdc-hetzner-dc#697``).
+    (consumer feedback signal 19).
     """
     if descriptor.source_kind == "ingested":
         await _restore_saved_ingest_profiles(target)
@@ -2336,7 +2336,7 @@ async def _handle_http_status_error(
 
     G0.24-T4 (#1649): an upstream 403 or 422 carries actionable detail the
     generic ``connector_error`` arm would bury in ``extras.exception_message``
-    (consumer ``claude-rdc-hetzner-dc#1138``), because the shared
+    (consumer feedback), because the shared
     ``HttpConnector`` adapter does no error mapping. 403 -> insufficient
     permission (authenticated but lacking the op's scope); 422 -> invalid
     payload (the upstream parsed the request and rejected its content).

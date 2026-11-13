@@ -2470,7 +2470,7 @@ def test_find_unresolvable_local_refs_reports_only_dangling_pointers() -> None:
     assert find_unresolvable_local_refs({"$ref": "#/allOf/0", "allOf": [{}]}) == []
 
 
-# -- Spec-fetch address pinning (F13, evoila-bosnia/meho-internal#275) -------
+# -- Spec-fetch address pinning (F13) ----------------------------------------
 
 
 def test_screen_fetch_host_returns_public_addresses() -> None:

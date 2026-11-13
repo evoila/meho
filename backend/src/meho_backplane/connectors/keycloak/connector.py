@@ -22,7 +22,7 @@ aren't configured yet (the chicken-and-egg the issue body calls out).
 
 So the connector authenticates to the Keycloak **Admin REST API** with a
 **separate admin credential** loaded from Vault (consumer path
-``secret/rdc-hetzner-dc/keycloak/admin``) via
+``secret/<consumer>/keycloak/admin``) via
 :func:`~meho_backplane.connectors.keycloak.session.load_admin_credentials_from_vault`.
 It mints an admin access token through Keycloak's own token endpoint
 (``POST /realms/{admin_realm}/protocol/openid-connect/token``) and caches

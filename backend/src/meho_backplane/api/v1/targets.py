@@ -72,7 +72,7 @@ the v1 :func:`~meho_backplane.connectors.registry.get_connector` lookup
 while dispatch consulted v2's
 :func:`~meho_backplane.connectors.resolve_connector`, producing
 disagreeing yes/no answers for the same target (consumer feedback
-signal 19 in ``claude-rdc-hetzner-dc#697`` — a target got 501
+signal 19 in consumer feedback — a target got 501
 from ``/probe`` while ``POST /operations/call`` resolved the same
 target's connector cleanly).
 
@@ -107,7 +107,7 @@ DELETE + product PATCH (G0.14-T4 #1145)
 
 The G0.14-T4 amendment closes the
 *"misregistered target cannot be recovered"* hole the v0.6.0 dogfood
-exercise surfaced (signal 6, `claude-rdc-hetzner-dc#697`):
+exercise surfaced (signal 6):
 
 * **``DELETE /api/v1/targets/{name}``** soft-deletes the row by
   stamping ``deleted_at``; the row stays queryable from the
@@ -124,7 +124,7 @@ exercise surfaced (signal 6, `claude-rdc-hetzner-dc#697`):
   design and would always block the DELETE.
 * **``PATCH /api/v1/targets/{name}``** now accepts ``product`` so
   an operator who misregisters ``product='kubernetes'`` (the real
-  ``rke2-infra`` typo from the dogfood) can correct it to ``'k8s'``
+  ``rke2-ops`` typo from the dogfood) can correct it to ``'k8s'``
   in-place instead of deleting and re-creating. The new value is
   validated at request time against the registered connector
   products; an unknown product yields a structured 422 listing the
@@ -1447,7 +1447,7 @@ async def probe_target(
       connector's :meth:`fingerprint` raises (G0.15-T1 #1210; mirrors
       the dispatcher's ``connector_error`` envelope at the route
       boundary so probe + dispatch agree on the shape of a connector
-      failure — sub-signal A of ``claude-rdc-hetzner-dc#753``).
+      failure — sub-signal A of consumer feedback).
 
     No error branch writes to the DB row, so the column always
     reflects the *last successful* probe. The path value is a name,
@@ -1968,7 +1968,7 @@ async def delete_target(
     """Soft-delete a target.
 
     G0.14-T4 (#1145) — recovery path for misregistered targets
-    (signal 6 in ``claude-rdc-hetzner-dc#697``). Stamps
+    (signal 6 in consumer feedback). Stamps
     ``deleted_at`` on the row instead of removing it so the
     append-only :attr:`AuditLog.target_id` soft-FK keeps pointing
     at *something* (audit is append-only per v0.1-spec §6); every

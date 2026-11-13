@@ -713,7 +713,7 @@ def test_who_touched_and_work_ref_pivots_render() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     # A target name resolves via the LEFT JOIN; seed a target row + an audit
     # row referencing it so target_name is denormalized onto the entry.
-    target_id = _seed_target(tenant_id=_TENANT_A, name="rdc-vcenter")
+    target_id = _seed_target(tenant_id=_TENANT_A, name="example-vcenter")
     _seed_audit_row_with_target(
         tenant_id=_TENANT_A,
         second=0,
@@ -728,7 +728,7 @@ def test_who_touched_and_work_ref_pivots_render() -> None:
     assert response.status_code == 200, response.text
     body = response.text
     # who-touched pivot binds the target; by-work-ref binds the ref.
-    assert "/ui/audit?target=rdc-vcenter" in body
+    assert "/ui/audit?target=example-vcenter" in body
     assert "work_ref=gh" in body  # urlencoded; the gh: prefix survives
 
 

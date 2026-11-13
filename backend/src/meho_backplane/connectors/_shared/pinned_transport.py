@@ -8,7 +8,7 @@ then hands the *hostname* to httpx leaves a check/use gap: httpx
 re-resolves the name at connect time, so a resolver that changes its
 answer between the screen and the connect (DNS rebinding, or a
 split-horizon flip) can steer the socket at a blocked address the guard
-never saw (evoila-bosnia/meho-internal#275, F13).
+never saw (F13).
 
 This module removes the gap by moving the decision to the socket
 boundary. A pinning transport wraps httpcore's connection pool with a

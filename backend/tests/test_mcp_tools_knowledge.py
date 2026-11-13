@@ -7,7 +7,7 @@ Covers every acceptance criterion in the task body:
 
 * Both meta-tools are registered against the G0.5 registry; ``tools/list``
   surfaces them with strict 2020-12 ``inputSchema`` (``additionalProperties:
-  false``) and the MEHO-internal RBAC fields stripped from the wire shape.
+  false``) and the internal RBAC fields stripped from the wire shape.
 * ``inputSchema`` ``required`` lists match the spec: ``[query]`` for
   ``search_knowledge``; ``[slug, body]`` for ``add_to_knowledge``.
 * ``tools/call search_knowledge`` against a seeded corpus returns ranked
@@ -89,7 +89,7 @@ def test_tools_list_exposes_kb_tools_with_strict_input_schema(
 
     ``search_knowledge`` requires ``[query]``; ``add_to_knowledge``
     requires ``[slug, body]``. Both have ``additionalProperties: false``.
-    The MEHO-internal RBAC fields (``required_role`` / ``op_class``)
+    The internal RBAC fields (``required_role`` / ``op_class``)
     are stripped by :meth:`ToolDefinition.to_wire`.
     """
     client, _op = client_with_operator

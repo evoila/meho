@@ -53,6 +53,7 @@ from meho_backplane.db.models import AgentRunStatus
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.work_ref import WorkRefError, normalize_work_ref
 
 _log = structlog.get_logger(__name__)
 
@@ -157,8 +158,13 @@ async def _run_handler(
     user_input = _require_input(arguments)
     async_mode = bool(arguments.get("async", False))
     work_ref = arguments.get("work_ref")
-    if work_ref is not None and not isinstance(work_ref, str):
-        raise McpInvalidParamsError("work_ref must be a string when supplied")
+    if work_ref is not None:
+        if not isinstance(work_ref, str):
+            raise McpInvalidParamsError("work_ref must be a string when supplied")
+        try:
+            work_ref = normalize_work_ref(work_ref)
+        except WorkRefError as exc:
+            raise McpInvalidParamsError(str(exc)) from exc
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUN_OP_IDS["run"],
         audit_op_class="write",
@@ -167,7 +173,7 @@ async def _run_handler(
     invoker = get_agent_invoker()
     # work_ref I3-T2 (#1662): bind the change-ticket ref onto work_ref_var
     # for the run-create boundary so the durable run row inherits it.
-    cleaned_work_ref = work_ref.strip() if isinstance(work_ref, str) else None
+    cleaned_work_ref = work_ref
     work_ref_token = work_ref_var.set(cleaned_work_ref) if cleaned_work_ref else None
     try:
         outcome = await invoker.run(operator, name, user_input, async_mode=async_mode)

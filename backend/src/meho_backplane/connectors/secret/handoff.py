@@ -537,11 +537,20 @@ async def secret_handoff_import(
     """Use a handoff from another instance once and write the value into a sink.
 
     Op-id: ``secret.handoff.import``. Checks the sink before the handoff is
-    used, so a wrong sink path does not burn the handoff. Returns only
+    used, so a wrong sink path does not burn the handoff. The sink must be a
+    ``vault:`` place. Returns only
     ``status``, ``value_fingerprint`` and ``length``.
     """
     del target
     sink_ref = parse_secret_ref(str(params["to"]))
+    # A handoff writes only into this instance's Vault. A file on a host is
+    # written only by secret.move, which waits for a person on every call.
+    if sink_ref.kind != "vault":
+        raise SecretHandoffRefusedError(
+            f"secret.handoff.import writes only to a 'vault:' place, not to a "
+            f"{sink_ref.kind!r} place, so the handoff was not used and is still usable; "
+            "import into Vault, then use secret.move to place the secret elsewhere"
+        )
     sink = resolve_secret_endpoint(sink_ref)
     sink_name = f"{sink_ref.kind}:{sink_ref.ref}"
     _check_sink(operator, sink, sink_name)

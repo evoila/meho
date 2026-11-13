@@ -319,6 +319,10 @@
                   <dt class="opacity-70">Result status</dt>
                   <dd class="font-mono">{{ request.outcome.result_status }}</dd>
                 {% endif %}
+                {% if request.outcome.exit_code is not none %}
+                  <dt class="opacity-70">Exit code</dt>
+                  <dd class="font-mono" data-testid="approval-exit-code" data-exit-code="{{ request.outcome.exit_code }}">{{ request.outcome.exit_code }}{% if request.outcome.exit_code != 0 %} (the script failed){% endif %}</dd>
+                {% endif %}
                 {% if request.outcome.error_code %}
                   <dt class="opacity-70">Error code</dt>
                   <dd class="font-mono [overflow-wrap:anywhere]">{{ request.outcome.error_code }}</dd>

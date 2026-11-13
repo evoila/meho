@@ -104,6 +104,7 @@ from meho_backplane.operations._preview_steps import (
 )
 from meho_backplane.operations._secret_values import split_reveal_secret
 from meho_backplane.operations._target_connector_match import mismatch_preview_envelope
+from meho_backplane.operations._target_version_range import version_range_preview_envelope
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     _is_mutating,
@@ -395,6 +396,11 @@ async def _resolve_descriptor(
     )
     if mismatch is not None:
         return mismatch
+    outside = version_range_preview_envelope(
+        descriptor=descriptor, connector_id=connector_id, target=target
+    )
+    if outside is not None:
+        return outside
 
     return await _catalog_choice(
         operator=operator, descriptor=descriptor, connector_id=connector_id, target=target

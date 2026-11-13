@@ -59,6 +59,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from meho_backplane.work_ref import WorkRef
+
 __all__ = [
     "AbortRunRequest",
     "AbortRunResponse",
@@ -260,7 +262,7 @@ class StartRunRequest(BaseModel):
     template_slug: str
     target: str
     params: dict[str, object] = Field(default_factory=dict)
-    work_ref: str | None = None
+    work_ref: WorkRef | None = None
 
 
 class CurrentStepResponse(BaseModel):

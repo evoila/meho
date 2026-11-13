@@ -147,11 +147,18 @@ The merge queue runs the full matrix on the exact code that will land on
 `main`. But a reviewer should see test results before that. What a
 maintainer does before merge:
 
-1. Read the change first, and note the full SHA of the commit you
-   read. The next step pushes it to a branch in this repository. Then
-   all pull request workflows of this repository run the pushed code,
-   with this repository's settings, on our own runners.
-2. Push the exact commit you read, by its full SHA, to a branch in this
+1. Look at the changed files first. The CI result of a fork pull
+   request counts only when the pull request changes nothing under
+   `.github/`, `scripts/ci/` and `backend/tests/_unit_*.py`. If it
+   changes one of them, read that change first. Take the commands from
+   this guide, not from the job summary.
+2. Read the change, and note the full SHA of the commit you read. The
+   next step pushes it to a branch in this repository. Then the
+   workflow files of that commit run with this repository's settings
+   and secrets, on our own runners. A push of a commit that changes a
+   file under `.github/workflows/` needs a token with the `workflow`
+   scope.
+3. Push the exact commit you read, by its full SHA, to a branch in this
    repository, for example `ci/pr-<number>`. Do not push the branch of
    the fork: it may have a newer commit that you did not read. Then
    open a draft pull request from that branch to `main`. CI runs only
@@ -165,10 +172,10 @@ maintainer does before merge:
      --title "CI run for #<number>" --body "CI only. Do not merge."
    ```
 
-3. Link that CI run in the review of the fork pull request.
-4. If you cannot push the branch, run ruff, mypy and the tests of the
+4. Link that CI run in the review of the fork pull request.
+5. If you cannot push the branch, run ruff, mypy and the tests of the
    changed code on your machine and write the result in the review.
-5. When the review is done, close the draft pull request and delete
+6. When the review is done, close the draft pull request and delete
    the `ci/pr-<number>` branch.
 
 ## Code style

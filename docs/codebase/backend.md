@@ -1191,7 +1191,7 @@ agent-facing switch by env name, sorted, with its current value:
   Agents read those, so a new field there would itself change what
   the AI sees. `/ready` keeps its own `features.mcp.short_tool_texts`.
 - Limit: `/version` knows no tenant and no agent definition. Settings
-  per tenant (such as a tenant's team wiki collection) and settings
+  per tenant (such as a tenant's wiki collection) and settings
   per agent definition (such as `meta_tools`) are not on the list.
 
 ### Cosign keyless signing (Task #34, ADR 0006)

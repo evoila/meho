@@ -61,12 +61,12 @@ target-configurable without a schema migration:
 * ``admin_realm`` — the realm the admin client authenticates against
   (the admin-cli / service-account client typically lives in
   ``master``). Defaults to :data:`DEFAULT_ADMIN_REALM`.
-* ``managed_realm`` — the realm the connector manages and fingerprints
-  (``evba`` on the RDC fleet). Defaults to :data:`DEFAULT_MANAGED_REALM`.
+* ``managed_realm`` — the realm the connector manages and fingerprints.
+  It has no default: a target must name it. A target that does not is
+  refused with :class:`KeycloakManagedRealmMissingError`.
 
-Both are read through :func:`resolve_realm_config` which tolerates a
-missing ``extras`` attribute (pre-G0.3 stub targets) and falls back to
-the defaults.
+Both are read through :func:`resolve_realm_config`. A missing ``extras``
+attribute (pre-G0.3 stub targets) counts as no extras.
 """
 
 from __future__ import annotations
@@ -81,14 +81,15 @@ from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
     strip_credential_value,
 )
+from meho_backplane.targets.required_extras import managed_realm_missing_message
 
 __all__ = [
     "DEFAULT_ADMIN_REALM",
-    "DEFAULT_MANAGED_REALM",
     "KeycloakAdminCredentials",
     "KeycloakAdminCredentialsLoader",
     "KeycloakAmbiguousVaultPayloadError",
     "KeycloakClientCredentials",
+    "KeycloakManagedRealmMissingError",
     "KeycloakPasswordCredentials",
     "KeycloakTargetLike",
     "RealmConfig",
@@ -101,11 +102,6 @@ __all__ = [
 #: ``admin-cli`` client and most service-account admin clients live in
 #: ``master``; a target can override via ``extras["admin_realm"]``.
 DEFAULT_ADMIN_REALM: str = "master"
-
-#: The realm the connector manages + fingerprints. ``evba`` is the RDC
-#: fleet's managed realm; a target can override via
-#: ``extras["managed_realm"]``.
-DEFAULT_MANAGED_REALM: str = "evba"
 
 #: The four field names the credential-shape discriminator inspects. Kept
 #: as module constants so the loader and its tests share one source of
@@ -156,7 +152,7 @@ class KeycloakTargetLike(Protocol):
       :func:`~meho_backplane.connectors._shared.vcf_auth.is_acceptable_auth_model`;
       only ``"shared_service_account"`` / ``None`` accepted.
     * ``extras`` — free-form mapping carrying the optional
-      ``admin_realm`` / ``managed_realm`` overrides.
+      ``admin_realm`` (optional) and ``managed_realm`` (required).
     * ``id`` / ``tenant_id`` — the tenant-unique ``(tenant_id, id)``
       cache key (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
       the admin-token cache uses, so two same-named targets in different
@@ -181,21 +177,30 @@ class RealmConfig:
     managed_realm: str
 
 
+class KeycloakManagedRealmMissingError(ValueError):
+    """The target names no managed realm, so no operation can run on it."""
+
+
 def resolve_realm_config(target: KeycloakTargetLike) -> RealmConfig:
     """Resolve a target's admin-realm + managed-realm from ``extras``.
 
-    Reads ``target.extras["admin_realm"]`` / ``["managed_realm"]`` and
-    falls back to :data:`DEFAULT_ADMIN_REALM` / :data:`DEFAULT_MANAGED_REALM`
-    when the key is absent, empty, or the ``extras`` attribute is missing
-    entirely (a pre-G0.3 stub target). Non-string / empty values fall
-    back to the default rather than producing a malformed realm path.
+    Reads ``target.extras["admin_realm"]`` / ``["managed_realm"]``. The
+    admin realm falls back to :data:`DEFAULT_ADMIN_REALM` when the key is
+    absent, empty, or the ``extras`` attribute is missing entirely (a
+    pre-G0.3 stub target). The managed realm has no default: when the
+    target does not name one, this raises
+    :class:`KeycloakManagedRealmMissingError` before any call to Keycloak.
     """
     extras = getattr(target, "extras", None) or {}
     admin = extras.get("admin_realm") if isinstance(extras, Mapping) else None
     managed = extras.get("managed_realm") if isinstance(extras, Mapping) else None
+    if not (isinstance(managed, str) and managed):
+        raise KeycloakManagedRealmMissingError(
+            managed_realm_missing_message(getattr(target, "name", None))
+        )
     return RealmConfig(
         admin_realm=admin if isinstance(admin, str) and admin else DEFAULT_ADMIN_REALM,
-        managed_realm=managed if isinstance(managed, str) and managed else DEFAULT_MANAGED_REALM,
+        managed_realm=managed,
     )
 
 

@@ -183,6 +183,7 @@ from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.required_extras import check_keycloak_managed_realm
 from meho_backplane.targets.resolver import (
     TargetNotFoundError,
     resolve_target,
@@ -910,6 +911,20 @@ def _validate_preferred_impl_id(preferred_impl_id: str | None, product: str) -> 
         )
 
 
+def _require_keycloak_managed_realm(product: str, extras: Any, name: str) -> None:
+    """Reject a Keycloak target that names no managed realm, with a 422.
+
+    Runs on create and on update, on the target as it will be after the
+    write. See :mod:`meho_backplane.targets.required_extras`.
+    """
+    try:
+        check_keycloak_managed_realm(product, extras, name)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+
 def _apply_product_patch(updates: dict[str, Any], current_product: str) -> str:
     """Validate a PATCH's ``product`` field; return the effective product.
 
@@ -1553,6 +1568,7 @@ def _validate_create_body_fields(body: TargetCreate, operator: Operator) -> str:
       :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
     product = _canonicalise_and_validate_product(body.product)
+    _require_keycloak_managed_realm(product, body.extras, body.name)
     _validate_preferred_impl_id(body.preferred_impl_id, product)
     enforce_vault_login_extras_platform_admin(
         operator, before=None, after=body.extras, target_name=body.name
@@ -1754,6 +1770,7 @@ def _validate_update_body_fields(
       :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
     effective_product = _apply_product_patch(updates, t.product)
+    _require_keycloak_managed_realm(effective_product, updates.get("extras", t.extras), t.name)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:
         _enforce_secret_ref_tenant_scope(updates["secret_ref"], operator, t.name)

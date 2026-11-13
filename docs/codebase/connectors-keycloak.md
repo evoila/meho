@@ -137,9 +137,11 @@ fresh target with no asserted version still resolves.
   (`connectors/keycloak/session.py`) — the two admin-credential shapes
   (tagged union `KeycloakAdminCredentials`).
 - `KeycloakTargetLike` — structural Protocol the concrete `Target` model
-  satisfies; adds `extras` (carrying the realm overrides) to the common
+  satisfies; adds `extras` (carrying the realm names) to the common
   REST-target shape.
 - `RealmConfig` — the resolved `(admin_realm, managed_realm)` pair.
+- `KeycloakManagedRealmMissingError` — raised by `resolve_realm_config`
+  when the target names no managed realm. It is a `ValueError`.
 - `KeycloakAdminTokenError` — raised when the token-endpoint round-trip
   fails or returns no usable `access_token`. On a non-2xx it echoes
   Keycloak's `{error, error_description}` (RFC 6749 §5.2 — both non-secret)
@@ -1273,11 +1275,36 @@ two realm knobs live on `target.extras` (no schema migration):
 
 - `admin_realm` — realm the admin client authenticates against (default
   `master`).
-- `managed_realm` — realm the connector manages + fingerprints (default:
-  `DEFAULT_MANAGED_REALM` in `connectors/keycloak/session.py`).
+- `managed_realm` — realm the connector manages + fingerprints. **Required.**
+  MEHO has no built-in realm name: a target must name its realm.
 
-Resolved through `resolve_realm_config`, which tolerates a missing
-`extras` attribute and falls back to the defaults.
+Resolved through `resolve_realm_config`. The admin realm falls back to
+`master`, also when the `extras` attribute is missing. The managed realm
+never falls back: with no `managed_realm` the function raises
+`KeycloakManagedRealmMissingError`.
+
+A Keycloak target with no managed realm is refused like this:
+
+- **Operations.** Every operation on it fails before any call to Keycloak.
+  The admin token step reads the realm first, so no credential is read
+  from the secret store and no request is sent. The error text says how to
+  set the realm.
+- **Probe and fingerprint.** `meho targets probe` answers
+  `reachable: false` with the same text. This is how to find such a target.
+- **Create and update.** `POST /api/v1/targets` and `PATCH` (also
+  `meho targets add`, `meho targets update`, `meho targets import` and the
+  `targets.register` and `targets.update` operations) answer HTTP 422 with
+  the same text. An update is checked on the target as it will be after the
+  write: sending `extras` without `managed_realm`, or changing the product to
+  `keycloak` on a target without one, is refused. The check lives in
+  `targets/required_extras.py`.
+
+To set the realm on an existing target (`--extra` replaces the whole
+`extras` map, so repeat the keys you keep):
+
+```console
+$ meho targets update <name> --extra admin_realm=master --extra managed_realm=<realm>
+```
 
 ## Dependencies
 

@@ -117,6 +117,7 @@ from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakAdminCredentialsLoader,
     KeycloakClientCredentials,
+    KeycloakManagedRealmMissingError,
     KeycloakTargetLike,
     RealmConfig,
     load_admin_credentials_from_vault,
@@ -536,7 +537,17 @@ class KeycloakConnector(HttpConnector):
         )
 
         probed_at = datetime.now(UTC)
-        realms = resolve_realm_config(target)
+        try:
+            realms = resolve_realm_config(target)
+        except KeycloakManagedRealmMissingError as exc:
+            return FingerprintResult(
+                vendor="keycloak",
+                product="keycloak",
+                reachable=False,
+                probed_at=probed_at,
+                probe_method="check managed realm",
+                extras={"error": f"{type(exc).__name__}: {exc}"},
+            )
         realm_path = fill_path(_ADMIN_REALM_PATH, {"realm": realms.managed_realm})
         probe_method = f"GET {realm_path}"
         effective_operator = operator if operator is not None else synthesise_system_operator()

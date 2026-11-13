@@ -71,7 +71,7 @@ _KC_HOST = "keycloak-secret-sink.test.invalid"
 _KC_BASE_URL = f"https://{_KC_HOST}"
 _ADMIN_TOKEN = "kc-admin-token-secret-sink"
 _TARGET_NAME = "rdc-keycloak-secret-sink"
-_REALM = "evba"
+_REALM = "example"
 _USERNAME = "operator-a"
 _USER_UUID = "44444444-4444-4444-4444-444444444444"
 
@@ -141,7 +141,7 @@ async def _seed_keycloak_target() -> None:
             secret_ref="rdc-hetzner-dc/keycloak/admin",
             auth_model="shared_service_account",
             vpn_required=False,
-            extras={},
+            extras={"managed_realm": _REALM},
             fingerprint={"version": "26.0.5"},
             notes="seeded by test_secret_broker_keycloak_sink",
         )

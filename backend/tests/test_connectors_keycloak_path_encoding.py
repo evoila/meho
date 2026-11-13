@@ -139,7 +139,7 @@ async def test_client_get_encodes_traversal_id_in_request_path() -> None:
     """keycloak_client_get with a traversal id issues a request under realms/{managed_realm}.
 
     Uses an httpx MockTransport to capture the built request URL and assert
-    that the path stays confined to ``/admin/realms/evba/clients/`` with the
+    that the path stays confined to ``/admin/realms/example/clients/`` with the
     traversal chars percent-encoded, not resolved as ``..`` segments.
     """
 
@@ -157,7 +157,7 @@ async def test_client_get_encodes_traversal_id_in_request_path() -> None:
     target_stub.port = 443
     target_stub.secret_ref = "stub/secret"
     target_stub.auth_model = "shared_service_account"
-    target_stub.extras = {}
+    target_stub.extras = {"managed_realm": "example"}
     # Tenant-unique cache key components (#1642/#1672); a MagicMock with a
     # Protocol spec does not auto-expose annotation-only attributes, so set
     # them explicitly or target_cache_key raises AttributeError.
@@ -170,14 +170,14 @@ async def test_client_get_encodes_traversal_id_in_request_path() -> None:
             200, json={"access_token": _ADMIN_TOKEN, "expires_in": 300}
         )
         # The traversal-encoded path should be what reaches the transport.
-        encoded_path = f"/admin/realms/evba/clients/{_TRAVERSAL_ENCODED}"
+        encoded_path = f"/admin/realms/example/clients/{_TRAVERSAL_ENCODED}"
         route = mock.get(encoded_path).respond(
             200, json={"id": _CLIENT_UUID, "clientId": "meho-backplane"}
         )
 
         result = await keycloak_client_get(connector, _OPERATOR, target_stub, {"id": _TRAVERSAL_ID})
 
-    # The route was called — meaning the path stayed under realms/evba/clients/
+    # The route was called — meaning the path stayed under realms/example/clients/
     # with the traversal chars encoded, and was NOT resolved as ../../ by httpx.
     assert route.called, f"Expected GET {encoded_path} to be called; traversal id was not encoded."
     assert result["client"]["id"] == _CLIENT_UUID
@@ -202,7 +202,7 @@ async def test_role_mapping_get_encodes_traversal_id_in_request_path() -> None:
     target_stub.port = 443
     target_stub.secret_ref = "stub/secret"
     target_stub.auth_model = "shared_service_account"
-    target_stub.extras = {}
+    target_stub.extras = {"managed_realm": "example"}
     # Tenant-unique cache key components (#1642/#1672); a MagicMock with a
     # Protocol spec does not auto-expose annotation-only attributes, so set
     # them explicitly or target_cache_key raises AttributeError.
@@ -213,7 +213,7 @@ async def test_role_mapping_get_encodes_traversal_id_in_request_path() -> None:
         mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": _ADMIN_TOKEN, "expires_in": 300}
         )
-        encoded_path = f"/admin/realms/evba/users/{_TRAVERSAL_ENCODED}/role-mappings"
+        encoded_path = f"/admin/realms/example/users/{_TRAVERSAL_ENCODED}/role-mappings"
         route = mock.get(encoded_path).respond(
             200, json={"realmMappings": [], "clientMappings": {}}
         )
@@ -273,7 +273,7 @@ async def _seed_encoding_target() -> TargetORM:
             secret_ref="rdc-hetzner-dc/keycloak/admin",
             auth_model="shared_service_account",
             vpn_required=False,
-            extras={},
+            extras={"managed_realm": "example"},
             fingerprint={"version": "26.0.5"},
             notes="seeded by test_connectors_keycloak_path_encoding",
         )
@@ -379,7 +379,7 @@ async def test_schema_gate_accepts_valid_uuid(
         mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": _ADMIN_TOKEN, "expires_in": 300}
         )
-        mock.get(f"/admin/realms/evba/clients/{_CLIENT_UUID}").respond(
+        mock.get(f"/admin/realms/example/clients/{_CLIENT_UUID}").respond(
             200, json={"id": _CLIENT_UUID, "clientId": "meho-backplane"}
         )
 

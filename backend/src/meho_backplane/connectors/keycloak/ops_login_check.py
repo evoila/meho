@@ -293,7 +293,8 @@ async def keycloak_user_check_login(
     goes only into the token request body. The answer never carries the
     password or a token.
     """
-    realm = _opt_str(params.get("realm")) or resolve_realm_config(target).managed_realm
+    managed_realm = resolve_realm_config(target).managed_realm
+    realm = _opt_str(params.get("realm")) or managed_realm
     username = str(params["username"]).strip()
     client_id = _opt_str(params.get("client_id")) or _DEFAULT_CLIENT_ID
     password = await _read_password_from_vault(operator, target, params)

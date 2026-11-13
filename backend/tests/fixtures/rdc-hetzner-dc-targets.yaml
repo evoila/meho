@@ -589,6 +589,8 @@ targets:
     product: keycloak
     host: keycloak.evba.lab
     port: 443
+    extras:
+      managed_realm: example
     # No secret_ref yet — connector wrapper doesn't exist. Bootstrap admin
     # credential lives in Vault at secret/rdc-hetzner-dc/keycloak/admin
     # (fields: username, password). Future connector wrapper will reference

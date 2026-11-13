@@ -1120,8 +1120,10 @@ all three lists name them so a new status is added in one place.
 
 ## Global work-ref (`--work-ref`, `MEHO_WORK_REF`, #3804)
 
-A change-ticket reference (`gh:<owner>/<repo>#<n>`) links an audit row
-to the change that allowed it. The backplane audit middleware reads it
+A change-ticket reference links an audit row to the change that
+allowed it. It can be any ticket id: a GitHub issue
+(`gh:<owner>/<repo>#<n>`), a ServiceNow change (`CHG0012345`) or a
+Jira key (`OPS-123`). The backplane audit middleware reads it
 from the `Meho-Work-Ref` request header and writes it to
 `audit_log.work_ref` on the row for that request (#1657). The CLI sets
 that header from one place, so every verb gets it without its own flag.
@@ -1129,9 +1131,21 @@ that header from one place, so every verb gets it without its own flag.
 - The root command has a persistent `--work-ref` flag. When the flag is
   not set, the CLI reads `MEHO_WORK_REF`. The flag wins.
 - The root `PersistentPreRunE` (`applyWorkRef` in `root.go`) checks the
-  shape once. A bad value stops the command before any request leaves
-  the CLI. A good value goes on the command context
-  (`api.WithWorkRef`).
+  value once with `api.ValidWorkRef`. The check is no stricter than the
+  backplane, which takes any non-empty text. It refuses only a blank
+  value and a value with a control character such as a line break,
+  because the `Meho-Work-Ref` header cannot carry one. A given flag is
+  always checked, so `--work-ref ""` is refused. An empty
+  `MEHO_WORK_REF` means "not set". The variable is checked before the
+  CLI trims it, so a trailing line break is refused too. A bad value
+  stops the command before any request leaves the CLI. A good value
+  goes on the command context (`api.WithWorkRef`).
+- `meho operation call` has its own `--work-ref` flag, which goes into
+  the request body. It is checked and trimmed the same way, so
+  `--work-ref " CHG1 "` stores `CHG1`, like the global flag.
+- The header carries the text as UTF-8. The backplane reads it as UTF-8
+  (`decode_work_ref_header` in `operations/_audit.py`), so a non-ASCII
+  ticket id such as `Änderung-7` lands on the audit row unchanged.
 - Commands that send no backplane request skip the check:
   `help`, `completion` and its children, `__complete` /
   `__completeNoDesc` (shell completion), `version` and
@@ -1178,10 +1192,10 @@ that header from one place, so every verb gets it without its own flag.
   ticket X. For one release, a `--work-ref` on these commands still
   filters too when `--filter-work-ref` is not given, and
   `workref.Filter` (`cli/internal/cmd/workref/`) prints one warning
-  line on stderr that names `--filter-work-ref`. A filter value need
-  not have the `gh:<owner>/<repo>#<n>` shape: when it does not,
-  `applyWorkRef` skips the tag on these commands instead of failing,
-  and the value only filters. When `--filter-work-ref` is given, also
+  line on stderr that names `--filter-work-ref`. A filter value that
+  `api.ValidWorkRef` refuses (for example one with a line break) does
+  not fail there: `applyWorkRef` skips the tag on these commands, and
+  the value only filters. When `--filter-work-ref` is given, also
   empty (`--filter-work-ref=""` means no filter), `--work-ref` only
   tags, and a bad value is an error like on every other command.
   `MEHO_WORK_REF` never filters. `TestWorkRefFlagHasOneMeaning` walks
@@ -1693,7 +1707,7 @@ narrow-waist contract.
   `tenant_admin` (#3668). With `--op-id <op_id>` (no query needed) it
   prints that one operation's call contract instead: parameter
   schema, examples, target rule, result shape and retry rules.
-- `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--work-ref gh:<owner>/<repo>#<n>] [--preview-hash <hash>] [--async]`
+- `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--work-ref <ticket>] [--preview-hash <hash>] [--async]`
   — calls `POST /api/v1/operations/call`. Invokes the G0.6 dispatcher
   end-to-end (parameter validation, policy gate, audit, JSONFlux,
   broadcast). The dispatcher always returns a structured
@@ -1800,10 +1814,12 @@ narrow-waist contract.
   render modes. The human renderer labels it `result handle`; its
   `handle_id` is the UUID accepted by `meho operation result-query`. This is
   distinct from any `flight_recorder_trace_handle` in `extras`.
-- `--work-ref gh:<owner>/<repo>#<n>` (call only) — an external change-ticket
-  reference for this dispatch. The CLI rejects malformed values before issuing
-  the request, then threads a valid reference into `CallOperationBody.WorkRef`
-  so the dispatch's approval and audit rows retain their change-ticket linkage.
+- `--work-ref <ticket>` (call only) — an external change-ticket reference for
+  this dispatch, for example `gh:evoila/meho#13` or `CHG0012345`. The CLI
+  refuses an empty or blank value, or one with a line break, before it sends the request,
+  with the same check as the global flag. It puts a good value into
+  `CallOperationBody.WorkRef`, so the dispatch's approval and audit rows keep
+  their change-ticket link.
 
 ### HTTP shape
 

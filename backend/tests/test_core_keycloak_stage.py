@@ -1194,6 +1194,28 @@ async def test_sign_in_levels_keep_the_other_levels_and_attributes(
     assert "sign-in levels: kept (meho-approve)" in capfd.readouterr().out
 
 
+async def test_a_refused_level_write_names_the_missing_right(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The realm can be read, but Keycloak refuses (HTTP 403) the write of the level map."""
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(_realm_as_imported())
+    kc.realm_attributes["acr.loa.map"] = '{"meho-touch":3}'
+    call = kc.call
+
+    async def no_realm_write(method: str, path: str, **kwargs: Any) -> Reply:
+        if method == "PUT" and path == "/admin/realms/meho":
+            return Reply(403, {"error": "HTTP 403 Forbidden"})
+        return await call(method, path, **kwargs)
+
+    monkeypatch.setattr(kc, "call", no_realm_write)
+
+    with pytest.raises(RealmStageError, match=r"sign-in levels: .*manage-realm") as stopped:
+        await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+    assert "HTTP 403" not in str(stopped.value)
+    assert "meho-approve" not in kc.realm_attributes.get("acr.loa.map", "")
+
+
 async def test_a_level_map_that_is_not_an_object_stops_the_stage() -> None:
     kc = FakeKeycloak(bootstrap=None)
     kc.import_realm(_realm_as_imported())

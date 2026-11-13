@@ -361,15 +361,18 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_flow \
   (`client_level_map`): MEHO stops before it changes anything. Give the
   other name another level, or remove the client's own levels, then run
   it again.
-- The target's account lacks the realm-management role `manage-realm`:
-  MEHO refuses the call before it waits for approval, and names the role
-  and the account. Give the account the role, then run it again.
+- The target's account lacks the realm-management role `manage-realm`
+  (it changes the flow and the realm's level map): MEHO refuses the call
+  before it waits for approval, and names the role and the account. Give
+  the account the role, then run it again.
 - The account lacks `manage-clients`: the call still waits for approval.
   A Keycloak permission to manage only `meho-cli-approve` gives the same
-  right, and MEHO cannot see it. The approval card says so. When Keycloak
-  then refuses to change the client, the error names what MEHO changed
-  before: the flow, the level setting and the realm's level map. These
-  changes stay; run the operation again after the fix.
+  right, and MEHO cannot see it. The approval card says so.
+- Keycloak refuses (HTTP 403) a write after the flow is there: the
+  settings of the level step, the realm's level map, or the client. The
+  error names the refused step and what MEHO changed before: the flow,
+  the level setting, the level name. These changes stay; run the
+  operation again after the fix.
 - To find the client, the account needs one of the roles `query-clients`,
   `view-clients` or `manage-clients`. The approval card lists them.
 

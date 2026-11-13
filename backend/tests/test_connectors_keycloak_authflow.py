@@ -612,7 +612,7 @@ async def test_refused_binding_says_what_the_run_changed(kc: KeycloakConnector, 
         assert "refused (HTTP 403) to bind it to the client" in text
     assert "<truncated>" not in extras["exception_message"]
     remediation = extras["remediation"]
-    assert "to the client 'meho-cli-approve'" in remediation
+    assert "(client 'meho-cli-approve')" in remediation
     if made:
         assert "These stay in the realm: the flow, the level setting." in remediation
     else:
@@ -622,6 +622,30 @@ async def test_refused_binding_says_what_the_run_changed(kc: KeycloakConnector, 
     assert any(method == "POST" for method, _, _ in fake.writes) is made
     # The kept admin token is dropped, so the next call signs in again.
     assert kc._admin_tokens == {}
+
+
+async def test_refused_level_write_says_what_the_run_changed(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(flow_steps=None, client=_client(), levels=None)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        # The flow writes answer 2xx; Keycloak refuses only the realm PUT.
+        refused = mock.put(_ADMIN).respond(403, json={"error": "HTTP 403 Forbidden"})
+        fake.mount(mock)
+        result = await _run(_FLOW_OP, {})
+
+    assert refused.call_count == 1
+    assert result["status"] == "error", result
+    extras = result["extras"]
+    assert extras["http_status"] == 403
+    assert extras["exception_class"] == "KeycloakMissingRightsError"
+    for text in (extras["exception_message"], extras["remediation"]):
+        assert "stopped half-way" in text
+        assert "refused (HTTP 403) to write the realm's level map" in text
+    assert "<truncated>" not in extras["exception_message"]
+    remediation = extras["remediation"]
+    assert "These stay in the realm: the flow, the level setting." in remediation
+    assert "the level name in the realm's level map" not in remediation
+    # The client was never changed.
+    assert not any(path.endswith(f"/clients/{_CLIENT_UUID}") for _, path, _ in fake.writes)
 
 
 async def test_flow_list_that_is_not_a_list_is_an_error(kc: KeycloakConnector) -> None:

@@ -40,8 +40,11 @@ What the op does, on the target's managed realm:
    The client is read, the one key is put on top, and the full client is
    written back, so no other client setting changes. Then the client is read
    again; the result reports the browser flow id that was read back.
-   When Keycloak refuses this with HTTP 403, the error says what the run
-   changed before: the flow alias, its id and ``flow_created``.
+
+When Keycloak refuses (HTTP 403) the settings of the level step, the level
+name or the binding, the error names the refused step and what the run
+changed before: the flow (alias, id, ``flow_created``), the level setting
+and the level name.
 
 A 403 at the client lookup names the roles that let an account find a
 client (``query-clients``, ``view-clients`` or ``manage-clients``).
@@ -491,15 +494,16 @@ async def _bind(
     }
 
 
-def _bind_refused_text(
+def _refused_text(
     flow_id: str,
     *,
+    step: str,
     created: bool,
     level_setting_added: bool,
     level_changed: bool,
     client_id: str | None = None,
 ) -> str:
-    """Say what the run changed before Keycloak refused the client binding.
+    """Say what the run changed before Keycloak refused *step*.
 
     Without *client_id* the text is short enough for the error message.
     """
@@ -507,7 +511,7 @@ def _bind_refused_text(
     text = (
         f"{ENSURE_APPROVAL_FLOW_OP_ID} stopped half-way: the flow {APPROVAL_FLOW_ALIAS!r} "
         f"(id {flow_id!r}, flow_created={str(created).lower()}) is {state}; "
-        "Keycloak refused (HTTP 403) to bind it to the client"
+        f"Keycloak refused (HTTP 403) to {step}"
     )
     if client_id is None:
         return f"{text}. See extras.remediation."
@@ -521,7 +525,7 @@ def _bind_refused_text(
         if changed
     ]
     after = f"These stay in the realm: {', '.join(kept)}." if kept else "MEHO changed nothing."
-    return f"{text} {client_id!r}. {after}"
+    return f"{text} (client {client_id!r}). {after}"
 
 
 @names_missing_rights(ENSURE_APPROVAL_FLOW_OP_ID, _ROLES)
@@ -579,16 +583,21 @@ async def keycloak_authflow_ensure_approval_flow(
                 f"{difference}. The client was not bound to it.",
             )
 
-    setting_added = await _ensure_level_setting(self, operator, target, realm_segment)
-    level_changed = await _ensure_level_name(self, operator, target, realm_segment)
+    setting_added = level_changed = False
+    step = "write the settings of the level step"
     try:
+        setting_added = await _ensure_level_setting(self, operator, target, realm_segment)
+        step = "write the realm's level map"
+        level_changed = await _ensure_level_name(self, operator, target, realm_segment)
+        step = "bind it to the client"
         binding = await _bind(self, operator, target, client_path, flow_id)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code != 403:
             raise
         refused = functools.partial(
-            _bind_refused_text,
+            _refused_text,
             flow_id,
+            step=step,
             created=created,
             level_setting_added=setting_added,
             level_changed=level_changed,

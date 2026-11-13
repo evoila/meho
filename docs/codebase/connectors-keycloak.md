@@ -916,7 +916,7 @@ target's account before the call waits for approval
 
 | op_id | roles the run needs |
 |---|---|
-| `keycloak.authflow.ensure_approval_flow` | `manage-realm` (the flow), `manage-clients` (the client binding) |
+| `keycloak.authflow.ensure_approval_flow` | `manage-realm` (the flow and the realm's level map), `manage-clients` (the client binding) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `manage-realm` (the flow copy and the realm's browser flow) |
 | `keycloak.authflow.ensure_approval_touch` | `manage-realm` (the flow and the realm's level map), `manage-clients` (the client's `amr` mapper and the client binding) |
 
@@ -956,11 +956,12 @@ request share one read, so a wrong password makes one failed sign-in.
   `http_status` 403 and `exception_class` `KeycloakMissingRightsError`.
   `extras.remediation` names the roles the op needs, the admin client and
   the account, and the missing roles when they could be read.
-- **A 403 when `ensure_approval_flow` binds the client** (the account has
-  `manage-realm` but may not change the client): the run stops half-way.
-  The error says what the run changed: the flow alias, its id and
-  `flow_created`. The flow stays in the realm; a second run after the fix
-  finds it and only binds it.
+- **A 403 at a step of `ensure_approval_flow`** after the flow exists (the
+  settings of the level step, the realm's level map, the client binding):
+  the run stops half-way. The error names the refused step and the flow
+  (alias, id, `flow_created`). `extras.remediation` also says what the run
+  changed before: the flow, the level setting and the level name. These
+  changes stay; a second run after the fix keeps them and does the rest.
 - **A 403 at a step of `ensure_approval_touch`** after the flow exists (the
   realm's level map, the client's `amr` mapper, the company login default,
   the client binding): the run stops half-way. The error names the refused

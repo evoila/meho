@@ -163,7 +163,10 @@ from meho_backplane.connectors._shared.gsm_creds import (
     gsm_project_of,
     is_gsm_project_allowed,
 )
-from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
+from meho_backplane.connectors._shared.vault_creds import (
+    DEFAULT_KV_MOUNT,
+    TargetSecretNotFoundError,
+)
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
@@ -178,6 +181,7 @@ from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder.config import invalidate_target_override_cache
+from meho_backplane.operations._errors_target_secret import target_secret_not_found_parts
 from meho_backplane.operations._handler_resolve import (
     forget_target_in_connectors,
     get_or_create_connector_instance,
@@ -1403,6 +1407,29 @@ def _raise_fingerprint_failed(
     raise HTTPException(status_code=500, detail=detail) from exc
 
 
+def _raise_target_secret_not_found(
+    exc: TargetSecretNotFoundError, *, operator: Operator
+) -> NoReturn:
+    """Turn a missing target secret into a 422 with the ``target_secret_not_found`` shape.
+
+    The detail carries the target, the ref, whether MEHO built the ref from
+    the target name, and the fix. It has no Vault text and no Vault address.
+    """
+    derived, message, remediation = target_secret_not_found_parts(exc, tenant_id=operator.tenant_id)
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "error": "target_secret_not_found",
+            "message": message,
+            "target": exc.target_name,
+            "secret_ref": exc.secret_ref,
+            "secret_ref_derived": derived,
+            "remediation": remediation,
+            "docs": "docs/codebase/error-message-shape.md",
+        },
+    ) from exc
+
+
 @router.post("/{name}/probe", response_model=FingerprintResult)
 async def probe_target(
     name: str,
@@ -1487,6 +1514,8 @@ async def probe_and_store_fingerprint(
         fp = await cls().fingerprint(t, operator=operator)
     except HTTPException:
         raise
+    except TargetSecretNotFoundError as missing_exc:
+        _raise_target_secret_not_found(missing_exc, operator=operator)
     except Exception as exc:
         _raise_fingerprint_failed(exc, cls=cls, t=t, operator=operator)
     # ``model_dump(mode='json')`` produces a JSONB-safe dict (datetime

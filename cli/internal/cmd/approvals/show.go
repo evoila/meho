@@ -245,6 +245,15 @@ func printRunOutcome(w io.Writer, d *api.ApprovalRequestView) {
 	if o.ErrorCode != nil {
 		fmt.Fprintf(w, "Error code:   %s\n", output.SafeText(*o.ErrorCode))
 	}
+	// The run is "ok" when MEHO ran the script, even if the script itself
+	// failed. A non-zero exit code must not read as a plain success.
+	if o.ExitCode != nil {
+		if *o.ExitCode != 0 {
+			fmt.Fprintf(w, "Exit code:    %d (the script ran, but it failed)\n", *o.ExitCode)
+		} else {
+			fmt.Fprintf(w, "Exit code:    %d\n", *o.ExitCode)
+		}
+	}
 	// The next step a failed multi-step operation names (#5377), for
 	// example the VM question that holds the change.
 	// MEHO does not know if the change happened (#5025). Say what to do. The

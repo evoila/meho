@@ -1358,7 +1358,9 @@ session (on top of the Role + Extra-gate columns).
 | `meho_sensor_create` | tenant_admin | — | Create a sensor (op + assertion + cadence + severity). |
 | `meho_sensor_delete` | tenant_admin | — | Hard-delete a sensor by id. |
 | `meho_sensor_list` | operator | — | List sensors with their latest-result projection. |
+| `meho_sensor_pause` | tenant_admin | — | Pause a sensor: the runner stops running it; its history stays. |
 | `meho_sensor_results` | operator | — | Per-tick evidence trend history for one sensor. |
+| `meho_sensor_resume` | tenant_admin | — | Resume a paused sensor; it runs again at once. |
 | `meho_targets_register` | tenant_admin | — | Register a new target in the tenant. |
 | `meho_targets_update` | tenant_admin | — | Change fields of one target in the tenant, by its id. |
 | `meho_topology_annotate` | tenant_admin | — | Assert a curated graph edge auto-discovery can't infer. |

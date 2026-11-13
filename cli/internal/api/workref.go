@@ -6,7 +6,8 @@ package api
 import (
 	"context"
 	"net/http"
-	"regexp"
+	"strings"
+	"unicode"
 )
 
 // WorkRefHeader is the request header the backplane audit middleware
@@ -17,11 +18,23 @@ const WorkRefHeader = "Meho-Work-Ref"
 // falls back to when the flag is not set.
 const WorkRefEnv = "MEHO_WORK_REF"
 
-var workRefPattern = regexp.MustCompile(`^gh:[^/[:space:]]+/[^#[:space:]]+#[1-9][0-9]*$`)
+// WorkRefRule is the error text for a work-ref that ValidWorkRef
+// refuses. The caller puts the flag or variable name in front of it.
+const WorkRefRule = "must be a ticket id on one line, for example gh:evoila/meho#13 or CHG0012345"
 
-// ValidWorkRef reports whether ref has the gh:<owner>/<repo>#<n> shape.
+// ValidWorkRef reports whether ref can be sent as a change-ticket
+// reference. The backplane takes any non-empty text: a GitHub issue
+// (gh:<owner>/<repo>#<n>), a Jira key, a ServiceNow change number.
+// So the CLI only refuses what the backplane or the header cannot
+// carry: blank text, and control characters such as a line break. A
+// tab is allowed, like in an HTTP header.
 func ValidWorkRef(ref string) bool {
-	return workRefPattern.MatchString(ref)
+	if strings.TrimSpace(ref) == "" {
+		return false
+	}
+	return !strings.ContainsFunc(ref, func(r rune) bool {
+		return r != '\t' && unicode.IsControl(r)
+	})
 }
 
 type workRefKey struct{}

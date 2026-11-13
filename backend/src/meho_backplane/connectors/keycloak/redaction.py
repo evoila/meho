@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["REDACTED", "redact_secret_fields"]
+__all__ = ["REDACTED", "redact_secret_fields", "redact_trace_fields"]
 
 #: Sentinel written in place of a scrubbed secret value. A non-empty
 #: marker (rather than dropping the key) keeps the shape stable so a
@@ -117,15 +117,38 @@ def redact_secret_fields(value: Any) -> Any:
     the handler's scrub can never accidentally leave a half-redacted
     object aliased somewhere else.
     """
+    return _redact(value, _SECRET_FIELDS)
+
+
+#: Field names masked only in the flight recorder trace, on top of
+#: :data:`_SECRET_FIELDS`. They are personal data, not secrets: the
+#: operation that reads them leaves them out of its result, but the trace
+#: stores the whole vendor answer, so the mask must hide them there too.
+#: ``lastIPFailure`` is the IP address of a user's last failed sign-in
+#: (``GET /attack-detection/brute-force/users/{id}``).
+_TRACE_ONLY_FIELDS: frozenset[str] = frozenset({"lastipfailure"})
+
+
+def redact_trace_fields(value: Any) -> Any:
+    """Return *value* with secrets and trace-only personal fields masked.
+
+    The same walk as :func:`redact_secret_fields`, with
+    :data:`_TRACE_ONLY_FIELDS` masked too. Used for the vendor answer the
+    flight recorder stores.
+    """
+    return _redact(value, _SECRET_FIELDS | _TRACE_ONLY_FIELDS)
+
+
+def _redact(value: Any, fields: frozenset[str]) -> Any:
     if isinstance(value, dict):
         return {
             key: (
                 REDACTED
-                if isinstance(key, str) and key.lower() in _SECRET_FIELDS
-                else redact_secret_fields(item)
+                if isinstance(key, str) and key.lower() in fields
+                else _redact(item, fields)
             )
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [redact_secret_fields(item) for item in value]
+        return [_redact(item, fields) for item in value]
     return value

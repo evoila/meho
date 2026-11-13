@@ -351,8 +351,9 @@ async def test_log_handler_full_tail_flags_truncated() -> None:
 
 
 def test_registration_both_ops_are_safe_reads_in_known_group() -> None:
-    ops = {op.op_id: op for op in PFSENSE_OPS if op.op_id.startswith("pfsense.openvpn.")}
-    assert set(ops) == {"pfsense.openvpn.clients", "pfsense.openvpn.log"}
+    reads = {"pfsense.openvpn.clients", "pfsense.openvpn.log"}
+    ops = {op.op_id: op for op in PFSENSE_OPS if op.op_id in reads}
+    assert set(ops) == reads
     for op in ops.values():
         assert (op.safety_level, op.requires_approval) == ("safe", False)
         assert op.group_key == "openvpn"

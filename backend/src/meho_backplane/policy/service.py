@@ -147,14 +147,26 @@ def _values(result: Classification) -> tuple[Any, ...]:
     )
 
 
-def _match_key(entry: dict[str, Any]) -> str:
-    match = entry.get("match") or {}
-    return "|".join(f"{k}={match.get(k) or ''}" for k in ("connector", "group", "op"))
+def _match_key(entry: Any) -> str:
+    """The key of *entry* in the diff: two different matches never share one.
+
+    Each part is quoted (JSON), so no pattern text can look like another
+    part. A stored entry that is not a map, or whose ``match`` is not a
+    map, keys on its whole text: the import shows it as removed.
+    """
+    match = entry.get("match") if isinstance(entry, dict) else None
+    if not isinstance(match, dict):
+        return json.dumps(["not-valid", entry], sort_keys=True, default=str)
+    return json.dumps([match.get(k) or None for k in ("connector", "group", "op")])
 
 
-def _counts(
-    raw: dict[str, Any], scope: Scope, ops: Sequence[KnownOp], changed: set[int]
-) -> dict[str, Any]:
+def _raw_entries(document: dict[str, Any]) -> list[Any]:
+    """The ``classifications`` of *document*; a value that is not a list is no entry."""
+    raw = document.get("classifications")
+    return list(raw) if isinstance(raw, list) else []
+
+
+def _counts(raw: Any, scope: Scope, ops: Sequence[KnownOp], changed: set[int]) -> dict[str, Any]:
     """How many operations *raw* matches, and how many of those change.
 
     Both are ``None`` for a stored entry that is not valid (it matched nothing).
@@ -168,8 +180,8 @@ def _counts(
 
 
 def _classification_diff(
-    before: list[dict[str, Any]],
-    after: list[dict[str, Any]],
+    before: list[Any],
+    after: list[Any],
     *,
     scope: Scope,
     ops: Sequence[KnownOp],
@@ -286,8 +298,8 @@ def _build_diff(
         "description": _description_diff(old, after),
         "taxonomy": _taxonomy_diff(old, after),
         "classifications": _classification_diff(
-            list(old.get("classifications") or []),
-            list(after.get("classifications") or []),
+            _raw_entries(old),
+            _raw_entries(after),
             scope=scope,
             ops=ops,
             changed=changed,

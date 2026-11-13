@@ -1533,6 +1533,13 @@ class Settings(BaseModel):
         person gets the value on the command line, in the console or over
         REST. It stays off until model tests show it helps. Env
         ``MCP_REVEAL_FETCH``.
+    mcp_approval_exit_code:
+        Off by default. When on, the ``resume_outcome`` of an approval on the
+        MCP tools ``meho_approvals_list`` and ``meho_approvals_get`` also has
+        ``exit_code``: the exit code of an approved script run. When off, the
+        MCP answer is the same as before. REST, the command line and the
+        console always show it. It stays off until model tests show it helps.
+        Env ``MCP_APPROVAL_EXIT_CODE``.
     policy_classification:
         Off by default. When on, each connector, operation group and
         operation can carry a category, labels and an "always wait" mark,
@@ -2466,6 +2473,7 @@ class Settings(BaseModel):
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = False
     policy_engine_shadow: bool = False
     policy_approver_routing: bool = False
@@ -2551,6 +2559,14 @@ class Settings(BaseModel):
     #: Only the outcome changes, never the hits or their order. Set via
     #: ``SEARCH_CLEAR_LEAD``.
     search_clear_lead: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Node size and reserved room in ``k8s.node.list`` (#4652), behind a
+    #: switch that is off by default. When on, each node row also has
+    #: ``capacity``, ``allocatable``, ``requested`` and ``requests_error``,
+    #: and the op's description, ``llm_instructions`` and response schema
+    #: name them (:mod:`meho_backplane.connectors.kubernetes._node_resources`).
+    #: The node list then also reads the pods of all namespaces. Off: the op
+    #: is as before. Set via ``K8S_NODE_LIST_RESOURCES``.
+    k8s_node_list_resources: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Wider ``preview_operation`` for typed writes (#5074), behind a switch
     #: that is off by default. When on, a typed write previews also when it
     #: does not carry ``requires_approval``, and a credential write with its
@@ -3556,6 +3572,9 @@ def get_settings() -> Settings:
         mcp_reveal_fetch=parse_bool_env(
             os.environ.get("MCP_REVEAL_FETCH"),
         ),
+        mcp_approval_exit_code=parse_bool_env(
+            os.environ.get("MCP_APPROVAL_EXIT_CODE"),
+        ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),
         ),
@@ -3589,6 +3608,9 @@ def get_settings() -> Settings:
         ),
         search_clear_lead=parse_bool_env(
             os.environ.get("SEARCH_CLEAR_LEAD"),
+        ),
+        k8s_node_list_resources=parse_bool_env(
+            os.environ.get("K8S_NODE_LIST_RESOURCES"),
         ),
         preview_typed_writes=parse_bool_env(
             os.environ.get("PREVIEW_TYPED_WRITES"),

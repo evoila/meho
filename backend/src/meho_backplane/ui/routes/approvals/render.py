@@ -141,6 +141,7 @@ def project_outcome(outcome: ResumeOutcome | None) -> dict[str, Any] | None:
         "audit_href": f"/ui/audit?audit_id={audit_id}" if audit_id else None,
         "guidance": outcome.guidance,
         "execution_outcome": outcome.execution_outcome,
+        "exit_code": outcome.exit_code,
         "refused_message": RESUME_REFUSAL_MESSAGES.get(outcome.error_code or ""),
     }
 

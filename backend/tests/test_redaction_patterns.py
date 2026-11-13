@@ -957,6 +957,53 @@ def test_placeholder_look_alike_is_redacted_whole(sample: str) -> None:
     assert redacted.endswith(" during login")
 
 
+_PROMPT_OUTPUT = (
+    "Enter SYS user password:\n"
+    "*************************\n"
+    "Enter SYSTEM user password:\n"
+    "*************\n"
+    "Done.\n"
+)
+
+
+def test_mask_only_value_keeps_the_prompt_lines() -> None:
+    result = redact(_PROMPT_OUTPUT, _API_KEY_ONLY_POLICY)
+    assert result.redacted == _PROMPT_OUTPUT
+    assert not result.manifest
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [
+        pytest.param(
+            "password: \u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022", id="bullets"
+        ),
+        pytest.param("password='**********'", id="quoted"),
+        pytest.param("password=**********", id="same-line"),
+    ],
+)
+def test_other_mask_forms_are_kept(sample: str) -> None:
+    result = redact(sample, _API_KEY_ONLY_POLICY)
+    assert result.redacted == sample
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [
+        pytest.param("password: hunter2-made-up", id="real-value"),
+        pytest.param("password:\nhunter2-made-up", id="real-value-next-line"),
+        pytest.param("password: ********madeup1", id="masks-then-value"),
+        pytest.param("password: madeup1********", id="value-then-masks"),
+    ],
+)
+def test_real_value_after_label_is_still_redacted(sample: str) -> None:
+    result = redact("Enter " + sample + " end", _API_KEY_ONLY_POLICY)
+    redacted = result.redacted
+    assert isinstance(redacted, str)
+    assert "madeup" not in redacted and "hunter2" not in redacted
+    assert "[REDACTED:api_key]" in redacted
+
+
 def test_complete_placeholder_keeps_its_label() -> None:
     payload = "password=[REDACTED:param_name] token='[REDACTED:presidio:PERSON]' end"
     result = redact(payload, _API_KEY_ONLY_POLICY)

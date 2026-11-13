@@ -101,7 +101,9 @@ spec:
 
 - Passwords, tokens and keys of any kind.
 - The settings MEHO reads from environment variables when it starts.
-- Who is in which Keycloak group, and the Keycloak realm setup.
+- Who is in which Keycloak group, and the Keycloak realm setup. To
+  move them to another install, see
+  [Move the login setup](../install/move-login-setup.md).
 - The settings of the machine or cluster: host names, IP addresses,
   certificates, storage and network setup.
 - Fields that MEHO manages itself, such as ids and timestamps.

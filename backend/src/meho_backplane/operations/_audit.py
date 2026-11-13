@@ -42,6 +42,11 @@ from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
 from meho_backplane.operations._errors import status_code_for_result
+from meho_backplane.operations.audit_row_safe import (
+    is_database_unreachable,
+    make_storable,
+    short_row_payload,
+)
 from meho_backplane.operations.caller_gone import caller_gone_at
 from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.work_ref import normalize_work_ref
@@ -663,6 +668,14 @@ async def write_audit_row(
     happened: ``operation_execution`` when the operation ran (``ok``,
     ``error``, or stopped part-way because a step waits for approval or was
     denied, #4275), ``policy_decision`` when a gate refused it before it ran.
+
+    Before the row is stored, every text and number in ``payload``,
+    ``raw_payload`` and ``redaction_manifest`` is made storable
+    (:func:`~meho_backplane.operations.audit_row_safe.make_storable`, #6452).
+    When the insert of the full row still fails, for a reason other than
+    "the database cannot be reached", one short row is stored instead: the
+    fixed columns and a ``full_row_lost`` mark with the error class. Only
+    when that insert fails too does this function raise.
     """
     sessionmaker = get_sessionmaker()
     payload = _build_audit_payload(
@@ -706,33 +719,66 @@ async def write_audit_row(
     # is added by migration ``0051``. ``None`` when no gate ran for this row.
     if hasattr(AuditLog, "policy_decision"):
         runbook_kwargs["policy_decision"] = policy_decision_var.get()
-    async with sessionmaker() as session:
-        await _apply_principal_name(session, payload, operator)
-        apply_client_block(payload, operator)
-        row = AuditLog(
-            id=audit_id,
-            occurred_at=datetime.now(UTC),
-            operator_sub=operator.sub,
-            actor_sub=resolve_actor_sub(),
-            tenant_id=operator.tenant_id,
-            target_id=target_id,
-            parent_audit_id=parent_audit_id,
-            agent_session_id=agent_session_id,
-            event_class=event_class,
-            method="DISPATCH",
-            path=descriptor.op_id,
-            status_code=status_code_for_result(result_status),
-            # #3695: the request's correlation id. A standing-grant
-            # auto-approval row written for this call carries the same
-            # value, so the approval links forward to this row.
-            request_id=current_request_id(),
-            duration_ms=Decimal(str(round(duration_ms, 2))),
-            payload=payload,
-            raw_payload=raw_payload,
-            redaction_manifest=redaction_manifest,
-            **runbook_kwargs,
+    row_fields: dict[str, Any] = {
+        "id": audit_id,
+        "occurred_at": datetime.now(UTC),
+        "operator_sub": operator.sub,
+        "actor_sub": resolve_actor_sub(),
+        "tenant_id": operator.tenant_id,
+        "target_id": target_id,
+        "parent_audit_id": parent_audit_id,
+        "agent_session_id": agent_session_id,
+        "method": "DISPATCH",
+        "path": descriptor.op_id,
+        "status_code": status_code_for_result(result_status),
+        # #3695: the request's correlation id. A standing-grant
+        # auto-approval row written for this call carries the same
+        # value, so the approval links forward to this row.
+        "request_id": current_request_id(),
+        "duration_ms": Decimal(str(round(duration_ms, 2))),
+        **runbook_kwargs,
+    }
+    try:
+        async with sessionmaker() as session:
+            await _apply_principal_name(session, payload, operator)
+            apply_client_block(payload, operator)
+            row = AuditLog(
+                **row_fields,
+                event_class=event_class,
+                payload=make_storable(payload),
+                raw_payload=make_storable(raw_payload),
+                redaction_manifest=make_storable(redaction_manifest),
+            )
+            session.add(row)
+            await session.commit()
+    except Exception as exc:
+        if is_database_unreachable(exc):
+            raise
+        await _write_short_row(row_fields, event_class, exc)
+
+
+async def _write_short_row(
+    row_fields: dict[str, Any], event_class: AuditEventClass, cause: BaseException
+) -> None:
+    """Store the short row when the full row of a call could not be stored (#6452).
+
+    The short row keeps the fixed columns (who, when, tenant, target,
+    operation, status, ticket id, request id) and a ``full_row_lost`` mark
+    with the error class. It holds none of the text that failed. When this
+    insert fails too, the error is raised: the caller then answers
+    ``audit_commit_failed``.
+    """
+    _log.warning(
+        "audit_full_row_lost",
+        audit_id=str(row_fields["id"]),
+        op_id=row_fields["path"],
+        request_id=row_fields["request_id"],
+        error_class=type(cause).__name__,
+    )
+    async with get_sessionmaker()() as session:
+        session.add(
+            AuditLog(**row_fields, event_class=event_class, payload=short_row_payload(cause))
         )
-        session.add(row)
         await session.commit()
 
 
@@ -807,6 +853,9 @@ async def audit_safe(
             op_id=descriptor.op_id,
             result_status=result_status,
             operator_sub=operator.sub,
+            request_id=current_request_id(),
+            target=getattr(target, "name", None),
+            target_id=str(_resolve_target_id(target) or ""),
         )
         if require_audit:
             # Completed-handler success path: the DISPATCH row is a hard

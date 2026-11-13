@@ -2530,6 +2530,15 @@ type AuditTraceResult struct {
 	TracePresent bool       `json:"trace_present"`
 }
 
+// AuditTraceSearchResult 200 body for “GET /api/v1/audit/traces“ (#6452).
+//
+// The stored traces that match the request id, caller and time window,
+// newest first. A trace is listed even when its audit row was never
+// stored.
+type AuditTraceSearchResult struct {
+	Items []TraceView `json:"items"`
+}
+
 // AuthConfigResponse OAuth discovery surface returned to “meho login“.
 //
 // Field names match the CLI's expected JSON keys (“keycloak_issuer“,
@@ -12241,13 +12250,15 @@ type TraceSpanView struct {
 // flag rather than acting on it -- an operator sees everything, and sees which
 // traces the agent could not.
 type TraceView struct {
-	AuditId            openapi_types.UUID `json:"audit_id"`
-	CreatedAt          time.Time          `json:"created_at"`
-	ExpiresAt          time.Time          `json:"expires_at"`
-	RedactionUncertain bool               `json:"redaction_uncertain"`
-	Spans              []TraceSpanView    `json:"spans"`
-	TenantId           openapi_types.UUID `json:"tenant_id"`
-	TraceId            openapi_types.UUID `json:"trace_id"`
+	AuditId            openapi_types.UUID  `json:"audit_id"`
+	CreatedAt          time.Time           `json:"created_at"`
+	ExpiresAt          time.Time           `json:"expires_at"`
+	OperatorSub        *string             `json:"operator_sub"`
+	RedactionUncertain bool                `json:"redaction_uncertain"`
+	RequestId          *openapi_types.UUID `json:"request_id"`
+	Spans              []TraceSpanView     `json:"spans"`
+	TenantId           openapi_types.UUID  `json:"tenant_id"`
+	TraceId            openapi_types.UUID  `json:"trace_id"`
 }
 
 // UISessionContext Per-request session identity exposed on “request.state“.
@@ -12887,6 +12898,16 @@ type ReplayApiV1AuditSessionsSessionIdReplayGetParams struct {
 // ShowApiV1AuditShowAuditIdGetParams defines parameters for ShowApiV1AuditShowAuditIdGet.
 type ShowApiV1AuditShowAuditIdGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
+}
+
+// SearchTracesApiV1AuditTracesGetParams defines parameters for SearchTracesApiV1AuditTracesGet.
+type SearchTracesApiV1AuditTracesGetParams struct {
+	RequestId     *openapi_types.UUID `form:"request_id,omitempty" json:"request_id,omitempty"`
+	Caller        *string             `form:"caller,omitempty" json:"caller,omitempty"`
+	Since         *string             `form:"since,omitempty" json:"since,omitempty"`
+	Until         *string             `form:"until,omitempty" json:"until,omitempty"`
+	Limit         *int                `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
 }
 
 // WhoTouchedApiV1AuditWhoTouchedTargetGetParams defines parameters for WhoTouchedApiV1AuditWhoTouchedTargetGet.
@@ -17091,6 +17112,9 @@ type ClientInterface interface {
 	// ShowApiV1AuditShowAuditIdGet request
 	ShowApiV1AuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// SearchTracesApiV1AuditTracesGet request
+	SearchTracesApiV1AuditTracesGet(ctx context.Context, params *SearchTracesApiV1AuditTracesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// WhoTouchedApiV1AuditWhoTouchedTargetGet request
 	WhoTouchedApiV1AuditWhoTouchedTargetGet(ctx context.Context, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -19528,6 +19552,18 @@ func (c *Client) ReplayApiV1AuditSessionsSessionIdReplayGet(ctx context.Context,
 
 func (c *Client) ShowApiV1AuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewShowApiV1AuditShowAuditIdGetRequest(c.Server, auditId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SearchTracesApiV1AuditTracesGet(ctx context.Context, params *SearchTracesApiV1AuditTracesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSearchTracesApiV1AuditTracesGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -29885,6 +29921,134 @@ func NewShowApiV1AuditShowAuditIdGetRequest(server string, auditId openapi_types
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewSearchTracesApiV1AuditTracesGetRequest generates requests for SearchTracesApiV1AuditTracesGet
+func NewSearchTracesApiV1AuditTracesGetRequest(server string, params *SearchTracesApiV1AuditTracesGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/audit/traces")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.RequestId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "request_id", runtime.ParamLocationQuery, *params.RequestId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Caller != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "caller", runtime.ParamLocationQuery, *params.Caller); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Until != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "until", runtime.ParamLocationQuery, *params.Until); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -53687,6 +53851,9 @@ type ClientWithResponsesInterface interface {
 	// ShowApiV1AuditShowAuditIdGetWithResponse request
 	ShowApiV1AuditShowAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*ShowApiV1AuditShowAuditIdGetResponse, error)
 
+	// SearchTracesApiV1AuditTracesGetWithResponse request
+	SearchTracesApiV1AuditTracesGetWithResponse(ctx context.Context, params *SearchTracesApiV1AuditTracesGetParams, reqEditors ...RequestEditorFn) (*SearchTracesApiV1AuditTracesGetResponse, error)
+
 	// WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse request
 	WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse(ctx context.Context, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams, reqEditors ...RequestEditorFn) (*WhoTouchedApiV1AuditWhoTouchedTargetGetResponse, error)
 
@@ -56445,6 +56612,29 @@ func (r ShowApiV1AuditShowAuditIdGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ShowApiV1AuditShowAuditIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SearchTracesApiV1AuditTracesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AuditTraceSearchResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r SearchTracesApiV1AuditTracesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SearchTracesApiV1AuditTracesGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -66312,6 +66502,15 @@ func (c *ClientWithResponses) ShowApiV1AuditShowAuditIdGetWithResponse(ctx conte
 	return ParseShowApiV1AuditShowAuditIdGetResponse(rsp)
 }
 
+// SearchTracesApiV1AuditTracesGetWithResponse request returning *SearchTracesApiV1AuditTracesGetResponse
+func (c *ClientWithResponses) SearchTracesApiV1AuditTracesGetWithResponse(ctx context.Context, params *SearchTracesApiV1AuditTracesGetParams, reqEditors ...RequestEditorFn) (*SearchTracesApiV1AuditTracesGetResponse, error) {
+	rsp, err := c.SearchTracesApiV1AuditTracesGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSearchTracesApiV1AuditTracesGetResponse(rsp)
+}
+
 // WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse request returning *WhoTouchedApiV1AuditWhoTouchedTargetGetResponse
 func (c *ClientWithResponses) WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse(ctx context.Context, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams, reqEditors ...RequestEditorFn) (*WhoTouchedApiV1AuditWhoTouchedTargetGetResponse, error) {
 	rsp, err := c.WhoTouchedApiV1AuditWhoTouchedTargetGet(ctx, target, params, reqEditors...)
@@ -73152,6 +73351,39 @@ func ParseShowApiV1AuditShowAuditIdGetResponse(rsp *http.Response) (*ShowApiV1Au
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AuditEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSearchTracesApiV1AuditTracesGetResponse parses an HTTP response from a SearchTracesApiV1AuditTracesGetWithResponse call
+func ParseSearchTracesApiV1AuditTracesGetResponse(rsp *http.Response) (*SearchTracesApiV1AuditTracesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SearchTracesApiV1AuditTracesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuditTraceSearchResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

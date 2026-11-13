@@ -60,6 +60,7 @@ __all__ = [
     "AuditQueryResult",
     "AuditReplayResult",
     "AuditTraceResult",
+    "AuditTraceSearchResult",
     "ReplayNode",
     "TraceSpanView",
     "TraceView",
@@ -209,6 +210,17 @@ class AuditReplayResult(BaseModel):
     row_count: int
     excluded_null_session_count: int
     loose_row_count: int
+
+
+class AuditTraceSearchResult(BaseModel):
+    """200 body for ``GET /api/v1/audit/traces`` (#6452).
+
+    The stored traces that match the request id, caller and time window,
+    newest first. A trace is listed even when its audit row was never
+    stored.
+    """
+
+    items: list[TraceView]
 
 
 class AuditTraceResult(BaseModel):

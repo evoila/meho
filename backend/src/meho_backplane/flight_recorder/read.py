@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import DispatchTrace, DispatchTraceSpan
 
-__all__ = ["TraceSpanView", "TraceView", "load_trace"]
+__all__ = ["TraceSpanView", "TraceView", "find_traces", "load_trace"]
 
 
 class TraceSpanView(BaseModel):
@@ -83,6 +83,10 @@ class TraceView(BaseModel):
     created_at: datetime
     expires_at: datetime
     redaction_uncertain: bool
+    #: Request id and caller of the call; ``None`` on a trace stored before
+    #: migration 0166.
+    request_id: uuid.UUID | None = None
+    operator_sub: str | None = None
     spans: list[TraceSpanView]
 
 
@@ -117,6 +121,11 @@ async def load_trace(
     if header is None:
         return None
 
+    return await _view_of(session, header)
+
+
+async def _view_of(session: AsyncSession, header: DispatchTrace) -> TraceView:
+    """Build the :class:`TraceView` of one trace header, spans in order."""
     span_rows = (
         (
             await session.execute(
@@ -136,6 +145,8 @@ async def load_trace(
         created_at=header.created_at,
         expires_at=header.expires_at,
         redaction_uncertain=header.redaction_uncertain,
+        request_id=header.request_id,
+        operator_sub=header.operator_sub,
         spans=[
             TraceSpanView(
                 seq=span.seq,
@@ -149,3 +160,45 @@ async def load_trace(
             for span in span_rows
         ],
     )
+
+
+async def find_traces(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    request_id: uuid.UUID | None = None,
+    operator_sub: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    include_redaction_uncertain: bool = True,
+    limit: int = 20,
+) -> list[TraceView]:
+    """Find stored traces of the tenant without their audit row (#6452).
+
+    A trace is found by request id, by caller (the exact ``operator_sub``),
+    by capture time, or by any mix of these. The newest come first. The
+    search reads the trace tables only, so it works when the audit row of a
+    call was never stored. The ``tenant_id`` filter is the isolation guard,
+    as in :func:`load_trace`. Traces stored before migration 0166 have no
+    request id and no caller, so only the time filter finds them.
+
+    ``include_redaction_uncertain=False`` leaves out the traces that are
+    withheld from agents.
+    """
+    query = select(DispatchTrace).where(DispatchTrace.tenant_id == tenant_id)
+    if request_id is not None:
+        query = query.where(DispatchTrace.request_id == request_id)
+    if operator_sub is not None:
+        query = query.where(DispatchTrace.operator_sub == operator_sub)
+    if since is not None:
+        query = query.where(DispatchTrace.created_at >= since)
+    if until is not None:
+        query = query.where(DispatchTrace.created_at <= until)
+    if not include_redaction_uncertain:
+        query = query.where(DispatchTrace.redaction_uncertain.is_(False))
+    headers = (
+        (await session.execute(query.order_by(DispatchTrace.created_at.desc()).limit(limit)))
+        .scalars()
+        .all()
+    )
+    return [await _view_of(session, header) for header in headers]

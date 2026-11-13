@@ -8351,6 +8351,106 @@
         }
       }
     },
+    "/api/v1/audit/traces": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Search Traces",
+        "description": "Find stored flight-recorder traces without their audit row (#6452).\n\nFilters: ``request_id`` (the id of the request that made the call),\n``caller`` (the exact login subject of the caller) and the window\n``since`` / ``until`` (duration shorthand or ISO-8601; ``since`` defaults\nto 24 hours). The newest traces come first. Use it when the audit row of\na call was never stored, so ``GET /{audit_id}/trace`` cannot be used.\n\nThe trace tables hold the request id and the caller since migration\n``0166``; an older trace is found by the time window only. The access\nrules are those of the single trace read: a person reads every trace of\nthe tenant; an agent login reads none unless the tenant lets agents read\ntraces, and never a trace marked ``redaction_uncertain``.",
+        "operationId": "search_traces_api_v1_audit_traces_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "caller",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512,
+              "nullable": true,
+              "title": "Caller"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "24h",
+              "title": "Since"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "nullable": true,
+              "title": "Until"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditTraceSearchResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/audit/{audit_id}/trace": {
       "get": {
         "tags": [
@@ -28412,6 +28512,23 @@
         "title": "AuditTraceResult",
         "description": "200 body for ``GET /api/v1/audit/{audit_id}/trace`` (#3215).\n\nThe operator read surface of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``). Wraps the tenant-scoped\n:class:`~meho_backplane.flight_recorder.TraceView` with the echoed\n``audit_id`` and a ``trace_present`` discriminator, the same REST-envelope\nlayering :class:`AuditReplayResult` follows over the substrate's\n:class:`ReplayNode`.\n\nTwo-level absence semantics -- distinct on purpose:\n\n* The **audit row** being missing or in another tenant is a 404 from the\n  route, matching ``GET /show/{audit_id}``: existence never leaks across\n  the tenant boundary.\n* The audit row existing but carrying **no captured trace** is *not* a 404 --\n  it is a 200 with ``trace_present=False`` and ``trace=None``. Capture is a\n  per-tenant/per-target opt-in and best-effort (F1/F7), so \"no trace\" is a\n  normal state an operator must be able to observe, not an error. The\n  console pane renders a \"no trace captured\" empty state for this case.\n\nOnly an ``operation_execution`` row resolves to the flight recorder\n(#3747). A decision, security or legacy row is not an execution, so it\nanswers ``trace_present=False`` and the route never reads a trace for\nit. ``event_class`` echoes the row's class so the reason is visible.\n\n``trace.redaction_uncertain`` surfaces the F5 degrade flag so an operator\n(and a paired add-on reading over this route with its operator principal)\ncan see when a trace was withheld from the agent handle. The operator plane\nkeeps **full** access regardless of that flag.\n\nFrozen like the models it carries."
       },
+      "AuditTraceSearchResult": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TraceView"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "AuditTraceSearchResult",
+        "description": "200 body for ``GET /api/v1/audit/traces`` (#6452).\n\nThe stored traces that match the request id, caller and time window,\nnewest first. A trace is listed even when its audit row was never\nstored."
+      },
       "AuthConfigResponse": {
         "properties": {
           "keycloak_issuer": {
@@ -44957,6 +45074,17 @@
           "redaction_uncertain": {
             "type": "boolean",
             "title": "Redaction Uncertain"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Request Id"
+          },
+          "operator_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Operator Sub"
           },
           "spans": {
             "items": {

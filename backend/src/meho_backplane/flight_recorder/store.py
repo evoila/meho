@@ -71,6 +71,8 @@ async def record_trace(
     tenant_id: uuid.UUID,
     spans: Sequence[SpanInput],
     redaction_uncertain: bool = False,
+    request_id: uuid.UUID | None = None,
+    operator_sub: str | None = None,
     now: datetime | None = None,
 ) -> uuid.UUID | None:
     """Persist one trace header + its ordered spans; return the new trace id.
@@ -96,6 +98,9 @@ async def record_trace(
     redaction_uncertain:
         F5 degrade flag: ``True`` marks the trace withheld from the agent
         read handle (operator-only). Set by the capture/redaction seam.
+    request_id, operator_sub:
+        The request id and the caller of the dispatch. They let the trace be
+        found without its audit row.
     now:
         Capture time; defaults to ``datetime.now(UTC)``. Injectable for tests.
     """
@@ -114,6 +119,8 @@ async def record_trace(
                     created_at=created_at,
                     expires_at=expires_at,
                     redaction_uncertain=redaction_uncertain,
+                    request_id=request_id,
+                    operator_sub=operator_sub,
                 )
             )
             for seq, span in enumerate(spans):

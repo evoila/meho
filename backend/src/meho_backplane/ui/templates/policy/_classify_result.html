@@ -12,9 +12,23 @@
     * ``requested`` -- dict: {status, approval_request_id, error,
                        matched_operations}: the answer to the request.
 
-  The ask button posts with the page's CSRF token: the fragment is swapped
-  into the page, and HTMX inherits ``hx-headers`` from the page's form.
+  The ask button's form has no ``hx-headers``, and it does not inherit the
+  page form's: ``#classify-result`` sits next to that form, not inside it.
+  It still sends the CSRF token, because ``static/src/app/csrf-token.js``
+  adds the ``X-CSRF-Token`` header from the ``meho_csrf`` cookie to every
+  htmx request.
+
+  "In force" is what applies with the values: the code's value, the
+  overrides and the minimum-level rules (floors) included. So a floor that
+  keeps a wait still shows "waits" when "Always wait" goes to "no".
 -#}
+{%- macro in_force(values) -%}
+  {%- if values -%}
+    {{ values.risk }}, {{ "waits" if values.waits else "runs at once" }}
+  {%- else -%}
+    -
+  {%- endif -%}
+{%- endmacro -%}
 {% if error %}
   <p class="alert alert-error text-sm" data-classify-error>{{ error }}</p>
 {% elif requested %}
@@ -61,6 +75,7 @@
             <th>Category</th>
             <th>Labels</th>
             <th>Always wait</th>
+            <th>In force</th>
           </tr>
         </thead>
         <tbody>
@@ -78,6 +93,9 @@
               </td>
               <td class="text-xs">
                 {{ "yes" if row.before.always_wait else "no" }} &rarr; {{ "yes" if row.after.always_wait else "no" }}
+              </td>
+              <td class="text-xs" data-classify-in-force>
+                {{ in_force(row.before.in_force) }} &rarr; {{ in_force(row.after.in_force) }}
               </td>
             </tr>
           {% endfor %}

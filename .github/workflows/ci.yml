@@ -2454,6 +2454,13 @@ jobs:
       # exact tag the testcontainers fixture asks for, without a docker.io
       # round-trip.
       MEHO_TEST_K3S_IMAGE: harbor.evba.lab/dockerhub-proxy/rancher/k3s:v1.32.5-k3s1
+      # The k3d test module runs once for each k3s tag in this list: the
+      # oldest line the Kubernetes connector serves (1.32) and two lines
+      # that upstream still maintains (1.35 and 1.37). The test takes the
+      # image name from MEHO_TEST_K3S_IMAGE above and swaps in each tag. An
+      # image that cannot be pulled skips its run with the reason shown
+      # (-rs below). The other k3s tests keep using the single image above.
+      MEHO_TEST_K3S_TAGS: v1.32.5-k3s1,v1.35.10-k3s1,v1.37.2-k3s1
       # G11.2-T7 (#1098) — Keycloak 26.x container fixture for the
       # live-IdP integration test
       # (backend/tests/integration/test_auth_keycloak_client_credentials.py).

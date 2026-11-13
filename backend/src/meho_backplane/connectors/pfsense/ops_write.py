@@ -415,9 +415,10 @@ async def _apply_playback(
     script_name: str,
     script_body: str,
     operator: Operator | None,
-) -> None:
+) -> str:
     """Stage, play back, and clean up a pfSsh.php playback fragment.
 
+    Returns the standard output of the playback (most callers ignore it).
     Raises :exc:`RuntimeError` when staging or playback exits non-zero. The
     staged script is removed in a ``finally`` so a failed playback never
     leaves the fragment behind.
@@ -438,6 +439,8 @@ async def _apply_playback(
         await self._run_command(target, f"rm -f {path}", operator=operator)
     if played.exit_status != 0:
         raise RuntimeError(f"pfSsh.php playback {script_name!r} failed: exit {played.exit_status}")
+    played_out = played.stdout if hasattr(played, "stdout") else ""
+    return played_out if isinstance(played_out, str) else ""
 
 
 # ---------------------------------------------------------------------------

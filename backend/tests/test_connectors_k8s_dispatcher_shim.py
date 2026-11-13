@@ -184,7 +184,7 @@ def test_registry_v2_class_attrs() -> None:
     assert KubernetesConnector.product == "k8s"
     assert KubernetesConnector.version == "1.x"
     assert KubernetesConnector.impl_id == "k8s"
-    assert KubernetesConnector.supported_version_range is None
+    assert KubernetesConnector.supported_version_range == ">=1.32,<1.38"
     assert KubernetesConnector.priority == 0
 
 

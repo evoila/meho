@@ -47,7 +47,7 @@ model (decision #11 in :file:`docs/decisions/locked-decisions.md`):
 * ``HttpOnly`` -- JS cannot read the cookie. Defeats every
   XSS-to-token exfiltration vector.
 * ``Secure`` -- TLS-only. The backplane terminates TLS at
-  ``meho.evba.lab``; a downgrade to HTTP would silently fail because
+  ``meho.example.test``; a downgrade to HTTP would silently fail because
   the cookie would not be sent.
 * ``SameSite=Strict`` -- the cookie is omitted from cross-site
   navigations, blocking the entire CSRF class on state-changing

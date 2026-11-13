@@ -17,7 +17,7 @@ import (
 // CLI shape:
 //
 //	meho holodeck about \
-//	  [--target <slug>]     # HoloRouter target (required for dispatch)
+//	  [--target <slug>]     # Holodeck router target (required for dispatch)
 //	  [--json]              # machine-readable output
 //	  [--backplane <url>]   # override the backplane URL
 //
@@ -45,8 +45,8 @@ func newAboutCmd() *cobra.Command {
 			"  - 2   auth_expired (run `meho login`)\n" +
 			"  - 3   unreachable (network / DNS / TLS)\n" +
 			"  - 4   unexpected response shape",
-		Example: "  meho holodeck about --target holorouter-hetzner-dc\n" +
-			"  meho holodeck about --target holorouter-hetzner-dc --json | jq .result",
+		Example: "  meho holodeck about --target my-router\n" +
+			"  meho holodeck about --target my-router --json | jq .result",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

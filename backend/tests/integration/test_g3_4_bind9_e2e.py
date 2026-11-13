@@ -237,7 +237,7 @@ _BIND9_VAULT_PATH: str = "kv/dev/bind9/e2e"
 # Inline Dockerfile -- copied from test_connectors_bind9_container.py.
 #
 # The image is the same Debian-bookworm + bind9 + openssh-server build
-# the existing container fixture uses, with one extra "evba.lab" zone
+# the existing container fixture uses, with one extra "example.test" zone
 # seeded so every read/write op has something to operate against.
 # ---------------------------------------------------------------------------
 
@@ -262,24 +262,24 @@ _DOCKERFILE: str = textwrap.dedent(
     RUN echo 'root ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers.d/99-meho-test \\
      && chmod 0440 /etc/sudoers.d/99-meho-test
 
-    RUN echo 'zone "evba.lab" { type master; file "/etc/bind/db.evba.lab"; };' \\
+    RUN echo 'zone "example.test" { type master; file "/etc/bind/db.example.test"; };' \\
             >> /etc/bind/named.conf.local
 
     RUN printf '%s\\n' \\
             '$TTL 3600' \\
-            '@ IN SOA ns1.evba.lab. admin.evba.lab. (' \\
+            '@ IN SOA ns1.example.test. admin.example.test. (' \\
             '    2026051801 3600 600 604800 86400 )' \\
-            '@   IN NS ns1.evba.lab.' \\
-            'ns1 IN A 10.5.50.1' \\
-            'www IN A 10.5.50.2' \\
-            'mail IN A 10.5.50.3' \\
+            '@   IN NS ns1.example.test.' \\
+            'ns1 IN A 192.0.2.1' \\
+            'www IN A 192.0.2.2' \\
+            'mail IN A 192.0.2.3' \\
             'mail IN AAAA 2001:db8::1' \\
-            'alias IN CNAME ns1.evba.lab.' \\
-            '@   IN MX 10 mail.evba.lab.' \\
+            'alias IN CNAME ns1.example.test.' \\
+            '@   IN MX 10 mail.example.test.' \\
             '@   IN TXT "v=spf1 a -all"' \\
-            > /etc/bind/db.evba.lab \\
-     && chown root:bind /etc/bind/db.evba.lab \\
-     && chmod 644 /etc/bind/db.evba.lab
+            > /etc/bind/db.example.test \\
+     && chown root:bind /etc/bind/db.example.test \\
+     && chmod 644 /etc/bind/db.example.test
 
     RUN printf '#!/bin/sh\\n/usr/sbin/named -u bind\\nexec /usr/sbin/sshd -D -e\\n' \\
             > /entrypoint.sh \\
@@ -864,7 +864,7 @@ async def test_call_operation_about_dispatches_through_meta_tool(
 
 @pytest.mark.asyncio
 async def test_dispatch_zone_list_against_bind9(bind9_e2e: _Bind9Target) -> None:
-    """``bind9.zone.list`` via the dispatcher returns the seeded ``evba.lab``."""
+    """``bind9.zone.list`` via the dispatcher returns the seeded ``example.test``."""
     operator = _make_operator(sub="op-zone-list", tenant_id=_OPERATOR_TENANT_ID)
     result = await dispatch(
         operator=operator,
@@ -876,20 +876,20 @@ async def test_dispatch_zone_list_against_bind9(bind9_e2e: _Bind9Target) -> None
     assert result.status == "ok", result.error
     payload = result.result
     zone_names = {row["name"] for row in payload["rows"]}
-    assert "evba.lab" in zone_names
+    assert "example.test" in zone_names
     await _assert_audit_row("bind9.zone.list", operator_sub="op-zone-list")
 
 
 @pytest.mark.asyncio
 async def test_dispatch_zone_read_against_bind9(bind9_e2e: _Bind9Target) -> None:
-    """``bind9.zone.read evba.lab`` returns the seeded record set."""
+    """``bind9.zone.read example.test`` returns the seeded record set."""
     operator = _make_operator(sub="op-zone-read", tenant_id=_OPERATOR_TENANT_ID)
     result = await dispatch(
         operator=operator,
         connector_id="bind9-ssh-9.x",
         op_id="bind9.zone.read",
         target=bind9_e2e,
-        params={"zone": "evba.lab"},
+        params={"zone": "example.test"},
     )
     assert result.status == "ok", result.error
     payload = result.result
@@ -900,18 +900,18 @@ async def test_dispatch_zone_read_against_bind9(bind9_e2e: _Bind9Target) -> None
 
 @pytest.mark.asyncio
 async def test_dispatch_record_get_against_bind9(bind9_e2e: _Bind9Target) -> None:
-    """``bind9.record.get www.evba.lab`` resolves through the live named."""
+    """``bind9.record.get www.example.test`` resolves through the live named."""
     operator = _make_operator(sub="op-record-get", tenant_id=_OPERATOR_TENANT_ID)
     result = await dispatch(
         operator=operator,
         connector_id="bind9-ssh-9.x",
         op_id="bind9.record.get",
         target=bind9_e2e,
-        params={"fqdn": "www.evba.lab", "type": "A"},
+        params={"fqdn": "www.example.test", "type": "A"},
     )
     assert result.status == "ok", result.error
     rdatas = {row["rdata"] for row in result.result["rows"]}
-    assert "10.5.50.2" in rdatas
+    assert "192.0.2.2" in rdatas
     await _assert_audit_row("bind9.record.get", operator_sub="op-record-get")
 
 
@@ -929,10 +929,10 @@ async def test_dispatch_record_add_against_bind9_writes_state_before_after(
         op_id="bind9.record.add",
         target=bind9_e2e,
         params={
-            "fqdn": "added-e2e.evba.lab",
-            "ip": "10.5.50.42",
+            "fqdn": "added-e2e.example.test",
+            "ip": "192.0.2.42",
             "type": "A",
-            "zone": "evba.lab",
+            "zone": "example.test",
         },
     )
     assert result.status == "ok", result.error
@@ -962,10 +962,10 @@ async def test_read_after_record_add_row_has_no_state_before_after(
         op_id="bind9.record.add",
         target=bind9_e2e,
         params={
-            "fqdn": "scoped-e2e.evba.lab",
-            "ip": "10.5.50.43",
+            "fqdn": "scoped-e2e.example.test",
+            "ip": "192.0.2.43",
             "type": "A",
-            "zone": "evba.lab",
+            "zone": "example.test",
         },
     )
     assert added.status == "ok", added.error
@@ -974,7 +974,7 @@ async def test_read_after_record_add_row_has_no_state_before_after(
         connector_id="bind9-ssh-9.x",
         op_id="bind9.record.get",
         target=bind9_e2e,
-        params={"fqdn": "scoped-e2e.evba.lab", "type": "A"},
+        params={"fqdn": "scoped-e2e.example.test", "type": "A"},
     )
     assert read.status == "ok", read.error
 
@@ -1011,10 +1011,10 @@ async def test_governed_record_remove_gate_holds_against_real_bind9(
         op_id="bind9.record.add",
         target=bind9_e2e,
         params={
-            "fqdn": "to-remove.evba.lab",
-            "ip": "10.5.50.43",
+            "fqdn": "to-remove.example.test",
+            "ip": "192.0.2.43",
             "type": "A",
-            "zone": "evba.lab",
+            "zone": "example.test",
         },
     )
     assert add_result.status == "ok"
@@ -1027,7 +1027,7 @@ async def test_governed_record_remove_gate_holds_against_real_bind9(
         connector_id="bind9-ssh-9.x",
         op_id="bind9.record.remove",
         target=bind9_e2e,
-        params={"fqdn": "to-remove.evba.lab", "zone": "evba.lab"},
+        params={"fqdn": "to-remove.example.test", "zone": "example.test"},
     )
     assert bare.status == "denied", bare
     assert bare.extras["error_code"] == "preview_binding_required"
@@ -1039,10 +1039,10 @@ async def test_governed_record_remove_gate_holds_against_real_bind9(
         connector_id="bind9-ssh-9.x",
         op_id="bind9.record.get",
         target=bind9_e2e,
-        params={"fqdn": "to-remove.evba.lab", "type": "A"},
+        params={"fqdn": "to-remove.example.test", "type": "A"},
     )
     assert still_there.status == "ok", still_there.error
-    assert any(row["rdata"] == "10.5.50.43" for row in still_there.result["rows"])
+    assert any(row["rdata"] == "192.0.2.43" for row in still_there.result["rows"])
 
 
 @pytest.mark.asyncio
@@ -1063,7 +1063,7 @@ async def test_dispatch_config_show_against_bind9(
         params={"path": "named.conf.local"},
     )
     assert result.status == "ok", result.error
-    assert "evba.lab" in result.result["content"]
+    assert "example.test" in result.result["content"]
     await _assert_audit_row("bind9.config.show", operator_sub="op-config-show")
 
 
@@ -1227,10 +1227,10 @@ async def test_agent_meta_tool_flow_search_then_call_record_add(
             "op_id": "bind9.record.add",
             "target": {"name": _TARGET_NAME},
             "params": {
-                "fqdn": "agent-flow.evba.lab",
-                "ip": "10.5.50.99",
+                "fqdn": "agent-flow.example.test",
+                "ip": "192.0.2.99",
                 "type": "A",
-                "zone": "evba.lab",
+                "zone": "example.test",
             },
         },
     )

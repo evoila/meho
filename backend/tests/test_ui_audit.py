@@ -5,7 +5,7 @@
 
 Initiative #1209 (G0.15 v0.7.0 closed-loop dogfood hardening), Task
 #1216 (T7). The consumer's v0.7.0 closed-loop dogfood
-(``claude-rdc-hetzner-dc#753``) flagged that an operator browsing 5
+flagged that an operator browsing 5
 ``/ui/*`` surfaces generated **zero** ``audit_log`` rows under their
 ``principal_sub`` -- a governance product completeness gap. The fix
 binds audit contextvars
@@ -252,8 +252,8 @@ def _client_with_session(session_id: uuid.UUID) -> TestClient:
         ("/ui/broadcast", "broadcast"),
         ("/ui/broadcast/event/abc", "broadcast"),
         ("/ui/connectors", "connectors"),
-        ("/ui/connectors/rdc-vault", "connectors"),
-        ("/ui/connectors/rdc-vault/probe", "connectors"),
+        ("/ui/connectors/example-vault", "connectors"),
+        ("/ui/connectors/example-vault/probe", "connectors"),
         ("/ui/kb", "kb"),
         ("/ui/kb/my-slug", "kb"),
         ("/ui/kb/my-slug/preview", "kb"),

@@ -16,7 +16,7 @@ the same embedded-etcd-server precondition guard:
   snapshots that already exist on a server node (``rke2 etcd-snapshot
   list``). It is a genuine read (it enumerates, mutates nothing), so it
   carries the ``read-only`` tag. It verifies a fresh post-rotation
-  snapshot landed -- the ``claude-rdc-hetzner-dc#615`` rotation-runbook
+  snapshot landed -- the rotation-runbook
   step that ``.save`` alone could not confirm.
 
 A snapshot listing carries names / locations / sizes / timestamps only,

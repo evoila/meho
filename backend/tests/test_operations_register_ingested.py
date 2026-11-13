@@ -1303,7 +1303,7 @@ async def test_register_ingested_passes_pre_flight_for_compatible_version(
 
 
 # ---------------------------------------------------------------------------
-# Product identity at the ingest write path (claude-rdc-hetzner-dc#1136,
+# Product identity at the ingest write path (consumer report,
 # Initiative #1810)
 #
 # Historically the VCF-family connectors registered under a long product

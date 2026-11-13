@@ -1055,7 +1055,7 @@ class PfSenseConnector(SshConnector):
         params: dict[str, Any],
         operator: Operator | None = None,
     ) -> dict[str, Any]:
-        """Bound-method shim for ``pfsense.mgmt_flow.summary`` (meho-internal#252).
+        """Bound-method shim for ``pfsense.mgmt_flow.summary``.
 
         Delegates to
         :func:`~meho_backplane.connectors.pfsense.ops_mgmt_flow.pfsense_mgmt_flow_summary`.

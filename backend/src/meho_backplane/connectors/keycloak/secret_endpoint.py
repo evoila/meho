@@ -206,7 +206,7 @@ def _parse_keycloak_ref(ref: str) -> tuple[str, str, str]:
         raise KeycloakSecretRefError(
             f"malformed keycloak secret ref {ref!r}: expected "
             "'<target>/<realm>/<username>#password' "
-            "(e.g. 'keycloak:rdc-keycloak/evba/operator-a#password')"
+            "(e.g. 'keycloak:example-keycloak/example-realm/operator-a#password')"
         )
     field = field.strip()
     if field != _SUPPORTED_FIELD:

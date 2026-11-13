@@ -706,7 +706,7 @@ async def enforce_subop_policy(
     from meho_backplane.agent.invoke import current_agent_run_id_var
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
-    from meho_backplane.operations._audit import policy_decision_var
+    from meho_backplane.operations._audit import policy_decision_var, policy_rule_var
     from meho_backplane.operations._errors import (
         result_awaiting_approval,
         result_composite_resume_multi_gate_unsupported,
@@ -733,6 +733,7 @@ async def enforce_subop_policy(
         _preflight_denied_refusal,
     )
     from meho_backplane.operations.op_policy import apply_step_classification
+    from meho_backplane.policy.stamp import take_rule
 
     started = time.monotonic()
     _warn_if_step_not_declared(op_id)
@@ -809,6 +810,7 @@ async def enforce_subop_policy(
         connector_id=connector_id,
         params=params,
     )
+    step_rule = take_rule()
     if verdict is PermissionVerdict.AUTO_EXECUTE:
         return None
     # #3980: a person approved this run, so a step that would only wait goes
@@ -828,6 +830,7 @@ async def enforce_subop_policy(
     # this call and put the parent's back on return, so the parent's own
     # audit row keeps the parent's verdict.
     verdict_token = policy_decision_var.set(verdict.value)
+    rule_token = policy_rule_var.set(step_rule)  # #6044, the same scope
     try:
         duration_ms = (time.monotonic() - started) * 1000.0
         if verdict is PermissionVerdict.NEEDS_APPROVAL:
@@ -1013,3 +1016,4 @@ async def enforce_subop_policy(
         )
     finally:
         policy_decision_var.reset(verdict_token)
+        policy_rule_var.reset(rule_token)

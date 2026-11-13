@@ -83,7 +83,8 @@
                              principal_act / proposed_effect / reveal_secret / status /
                              reviewed_by / work_ref / created_at /
                              decided_at / expires_at / chain (#3596:
-                             {work_ref, step, total} or None)
+                             {work_ref, step, total} or None) /
+                             policy_rule / policy_version (#6044)
     reviewer_context      -- ReviewerContext (#3353): the redacted, resolved
                              judging context shared with ``meho approvals
                              show`` -- target_name / target_product /
@@ -522,6 +523,22 @@
         <div class="flex items-baseline justify-between gap-4">
           <dt class="shrink-0 text-base-content/55">MEHO release</dt>
           <dd class="font-mono text-xs [overflow-wrap:anywhere] text-right">{{ request.release_id }}</dd>
+        </div>
+      {% endif %}
+      {#- The policy rule that matched the call (#6044). Only while the policy
+          evaluator runs in shadow mode; then the rule did not decide. -#}
+      {% if request.policy_rule %}
+        {% set rule = request.policy_rule %}
+        <div class="flex items-baseline justify-between gap-4" data-testid="approval-policy-rule">
+          <dt class="shrink-0 text-base-content/55">Policy rule</dt>
+          <dd class="text-xs [overflow-wrap:anywhere] text-right">
+            <span class="font-mono">{{ rule.get("source") }}:{{ rule.get("rule_id") }}</span>
+            {%- if request.policy_version is not none %} (policy version {{ request.policy_version }}){% endif %}
+            {%- if rule.get("text") %}: {{ rule.get("text") }}{% endif %}
+            {%- if not rule.get("decided") %}
+              <span class="text-base-content/55" data-policy-rule-shadow>(shadow: watched only, today's checks decided)</span>
+            {%- endif %}
+          </dd>
         </div>
       {% endif %}
     </dl>

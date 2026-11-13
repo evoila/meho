@@ -314,6 +314,7 @@ from meho_backplane.operations._audit import (
     descriptor_op_class,
     parent_audit_id_var,
     policy_decision_var,
+    policy_rule_var,
     restore_audit_extras,
     reveal_secret_var,
     snapshot_audit_extras,
@@ -466,6 +467,7 @@ from meho_backplane.operations.shutdown_drain import (
     track_operation,
 )
 from meho_backplane.operations.uncertain_outcome import changes_target
+from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -3946,6 +3948,8 @@ async def _dispatch_now(
     # child ``dispatch`` rebinds the var, and clears it for the next dispatch
     # reusing this task.
     _verdict_token = policy_decision_var.set(None)
+    # #6044: the rule the policy evaluator matched, with the same scope.
+    _rule_token = policy_rule_var.set(None)
     # Stamp the reveal choice on the audit row: on every secret read
     # (True/False = values / names only), and on any other operation only
     # when the caller asked for the values (True). Every other dispatch binds
@@ -3989,6 +3993,8 @@ async def _dispatch_now(
                 preview_hash=preview_hash,
                 params=params,
             )
+            # Only while POLICY_ENGINE_SHADOW is on; marked as not deciding.
+            policy_rule_var.set(take_rule())
             # #3980: a child step of an approved multi-step run goes ahead
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:
@@ -4282,6 +4288,7 @@ async def _dispatch_now(
         )
     finally:
         policy_decision_var.reset(_verdict_token)
+        policy_rule_var.reset(_rule_token)
         reveal_secret_var.reset(_reveal_token)
         if _approved_run_token is not None:
             approved_run_var.reset(_approved_run_token)

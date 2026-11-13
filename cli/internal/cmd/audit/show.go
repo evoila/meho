@@ -196,6 +196,13 @@ func printEntrySummary(w io.Writer, e *api.AuditEntry) {
 	field("op_id:", e.OpId)
 	field("op_class:", e.OpClass)
 	field("result_status:", e.ResultStatus)
+	field("policy_decision:", strOrDash(strDeref(e.PolicyDecision)))
+	// The rule that matched the call (#6044). "(shadow)" at the end means
+	// the policy evaluator only watched: today's checks decided.
+	field("policy_rule:", strOrDash(strDeref(e.PolicyRule)))
+	if e.PolicyVersion != nil {
+		field("policy_version:", fmt.Sprintf("%d", *e.PolicyVersion))
+	}
 	field("parent_audit_id:", strOrDash(uuidDeref(e.ParentAuditId)))
 	field("agent_session_id:", strOrDash(uuidDeref(e.AgentSessionId)))
 	field("broadcast_event_id:", strOrDash(uuidDeref(e.BroadcastEventId)))

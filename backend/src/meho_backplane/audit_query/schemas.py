@@ -190,6 +190,12 @@ class AuditEntry(BaseModel):
     # the verdict directly instead of joining ``method``+``path`` + parsing
     # ``payload``.
     policy_decision: str | None
+    # The policy rule that matched the call and the policy file version
+    # (#6044), from ``audit_log.policy_rule`` / ``policy_version``. A rule
+    # that ends with ``(shadow)`` did not decide: the policy evaluator ran
+    # in shadow mode. ``None`` when the switch was off or no gate ran.
+    policy_rule: str | None = None
+    policy_version: int | None = None
     # What kind of accountable event the row records (#3733), from the real
     # ``audit_log.event_class`` column. Rows written before the column
     # existed read as ``legacy_request``.

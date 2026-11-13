@@ -92,6 +92,7 @@ def _connector() -> tuple[KeycloakConnector, list[str]]:
     [
         {},
         {"managed_realm": ""},
+        {"managed_realm": "   "},
         {"managed_realm": None},
         {"managed_realm": 7},
         {"admin_realm": "x"},
@@ -131,12 +132,18 @@ def test_resolve_realm_config_reads_a_named_admin_realm() -> None:
 # ---------------------------------------------------------------------------
 
 
+_NO_REALM_EXTRAS = [{}, {"managed_realm": "   "}]
+
+
 @pytest.mark.asyncio
-async def test_operation_without_a_realm_is_refused_before_any_call() -> None:
+@pytest.mark.parametrize("extras", _NO_REALM_EXTRAS)
+async def test_operation_without_a_realm_is_refused_before_any_call(
+    extras: dict[str, Any],
+) -> None:
     connector, loads = _connector()
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         with pytest.raises(KeycloakManagedRealmMissingError):
-            await connector.realm_get(_operator(), _StubTarget(), {})
+            await connector.realm_get(_operator(), _StubTarget(extras=extras), {})
         assert mock.calls.call_count == 0
     assert loads == []
 
@@ -155,11 +162,14 @@ async def test_operation_with_a_realm_runs_as_before() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fingerprint_and_probe_report_a_target_without_a_realm() -> None:
+@pytest.mark.parametrize("extras", _NO_REALM_EXTRAS)
+async def test_fingerprint_and_probe_report_a_target_without_a_realm(
+    extras: dict[str, Any],
+) -> None:
     connector, loads = _connector()
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
-        fp = await connector.fingerprint(_StubTarget(), operator=_operator())
-        probe = await connector.probe(_StubTarget())
+        fp = await connector.fingerprint(_StubTarget(extras=extras), operator=_operator())
+        probe = await connector.probe(_StubTarget(extras=extras))
         assert mock.calls.call_count == 0
     assert fp.reachable is False
     assert "--extra managed_realm=<realm>" in fp.extras["error"]
@@ -170,7 +180,10 @@ async def test_fingerprint_and_probe_report_a_target_without_a_realm() -> None:
 
 
 @pytest.mark.asyncio
-async def test_check_login_with_an_explicit_realm_still_needs_the_target_realm() -> None:
+@pytest.mark.parametrize("extras", _NO_REALM_EXTRAS)
+async def test_check_login_with_an_explicit_realm_still_needs_the_target_realm(
+    extras: dict[str, Any],
+) -> None:
     from meho_backplane.connectors.keycloak.ops_login_check import keycloak_user_check_login
 
     connector, loads = _connector()
@@ -179,7 +192,7 @@ async def test_check_login_with_an_explicit_realm_still_needs_the_target_realm()
             await keycloak_user_check_login(
                 connector,
                 _operator(),
-                _StubTarget(),
+                _StubTarget(extras=extras),
                 {"username": "operator-a", "realm": "example", "password_ref": "x"},
             )
         assert mock.calls.call_count == 0

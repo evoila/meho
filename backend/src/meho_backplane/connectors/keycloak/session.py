@@ -81,7 +81,10 @@ from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
     strip_credential_value,
 )
-from meho_backplane.targets.required_extras import managed_realm_missing_message
+from meho_backplane.targets.required_extras import (
+    has_managed_realm,
+    managed_realm_missing_message,
+)
 
 __all__ = [
     "DEFAULT_ADMIN_REALM",
@@ -194,13 +197,13 @@ def resolve_realm_config(target: KeycloakTargetLike) -> RealmConfig:
     extras = getattr(target, "extras", None) or {}
     admin = extras.get("admin_realm") if isinstance(extras, Mapping) else None
     managed = extras.get("managed_realm") if isinstance(extras, Mapping) else None
-    if not (isinstance(managed, str) and managed):
+    if not has_managed_realm(extras):
         raise KeycloakManagedRealmMissingError(
             managed_realm_missing_message(getattr(target, "name", None))
         )
     return RealmConfig(
         admin_realm=admin if isinstance(admin, str) and admin else DEFAULT_ADMIN_REALM,
-        managed_realm=managed,
+        managed_realm=str(managed),
     )
 
 

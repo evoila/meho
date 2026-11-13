@@ -497,6 +497,9 @@ their own idempotency above):
   `role_mapping.assign`. A `/`, a dot or a `%` stays part of the name.
   `role_mapping.assign` refuses a role whose returned name is not the
   name asked for, and its result lists the names Keycloak returned.
+  When the user cannot be read before the call and only a username was
+  sent, the approved run is refused, because the approval card has no
+  user id.
 - **Idempotency.** A create that hits HTTP 409 (already-exists) is a
   success (`conflict: true`), and the existing object's UUID is resolved.
 - **Password handling.** `user.create` / `user.reset_password` source the

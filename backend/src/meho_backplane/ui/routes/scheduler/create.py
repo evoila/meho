@@ -73,6 +73,7 @@ from meho_backplane.scheduler.service import (
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.routes.work_ref_form import form_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = [
@@ -311,7 +312,7 @@ def _build_create_payload(
         ) from exc
 
     inputs = _parse_json_field(inputs_raw, field_name="inputs")
-    work_ref_clean = work_ref.strip() if work_ref and work_ref.strip() else None
+    work_ref_clean = form_work_ref(work_ref)
 
     # Populate only the discriminator field for the chosen kind so the
     # schema's exactly-one-discriminator invariant holds regardless of any

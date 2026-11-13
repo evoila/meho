@@ -157,7 +157,7 @@ from meho_backplane.broadcast import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
-from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._audit import decode_work_ref_header, work_ref_var
 from meho_backplane.request_usage.collector import open_request_usage
 
 __all__ = ["AuditMiddleware", "bind_preallocated_audit_id"]
@@ -632,15 +632,15 @@ def _extract_work_ref(scope: Scope) -> str | None:
     :func:`meho_backplane.middleware._extract_request_id` reads
     ``X-Request-Id``. Header names are case-insensitive per RFC 9110
     §5.1, so the comparison lower-cases the wire name; the value is
-    decoded ``latin-1`` (the byte range ASGI guarantees for header
-    values) and stripped. An absent header, or a present-but-empty
-    value, both return ``None`` so the audit row's ``work_ref`` lands
-    NULL -- the correct quiet path for a call carrying no ticket.
+    decoded as UTF-8 (latin-1 when it is not valid UTF-8) and stripped
+    by :func:`decode_work_ref_header`, so a non-ASCII ticket id lands as
+    the client sent it. An absent header, or a present-but-empty value,
+    both return ``None`` so the audit row's ``work_ref`` lands NULL --
+    the correct quiet path for a call carrying no ticket.
     """
     for name, value in scope.get("headers", ()):
         if name.lower() == _WORK_REF_HEADER:
-            decoded = value.decode("latin-1").strip()
-            return decoded or None
+            return decode_work_ref_header(value)
     return None
 
 

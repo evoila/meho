@@ -40,6 +40,30 @@ def test_a_secret_shape_is_found_and_not_echoed(text: str, pattern: str) -> None
 @pytest.mark.parametrize(
     "text",
     [
+        "password: ********",
+        "password=\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+        "Enter SYS user password:\n\u25cf\u25cf\u25cf\u25cf\u25cf\u25cf\u25cf\u25cf",
+    ],
+)
+def test_a_mask_only_value_passes(text: str) -> None:
+    assert find_secret(text) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password: madeUpValue99",
+        "password: ********madeUpValue99",
+        "password=\u2022\u2022\u2022\u2022madeUpValue99",
+    ],
+)
+def test_a_real_value_after_the_label_is_still_a_secret(text: str) -> None:
+    assert find_secret(text) == "api_key on line 1"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "A plain page about snapshot limits in version 9.0.",
         "Set password: <password> in the form.",
         'password: "<password>"',

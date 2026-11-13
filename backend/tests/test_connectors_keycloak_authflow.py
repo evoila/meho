@@ -416,6 +416,39 @@ async def test_binding_that_does_not_read_back_is_an_error(kc: KeycloakConnector
     assert "check_failed" in json.dumps(result)
 
 
+@pytest.mark.parametrize("made", [True, False], ids=["flow made", "flow was there"])
+async def test_refused_binding_says_what_the_run_changed(kc: KeycloakConnector, made: bool) -> None:
+    fake = FakeKeycloak(flow_steps=None if made else _good_steps(), client=_client())
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        # The flow writes answer 2xx; Keycloak refuses only the client PUT.
+        refused = mock.put(f"{_ADMIN}/clients/{_CLIENT_UUID}").respond(
+            403, json={"error": "HTTP 403 Forbidden"}
+        )
+        fake.mount(mock)
+        result = await _run(_FLOW_OP, {})
+
+    assert refused.call_count == 1
+    assert result["status"] == "error", result
+    extras = result["extras"]
+    assert extras["http_status"] == 403
+    assert extras["exception_class"] == "KeycloakMissingRightsError"
+    for text in (extras["exception_message"], extras["remediation"]):
+        assert "stopped half-way" in text
+        assert repr(_FLOW) in text
+        assert repr(_FLOW_ID) in text
+        assert f"flow_created={'true' if made else 'false'}" in text
+        assert "refused (HTTP 403) to bind it to the client" in text
+    assert "<truncated>" not in extras["exception_message"]
+    remediation = extras["remediation"]
+    assert "to the client 'meho-cli-approve'" in remediation
+    assert ("The flow stays in the realm." in remediation) is made
+    assert "manage-clients" in remediation
+    assert "try again after that" in remediation
+    assert any(method == "POST" for method, _, _ in fake.writes) is made
+    # The kept admin token is dropped, so the next call signs in again.
+    assert kc._admin_tokens == {}
+
+
 async def test_flow_list_that_is_not_a_list_is_an_error(kc: KeycloakConnector) -> None:
     fake = FakeKeycloak(flow_steps=None, client=_client())
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:

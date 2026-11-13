@@ -194,7 +194,7 @@ switch off and on.
   with no difference; the kept rule (#6044).
 - `backend/tests/test_operations_dispatcher.py`,
   `backend/tests/test_approval_queue.py`, `backend/tests/test_ui_approvals.py`
-  and `backend/tests/migrations/test_migration_0164_add_policy_rule_columns.py`:
+  and `backend/tests/migrations/test_migration_0165_add_policy_rule_columns.py`:
   the rule on audit rows, approval requests and the console, and the
   migration on PostgreSQL with the append-only trigger (#6044).
 - `backend/tests/test_policy_shadow_load.py`: the load check.

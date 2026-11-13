@@ -87,14 +87,14 @@ be non-empty — a malformed intent is rejected at param validation
 not deep inside the handler. `kind` selects the store adapter from the
 registry; `ref` is the store-specific address that adapter interprets.
 
-Two kinds ship today (the initiative's "≥2 connector kinds" definition of
-done). A move may be **same-kind** (`vault` → `vault`) or **cross-kind**
-(`vault` → `keycloak`):
+Three kinds ship today. A move may be **same-kind** (`vault` → `vault`) or
+**cross-kind** (`vault` → `keycloak`, `vault` → `linux`):
 
 | `kind` | Role | `ref` grammar | Example |
 | --- | --- | --- | --- |
 | `vault` | source **and** sink | `<path>#<field>` — a KV-v2 path with a required `#<field>` fragment selecting one field | `vault:secret/db/prod#password` |
 | `keycloak` | sink **only** | `<target>/<realm>/<username>#password` — `#password` is the only writable field | `keycloak:kc/meho/operator-a#password` |
+| `linux` | sink **only** | `<target>/<absolute path>#<owner>` — a file in the home of `<owner>` (a normal user: never `root`, never a system user) on a host of a `linux-ssh` target, mode 0600, written as `<owner>` | `linux:app-host/home/app/.config/app/key#app` |
 
 **vault** (`vault:` —
 [`vault_endpoint.py`](../../backend/src/meho_backplane/connectors/secret/vault_endpoint.py)).
@@ -124,6 +124,17 @@ here: the **operator's JWT** authorises only the per-operator target
 resolution, while the Keycloak admin `PUT` itself is minted under the
 **connector's own admin credential** — the operator's token never reaches
 Keycloak.
+
+**linux** (`linux:` —
+[`secret_endpoint.py`](../../backend/src/meho_backplane/connectors/linux/secret_endpoint.py)).
+A linux adapter is a **sink only**. It writes the value to one file on the
+host of a `linux-ssh` target, over SSH with sudo. The file must be inside the
+home of its owner, and the owner writes it. A target of another kind is
+refused. `secret.handoff.import` never writes to a `linux:` place. The
+allowed place, the paths it refuses and the link rules are in
+[`connectors-secret-broker.md`](../codebase/connectors-secret-broker.md),
+"The `linux:` store". A person approves each move: no standing grant and no
+run approval covers `secret.move`.
 
 ### 1.3 The response — value-free by schema
 

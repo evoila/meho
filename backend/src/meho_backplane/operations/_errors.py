@@ -1173,6 +1173,7 @@ def result_awaiting_approval(
     duration_ms: float,
     *,
     reused: bool = False,
+    audit_id: uuid.UUID | None = None,
 ) -> OperationResult:
     """Policy gate issued a ``needs-approval`` verdict; pending row created.
 
@@ -1196,6 +1197,10 @@ def result_awaiting_approval(
     existing request back instead of a new one. It adds
     ``extras["approval_request_reused"] = True``; the key is absent
     otherwise, so a new park's envelope is unchanged.
+
+    *audit_id* is the id of the committed ``approval.request`` audit row
+    of the pending request (its ``request_audit_id``). It becomes the
+    result's ``audit_id`` receipt. ``None`` when the caller has no row id.
     """
     extras: dict[str, Any] = {
         "error_code": "awaiting_approval",
@@ -1209,6 +1214,7 @@ def result_awaiting_approval(
         error=f"awaiting_approval: {op_id!r} requires approval before execution",
         duration_ms=duration_ms,
         extras=extras,
+        audit_id=audit_id,
     )
 
 

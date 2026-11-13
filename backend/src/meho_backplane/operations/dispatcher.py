@@ -3565,7 +3565,13 @@ async def _handle_needs_approval(
             )
             await session.commit()
         if getattr(request, "_reused", False):
-            return result_awaiting_approval(op_id, request.id, duration_ms, reused=True)
+            return result_awaiting_approval(
+                op_id,
+                request.id,
+                duration_ms,
+                reused=True,
+                audit_id=request.request_audit_id,
+            )
         # Record the add-on step events AFTER commit so a phantom event
         # cannot outlive a failed transaction (the helper is fail-open).
         expired_request = getattr(request, "_expired_request", None)
@@ -3582,7 +3588,9 @@ async def _handle_needs_approval(
             decision="pending",
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
-        return result_awaiting_approval(op_id, request.id, duration_ms)
+        return result_awaiting_approval(
+            op_id, request.id, duration_ms, audit_id=request.request_audit_id
+        )
     except IdempotencyKeyConflictError as exc:
         return await _audit_denied_and_return(
             result_idempotency_key_conflict(op_id, exc.request_id, duration_ms),

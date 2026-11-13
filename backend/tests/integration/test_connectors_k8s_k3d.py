@@ -92,15 +92,20 @@ _DEFAULT_K3S_IMAGES: tuple[str, ...] = (
 def _k3s_images() -> list[str]:
     """Return the k3s images the module runs against, one run each.
 
-    ``MEHO_TEST_K3S_IMAGES`` (comma separated) picks them all. Otherwise
-    ``MEHO_TEST_K3S_IMAGE`` picks a single one, as before. Otherwise the
+    ``MEHO_TEST_K3S_TAGS`` (comma separated k3s tags) picks one run per
+    tag. The image name comes from ``MEHO_TEST_K3S_IMAGE`` (for example a
+    registry mirror), or is ``rancher/k3s``. Without tags,
+    ``MEHO_TEST_K3S_IMAGE`` picks a single image, as before. Otherwise the
     defaults above run.
     """
-    many = os.environ.get("MEHO_TEST_K3S_IMAGES", "")
-    images = [item.strip() for item in many.split(",") if item.strip()]
-    if images:
-        return images
     single = os.environ.get("MEHO_TEST_K3S_IMAGE")
+    tags = [item.strip() for item in os.environ.get("MEHO_TEST_K3S_TAGS", "").split(",")]
+    tags = [tag for tag in tags if tag]
+    if tags:
+        name, _, tag = (single or "rancher/k3s").rpartition(":")
+        if not name or "/" in tag:  # no tag, maybe a registry port
+            name = single or "rancher/k3s"
+        return [f"{name}:{tag}" for tag in tags]
     return [single] if single else list(_DEFAULT_K3S_IMAGES)
 
 

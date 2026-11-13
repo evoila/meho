@@ -505,3 +505,59 @@ def test_contributing_fork_steps_start_a_ci_run() -> None:
     # request does.
     assert triggers["push"]["branches"] == ["main"]
     assert "workflow_dispatch" not in triggers
+
+
+# --- values from pull request code reach a script only through env: ----------
+#
+# On a fork pull request the change detector runs code from the pull request.
+# A job output or a pull request field must never sit inside the text of a
+# `run:` script. It goes through `env:` and the script reads a shell variable.
+
+_UNSAFE_IN_RUN = re.compile(r"\$\{\{[^}]*\b(needs\.|github\.event\.pull_request\.)")
+
+
+def _unsafe_run_steps(jobs: dict[str, Any]) -> list[str]:
+    found = []
+    for job_name, job in jobs.items():
+        if _CI_FORK_GUARD in str(job.get("if", "")):
+            # A same-repository pull request only: a fork cannot start it.
+            continue
+        for index, step in enumerate(job.get("steps") or []):
+            if _UNSAFE_IN_RUN.search(str(step.get("run", ""))):
+                found.append(f"{job_name} step {index} ({step.get('name', '')})")
+    return found
+
+
+def test_ci_run_scripts_of_fork_jobs_hold_no_job_output() -> None:
+    bad = _unsafe_run_steps(_ci_jobs())
+    assert not bad, (
+        "These steps put a job result or a pull request field into the text of a "
+        "run: script. Pass it through env: instead: " + "; ".join(bad)
+    )
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "${{ needs.changes.outputs.docs_only }}",
+        "${{ needs.changes.result }}",
+        "${{ github.event.pull_request.head.ref }}",
+    ],
+)
+def test_unsafe_run_check_flags_an_expression_in_a_script(expression: str) -> None:
+    jobs = {"lane": {"steps": [{"name": "s", "run": f"value='{expression}'"}]}}
+    assert _unsafe_run_steps(jobs) == ["lane step 0 (s)"]
+
+
+def test_unsafe_run_check_accepts_env() -> None:
+    jobs = {
+        "lane": {
+            "steps": [
+                {
+                    "env": {"DOCS_ONLY": "${{ needs.changes.outputs.docs_only }}"},
+                    "run": 'echo "${DOCS_ONLY}"',
+                }
+            ]
+        }
+    }
+    assert _unsafe_run_steps(jobs) == []

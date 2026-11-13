@@ -11,11 +11,14 @@ The matcher compares the trigger filter with the **payload** only, never with
 the event kind column. So every payload names its own event in ``event`` and
 its producer in ``source.kind``.
 
-Two producers:
+Three producers:
 
 * ``check.sensor.changed`` -- one event per confirmed Sensor state change.
   :func:`publish_sensor_changed` adds the row in the caller's open
   transaction, so the event commits together with ``last_state``.
+* ``check.sensor.parked`` -- one event when the runner pauses a Sensor
+  because its target keeps refusing the login. The reason is
+  ``target_credential_stale``. Same transaction rule as above.
 * ``check.dashboard.changed`` -- one event per cause group of a worsening
   Dashboard edge, and one event for every other claimed edge.
   :func:`publish_dashboard_changed` uses its own transaction.
@@ -39,13 +42,16 @@ from meho_backplane.events.outbox import publish
 __all__ = [
     "CHECK_DASHBOARD_CHANGED",
     "CHECK_SENSOR_CHANGED",
+    "CHECK_SENSOR_PARKED",
     "publish_dashboard_changed",
     "publish_sensor_changed",
+    "publish_sensor_parked",
     "target_name",
 ]
 
 CHECK_SENSOR_CHANGED: Final[str] = "check.sensor.changed"
 CHECK_DASHBOARD_CHANGED: Final[str] = "check.dashboard.changed"
+CHECK_SENSOR_PARKED: Final[str] = "check.sensor.parked"
 
 
 def target_name(target: dict[str, object] | None) -> str | None:
@@ -142,3 +148,35 @@ async def publish_dashboard_changed(
             payload=payload,
         )
         await session.commit()
+
+
+async def publish_sensor_parked(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    sensor_id: uuid.UUID,
+    sensor_name: str,
+    target: dict[str, object] | None,
+    connector_id: str,
+    op_id: str,
+    parked_at: datetime,
+) -> None:
+    """Add one ``check.sensor.parked`` row in *session*'s open transaction."""
+    name = target_name(target)
+    payload: dict[str, object] = {
+        "event": CHECK_SENSOR_PARKED,
+        "source": {"kind": "sensor", "id": str(sensor_id), "name": sensor_name},
+        "tenant_id": str(tenant_id),
+        "reason": "target_credential_stale",
+        "target": name,
+        "connector_id": connector_id,
+        "op_id": op_id,
+        "parked_at": parked_at.isoformat(),
+        "coalesce_key": f"sensor-parked:{name if name is not None else sensor_id}",
+    }
+    await publish(
+        session,
+        tenant_id=tenant_id,
+        event_kind=CHECK_SENSOR_PARKED,
+        payload=payload,
+    )

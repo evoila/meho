@@ -22,11 +22,11 @@
 # Project context: see CLAUDE.md and INVENTORY.md.
 
 targets:
-  - name: rdc-vcenter
+  - name: example-vcenter
     aliases: [rdc, host-vcenter, hetzner-vcenter]
     product: vcenter
     host: vc-dc.evba.lab
-    secret_ref: secret/rdc-hetzner-dc/vsphere/rdc-vcenter
+    secret_ref: secret/rdc-hetzner-dc/vsphere/example-vcenter
     sso_realm: evba.lab
     vpn_required: true
     notes: "Host vCenter for the 4 physical Hetzner hosts (esx-dc1..4). Datacenter /FSN1-DC21-RACK1, cluster cluster1. vCenter 8.0.3."

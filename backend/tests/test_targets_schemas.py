@@ -131,7 +131,7 @@ def _make_target(**overrides: Any) -> Target:
     defaults: dict[str, Any] = {
         "id": uuid.uuid4(),
         "tenant_id": uuid.uuid4(),
-        "name": "rdc-vcenter",
+        "name": "example-vcenter",
         "aliases": ["vcenter", "vc.corp.internal"],
         "product": "vsphere",
         "host": "vcenter.corp.internal",
@@ -162,7 +162,7 @@ def test_target_round_trip_lossless() -> None:
 
 def test_target_summary_round_trip_lossless() -> None:
     s = _make_summary(
-        name="rdc-vcenter",
+        name="example-vcenter",
         aliases=["vcenter"],
         product="vsphere",
         host="vcenter.corp.internal",
@@ -263,7 +263,7 @@ def test_target_create_accepts_verify_tls_false() -> None:
 
 def test_target_create_all_fields() -> None:
     t = TargetCreate(
-        name="rdc-vcenter",
+        name="example-vcenter",
         aliases=["vcenter", "vc"],
         product="vsphere",
         host="vcenter.corp.internal",
@@ -276,7 +276,7 @@ def test_target_create_all_fields() -> None:
         extras={"dc": "fra1"},
         notes="Production vCenter",
     )
-    assert t.name == "rdc-vcenter"
+    assert t.name == "example-vcenter"
     assert t.auth_model == AuthModel.IMPERSONATION
     assert t.vpn_required is True
     assert t.verify_tls is False

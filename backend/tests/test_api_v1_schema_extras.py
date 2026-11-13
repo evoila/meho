@@ -103,7 +103,7 @@ _REQUEST_MODELS: list[tuple[type[BaseModel], dict[str, Any]]] = [
     (IngestKbRequest, {"directory": "/tmp/kb"}),
     (
         TargetCreate,
-        {"name": "rdc-vcenter", "product": "vsphere", "host": "vc.example.lab"},
+        {"name": "example-vcenter", "product": "vsphere", "host": "vc.example.lab"},
     ),
     (TargetUpdate, {"host": "vc-2.example.lab"}),
     (

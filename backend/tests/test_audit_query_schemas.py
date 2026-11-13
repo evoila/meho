@@ -128,14 +128,14 @@ def test_entry_round_trip_preserves_every_field() -> None:
     target_id = uuid.uuid4()
     entry = _make_entry(
         target_id=target_id,
-        target_name="rdc-vcenter",
+        target_name="example-vcenter",
         payload=payload,
         op_id="vsphere.vm.list",
         op_class="read",
     )
 
     assert entry.target_id == target_id
-    assert entry.target_name == "rdc-vcenter"
+    assert entry.target_name == "example-vcenter"
     assert entry.payload == payload
     assert entry.op_id == "vsphere.vm.list"
     assert entry.op_class == "read"

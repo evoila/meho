@@ -75,7 +75,7 @@ from ._targets_helpers import (
 # not asserted. Regenerate together if the consumer file evolves.
 # The entry-count constant below pins to the upstream SHA's
 # structure; mismatches surface as a fixture-drift test failure.
-_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "rdc-hetzner-dc-targets.yaml"
+_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "example-targets.yaml"
 _FIXTURE_UPSTREAM_SHA = "1e1e6885e1ef79d03001955205d9e44a0bc8e79d"
 _FIXTURE_EXPECTED_ENTRY_COUNT = 24
 
@@ -425,18 +425,18 @@ def test_duplicate_name_aborts_default_mode_workflow(client: TestClient) -> None
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         r1 = client.post(
             "/api/v1/targets",
-            json={"name": "rdc-vcenter", "product": "vcenter", "host": "vc.evba.lab"},
+            json={"name": "example-vcenter", "product": "vcenter", "host": "vc.evba.lab"},
             headers=headers,
         )
         r2 = client.post(
             "/api/v1/targets",
-            json={"name": "rdc-vcenter", "product": "vcenter", "host": "vc.evba.lab"},
+            json={"name": "example-vcenter", "product": "vcenter", "host": "vc.evba.lab"},
             headers=headers,
         )
     assert r1.status_code == 201
     assert r2.status_code == 409
     detail = r2.json()["detail"]
-    assert "rdc-vcenter" in detail
+    assert "example-vcenter" in detail
 
 
 def test_list_targets_after_import_returns_all_names(client: TestClient) -> None:

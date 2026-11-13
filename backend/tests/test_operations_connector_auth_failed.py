@@ -1501,7 +1501,7 @@ async def test_dispatch_recovers_401_via_invalidate_and_retry_once(
         embedding=stub_embedding_service.encode_one.return_value,
     )
 
-    target = _FakeTarget(name="rdc-vcenter", host="vcenter.lab.internal")
+    target = _FakeTarget(name="example-vcenter", host="vcenter.lab.internal")
     result = await dispatch(
         operator=_make_operator(),
         connector_id="vcfops-rest-recovering-9",
@@ -1598,7 +1598,7 @@ async def test_dispatch_recovers_non_idempotent_post_on_401(
         path="/api/v2/events",
     )
 
-    target = _FakeTarget(name="rdc-vcenter", host="vcenter.lab.internal")
+    target = _FakeTarget(name="example-vcenter", host="vcenter.lab.internal")
     result = await dispatch(
         operator=_make_operator(),
         connector_id="vcfops-rest-recovering-9",
@@ -1637,7 +1637,7 @@ async def test_dispatch_second_auth_failure_resolves_to_auth_failed_no_loop(
         embedding=stub_embedding_service.encode_one.return_value,
     )
 
-    target = _FakeTarget(name="rdc-vcenter", host="vcenter.lab.internal")
+    target = _FakeTarget(name="example-vcenter", host="vcenter.lab.internal")
     result = await dispatch(
         operator=_make_operator(),
         connector_id="vcfops-rest-persistent-401-9",
@@ -1698,7 +1698,7 @@ async def test_dispatch_5xx_with_hook_is_not_retried(
         embedding=stub_embedding_service.encode_one.return_value,
     )
 
-    target = _FakeTarget(name="rdc-vcenter", host="vcenter.lab.internal")
+    target = _FakeTarget(name="example-vcenter", host="vcenter.lab.internal")
     result = await dispatch(
         operator=_make_operator(),
         connector_id="vcfops-rest-recovering-500-9",

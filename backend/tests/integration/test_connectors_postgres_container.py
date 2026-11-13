@@ -35,7 +35,6 @@ meaningful.
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,6 +57,7 @@ from meho_backplane.connectors.postgres.session import (
 from meho_backplane.settings import get_settings
 
 from .._vault_fakes import install_fake_client
+from ._image_tags import major_of_image
 
 
 def _docker_socket_present() -> bool:
@@ -118,12 +118,6 @@ _PG_IMAGES = (
 )
 
 
-def _major_of_image(image: str) -> str | None:
-    """The major version in an image tag (``postgres:17-alpine`` -> ``17``), else None."""
-    match = re.search(r":(\d+)", image)
-    return match.group(1) if match else None
-
-
 @dataclass
 class _Container:
     host: str
@@ -156,7 +150,7 @@ def pg_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
             user=pg.username,
             password=pg.password,
             dbname=pg.dbname,
-            major=_major_of_image(image),
+            major=major_of_image(image),
         )
         import asyncio
 

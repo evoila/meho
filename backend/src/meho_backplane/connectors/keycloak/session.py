@@ -13,7 +13,7 @@ deployed Keycloak whose operator-login clients are not yet configured
 (the chicken-and-egg the issue body calls out). So the connector
 authenticates to the Keycloak Admin REST API with a **separate admin
 credential** sourced from Vault at the consumer path
-``secret/rdc-hetzner-dc/keycloak/admin``.
+``secret/<consumer>/keycloak/admin``.
 
 Credential-protocol discriminator
 ==================================

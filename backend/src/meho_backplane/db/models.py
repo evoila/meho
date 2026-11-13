@@ -27,7 +27,7 @@ Schema decisions for :class:`Tenant`:
   ``default=uuid.uuid4`` for the SQLite dev/test driver and for
   out-of-band inserts.
 * ``slug`` — Text NOT NULL UNIQUE. The operator-facing identifier
-  (``rdc-internal``, ``customer-a``); used in URLs, log lines,
+  (``tenant-a``, ``customer-a``); used in URLs, log lines,
   audit displays. Uniqueness is enforced **exclusively** by the
   named ``tenant_slug_idx`` b-tree index (declared
   ``unique=True``); the column itself omits ``unique=True`` so
@@ -118,7 +118,7 @@ Indexes on :class:`AuditLog`:
   shape) hit the index.
 * ``audit_log_tenant_id_idx`` — b-tree on ``tenant_id`` so
   per-tenant audit queries ("show me everything in
-  ``rdc-internal``") hit the index. Added by migration ``0002``;
+  ``tenant-a``") hit the index. Added by migration ``0002``;
   G0.1 sibling tasks T2/T3 wire the column writes.
 * ``audit_log_target_id_idx`` — b-tree on ``target_id`` so
   per-target audit queries hit the index. Added by migration ``0004``.
@@ -769,7 +769,7 @@ class Tenant(Base):
 
     Every authenticated request post-G0.1 carries a ``tenant_id``
     JWT claim that resolves to a row in this table. The slug
-    (``rdc-internal``, ``customer-a``) is the operator-facing
+    (``tenant-a``, ``customer-a``) is the operator-facing
     handle; the ``id`` is the FK keystone every per-tenant feature
     (knowledge bases, memory scopes, target registries, broadcast
     streams, audit-log scoping) joins on.

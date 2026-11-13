@@ -175,9 +175,8 @@ def parse_pfctl_rules(output: str) -> list[dict[str, Any]]:
 #   <interface> <proto> <ep1> <-> <ep2> ...
 # e.g. ``em0 tcp 192.0.2.9:443 <- 198.51.100.5:59269  ESTABLISHED:ESTABLISHED``
 # on pfSense 2.7; older builds print ``all`` as the interface. Field order
-# confirmed against the pf state format (pfSense redmine #2121) and the lab's
-# own live classifier (rdc-hetzner-dc ``pfsense-meho-measure-report.sh``:
-# ``$2=="tcp"``; ``<if> tcp <ep1>:<p1> <-|-> <ep2>:<p2>``). Group 1 is the
+# confirmed against the pf state format (pfSense redmine issue 2121) and against
+# live output (``<if> tcp <ep1>:<p1> <-|-> <ep2>:<p2>``). Group 1 is the
 # interface, group 2 the protocol -- previously transposed, which mislabelled
 # every row (fixed for #252; also corrects ``pfsense.firewall.state``).
 #

@@ -25,7 +25,7 @@ The shapes are deliberately conservative:
   :class:`EditOpBody`. Unknown fields fail 422 ``extra_forbidden`` at
   the framework boundary instead of being silently dropped, so a v0.2.1
   client mis-spelling ``impl_id`` as ``implementation_id`` (or the
-  RDC-team-style ``q`` / ``top_k`` carryover) hears about it
+  ``q`` / ``top_k`` names carried over from another search API) hears about it
   immediately rather than seeing a confusing required-field error or
   silent default. Response models keep the pydantic default
   (``extra="ignore"``) — they aren't validated against client input.

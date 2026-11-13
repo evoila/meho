@@ -351,7 +351,7 @@ def test_tools_list_endpoint_returns_filtered_tools(
     body = response.json()
     tool_names = [t["name"] for t in body["result"]["tools"]]
     assert tool_names == ["read_only.tool"]
-    # MEHO-internal fields stripped from the wire shape.
+    # internal fields stripped from the wire shape.
     for entry in body["result"]["tools"]:
         assert "required_role" not in entry
         assert "op_class" not in entry
@@ -670,7 +670,7 @@ def test_resources_templates_list_endpoint_returns_registered_templates(
     assert len(templates) == 1
     assert templates[0]["uriTemplate"] == "meho://test/{tenant_id}/info"
     assert templates[0]["mimeType"] == "application/json"
-    # required_role is MEHO-internal, never on the wire.
+    # required_role is internal, never on the wire.
     assert "required_role" not in templates[0]
 
 
@@ -754,7 +754,7 @@ def test_resources_list_publishes_only_list_uris_providers(
     assert [r["uri"] for r in resources] == [f"meho://listed/{op.tenant_id}/info"]
     assert resources[0]["name"] == "listed info"
     assert resources[0]["mimeType"] == "application/json"
-    # MEHO-internal RBAC field never rides the wire shape.
+    # internal RBAC field never rides the wire shape.
     assert "required_role" not in resources[0]
 
 

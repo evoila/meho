@@ -69,7 +69,7 @@ def test_resources_templates_list_exposes_tenant_conventions(
     ]
     assert len(conventions) == 1
     assert conventions[0]["mimeType"] == "text/markdown"
-    # MEHO-internal RBAC field is stripped from the wire shape.
+    # internal RBAC field is stripped from the wire shape.
     assert "required_role" not in conventions[0]
 
 

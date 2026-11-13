@@ -152,7 +152,7 @@ KEYCLOAK_CONNECTOR_ID: Final[str] = "keycloak-admin-26.x"
 KEYCLOAK_PRODUCT: Final[str] = "keycloak"
 
 #: Maximum target-slug length accepted on the query string. A target slug
-#: is a short name (``rdc-keycloak``); the bound rejects an oversized paste
+#: is a short name (``example-keycloak``); the bound rejects an oversized paste
 #: at the form boundary (422) before it reaches the dispatch.
 _MAX_TARGET_LENGTH: Final[int] = 256
 

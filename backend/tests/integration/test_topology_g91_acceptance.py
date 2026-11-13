@@ -25,7 +25,7 @@ two seeded tenants, Docker-gated skip) is inherited verbatim from
 Scenario coverage (mirrors the issue's six acceptance scenarios):
 
 1. **Tenant boundary** — two tenants with an overlapping target name
-   (both own a ``rdc-vcenter``); tenant A's dependents query returns
+   (both own a ``example-vcenter``); tenant A's dependents query returns
    only A's closure, never B's; a refresh in tenant A leaves B's
    nodes/edges untouched; cross-tenant refresh is structurally
    impossible (a tenant cannot name another tenant's target).
@@ -282,9 +282,9 @@ def stable_connector(pg_engine: None) -> AsyncIterator[None]:
 async def test_scenario1_tenant_boundary_overlapping_names(
     stable_connector: None,
 ) -> None:
-    """Two tenants own a ``rdc-vcenter``; neither query crosses the boundary.
+    """Two tenants own a ``example-vcenter``; neither query crosses the boundary.
 
-    Both tenants seed a target literally named ``rdc-vcenter``. Tenant A
+    Both tenants seed a target literally named ``example-vcenter``. Tenant A
     refreshes; its dependents/dependencies queries return only A's
     closure. A tenant-B refresh writes only tenant-B rows — tenant A's
     row count is byte-for-byte unchanged, proving the refresh write path
@@ -292,8 +292,8 @@ async def test_scenario1_tenant_boundary_overlapping_names(
     the refresh resolves a target by ``(tenant_id, name)``, so a tenant
     can never name another tenant's target to begin with.
     """
-    await _insert_target(tenant_id=TENANT_A_ID, name="rdc-vcenter")
-    await _insert_target(tenant_id=TENANT_B_ID, name="rdc-vcenter")
+    await _insert_target(tenant_id=TENANT_A_ID, name="example-vcenter")
+    await _insert_target(tenant_id=TENANT_B_ID, name="example-vcenter")
 
     sm = get_sessionmaker()
 
@@ -303,7 +303,7 @@ async def test_scenario1_tenant_boundary_overlapping_names(
             await s.execute(
                 select(TargetORM).where(
                     TargetORM.tenant_id == TENANT_A_ID,
-                    TargetORM.name == "rdc-vcenter",
+                    TargetORM.name == "example-vcenter",
                 )
             )
         ).scalar_one()
@@ -311,13 +311,13 @@ async def test_scenario1_tenant_boundary_overlapping_names(
     assert res_a.added_nodes == 3
     assert res_a.added_edges == 2
 
-    # Tenant A sees its graph; the dependents of host-rdc-vcenter are
-    # vm-rdc-vcenter (depth 1) and rdc-vcenter (depth 2), root at 0.
-    a_dep = await find_dependents(_operator(TENANT_A_ID), "host-rdc-vcenter")
+    # Tenant A sees its graph; the dependents of host-example-vcenter are
+    # vm-example-vcenter (depth 1) and example-vcenter (depth 2), root at 0.
+    a_dep = await find_dependents(_operator(TENANT_A_ID), "host-example-vcenter")
     assert {n.name: n.depth for n in a_dep} == {
-        "host-rdc-vcenter": 0,
-        "vm-rdc-vcenter": 1,
-        "rdc-vcenter": 2,
+        "host-example-vcenter": 0,
+        "vm-example-vcenter": 1,
+        "example-vcenter": 2,
     }
 
     # Tenant B has not refreshed — its query raises NodeNotFoundError
@@ -327,7 +327,7 @@ async def test_scenario1_tenant_boundary_overlapping_names(
     # in tenant A's graph reads as untracked from tenant B, never as
     # "tracked but no dependents".
     with pytest.raises(NodeNotFoundError):
-        await find_dependents(_operator(TENANT_B_ID), "host-rdc-vcenter")
+        await find_dependents(_operator(TENANT_B_ID), "host-example-vcenter")
 
     a_nodes_before, a_edges_before = await _count_rows(TENANT_A_ID)
 
@@ -338,7 +338,7 @@ async def test_scenario1_tenant_boundary_overlapping_names(
             await s.execute(
                 select(TargetORM).where(
                     TargetORM.tenant_id == TENANT_B_ID,
-                    TargetORM.name == "rdc-vcenter",
+                    TargetORM.name == "example-vcenter",
                 )
             )
         ).scalar_one()
@@ -352,8 +352,8 @@ async def test_scenario1_tenant_boundary_overlapping_names(
 
     # Both tenants' dependents now resolve independently to their own
     # row, never the other tenant's same-named node.
-    a_again = await find_dependents(_operator(TENANT_A_ID), "host-rdc-vcenter")
-    b_again = await find_dependents(_operator(TENANT_B_ID), "host-rdc-vcenter")
+    a_again = await find_dependents(_operator(TENANT_A_ID), "host-example-vcenter")
+    b_again = await find_dependents(_operator(TENANT_B_ID), "host-example-vcenter")
     assert {n.name for n in a_again} == {n.name for n in b_again}
     assert len(a_again) == len(b_again) == 3
 

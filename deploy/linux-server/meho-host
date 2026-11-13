@@ -5,8 +5,7 @@
 # meho-host: the host command of install form 2. install.sh puts it at
 # /usr/local/sbin/meho-host. It is the customer's tool for the work on the
 # machine after the install, so the customer never needs kubectl (ADR 0007
-# decision 2; form-2 design, section 5, in meho-internal
-# docs/design/2026-10-10-install-forms/).
+# decision 2; form-2 design, section 5).
 #
 # Commands in this version:
 #   check [--json]    a red/green list of the built-in Kubernetes (RKE2) and

@@ -25,7 +25,7 @@ the substrate is covered in :mod:`tests.test_topology_create_node`):
 * End-to-end **empty-tenant bootstrap**: two ``create_node`` calls
   then one ``meho_topology_annotate`` call land a curated edge with
   no probe / refresh in the loop. Closes the consumer's
-  ``-32602 no graph_node matched 'rdc-vault'`` dead-end.
+  ``-32602 no graph_node matched 'example-vault'`` dead-end.
 
 The MCP-level happy paths exercise the SQLite-migrated test DB
 end-to-end (same shape :mod:`tests.test_mcp_tools_topology_annotate`
@@ -202,7 +202,7 @@ def test_create_node_call_from_non_admin_is_forbidden(
 ) -> None:
     """tools/call meho_topology_create_node from an operator → -32602 forbidden."""
     client, _op = client_with_operator
-    response = _create_node_call(client, 3, {"kind": "vault-role", "name": "rdc-vault"})
+    response = _create_node_call(client, 3, {"kind": "vault-role", "name": "example-vault"})
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
     assert "forbidden" in body["error"]["message"].lower()
@@ -226,7 +226,7 @@ async def test_create_node_inserts_row_and_returns_was_created_true(
         10,
         {
             "kind": "vault-role",
-            "name": "rdc-vault",
+            "name": "example-vault",
             "note": "INVENTORY.md L42",
             "evidence_url": "https://example.test/inv#L42",
         },
@@ -236,7 +236,7 @@ async def test_create_node_inserts_row_and_returns_was_created_true(
     assert body["result"]["isError"] is False
     payload = json.loads(body["result"]["content"][0]["text"])
     assert payload["kind"] == "vault-role"
-    assert payload["name"] == "rdc-vault"
+    assert payload["name"] == "example-vault"
     assert payload["source"] == "curated"
     assert payload["was_created"] is True
     assert uuid.UUID(payload["node_id"])  # valid UUID
@@ -266,11 +266,11 @@ async def test_create_node_is_idempotent_on_repeat(
     """A second tools/call with the same (kind, name) → was_created=false."""
     client, _op = client_with_operator
 
-    first = _create_node_call(client, 20, {"kind": "vault-role", "name": "rdc-vault"})
+    first = _create_node_call(client, 20, {"kind": "vault-role", "name": "example-vault"})
     second = _create_node_call(
         client,
         21,
-        {"kind": "vault-role", "name": "rdc-vault", "note": "second"},
+        {"kind": "vault-role", "name": "example-vault", "note": "second"},
     )
 
     first_payload = json.loads(first.json()["result"]["content"][0]["text"])
@@ -322,7 +322,7 @@ def test_create_node_rejects_additional_properties(
         31,
         {
             "kind": "vault-role",
-            "name": "rdc-vault",
+            "name": "example-vault",
             "tenant_id": str(uuid.uuid4()),
         },
     )
@@ -353,13 +353,13 @@ async def test_bootstrap_then_annotate_round_trip_via_mcp(
 
     Empty tenant → ``meho_topology_create_node`` twice →
     ``meho_topology_annotate`` once → curated edge lands without any probe / refresh in
-    the loop. Closes the ``-32602 no graph_node matched 'rdc-vault'``
+    the loop. Closes the ``-32602 no graph_node matched 'example-vault'``
     dead-end the consumer hit in the 2026-05-21 dogfood.
     """
     client, _op = client_with_operator
 
     node_one = _create_node_call(client, 40, {"kind": "principal", "name": "k8s-sa-prod"})
-    node_two = _create_node_call(client, 41, {"kind": "vault-role", "name": "rdc-vault"})
+    node_two = _create_node_call(client, 41, {"kind": "vault-role", "name": "example-vault"})
     edge = _annotate_call(
         client,
         42,
@@ -367,7 +367,7 @@ async def test_bootstrap_then_annotate_round_trip_via_mcp(
             "from_name": "k8s-sa-prod",
             "from_node_kind": "principal",
             "kind": "authenticates-via",
-            "to_name": "rdc-vault",
+            "to_name": "example-vault",
             "to_node_kind": "vault-role",
             "note": "bootstrap",
         },
@@ -378,7 +378,7 @@ async def test_bootstrap_then_annotate_round_trip_via_mcp(
     assert edge.json()["result"]["isError"] is False
     edge_payload = json.loads(edge.json()["result"]["content"][0]["text"])
     assert edge_payload["from"]["name"] == "k8s-sa-prod"
-    assert edge_payload["to"]["name"] == "rdc-vault"
+    assert edge_payload["to"]["name"] == "example-vault"
     assert edge_payload["kind"] == "authenticates-via"
     assert edge_payload["source"] == "curated"
 

@@ -2210,8 +2210,7 @@ def result_connector_http_403(
     accepted/required permissions -- into an opaque
     ``connector_error: HTTPStatusError`` with only the httpx status
     line, the actionable detail buried in
-    ``extras["exception_message"]`` (consumer
-    ``claude-rdc-hetzner-dc#1138``).
+    ``extras["exception_message"]`` (consumer feedback).
 
     The cause is kept **connector-agnostic**: any upstream 403 means the
     upstream refused the call, not a transport fault. Most often the
@@ -2288,8 +2287,7 @@ def result_connector_http_422(
     ``connector_error: HTTPStatusError`` with only the httpx status line,
     the actionable detail buried in ``extras["exception_message"]``. That
     bare shape is exactly what slowed the diagnosis of the
-    requestBody-mangling bug T5 #1656 (consumer
-    ``claude-rdc-hetzner-dc#1138``).
+    requestBody-mangling bug T5 #1656 (consumer feedback).
 
     The cause is kept **connector-agnostic**: any upstream 422 means the
     upstream parsed the request and rejected its *content*, not transport

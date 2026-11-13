@@ -384,7 +384,7 @@ def test_list_renders_cards_with_preview_and_scope_badge() -> None:
         tenant_id=_TENANT_A,
         scope=MemoryScope.USER,
         slug="wine-pref",
-        body="Damir prefers Riesling. " * 20,  # > 200 chars
+        body="Operator A prefers Riesling. " * 20,  # > 200 chars
         user_sub=_OP_A,
         tags=["preference", "wine"],
     )
@@ -408,7 +408,7 @@ def test_list_renders_cards_with_preview_and_scope_badge() -> None:
     # Scope badges + preview text both rendered.
     assert ">user<" in body
     assert ">tenant<" in body
-    assert "Damir prefers Riesling." in body
+    assert "Operator A prefers Riesling." in body
     # Tag chips.
     assert "preference" in body
     assert "wine" in body

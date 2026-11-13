@@ -116,6 +116,7 @@ from meho_backplane.mcp.tools._short_tool_texts import (
     BROADCAST_RECENT_SHORT,
     BROADCAST_WATCH_SHORT,
 )
+from meho_backplane.work_ref import WorkRefError, normalize_work_ref
 
 __all__: list[str] = []
 
@@ -436,8 +437,10 @@ def _parse_announce_claims(arguments: dict[str, Any]) -> _AnnounceClaims:
     if work_ref is not None:
         if not isinstance(work_ref, str):
             raise McpInvalidParamsError("work_ref: must be a string when provided")
-        if not 1 <= len(work_ref) <= WORK_REF_MAX_CHARS:
-            raise McpInvalidParamsError(f"work_ref: must be 1..{WORK_REF_MAX_CHARS} chars")
+        try:
+            work_ref = normalize_work_ref(work_ref)
+        except WorkRefError as exc:
+            raise McpInvalidParamsError(str(exc)) from exc
     return _AnnounceClaims(
         targets=_parse_targets(arguments.get("targets")),
         planned_op_class=cast("PlannedOpClass | None", planned),
@@ -735,7 +738,6 @@ register_mcp_tool(
                 "work_ref": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": WORK_REF_MAX_CHARS,
                     "description": (
                         "Optional change-ticket reference, e.g. 'gh:org/repo#123'. "
                         "Set by the server inside a hosted run."

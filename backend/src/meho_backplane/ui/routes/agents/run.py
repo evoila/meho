@@ -145,10 +145,10 @@ from meho_backplane.ui.routes.agents.views import (
     _fetch_agent_or_404,
     is_htmx_request,
 )
+from meho_backplane.ui.routes.work_ref_form import form_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = [
-    "WORK_REF_MAX",
     "cancel_run",
     "render_run_console",
     "stream_run_events",
@@ -156,12 +156,6 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
-
-#: Max length of the optional ``work_ref`` form field. Mirrors the
-#: change-ticket reference the run row stamps (work_ref I3-T2 #1662); a
-#: generous cap that bounds the form-body parse before it reaches the
-#: token mint.
-WORK_REF_MAX: Final[int] = 256
 
 #: Max length of the prompt textarea. Generous (a run prompt can be a
 #: multi-paragraph instruction) but bounded so a pathological submit
@@ -303,7 +297,7 @@ async def submit_run(
     The actual run executes inside the GET bridge the fragment subscribes
     to (one ``EventSource`` connection = one run's lifetime).
     """
-    cleaned_work_ref = work_ref.strip() if work_ref else None
+    cleaned_work_ref = form_work_ref(work_ref)
     # Reject a blank / whitespace-only prompt up front. The REST
     # ``AgentRunRequest`` model only enforces ``min_length=1`` (so a
     # single space would pass and burn a turn on an empty instruction);

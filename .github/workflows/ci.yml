@@ -745,36 +745,13 @@ jobs:
         shell: bash
         run: |
           set +e
-          cg=/sys/fs/cgroup
-          if [ ! -r "${cg}/memory.current" ] || [ ! -r "${cg}/memory.stat" ]; then
-            echo "No cgroup v2 memory files here, so no sampling."
-            exit 0
-          fi
-          sample() {
-            total_max=0; ws_max=0; anon_max=0; n=0
-            while :; do
-              read -r total < "${cg}/memory.current"
-              anon=0; inactive_file=0
-              while read -r key value; do
-                case "${key}" in
-                  anon) anon=${value} ;;
-                  inactive_file) inactive_file=${value} ;;
-                esac
-              done < "${cg}/memory.stat"
-              total=${total:-0}
-              ws=$(( total - inactive_file ))
-              if [ "${total}" -gt "${total_max}" ]; then total_max=${total}; fi
-              if [ "${ws}" -gt "${ws_max}" ]; then ws_max=${ws}; fi
-              if [ "${anon}" -gt "${anon_max}" ]; then anon_max=${anon}; fi
-              n=$(( n + 1 ))
-              echo "${total_max} ${ws_max} ${anon_max} ${n}" > "${RUNNER_TEMP}/memory-samples.tmp"
-              mv -f "${RUNNER_TEMP}/memory-samples.tmp" "${RUNNER_TEMP}/memory-samples.txt"
-              sleep 1
-            done
-          }
-          sample </dev/null >/dev/null 2>&1 &
+          # The script is scripts/ci/memory_sampler.sh. It also writes one
+          # short line every 15 s to ${RUNNER_TEMP}/memory-log.txt; the pytest
+          # step shows that file in the job log (a killed runner keeps no
+          # file, but GitHub keeps the log lines it already received).
+          bash "${GITHUB_WORKSPACE}/scripts/ci/memory_sampler.sh" run </dev/null >/dev/null 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
-          echo "Memory sampling started: one sample per second."
+          echo "Memory sampling started: one sample per second, one log line every 15 s."
 
       - name: List the required spec-shelf files
         # The required vendor API files are listed in ci/spec-shelf/, one
@@ -1139,6 +1116,7 @@ jobs:
         # perf-budget check below can never mask a red suite.
         shell: bash
         env:
+          MEHO_CI_PROGRESS_DIR: ${{ runner.temp }}/pytest-progress
           # Time limits in tests (marker slow_runner_tolerant) do not fail
           # this required job; the tests still run and their other checks
           # still count. The non-required python-timing-tests job checks
@@ -1200,6 +1178,14 @@ jobs:
         # non-blocking, sharded `python-coverage` + `python-coverage-combine`
         # jobs below (#1982/#1987/#3172).
         run: |
+          # Show the memory lines of the sampler in this log (see
+          # scripts/ci/memory_sampler.sh). The test names of the workers come
+          # from MEHO_CI_PROGRESS_DIR.
+          mkdir -p "${MEHO_CI_PROGRESS_DIR}"
+          touch "${RUNNER_TEMP}/memory-log.txt"
+          tail -n +1 -F "${RUNNER_TEMP}/memory-log.txt" 2>/dev/null &
+          MEMORY_TAIL_PID=$!
+          trap 'kill "${MEMORY_TAIL_PID}" 2>/dev/null' EXIT
           # Deterministic split by measured file time (#4809; #3251 used
           # every TOTAL-th file of the sorted list, which put the slow
           # files unevenly: shard 4 ran 613 s against 465 s for shard 2).
@@ -1544,9 +1530,10 @@ jobs:
     #     `changes` is in `needs`) and BRANCHES:
     #       * docs_only == 'true'  → accept success|skipped (fast path).
     #       * else (full run)      → require STRICT success (a skipped lint /
-    #                                shard here is anomalous — these jobs' only
-    #                                skip paths are fork-PR or docs-only, and we
-    #                                are in neither — so treat it as failure and
+    #                                shard here is anomalous — lint skips only
+    #                                for a docs-only or no-backend diff, and the
+    #                                shards also skip on a fork PR; we are in
+    #                                none of these — so treat it as failure and
     #                                fail CLOSED). This is STRICTER than the
     #                                pre-#3252 gate. A fork PR takes its own
     #                                branch first (#4835, property 2).
@@ -1576,20 +1563,30 @@ jobs:
           IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        # needs.<job>.result is one of success / failure / cancelled / skipped.
-        # For the matrix job, needs.python-unit-shard.result is the AGGREGATE:
-        # success only if every leg succeeded, otherwise failure/cancelled.
+          # Job results and outputs reach the script only through env:, as
+          # data. On a fork pull request the change detector runs code from
+          # the pull request, so its outputs are never part of the script text.
+          # needs.<job>.result is one of success / failure / cancelled / skipped.
+          # For the matrix job, needs.python-unit-shard.result is the AGGREGATE:
+          # success only if every leg succeeded, otherwise failure/cancelled.
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CHANGES_DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          CHANGES_BACKEND_PYTHON: ${{ needs.changes.outputs.backend_python }}
+          CHANGES_SINGLE_CONNECTOR: ${{ needs.changes.outputs.single_connector }}
+          LINT_RESULT: ${{ needs.python-lint.result }}
+          SHARDS_RESULT: ${{ needs.python-unit-shard.result }}
+          OUTSIDE_RESULT: ${{ needs.python-outside-backend.result }}
         run: |
-          detect='${{ needs.changes.result }}'
-          docs_only='${{ needs.changes.outputs.docs_only }}'
-          lint='${{ needs.python-lint.result }}'
-          shards='${{ needs.python-unit-shard.result }}'
-          backend_python='${{ needs.changes.outputs.backend_python }}'
-          outside='${{ needs.python-outside-backend.result }}'
+          detect="${CHANGES_RESULT}"
+          docs_only="${CHANGES_DOCS_ONLY}"
+          lint="${LINT_RESULT}"
+          shards="${SHARDS_RESULT}"
+          backend_python="${CHANGES_BACKEND_PYTHON}"
+          outside="${OUTSIDE_RESULT}"
           echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
           echo "python-lint (ruff + ruff format + mypy): ${lint}"
           echo "python-unit-shard (aggregate of all 6 shard legs, or the one connector leg): ${shards}"
-          echo "single_connector='${{ needs.changes.outputs.single_connector }}' (empty = six shards)"
+          echo "single_connector='${CHANGES_SINGLE_CONNECTOR}' (empty = six shards)"
           echo "python-outside-backend (tests that read outside backend/): ${outside}"
 
           # The detect job MUST have succeeded for its docs_only classification
@@ -1604,8 +1601,9 @@ jobs:
 
           fail=0
           if [ "${IS_FORK_PR}" = "true" ]; then
-            # FORK PR (#4835) — the shards and the outside-backend tests use
-            # our own pool, so they skip on a fork PR. Lint must pass when the
+            # FORK PR (#4835) — the shards use our own pool, so they skip on a
+            # fork PR. The outside-backend job runs on a hosted runner, but its
+            # own `if:` skips it on a fork PR. Lint must pass when the
             # diff has backend code; it may skip only for a docs-only or
             # no-backend diff. A red or cancelled job still fails the lane. A
             # green lane here is NOT a test pass.
@@ -1623,14 +1621,22 @@ jobs:
                 *) fail=1 ;;
               esac
             done
-            if [ "${fail}" -eq 0 ]; then
+            if [ "${fail}" -eq 0 ] && [ "${docs_only}" = "true" ]; then
+              {
+                echo "### Pull request from a fork: docs only"
+                echo
+                echo "- This pull request changes only docs, so the unit tests were skipped. No unit test is needed for it."
+                echo "- Maintainer: first look at the changed files. This result counts only when the pull request changes nothing under \`.github/\`, \`scripts/ci/\` and \`backend/tests/_unit_*.py\`. See \"Pull requests from forks\" in CONTRIBUTING.md."
+              } >> "${GITHUB_STEP_SUMMARY}"
+              echo "Unit lane GREEN for a docs-only fork pull request. The unit tests were skipped because only docs changed. See the step summary."
+            elif [ "${fail}" -eq 0 ]; then
               {
                 echo "### Pull request from a fork: the unit tests did not run"
                 echo
                 echo "- The unit test shards run on our own runners. A fork pull request cannot use them, so they were skipped. A skipped job shows as green. Green here does **not** mean the tests passed."
                 echo "- Lint and type check (ruff + mypy): ${lint}."
                 echo "- The merge queue runs the full test matrix before this code lands on \`main\`."
-                echo "- Maintainer: read the change first. Then push the exact commit you read, by its full SHA, to a branch in this repository, open a draft pull request from it to \`main\`, and link its CI run in the review. A pushed branch alone starts no CI. See \"Pull requests from forks\" in CONTRIBUTING.md."
+                echo "- Maintainer: read the change first, and take the commands from CONTRIBUTING.md, not from this summary. This result counts only when the pull request changes nothing under \`.github/\`, \`scripts/ci/\` and \`backend/tests/_unit_*.py\`. Then push the exact commit you read, by its full SHA, to a branch in this repository, open a draft pull request from it to \`main\`, and link its CI run in the review. A pushed branch alone starts no CI. See \"Pull requests from forks\" in CONTRIBUTING.md."
                 echo
                 echo '```bash'
                 echo "git fetch origin pull/${PR_NUMBER}/head"
@@ -1883,36 +1889,13 @@ jobs:
         shell: bash
         run: |
           set +e
-          cg=/sys/fs/cgroup
-          if [ ! -r "${cg}/memory.current" ] || [ ! -r "${cg}/memory.stat" ]; then
-            echo "No cgroup v2 memory files here, so no sampling."
-            exit 0
-          fi
-          sample() {
-            total_max=0; ws_max=0; anon_max=0; n=0
-            while :; do
-              read -r total < "${cg}/memory.current"
-              anon=0; inactive_file=0
-              while read -r key value; do
-                case "${key}" in
-                  anon) anon=${value} ;;
-                  inactive_file) inactive_file=${value} ;;
-                esac
-              done < "${cg}/memory.stat"
-              total=${total:-0}
-              ws=$(( total - inactive_file ))
-              if [ "${total}" -gt "${total_max}" ]; then total_max=${total}; fi
-              if [ "${ws}" -gt "${ws_max}" ]; then ws_max=${ws}; fi
-              if [ "${anon}" -gt "${anon_max}" ]; then anon_max=${anon}; fi
-              n=$(( n + 1 ))
-              echo "${total_max} ${ws_max} ${anon_max} ${n}" > "${RUNNER_TEMP}/memory-samples.tmp"
-              mv -f "${RUNNER_TEMP}/memory-samples.tmp" "${RUNNER_TEMP}/memory-samples.txt"
-              sleep 1
-            done
-          }
-          sample </dev/null >/dev/null 2>&1 &
+          # The script is scripts/ci/memory_sampler.sh. It also writes one
+          # short line every 15 s to ${RUNNER_TEMP}/memory-log.txt; the pytest
+          # step shows that file in the job log (a killed runner keeps no
+          # file, but GitHub keeps the log lines it already received).
+          bash "${GITHUB_WORKSPACE}/scripts/ci/memory_sampler.sh" run </dev/null >/dev/null 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
-          echo "Memory sampling started: one sample per second."
+          echo "Memory sampling started: one sample per second, one log line every 15 s."
 
       - name: Docker Hub login (for testcontainers pulls)
         # Empty-secret guard — see the python-tests job's login step for
@@ -1995,6 +1978,7 @@ jobs:
         # cancel the run, but it must read as a step FAILURE, not a false green.
         shell: bash
         env:
+          MEHO_CI_PROGRESS_DIR: ${{ runner.temp }}/pytest-progress
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
           # Each xdist worker is a subprocess; coverage's a1_coverage.pth hook
           # calls coverage.process_startup() when COVERAGE_PROCESS_START points
@@ -2037,6 +2021,14 @@ jobs:
         # FAILURE the job's continue-on-error absorbs — `shell: bash` above
         # guarantees PIPESTATUS + pipefail on this self-hosted pool.
         run: |
+          # Show the memory lines of the sampler in this log (see
+          # scripts/ci/memory_sampler.sh). The test names of the workers come
+          # from MEHO_CI_PROGRESS_DIR.
+          mkdir -p "${MEHO_CI_PROGRESS_DIR}"
+          touch "${RUNNER_TEMP}/memory-log.txt"
+          tail -n +1 -F "${RUNNER_TEMP}/memory-log.txt" 2>/dev/null &
+          MEMORY_TAIL_PID=$!
+          trap 'kill "${MEMORY_TAIL_PID}" 2>/dev/null' EXIT
           # Deterministic stride shard (#3172): the sorted test-file list,
           # every 8th file to this shard. File-level split keeps conftest
           # semantics identical to a full run; stride (vs contiguous
@@ -2489,6 +2481,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      - name: Start memory sampling
+        # The same sampler as the unit shards (scripts/ci/memory_sampler.sh):
+        # one "[memory]" line every 15 s in the log of the pytest step, so a
+        # runner killed for memory still leaves a trace. It never fails the
+        # job; "Stop memory sampling" ends it.
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +e
+          bash "${GITHUB_WORKSPACE}/scripts/ci/memory_sampler.sh" run </dev/null >/dev/null 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
+          echo "Memory sampling started: one sample per second, one log line every 15 s."
+
       - name: List the required spec-shelf files
         # The required vendor API files are listed in ci/spec-shelf/, one
         # small file per product version, so this workflow names none of
@@ -2578,12 +2584,21 @@ jobs:
         # when the cluster cannot pull an image; without the reason a green
         # lane hides that nothing ran on the cluster.
         env:
+          MEHO_CI_PROGRESS_DIR: ${{ runner.temp }}/pytest-progress
           # Time limits in tests (marker slow_runner_tolerant) do not fail
           # this required job; the tests still run and their other checks
           # still count. The non-required python-timing-tests job checks
           # the limits (#6270, tests/_time_limits.py).
           MEHO_SKIP_TIME_LIMITS: "1"
         run: |
+          # Show the memory lines of the sampler in this log (see
+          # scripts/ci/memory_sampler.sh). The running test comes from
+          # MEHO_CI_PROGRESS_DIR.
+          mkdir -p "${MEHO_CI_PROGRESS_DIR}"
+          touch "${RUNNER_TEMP}/memory-log.txt"
+          tail -n +1 -F "${RUNNER_TEMP}/memory-log.txt" 2>/dev/null &
+          MEMORY_TAIL_PID=$!
+          trap 'kill "${MEMORY_TAIL_PID}" 2>/dev/null' EXIT
           # Split by measured file time, the same tool as the unit shards
           # (tests/_unit_shard_split.py) with the integration measurements
           # in tests/_integration_shard_durations.json. Every file lands in
@@ -2604,6 +2619,16 @@ jobs:
           # test case.
           uv run pytest -x -rs -o junit_family=xunit1 \
             --junitxml=pytest-integration-shard.xml "${SHARD_FILES[@]}"
+
+      - name: Stop memory sampling
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          if [ -r "${RUNNER_TEMP}/memory-sampler.pid" ]; then
+            kill "$(cat "${RUNNER_TEMP}/memory-sampler.pid")" 2>/dev/null || true
+          fi
 
       - name: Upload per-test times (input for the shard split)
         # Refresh tests/_integration_shard_durations.json from these
@@ -2720,11 +2745,16 @@ jobs:
       - name: Assert every integration shard passed
         # needs.python-integration-shard.result is the AGGREGATE of the
         # matrix: success only if every leg succeeded.
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CHANGES_DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          CHANGES_BACKEND_PYTHON: ${{ needs.changes.outputs.backend_python }}
+          SHARDS_RESULT: ${{ needs.python-integration-shard.result }}
         run: |
-          detect='${{ needs.changes.result }}'
-          docs_only='${{ needs.changes.outputs.docs_only }}'
-          backend_python='${{ needs.changes.outputs.backend_python }}'
-          shards='${{ needs.python-integration-shard.result }}'
+          detect="${CHANGES_RESULT}"
+          docs_only="${CHANGES_DOCS_ONLY}"
+          backend_python="${CHANGES_BACKEND_PYTHON}"
+          shards="${SHARDS_RESULT}"
           echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
           echo "python-integration-shard (aggregate of all 4 shard legs): ${shards}"
 

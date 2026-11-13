@@ -942,6 +942,48 @@ def test_operations_ui_run_call_ok_renders_result_inline(
     assert args["work_ref"] == "gh:evoila/meho#7"
 
 
+def test_operations_ui_run_counts_work_ref_length_after_nfc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ticket id longer than 512 code points in NFD form but within the rule is taken."""
+    import unicodedata
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    received = _patch_call_operation(
+        monkeypatch,
+        {
+            "status": "ok",
+            "op_id": "POST:/repos/{owner}/{repo}/issues",
+            "result": {"number": 7},
+            "error": None,
+            "duration_ms": 1.0,
+            "handle": None,
+            "extras": {},
+        },
+    )
+    ticket = "\u1ec7" * 200  # three code points each in NFD form
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": '{"owner": "evoila", "repo": "meho", "body": {"title": "go"}}',
+                "work_ref": unicodedata.normalize("NFD", ticket),
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert received[0]["work_ref"] == ticket
+
+
 @pytest.mark.parametrize("reveal", [True, False], ids=["reveal", "no-reveal"])
 def test_operations_ui_run_call_says_no_store_only_when_it_reveals(
     monkeypatch: pytest.MonkeyPatch, reveal: bool

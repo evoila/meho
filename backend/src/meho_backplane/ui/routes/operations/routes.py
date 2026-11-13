@@ -220,6 +220,7 @@ from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
     resolve_role_probe,
 )
+from meho_backplane.ui.routes.work_ref_form import form_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_operations_router"]
@@ -263,12 +264,6 @@ _MAX_TARGET_LENGTH: Final[int] = 256
 #: an oversized paste. The CSRF middleware already caps the buffered body
 #: at 256 KiB; this is the surface-specific, friendlier-error bound.
 _MAX_PARAMS_LENGTH: Final[int] = 64 * 1024
-
-#: Maximum ``work_ref`` length accepted on the run form. The work_ref is an
-#: opaque external change-ticket reference (``gh:evoila/meho#7``); a short
-#: bound rejects an oversized paste while leaving room for a real URI. The
-#: meta-tool treats it as an opaque string (no validation, #1657).
-_MAX_WORK_REF_LENGTH: Final[int] = 512
 
 #: Maximum ``preview_hash`` length accepted on the run form. The hash is a
 #: SHA-256 hex string (64 characters) from a prior preview of the same call;
@@ -499,7 +494,7 @@ def build_operations_router() -> APIRouter:
         op_id: str = Form(max_length=_MAX_OP_ID_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
         params: str = Form(default="", max_length=_MAX_PARAMS_LENGTH),
-        work_ref: str = Form(default="", max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Form(default=""),
         preview_hash: str = Form(default="", max_length=_MAX_PREVIEW_HASH_LENGTH),
     ) -> HTMLResponse:
         """Dispatch the chosen op in-process; render the ``OperationResult`` inline.
@@ -935,7 +930,7 @@ async def _render_call_result(
     }
     # ``work_ref`` is an opaque per-op override; bind it only when non-empty so
     # a bare run does not clobber an ambient ``Meho-Work-Ref`` (#1657).
-    work_ref_value = work_ref.strip()
+    work_ref_value = form_work_ref(work_ref)
     if work_ref_value:
         arguments["work_ref"] = work_ref_value
     # The hash of the preview the run window showed. A destructive op needs it

@@ -1115,7 +1115,7 @@ meho bind9 record add <fqdn> <ip> [flags]
 - `--target` — target slug to dispatch against
 - `--type` — record type (A / AAAA). Omitted → handler default (A).
 - `--view` — split-horizon view owning the zone. Required only when the zone is in multiple views.
-- `--zone` — owning zone (e.g. example.com). Omitted → handler resolves via longest-suffix match.
+- `--zone` — owning zone (e.g. example.test). Omitted → handler resolves via longest-suffix match.
 
 #### `meho bind9 record get`
 
@@ -1142,7 +1142,7 @@ meho bind9 record remove <fqdn> [flags]
 - `--json` — emit the full OperationResult envelope as JSON
 - `--target` — target slug to dispatch against
 - `--view` — split-horizon view owning the zone. Required only when the zone is in multiple views.
-- `--zone` — owning zone (e.g. example.com). Omitted → handler resolves via longest-suffix match.
+- `--zone` — owning zone (e.g. example.test). Omitted → handler resolves via longest-suffix match.
 
 ### `meho bind9 zone`
 

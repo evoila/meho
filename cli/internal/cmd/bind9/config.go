@@ -113,7 +113,7 @@ func printConfigShow(w io.Writer, r *CallResult) {
 //     `named.conf.local` (the canonical views include).
 //   - Every regular file under `<zones-dir>` lands under the same
 //     relative subpath in `/etc/bind/` (e.g. a local
-//     `<zones-dir>/db.evba.lab` lands at `/etc/bind/db.evba.lab`).
+//     `<zones-dir>/db.example.test` lands at `/etc/bind/db.example.test`).
 //
 // The atomic-apply primitive overlays the live tree; the snapshot-
 // rollback contract leaves /etc/bind/ byte-identical on failure.
@@ -151,7 +151,7 @@ func newConfigApplyViewsCmd() *cobra.Command {
 			"the call.\n\n" +
 			"Exit codes mirror meho operation call.",
 		Example: "  meho bind9 config apply-views ./views/external.conf ./zones --target vcf-router-bind9\n" +
-			"  meho bind9 config apply-views ./views.conf ./zones --verify-fqdn www.evba.lab --target vcf-router-bind9",
+			"  meho bind9 config apply-views ./views.conf ./zones --verify-fqdn www.example.test --target vcf-router-bind9",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -210,7 +210,7 @@ func runConfigApplyViews(
 //
 // The views.conf path lands at `named.conf.local` (the bind9
 // canonical views include); every file under zonesDir lands at its
-// `zonesDir`-relative path verbatim (e.g. `db.evba.lab`, or
+// `zonesDir`-relative path verbatim (e.g. `db.example.test`, or
 // `nested/db.other.zone`). The handler's path-safety filter rejects
 // anything that escapes /etc/bind/; we do a defence-in-depth check
 // here too (no leading slash; no `..` component) so a typo'd local

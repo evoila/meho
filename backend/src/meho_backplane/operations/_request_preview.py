@@ -11,8 +11,7 @@ only a **hashed** ``params_hash`` (an intentional privacy + row-size
 choice -- full args may carry secrets), not the resolved method / path /
 body. During the #1656 dogfood the consumer had to "bisect payload
 shapes from the outside" to discover the body was being sent wrapped,
-because nothing inside meho exposed the constructed request
-(``claude-rdc-hetzner-dc#1138``).
+because nothing inside meho exposed the constructed request.
 
 This module is the lowest-friction fix consistent with the dumb-substrate
 posture: a **read-only preview** that resolves an op + params to the

@@ -211,7 +211,7 @@ func TestTokenBox_Refresh_OmitsScopeToPreserveGrant(t *testing.T) {
 			RefreshToken: "stale-refresh",
 			TokenType:    "Bearer",
 			ClientID:     "meho-cli",
-			Issuer:       "https://kc.example/realms/evba",
+			Issuer:       "https://kc.example/realms/example",
 			// Past expiry so the oauth2 TokenSource actually performs the
 			// refresh exchange rather than returning the cached token.
 			Expiry: time.Now().Add(-time.Hour),
@@ -265,7 +265,7 @@ func TestTokenBox_Refresh_InvalidGrant_IsRefreshRejected(t *testing.T) {
 			RefreshToken: "dead-refresh",
 			TokenType:    "Bearer",
 			ClientID:     "meho-cli",
-			Issuer:       "https://kc.example/realms/evba",
+			Issuer:       "https://kc.example/realms/example",
 			Expiry:       time.Now().Add(-time.Hour),
 		},
 		httpClient: srv.Client(),
@@ -322,7 +322,7 @@ func TestTokenBox_Refresh_InvalidGrant_SendsOneRequest(t *testing.T) {
 			RefreshToken: "dead-refresh",
 			TokenType:    "Bearer",
 			ClientID:     "meho-cli",
-			Issuer:       "https://kc.example/realms/evba",
+			Issuer:       "https://kc.example/realms/example",
 			Expiry:       time.Now().Add(-time.Hour),
 		},
 		httpClient: srv.Client(),

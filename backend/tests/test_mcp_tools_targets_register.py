@@ -249,16 +249,16 @@ async def test_human_admin_creates_and_round_trips_via_list_targets(
     """A human tenant_admin registration executes immediately + is listable."""
     client, op = client_with_operator
     created = _register_call(
-        client, 1, {"name": "rdc-vault", "product": "vault", "host": "vault.example"}
+        client, 1, {"name": "example-vault", "product": "vault", "host": "vault.example"}
     ).json()["result"]
     assert created["isError"] is False
     payload = created["structuredContent"]
-    assert payload["name"] == "rdc-vault"
+    assert payload["name"] == "example-vault"
     assert payload["product"] == "vault"
     assert payload["tenant_id"] == str(op.tenant_id)
 
     listed = _list_targets_call(client, 2).json()["result"]["structuredContent"]
-    assert [t["name"] for t in listed["targets"]] == ["rdc-vault"]
+    assert [t["name"] for t in listed["targets"]] == ["example-vault"]
     assert listed["targets"][0]["id"] == payload["target_id"]
 
 

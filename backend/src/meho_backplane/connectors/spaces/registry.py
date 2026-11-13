@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Register the five ``spaces.*`` typed operations.
+"""Register the six ``spaces.*`` typed operations.
 
 Natural key ``(product="spaces", version="1.x", impl_id="spaces-records")``,
 so the wire connector id is ``spaces-records-1.x``.
 
-Risk levels: the four writes are ``caution`` and need approval; the overview
-is ``safe``. The four writes have a ``tenant_admin`` role floor
+Risk levels: the five writes are ``caution`` and need approval; the overview
+is ``safe``. The five writes have a ``tenant_admin`` role floor
 (``operations/role_floors.py``): a person below it is refused on every path,
 and only a ``tenant_admin`` can approve a waiting call. An agent's call runs
 under the agent's own login once a ``tenant_admin`` approved it.
@@ -19,6 +19,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.connectors.spaces import import_op
 from meho_backplane.connectors.spaces import schemas as s
 from meho_backplane.connectors.spaces.overview import spaces_overview
 from meho_backplane.connectors.spaces.writes import (
@@ -27,6 +28,7 @@ from meho_backplane.connectors.spaces.writes import (
     spaces_reassign,
     spaces_unassign,
 )
+from meho_backplane.operations._preview import register_preview_builder
 from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
 
@@ -100,6 +102,20 @@ _SPECS: tuple[_Spec, ...] = (
         "caution",
     ),
     (
+        import_op.IMPORT_OP_ID,
+        import_op.spaces_import,
+        "Import a site's ownership records (labs, owners, targets) into spaces.",
+        "Reads a manifest and creates the spaces, members and assignments it lists, "
+        "one lab at a time, with a reason. `only` imports some labs. The approval "
+        "card shows what would change and every row that cannot be imported. A second "
+        "run changes nothing. Needs the tenant_admin role.",
+        import_op.IMPORT_PARAMETERS,
+        import_op.IMPORT_RESPONSE,
+        import_op.IMPORT_GUIDANCE,
+        _WRITE_TAGS,
+        "caution",
+    ),
+    (
         "spaces.overview",
         spaces_overview,
         "Show spaces with owners, members, product versions and health.",
@@ -118,12 +134,14 @@ for _spec in _SPECS:
     if _spec[-1] == "caution":
         register_role_floor(_spec[0], TenantRole.TENANT_ADMIN)
 
+register_preview_builder(import_op.IMPORT_OP_ID, import_op.build_import_preview)
+
 
 async def register_spaces_operations(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert the five ``spaces.*`` typed operations. Safe to run twice."""
+    """Upsert the six ``spaces.*`` typed operations. Safe to run twice."""
     for op_id, handler, summary, description, params, response, guidance, tags, safety in _SPECS:
         await register_typed_operation(
             product="spaces",

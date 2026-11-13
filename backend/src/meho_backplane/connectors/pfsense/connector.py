@@ -310,6 +310,19 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "only that user's ``disabled`` flag, a second person must approve, "
         "and the built-in admin account is refused."
     ),
+    "vpn": (
+        "Use to give a person VPN access on a pfSense firewall with OpenVPN "
+        "servers that log users in by name and password. Call "
+        "``pfsense.openvpn.address.next_free`` first: it finds the lowest tunnel "
+        "address that is free on every such server. Then create the user with "
+        "``pfsense.openvpn.user.create`` (the password goes to Vault and is never "
+        "shown; needs approval) and give the user a fixed address and routes with "
+        "``pfsense.openvpn.csc.sync`` (run it with ``compare_only`` first). "
+        "``pfsense.openvpn.rule.sync`` adds the tagged pass rules each user needs "
+        "(needs approval; also has ``compare_only``). "
+        "``pfsense.openvpn.user.delete`` removes a VPN user and its overrides "
+        "(needs approval; refused while the user is connected unless ``force``)."
+    ),
 }
 
 
@@ -875,6 +888,96 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_user_enable(self, target, params, operator)
+
+    async def openvpn_address_next_free(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.openvpn.address.next_free`` (#3993).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_openvpn_csc.pfsense_openvpn_address_next_free`.
+        Reads the next VPN tunnel address that is free on every user-login server.
+        """
+        from meho_backplane.connectors.pfsense.ops_openvpn_csc import (
+            pfsense_openvpn_address_next_free as _pfsense_openvpn_address_next_free,
+        )
+
+        return await _pfsense_openvpn_address_next_free(self, target, params, operator)
+
+    async def openvpn_csc_sync(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.openvpn.csc.sync`` (#3993).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_openvpn_csc.pfsense_openvpn_csc_sync`.
+        Creates or extends client overrides (can compare only).
+        """
+        from meho_backplane.connectors.pfsense.ops_openvpn_csc import (
+            pfsense_openvpn_csc_sync as _pfsense_openvpn_csc_sync,
+        )
+
+        return await _pfsense_openvpn_csc_sync(self, target, params, operator)
+
+    async def openvpn_rule_sync(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.openvpn.rule.sync`` (#3993).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_openvpn_rule.pfsense_openvpn_rule_sync`.
+        Adds the missing tagged per-user VPN pass rules (can compare only).
+        """
+        from meho_backplane.connectors.pfsense.ops_openvpn_rule import (
+            pfsense_openvpn_rule_sync as _pfsense_openvpn_rule_sync,
+        )
+
+        return await _pfsense_openvpn_rule_sync(self, target, params, operator)
+
+    async def openvpn_user_create(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.openvpn.user.create`` (#3993).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_openvpn_user.pfsense_openvpn_user_create`.
+        Makes a VPN user and stores its password in Vault (needs approval).
+        """
+        from meho_backplane.connectors.pfsense.ops_openvpn_user import (
+            pfsense_openvpn_user_create as _pfsense_openvpn_user_create,
+        )
+
+        return await _pfsense_openvpn_user_create(self, target, params, operator)
+
+    async def openvpn_user_delete(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.openvpn.user.delete`` (#3993).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_openvpn_user.pfsense_openvpn_user_delete`.
+        Removes a VPN user and its overrides (needs approval).
+        """
+        from meho_backplane.connectors.pfsense.ops_openvpn_user import (
+            pfsense_openvpn_user_delete as _pfsense_openvpn_user_delete,
+        )
+
+        return await _pfsense_openvpn_user_delete(self, target, params, operator)
 
     async def route_static_list(
         self,

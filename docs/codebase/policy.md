@@ -126,7 +126,8 @@ every tenant yet; that needs a decision first.
   is `changed` when its approvers or its place in the list changed
   (`index`, and `was` for the old place). Each classification entry also has `matches` (how many
   operations it matches) and `changes` (how many of those get other
-  values). `operations_changed` counts all operations whose values change.
+  values). Entries are told apart by their whole `match` (each part on its
+  own), so two different matches never share one line. `operations_changed` counts all operations whose values change.
   `based_on` is the SHA-256 of the meaning of the stored policy (key order,
   comments and empty keys do not count). It covers only the stored policy
   of the import's own scope. A tenant import does not notice a change to
@@ -189,7 +190,9 @@ level that does not exist), every policy read of that tenant fails while
 the switch is on. The error names the document and the entry, for example
 "The stored policy of tenant `<tenant-id>` is not valid, so MEHO cannot
 classify operations: tenant:classifications[3]: ...". An import of a good
-file replaces it; the preview says so in a warning. With approver routing
+file replaces it; the preview says so in a warning. This holds also when
+an entry or its `match` is not a map, or `classifications` is not a list:
+the diff then lists such an entry as removed. With approver routing
 on, a bad `routing` entry makes every request of that tenant fail to start
 waiting: the call is refused ("approval queue unavailable") instead of
 waiting with an unknown approver set.

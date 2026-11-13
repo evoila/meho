@@ -9264,6 +9264,15 @@ class Sensor(Base):
         default=0,
         server_default="0",
     )
+    # How many evaluations in a row the target refused the login. The runner
+    # pauses the Sensor when it reaches the limit
+    # (``checks/auth_park.py``). Any other result sets it back to 0.
+    auth_failure_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
     # Identity ``sub`` #2505's runner dispatches under -- the sensor
     # analogue of the trigger's ``__scheduler__`` sentinel.
     identity_sub: Mapped[str] = mapped_column(

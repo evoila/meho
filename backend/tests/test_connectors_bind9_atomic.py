@@ -211,15 +211,15 @@ class TestResolveZoneForFqdn:
     """Pure-function tests for the longest-suffix matcher."""
 
     def test_longest_suffix_match(self) -> None:
-        assert resolve_zone_for_fqdn(["example.test", "lab"], "api.example.test") == "example.test"
+        assert resolve_zone_for_fqdn(["example.test", "test"], "api.example.test") == "example.test"
 
     def test_trailing_dot_normalised(self) -> None:
         assert resolve_zone_for_fqdn(["example.test."], "api.example.test.") == "example.test"
 
     def test_label_boundary_respected(self) -> None:
-        """``ba.lab`` does NOT match ``api.example.test`` -- labels are atomic."""
+        """``ple.test`` does NOT match ``api.example.test`` -- labels are atomic."""
         with pytest.raises(ZoneResolutionError) as exc_info:
-            resolve_zone_for_fqdn(["ba.lab"], "api.example.test")
+            resolve_zone_for_fqdn(["ple.test"], "api.example.test")
         assert exc_info.value.reason == "unresolvable"
 
     def test_root_zone_excluded(self) -> None:

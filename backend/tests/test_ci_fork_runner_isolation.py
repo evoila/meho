@@ -36,6 +36,7 @@ cannot read; this test guards the in-repo arm.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -525,6 +526,13 @@ _UNSAFE_IN_RUN = re.compile(
 _RUN_VALUE_ALLOWED: dict[tuple[str, str], str] = {}
 
 
+# The only terms that prove a fork pull request cannot start a job. Any other
+# term, such as a negation, counts as reachable.
+_FORK_CANNOT_START_TERMS = frozenset(
+    {"github.event.pull_request.head.repo.full_name == github.repository", _PUSH_ONLY}
+)
+
+
 def _split_top_level(expr: str, operator: str) -> list[str]:
     parts, depth, start, i = [], 0, 0, 0
     while i < len(expr):
@@ -546,8 +554,8 @@ def _fork_cannot_start(condition: str) -> bool:
     """True when the whole `if:` condition is false for a fork pull request.
 
     An `||` holds only when every arm holds. An `&&` holds when one term holds.
-    A term holds when it is the same-repository check, a push-only check, or a
-    bracket group that holds.
+    A term holds when it is exactly the same-repository check, exactly a
+    push-only check, or a bracket group that holds. Any other form is reachable.
     """
     expr = condition.strip()
     if expr.startswith("${{") and expr.endswith("}}"):
@@ -563,7 +571,7 @@ def _fork_cannot_start(condition: str) -> bool:
     term = terms[0]
     if term.startswith("(") and term.endswith(")"):
         return _fork_cannot_start(term[1:-1])
-    return _CI_FORK_GUARD in term or term == _PUSH_ONLY
+    return " ".join(term.split()) in _FORK_CANNOT_START_TERMS
 
 
 def _unsafe_run_steps(jobs: dict[str, Any]) -> list[str]:
@@ -577,17 +585,13 @@ def _unsafe_run_steps(jobs: dict[str, Any]) -> list[str]:
     return found
 
 
-def _pull_request_workflows() -> list[Path]:
-    return [
-        path
-        for path in sorted(_WORKFLOWS_DIR.glob("*.yml"))
-        if "pull_request" in _triggers(_load_workflow(path))
-    ]
+def _pull_request_workflows(paths: list[Path]) -> list[Path]:
+    return [path for path in paths if "pull_request" in _triggers(_load_workflow(path))]
 
 
 def test_run_scripts_of_fork_jobs_hold_no_job_output() -> None:
     bad = []
-    for path in _pull_request_workflows():
+    for path in _pull_request_workflows(_workflow_files()):
         jobs = _load_workflow(path)["jobs"]
         for found in _unsafe_run_steps(jobs):
             job_name = found.split(" step ", 1)[0]
@@ -597,6 +601,17 @@ def test_run_scripts_of_fork_jobs_hold_no_job_output() -> None:
         "These steps put a job result, a step output or a pull request field into "
         "the text of a run: script. Pass it through env: instead: " + "; ".join(bad)
     )
+
+
+def test_pull_request_workflows_include_both_file_extensions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a.yml").write_text("on: pull_request\njobs: {}\n")
+    (tmp_path / "b.yaml").write_text("on: [pull_request]\njobs: {}\n")
+    (tmp_path / "c.yaml").write_text("on: push\njobs: {}\n")
+    monkeypatch.setattr(sys.modules[__name__], "_WORKFLOWS_DIR", tmp_path)
+    found = _pull_request_workflows(_workflow_files())
+    assert [path.name for path in found] == ["a.yml", "b.yaml"]
 
 
 def test_run_value_allow_list_has_a_reason_for_each_entry() -> None:
@@ -621,6 +636,10 @@ def test_run_value_allow_list_has_a_reason_for_each_entry() -> None:
             True,
         ),
         ("a || github.event.pull_request.head.repo.full_name == github.repository", False),
+        ("${{ !(github.event.pull_request.head.repo.full_name == github.repository) }}", False),
+        ("!(github.event_name == 'push')", False),
+        ("github.event.pull_request.head.repo.full_name == github.repository == false", False),
+        ("github.event.pull_request.head.repo.full_name != github.repository", False),
         ("always()", False),
         ("", False),
     ],

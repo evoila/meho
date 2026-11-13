@@ -23,6 +23,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target, Tenant
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._preview import PreviewContext
+from meho_backplane.operations.meta_tools import preview_operation
 from meho_backplane.settings import get_settings
 from meho_backplane.spaces import store
 from meho_backplane.spaces.models import ResourceAssignment, Space, SpaceMember
@@ -422,13 +423,17 @@ def test_the_manifest_is_not_changed_by_parsing() -> None:
     assert _key("ann") in parsed.people
 
 
-@pytest.mark.asyncio
-async def test_dispatch_waits_for_approval_and_a_lower_role_is_denied(world: _World) -> None:
+async def _register() -> None:
     service = AsyncMock()
     service.encode_one.return_value = [0.1] * 384
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     await register_spaces_operations(embedding_service=service)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_waits_for_approval_and_a_lower_role_is_denied(world: _World) -> None:
+    await _register()
     denied = await dispatch(
         operator=_operator(world.tenant, TenantRole.OPERATOR),
         connector_id=SPACES_CONNECTOR_ID,
@@ -444,5 +449,94 @@ async def test_dispatch_waits_for_approval_and_a_lower_role_is_denied(world: _Wo
         target=None,
         params=_params(_manifest(), only=["lab-ok"]),
     )
-    assert parked.status != "ok"
+    assert parked.status == "awaiting_approval", parked.error
     assert await _count(Space) == 0
+
+
+@pytest.mark.asyncio
+async def test_owner_list_passes_the_schema_on_the_public_paths(world: _World) -> None:
+    """The manifest has a lab with two owners. The schema takes it; the plan lists it."""
+    await _register()
+    parked = await dispatch(
+        operator=_operator(world.tenant),
+        connector_id=SPACES_CONNECTOR_ID,
+        op_id="spaces.import",
+        target=None,
+        params=_params(_manifest(), only=["lab-ok"]),
+    )
+    assert parked.status == "awaiting_approval", parked.error
+    envelope = await preview_operation(
+        _operator(world.tenant),
+        {
+            "connector_id": SPACES_CONNECTOR_ID,
+            "op_id": "spaces.import",
+            "params": _params(_manifest()),
+        },
+    )
+    assert envelope["status"] == "ok", envelope
+    assert envelope["plan_shown"] is True
+    plan = envelope["proposed_effect"]["preview"]
+    assert _codes(plan)[("space", "lab-two")] == "two_owners"
+    assert await _count(Space) == 0
+
+
+async def _end_the_assignment(tenant_id: uuid.UUID) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        row = (await session.scalars(select(ResourceAssignment))).one()
+        await store.end_assignment(session, tenant_id=tenant_id, assignment_id=row.id)
+
+
+@pytest.mark.asyncio
+async def test_import_does_not_bring_back_an_ended_assignment(world: _World) -> None:
+    params = _params(_manifest(), only=["lab-ok"])
+    await spaces_import(_operator(world.tenant), None, params)
+    await _end_the_assignment(world.tenant)
+    ctx = PreviewContext(
+        descriptor=MagicMock(op_id="spaces.import"),
+        connector_instance=None,
+        operator=_operator(world.tenant),
+        target=None,
+        params=params,
+    )
+    preview = await build_import_preview(ctx)
+    assert preview is not None
+    assert _codes(preview)[("assignment", "demo-t1")] == "ended_in_meho"
+    answer = await spaces_import(_operator(world.tenant), None, params)
+    assert _codes(answer)[("assignment", "demo-t1")] == "ended_in_meho"
+    assert answer["counts"]["assignment"]["created"] == 0
+    assert _total(answer["counts"]) == answer["total_rows"]
+    async with get_sessionmaker()() as session:
+        current = await store.list_assignments(session, tenant_id=world.tenant)
+    assert current == []
+    assert await _count(ResourceAssignment) == 1
+
+
+@pytest.mark.asyncio
+async def test_import_does_not_bring_back_an_ended_membership(world: _World) -> None:
+    params = _params(_manifest(), only=["lab-ok"])
+    await spaces_import(_operator(world.tenant), None, params)
+    async with get_sessionmaker()() as session, session.begin():
+        space = (await session.scalars(select(Space))).one()
+        await store.end_member(
+            session,
+            tenant_id=world.tenant,
+            space_id=space.id,
+            member_issuer=_ISSUER,
+            member_sub="bob",
+        )
+    answer = await spaces_import(_operator(world.tenant), None, params)
+    assert _codes(answer)[("member", f"bob ({_ISSUER})")] == "ended_in_meho"
+    assert answer["counts"]["member"]["created"] == 0
+    async with get_sessionmaker()() as session, session.begin():
+        await store.end_member(
+            session,
+            tenant_id=world.tenant,
+            space_id=space.id,
+            member_issuer=_ISSUER,
+            member_sub="ann",
+        )
+    before = await _count(SpaceMember)
+    again = await spaces_import(_operator(world.tenant), None, params)
+    assert _codes(again)[("space", "lab-ok")] == "owner_ended_in_meho"
+    assert again["labs_written"] == 0
+    assert await _count(SpaceMember) == before

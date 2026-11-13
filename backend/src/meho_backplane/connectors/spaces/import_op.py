@@ -73,7 +73,13 @@ IMPORT_PARAMETERS: Final[dict[str, Any]] = {
                                 "items": {"type": "string"},
                                 "description": "Names of MEHO targets that belong to the lab.",
                             },
-                            "owner": {**_PERSON, "description": "The one owner of the lab."},
+                            "owner": {
+                                "anyOf": [_PERSON, {"type": "array", "items": _PERSON}],
+                                "description": (
+                                    "The owner of the lab: one person. A list of two or more "
+                                    "people is accepted and listed as a conflict."
+                                ),
+                            },
                             "users": {
                                 "type": "array",
                                 "items": _PERSON,

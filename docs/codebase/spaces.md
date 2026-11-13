@@ -111,6 +111,8 @@ and subject. Example with made-up names:
 }
 ```
 
+- `owner` is one person. A list of two or more people is accepted and
+  listed as the conflict `two_owners`.
 - `people` lists the accounts that exist. `display_name` is read but not
   stored; MEHO keeps no person record.
 - `only` (a list of lab names) imports part of the manifest. Other labs are
@@ -125,11 +127,14 @@ and subject. Example with made-up names:
   current owner record yet, or only a plain member record.
 - Lab-level conflicts skip the whole lab and list all its rows: `no_owner`,
   `two_owners`, `owner_has_no_account`, `duplicate_lab` (the name twice),
-  `space_disabled`, `owner_differs_in_meho`, `owner_disabled_in_meho`.
+  `space_disabled`, `owner_differs_in_meho`, `owner_disabled_in_meho`,
+  `owner_ended_in_meho`.
 - Row-level conflicts leave the rest of the lab to import: `unknown_target`,
-  `target_in_two_labs`, `assigned_elsewhere_in_meho`, `no_account`,
-  `disabled_in_meho`. The last three mean MEHO holds a newer record. The
-  import never brings back a disabled person or an old owner. A `write_failed`
+  `target_in_two_labs`, `assigned_elsewhere_in_meho`, `ended_in_meho`,
+  `no_account`, `disabled_in_meho`. `assigned_elsewhere_in_meho`,
+  `ended_in_meho` and `disabled_in_meho` mean MEHO holds a newer record. The
+  import never brings back a disabled person, an old owner, or an assignment
+  or membership that an administrator ended. A `write_failed`
   conflict lists a lab whose transaction failed.
 - The preview (the approval card, `preview_operation`) plans with the same
   code and writes nothing. Apply writes one transaction per lab and uses the

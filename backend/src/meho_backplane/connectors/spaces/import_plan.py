@@ -10,14 +10,15 @@ the labs (kind ``space``), the people, the target references and the users.
 The owner of a lab is part of its ``space`` row.
 
 A lab with a lab-level conflict (no owner, an owner without an account, two
-owners, the same name twice, a disabled space or owner in MEHO, or another
-owner in MEHO) is not imported: its space row and all its other rows are
-conflicts. A conflict on one target or one user leaves the rest of the lab
-to be imported.
+owners, the same name twice, a disabled space or owner in MEHO, an owner whose
+membership MEHO ended, or another owner in MEHO) is not imported: its space
+row and all its other rows are conflicts. A conflict on one target or one
+user leaves the rest of the lab to be imported.
 
 The import never brings back what an administrator ended: a person who is
-disabled in MEHO, a target that now belongs to another space, a disabled
-space, or another owner stay as they are and are listed.
+disabled in MEHO, a target that now belongs to another space, a target whose
+assignment or membership was ended, a disabled space, or another owner stay as
+they are and are listed.
 """
 
 from __future__ import annotations
@@ -154,9 +155,17 @@ async def _plan_users(
     rows: list[Row] = []
     actions: list[_Action] = []
     current: dict[PersonKey, Any] = {}
+    ended: set[PersonKey] = set()
     if space is not None:
-        members = await store.list_members(session, tenant_id=ctx.tenant_id, space_id=space.id)
-        current = {(m.member_issuer, m.member_sub): m for m in members}
+        members = await store.list_members(
+            session, tenant_id=ctx.tenant_id, space_id=space.id, include_history=True
+        )
+        for m in members:
+            key = (m.member_issuer, m.member_sub)
+            if m.valid_to is None:
+                current[key] = m
+            else:
+                ended.add(key)
     seen: set[PersonKey] = {owner}
     for user in lab.users:
         ref = _who(user)
@@ -170,7 +179,18 @@ async def _plan_users(
             )
             continue
         member = current.get(user)
-        if member is None:
+        if member is None and user in ended:
+            rows.append(
+                Row(
+                    "member",
+                    ref,
+                    lab.name,
+                    "conflict",
+                    "ended_in_meho",
+                    "MEHO ended this membership. The import does not bring it back.",
+                )
+            )
+        elif member is None:
             rows.append(Row("member", ref, lab.name, "created"))
             actions.append(_Action("set_member", {"key": user, "role": "member"}))
         elif member.state == "disabled":
@@ -189,15 +209,46 @@ async def _plan_users(
     return rows, actions
 
 
+async def _target_history(
+    session: AsyncSession, ctx: _Context
+) -> tuple[dict[uuid.UUID, uuid.UUID], set[uuid.UUID]]:
+    """The current space of each assigned target, and the targets with an ended row."""
+    owned: dict[uuid.UUID, uuid.UUID] = {}
+    ended: set[uuid.UUID] = set()
+    history = await store.list_assignments(session, tenant_id=ctx.tenant_id, include_history=True)
+    for a in history:
+        if a.kind != "target" or a.target_id is None:
+            continue
+        if a.valid_to is None:
+            owned[a.target_id] = a.space_id
+        else:
+            ended.add(a.target_id)
+    return owned, ended
+
+
+def _target_conflict(
+    ref: str,
+    target_id: uuid.UUID | None,
+    owned: dict[uuid.UUID, uuid.UUID],
+    ended: set[uuid.UUID],
+    ctx: _Context,
+) -> tuple[str, str] | None:
+    """The conflict of one target reference before it is compared to the space."""
+    if target_id is None:
+        return "unknown_target", "MEHO has no such target."
+    if ctx.target_lab_count[ref] > 1:
+        return "target_in_two_labs", "Two labs list it."
+    if target_id not in owned and target_id in ended:
+        return "ended_in_meho", "MEHO ended its assignment. The import does not bring it back."
+    return None
+
+
 async def _plan_targets(
     session: AsyncSession, lab: Lab, space: Space | None, ctx: _Context
 ) -> tuple[list[Row], list[_Action]]:
     rows: list[Row] = []
     actions: list[_Action] = []
-    owned: dict[uuid.UUID, uuid.UUID] = {}
-    for a in await store.list_assignments(session, tenant_id=ctx.tenant_id):
-        if a.kind == "target" and a.target_id is not None:
-            owned[a.target_id] = a.space_id
+    owned, ended = await _target_history(session, ctx)
     seen: set[str] = set()
     for ref in lab.targets:
         if ref in seen:
@@ -205,29 +256,10 @@ async def _plan_targets(
             continue
         seen.add(ref)
         target_id = ctx.targets.get(ref)
-        if target_id is None:
-            rows.append(
-                Row(
-                    "assignment",
-                    ref,
-                    lab.name,
-                    "conflict",
-                    "unknown_target",
-                    "MEHO has no such target.",
-                )
-            )
-        elif ctx.target_lab_count[ref] > 1:
-            rows.append(
-                Row(
-                    "assignment",
-                    ref,
-                    lab.name,
-                    "conflict",
-                    "target_in_two_labs",
-                    "Two labs list it.",
-                )
-            )
-        elif target_id not in owned:
+        conflict = _target_conflict(ref, target_id, owned, ended, ctx)
+        if conflict is not None:
+            rows.append(Row("assignment", ref, lab.name, "conflict", *conflict))
+        elif target_id is None or target_id not in owned:
             rows.append(Row("assignment", ref, lab.name, "created"))
             actions.append(_Action("assign", {"target_id": target_id, "name": ref}))
         elif space is not None and owned[target_id] == space.id:
@@ -259,8 +291,13 @@ async def _plan_space(
         return _blocked(lab, "space_disabled", "The space is disabled in MEHO.")
     if (space.owner_issuer, space.owner_sub) != owner:
         return _blocked(lab, "owner_differs_in_meho", "MEHO has another owner for this space.")
-    members = await store.list_members(session, tenant_id=ctx.tenant_id, space_id=space.id)
-    mine = next((m for m in members if (m.member_issuer, m.member_sub) == owner), None)
+    history = await store.list_members(
+        session, tenant_id=ctx.tenant_id, space_id=space.id, include_history=True
+    )
+    owner_rows = [m for m in history if (m.member_issuer, m.member_sub) == owner]
+    mine = next((m for m in owner_rows if m.valid_to is None), None)
+    if mine is None and owner_rows:
+        return _blocked(lab, "owner_ended_in_meho", "MEHO ended the owner's membership.")
     if mine is None or (mine.state == "active" and mine.role != "owner"):
         return Row("space", lab.name, lab.name, "changed"), [
             _Action("set_member", {"key": owner, "role": "owner"})

@@ -51,6 +51,7 @@ __all__ = [
     "agent_session_id_var",
     "audit_rejection_safe",
     "audit_safe",
+    "decode_work_ref_header",
     "descriptor_op_class",
     "parent_audit_id_var",
     "policy_decision_var",
@@ -170,6 +171,24 @@ work_ref_var: ContextVar[str | None] = ContextVar(
     "work_ref",
     default=None,
 )
+
+
+def decode_work_ref_header(raw: bytes) -> str | None:
+    """Return the text of a ``Meho-Work-Ref`` header value, or ``None``.
+
+    Clients send the header as UTF-8 (the CLI sends a ticket id such as
+    ``Änderung-7`` as its UTF-8 bytes). ASGI hands the raw bytes over, so
+    decode them as UTF-8 to keep the text the client sent. Bytes that are
+    not valid UTF-8 fall back to latin-1, which maps every byte, so an
+    older client's value still lands. The value is stripped; a blank
+    value returns ``None`` so the row's ``work_ref`` stays NULL.
+    """
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        decoded = raw.decode("latin-1")
+    return decoded.strip() or None
+
 
 #: The policy-gate verdict for the in-flight dispatch (#130). The
 #: dispatcher binds it (a :class:`PermissionVerdict` value string) right

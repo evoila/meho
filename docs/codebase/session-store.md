@@ -201,7 +201,8 @@ replacement never breaks the JSON. Other lines are checked as text.
   is not UTF-8 text, when a secret-like name still has a value, for
   example `"password": "..."` in JSON, or when a private key starts or
   ends in another upload. Variables (`${X}`), placeholders (`<x>`), short
-  values and markers do not count.
+  values, markers and values made only of mask characters (`*`, `•`, `●`,
+  `·`) do not count.
 
 A quarantined upload is stored (with the known secrets replaced) but only a
 tenant admin can download it. An operator gets `403

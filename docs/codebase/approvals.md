@@ -3100,7 +3100,9 @@ and the destructive-tier checks, at both park points (`_handle_needs_approval`
 and the composite sub-op seam `composite.enforce_subop_policy`). It
 returns `status="denied"` with `error_code="write_capability_denied"` and
 `extras` `path` / `granted` / `required` / `reason` / `doc_ref` (the write
-policy, `connector-vault-policy.md#6-kv-v2-write-surface`). So no person
+policy, `connector-vault-policy.md#6-kv-v2-write-surface`). A preflight of
+another vendor sets its own next step (`remediation`) and `doc_ref` in its
+result; the text then names them instead of the Vault write policy. So no person
 spends an approval on a write the identity cannot perform. The caller adds
 the write grant and calls again. Both park points still write one `denied`
 audit row for the attempt on the refused op's own path (the refusal details

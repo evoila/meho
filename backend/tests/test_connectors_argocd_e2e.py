@@ -261,7 +261,7 @@ async def _seed_argocd_target() -> TargetORM:
             host=_ARGOCD_HOST,
             port=443,
             fqdn=None,
-            secret_ref="rdc-hetzner-dc/argocd/api-token",
+            secret_ref="example-site/argocd/api-token",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},

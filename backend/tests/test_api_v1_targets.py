@@ -90,7 +90,7 @@ async def test_list_targets_returns_targets(client: TestClient) -> None:
     )
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rdc-vault",
+        name="vault-a",
         product="vault",
         host="10.1.0.2",
     )
@@ -104,7 +104,7 @@ async def test_list_targets_returns_targets(client: TestClient) -> None:
     assert response.status_code == 200
     names = {t["name"] for t in response.json()["items"]}
     assert "example-vcenter" in names
-    assert "rdc-vault" in names
+    assert "vault-a" in names
 
 
 @pytest.mark.asyncio
@@ -1061,7 +1061,7 @@ def test_create_target_unknown_product_lists_all_valid(client: TestClient) -> No
 # ---------------------------------------------------------------------------
 # #1814 (Initiative #1810) — SDDC product realigned to the short token
 #
-# RDC #789 Finding 6 originally caught that ``meho connector list``
+# A consumer report originally caught that ``meho connector list``
 # emits ``product="sddc"`` (parser-derived, load-bearing for the #773
 # connector_id round-trip) while ``POST /api/v1/targets`` validated
 # against the registry's then-canonical ``"sddc-manager"`` — bridged by
@@ -1298,9 +1298,9 @@ def test_create_target_with_version_persisted(client: TestClient) -> None:
     {"name": "test-vc", "product": "vmware", "version": "9.0", ...}``
     → 201 with ``version: "9.0"`` in the response body.
 
-    The replays the v0.7.0 dogfood signal-6 reproducer (RDC #753):
-    operator knows the target's product version up-front (consumer
-    deployed vCenter 9.0 in `rdc-hetzner-dc`) and seeds it at create
+    This replays the v0.7.0 dogfood signal-6 reproducer from a consumer
+    report: the operator knows the target's product version up-front (the
+    consumer deployed vCenter 9.0 in a lab) and seeds it at create
     time so the very first dispatch resolves the versioned connector
     without round-tripping through PATCH.
     """
@@ -1418,8 +1418,8 @@ def test_create_target_unknown_preferred_impl_id_returns_422(
 ) -> None:
     """POST with an unregistered ``preferred_impl_id`` returns a structured 422.
 
-    G0.15-T6 (#1215) acceptance criterion: the v0.7.0 dogfood (RDC
-    #753) caught operators PATCHing typo'd ``preferred_impl_id`` values
+    G0.15-T6 (#1215) acceptance criterion: the v0.7.0 dogfood (a
+    consumer report) caught operators PATCHing typo'd ``preferred_impl_id`` values
     (e.g. ``"vmware-rest"`` instead of the full ``"vmware-rest-9.0"``)
     and the resolver silently ignored them. This validator surfaces
     the foot-gun at write time with the same error-message-shape as

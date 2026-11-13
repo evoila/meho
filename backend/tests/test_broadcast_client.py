@@ -276,7 +276,7 @@ class TestClientLifecycle:
 
 
 class TestBlockingClientLifecycle:
-    """Singleton + dispose semantics for the long-poll client (RDC #789 N1 / #1353)."""
+    """Singleton + dispose semantics for the long-poll client (#1353)."""
 
     def test_singleton_returns_same_instance(self, _broadcast_env: None) -> None:
         first = get_broadcast_blocking_client()

@@ -854,7 +854,7 @@ async def test_explicit_mount_path_override_wins_over_settings(
 ) -> None:
     """An explicit ``mount_path`` logs in against that JWT auth mount.
 
-    The ``rdc-vault-teardown`` target's role lives on the ``jwt-meho`` auth
+    The ``vault-teardown`` target's role lives on the ``jwt-meho`` auth
     mount (``extras["vault_mount"]``); absent, the settings-global mount
     stands. The role is untouched when only the mount is overridden.
     """

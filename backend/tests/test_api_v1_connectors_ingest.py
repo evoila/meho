@@ -806,7 +806,7 @@ async def test_list_operation_count_includes_typed_and_composite(
 ) -> None:
     """The ``operation_count`` rollup counts typed + composite rows, not only ingested.
 
-    Regression for Signal #4 in the 2026-05-20 RDC v0.3.0 dogfood (#728):
+    Regression for Signal #4 in the 2026-05-20 consumer v0.3.0 dogfood (#728):
     ``_operation_count_by_connector`` used to filter ``source_kind ==
     "ingested"``, so typed connectors like ``bind9-ssh-9.x`` /
     ``k8s-1.x`` / ``vault-1.x`` -- whose groups surface (the groups
@@ -975,7 +975,7 @@ async def test_list_surfaces_register_connector_v2_only_entries(
       ``state="ingested"`` without a ``connector_id`` change.
 
     #1814 (Initiative #1810) — the SDDC connector registers under the
-    short, dispatch-canonical ``"sddc"`` token (RDC #789 Finding 6's
+    short, dispatch-canonical ``"sddc"`` token (a consumer report's
     original ``"sddc" -> "sddc-manager"`` alias, added in G0.18-T2
     #1355, was dropped). So an operator copying ``product`` out of this
     listing into ``POST /api/v1/targets`` succeeds directly: ``"sddc"``
@@ -1334,7 +1334,7 @@ async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
 ) -> None:
     """Catalog-hit + ``catalog_ingest="spec-only"``: row carries the ``--spec`` verb.
 
-    G0.18-T8 (#1361) / RDC #789 N8. The meho-automation add-on row ships
+    G0.18-T8 (#1361), from a consumer report. The meho-automation add-on row ships
     with ``catalog_ingest: spec-only`` because no MEHO-authored spec ships
     for it (the OpenAPI is read from the live add-on at registration), so
     it cannot drive ``meho connector ingest --catalog`` server-side. The
@@ -1480,7 +1480,7 @@ async def test_list_drops_stale_impl_id_rows_whose_connector_id_will_not_resolve
 ) -> None:
     """A stale-rename row that won't round-trip is filtered out.
 
-    G0.9.1-T1 (#773) regression for Signal #6 in the 2026-05-21 RDC
+    G0.9.1-T1 (#773) regression for Signal #6 in the 2026-05-21 consumer
     v0.3.1 dogfood. The consumer deploy carried ``operation_group`` /
     ``endpoint_descriptor`` rows under ``impl_id="kubernetes-asyncio"``
     from the G3.2 (#320) ship, but the connector now registers under
@@ -3134,7 +3134,7 @@ def test_ingest_async_cross_tenant_tenant_id_rejected_403_no_job(
                 "specs": [{"uri": "https://specs.test/never-fetched.yaml"}],
                 "tenant_id": str(other_tenant),
                 # Explicit for readability — async=true is also the
-                # default, i.e. the exact shape the RDC consumer hit.
+                # default, i.e. the exact shape the consumer hit.
                 "async": True,
             },
             headers=_authed(token),

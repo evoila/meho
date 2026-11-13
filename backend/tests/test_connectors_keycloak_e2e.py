@@ -229,7 +229,7 @@ async def _seed_keycloak_target() -> TargetORM:
             host=_KC_HOST,
             port=443,
             fqdn=None,
-            secret_ref="rdc-hetzner-dc/keycloak/admin",
+            secret_ref="example-site/keycloak/admin",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={"managed_realm": "example"},

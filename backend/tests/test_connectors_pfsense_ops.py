@@ -1226,7 +1226,7 @@ def test_pfsense_ops_requires_approval_only_for_governed_ops() -> None:
 # A two-leg pfctl -ss fixture in the REAL captured pfSense 2.7 format: field
 # order is <iface> <proto> <ep1>:<p1> <-|-> <ep2>:<p2>  <state>:<state> (pf
 # state format, redmine #2121; matches the lab's own live classifier
-# `rdc-hetzner-dc/scripts/pfsense-meho-measure-report.sh` -- `$2=="tcp"`,
+# script -- `$2=="tcp"`,
 # `<if> tcp <ep1> <-|-> <ep2>`). Inbound management connections render as
 # `<if> tcp <server:mgmtport> <- <client:highport>`; the classifier resolves
 # the server from the direction arrow (`->` server = dst, `<-` server = src),

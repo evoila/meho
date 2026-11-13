@@ -960,7 +960,7 @@ async def test_target_filter_resolves_by_name(session: AsyncSession) -> None:
     """``target="example-vcenter"`` resolves through the targets table by name."""
     tenant_id = uuid.uuid4()
     target_id = await _seed_target(session, tenant_id=tenant_id, name="example-vcenter")
-    other_target_id = await _seed_target(session, tenant_id=tenant_id, name="rdc-vault")
+    other_target_id = await _seed_target(session, tenant_id=tenant_id, name="vault-a")
     await session.commit()
 
     await _seed_audit_row(

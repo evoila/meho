@@ -236,8 +236,7 @@ def test_unparseable_bearer_token_returns_malformed_jws() -> None:
     """A non-JWT bearer surfaces the structural-break code ``malformed_jws``.
 
     Reproduces the consumer's v0.6.0 dogfood signal
-    (`rdc-hetzner-dc/meho-signals/auth-invalid-token-opaque-error.yaml`,
-    G0.13-T1 #1131): the probe ``curl -H "Authorization: Bearer
+    (G0.13-T1 #1131): the probe ``curl -H "Authorization: Bearer
     not-a-real-jwt" .../api/v1/health`` previously returned bare
     ``{"detail":"invalid_token"}`` because authlib's
     :class:`DecodeError` (raised on the segment-count check before

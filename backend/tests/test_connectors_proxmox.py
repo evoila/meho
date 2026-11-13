@@ -105,7 +105,7 @@ def _fake_target() -> _FakeTarget:
         name=_TARGET_NAME,
         host=_PVE_HOST,
         port=_PVE_PORT,
-        secret_ref="rdc/proxmox/token",
+        secret_ref="site/proxmox/token",
         auth_model="shared_service_account",
     )
 
@@ -263,7 +263,7 @@ async def test_rejects_unsupported_auth_model() -> None:
         name=_TARGET_NAME,
         host=_PVE_HOST,
         port=_PVE_PORT,
-        secret_ref="rdc/proxmox/token",
+        secret_ref="site/proxmox/token",
         auth_model="per_user",
     )
     try:
@@ -418,7 +418,7 @@ async def _seed_target() -> None:
                 host=_PVE_HOST,
                 port=_PVE_PORT,
                 fqdn=None,
-                secret_ref="rdc/proxmox/token",
+                secret_ref="site/proxmox/token",
                 auth_model="shared_service_account",
                 vpn_required=False,
                 extras={},

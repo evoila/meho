@@ -67,7 +67,7 @@ _NEW_USER_UUID = "66666666-6666-6666-6666-666666666666"
 #: security assertion is that this string never escapes into the op
 #: result, the audit params view, or the broadcast payload.
 _PASSWORD_SENTINEL = "vault-sourced-password-DO-NOT-LEAK"
-_PASSWORD_SECRET_REF = "rdc-hetzner-dc/keycloak/operator-a-password"
+_PASSWORD_SECRET_REF = "example-site/keycloak/operator-a-password"
 
 _OPERATOR_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000ae")
 _OPERATOR = Operator(
@@ -188,7 +188,7 @@ async def _seed_keycloak_target() -> TargetORM:
             host=_KC_HOST,
             port=443,
             fqdn=None,
-            secret_ref="rdc-hetzner-dc/keycloak/admin",
+            secret_ref="example-site/keycloak/admin",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={"managed_realm": "example"},

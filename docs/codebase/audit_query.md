@@ -132,7 +132,9 @@ to the database:
   uses (the `client` block and the caller's name included).
 
 On a problem the call is refused with `audit_row_invalid`. `extras.field`
-names the value (never its content). Nothing is sent to the target, no
+names the value (never its content). A payload value is named by its path,
+for example `payload.principal_name`. A key that cannot be stored is named by
+its position (`payload.<key 1>`), so the refusal never holds the bad text. Nothing is sent to the target, no
 approval request is made and no row is written. All ways into the
 dispatcher pass through this one check. `audit_commit_failed` stays for a
 database that is not reachable after the call, and for what is known only

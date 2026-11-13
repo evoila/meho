@@ -10,13 +10,14 @@ already hold the change. Now the call is refused first, with
 ``audit_row_invalid`` naming the field.
 
 The tests cover each way into the dispatcher (a direct call, a step of a
-multi-step operation, a call resumed after approval, and ``call_operation``,
-which runbook steps, the scheduler and hosted agent runs use). In each one
-the fake target records zero calls.
+multi-step operation, a call resumed after approval, and ``call_operation``).
+In each one the fake target records zero calls. The runbook, scheduler and
+hosted agent paths have their own tests in ``test_audit_row_precheck_paths.py``.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -27,6 +28,7 @@ from uuid import UUID
 import pytest
 import sqlalchemy as sa
 from sqlalchemy import select
+from starlette.responses import JSONResponse
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
@@ -37,11 +39,13 @@ from meho_backplane.db.engine import get_engine, get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
 from meho_backplane.operations import (
     DispatchChild,
+    audit_row_precheck,
     dispatch,
     register_typed_operation,
     reset_dispatcher_caches,
 )
 from meho_backplane.operations._audit import step_id_var, work_ref_var
+from meho_backplane.operations._errors import result_audit_row_invalid
 from meho_backplane.operations.audit_row_precheck import (
     AFTER_CALL_JSON_COLUMNS,
     CHECKED_JSON_COLUMNS,
@@ -293,6 +297,43 @@ def test_a_bad_value_in_the_payload_is_named_with_its_path() -> None:
     assert problem.field == "payload.principal_name"
 
 
+@pytest.mark.parametrize(
+    ("bad_key", "field"),
+    [
+        ("bad\ud800key", "payload.<key 1>"),
+        ("bad\x00key", "payload.<key 1>"),
+    ],
+    ids=["lone-surrogate-key", "nul-key"],
+)
+def test_a_bad_key_is_named_by_its_position(
+    monkeypatch: pytest.MonkeyPatch, bad_key: str, field: str
+) -> None:
+    """The refusal never copies a bad key, so it can still be sent as JSON."""
+    monkeypatch.setattr(
+        audit_row_precheck,
+        "_build_audit_payload",
+        lambda *_args: {"params_hash": "ab", bad_key: {"inner": "ok"}},
+    )
+    problem = audit_row_problem(operator=_operator(), descriptor=_descriptor(), params_hash="ab")
+    assert problem is not None
+    assert problem.field == field
+    result = result_audit_row_invalid(WRITE_OP_ID, problem.field, problem.reason, 1.0)
+    body = JSONResponse(result.model_dump(mode="json")).body
+    assert b"bad" not in body
+    assert json.loads(body)["extras"]["field"] == field
+
+
+def test_a_bad_value_under_a_bad_key_keeps_the_safe_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        audit_row_precheck,
+        "_build_audit_payload",
+        lambda *_args: {"good": [{"x\ud800": "v"}]},
+    )
+    problem = audit_row_problem(operator=_operator(), descriptor=_descriptor(), params_hash="ab")
+    assert problem is not None
+    assert problem.field == "payload.good[0].<key 0>"
+
+
 def test_a_long_text_is_allowed_where_no_index_holds_it() -> None:
     long_name = "n" * (INDEX_TEXT_MAX_BYTES + 100)
     operator = _operator().model_copy(update={"name": long_name})
@@ -436,10 +477,8 @@ async def test_a_call_resumed_after_approval_is_refused(embedding: AsyncMock) ->
     _assert_refused(result, "operator_sub")
 
 
-async def test_call_operation_is_refused_for_runbook_scheduler_and_agent_runs(
-    embedding: AsyncMock,
-) -> None:
-    """Those three paths call ``call_operation``; a bad ticket id stops it too."""
+async def test_call_operation_is_refused_before_the_call(embedding: AsyncMock) -> None:
+    """A bad ticket id given to ``call_operation`` stops the call too."""
     await _register_ops(embedding)
     result = await call_operation(
         _operator(),

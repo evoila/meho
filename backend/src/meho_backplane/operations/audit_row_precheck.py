@@ -93,14 +93,22 @@ def _text_reason(value: str, *, indexed: bool) -> str | None:
 
 
 def _texts_in(value: Any, path: str) -> Iterator[tuple[str, str]]:
-    """Yield ``(field, text)`` for every key and string value inside *value*."""
+    """Yield ``(field, text)`` for every key and string value inside *value*.
+
+    The field is built from keys, so a key that cannot be stored is never put
+    into it: that entry is named by its position, as ``<path>.<key N>``.
+    Otherwise the refusal would hold the same bad text and could not be sent.
+    """
     if isinstance(value, str):
         yield path, value
     elif isinstance(value, dict):
-        for key, item in value.items():
-            if isinstance(key, str):
-                yield f"{path}.{key}", key
-            yield from _texts_in(item, f"{path}.{key}")
+        for position, (key, item) in enumerate(value.items()):
+            if isinstance(key, str) and _text_reason(key, indexed=False) is not None:
+                key_path = f"{path}.<key {position}>"
+                yield key_path, key
+            else:
+                key_path = f"{path}.{key}"
+            yield from _texts_in(item, key_path)
     elif isinstance(value, list | tuple):
         for index, item in enumerate(value):
             yield from _texts_in(item, f"{path}[{index}]")

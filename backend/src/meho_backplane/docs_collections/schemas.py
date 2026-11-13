@@ -15,7 +15,7 @@ Two read models cover the registry's wire contract:
   plus the operator-facing liveness fields (``status`` /
   ``last_ingested_at`` / ``doc_count`` / ``readiness``). The
   ``backend`` record is **omitted** by design — the backend
-  (``vertex-rag`` / ``meho-knowledge``) is resolved server-side and
+  (``vertex-rag`` / a self-hosted store) is resolved server-side and
   never appears in a catalogue response (#1548 backend-agnostic
   contract). Frozen.
 

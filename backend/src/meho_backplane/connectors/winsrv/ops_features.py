@@ -7,7 +7,7 @@ The Windows Server role/feature surface is driven by the ``ServerManager``
 module (``Get-WindowsFeature`` / ``Install-WindowsFeature`` /
 ``Uninstall-WindowsFeature``) over the shared PowerShell-over-SSH transport.
 This is the c1sql1 ``Install-WindowsFeature`` path
-(evoila-bosnia/claude-rdc-hetzner-dc#2789) — the Failover-Clustering role
+ — the Failover-Clustering role
 install that today rides ungoverned ``govc guest.run``.
 
 ``install`` is ``caution`` (additive, recoverable). ``remove`` was promoted to

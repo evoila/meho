@@ -983,7 +983,7 @@ def _maybe_build_class_only_item(
             # so the operator's ingest finds the real connector class and
             # runs a real version-coverage pre-flight; register-time row
             # reconciliation persists the rows under the dispatch product,
-            # so it still round-trips dispatchably (claude-rdc-hetzner-dc#1136).
+            # so it still round-trips dispatchably.
             catalog=catalog,
             registry_product=registry_product,
             registry_version=registry_version,

@@ -98,7 +98,7 @@ class ServiceGrantCreate(BaseModel):
         max_length=512,
         description=(
             "Target selector (#3349): match any dispatch whose target name "
-            "matches this fnmatch glob (e.g. 'esx-dc*'). Requires target_id "
+            "matches this fnmatch glob (e.g. 'esx-site*'). Requires target_id "
             "to be null. This glob is the explicit any-target request — it is "
             "never implied by a null target_id."
         ),

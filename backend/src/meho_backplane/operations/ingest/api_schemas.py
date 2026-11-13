@@ -314,7 +314,7 @@ class IngestRequest(BaseModel):
     #: exclusive with ``catalog_entry`` (the catalog row carries its
     #: own band) — see the ``catalog_entry_conflict`` validator below.
     #:
-    #: T1 (#1646) — the vRLI catch-22 (claude-rdc-hetzner-dc#1136):
+    #: T1 (#1646) — the vRLI catch-22:
     #: the version-stable ``/api/v2`` surface self-identifies as
     #: ``info.version="v2"`` while the seeded ``VcfLogsConnector``
     #: label is ``9.0``; no label ingested the canonical artifact
@@ -1305,7 +1305,7 @@ class EnableReadsResponse(BaseModel):
 #: spelling; the route layer projects ``IngestJob`` rows through the
 #: response models defined below.
 #:
-#: ``degraded`` (G0.24 / claude-rdc-hetzner-dc#1136) is terminal-but-not-
+#: ``degraded`` (G0.24) is terminal-but-not-
 #: green: the pipeline ran to completion yet persisted nothing the
 #: dispatcher can resolve, so the job carries both ``ingestion`` counts
 #: and a structured ``error_class`` (``ingested_not_dispatchable``).

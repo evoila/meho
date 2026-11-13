@@ -143,7 +143,7 @@ def test_argocd_connector_subclasses_http_connector() -> None:
     assert ArgoCdConnector.product == "argocd"
     assert ArgoCdConnector.version == "3.x"
     assert ArgoCdConnector.impl_id == "argocd-api"
-    assert ArgoCdConnector.supported_version_range == ">=2.0,<4.0"
+    assert ArgoCdConnector.supported_version_range == ">=3.0,<4.0"
     assert ArgoCdConnector.priority == 1
 
 

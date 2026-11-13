@@ -157,8 +157,12 @@ a standing grant covers such an operation:
 - At call time the gate never lets a run approval or a standing grant clear
   a marked operation.
 
-Marked today: `msad.group.add-member` and `msad.group.remove-member`. A group
-membership gives rights in the domain.
+Marked today:
+
+- `msad.group.add-member` and `msad.group.remove-member`. A group
+  membership gives rights in the domain.
+- `secret.move`. A move writes a secret into a store or into a file on a
+  host, so a person checks each place and owner.
 
 ## Approver routing
 

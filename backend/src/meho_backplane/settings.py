@@ -96,6 +96,12 @@ AGENT_MODEL_BACKENDS: Final[tuple[str, ...]] = ("anthropic", "openai", "bedrock"
 #: keeps it and logs what ``on`` would refuse; ``on`` refuses the call.
 AGENT_GRANT_REQUIRED_MODES: Final[tuple[str, ...]] = ("off", "observe", "on")
 
+#: The values ``APPROVAL_SIGN_IN_LEVEL`` accepts (#6281). ``off`` keeps the
+#: checks of an approval sign-in as before; ``observe`` also logs a token
+#: without the approval level; ``required`` refuses it; ``auto`` (the
+#: default) refuses it when the realm gives the level, else observes.
+APPROVAL_SIGN_IN_LEVEL_MODES: Final[tuple[str, ...]] = ("off", "observe", "auto", "required")
+
 #: Truthy spellings accepted by :func:`_parse_bool`. Anything else
 #: (including the empty string and "disabled") is treated as ``False``
 #: so a misconfigured env var never silently enables a guarded surface.
@@ -1314,6 +1320,19 @@ class Settings(BaseModel):
         on the command line or REST counts as a fresh sign-in. An ``acr``
         alone never replaces a recent ``auth_time``. Comma-separated, via
         ``APPROVAL_ONE_TIME_CODE_ACR_VALUES``.
+    approval_sign_in_level:
+        Whether an approve on the command line or REST needs the approval
+        level in the token's ``acr`` claim (#6281). Only the approval
+        sign-in flow of the realm gives the level ``meho-approve``; the
+        passkey touch level ``meho-touch`` counts too. ``off``: the checks
+        as before. ``observe``: the same, and MEHO logs
+        ``approval_sign_in_level_missing`` for a token without the level.
+        ``required``: such a token gets the same ``401`` as an old
+        sign-in. ``auto`` (the default): ``observe`` only while MEHO's
+        check of the approval sign-in (``approvals.sign_in`` in
+        ``/api/v1/health``) shows for sure that the realm does not give the
+        level, else ``required``, also when the check failed. Any other value
+        stops the start. Set via ``APPROVAL_SIGN_IN_LEVEL``.
     approval_allow_delegated_decision:
         Lab-class switch for **delegated** approval decisions (#3693).
         A delegated decision is an approve or reject whose ``reason``
@@ -1966,6 +1985,9 @@ class Settings(BaseModel):
     approval_presence_touch_valid_seconds: int = Field(default=120, ge=30, le=600)
     # #3979 -- the acr values that mean a one-time code step. Empty = off.
     approval_one_time_code_acr_values: tuple[str, ...] = ()
+    # #6281 -- does an approve on the command line or REST need the
+    # approval level in ``acr``? off | observe | auto | required.
+    approval_sign_in_level: str = "auto"
     # #4622 -- sandbox mode: a standing grant may also cover deletes, only
     # on an instance for disposable test systems. Both read at boot only.
     sandbox_mode: bool = False
@@ -2707,6 +2729,19 @@ class Settings(BaseModel):
             raise ValueError(f"AGENT_GRANT_REQUIRED must be one of: {allowed}. Got: {value!r}")
         return value
 
+    @field_validator("approval_sign_in_level")
+    @classmethod
+    def _approval_sign_in_level_must_be_known(cls, value: str) -> str:
+        """Stop the start when ``APPROVAL_SIGN_IN_LEVEL`` is not off, observe, auto or required.
+
+        A typo must not turn the approval level check off, so an unknown
+        value fails at startup.
+        """
+        if value not in APPROVAL_SIGN_IN_LEVEL_MODES:
+            allowed = ", ".join(APPROVAL_SIGN_IN_LEVEL_MODES)
+            raise ValueError(f"APPROVAL_SIGN_IN_LEVEL must be one of: {allowed}. Got: {value!r}")
+        return value
+
     @field_validator("result_cache_redis_url")
     @classmethod
     def _result_cache_url_must_use_supported_scheme(cls, value: str) -> str:
@@ -3323,6 +3358,9 @@ def get_settings() -> Settings:
             for chunk in os.environ.get("APPROVAL_ONE_TIME_CODE_ACR_VALUES", "").split(",")
             if chunk.strip()
         ),
+        # #6281 -- does an approve need the approval level in acr?
+        approval_sign_in_level=os.environ.get("APPROVAL_SIGN_IN_LEVEL", "").strip().lower()
+        or "auto",
         # #4622 -- sandbox mode is off unless both settings are set; the
         # boot guards in ``meho_backplane.sandbox_mode`` check them.
         sandbox_mode=parse_bool_env(

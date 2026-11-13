@@ -138,6 +138,10 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │       error_code=target_connector_mismatch (same answer and order as
         │       /call: before the catalog choice and before the check before
         │       the wait for approval, no audit row, #5948)
+        ├─ the target's known version is outside its connector's
+        │       supported_version_range ? → status=error error_code=no_connector
+        │       (same answer and order as /call; the error names the range;
+        │       no audit row; operations/_target_version_range.py)
         ├─ choose_catalog_for_target → sibling fits ? → use the sibling (#3600)
         │       → refused ? → status=error error_code=unqualified_target_version
         │       (same reason and target fields as dispatch, no audit row, #4984;

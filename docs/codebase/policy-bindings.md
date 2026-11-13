@@ -77,20 +77,24 @@ another case.
    - No binding matches: the login keeps the kind MEHO works out today
      (from the token's `tenant_role`, `approver` and the self-approval
      group).
+   - The bindings that match give two kinds (for example `Operators` and
+     `SA-Operators`, or `Operators` and `Readers`): the login is refused
+     with `401 multiple_bound_kinds`. A login gets one kind per tenant, as
+     today. This check counts every binding that matches, also one of
+     another base level. So a person in groups of two base levels (for
+     example two subgroups, `/MEHO-Operators/Network` and
+     `/MEHO-Readers/Storage`, both bound) is refused, whatever role the
+     token carries.
    - One base level per login stays. Vault reads the `tenant_role` claim of
-     the token, so a binding never changes the role. A binding whose kind
-     has another role than the token (for example `Admins` for an
-     `operator` token) is left out and logged as
-     `policy_binding_other_base_level`.
-   - The bindings that are left give one kind: the login gets the
-     `approver` and `self_approver` flags of that kind (`group_grant` in
-     `auth/operator.py`), `bound_kind` and the categories of all these
-     bindings together. `"*"` means every category. A machine login never
-     gets either flag. A token with a bad `meho_tenants` claim never gets
-     `self_approver`.
-   - They give two kinds (for example `Operators` and `SA-Operators`): the
-     login is refused with `401 multiple_bound_kinds`. A login gets one
-     kind per tenant, as today.
+     the token, so a binding never changes the role. When the one kind
+     that matches has another role than the token (for example `Admins`
+     for an `operator` token), it is left out and logged as
+     `policy_binding_other_base_level`. The login keeps today's kind.
+   - Else the login gets the `approver` and `self_approver` flags of that
+     kind (`group_grant` in `auth/operator.py`), `bound_kind` and the
+     categories of all these bindings together. `"*"` means every
+     category. A machine login never gets either flag. A token with a bad
+     `meho_tenants` claim never gets `self_approver`.
 6. A stored `bindings` section that cannot be read (changed outside MEHO)
    gives the login the kind with the fewest rights of its base level
    (`Readers`, `Operators` or `Admins`), no category and no flag. MEHO logs

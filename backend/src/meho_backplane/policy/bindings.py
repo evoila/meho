@@ -30,12 +30,14 @@ The rules (:func:`bind`):
 
 * MEHO matches the bindings after it chose the current tenant, with the
   bindings of that tenant. The token parser reads no database.
-* One base level per login stays. Vault reads the ``tenant_role`` claim
-  of the token, so a binding never changes the role. A binding whose kind
-  has another role than the token is left out and logged.
 * A login gets one kind per tenant, as today. When the bindings that
   match give two kinds, the login is refused with 401
-  ``multiple_bound_kinds``.
+  ``multiple_bound_kinds``. This counts every binding that matches, also
+  one of another base level, so groups of two base levels never pass.
+* One base level per login stays. Vault reads the ``tenant_role`` claim
+  of the token, so a binding never changes the role. When the one kind
+  that matches has another role than the token, it is left out and
+  logged.
 * The kind sets the ``approver`` and ``self_approver`` flags of the login
   (:func:`~meho_backplane.auth.operator.group_grant`). The categories of
   all matching bindings add up. ``"*"`` means every category.
@@ -269,6 +271,15 @@ def bind(
     principal = _PRINCIPAL_NAMES[operator.principal_kind]
     matched = [entry for entry in entries if entry.matches(principal, paths, attributes)]
     log = structlog.get_logger(__name__)
+    kinds = sorted({entry.kind for entry in matched}, key=lambda kind: GROUP_KINDS.index(kind))
+    if len(kinds) > 1:
+        log.warning(
+            "multiple_bound_kinds",
+            operator_sub=operator.sub,
+            kinds=[kind.value for kind in kinds],
+            bindings=[entry.ref for entry in matched],
+        )
+        raise BoundKindConflictError(kinds)
     usable: list[BindingEntry] = []
     for entry in matched:
         if group_grant(entry.kind).role == operator.tenant_role:
@@ -283,19 +294,10 @@ def bind(
         )
     if not usable:
         return operator
-    kinds = sorted({entry.kind for entry in usable}, key=lambda kind: GROUP_KINDS.index(kind))
-    if len(kinds) > 1:
-        log.warning(
-            "multiple_bound_kinds",
-            operator_sub=operator.sub,
-            kinds=[kind.value for kind in kinds],
-            bindings=[entry.ref for entry in usable],
-        )
-        raise BoundKindConflictError(kinds)
     categories = frozenset().union(*(entry.categories for entry in usable))
     if ALL_CATEGORIES in categories:
         categories = frozenset({ALL_CATEGORIES})
-    return _with_kind(operator, kinds[0], categories)
+    return _with_kind(operator, usable[0].kind, categories)
 
 
 def _with_kind(operator: Operator, kind: RoleGroup, categories: frozenset[str]) -> Operator:

@@ -347,6 +347,15 @@ def test_two_kinds_in_one_tenant_refuse_the_login() -> None:
     )
 
 
+@pytest.mark.parametrize("role", [TenantRole.READ_ONLY, TenantRole.OPERATOR])
+def test_kinds_of_two_base_levels_refuse_the_login(role: TenantRole) -> None:
+    readers = _entry(RoleGroup.READERS, {"*"}, group="/MEHO-Readers/Storage")
+    claims = {"groups": ["/MEHO-Operators/Network", "/MEHO-Readers/Storage"]}
+    with pytest.raises(BoundKindConflictError) as caught:
+        bind(_operator(tenant_role=role), claims, [_NETWORK, readers])
+    assert caught.value.kinds == (RoleGroup.READERS, RoleGroup.SA_OPERATORS)
+
+
 def test_a_kind_of_another_base_level_is_left_out() -> None:
     admins = _entry(RoleGroup.ADMINS, {"*"}, group="/MEHO-Operators/Network")
     before = _operator()
@@ -559,6 +568,46 @@ async def test_two_kinds_give_a_401(monkeypatch: pytest.MonkeyPatch) -> None:
         _switch_off(monkeypatch)
         operator = await jwt_module.verify_jwt_for_audience("Bearer a.b.c", expected_audience="m")
         assert operator.bound_kind is None
+    finally:
+        await _store(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["read_only", "operator"])
+async def test_subgroups_of_two_base_levels_give_a_401(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    await _store(
+        {
+            "bindings": [
+                *_STORED["bindings"],
+                {
+                    "match": {"group": "/MEHO-Readers/Storage"},
+                    "kind": "Readers",
+                    "categories": ["*"],
+                },
+            ]
+        }
+    )
+    claims = {
+        "sub": "person-1",
+        "tenant_id": str(_TENANT),
+        "tenant_role": role,
+        "groups": ["/MEHO-Operators/Network", "/MEHO-Readers/Storage"],
+    }
+
+    async def _decoded(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return claims
+
+    monkeypatch.setattr(jwt_module, "_decode_with_kid_rotation", _decoded)
+    try:
+        with pytest.raises(HTTPException) as caught:
+            await jwt_module.verify_jwt_for_audience("Bearer a.b.c", expected_audience="meho")
+        assert caught.value.status_code == 401
+        assert str(caught.value.detail).startswith(
+            "multiple_bound_kinds: this login matches bindings with 2 group kinds "
+            "(Readers, SA-Operators)"
+        )
     finally:
         await _store(None)
 

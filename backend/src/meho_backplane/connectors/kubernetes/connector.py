@@ -471,6 +471,9 @@ class KubernetesConnector(Connector):
     product = "k8s"
     version = "1.x"
     impl_id = "k8s"
+    # Kubernetes lines that are supported upstream (1.35 to 1.37) plus the
+    # 1.32 line that CI tests today. Older targets get a clear fit warning.
+    supported_version_range = ">=1.32,<1.38"
 
     def __init__(
         self,

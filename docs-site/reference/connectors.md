@@ -28,7 +28,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `harbor-rest-2.x` | `harbor` | — | >=2.0,<3.0 | not yet recorded | generic | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-harbor.md) |
 | `hetzner-rest-2026.04` | `hetzner` | — | Hetzner Robot has no product version. The connector version 2026.04 is a date. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-hetzner-robot.md) |
 | `hyperv-ssh-2022.x` | `hyperv` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-hyperv.md) |
-| `k8s-1.x` | `k8s` | — | no range stated | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-kubernetes.md) |
+| `k8s-1.x` | `k8s` | — | >=1.32,<1.38 | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-kubernetes.md) |
 | `keycloak-admin-26.x` | `keycloak` | — | >=26.0,<27.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-keycloak.md) |
 | `linux-ssh-1.x` | `linux` | — | Any Linux host that runs systemd fits. A rule for the distribution applies, not a range. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-linux.md) |
 | `loki-api-3.x` | `loki` | — | >=2.9,<4.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-loki.md) |
@@ -41,7 +41,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `prometheus-api-2.x` | `prometheus` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-prometheus.md) |
 | `proxmox-api-8.x` | `proxmox` | — | >=7.0,<9.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-proxmox.md) |
 | `rabbitmq-management-3.x` | `rabbitmq` | — | >=3.8,<5.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rabbitmq.md) |
-| `rke2-ssh-1.x` | `rke2` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rke2.md) |
+| `rke2-ssh-1.x` | `rke2` | — | >=1.32,<1.38 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rke2.md) |
 | `tempo-api-2.x` | `tempo` | — | >=2.0,<3.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-tempo.md) |
 | `vault-1.x` | `vault` | — | no range stated | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-vault.md) |
 | `windns-ssh-2016.x` | `windns` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-windows-dns.md) |

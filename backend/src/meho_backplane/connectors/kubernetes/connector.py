@@ -1205,7 +1205,8 @@ class KubernetesConnector(Connector):
                 group=group, version=version, plural=plural
             )
         items = list_items(resp, group=group, plural=plural)
-        rows = [custom_resource_row(obj) for obj in items]
+        fields: list[str] | None = params.get("fields")
+        rows = [custom_resource_row(obj, fields) for obj in items]
         return {"rows": rows, "total": len(rows)}
 
     async def k8s_cr_info(
@@ -1252,7 +1253,7 @@ class KubernetesConnector(Connector):
             obj = await custom.get_cluster_custom_object(
                 group=group, version=version, plural=plural, name=name
             )
-        return custom_resource_row(obj)
+        return custom_resource_row(obj, params.get("fields"))
 
     async def k8s_ls(
         self,

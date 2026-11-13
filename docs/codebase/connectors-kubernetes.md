@@ -1136,6 +1136,22 @@ need no raw kubectl:
   - `status_excerpt` is the JSON `.status`, capped like `spec_excerpt`
     (2048 B), with its own `status_truncated` flag. It is `null` when
     the object has no `.status`.
+- **Reading a large object.** `spec_excerpt` and `status_excerpt` are
+  cut at 2048 B after the keys are sorted, so a long block hides the
+  keys after it (a CronJob's `schedule` after `jobTemplate`, a node's
+  `nodeInfo` after `images`). Two things make a cut safe:
+  - When an excerpt is cut, the row also has `spec_omitted_keys` or
+    `status_omitted_keys`: the top-level keys that are not whole in it.
+    The key where the cut falls is in the list too.
+  - Pass `fields` (up to 20 paths that start at `spec` or `status`, for
+    example `spec.schedule` or `status.conditions`; a number picks a
+    list item) to `k8s.cr.list` or `k8s.cr.info`. The row then has
+    `fields`, a map from each path to its value, never cut. A path that
+    is not in the object is in `fields_missing`, so a missing field does
+    not look like a null one. The values come from the redacted object:
+    a Secret's `data` is not readable this way, and HelmChart values
+    stay placeholders. The helpers are in
+    `ops_customresource_fields.py`.
 - **Built-in kinds** (#3840): the same two ops read any kind no
   dedicated op covers. A built-in group with a name (for example
   `apiregistration.k8s.io` / `v1` / `apiservices`, or

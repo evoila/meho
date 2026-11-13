@@ -4,7 +4,13 @@ G11.2-T6 (#819) under Initiative #803 (the P3 agent identity + RBAC + approval g
 
 ## Overview
 
-A newly-registered agent starts with the rows of the starting grant set a person picked (see "Starting grant sets" below), or with **no** `agent_permission` rows. Without an explicit grant, the agent operates under `safety_level`-based defaults: safe ops auto-execute; caution, dangerous and destructive ops wait for a person's approval (#3980). Agents never approve, not their own requests and not anyone else's. Admin-class ops are never auto-granted.
+A newly-registered agent starts with the rows of the starting grant set a person picked (see "Starting grant sets" below), or with **no** `agent_permission` rows. What an agent may do without a matching grant depends on the switch `AGENT_GRANT_REQUIRED` (#6189):
+
+- `off` (the default): the `safety_level` defaults. Safe ops auto-execute; caution, dangerous and destructive ops wait for a person's approval (#3980).
+- `on`: the call is refused on every level, also `safe`, with the code `agent_no_grant`. The agent runs nothing until it has a grant.
+- `observe`: the same as `off`, and MEHO logs `agent_no_grant_would_deny` for each call that `on` would refuse.
+
+The full table is in [agent-permission-model.md](agent-permission-model.md#safety-levels-at-a-glance). The switch changes only agent logins; people, service accounts and runners do not use this table. Agents never approve, not their own requests and not anyone else's. Admin-class ops are never auto-granted.
 
 Operators (`tenant_admin`) issue grants to extend agent access for a specific op-pattern on an optional target scope. Grants are permanent by default; supply `expires_at` to create a **time-bounded elevation** (change window) that reverts automatically: the permission resolver (T3 `auth/permissions.py`) ignores rows past their `expires_at` **immediately at expiry**, and the expiry sweeper deletes them on its periodic tick (the sweep is the durable cleanup; the resolver filter makes the revert exact).
 
@@ -116,7 +122,8 @@ For time-bounded elevations: same path, plus `expires_at` set on the row. The gr
 
 | Agent state | Writes | Admin-class ops |
 |---|---|---|
-| No grants (new agent) | Safety-level default: `caution`, `dangerous` and `destructive` wait for a person's approval | Deny |
+| No grants, switch `off` or `observe` | Safety-level default: `safe` runs at once; `caution`, `dangerous` and `destructive` wait for a person's approval | Deny |
+| No grants, switch `on` | Refused on every level, also `safe` (`agent_no_grant`) | Deny |
 | Permanent grant on `*` | Verdict from grant row | Only if explicit auto-execute grant (`caution`, `dangerous` and `destructive` still capped at waiting for approval) |
 | Elevation active | As granted until expiry | Only if explicit grant (same cap) |
 | Elevation expired | Reverts to baseline | Denied |
@@ -149,7 +156,7 @@ definition, they pick the agent's first grants in the field
 | `set` | Rows written | What the agent can do |
 |---|---|---|
 | `none` | no row | Nothing runs until an admin adds a grant (with `AGENT_GRANT_REQUIRED=on`). Discovery tools still work. |
-| `read-everything` | one row: `op_pattern="*"`, `target_scope="*"`, `auto-execute` | `safe` operations run at once on every target. Everything above `safe` waits for a person (the risk-level ceiling). |
+| `read-everything` | one row: `op_pattern="*"`, `target_scope="*"`, `auto-execute` | `safe` operations run at once on every target in this tenant, also on targets added later. Everything above `safe` waits for a person (the risk-level ceiling). |
 | `read-targets` | one row per named target: `op_pattern="*"`, `target_scope=<target id>`, `auto-execute` | The same, but only on those targets (with `AGENT_GRANT_REQUIRED=on`). |
 
 The limits of `none` and `read-targets` hold only with

@@ -101,7 +101,7 @@ def test_check_mode_passes_on_the_committed_tree() -> None:
 
 def test_renderings_carry_no_estate_identifiers() -> None:
     """No estate hostname/realm/IP leaks survive into a rendered vehicle."""
-    forbidden = (".lab", "rdc-vault", "rdc-hetzner", "v0.2 transition")
+    forbidden = (".lab", "rdc-vault", "rdc-hetzner", "ev" + "ba", "v0.2 transition")
     for path, content in _RENDERED.items():
         lowered = content.lower()
         for token in forbidden:

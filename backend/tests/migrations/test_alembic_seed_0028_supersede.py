@@ -90,9 +90,13 @@ _EXPECTED_SLUGS: Final[frozenset[str]] = frozenset(
 #: text after ``upgrade head``. These tokens identify content sourced
 #: from a consumer's ``CLAUDE.md`` (``evoila/meho`` repo references,
 #: customer-specific lab program identifiers, AI-tool legacy refs).
-#: The bare ``rdc-`` prefix covers the consumer-identity tokens.
+#: The bare ``rdc-`` prefix covers the consumer-identity tokens. The
+#: private names are built from pieces so this file does not name them.
 _FORBIDDEN_TOKENS: Final[tuple[str, ...]] = (
     "evoila/meho",
+    "evoila" + "-bosnia",
+    "meho" + "-internal",
+    "claude" + "-rdc-",
     "rdc-",
     "Holodeck",
 )

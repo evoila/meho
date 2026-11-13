@@ -335,12 +335,13 @@ Dashboard's mail address. You can run it from a normal event trigger.
 
 The folder
 [`examples/checks-investigator/`](https://github.com/evoila/meho/tree/main/examples/checks-investigator)
-has everything: the agent (`agent.json`), its grants (`permissions.json`) and
-the trigger (`trigger.json`). Its README lists the commands. In short:
+has everything: the agent (`agent.json`) and the trigger (`trigger.json`).
+Its README lists the commands. In short:
 
 1. Turn on `CHECKS_AGENT_EVENTS`.
-2. Register the login `agent:checks-investigator`, then create the agent and
-   its grants from the files.
+2. Register the login `agent:checks-investigator` with
+   `--grants read-everything`, then create the agent from the file. The agent
+   only reads; anything else it tries waits for a person's approval.
 3. Create the trigger with the filter from `trigger.json`. It matches
    `check.dashboard.changed` events that are worse and are not known noise.
 

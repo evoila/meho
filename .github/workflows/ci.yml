@@ -139,8 +139,8 @@
 # 2026-05-20/21. The concurrency group is intentionally NOT set to
 # cancel-in-progress on merge_group runs: a cancelled queue check fails
 # the merge attempt and defeats the queue's purpose. cancel-in-progress
-# is scoped to pull_request / push refs only so PR force-pushes and rapid
-# main pushes still cancel their predecessors cleanly.
+# is scoped to pull_request refs only so PR force-pushes still cancel
+# their predecessors cleanly. A push to `main` starts no run (#6387).
 #
 # Merge-queue watchdog (#4732): the queue drops a group as soon as one of
 # its required checks fails, or when it rebuilds the group behind a pull
@@ -156,8 +156,14 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  # No `push` trigger (#6387). Every change reaches `main` through the merge
+  # queue, and the queue run already ran the full matrix on exactly that
+  # code. A push run repeated it, took heavy runners from pull requests and
+  # merge groups, and was cancelled by the next merge, which left a red
+  # gate on the commit although no test failed. What a push run gave besides
+  # tests is a warm cache on `main` (uv, the PHP package files). The nightly
+  # run on `main` gives it now. A new `push` trigger fails
+  # test_ci_main_push.py.
   pull_request:
     branches: [main]
   # Fires when a PR enters the merge queue. Runs the full check matrix
@@ -180,8 +186,7 @@ permissions:
   contents: read
 
 concurrency:
-  # On push to main: one in-flight CI run per ref so a fast follow-up
-  # commit cancels its predecessor. On PRs: scoped per PR ref so an
+  # There is no push run (#6387). On PRs: scoped per PR ref so an
   # author force-push cancels its own prior CI run cleanly. Mirrors
   # the pattern used by image.yml, chart.yml, and cli-release.yml.
   #
@@ -237,7 +242,7 @@ jobs:
     # docs-only. `--no-renames` makes a rename appear as delete(old)+add(new)
     # so a code→`*.md` (or `*.md`→code) rename can never smuggle a non-docs
     # path past the allow-list. merge_group / push NEVER fast-path (a queue
-    # batch may mix docs + code; a push to `main` must always run the full
+    # batch may mix docs + code; the queue run must always run the full
     # matrix) — they emit `docs_only=false` unconditionally.
     #
     #   single_connector — the connector name when a PR changes only one
@@ -608,7 +613,7 @@ jobs:
     # matrix below has ONE leg, and the pytest step runs that connector's
     # tests plus the contract set (tests/_unit_connector_select.py) instead
     # of a quarter of the suite. Only a pull request can get there; the
-    # merge queue and pushes to `main` always run the six shards.
+    # the merge queue always runs the six shards.
     # Test map run (#5642): when `changes` sets test_map, the matrix also has
     # ONE leg, and the pytest step runs the tests that `changes` picked and
     # stored as the artifact `unit-test-selection`. Same rule: only a
@@ -647,13 +652,10 @@ jobs:
     # Two heavy runner sets share the same machines. Only merge-queue runs
     # use `meho-runners-ci-heavy-queue` (6 runners: one per shard of one
     # merge-queue run, so its size changes with the shard count). Every
-    # other event (pull requests, pushes to `main`, the nightly run) uses
+    # other event (pull requests, the nightly run) uses
     # `meho-runners-ci-heavy`.
     # Before the split, merge-queue shards waited behind pull request shards
     # that were queued earlier, because GitHub gives jobs out in queue order.
-    # Pushes to `main` stay off the queue set: otherwise every merged commit
-    # would run its shards there twice (queue run, then push run), and the
-    # queue would merge only about half as fast.
     runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue' || 'meho-runners-ci-heavy' }}
     strategy:
       # 6 shards (#3251 started with 3; #4655 raised it to 4 after the
@@ -1021,7 +1023,7 @@ jobs:
         #    them): `dpkg -i` installs them. This needs no network, so a
         #    package mirror that does not answer cannot fail the shard.
         # 3. Else apt downloads php-cli into the cache folder and installs
-        #    it, and the step after saves the folder. A push to main fills
+        #    it, and the step after saves the folder. The nightly run on main fills
         #    the cache, and pull request and merge-queue runs read it, so
         #    the download happens about once per OS release.
         # If the cached files do not install (the runner image changed),
@@ -3303,7 +3305,7 @@ jobs:
   merge-queue-watchdog:
     name: Merge queue watchdog
     # Only merge-queue runs. A pull-request run must still show every failing
-    # job, and a push to `main` has no queue group that can be dropped.
+    # job, and the nightly run has no queue group that can be dropped.
     if: github.event_name == 'merge_group'
     # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
     runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}

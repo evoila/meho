@@ -51,6 +51,11 @@ What the op does, on the target's managed realm:
    not bound, and ``not_bound_reason`` says why. ``replace_custom_login``
    binds it anyway. A client bound to the flow already stays bound.
 
+When Keycloak refuses a step with HTTP 403, the error says what the run
+changed before (the flow, the realm's level map, the client's mapper) and
+which step was refused. Before the wait, MEHO checks the roles of the
+target's account (``ops_authflow_rights``).
+
 Safe to run twice. Risk level ``caution`` with approval: the op changes how
 people log in to the console.
 """
@@ -59,6 +64,8 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING, Any
+
+import httpx
 
 from meho_backplane.connectors.keycloak._paths import (
     _ADMIN_REALM_PATH,
@@ -83,6 +90,13 @@ from meho_backplane.connectors.keycloak.ops_authflow_passkey import (
     PASSKEY_FLOW_ALIAS,
     passkey_copy_difference,
 )
+from meho_backplane.connectors.keycloak.ops_authflow_rights import (
+    CLIENT_LOOKUP_ROLES,
+    find_client_uuid,
+    missing_rights_error,
+    names_missing_rights,
+    register_rights_check,
+)
 from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import (
     AMR_MAPPER,
     ENSURE_APPROVAL_TOUCH_OP_ID,
@@ -102,7 +116,7 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
 from meho_backplane.connectors.keycloak.ops_write_merge import merge_representation
 from meho_backplane.connectors.keycloak.ops_write_preview import _managed_realm
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
-from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+from meho_backplane.operations._preview import PreviewContext
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -117,6 +131,10 @@ __all__ = [
 
 _DEFAULT_CLIENT_ID = "meho-web"
 _AUTHENTICATOR_PROVIDERS_PATH = "/admin/realms/{realm}/authentication/authenticator-providers"
+#: The realm-management roles the run needs: the flow and the realm, then the client.
+_ROLES = ("manage-realm", "manage-clients")
+#: A Keycloak permission on the one client can replace ``manage-clients``.
+_PER_CLIENT = ("manage-clients",)
 #: A wanted step as Keycloak lists it: level, name, requirement, settings.
 _Wanted = tuple[int, FlowNode]
 
@@ -705,6 +723,23 @@ async def _ensure_flow(
     return flow_id, created, rows
 
 
+def _half_way_text(changed: list[str], refused: str, *, short: bool) -> str:
+    """Say what the run changed before Keycloak refused a step with HTTP 403.
+
+    With *short* the text fits the error message.
+    """
+    head = (
+        f"{ENSURE_APPROVAL_TOUCH_OP_ID} stopped half-way: Keycloak refused (HTTP 403) to {refused}"
+    )
+    if short:
+        return f"{head}. See extras.remediation."
+    return (
+        f"{head}. Before that, {'; '.join(changed)}. These changes stay; a second run "
+        "after the fix keeps them."
+    )
+
+
+@names_missing_rights(ENSURE_APPROVAL_TOUCH_OP_ID, _ROLES)
 async def keycloak_authflow_ensure_approval_touch(
     self: KeycloakConnector,
     operator: Operator,
@@ -715,30 +750,59 @@ async def keycloak_authflow_ensure_approval_touch(
     realm = resolve_realm_config(target).managed_realm
     segment = quote_segment(realm)
     client_id = str(params.get("client_id") or _DEFAULT_CLIENT_ID).strip()
-    client_uuid = await self._find_client_uuid(target, segment, client_id, operator=operator)
+    client_uuid = await find_client_uuid(
+        self, operator, target, segment, client_id, op_id=ENSURE_APPROVAL_TOUCH_OP_ID, roles=_ROLES
+    )
     if client_uuid is None:
         raise KeycloakTouchFlowError(
             "client_not_found", f"no client {client_id!r} in realm {realm!r}; nothing was changed"
         )
     await _check_verification(self, operator, target, segment)
     flow_id, created, rows = await _ensure_flow(self, operator, target, segment)
-    loa_changed = await _ensure_loa_map(self, operator, target, segment)
-    mapper_added, mapper_fixed = await _ensure_amr_mapper(
-        self, operator, target, segment, client_uuid
-    )
-    redirect_copied = await _ensure_redirect(self, operator, target, segment, rows)
+    state = "made by this run" if created else "already there"
+    flag = str(created).lower()
+    changed = [f"the flow {TOUCH_FLOW_ALIAS!r} (id {flow_id!r}, flow_created={flag}) is {state}"]
     client_path = fill_path(
         _CLIENT_PATH, {"realm": segment, "client-uuid": quote_segment(client_uuid)}
     )
-    binding = await _bind(
-        self,
-        operator,
-        target,
-        segment,
-        client_path,
-        flow_id,
-        replace_custom_login=params.get("replace_custom_login") is True,
-    )
+    refused = f"map {TOUCH_ACR!r} to level {TOUCH_LEVEL} in the realm"
+    try:
+        loa_changed = await _ensure_loa_map(self, operator, target, segment)
+        if loa_changed:
+            changed.append(f"the realm maps {TOUCH_ACR!r} to level {TOUCH_LEVEL}")
+        refused = f"add or fix the 'amr' mapper of the client {client_id!r}"
+        mapper_added, mapper_fixed = await _ensure_amr_mapper(
+            self, operator, target, segment, client_uuid
+        )
+        if mapper_added or mapper_fixed:
+            changed.append(f"the client {client_id!r} has the 'amr' mapper")
+        refused = "copy the company login default to the flow"
+        redirect_copied = await _ensure_redirect(self, operator, target, segment, rows)
+        if redirect_copied:
+            changed.append("the flow has the company login default")
+        refused = f"bind the flow to the client {client_id!r}"
+        binding = await _bind(
+            self,
+            operator,
+            target,
+            segment,
+            client_path,
+            flow_id,
+            replace_custom_login=params.get("replace_custom_login") is True,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            raise
+        raise await missing_rights_error(
+            self,
+            operator,
+            target,
+            exc,
+            op_id=ENSURE_APPROVAL_TOUCH_OP_ID,
+            roles=_ROLES,
+            message=_half_way_text(changed, refused, short=True),
+            done=_half_way_text(changed, refused, short=False),
+        ) from exc
     return {
         "realm": realm,
         "flow_alias": TOUCH_FLOW_ALIAS,
@@ -778,7 +842,8 @@ async def _touch_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "way_back": (
             'keycloak.client.update with {"authenticationFlowBindingOverrides": {"browser": ""}}'
         ),
+        "client_lookup_needs_one_of": list(CLIENT_LOOKUP_ROLES),
     }
 
 
-register_preview_builder(ENSURE_APPROVAL_TOUCH_OP_ID, _touch_preview)
+register_rights_check(ENSURE_APPROVAL_TOUCH_OP_ID, _ROLES, _touch_preview, per_object=_PER_CLIENT)

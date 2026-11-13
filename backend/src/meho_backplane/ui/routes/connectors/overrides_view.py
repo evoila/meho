@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse
 
 from meho_backplane.api.v1.operation_overrides import load_override_rows
 from meho_backplane.auth.operator import Operator
+from meho_backplane.policy.store import classification_enabled
 from meho_backplane.ui.routes.connectors.operator import resolve_operator_or_403
 from meho_backplane.ui.templating import get_templates
 
@@ -40,7 +41,11 @@ async def _overrides_page(
     return get_templates().TemplateResponse(
         request,
         "connectors/overrides.html",
-        {"rows": [row.model_dump() for row in rows], "show": show},
+        {
+            "rows": [row.model_dump() for row in rows],
+            "show": show,
+            "classification": classification_enabled(),
+        },
     )
 
 

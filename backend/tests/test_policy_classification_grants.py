@@ -255,7 +255,8 @@ async def test_policy_classify_is_approved_call_by_call(
     )
     assert refusal is not None
 
-    # A grant row stored some other way does not clear a call either.
+    # A grant row stored some other way does not clear a call either: a
+    # service login may not even ask for it, only a person may.
     await _seed_grant(POLICY_CLASSIFY_OP_ID, POLICY_REGISTRY_CONNECTOR_ID)
     descriptor = await lookup_descriptor(
         tenant_id=_TENANT,
@@ -271,7 +272,7 @@ async def test_policy_classify_is_approved_call_by_call(
         target=None,
         connector_id=POLICY_REGISTRY_CONNECTOR_ID,
     )
-    assert verdict is PermissionVerdict.NEEDS_APPROVAL
+    assert verdict is PermissionVerdict.DENY
 
 
 async def _policy_rows() -> list[Any]:

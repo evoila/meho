@@ -58,6 +58,7 @@ __all__ = [
     "check_no_conflict",
     "classify",
     "entries_from_document",
+    "has_wildcard",
     "install_wait_text",
     "install_wait_undone",
     "taxonomy_from_documents",
@@ -102,6 +103,11 @@ class OpCoordinates:
 
 class ClassificationConflictError(ValueError):
     """Two entries of the same rank give one operation different values."""
+
+
+def has_wildcard(pattern: str) -> bool:
+    """True when *pattern* holds ``*``, ``?`` or ``[``: it can match more than its own text."""
+    return any(char in _GLOB_METACHARS for char in pattern)
 
 
 def _literal_prefix(pattern: str | None) -> int:

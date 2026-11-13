@@ -28,8 +28,8 @@ The `-ssh` discriminator in the impl_id leaves room for a future
 resolver's tie-break ladder; v0.1 ships only the SSH transport.
 
 The op surface covers daily firewall and network diagnostics, plus
-writes that change routes, gateways, firewall rules, NAT rules, aliases
-and local users:
+writes that change routes, gateways, firewall rules, NAT rules, aliases,
+local users and VPN access:
 
 | Group | Ops | Class |
 | --- | --- | --- |
@@ -49,8 +49,11 @@ and local users:
 | `users` | `pfsense.user.disable`, `pfsense.user.enable` | `dangerous` writes; wait for approval |
 | `alias` | `pfsense.alias.delete`, `pfsense.alias.member.remove` | `destructive` writes; wait for approval |
 | `diagnostics` | `pfsense.diag.ping` | `caution`; waits for approval, because it connects to an address you give |
+| `openvpn` | `pfsense.openvpn.clients`, `pfsense.openvpn.log` | read-only |
+| `vpn` | `pfsense.openvpn.address.next_free` | read-only |
+| `vpn` | `pfsense.openvpn.csc.sync` (`caution`), `pfsense.openvpn.rule.sync`, `pfsense.openvpn.user.create`, `pfsense.openvpn.user.delete` (`dangerous`) | writes; wait for approval, also with `compare_only` |
 
-Twenty-four ops total: twelve `safe` reads and twelve ops at `caution`
+Thirty-one ops total: fifteen `safe` reads and sixteen ops at `caution`
 or higher. The `meho pfsense` verbs below cover the reads, except
 `pfsense.mgmt_flow.summary`, which has no verb. Run that read and the
 other ops with `meho operation call` or through the agent path. Every op dispatches through the same

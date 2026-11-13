@@ -84,9 +84,14 @@ You have, in this order:
 4. **One agent principal registered** for both tiers
    ([G11.2-T1 #815](https://github.com/evoila/meho/issues/815)):
    ```bash
-   meho agent-principal register r1-cheap-tier-classifier --json | jq -r .keycloak_client_id
+   meho agent-principal register r1-cheap-tier-classifier --grants none --json | jq -r .keycloak_client_id
    # expect: agent:r1-cheap-tier-classifier
    ```
+   `--grants none` writes no grant: Step 3 adds the four grants of
+   [`permissions.json`](./permissions.json) by hand. With the server
+   setting `AGENT_GRANT_REQUIRED` at `observe` or `on`, MEHO needs this
+   pick. With `on`, the login runs nothing until Step 3 is done
+   ([hosted agents guide](../../docs-site/guides/hosted-agents.md#what-the-agent-may-do-with-no-grants)).
    The `keycloak_client_id` field is the principal's OIDC `sub` —
    the registry sets it to `agent:<name>` so it matches the
    `identity_ref` on both `agent.*.json` files. Both tiers use this
@@ -117,7 +122,8 @@ meho agent create r1-cheap-tier-classifier \
   --model-tier fast \
   --turn-budget 12 \
   --system-prompt "$(jq -r .system_prompt examples/r1-tiered-triage/agent.cheap-tier-classifier.json)" \
-  --toolset @-
+  --toolset @- \
+  --grants none
 
 jq .toolset examples/r1-tiered-triage/agent.deep-tier-investigator.json | \
 meho agent create r1-deep-tier-investigator \
@@ -126,8 +132,13 @@ meho agent create r1-deep-tier-investigator \
   --turn-budget 25 \
   --system-prompt "$(jq -r .system_prompt examples/r1-tiered-triage/agent.deep-tier-investigator.json)" \
   --toolset @- \
-  --output-schema @<(jq .output_schema examples/r1-tiered-triage/agent.deep-tier-investigator.json)
+  --output-schema @<(jq .output_schema examples/r1-tiered-triage/agent.deep-tier-investigator.json) \
+  --grants none
 ```
+
+`--grants none` again: the login still has no grant at this point, so
+MEHO asks for the pick when the switch is `observe` or `on`. The grants
+come in Step 3.
 
 > Note on `--toolset @<path>` / `--output-schema @<path>`: each flag
 > uses `loadJSONObjectFlag` (see

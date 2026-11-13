@@ -353,11 +353,7 @@ gh run list --repo <consumer-org>/<consumer-repo> \
 #   ⇒ a run is queued / in_progress for the new event_type
 ```
 
-The companion script
-[`scripts/cross-repo/verify-ci-cluster-access.sh`](../../scripts/cross-repo/verify-ci-cluster-access.sh)
-automates the kubectl portion (`KUBECONFIG=… ./verify-ci-cluster-access.sh`),
-prints a pass/fail line per check, and exits non-zero on any
-unexpected outcome. Run it from either side of the handshake before
+Run the commands above from either side of the handshake before
 declaring the contract closed.
 
 ## Status

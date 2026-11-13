@@ -3391,9 +3391,6 @@ namespace-scoped RBAC for `meho-ci-*`, the `meho-image-pushed`
 `repository_dispatch` event shape, and the verification commands
 either side can run to prove the contract holds — lives in
 [`docs/cross-repo/ci-cluster-coordination.md`](../cross-repo/ci-cluster-coordination.md).
-The companion script
-[`scripts/cross-repo/verify-ci-cluster-access.sh`](../../scripts/cross-repo/verify-ci-cluster-access.sh)
-automates the kubectl portion of the check.
 
 ## Acceptance contracts (v0.1 deploy goal)
 

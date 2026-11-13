@@ -333,7 +333,7 @@ _SEED_CONVENTIONS: Final[tuple[tuple[str, str, int, str], ...]] = (
             "specifics (real hostnames, IPs, customer names, project "
             "codes) must not appear in commits, issues, or public "
             "docs. Generic naming + sanitised examples only. Internal "
-            "coordination happens in `evoila-bosnia/meho-internal` or "
+            "coordination happens in a private repository or "
             "other private channels."
         ),
     ),

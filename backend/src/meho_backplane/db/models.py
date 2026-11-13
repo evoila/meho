@@ -35,7 +35,7 @@ Schema decisions for :class:`Tenant`:
   to the named one. The named index gives later migrations a
   stable identifier to reference.
 * ``name`` — Text NOT NULL. Free-form display label
-  (e.g. "RDC Internal Tenancy"); not constrained or indexed.
+  (e.g. "Tenant A"); not constrained or indexed.
 * ``created_at`` — ``timestamptz``. PG-side ``now()`` server
   default via the migration; the ORM also declares
   ``default=lambda: datetime.now(UTC)`` so SQLite dev/test paths

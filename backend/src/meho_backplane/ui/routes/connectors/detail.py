@@ -346,8 +346,7 @@ def _classify_no_connector_cause(target: TargetORM) -> str:
       Re-probing here re-dispatches through the same resolver with the
       same ``(product, version)`` tuple and fails the same way; the
       correct verbs are **Edit** (PATCH product to a valid value) or
-      **Delete**. This is the v0.7.0 dogfood signal #6 closure
-      (``claude-rdc-hetzner-dc#753``).
+      **Delete**. This is the v0.7.0 dogfood signal #6 closure.
 
     Returns one of the two literals above so the template can pick the
     right message + remediation hint. Returns ``"product_mismatch"`` as

@@ -8,8 +8,7 @@ loop long enough on real-world vendor specs that the kubelet's liveness
 probe times out and the pod is graceful-killed -- a 7.5 MB / 1275-op
 vendor spec took 30 s of CPU + DB time inline on the
 request thread before the probe deadline expired
-(see ``claude-rdc-hetzner-dc#771`` Finding 20, and
-``docs/codebase/api-shape-conventions.md`` §1 for the strategic
+(see ``docs/codebase/api-shape-conventions.md`` §1 for the strategic
 "OpenAPI is the escape hatch, not the daily-driver" framing).
 
 This module is the off-the-request-thread shape: the route hands the
@@ -144,7 +143,7 @@ _INGEST_JOB_TIMEOUT_SECONDS: float = _load_ingest_job_timeout_seconds()
 #: module scope so the route layer + tests share one source of truth
 #: rather than re-declaring the literal in each Pydantic projection.
 #:
-#: ``degraded`` (G0.24 / claude-rdc-hetzner-dc#1136) is a terminal state
+#: ``degraded`` (G0.24) is a terminal state
 #: distinct from ``failed``: the pipeline coroutine returned without
 #: raising, but a postcondition found nothing dispatchable was persisted
 #: (zero inserts, or rows that are invisible to the dispatch/query
@@ -325,8 +324,7 @@ class IngestJobRegistry:
         operator still sees inserted/skipped counts) **and** the
         structured *error_class* / *error* (so the failure is
         machine-branchable and operator-readable) — a job that lied with
-        a bare ``succeeded`` is the failure mode this state closes
-        (claude-rdc-hetzner-dc#1136).
+        a bare ``succeeded`` is the failure mode this state closes.
 
         Also the terminal state for a *register-committed / grouping-failed*
         run (``error_class="grouping_failed_after_register"``, #3685): register
@@ -481,7 +479,7 @@ def reset_job_registry_for_tests() -> None:
 #: completion but left the connector non-dispatchable. The CLI / agent
 #: branch on this string to tell "the pipeline raised" (``failed`` with
 #: the exception class) apart from "the pipeline returned but nothing
-#: usable landed" (``degraded`` with this class). claude-rdc-hetzner-dc#1136.
+#: usable landed" (``degraded`` with this class).
 INGESTED_NOT_DISPATCHABLE = "ingested_not_dispatchable"
 
 #: Structured ``error_class`` an async ingest carries when the register
@@ -614,8 +612,7 @@ async def _reconcile_returned_result(
 ) -> None:
     """Flip a *returned* pipeline result to ``succeeded`` or ``degraded``.
 
-    Applies the dispatchability postcondition
-    (claude-rdc-hetzner-dc#1136): a coroutine that returned without
+    Applies the dispatchability postcondition: a coroutine that returned without
     raising is **not** sufficient evidence the ingest is dispatchable --
     an async ``--spec`` run can persist rows under a product key the
     dispatch surface never queries (the VCF-family long<->short split,
@@ -725,7 +722,7 @@ async def _dispatchability_failure_reason(
     * **Persisted-but-invisible** — ``inserted_count > 0`` yet
       *dispatchability_check* returns ``False``: rows landed under a key
       the dispatch/query surface does not resolve. This is the exact
-      claude-rdc-hetzner-dc#1136 mis-keyed-product symptom (pre the
+      mis-keyed-product symptom (pre the
       register-time reconciliation) and any future drift of the same
       shape.
 

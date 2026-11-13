@@ -128,7 +128,7 @@ References
 * Parent Initiative #3128; Task #3134.
 * #444 — the ``audit_log`` aggregation + REST + CLI precedent reused here.
 * #2544 — the structured announce-claim store (:class:`AgentAnnouncement`).
-* Delineation from evoila-bosnia/meho-internal#200: taint metrics
+* Delineation: taint metrics
   measure meho-vs-local-fallback *adoption*; these reflex KPIs measure
   *in-session discipline*. Related, not merged.
 """

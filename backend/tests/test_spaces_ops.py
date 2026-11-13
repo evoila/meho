@@ -802,6 +802,7 @@ async def test_registration_sets_the_risk_levels() -> None:
         "spaces.unassign": "caution",
         "spaces.reassign": "caution",
         "spaces.member.disable": "caution",
+        "spaces.import": "caution",
         "spaces.overview": "safe",
     }
 

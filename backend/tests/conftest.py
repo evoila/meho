@@ -1233,7 +1233,9 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
             fh.write(f"{os.getpid()} {item.nodeid}\n")
         os.replace(f"{target}.tmp", target)
     except OSError:
-        pass
+        # The file only helps the memory sampler; a full or missing folder
+        # must never fail or stop a test.
+        return
 
 
 def _save_worker_coverage_data() -> None:

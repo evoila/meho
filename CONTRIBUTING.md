@@ -117,6 +117,60 @@ approval rules or a security default also needs the project owner's
 approval. Authors cannot approve their own pull request: `main` needs
 one approval from someone else, given after the last push.
 
+### Pull requests from forks
+
+A pull request from a fork gets less CI than one from a branch in this
+repository. Our own runners must not run code from a fork, so the jobs
+on them skip.
+
+CI on a fork pull request starts only after a maintainer approves the
+workflow run on the pull request page.
+
+What runs on a fork pull request:
+
+- Change detection, lint and type check (ruff + mypy), Go lint and
+  tests, the CLI API snapshot check and the Helm checks. They run on
+  GitHub-hosted runners. Lint and type check skip when the diff changes
+  only docs or no backend code.
+- The required check "Python (ruff + mypy + pytest)" runs too. Its job
+  summary says that the unit tests did not run. It fails when lint
+  fails, and when lint did not run for a diff with backend code.
+
+What does not run:
+
+- The unit test shards, the integration tests, the migration tests and
+  the coverage jobs. They use our own runners and show as skipped. A
+  skipped job counts as green, so **green here does not mean the tests
+  passed**.
+
+The merge queue runs the full matrix on the exact code that will land on
+`main`. But a reviewer should see test results before that. What a
+maintainer does before merge:
+
+1. Read the change first, and note the full SHA of the commit you
+   read. The next step pushes it to a branch in this repository. Then
+   all pull request workflows of this repository run the pushed code,
+   with this repository's settings, on our own runners.
+2. Push the exact commit you read, by its full SHA, to a branch in this
+   repository, for example `ci/pr-<number>`. Do not push the branch of
+   the fork: it may have a newer commit that you did not read. Then
+   open a draft pull request from that branch to `main`. CI runs only
+   on pull requests (and in the merge queue), so a pushed branch alone
+   starts nothing. The draft pull request runs the full matrix:
+
+   ```bash
+   git fetch origin pull/<number>/head
+   git push origin <full-sha>:refs/heads/ci/pr-<number>
+   gh pr create --draft --base main --head ci/pr-<number> \
+     --title "CI run for #<number>" --body "CI only. Do not merge."
+   ```
+
+3. Link that CI run in the review of the fork pull request.
+4. If you cannot push the branch, run ruff, mypy and the tests of the
+   changed code on your machine and write the result in the review.
+5. When the review is done, close the draft pull request and delete
+   the `ci/pr-<number>` branch.
+
 ## Code style
 
 Each language has a fixed toolchain. CI runs the same tools — no

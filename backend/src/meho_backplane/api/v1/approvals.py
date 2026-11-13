@@ -295,6 +295,11 @@ class ApprovalResumeOutcomeView(BaseModel):
     #: do not run it again, check the target first. ``None`` for any other
     #: run. Additive.
     execution_outcome: str | None = None
+    #: Exit code of a finished command or script (for example
+    #: ``linux.script.run``). ``result_status`` can be ``ok`` (MEHO ran it)
+    #: while this is not 0 (the script failed). ``None`` when the result has
+    #: no exit code. Additive.
+    exit_code: int | None = None
 
 
 class OutcomeUnknownView(BaseModel):
@@ -609,6 +614,7 @@ def _resume_outcome_view(row: ApprovalRequest) -> ApprovalResumeOutcomeView | No
         audit_id=outcome.audit_id,
         guidance=outcome.guidance,
         execution_outcome=outcome.execution_outcome,
+        exit_code=outcome.exit_code,
     )
 
 

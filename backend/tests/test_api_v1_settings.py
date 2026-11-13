@@ -145,7 +145,6 @@ async def _seed() -> None:
                 id=_TENANT,
                 slug="tenant-a",
                 name="Tenant A",
-                announce_gate_enabled=True,
                 flight_recorder_enabled=True,
                 flight_recorder_retention_days=14,
                 mail_recipient_allowlist="@example.com",
@@ -195,7 +194,6 @@ async def _wipe_tenant_settings() -> None:
             update(Tenant)
             .where(Tenant.id == _TENANT)
             .values(
-                announce_gate_enabled=False,
                 flight_recorder_enabled=False,
                 flight_recorder_retention_days=None,
                 flight_recorder_agent_readable=None,
@@ -236,7 +234,8 @@ def test_other_roles_are_refused(client: TestClient, role: TenantRole) -> None:
 def test_tenant_admin_cannot_import_another_tenant(client: TestClient) -> None:
     content = (
         "apiVersion: meho.evoila.com/v1\nkind: Settings\n"
-        f"spec:\n  tenants:\n    - id: {_OTHER}\n      policies: {{announce_gate_enabled: true}}\n"
+        f"spec:\n  tenants:\n    - id: {_OTHER}\n"
+        "      policies: {run_approval_target_kinds: true}\n"
     )
     key = make_rsa_keypair("kid-other")
     with respx.mock as r:
@@ -279,7 +278,6 @@ async def test_export_shape_and_no_secrets(client: TestClient) -> None:
     (tenant,) = doc["spec"]["tenants"]
     assert tenant["id"] == str(_TENANT)
     assert tenant["policies"] == {
-        "announce_gate_enabled": True,
         "flight_recorder": {"enabled": True, "retention_days": 14, "agent_readable": None},
         "mail_recipient_allowlist": "@example.com",
         "run_approval_target_kinds": False,
@@ -385,6 +383,36 @@ async def test_apply_records_revision_and_second_import_is_a_no_op(client: TestC
             "after": 30,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_older_export_with_retired_announce_gate_key_imports_clean(
+    client: TestClient,
+) -> None:
+    """A file exported before #3762 carries ``announce_gate_enabled``; it is ignored."""
+    await _seed()
+    key = make_rsa_keypair("kid-retired")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        token = _token(key)
+        exported = _export(client, token)
+        doc = yaml.safe_load(exported)
+        doc["spec"]["tenants"][0]["policies"]["announce_gate_enabled"] = True
+        older = yaml.safe_dump(doc, sort_keys=False)
+
+        preview = _import(client, token, older, preview=True)
+        applied = _import(client, token, older)
+        after = _export(client, token)
+
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["ok"] is True, body
+    for section in body["diff"].values():
+        assert section["added"] == [] and section["changed"] == []
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["applied"] is False
+    assert "announce_gate_enabled" not in after
+    assert await _rows(InstanceSettingsRevision) == []
 
 
 @pytest.mark.asyncio
@@ -509,14 +537,14 @@ spec:
 def test_tenant_id_may_be_left_out_in_a_one_tenant_file(client: TestClient) -> None:
     content = (
         "apiVersion: meho.evoila.com/v1\nkind: Settings\n"
-        "spec:\n  tenants:\n    - policies: {announce_gate_enabled: true}\n"
+        "spec:\n  tenants:\n    - policies: {run_approval_target_kinds: true}\n"
     )
     key = make_rsa_keypair("kid-noid")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = _import(client, _token(key), content, preview=True)
     assert resp.status_code == 200, resp.text
-    assert resp.json()["diff"]["policies"]["changed"][0]["key"] == "announce_gate_enabled"
+    assert resp.json()["diff"]["policies"]["changed"][0]["key"] == "run_approval_target_kinds"
 
 
 @pytest.mark.asyncio

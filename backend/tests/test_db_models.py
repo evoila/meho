@@ -352,7 +352,7 @@ def test_migration_installs_tenant_table_and_indexes(
                 "slug",
                 "name",
                 "created_at",
-                "announce_gate_enabled",  # #3133 opt-in announce gate flag
+                "announce_gate_enabled",  # retired in #3762, kept: migrations are additive
                 "flight_recorder_enabled",  # #3212 F1 per-tenant capture default
                 "flight_recorder_retention_days",  # #3212 F4 per-tenant retention
                 "flight_recorder_agent_readable",  # #3216 F5 per-tenant agent-read gate

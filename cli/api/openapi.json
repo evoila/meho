@@ -15006,20 +15006,9 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast Feed",
-        "description": "``GET /ui/broadcast[?op_class=&principal=&target=&op_id=&wall=1]``.\n\nFilters are accepted on the full-page route too so a copy-pasted\nfiltered URL reproduces the operator's view (the filter bar sets\n``hx-push-url`` on the fragment route, mirroring topology).\n``wall=1`` selects the no-chrome wall-monitor layout (work item\n#5).",
+        "description": "``GET /ui/broadcast[?principal=&target=&wall=1]``.\n\nFilters are accepted on the full-page route too so a copy-pasted\nfiltered URL reproduces the operator's view (the filter bar sets\n``hx-push-url`` on the fragment route, mirroring topology).\n``wall=1`` selects the no-chrome wall-monitor layout (work item\n#5).",
         "operationId": "ui_broadcast_feed_ui_broadcast_get",
         "parameters": [
-          {
-            "name": "op_class",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 64,
-              "default": "",
-              "title": "Op Class"
-            }
-          },
           {
             "name": "principal",
             "in": "query",
@@ -15040,17 +15029,6 @@
               "maxLength": 256,
               "default": "",
               "title": "Target"
-            }
-          },
-          {
-            "name": "op_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 256,
-              "default": "",
-              "title": "Op Id"
             }
           },
           {
@@ -15096,20 +15074,9 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast Feed Fragment",
-        "description": "``GET /ui/broadcast/feed[?op_class=&principal=&target=&op_id=]``.\n\nThe filter-bar submit target. Returns the feed fragment with the\nfiltered ``sse-connect`` URL embedded.",
+        "description": "``GET /ui/broadcast/feed[?principal=&target=]``.\n\nThe filter-bar submit target. Returns the feed fragment with the\nfiltered ``sse-connect`` URL embedded.",
         "operationId": "ui_broadcast_feed_fragment_ui_broadcast_feed_get",
         "parameters": [
-          {
-            "name": "op_class",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 64,
-              "default": "",
-              "title": "Op Class"
-            }
-          },
           {
             "name": "principal",
             "in": "query",
@@ -15130,17 +15097,6 @@
               "maxLength": 256,
               "default": "",
               "title": "Target"
-            }
-          },
-          {
-            "name": "op_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 256,
-              "default": "",
-              "title": "Op Id"
             }
           }
         ],
@@ -15177,17 +15133,6 @@
         "description": "``GET /ui/broadcast/stream`` -- stream the session tenant's announcements.",
         "operationId": "ui_broadcast_stream_ui_broadcast_stream_get",
         "parameters": [
-          {
-            "name": "op_class",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 64,
-              "nullable": true,
-              "title": "Op Class"
-            }
-          },
           {
             "name": "principal",
             "in": "query",
@@ -15246,23 +15191,8 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast History",
-        "description": "``GET /ui/broadcast/history[?kind=]`` -- the Last-24h replay fragment.\n\nReads the session tenant's stored announcements of the retention\nwindow (fail-soft, :func:`_fetch_history`), passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.\n\nThe optional ``kind`` query parameter narrows the pane to a\nsingle event kind (``operation`` / ``agent_announcement``); it is\nclamped to a known kind by :func:`_normalise_kind_filter`, so a\nblank or unknown value renders both kinds.",
+        "description": "``GET /ui/broadcast/history`` -- the Last-24h replay fragment.\n\nReads the session tenant's stored announcements of the retention\nwindow (fail-soft, :func:`_fetch_history`), passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.",
         "operationId": "ui_broadcast_history_ui_broadcast_history_get",
-        "parameters": [
-          {
-            "name": "kind",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 64,
-              "nullable": true,
-              "description": "Optional event-kind filter: 'operation' (audit-driven) or 'agent_announcement'. Absent/blank renders both kinds.",
-              "title": "Kind"
-            },
-            "description": "Optional event-kind filter: 'operation' (audit-driven) or 'agent_announcement'. Absent/blank renders both kinds."
-          }
-        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -15270,16 +15200,6 @@
               "text/html": {
                 "schema": {
                   "type": "string"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -15400,69 +15320,6 @@
                   "type": "string"
                 }
               }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ui/broadcast/event/{audit_id}": {
-      "get": {
-        "tags": [
-          "ui-broadcast"
-        ],
-        "summary": "Ui Broadcast Event Detail",
-        "description": "``GET /ui/broadcast/event/{audit_id}[?event_id=...]``.\n\nResolves the audit row tenant-scoped, classifies its op for the\naggregate-only gate, and renders ``broadcast/_event_drawer.html``\nwith the full detail (or the \ud83d\udd12 placeholder for sensitive\nclasses). A missing / cross-tenant id renders the not-found\nfragment with HTTP 404.",
-        "operationId": "ui_broadcast_event_detail_ui_broadcast_event__audit_id__get",
-        "parameters": [
-          {
-            "name": "audit_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Audit Id"
-            }
-          },
-          {
-            "name": "event_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 128,
-              "description": "Broadcast (Valkey-stream) event id, for display only.",
-              "default": "",
-              "title": "Event Id"
-            },
-            "description": "Broadcast (Valkey-stream) event id, for display only."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Audit id does not exist in this tenant (or exists only for another tenant). Returns the not-found drawer fragment.",
-            "content": {
-              "text/html": {}
             }
           },
           "422": {

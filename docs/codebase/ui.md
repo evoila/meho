@@ -1393,11 +1393,10 @@ keeps a full-screen wall display from logging out mid-stream.
 
 | Route | Renders |
 | ----- | ------- |
-| `GET /ui/broadcast` | Full-page live-feed view (`broadcast/feed.html`, extends `base.html`). Sidebar active-state on Broadcast. Accepts `?op_class=&principal=&target=&op_id=` so a copy-pasted filtered URL reproduces the view. `?wall=1` selects the no-chrome wall-monitor layout (`broadcast/wall.html`) instead. |
+| `GET /ui/broadcast` | Full-page live-feed view (`broadcast/feed.html`, extends `base.html`). Sidebar active-state on Broadcast. Shows agent announcements only (#3762) and a side card that says only trusted agents post and links the audit log. Accepts `?principal=&target=` so a copy-pasted filtered URL reproduces the view. `?wall=1` selects the no-chrome wall-monitor layout (`broadcast/wall.html`) instead. |
 | `GET /ui/broadcast/feed` | Filtered feed **fragment** (`broadcast/_feed.html`) — the filter-bar submit target. Re-renders the feed with the active server-side filters baked into a fresh `sse-connect` URL. |
-| `GET /ui/broadcast/stream` | SSE bridge behind `require_ui_operator` (`text/event-stream`). The feed view's `sse-connect` target. Accepts `op_class` / `principal` / `target` filters. |
+| `GET /ui/broadcast/stream` | SSE bridge behind `require_ui_operator` (`text/event-stream`). The feed view's `sse-connect` target. Accepts `principal` / `target` filters. |
 | `GET /ui/broadcast/history` | Last-24h replay **fragment** (`broadcast/_history.html`) — the "Last 24h" tab's HTMX target. A finite read of the tenant's last-24h stored announcements seeded into the shared `broadcastFeed` controller. |
-| `GET /ui/broadcast/event/{audit_id}` | Event detail drawer **fragment** (`broadcast/_event_drawer.html`; `_event_drawer_not_found.html` + HTTP 404 for a missing / cross-tenant id). Shared by the live feed, the wall view, and the history pane. |
 | `GET/POST /ui/broadcast/overrides`, `DELETE /ui/broadcast/overrides/{override_id}` | The Overrides tab (`ui/routes/broadcast/overrides.py`). A `tenant_admin` lists, creates and deletes broadcast override rules. For another role the list answers 403 with a gated view that shows no rules, and a create or delete answers 403. |
 
 Every broadcast route above except the Overrides tab needs the `operator` role (`require_ui_operator`,
@@ -1454,15 +1453,13 @@ the colour policy stays one auditable map.
 
 | File | Purpose |
 | ---- | ------- |
-| `broadcast/feed.html` | Full-page view: header, filter bar include, feed-fragment include, drawer slot. Injects the controller `<script src>` into the head-level `{% block component_scripts %}` so it executes before `alpine.min.js` (#1692). |
-| `broadcast/_filter_bar.html` | The op_class / principal / target / op_id controls. The three server filters `hx-get` to `/ui/broadcast/feed`; op_id dispatches a `broadcast-op-id-changed` window event for the client-side filter. |
+| `broadcast/feed.html` | Full-page view: header, filter bar include, feed-fragment include, side card (who posts, where operations are recorded). Injects the controller `<script src>` into the head-level `{% block component_scripts %}` so it executes before `alpine.min.js` (#1692). |
+| `broadcast/_filter_bar.html` | The principal / target controls. Both server filters `hx-get` to `/ui/broadcast/feed`. No operation filter since #3762. |
 | `broadcast/_feed.html` | The swappable feed fragment: the SSE sink (with the filtered `sse-connect` URL), status bar, column header, empty state, `<template x-for>`. Wraps the `broadcastFeed` Alpine controller so a filter re-render resets the event list and re-subscribes. |
-| `broadcast/_event_row.html` | Server-authored row markup (timestamp · principal badge · op_id · op_class badge · result_status icon · target · payload summary). Click opens the drawer; aggregate-only events render the 🔒 marker + placeholder. |
-| `broadcast/_event_drawer.html` | Event detail drawer: op identity, operation metadata, identifiers (audit_id / request_id / broadcast event_id), full payload (or the 🔒 placeholder for sensitive ops). Alpine `click.outside` / Escape / Close dismiss. |
-| `broadcast/_event_drawer_not_found.html` | The 404 drawer fragment for a missing / cross-tenant audit id. |
+| `broadcast/_event_row.html` | Server-authored announcement row (time · agent · announcement text bound via `x-text` · phase · targets · claim details). No operation row and no drawer since #3762. |
 | `broadcast/wall.html` | The no-chrome wall-monitor view (Task #869): a standalone document (not `extends base.html`) that drops the sidebar / navbar / filter bar and embeds `_feed.html` with `wall=True` (taller rows + auto-scroll). |
-| `broadcast/_history.html` | The Last-24h replay fragment (Task #869): seeds the shared `broadcastFeed` controller with the stored announcements the `/ui/broadcast/history` route read from the archive, so the rows render through `_event_row.html` and open the same drawer as the live feed. |
-| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`; loaded from the head-level `component_scripts` block — before `alpine.min.js`, or the registration is lost, #1692). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, the `visibleEvents` op_id client filter, the `init` re-read of the live op_id input (so the filter survives a server-side fragment swap, gated to `#broadcast-feed` only), the `openDrawer` helper, the badge/timestamp/payload/aggregate-only helpers, the `opts.seedFrom` data-island seed (for the history replay pane — reads + `JSON.parse`s a `<script type="application/json">` block rather than receiving events through the `x-data` attribute, closing B1's stored-XSS hole), and the `opts.autoScroll` wall-monitor behaviour. |
+| `broadcast/_history.html` | The Last-24h replay fragment (Task #869): seeds the shared `broadcastFeed` controller with the stored announcements the `/ui/broadcast/history` route read from the archive, so the rows render through `_event_row.html`. No kind switch since #3762. |
+| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`; loaded from the head-level `component_scripts` block — before `alpine.min.js`, or the registration is lost, #1692). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, `visibleEvents` (announcements only), the timestamp / phase / targets / claim helpers, the `opts.seedFrom` data-island seed (for the history replay pane — reads + `JSON.parse`s a `<script type="application/json">` block rather than receiving events through the `x-data` attribute, closing B1's stored-XSS hole), and the `opts.autoScroll` wall-monitor behaviour. |
 
 ### Performance + empty state
 
@@ -1666,7 +1663,8 @@ parsing it client-side keeps the untrusted data out of every attribute
 context; `tojson`'s `<`/`>` escaping prevents a `</script>` in a field
 from closing the element early.
 
-**The `op_id` scalar sinks (follow-up to B1, same PR #1044).** The same
+**The `op_id` scalar sinks (follow-up to B1, same PR #1044; the op_id
+filter itself was removed in #3762, so these sinks no longer exist).** The same
 `tojson`-in-a-double-quoted-`x-data` class shipped on the live feed too:
 `_feed.html`'s `opIdFilter: {{ op_id_filter | tojson }}` and
 `_filter_bar.html`'s `x-data="{ opId: {{ op_id_filter | tojson }} }"`.
@@ -1736,24 +1734,18 @@ The page works on a phone screen (about 390 px wide) and still looks the
 same on a laptop:
 
 * **Rows.** Below the `sm` width `broadcast/_event_row.html` uses a
-  6-column grid: time and person on line one, the operation (or the
-  announcement text) on line two, status and target on line three. The
-  class and payload cells and the column header show from `sm` up. Newest
-  events stay on top, as before.
-* **Filters.** Below `md` the four filters fold away behind a "Filters"
-  button (Alpine `filtersOpen` on the form), so the newest events sit at
+  6-column grid: time and agent on line one, the announcement text on
+  line two, the details button and the targets on line three. The phase
+  and claim cells and the column header show from `sm` up. Newest
+  announcements stay on top, as before.
+* **Filters.** Below `md` the two filters fold away behind a "Filters"
+  button (Alpine `filtersOpen` on the form), so the newest announcements sit at
   the top of the screen. Without JavaScript the fields stay visible.
-* **Announcements.** An agent announcement has no audit row, so it has
-  no detail drawer. On a phone a tap on it (or on the small button in
-  its status cell, which carries `aria-expanded`) folds out a details
+* **Details.** On a phone a tap on an announcement (or on its small
+  button, which carries `aria-expanded`) folds out a details
   block under the row: the phase, the full text without cutting, the
   targets and the claim metadata (`detailsOpen`, local to the row). From
   `sm` up the columns show these, and the block stays hidden.
-* **Details.** A tap on an operation row opens the detail drawer as before. Below
-  `lg` the drawer sits under the feed, so `openDrawer` scrolls it into
-  view once it is swapped in. It swaps with `settle:0ms`: htmx keeps the
-  old element's classes until the settle step, and the empty placeholder
-  is `hidden` below `lg` (it shows from `lg` up only).
 * **Sidebar.** `base.html` starts the sidebar closed on every page load
   below `lg`, so a phone shows the page and not the menu. Before, the
   saved open/closed choice (`meho.sidebar`, default open) opened the menu

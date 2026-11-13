@@ -59,7 +59,6 @@
   "tests/test_agents_schemas.py": 0.24,
   "tests/test_agents_service.py": 1.12,
   "tests/test_announce_claim_lookup.py": 1.08,
-  "tests/test_announce_gate.py": 0.94,
   "tests/test_api_audit_routes.py": 5.57,
   "tests/test_api_audit_trace_route.py": 1.5,
   "tests/test_api_audit_wait_rows.py": 0.59,

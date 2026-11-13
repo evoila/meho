@@ -42,6 +42,7 @@ import structlog
 from pydantic import ValidationError
 
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
+from meho_backplane.broadcast.claim_state import is_active_claim_step
 from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.db.models import AgentAnnouncement
 from meho_backplane.untrusted_text import wrap_untrusted_strings, wrap_untrusted_text
@@ -149,21 +150,9 @@ def _work_ref_matches(event: BroadcastEvent | AgentAnnouncementEvent, work_ref: 
     return event.work_ref == work_ref
 
 
-def _is_expired_claim(
-    event: BroadcastEvent | AgentAnnouncementEvent,
-    now: datetime,
-) -> bool:
-    """Return ``True`` iff *event* is a TTL'd claim whose expiry has passed.
-
-    Only :class:`AgentAnnouncementEvent` with a bound ``ttl_minutes``
-    can expire. Everything else -- audit-driven :class:`BroadcastEvent`
-    rows and announcements without a TTL -- is never "expired" and so
-    always survives an ``active_only`` filter.
-    """
-    if not isinstance(event, AgentAnnouncementEvent):
-        return False
-    expires_at = event.expires_at
-    return expires_at is not None and expires_at <= now
+def _is_active(event: BroadcastEvent | AgentAnnouncementEvent, now: datetime) -> bool:
+    """Whether *event* passes ``active_only``: an active claim step (#3762)."""
+    return isinstance(event, AgentAnnouncementEvent) and is_active_claim_step(event, now)
 
 
 def event_matches(
@@ -207,10 +196,16 @@ def event_matches(
       change ticket -- an :class:`AgentAnnouncementEvent`'s declared
       ``work_ref`` (T1 #2544) OR a :class:`BroadcastEvent`'s projected
       lineage ``work_ref`` (T3 #2545) (see :func:`_work_ref_matches`).
-    * **active_only:** when ``True``, drops TTL'd announcement claims
-      whose ``expires_at`` (``ts + ttl_minutes``) is at or before
-      ``now`` (defaulting to the current UTC instant). Non-TTL events
-      always pass (see :func:`_is_expired_claim`).
+    * **active_only:** when ``True``, keeps only steps that keep their
+      claim active at ``now`` (defaulting to the current UTC instant):
+      a trusted claim step that is not the ``completion`` and whose
+      finite TTL has not run out (see
+      :func:`~meho_backplane.broadcast.claim_state.is_active_claim_step`,
+      #3762). Legacy announcements without a trusted claim, steps without
+      a TTL and operation events never pass. This looks at one row only.
+      The archive reads also drop every step of a claim whose newest
+      stored step ended it
+      (:func:`~meho_backplane.broadcast.claim_archive.ended_claim_ids`).
     """
     if op_class is not None:
         # AgentAnnouncementEvent has no ``op_class``; the caller asked
@@ -231,7 +226,7 @@ def event_matches(
             return False
     if work_ref is not None and not _work_ref_matches(event, work_ref):
         return False
-    return not (active_only and _is_expired_claim(event, now or datetime.now(UTC)))
+    return not active_only or _is_active(event, now or datetime.now(UTC))
 
 
 def select_event_model(
@@ -434,7 +429,7 @@ def row_to_announcement(row: AgentAnnouncement) -> AgentAnnouncementEvent:
     off the DB validate against the model's ``Literal`` unions without a
     typed-cast dance. ``created_at`` is UTC-normalised because the SQLite
     dev/test driver returns naive datetimes; a naive ``ts`` would raise
-    when :func:`_is_expired_claim` compares ``expires_at`` against the
+    when the claim rules compare ``expires_at`` against the
     timezone-aware ``now``.
     """
     created_at = row.created_at
@@ -466,8 +461,8 @@ def row_to_announcement(row: AgentAnnouncement) -> AgentAnnouncementEvent:
 #: The mutating op classes -- ``write`` / ``credential_write`` /
 #: ``credential_mint``. A single source of truth for "is this a
 #: write-class op" shared by the dispatch-time advisories (#2550
-#: target-activity, #3133 reflex) and the #3133 announce gate, so a
-#: change to the mutating-class set lands in one place. Read-class
+#: target-activity, #3133 reflex), so a change to the mutating-class set
+#: lands in one place. Read-class
 #: dispatches (``read`` / ``credential_read`` / ``audit_query`` /
 #: ``other`` / ``approval`` / ``checks``) are not members.
 WRITE_OP_CLASSES: Final[frozenset[str]] = frozenset(

@@ -81,7 +81,6 @@ from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 from meho_backplane.targets.secret_field_map import merge_secret_field_map
 from meho_backplane.tenancy.ensure import ensure_tenant
 from meho_backplane.tenancy.policies import (
-    set_announce_gate_enabled,
     set_flight_recorder_policy,
     set_knowledge_wiki_collection,
     set_mail_recipient_allowlist,
@@ -154,7 +153,6 @@ class SettingsExportRefusedError(Exception):
 
 def _policies_block(tenant: Tenant) -> dict[str, Any]:
     return {
-        "announce_gate_enabled": tenant.announce_gate_enabled,
         "flight_recorder": {
             "enabled": tenant.flight_recorder_enabled,
             "retention_days": tenant.flight_recorder_retention_days,
@@ -440,8 +438,6 @@ def _plan_policies(
     if policies is None:
         return copy.deepcopy(DEFAULT_POLICIES), copy.deepcopy(DEFAULT_POLICIES)
     sent = policies.model_fields_set
-    if "announce_gate_enabled" in sent:
-        desired["announce_gate_enabled"] = bool(policies.announce_gate_enabled)
     if "flight_recorder" in sent:
         recorder = policies.flight_recorder
         if recorder is None:
@@ -781,7 +777,6 @@ async def _apply_policies(
             tenant = await session.get(Tenant, tenant_plan.tenant_id)
             if tenant is None:
                 raise LookupError("tenant row missing")
-            set_announce_gate_enabled(tenant, policies["announce_gate_enabled"])
             recorder = policies["flight_recorder"]
             set_flight_recorder_policy(
                 tenant,

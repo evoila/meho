@@ -22,18 +22,17 @@ Module layout:
   feed view subscribes to; bridges the BFF session cookie to the
   tenant-scoped Valkey feed because the browser ``EventSource`` cannot
   send the Bearer header ``/api/v1/feed`` (G6.1-T4) requires.
-* :mod:`~meho_backplane.ui.routes.broadcast.event` -- the
-  ``GET /ui/broadcast/event/{audit_id}`` route. Renders the event
-  detail drawer fragment (full audit row payload + request_id +
-  audit_id + broadcast event_id) the feed rows open via ``hx-get``;
-  applies the same decision-#3 aggregate-only gate as the publisher so
-  a sensitive op never leaks its payload on click.
 * :mod:`~meho_backplane.ui.routes.broadcast.history` -- the
   ``GET /ui/broadcast/history`` route (T3 #869). The "Last 24h" tab's
-  HTMX target: a finite ``XRANGE`` pull of the tenant's last-24h events,
+  HTMX target: a finite read of the tenant's stored announcements,
   serialised as JSON the shared ``broadcastFeed`` controller renders
   through ``_event_row.html``, so a replayed history row is identical to
-  a live row and opens the same T2 drawer.
+  a live row.
+
+The pages show only agent announcements; people read them and cannot
+publish (#3762). The operation detail drawer
+(``/ui/broadcast/event/{audit_id}``) is gone with the operation rows; the
+audit console shows operations.
 
 The umbrella :func:`build_router` aggregates both. It is mounted
 **before** :func:`meho_backplane.ui.routes.stubs.build_stubs_router` in
@@ -49,7 +48,6 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from meho_backplane.ui.routes.broadcast.event import build_event_router
 from meho_backplane.ui.routes.broadcast.feed import build_feed_router
 from meho_backplane.ui.routes.broadcast.history import build_history_router
 from meho_backplane.ui.routes.broadcast.overrides import build_overrides_router
@@ -66,22 +64,13 @@ def build_router() -> APIRouter:
     mirrors the chassis convention in
     :mod:`meho_backplane.ui.routes.topology`.
 
-    The feed router is included **before** the event router so the
-    literal ``/ui/broadcast/feed`` / ``/ui/broadcast/history`` /
-    ``/ui/broadcast/overrides`` fragment paths are matched ahead of the
-    parametrised ``/ui/broadcast/event/{audit_id}`` -- they share no
-    overlapping segment, but declaration order is the contract FastAPI
-    resolves on, so keeping the literal routes first is the safe
-    discipline (mirrors the targets router's ``/discover`` ahead of
-    ``/{name}``). The overrides router carries its own parametrised
-    ``/ui/broadcast/overrides/{override_id}`` DELETE, but that lives
-    under the literal ``/ui/broadcast/overrides`` prefix so it cannot
-    collide with the event route's ``/ui/broadcast/event/{audit_id}``.
+    The overrides router carries its own parametrised
+    ``/ui/broadcast/overrides/{override_id}`` DELETE under the literal
+    ``/ui/broadcast/overrides`` prefix.
     """
     router = APIRouter()
     router.include_router(build_feed_router())
     router.include_router(build_stream_router())
     router.include_router(build_history_router())
     router.include_router(build_overrides_router())
-    router.include_router(build_event_router())
     return router

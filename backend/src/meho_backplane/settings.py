@@ -1847,10 +1847,11 @@ class Settings(BaseModel):
     #: ``HTTP_MAX_REQUEST_BODY_BYTES``.
     http_max_request_body_bytes: int = Field(default=32 * 1024 * 1024, ge=1024)
     #: Look-back window (minutes) for the dispatch-time target-activity
-    #: advisory (#2550). A write-class dispatch on a target with peer
-    #: activity inside this window carries a compact
-    #: ``extras["target_activity_advisory"]`` on its response. ``0``
-    #: disables the feature entirely (no stream read on any dispatch).
+    #: advisory (#2550, #3762). A write-class dispatch on a target where
+    #: another agent holds an active claim, whose newest step is inside
+    #: this window, carries a compact ``extras["target_activity_advisory"]``
+    #: on its response. ``0`` disables the feature entirely (no archive
+    #: read on any dispatch).
     dispatch_activity_advisory_window_minutes: int = Field(default=30, ge=0)
     #: Dedupe window (minutes) for the dispatch-time checks-alert
     #: advisory (#2718). A successful dispatch by a caller whose tenant

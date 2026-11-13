@@ -50,7 +50,7 @@ and never captures more than it can prove it should):
   not here -- this resolver is the per-tenant policy, that is the per-trace
   degrade.
 
-Cache discipline mirrors :mod:`meho_backplane.broadcast.announce_gate`: a 60s
+Cache discipline mirrors :mod:`meho_backplane.broadcast.overrides`: a 60s
 per-key TTL cache keeps the policy off the DB on the per-dispatch path; only a
 miss awaits a one-row SELECT. One combined tenant cache serves all three
 questions (all read the same ``tenant`` row).
@@ -83,7 +83,7 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-#: Per-key TTL for both caches, mirroring the announce-gate resolver.
+#: Per-key TTL for both caches, mirroring the broadcast-override resolver.
 _CACHE_TTL_SECONDS: Final[float] = 60.0
 
 #: Per-tenant policy cache. Value = ((enabled, retention_days_override,

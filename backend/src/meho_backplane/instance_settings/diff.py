@@ -23,7 +23,6 @@ __all__ = ["DEFAULT_POLICIES", "SECTIONS", "diff_specs", "is_empty", "summarise"
 
 #: What a tenant MEHO has never seen gets (the ``tenant`` column defaults).
 DEFAULT_POLICIES: Final[dict[str, Any]] = {
-    "announce_gate_enabled": False,
     "flight_recorder": {"enabled": False, "retention_days": None, "agent_readable": None},
     "mail_recipient_allowlist": None,
     "run_approval_target_kinds": False,

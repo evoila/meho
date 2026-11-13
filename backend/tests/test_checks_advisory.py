@@ -50,7 +50,6 @@ from sqlalchemy import update
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import (
-    BroadcastEvent,
     get_broadcast_client,
     reset_broadcast_client_for_testing,
 )
@@ -71,6 +70,7 @@ from meho_backplane.operations import (
     reset_dispatcher_caches,
 )
 from meho_backplane.settings import get_settings
+from tests.broadcast_admission_helpers import seed_announcement
 
 _TENANT = UUID("00000000-0000-0000-0000-00000000c0c0")
 _AUDIT_ID = UUID("55555555-5555-5555-5555-555555555555")
@@ -518,35 +518,17 @@ async def test_both_advisory_fragments_coexist_on_one_response(
 ) -> None:
     """The #2550 fragment and the checks fragment ride one ``extras``.
 
-    A write-class dispatch on a target with peer activity (the #2550
-    trigger) by a caller whose tenant has a critical Dashboard (this
+    A write-class dispatch on a target where another agent holds an
+    active claim (the #2550 trigger, #3762) by a caller whose tenant has a critical Dashboard (this
     feature's trigger) carries BOTH fragments -- distinct keys, plain
     dict merge, neither clobbers the other.
     """
-    from datetime import UTC, datetime
-
     await _seed_dashboard(state="critical")
     await _register_op("vault.kv.delete", stub_embedding_service)
-    peer_event = BroadcastEvent(
-        event_id=uuid.uuid4(),
-        ts=datetime.now(UTC),
-        tenant_id=_TENANT,
-        principal_sub="peer-a",
-        target_name="test-target",
-        op_id="vault.kv.delete",
-        op_class="write",
-        result_status="ok",
-        audit_id=_AUDIT_ID,
-        actor_sub=None,
-        payload={"op_class": "write", "params": {}, "result_status": "ok"},
-    )
-
-    async def _xrevrange(name: str, **kwargs: Any) -> list[tuple[str, dict[str, str]]]:
-        return [("1747800001000-0", {"event": peer_event.model_dump_json()})]
+    await seed_announcement(_TENANT, principal_sub="peer-a", target="test-target", ttl_minutes=60)
 
     store = _FakeNxStore()
-    bc = get_broadcast_client()
-    with _patch_nx(store), patch.object(bc, "xrevrange", new=_xrevrange):
+    with _patch_nx(store):
         result = await dispatch(
             operator=_operator(),
             connector_id="vault-1.x",

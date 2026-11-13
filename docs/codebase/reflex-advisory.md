@@ -1,4 +1,4 @@
-# Reflex advisory + opt-in announce gate (dispatch-time)
+# Reflex advisory (dispatch-time)
 
 ## Overview
 
@@ -10,20 +10,22 @@ behavior: it nudges an agent session toward the discipline the backplane
 exposes but does not otherwise enforce — read the feed before acting,
 announce before mutating.
 
-`#3133` ships two pieces on the shared `dispatch()` path, so an agent
-`call_operation` and an operator CLI dispatch exercise the same code:
+The advisory (default ON, advice only) is a `build_reflex_advisory(...)`
+fragment on the shared `dispatch()` path, merged into the same `extras`
+dict. It returns `{"reflex_advisory": "<one line>"}` or `{}`. It copies
+the #2550 / #2718 advisory mould: fail-open, bounded, Valkey `SET NX EX`
+dedupe.
 
-1. **Reflex advisory** (default ON, advisory-only) — a
-   `build_reflex_advisory(...)` fragment merged into the same `extras`
-   dict. Returns `{"reflex_advisory": "<one line>"}` or `{}`.
-2. **Announce gate** (default OFF, opt-in per tenant) — a pre-execution
-   dispatch gate that *rejects* a caution-or-higher write-class op
-   dispatched without an active announce claim, in a tenant that opted
-   in.
-
-The advisory *nudges*; the gate *enforces*. Both copy the established
-#2550 / #2718 advisory mould: fail-open, bounded, Valkey `SET NX EX`
-dedupe where a dedupe applies.
+**No write waits for an announcement (#3762).** #3133 also shipped an
+opt-in per-tenant announce gate that refused a caution-or-higher write
+without an active claim. Only trusted agents can publish an announcement
+(#3736), so the gate could refuse a person's write for an announcement
+the person could never make. #3762 removed it: the gate module, the
+`announce_required` refusal, and the `tenant.announce_gate_enabled` flag in
+the model. The settings file still accepts `policies.announce_gate_enabled`
+from older files but ignores it. The database column stays (migrations only add, see
+[migrations.md](migrations.md)); no code reads it. See
+[the decision record](../decisions/2026-11-08-broadcast-people-read-agents-publish.md).
 
 ## Key types
 
@@ -34,22 +36,11 @@ dedupe where a dedupe applies.
   `CHECKS_ADVISORY_EXTRAS_KEY` (`checks_alert_advisory`).
 - `settings.reflex_advisory_window_minutes` — dedupe window, default
   `30`, `ge=0`; `0` disables the advisory before any I/O.
-- `meho_backplane.broadcast.announce_gate.announce_gate_blocks(operator, *, op_class, safety_level, target_name)`
-  — the gate decision; returns a remediation string (block) or `None`.
-- `announce_gate_enabled(tenant_id) -> bool` — the cache-aware, fail-open
-  per-tenant enablement resolver.
-- `tenant.announce_gate_enabled` — the structured per-tenant policy flag
-  (Boolean, default `False`), migration `0077`.
 - `announce_claim_gap(operator, *, op_class, target_name)`
-  (`broadcast/announce_claim_lookup.py`) — the shared active-claim lookup. Returns
+  (`broadcast/announce_claim_lookup.py`) — the active-claim lookup. Returns
   `None` when an active claim of the caller covers the op, else the
   reason (`ClaimGap`): `no_claim`, `expired`, `other_target` or
   `other_op_class`. The advisory uses the reason in its message.
-- `caller_has_active_announce_claim(operator, *, op_class, target_name)` —
-  the yes/no form of the same lookup, used by the gate.
-- `result_announce_required(op_id, remediation, duration_ms)`
-  (`operations/_errors.py`) — the `denied` envelope the gate returns,
-  `extras.error_code = "announce_required"`.
 
 ## Control flow
 
@@ -107,29 +98,11 @@ response falls through to announce on the next.
   lookup. Anyone else would be refused with `agent_identity_required`,
   so MEHO does not tell them to announce.
 
-### Gate (pre-execution, after the policy gate's AUTO_EXECUTE)
-
-```text
-dispatch(...)   # Step 4, verdict == AUTO_EXECUTE, not the _approved resume
-  → announce_gate_blocks(operator, op_class, safety_level, target_name)
-      [returns None — no block — in order, cheapest first:]
-        · op_class not in WRITE_OP_CLASSES
-        · _SAFETY_RANK[safety_level] < _SAFETY_RANK["caution"]
-        · not announce_gate_enabled(tenant_id)        # cached, fail-open
-        · caller_has_active_announce_claim(...)         # active claim covers it
-      [otherwise:]
-        → remediation string naming meho_broadcast_announce
-  → if blocked: write a "denied" audit row + return result_announce_required(...)
-```
-
 ## Design contract
 
-- **Advisory only / gate is a plain denial.** The advisory never blocks;
-  it rides an already-successful response, built after the synchronous
-  audit commit — never on a denied / error / awaiting-approval envelope.
-  The gate is a policy rejection (`status="denied"`), **not** a
-  NEEDS_APPROVAL path: no durable approval row, no four-eyes queue. The
-  caller self-remediates by announcing intent and retrying.
+- **Advice only.** The advisory never blocks; it rides an
+  already-successful response, built after the synchronous audit commit —
+  never on a denied / error / awaiting-approval envelope.
 - **Session-scoped advisory.** The nudge targets an agent session, keyed
   on `resolve_agent_session_id()`. A dispatch with no session id — an
   operator CLI / REST call, a system sweep — is not an agent session and
@@ -138,41 +111,28 @@ dispatch(...)   # Step 4, verdict == AUTO_EXECUTE, not the _approved resume
   `call_operation` carries a session and an operator `meho operation
   call` does not, so the same code nudges the former and stays silent for
   the latter.
-- **Surface-agnostic gate.** The gate keys on announce-*state*, not the
-  surface, so an enabled-tenant caution write with no claim is rejected
-  identically over MCP and CLI. It composes with #2546 (which
-  rate-limits the announce *call*): announce once, then the write passes.
 - **Deduped advisory.** At most one nudge per `(agent_session_id,
   heuristic)` per window, via an atomic Valkey `SET NX EX` — the #2718
   dedupe primitive, one key per heuristic.
 - **Fail-open throughout.** Any advisory error (DB / Valkey teardown,
   parse bug) is swallowed, warn-logged `reflex_advisory_failed`, and
-  yields `{}`. Any gate error — an unreadable enablement policy
-  (`announce_gate_enablement_read_failed`), an unreachable claim scan
-  (`announce_gate_check_failed`) — resolves to *no block*. The gate only
-  ever *adds* a rejection when it can positively determine the tenant
-  opted in AND the claim is absent.
+  yields `{}`.
 - **Bounded.** The read heuristic is one indexed `EXISTS` probe on
   `audit_log` (the `audit_log_agent_session_id_idx` b-tree). The announce
-  heuristic and the gate share one archive query (`announce_claim_gap`):
+  heuristic is one archive query (`announce_claim_gap`):
   the caller's own `agent_announcement` rows of the last 1440 minutes,
   newest first, at most 500 rows. The index
   `agent_announcement_tenant_principal_created_at_idx` on `(tenant_id,
   principal_sub, created_at DESC)` (migration `0135`, #5005) matches this
-  query, so it reads only the caller's rows, already in order. The
-  enablement flag is read through a
-  60s per-tenant TTL cache. A read-class dispatch or a disabled tenant
-  pays nothing on the gate.
+  query, so it reads only the caller's rows, already in order.
 - **`0` disables the advisory.** `REFLEX_ADVISORY_WINDOW_MINUTES` (default
-  30) short-circuits before session resolution or I/O when `0`. The gate
-  has no global knob — it is OFF unless a tenant opts in.
+  30) short-circuits before session resolution or I/O when `0`.
 
 ## Which claims count (#4091)
 
 The claim lookup reads the `agent_announcement` archive, the same record
 `meho_broadcast_recent` reads. So a claim that `meho_broadcast_recent`
-shows as active (`filter.active_only=true`) also silences the advisory
-and passes the gate.
+shows as active (`filter.active_only=true`) also silences the advisory.
 
 Before #4091 the lookup read the newest 100 entries of the tenant's
 Valkey stream. Those entries belong to every principal of the tenant (and
@@ -182,8 +142,13 @@ minutes, and the advisory told the agent to announce again although its
 claim was still active. The stream is now only a wake-up signal for live
 watchers, and its write is allowed to fail, so it cannot be the record.
 
-A claim covers the op when it was published for the caller's principal,
-has not expired, declared the op's class (or no class), and names the
+Only trusted claims count (#3762): rows without a `claim_id` and
+`owner_sub` are history from before trusted admission. Each claim is
+judged by its newest step (`broadcast/claim_state.py`); a claim whose
+newest step is the `completion` is finished and counts as no claim. A
+claim covers the op when it was published for the caller's principal,
+its finite TTL has not run out (a step without a TTL counts as expired),
+it declared the op's class (or no class), and its newest step names the
 op's target in `target` or `targets` (or names no target). Matching runs
 on the stored values, not on the untrusted-text wrap the read tools add.
 
@@ -197,23 +162,6 @@ claim wins:
 | `other_op_class` | an active claim for this target, another `planned_op_class` | announce with the op's class |
 | `other_target` | active claims, none naming this target | announce with this target |
 | `no_claim` | no active claim at all | announce first |
-
-## Enablement store — why a `tenant` column
-
-The gate's per-tenant enablement is a **structured per-tenant policy
-field** — `tenant.announce_gate_enabled` (Boolean, default `False`) —
-deliberately **not** `tenant_conventions` (free-form Markdown, unsuitable
-for a machine-read boolean). A typed column on the canonical per-tenant
-row is the minimum structured store for a single boolean, read through a
-cache-aware fail-open resolver that mirrors the `broadcast_override`
-resolver pattern (`broadcast/overrides.py`: 60s per-tenant TTL cache,
-fail-open-to-default). A dedicated rules table + CRUD/REST/MCP/UI surface
-(the full `broadcast_override` shape) is more than a one-flag policy
-warrants. The flag has no REST route of its own. A tenant opts in through
-the settings file: `spec.tenants[].policies.announce_gate_enabled`, applied
-by `POST /api/v1/settings/import` (see [settings.md](settings.md)). The
-write goes through `tenancy/policies.set_announce_gate_enabled`, which is
-audited and clears the 60s cache for that tenant.
 
 ## Known issues / limitations
 
@@ -238,9 +186,6 @@ audited and clears the 60s cache for that tenant.
   principals' announcements never count toward that cap. Only a principal
   that announces close to the rate limit all day can miss a claim it made
   more than 500 announcements ago.
-- **Completed claims still count.** A claim whose `completion` step was
-  published still covers the op until its TTL runs out, the same as the
-  `active_only` filter of `meho_broadcast_recent`.
 - **Session identity.** Both the dedupe key and the read query use
   `resolve_agent_session_id()`, which prefers the agent-run id and falls
   back to the MCP header session. A direct MCP agent session (the primary
@@ -278,9 +223,7 @@ Any one absent is a silent, correct `{}` — never a defect:
 Same as the #2718 fragment: the backend sets `extras` on the response for
 every front, but the human CLI render prints `extras` only on non-ok
 statuses. An agent (MCP `call_operation`) sees `reflex_advisory`
-unprompted; an operator sees it through `meho operation call --json`. A
-gate rejection is a non-ok (`denied`) status, so its remediation *does*
-surface on the human render.
+unprompted; an operator sees it through `meho operation call --json`.
 
 ## References
 
@@ -292,18 +235,15 @@ surface on the human render.
   `run_id`), `audit_log.agent_session_id` (`db/models.py`, MCP-session
   correlation, migration `0014`). Boundary: #2546 (announce rate limit).
 - Code: `backend/src/meho_backplane/broadcast/reflex.py`,
-  `backend/src/meho_backplane/broadcast/announce_gate.py`,
-  `announce_claim_gap` and `caller_has_active_announce_claim` in
+  `announce_claim_gap` in
   `backend/src/meho_backplane/broadcast/announce_claim_lookup.py`
   (moved out of `broadcast/history.py` in #5005),
-  the claim lookup's index (migration `0135`),
-  the merge seam + gate in
-  `backend/src/meho_backplane/operations/dispatcher.py`,
-  `result_announce_required` in
-  `backend/src/meho_backplane/operations/_errors.py`,
-  `tenant.announce_gate_enabled` (migration `0077`).
+  the claim rules in `backend/src/meho_backplane/broadcast/claim_state.py`
+  (#3762), the claim lookup's index (migration `0135`), the merge seam in
+  `backend/src/meho_backplane/operations/dispatcher.py`.
 - Tests: `backend/tests/test_reflex_advisory.py`,
-  `backend/tests/test_announce_gate.py`,
+  `backend/tests/test_broadcast_human_writes_not_gated.py` (a person's
+  write runs without any claim, #3762),
   `backend/tests/test_announce_claim_lookup.py` (the archive claim lookup,
   #4091),
   `backend/tests/integration/test_announce_claim_lookup_pg.py` (on a real

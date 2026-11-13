@@ -53,7 +53,6 @@ spec:
   tenants:
     - id: <tenant-uuid>
       policies:
-        announce_gate_enabled: false
         flight_recorder: { enabled: true, retention_days: 14, agent_readable: null }
         mail_recipient_allowlist: "@example.com"
         run_approval_target_kinds: false
@@ -78,6 +77,9 @@ spec:
   parts:
     - `policies`: the tenant's switches, such as the flight recorder
       and the mail allow list. `null` means "use the default".
+      Files from older versions may have `announce_gate_enabled`.
+      MEHO accepts this key and ignores it, because that switch no
+      longer exists.
       `knowledge_wiki_collection` names the docs collection of the
       tenant's own wiki (see
       [Lessons in your own wiki](memory-and-knowledge.md#lessons-in-your-own-wiki)).

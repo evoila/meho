@@ -3,7 +3,7 @@
 
 """A policy change is in force right after its commit, also with a read in between.
 
-The policy writes (tenant flight-recorder policy, announce gate, per-target
+The policy writes (tenant flight-recorder policy, per-target
 capture override, broadcast overrides) change a row in the request's session.
 That session commits at the end of the request. These tests run a cached read
 between the write and the commit, as a dispatch of the same tenant can, and
@@ -36,11 +36,7 @@ from meho_backplane.api.v1.broadcast_overrides import (
 )
 from meho_backplane.api.v1.targets import _audit_flight_recorder_capture_write
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import announce_gate, overrides
-from meho_backplane.broadcast.announce_gate import (
-    announce_gate_enabled,
-    reset_announce_gate_cache_for_testing,
-)
+from meho_backplane.broadcast import overrides
 from meho_backplane.broadcast.overrides import (
     _load_tenant_rules,
     reset_overrides_cache_for_testing,
@@ -56,10 +52,7 @@ from meho_backplane.flight_recorder.config import (
     should_expose_to_agent,
 )
 from meho_backplane.settings import get_settings
-from meho_backplane.tenancy.policies import (
-    set_announce_gate_enabled,
-    set_flight_recorder_policy,
-)
+from meho_backplane.tenancy.policies import set_flight_recorder_policy
 
 
 @pytest.fixture(autouse=True)
@@ -69,12 +62,10 @@ def _settings_and_clean_caches(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
     reset_flight_recorder_config_cache_for_testing()
-    reset_announce_gate_cache_for_testing()
     reset_overrides_cache_for_testing()
     yield
     get_settings.cache_clear()
     reset_flight_recorder_config_cache_for_testing()
-    reset_announce_gate_cache_for_testing()
     reset_overrides_cache_for_testing()
 
 
@@ -161,7 +152,7 @@ def test_counter_notes_a_change_since_the_count_was_taken() -> None:
 
 
 # --------------------------------------------------------------------------
-# Tenant flight-recorder policy and announce gate
+# Tenant flight-recorder policy
 # --------------------------------------------------------------------------
 
 
@@ -218,18 +209,6 @@ async def test_flight_recorder_policy_rolled_back_keeps_the_old_policy() -> None
         await session.rollback()
 
     assert await should_expose_to_agent(tenant_id=tenant_id) is True
-
-
-async def test_announce_gate_read_during_the_change() -> None:
-    tenant_id = await _seed_tenant("gate-commit-race", announce_gate_enabled=False)
-    async with get_sessionmaker()() as session:
-        tenant = await session.get(Tenant, tenant_id)
-        assert tenant is not None
-        assert set_announce_gate_enabled(tenant, True) is True
-        assert await announce_gate_enabled(tenant_id) is False
-        await session.commit()
-
-    assert await announce_gate_enabled(tenant_id) is True
 
 
 # --------------------------------------------------------------------------
@@ -363,23 +342,6 @@ async def test_flight_recorder_policy_read_paused_over_the_commit(
     assert await reader is True
     assert await should_expose_to_agent(tenant_id=tenant_id) is False
     assert await should_capture(tenant_id=tenant_id) is False
-
-
-async def test_announce_gate_read_paused_over_the_commit(monkeypatch: pytest.MonkeyPatch) -> None:
-    tenant_id = await _seed_tenant("gate-paused-read", announce_gate_enabled=False)
-    pause = _pause_next_read(monkeypatch, announce_gate)
-    reader = asyncio.create_task(announce_gate_enabled(tenant_id))
-    await pause.read_done.wait()
-
-    async with get_sessionmaker()() as session:
-        tenant = await session.get(Tenant, tenant_id)
-        assert tenant is not None
-        assert set_announce_gate_enabled(tenant, True) is True
-        await session.commit()
-
-    pause.release.set()
-    assert await reader is False
-    assert await announce_gate_enabled(tenant_id) is True
 
 
 async def test_target_capture_override_read_paused_over_the_commit(

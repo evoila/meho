@@ -39,7 +39,6 @@ spec:
   tenants:
     - id: 4f0c…                 # the tenant's Keycloak id (UUID)
       policies:
-        announce_gate_enabled: false
         flight_recorder: { enabled: true, retention_days: 14, agent_readable: null }
         mail_recipient_allowlist: "@example.com"
         run_approval_target_kinds: false
@@ -85,14 +84,16 @@ spec:
 ### Tenant block
 
 - `policies` — the per-tenant policy columns on `tenant`:
-  `announce_gate_enabled`, `flight_recorder.{enabled, retention_days,
-  agent_readable}`, `mail_recipient_allowlist`,
+  `flight_recorder.{enabled, retention_days, agent_readable}`, `mail_recipient_allowlist`,
   `run_approval_target_kinds` (a run approval may list a target kind; see
   [run-approvals.md](run-approvals.md)), `knowledge_wiki_collection`
   (the docs collection of the tenant's own wiki, at most 128 characters;
   an empty value is `null`; see [kb.md](kb.md#wiki-search-5976)).
   `null` means "use the instance default" (`false` for the switches,
   inherit or none for the others).
+  The retired `announce_gate_enabled` key (#3762) is still accepted, so
+  an older export imports clean, but it is ignored: never read, written
+  or exported.
   `policies: null` resets all of them.
 - `conventions[]` — keyed by `slug`. `title` and `kind` are needed when the
   convention is new. `kind` cannot change on import, the same as on
@@ -337,8 +338,7 @@ body and writes nothing. Otherwise it adds or updates, never deletes:
   Items that could not be written are listed in `failed` (one sentence
   each), and `ok` is then `false`; everything else is written.
 - The writes go through the same code as the REST routes:
-  `tenancy/policies.py` for the tenant columns (`announce_gate_enabled` has
-  no route of its own and is written there, audited), `ConventionsService`
+  `tenancy/policies.py` for the tenant columns, `ConventionsService`
   for conventions, and `create_target` / `update_target` for targets.
 - One `audit_log` row covers the whole import (`op_id=settings.import`). Its
   `op_class` is `write` only when something is written; a refused or

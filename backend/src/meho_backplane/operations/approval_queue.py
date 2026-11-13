@@ -1372,9 +1372,12 @@ async def _write_audit_row(
     policy_kwargs: dict[str, Any] = {}
     if hasattr(AuditLog, "policy_decision"):
         policy_kwargs["policy_decision"] = policy_decision_var.get()
-    # The matched policy rule (#6044), bound next to the verdict: set on the
-    # "request" row, NULL on a "decision" row, the same as the verdict.
-    policy_kwargs.update(policy_rule_columns())
+    # The matched policy rule (#6044), only on the "request" row. A
+    # "decision" row can be written on the task of another call: a retry
+    # that expires an old overdue request writes that request's decision
+    # row while the retry's own rule is bound.
+    if path == "approval.request":
+        policy_kwargs.update(policy_rule_columns())
     # Session-replay lineage (#2086), off the request row — the durable
     # source of truth, same discipline as ``work_ref`` below. The
     # "request" row and the "decision" rows are written on *different*

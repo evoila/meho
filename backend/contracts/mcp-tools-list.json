@@ -1470,7 +1470,6 @@
             "type": "integer"
           },
           "work_ref": {
-            "maxLength": 256,
             "minLength": 1,
             "type": "string"
           }
@@ -1760,6 +1759,10 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "category": {
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$",
+            "type": "string"
+          },
           "connector_id": {
             "minLength": 1,
             "type": "string"
@@ -1767,6 +1770,15 @@
           "group_key": {
             "minLength": 1,
             "type": "string"
+          },
+          "labels": {
+            "additionalProperties": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxProperties": 32,
+            "type": "object"
           },
           "name": {
             "type": [
@@ -1802,6 +1814,10 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "category": {
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$",
+            "type": "string"
+          },
           "connector_id": {
             "minLength": 1,
             "type": "string"
@@ -1817,6 +1833,15 @@
               "boolean",
               "null"
             ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxProperties": 32,
+            "type": "object"
           },
           "op_id": {
             "minLength": 1,
@@ -2434,6 +2459,9 @@
           "last_verified": {
             "type": "boolean"
           },
+          "retry": {
+            "type": "boolean"
+          },
           "run_id": {
             "format": "uuid",
             "type": "string"
@@ -2664,7 +2692,6 @@
             "type": "string"
           },
           "work_ref": {
-            "maxLength": 256,
             "type": [
               "string",
               "null"
@@ -2888,6 +2915,24 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "sensor_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sensor_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_sensor_pause",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
           "cursor": {
             "type": "string"
           },
@@ -2926,6 +2971,24 @@
         "type": "object"
       },
       "name": "meho_sensor_results",
+      "outputSchema": null,
+      "surface": "operator"
+    },
+    {
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "sensor_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sensor_id"
+        ],
+        "type": "object"
+      },
+      "name": "meho_sensor_resume",
       "outputSchema": null,
       "surface": "operator"
     },

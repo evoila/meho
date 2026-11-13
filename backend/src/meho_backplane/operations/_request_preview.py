@@ -97,7 +97,7 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._park_check import park_check_refusal, park_check_registered
-from meho_backplane.operations._preview import _SENSITIVE_CLASSES
+from meho_backplane.operations._preview import _SENSITIVE_CLASSES, has_preview_builder
 from meho_backplane.operations._preview_steps import (
     agent_step_refusal,
     preview_step_verdict,
@@ -106,6 +106,7 @@ from meho_backplane.operations._secret_values import split_reveal_secret
 from meho_backplane.operations._target_connector_match import mismatch_preview_envelope
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
+    _is_mutating,
     params_check_errors,
     policy_gate,
     validate_params,
@@ -115,7 +116,12 @@ from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 
-__all__ = ["PARAMS_DIGEST_KEY", "compute_preview_hash", "preview_dispatch"]
+__all__ = [
+    "PARAMS_DIGEST_KEY",
+    "compute_preview_hash",
+    "is_credential_builder_op",
+    "preview_dispatch",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -233,36 +239,59 @@ def _invalid_op_schema_envelope(
     }
 
 
+def is_credential_builder_op(descriptor: EndpointDescriptor) -> bool:
+    """True for a credential-class op that has its own preview builder (#5074).
+
+    Such an op previews from its builder only. The params are never copied
+    into the preview, because a secret can ride in them. Only while the
+    ``PREVIEW_TYPED_WRITES`` switch is on; off, nothing changes.
+    """
+    return (
+        get_settings().preview_typed_writes
+        and classify_op(descriptor.op_id) in _SENSITIVE_CLASSES
+        and has_preview_builder(descriptor.op_id)
+    )
+
+
 def _is_previewable(descriptor: EndpointDescriptor) -> bool:
     """True when the op has a preview surface; else it previews as ``unavailable``.
 
     An ``source_kind='ingested'`` op has a literal would-be HTTP request. A
-    non-ingested (``typed`` / ``composite``) op has none, so it is previewable
-    only in a governed approval tier, via the synthetic preview
-    (:func:`._composite_preview.build_composite_preview`):
+    non-ingested (``typed`` / ``composite``) op has none, so it gets the
+    synthetic preview (:func:`._composite_preview.build_composite_preview`)
+    when it can change something:
 
-    * ``safety_level='destructive'`` (#3198) — unconditional: the
-      governed-delete gate refuses to park without a bound preview hash, so the
-      op MUST be previewable. Destructive ops are non-credential deletes.
-    * ``requires_approval`` (#3312), **except a credential-class op** — so the
-      calling agent reads the same park-time ``proposed_effect`` the approver
-      sees. A credential-class op (``classify_op`` ∈ the aggregate-only
-      :data:`~meho_backplane.operations._preview._SENSITIVE_CLASSES`) is
-      **excluded**: its secret rides in the request params, and the synthetic
-      preview's ``redacted_body`` slot is a safe view of the params
-      (:func:`~meho_backplane.operations._composite_preview.safe_params_view`),
-      not a place to carry a written secret at all. The park path suppresses
-      credential-class request detail for exactly this reason
-      (``build_proposed_effect`` step 3); mirror it here so a ``vault.kv.put`` /
-      ``k8s.secret.create`` preview never surfaces the written secret.
-      Single-sourced on ``classify_op``; the class set is imported, never
-      re-declared.
+    * ``safety_level='destructive'`` (#3198) -- unconditional: the
+      governed-delete gate refuses to park without a bound preview hash.
+    * a credential-class op (``classify_op`` in the aggregate-only
+      :data:`~meho_backplane.operations._preview._SENSITIVE_CLASSES`) with
+      its own preview builder (#5074). The builder owns the secret
+      discipline, and the preview never copies the params.
+    * any other non-credential op that is not a read, whether or not it
+      carries ``requires_approval`` (#3312, #5074). A call can wait for
+      approval for some callers only, so the flag alone is not the rule. A
+      ``safe`` typed op is a read and stays ``unavailable``.
+
+    A credential-class op with no builder of its own stays ``unavailable``:
+    its secret rides in the params, and the generic safe view cannot be
+    trusted to hide a connector-specific secret shape.
+
+    The last two rules hold only while the ``PREVIEW_TYPED_WRITES`` switch
+    is on. Off (the default), a typed op previews as before: when it is
+    destructive, or when it carries ``requires_approval`` and is not a
+    credential-class op.
     """
     if descriptor.source_kind == "ingested":
         return True
     if descriptor.safety_level == "destructive":
         return True
-    return descriptor.requires_approval and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
+    if not get_settings().preview_typed_writes:
+        return (
+            descriptor.requires_approval and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
+        )
+    if classify_op(descriptor.op_id) in _SENSITIVE_CLASSES:
+        return has_preview_builder(descriptor.op_id)
+    return descriptor.requires_approval or _is_mutating(descriptor)
 
 
 def _refused_envelope(
@@ -506,6 +535,7 @@ async def _park_check_envelope(
         descriptor=descriptor,
         target=target,
         connector_id=connector_id,
+        params=params,
         decide_only=True,
     )
     if verdict is not PermissionVerdict.NEEDS_APPROVAL:
@@ -532,6 +562,7 @@ async def _governance_fields(
     descriptor: EndpointDescriptor,
     target: Any,
     connector_id: str,
+    params: dict[str, Any],
 ) -> dict[str, Any]:
     """The risk level and the policy verdict for this caller and target (#4923).
 
@@ -540,14 +571,17 @@ async def _governance_fields(
     ``auto-execute``, ``needs-approval`` or ``deny`` — from the same
     :func:`~meho_backplane.operations._validate.policy_gate` the dispatcher
     runs (Step 4), called with ``decide_only=True`` so it writes nothing: no
-    audit row, no approval request, no standing-grant use. ``policy_reason``
-    is the gate's reason string, or ``None`` when the gate gives none (a
+    audit row, no approval request, no standing-grant use. The gate gets the
+    call's *params*, so the op's requester check gives the call's answer.
+    ``policy_reason`` is the gate's reason string, or ``None`` when the gate gives none (a
     person's call that runs at once). A call that would run at once is
     also checked step by step (:func:`preview_step_verdict`, #5492): a
     multi-step operation reads as covered only when its write steps are
     too. With ``AGENT_GRANT_REQUIRED=on`` a call that would run or wait
-    reads as ``deny`` when a write step has no grant or a ``deny`` grant
-    (:func:`agent_step_refusal`), as the dispatcher refuses it.
+    reads as ``deny`` when a write step has no grant or a ``deny`` grant,
+    or when an agent calls a multi-step operation that changes something
+    and declares no steps (:func:`agent_step_refusal`), as the dispatcher
+    refuses it.
     All four are advisory: none is in :data:`_PREVIEW_HASH_KEYS`, so
     the hash does not change.
     """
@@ -556,13 +590,14 @@ async def _governance_fields(
         descriptor=descriptor,
         target=target,
         connector_id=connector_id,
+        params=params,
         decide_only=True,
     )
     step_refusal = None
     if verdict is not PermissionVerdict.DENY and get_settings().agent_grant_required == "on":
         # The same up-front check the dispatcher runs (#6189).
         step_refusal = await agent_step_refusal(
-            operator=operator, op_id=descriptor.op_id, connector_id=connector_id, target=target
+            operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
         )
     if step_refusal is not None:
         verdict, reason = PermissionVerdict.DENY, step_refusal
@@ -854,6 +889,7 @@ async def preview_dispatch(
             descriptor=descriptor,
             target=target,
             connector_id=connector_id,
+            params=params,
         )
     return {**envelope, **governance}
 

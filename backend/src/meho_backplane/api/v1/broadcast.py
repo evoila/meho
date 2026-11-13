@@ -45,6 +45,7 @@ from meho_backplane.broadcast import (
     publish_agent_announcement,
     read_announcement_history,
 )
+from meho_backplane.work_ref import WorkRef
 
 __all__ = ["router"]
 
@@ -77,7 +78,7 @@ class BroadcastAnnounceRequest(BaseModel):
         | None
     ) = None
     ttl_minutes: int | None = Field(default=None, ge=TTL_MIN_MINUTES, le=TTL_MAX_MINUTES)
-    work_ref: str | None = Field(default=None, min_length=1, max_length=WORK_REF_MAX_CHARS)
+    work_ref: WorkRef | None = None
     #: Deprecated: the server sets the run id. A value that is not the
     #: checked run is refused.
     run_id: UUID | None = None

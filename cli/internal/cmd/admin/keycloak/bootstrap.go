@@ -42,6 +42,12 @@ type BootstrapOptions struct {
 	// approve on the command line or REST.
 	CLIApproveClientID string
 
+	// WebClientID is the console's client (#6213); defaults to
+	// "meho-web". The bootstrap does not make it. When the realm has it,
+	// it gets the login flow with the passkey touch level and the `amr`
+	// mapper.
+	WebClientID string
+
 	// MCPClientID is the public authorization-code+PKCE client name
 	// used by browser-flow MCP clients — the mcp-remote stdio shim
 	// (Claude Desktop), MCP Inspector, and Claude Code / Cursor
@@ -140,6 +146,9 @@ func (o BootstrapOptions) withDefaults() BootstrapOptions {
 	}
 	if o.MCPClientID == "" {
 		o.MCPClientID = "meho-mcp"
+	}
+	if o.WebClientID == "" {
+		o.WebClientID = "meho-web"
 	}
 	if o.BackplaneAudience == "" {
 		o.BackplaneAudience = "meho-backplane"
@@ -670,9 +679,10 @@ type Result struct {
 //  3. 4 default client scopes (basic / roles / web-origins / acr)
 //     3a. Public approval sign-in client (`meho-cli-approve`, #5515) with
 //     the same mappers minus `meho-mcp-audience` and the same 4 default
-//     scopes, bound to its own login flow `meho approval sign-in`
+//     scopes, bound to its own login flow `meho approval sign-in level`
 //     (password form, then the one-time code when the person has one;
-//     made when missing)
+//     made when missing). The flow gives the approval level, named
+//     `meho-approve` in the realm's acr.loa.map (#6281)
 //  4. Public MCP browser-flow client (`meho-mcp`), and the clients of
 //     the AI tool kinds (`meho-mcp-code`, `meho-mcp-desktop`, #6210)
 //     with the same settings as `meho-mcp` (steps 4 and 5)
@@ -785,11 +795,19 @@ func Bootstrap(
 
 	// --- Approval sign-in client (#5515) ------------------------------------
 
+	if err := checkApprovalLevel(ctx, c, opts.CLIApproveClientID); err != nil {
+		return nil, fmt.Errorf("name sign-in level %q: %w", approvalLevelName, err)
+	}
 	flowID, flowEvents, err := reconcileApprovalFlow(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile login flow %q: %w", approvalFlowAlias, err)
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, flowEvents...)
+	levelEvents, err := ensureApprovalLevel(ctx, c)
+	if err != nil {
+		return nil, fmt.Errorf("name sign-in level %q: %w", approvalLevelName, err)
+	}
+	res.MapperEventsLog = append(res.MapperEventsLog, levelEvents...)
 	desiredApprove := opts.desiredCLIApproveClient()
 	if flowID != "" {
 		desiredApprove.AuthenticationFlowBindingOverrides = map[string]string{"browser": flowID}
@@ -861,6 +879,14 @@ func Bootstrap(
 		res.ToolMCPClientIDs = append(res.ToolMCPClientIDs, desired.ClientID)
 		res.MapperEventsLog = append(res.MapperEventsLog, events...)
 	}
+
+	// --- Console login flow with the passkey touch level (#6213) -----------
+
+	touchEvents, err := reconcileTouch(ctx, c, opts.WebClientID)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile login flow %q: %w", touchFlowAlias, err)
+	}
+	res.MapperEventsLog = append(res.MapperEventsLog, touchEvents...)
 
 	// --- Role groups + first admin user ------------------------------------
 
@@ -951,12 +977,15 @@ func dryRunSummary(opts BootstrapOptions, out io.Writer) {
 		"without meho-mcp-audience; no device flow, no offline_access)\n",
 		opts.CLIApproveClientID)
 	fmt.Fprintf(out, "==> login flow of the approval sign-in client: %q "+
-		"(always asks for the password; made if missing)\n", approvalFlowAlias)
+		"(always asks for the password; gives the approval level %q; made if missing)\n",
+		approvalFlowAlias, approvalLevelName)
 	fmt.Fprintf(out, "==> MCP browser-flow client: %s\n", opts.MCPClientID)
 	for _, t := range toolMCPClients {
 		fmt.Fprintf(out, "==> MCP client of %s: %s (same settings as %s)\n",
 			t.Tool, t.ID, opts.MCPClientID)
 	}
+	fmt.Fprintf(out, "==> login flow of the console client %s (when the realm has it): %q "+
+		"(level %s asks for a passkey touch; made if missing)\n", opts.WebClientID, touchFlowAlias, touchACR)
 	fmt.Fprintln(out, "==> protocol mappers (each on the CLI and MCP clients):")
 	for _, m := range opts.desiredMappers() {
 		fmt.Fprintf(out, "    - %s (%s)\n", m.Name, m.ProtocolMapper)

@@ -439,7 +439,8 @@ class AuditEventClass(StrEnum):
       rejected, or let an approval request expire, or its sender withdrew
       it (#5717). The operation did not run on any of these rows.
     * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
-      refresh-token replay or a broken satellite effect chain.
+      refresh-token replay or a broken satellite effect chain. The
+      ``mcp.session_open`` row of a new MCP session has this class too.
     * :attr:`CONFIG_CHANGE` -- an operator changed the settings of
       operations, and none of them ran. Two writers: an edit of one
       operation with ``meho_connector_edit_op`` (turned it on or off, or
@@ -934,7 +935,7 @@ class Tenant(Base):
         server_default=sa.false(),
     )
     # Where the tenant keeps its lessons (#5976): the key of one docs
-    # collection, the team wiki loaded into a knowledge index.
+    # collection, the tenant's wiki loaded into a knowledge index.
     # ``search_knowledge`` and ``meho kb search`` also search it, and
     # ``add_to_knowledge`` says the lesson goes there as a candidate page
     # (:mod:`meho_backplane.kb.wiki_search`). ``NULL`` (default): lessons
@@ -2010,6 +2011,12 @@ class EndpointDescriptor(Base):
         nullable=False,
         default=False,
     )
+    #: Not a column. ``True`` on a row that
+    #: :func:`~meho_backplane.operations.op_policy.apply_effective_policy`
+    #: returned when a classification entry makes the operation always
+    #: wait (or two entries conflict). Then no standing grant and no run
+    #: approval clears a call: a person approves each one.
+    policy_always_wait = False
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,
@@ -2125,7 +2132,14 @@ class OperationPolicyOverride(Base):
     ``requires_approval`` ``True`` means "require approval", ``False``
     means "a platform admin turned approval off" (only allowed with a
     ``reason``, never for a destructive operation), ``NULL`` means "no
-    change". A row with both fields ``NULL`` is deleted.
+    change". A row with both fields ``NULL`` and no category or labels is
+    deleted.
+
+    ``category`` and ``labels`` classify this one operation (the most
+    specific classification level). They are read only when the
+    ``POLICY_CLASSIFICATION`` switch is on; see
+    :mod:`meho_backplane.policy.classification`. ``labels`` is a map of
+    free ``key=value`` text, kept apart from the code's ``tags``.
     """
 
     __tablename__ = "operation_policy_override"
@@ -2141,6 +2155,10 @@ class OperationPolicyOverride(Base):
         sa.Boolean(), nullable=True, default=None
     )
     reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    labels: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON, nullable=True, default=None
+    )
     set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     set_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -2176,6 +2194,82 @@ class OperationPolicyOverride(Base):
             name="ck_operation_policy_override_safety_level",
         ),
     )
+
+
+class TenantPolicy(Base):
+    """The stored classification policy of one tenant, or of the whole install.
+
+    One row per scope: ``tenant_id`` is a tenant UUID for a tenant's
+    policy and ``NULL`` for the install's. ``document`` holds the
+    ``taxonomy`` (the categories and the default category) and the
+    ``classifications`` (category, labels, risk level and "always wait"
+    for connectors, operation groups and operations, matched by pattern).
+    The install's taxonomy is the one category list; a tenant's taxonomy
+    only adds categories for that tenant.
+
+    Read only when the ``POLICY_CLASSIFICATION`` switch is on; see
+    :mod:`meho_backplane.policy.classification`. The policy file import
+    writes whole documents here; a single classification edit changes one
+    entry.
+    """
+
+    __tablename__ = "tenant_policy"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    document: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "tenant_policy_install_idx",
+            sa.text("(tenant_id IS NULL)"),
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NULL"),
+            sqlite_where=sa.text("tenant_id IS NULL"),
+        ),
+        Index(
+            "tenant_policy_tenant_idx",
+            "tenant_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NOT NULL"),
+            sqlite_where=sa.text("tenant_id IS NOT NULL"),
+        ),
+    )
+
+
+class PolicyRevision(Base):
+    """One imported policy file (``meho policy import``), after a second admin approved it.
+
+    ``tenant_id`` is the tenant, or ``NULL`` for the install's policy.
+    ``file_text`` is the file as sent, ``document`` the stored policy after
+    the import, and ``diff`` what the import changed. The service only adds
+    rows; when a scope has more than 20, the oldest go
+    (:mod:`meho_backplane.policy.service`).
+    """
+
+    __tablename__ = "policy_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    imported_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    approved_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    file_text: Mapped[str] = mapped_column(Text, nullable=False)
+    document: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    diff: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+
+    __table_args__ = (Index("policy_revision_tenant_ts_idx", "tenant_id", "ts"),)
 
 
 class TenantOperationSetting(Base):
@@ -8808,6 +8902,14 @@ class RunbookRunStepState(Base):
         nullable=True,
         default=None,
     )
+    # Every check attempt of the step, oldest first: ``{"at", "passed",
+    # "verify_response"}``. ``verify_response`` above holds the latest one.
+    # A retry of a failed step adds an entry; no entry is ever replaced.
+    attempts: Mapped[object] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         sa.CheckConstraint(
@@ -9157,6 +9259,15 @@ class Sensor(Base):
         default=None,
     )
     pending_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    # How many evaluations in a row the target refused the login. The runner
+    # pauses the Sensor when it reaches the limit
+    # (``checks/auth_park.py``). Any other result sets it back to 0.
+    auth_failure_count: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0,

@@ -35,7 +35,11 @@
 # `python-unit-shard` (heavy pool), `python-integration-shard`,
 # `python-migration-tests` and the nightly coverage jobs. Every moved job
 # keeps its name, `if:` guard and triggers, so the required checks are
-# unchanged.
+# unchanged. Merge-queue runs are the exception (#6325, #6350): there
+# `python-lint`, `go-lint-test`, `cli-api-snapshot-freshness` and the
+# merge-queue watchdog use the internal `meho-runners-ci` pool. The
+# four short jobs `changes`, `python-unit-lane`, `python-integration` and
+# `helm-lint-template` stay hosted, to keep the main pool free.
 #
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
@@ -256,9 +260,11 @@ jobs:
     #                tests, any error, and every merge_group / push run give
     #                `false` (the full run).
     #
-    # Same fork-PR guard as the other jobs; the dependent jobs re-check
-    # head.repo in their own `if:`.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # No fork-PR guard (#4835): this job runs on a GitHub-hosted runner, with
+    # a read-only token and no secret, so a fork pull request may run it. The
+    # jobs on our own pool re-check head.repo in their own `if:`.
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # actions: read lets the step `map` list and download the test map
@@ -520,10 +526,11 @@ jobs:
     # python-unit-lane fan-in below. Whole-tree ruff + ruff format + mypy: none
     # of it is shardable by test file, none of it needs testcontainers / the
     # vendor spec-shelf / the embedding or spaCy models, and it is CPU-cheap
-    # (~1-2 min), so it runs ONCE here on a GitHub-hosted runner rather than N
+    # (~1-2 min), so it runs ONCE here on a small runner rather than N
     # times inside every pytest shard. Nothing in it needs the internal network
-    # (#4626). Same fork-PR guard as every other job,
-    # plus the #3252 docs-only skip: a proven docs-only PR skips this job (and
+    # (#4626). It has no fork-PR guard (#4835): on a pull request it runs on a
+    # GitHub-hosted runner, so a fork pull request gets a real lint signal.
+    # It has the #3252 docs-only skip: a proven docs-only PR skips this job (and
     # the shards) so the required unit-lane fan-in reports success-by-skip.
     # `needs: changes` makes `docs_only` readable here; if the detect job
     # fails, this job skip-cascades and the fan-in fails the required context
@@ -533,10 +540,10 @@ jobs:
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-       needs.changes.outputs.docs_only != 'true' &&
+      (needs.changes.outputs.docs_only != 'true' &&
        needs.changes.outputs.backend_python != 'false')
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # Twice the ~1-2 min observed cost, per the file's per-job cap convention.
     timeout-minutes: 10
     defaults:
@@ -619,7 +626,9 @@ jobs:
     # Fork-PR guard: never execute project code from a fork on the self-hosted
     # runner pool. Same stance as the old lane — job-level so no step ever
     # starts on a fork PR. On a fork PR all six legs skip (→ reported
-    # Success), which the fan-in's own fork guard mirrors. Plus the #3252
+    # Success). The fan-in still runs on a fork PR (#4835): it fails when
+    # lint failed and says in its step summary that the legs did not run.
+    # Plus the #3252
     # docs-only skip (identical shape to python-lint): a proven docs-only PR
     # skips all six legs → the fan-in reports success-by-skip. `needs:
     # changes` makes `docs_only` readable; a detect-job failure skip-cascades
@@ -634,7 +643,7 @@ jobs:
        needs.changes.outputs.backend_python != 'false')
     # The heavy runner pool (#761); its sizes live outside this repo. Only the
     # pytest sweep is CPU/memory-bound enough to want the extra cores;
-    # ruff/mypy run once in python-lint on a GitHub-hosted runner.
+    # ruff/mypy run once in python-lint on a small runner.
     # Two heavy runner sets share the same machines. Only merge-queue runs
     # use `meho-runners-ci-heavy-queue` (6 runners: one per shard of one
     # merge-queue run, so its size changes with the shard count). Every
@@ -736,36 +745,13 @@ jobs:
         shell: bash
         run: |
           set +e
-          cg=/sys/fs/cgroup
-          if [ ! -r "${cg}/memory.current" ] || [ ! -r "${cg}/memory.stat" ]; then
-            echo "No cgroup v2 memory files here, so no sampling."
-            exit 0
-          fi
-          sample() {
-            total_max=0; ws_max=0; anon_max=0; n=0
-            while :; do
-              read -r total < "${cg}/memory.current"
-              anon=0; inactive_file=0
-              while read -r key value; do
-                case "${key}" in
-                  anon) anon=${value} ;;
-                  inactive_file) inactive_file=${value} ;;
-                esac
-              done < "${cg}/memory.stat"
-              total=${total:-0}
-              ws=$(( total - inactive_file ))
-              if [ "${total}" -gt "${total_max}" ]; then total_max=${total}; fi
-              if [ "${ws}" -gt "${ws_max}" ]; then ws_max=${ws}; fi
-              if [ "${anon}" -gt "${anon_max}" ]; then anon_max=${anon}; fi
-              n=$(( n + 1 ))
-              echo "${total_max} ${ws_max} ${anon_max} ${n}" > "${RUNNER_TEMP}/memory-samples.tmp"
-              mv -f "${RUNNER_TEMP}/memory-samples.tmp" "${RUNNER_TEMP}/memory-samples.txt"
-              sleep 1
-            done
-          }
-          sample </dev/null >/dev/null 2>&1 &
+          # The script is scripts/ci/memory_sampler.sh. It also writes one
+          # short line every 15 s to ${RUNNER_TEMP}/memory-log.txt; the pytest
+          # step shows that file in the job log (a killed runner keeps no
+          # file, but GitHub keeps the log lines it already received).
+          bash "${GITHUB_WORKSPACE}/scripts/ci/memory_sampler.sh" run </dev/null >/dev/null 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
-          echo "Memory sampling started: one sample per second."
+          echo "Memory sampling started: one sample per second, one log line every 15 s."
 
       - name: List the required spec-shelf files
         # The required vendor API files are listed in ci/spec-shelf/, one
@@ -999,7 +985,27 @@ jobs:
         with:
           version: v3.16.4
 
+      - name: Name the PHP package cache
+        # The key holds the OS release and the CPU type, because the cached
+        # package files fit only that. Bump the -v1 at the end to drop a
+        # bad cache entry.
+        id: php-debs
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          . /etc/os-release
+          echo "key=php-cli-debs-${ID}-${VERSION_ID}-$(dpkg --print-architecture)-v1" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the PHP package files from the cache
+        id: php-debs-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-php-debs
+          key: ${{ steps.php-debs.outputs.key }}
+
       - name: Install PHP CLI
+        id: php-install
         # The pfSense user-write tests
         # (tests/test_connectors_pfsense_user_write_ops.py) run the
         # `pfSsh.php playback` fragment with the php command-line
@@ -1009,41 +1015,90 @@ jobs:
         # step below. Every shard needs it: the file split can put the
         # test file in any shard.
         #
-        # Own limit: the step stops after 6 minutes, and each try stops
-        # after 150 seconds with `timeout`. There are two tries, so a
-        # stalled download cannot use up the job's time.
+        # How php gets on the runner, in this order:
+        # 1. The runner image already has php: nothing to do.
+        # 2. The package files are in the cache (the step before restores
+        #    them): `dpkg -i` installs them. This needs no network, so a
+        #    package mirror that does not answer cannot fail the shard.
+        # 3. Else apt downloads php-cli into the cache folder and installs
+        #    it, and the step after saves the folder. A push to main fills
+        #    the cache, and pull request and merge-queue runs read it, so
+        #    the download happens about once per OS release.
+        # If the cached files do not install (the runner image changed),
+        # the step warns and falls back to 3. `--fix-broken` repairs what
+        # the failed `dpkg -i` left half done.
         #
-        # `apt-get update` exits 100 when any one package index fails to
-        # download, even one that php-cli does not need. The runner image
-        # carries the git-core PPA (it installs a newer git from there), and
-        # that mirror answered 503 in a merge-queue run (#4759), which
-        # dropped the pull request from the queue. apt had already retried
-        # the file three times in that run, so more retries alone do not
-        # help. So a failed update is a warning, not the end of the step:
-        # apt keeps the indexes it did download, and the install below
-        # fails on its own when the Ubuntu indexes are missing.
+        # Why downloads failed in merge-queue runs (#6312): the runner image
+        # carries the git-core PPA, and that mirror sometimes does not
+        # answer at all. apt waited 120 seconds for each try of the file,
+        # so `apt-get update` ran into the 150 second `timeout`, was killed
+        # before it stored any index, and the install then said "Unable to
+        # locate package php-cli". So the download in 3 gives apt a 10
+        # second wait and no retry for each file (`Acquire::*::Timeout`,
+        # `Acquire::Retries`): a dead mirror is skipped, and the update
+        # stores the Ubuntu indexes. `apt-get update` still exits 100 for
+        # the skipped mirror, so a failed update is only a warning.
+        #
+        # Own limit: the step stops after 6 minutes, and each apt or dpkg
+        # call stops after 150 seconds with `timeout`. There are two
+        # download tries. If the install still fails, the step prints
+        # "SETUP FAILURE" so a person and the fleet loop can tell it from a
+        # test failure. The pfSense tests still run with php in every shard
+        # (MEHO_REQUIRE_PHP below makes them fail, not skip, when php is
+        # missing).
         shell: bash
         timeout-minutes: 6
+        env:
+          PHP_DEBS_CACHE_HIT: ${{ steps.php-debs-cache.outputs.cache-hit }}
         run: |
           set -euo pipefail
           if command -v php >/dev/null 2>&1; then
             echo "php ready: $(php --version | head -1)"
             exit 0
           fi
+          debs="${HOME}/.cache/meho-ci-php-debs"
+          shopt -s nullglob
+          cached=("${debs}"/*.deb)
+          if [ "${#cached[@]}" -gt 0 ]; then
+            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive dpkg -i "${cached[@]}"; then
+              echo "php ready from the package cache: $(php --version | head -1)"
+              exit 0
+            fi
+            echo "::warning::the cached php-cli package files did not install; downloading php-cli"
+          fi
+          mkdir -p "${debs}/partial"
+          apt_opts=(-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=0)
           for attempt in 1 2; do
-            if ! timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y; then
+            if ! timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" update -y; then
               echo "::warning::apt-get update could not refresh every package index (try ${attempt} of 2); installing php-cli from the indexes that did download"
             fi
-            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli; then
+            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" \
+                -o Dir::Cache::archives="${debs}" -o APT::Keep-Downloaded-Packages=true \
+                install -y --fix-broken --no-install-recommends php-cli; then
               break
             fi
             if [ "${attempt}" = "2" ]; then
-              echo "::error::php-cli install failed after 2 tries"
+              echo "::error::SETUP FAILURE, not a test failure: php-cli install failed after 2 tries (package mirror problem on the runner)"
               exit 1
             fi
             echo "::warning::php-cli install failed or timed out; trying once more"
           done
+          # apt ran as root; the cache save runs as the runner user.
+          sudo -n chown -R "$(id -u):$(id -g)" "${debs}"
+          if [ "${PHP_DEBS_CACHE_HIT:-}" != "true" ]; then
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
           php --version | head -1
+
+      - name: Save the PHP package files to the cache
+        # Only after a download into an empty cache. A cache entry cannot
+        # be changed, so a bad one needs a new key (see "Name the PHP
+        # package cache").
+        if: steps.php-install.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-php-debs
+          key: ${{ steps.php-debs.outputs.key }}
 
       - name: Download the picked unit tests
         # Test map run (#5642): the list the `changes` job stored.
@@ -1061,6 +1116,7 @@ jobs:
         # perf-budget check below can never mask a red suite.
         shell: bash
         env:
+          MEHO_CI_PROGRESS_DIR: ${{ runner.temp }}/pytest-progress
           # Time limits in tests (marker slow_runner_tolerant) do not fail
           # this required job; the tests still run and their other checks
           # still count. The non-required python-timing-tests job checks
@@ -1122,6 +1178,14 @@ jobs:
         # non-blocking, sharded `python-coverage` + `python-coverage-combine`
         # jobs below (#1982/#1987/#3172).
         run: |
+          # Show the memory lines of the sampler in this log (see
+          # scripts/ci/memory_sampler.sh). The test names of the workers come
+          # from MEHO_CI_PROGRESS_DIR.
+          mkdir -p "${MEHO_CI_PROGRESS_DIR}"
+          touch "${RUNNER_TEMP}/memory-log.txt"
+          tail -n +1 -F "${RUNNER_TEMP}/memory-log.txt" 2>/dev/null &
+          MEMORY_TAIL_PID=$!
+          trap 'kill "${MEMORY_TAIL_PID}" 2>/dev/null' EXIT
           # Deterministic split by measured file time (#4809; #3251 used
           # every TOTAL-th file of the sorted list, which put the slow
           # files unevenly: shard 4 ran 613 s against 465 s for shard 2).
@@ -1363,14 +1427,16 @@ jobs:
     # Python jobs. It does not skip when backend_python is false: a pull
     # request that changes only the template must still test it.
     #
-    # GitHub-hosted runner: it needs public tools only (uv, the PyPI index for
-    # the wheel build backend).
+    # GitHub-hosted runner, and the internal pool in merge-queue runs (#6325):
+    # it needs public tools only (uv, the PyPI index for the wheel build
+    # backend).
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true')
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # About 3 minutes; the cap is a hang backstop.
     timeout-minutes: 20
     defaults:
@@ -1447,12 +1513,14 @@ jobs:
     #     A shard that hangs → its own timeout-minutes → `cancelled` leg →
     #     aggregate result `cancelled`/`failure` → this gate FAILS (not open).
     #     Verified reasoning, not luck.
-    #  2. Clean fork-PR + skip behaviour. The fork guard is AND-ed in, so on a
-    #     fork PR (and only then) this job — like python-lint / python-unit-
-    #     shard — is skipped by its own `if:`, which reports the required
-    #     context as Success exactly as the old single job did (#2140). On
-    #     same-repo PRs / push / merge_group the guard is true and the gate
-    #     evaluates the real results.
+    #  2. Honest fork-PR behaviour (#4835). The unit shards skip on a fork PR
+    #     (they use our own pool), and a job skipped by its own `if:` counts
+    #     as success (#2140). So this job runs on a fork PR too and says in
+    #     its step summary that the shards did not run. It passes when lint
+    #     passed, or when lint skipped for a docs-only or no-backend diff. A
+    #     failed, cancelled or wrongly skipped lint fails it. The merge queue
+    #     runs the full matrix before the code lands on `main`, and
+    #     CONTRIBUTING.md names the maintainer steps.
     #  3. Docs-only fast path WITHOUT weakening the code path (#3252). On a
     #     proven docs-only PR, python-lint + every shard skip via their own
     #     detect-gated `if:` and the step below must PASS on their `skipped`
@@ -1462,12 +1530,13 @@ jobs:
     #     `changes` is in `needs`) and BRANCHES:
     #       * docs_only == 'true'  → accept success|skipped (fast path).
     #       * else (full run)      → require STRICT success (a skipped lint /
-    #                                shard here is anomalous — these jobs' only
-    #                                skip paths are fork-PR or docs-only, and we
-    #                                are in neither — so treat it as failure and
+    #                                shard here is anomalous — lint skips only
+    #                                for a docs-only or no-backend diff, and the
+    #                                shards also skip on a fork PR; we are in
+    #                                none of these — so treat it as failure and
     #                                fail CLOSED). This is STRICTER than the
-    #                                pre-#3252 gate; the fork path is handled by
-    #                                this job's own `if:` skip, not by this step.
+    #                                pre-#3252 gate. A fork PR takes its own
+    #                                branch first (#4835, property 2).
     #     And FIRST: if `changes` did not itself succeed, the docs_only value is
     #     untrustworthy, so the gate fails CLOSED regardless.
     #
@@ -1476,49 +1545,108 @@ jobs:
     # in-flight run as a SET and a fresh run supersedes it — there is no
     # partial-cancel path that could leave this gate green on stale shards.
     # GitHub-hosted runner (#4626): this job does no setup and runs one bash
-    # step, and it is the last job of every CI run — it must never wait for a
-    # slot on the internal pool.
+    # step, and it is the last job of every CI run. Merge-queue runs use the
+    # internal pool instead (#6325), so the queue never waits for
+    # GitHub-hosted runners.
     #  4. No-backend path (#5296). When `backend_python` is `false`, lint and
     #     the shards skip by their own `if:`, and `python-outside-backend`
     #     must pass instead. On every other path that job is skipped.
     needs: [changes, python-lint, python-unit-shard, python-outside-backend]
-    if: >-
-      always() &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
+    if: always()
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Assert lint + typecheck + every pytest shard passed
-        # needs.<job>.result is one of success / failure / cancelled / skipped.
-        # For the matrix job, needs.python-unit-shard.result is the AGGREGATE:
-        # success only if every leg succeeded, otherwise failure/cancelled.
+        env:
+          IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Job results and outputs reach the script only through env:, as
+          # data. On a fork pull request the change detector runs code from
+          # the pull request, so its outputs are never part of the script text.
+          # needs.<job>.result is one of success / failure / cancelled / skipped.
+          # For the matrix job, needs.python-unit-shard.result is the AGGREGATE:
+          # success only if every leg succeeded, otherwise failure/cancelled.
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CHANGES_DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          CHANGES_BACKEND_PYTHON: ${{ needs.changes.outputs.backend_python }}
+          CHANGES_SINGLE_CONNECTOR: ${{ needs.changes.outputs.single_connector }}
+          LINT_RESULT: ${{ needs.python-lint.result }}
+          SHARDS_RESULT: ${{ needs.python-unit-shard.result }}
+          OUTSIDE_RESULT: ${{ needs.python-outside-backend.result }}
         run: |
-          detect='${{ needs.changes.result }}'
-          docs_only='${{ needs.changes.outputs.docs_only }}'
-          lint='${{ needs.python-lint.result }}'
-          shards='${{ needs.python-unit-shard.result }}'
-          backend_python='${{ needs.changes.outputs.backend_python }}'
-          outside='${{ needs.python-outside-backend.result }}'
+          detect="${CHANGES_RESULT}"
+          docs_only="${CHANGES_DOCS_ONLY}"
+          lint="${LINT_RESULT}"
+          shards="${SHARDS_RESULT}"
+          backend_python="${CHANGES_BACKEND_PYTHON}"
+          outside="${OUTSIDE_RESULT}"
           echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
           echo "python-lint (ruff + ruff format + mypy): ${lint}"
           echo "python-unit-shard (aggregate of all 6 shard legs, or the one connector leg): ${shards}"
-          echo "single_connector='${{ needs.changes.outputs.single_connector }}' (empty = six shards)"
+          echo "single_connector='${CHANGES_SINGLE_CONNECTOR}' (empty = six shards)"
           echo "python-outside-backend (tests that read outside backend/): ${outside}"
 
           # The detect job MUST have succeeded for its docs_only classification
           # to be trustworthy. If not (failure / cancelled / an unexpected
           # skip on a non-fork path), fail the required lane CLOSED — never
-          # infer docs-only from a broken detector. On a fork PR the detect job
-          # IS skipped, but so is THIS job via its own fork-guard `if:`, so this
-          # step never runs there.
+          # infer docs-only from a broken detector. The detect job runs on a
+          # fork PR too (#4835).
           if [ "${detect}" != "success" ]; then
             echo "::error title=Python unit lane — detector not green::the change-detector ('changes') result is '${detect}', so the docs-only classification cannot be trusted. Failing the required unit lane closed."
             exit 1
           fi
 
           fail=0
-          if [ "${docs_only}" = "true" ]; then
+          if [ "${IS_FORK_PR}" = "true" ]; then
+            # FORK PR (#4835) — the shards use our own pool, so they skip on a
+            # fork PR. The outside-backend job runs on a hosted runner, but its
+            # own `if:` skips it on a fork PR. Lint must pass when the
+            # diff has backend code; it may skip only for a docs-only or
+            # no-backend diff. A red or cancelled job still fails the lane. A
+            # green lane here is NOT a test pass.
+            if [ "${docs_only}" = "true" ] || [ "${backend_python}" = "false" ]; then
+              case "${lint}" in
+                success|skipped) ;;
+                *) fail=1 ;;
+              esac
+            elif [ "${lint}" != "success" ]; then
+              fail=1
+            fi
+            for r in "${shards}" "${outside}"; do
+              case "${r}" in
+                success|skipped) ;;
+                *) fail=1 ;;
+              esac
+            done
+            if [ "${fail}" -eq 0 ] && [ "${docs_only}" = "true" ]; then
+              {
+                echo "### Pull request from a fork: docs only"
+                echo
+                echo "- This pull request changes only docs, so the unit tests were skipped. No unit test is needed for it."
+                echo "- Maintainer: first look at the changed files. This result counts only when the pull request changes nothing under \`.github/\`, \`scripts/ci/\` and \`backend/tests/_unit_*.py\`. See \"Pull requests from forks\" in CONTRIBUTING.md."
+              } >> "${GITHUB_STEP_SUMMARY}"
+              echo "Unit lane GREEN for a docs-only fork pull request. The unit tests were skipped because only docs changed. See the step summary."
+            elif [ "${fail}" -eq 0 ]; then
+              {
+                echo "### Pull request from a fork: the unit tests did not run"
+                echo
+                echo "- The unit test shards run on our own runners. A fork pull request cannot use them, so they were skipped. A skipped job shows as green. Green here does **not** mean the tests passed."
+                echo "- Lint and type check (ruff + mypy): ${lint}."
+                echo "- The merge queue runs the full test matrix before this code lands on \`main\`."
+                echo "- Maintainer: read the change first, and take the commands from CONTRIBUTING.md, not from this summary. This result counts only when the pull request changes nothing under \`.github/\`, \`scripts/ci/\` and \`backend/tests/_unit_*.py\`. Then push the exact commit you read, by its full SHA, to a branch in this repository, open a draft pull request from it to \`main\`, and link its CI run in the review. A pushed branch alone starts no CI. See \"Pull requests from forks\" in CONTRIBUTING.md."
+                echo
+                echo '```bash'
+                echo "git fetch origin pull/${PR_NUMBER}/head"
+                echo "git push origin ${HEAD_SHA}:refs/heads/ci/pr-${PR_NUMBER}"
+                echo "gh pr create --draft --base main --head ci/pr-${PR_NUMBER} --title \"CI run for #${PR_NUMBER}\" --body \"CI only. Do not merge.\""
+                echo '```'
+              } >> "${GITHUB_STEP_SUMMARY}"
+              echo "Unit lane GREEN for a fork pull request, but the unit test shards did not run (lint: ${lint}). The merge queue runs them. See the step summary."
+            fi
+          elif [ "${docs_only}" = "true" ]; then
             # DOCS-ONLY FAST PATH — python-lint + every shard were skipped by
             # their detect-gated `if:` (they never ran). Accept `skipped` (the
             # expected state) or `success` (defensive: if one somehow ran and
@@ -1544,8 +1672,9 @@ jobs:
           else
             # FULL RUN — require STRICT success. A `skipped` lint/shard here is
             # anomalous (no skip-cascade is possible: `changes` succeeded above,
-            # and their only other skip paths are fork-PR / docs-only, neither
-            # of which holds), so treat skipped as a failure and fail CLOSED.
+            # the fork branch above took every fork PR, and the docs-only
+            # branch took every docs-only diff), so treat skipped as a failure
+            # and fail CLOSED.
             for r in "${lint}" "${shards}"; do
               case "${r}" in
                 success) ;;
@@ -1564,7 +1693,9 @@ jobs:
             exit 1
           fi
 
-          if [ "${docs_only}" = "true" ]; then
+          if [ "${IS_FORK_PR}" = "true" ]; then
+            :  # the fork branch above already reported
+          elif [ "${docs_only}" = "true" ]; then
             echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 6 pytest shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
           elif [ "${backend_python}" = "false" ]; then
             echo "Unit lane GREEN (no backend change, #5296) — lint + all 6 pytest shards skipped; the tests that read files outside backend/ passed."
@@ -1758,36 +1889,13 @@ jobs:
         shell: bash
         run: |
           set +e
-          cg=/sys/fs/cgroup
-          if [ ! -r "${cg}/memory.current" ] || [ ! -r "${cg}/memory.stat" ]; then
-            echo "No cgroup v2 memory files here, so no sampling."
-            exit 0
-          fi
-          sample() {
-            total_max=0; ws_max=0; anon_max=0; n=0
-            while :; do
-              read -r total < "${cg}/memory.current"
-              anon=0; inactive_file=0
-              while read -r key value; do
-                case "${key}" in
-                  anon) anon=${value} ;;
-                  inactive_file) inactive_file=${value} ;;
-                esac
-              done < "${cg}/memory.stat"
-              total=${total:-0}
-              ws=$(( total - inactive_file ))
-              if [ "${total}" -gt "${total_max}" ]; then total_max=${total}; fi
-              if [ "${ws}" -gt "${ws_max}" ]; then ws_max=${ws}; fi
-              if [ "${anon}" -gt "${anon_max}" ]; then anon_max=${anon}; fi
-              n=$(( n + 1 ))
-              echo "${total_max} ${ws_max} ${anon_max} ${n}" > "${RUNNER_TEMP}/memory-samples.tmp"
-              mv -f "${RUNNER_TEMP}/memory-samples.tmp" "${RUNNER_TEMP}/memory-samples.txt"
-              sleep 1
-            done
-          }
-          sample </dev/null >/dev/null 2>&1 &
+          # The script is scripts/ci/memory_sampler.sh. It also writes one
+          # short line every 15 s to ${RUNNER_TEMP}/memory-log.txt; the pytest
+          # step shows that file in the job log (a killed runner keeps no
+          # file, but GitHub keeps the log lines it already received).
+          bash "${GITHUB_WORKSPACE}/scripts/ci/memory_sampler.sh" run </dev/null >/dev/null 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
-          echo "Memory sampling started: one sample per second."
+          echo "Memory sampling started: one sample per second, one log line every 15 s."
 
       - name: Docker Hub login (for testcontainers pulls)
         # Empty-secret guard — see the python-tests job's login step for
@@ -1870,6 +1978,7 @@ jobs:
         # cancel the run, but it must read as a step FAILURE, not a false green.
         shell: bash
         env:
+          MEHO_CI_PROGRESS_DIR: ${{ runner.temp }}/pytest-progress
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
           # Each xdist worker is a subprocess; coverage's a1_coverage.pth hook
           # calls coverage.process_startup() when COVERAGE_PROCESS_START points
@@ -1912,6 +2021,14 @@ jobs:
         # FAILURE the job's continue-on-error absorbs — `shell: bash` above
         # guarantees PIPESTATUS + pipefail on this self-hosted pool.
         run: |
+          # Show the memory lines of the sampler in this log (see
+          # scripts/ci/memory_sampler.sh). The test names of the workers come
+          # from MEHO_CI_PROGRESS_DIR.
+          mkdir -p "${MEHO_CI_PROGRESS_DIR}"
+          touch "${RUNNER_TEMP}/memory-log.txt"
+          tail -n +1 -F "${RUNNER_TEMP}/memory-log.txt" 2>/dev/null &
+          MEMORY_TAIL_PID=$!
+          trap 'kill "${MEMORY_TAIL_PID}" 2>/dev/null' EXIT
           # Deterministic stride shard (#3172): the sorted test-file list,
           # every 8th file to this shard. File-level split keeps conftest
           # semantics identical to a full run; stride (vs contiguous
@@ -2364,6 +2481,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      - name: Start memory sampling
+        # The same sampler as the unit shards (scripts/ci/memory_sampler.sh):
+        # one "[memory]" line every 15 s in the log of the pytest step, so a
+        # runner killed for memory still leaves a trace. It never fails the
+        # job; "Stop memory sampling" ends it.
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +e
+          bash "${GITHUB_WORKSPACE}/scripts/ci/memory_sampler.sh" run </dev/null >/dev/null 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
+          echo "Memory sampling started: one sample per second, one log line every 15 s."
+
       - name: List the required spec-shelf files
         # The required vendor API files are listed in ci/spec-shelf/, one
         # small file per product version, so this workflow names none of
@@ -2453,12 +2584,21 @@ jobs:
         # when the cluster cannot pull an image; without the reason a green
         # lane hides that nothing ran on the cluster.
         env:
+          MEHO_CI_PROGRESS_DIR: ${{ runner.temp }}/pytest-progress
           # Time limits in tests (marker slow_runner_tolerant) do not fail
           # this required job; the tests still run and their other checks
           # still count. The non-required python-timing-tests job checks
           # the limits (#6270, tests/_time_limits.py).
           MEHO_SKIP_TIME_LIMITS: "1"
         run: |
+          # Show the memory lines of the sampler in this log (see
+          # scripts/ci/memory_sampler.sh). The running test comes from
+          # MEHO_CI_PROGRESS_DIR.
+          mkdir -p "${MEHO_CI_PROGRESS_DIR}"
+          touch "${RUNNER_TEMP}/memory-log.txt"
+          tail -n +1 -F "${RUNNER_TEMP}/memory-log.txt" 2>/dev/null &
+          MEMORY_TAIL_PID=$!
+          trap 'kill "${MEMORY_TAIL_PID}" 2>/dev/null' EXIT
           # Split by measured file time, the same tool as the unit shards
           # (tests/_unit_shard_split.py) with the integration measurements
           # in tests/_integration_shard_durations.json. Every file lands in
@@ -2479,6 +2619,16 @@ jobs:
           # test case.
           uv run pytest -x -rs -o junit_family=xunit1 \
             --junitxml=pytest-integration-shard.xml "${SHARD_FILES[@]}"
+
+      - name: Stop memory sampling
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          if [ -r "${RUNNER_TEMP}/memory-sampler.pid" ]; then
+            kill "$(cat "${RUNNER_TEMP}/memory-sampler.pid")" 2>/dev/null || true
+          fi
 
       - name: Upload per-test times (input for the shard split)
         # Refresh tests/_integration_shard_durations.json from these
@@ -2505,8 +2655,10 @@ jobs:
     # checks them. This job is NOT a required check and has
     # continue-on-error, so a red result shows a slowdown but never blocks
     # a merge.
+    # Not started in the merge queue (#6350): it is not required and shows
+    # only a slowdown, so a queue run does not need it.
     if: >-
-      github.event_name != 'pull_request' ||
+      (github.event_name != 'pull_request' && github.event_name != 'merge_group') ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true' &&
        needs.changes.outputs.backend_python != 'false')
@@ -2577,24 +2729,32 @@ jobs:
     #  4. No-backend PRs (#5296): the shards skip the same way when
     #     `backend_python` is `false`, and this step accepts `skipped` then
     #     too. The merge queue runs the shards on the merged result.
-    # GitHub-hosted runner (#4626): one bash step, no setup; it must never
-    # wait for a slot on the internal pool.
+    # GitHub-hosted runner (#4626): one bash step, no setup. Merge-queue runs
+    # use the internal pool instead (#6325), so the queue never waits for
+    # GitHub-hosted runners.
     needs: [changes, python-integration-shard]
     if: >-
       always() &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Assert every integration shard passed
         # needs.python-integration-shard.result is the AGGREGATE of the
         # matrix: success only if every leg succeeded.
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CHANGES_DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          CHANGES_BACKEND_PYTHON: ${{ needs.changes.outputs.backend_python }}
+          SHARDS_RESULT: ${{ needs.python-integration-shard.result }}
         run: |
-          detect='${{ needs.changes.result }}'
-          docs_only='${{ needs.changes.outputs.docs_only }}'
-          backend_python='${{ needs.changes.outputs.backend_python }}'
-          shards='${{ needs.python-integration-shard.result }}'
+          detect="${CHANGES_RESULT}"
+          docs_only="${CHANGES_DOCS_ONLY}"
+          backend_python="${CHANGES_BACKEND_PYTHON}"
+          shards="${SHARDS_RESULT}"
           echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
           echo "python-integration-shard (aggregate of all 4 shard legs): ${shards}"
 
@@ -2697,11 +2857,11 @@ jobs:
 
   go-lint-test:
     name: Go (golangci-lint + go test)
-    # Fork-PR guard mirrors the Python job — same rationale. Runs on a
-    # GitHub-hosted runner since #4626: it needs only the Go toolchain and
-    # public egress.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # No fork-PR guard (#4835): it runs on a GitHub-hosted runner since #4626
+    # (the internal pool in merge-queue runs, #6325) and needs only the Go
+    # toolchain and public egress, so a fork pull request may run it.
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -2714,20 +2874,17 @@ jobs:
         # the tree today.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          # Tracks `cli/go.mod`'s `go 1.26.10` directive. golangci-lint
+          # Tracks the `go` directive in `cli/go.mod`. golangci-lint
           # invokes `go/packages` which honors the go.mod-required Go
           # version; running an older Go than go.mod requires fails with
           # `go.mod requires go >= X` (CI run 25680051917).
           # Bumped from 1.25 → 1.26 because Go 1.25 gets no more
-          # security fixes: nine standard-library CVEs (net/http,
-          # crypto/tls, net/textproto) need go1.26.9 or newer, and
-          # GO-2026-6809 (crypto/x509) needs go1.26.10 or newer.
-          # '1.26' resolves the newest 1.26.x patch; go.mod's 1.26.10
-          # floor (with GOTOOLCHAIN=local, which setup-go sets) makes
-          # an older 1.26.x fail the build instead of shipping the CVEs.
-          # check-latest: the runner image can cache an older 1.26.x
-          # (it had 1.26.9 when go.mod moved to 1.26.10), and setup-go
-          # uses a cached match unless asked to check for a newer one.
+          # security fixes. The go.mod version is a floor (with
+          # GOTOOLCHAIN=local, which setup-go sets), so an older 1.26.x
+          # fails the build instead of shipping known CVEs.
+          # check-latest: the runner image can cache an older 1.26.x,
+          # and setup-go uses a cached match unless asked to check for
+          # a newer one.
           go-version: '1.26.11'
           check-latest: true
           cache-dependency-path: cli/go.sum
@@ -2823,8 +2980,8 @@ jobs:
         # then this step keeps PR CI green without expanding the
         # workflow's blast radius. On the GitHub-hosted runner this job
         # uses since #4626, gcc and libc6-dev are preinstalled, so the
-        # probe passes and apt never runs; the step stays so the job can
-        # move back to the internal pool without edits.
+        # probe passes and apt never runs. Merge-queue runs use the
+        # internal pool (#6325), where this step is needed.
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -2881,10 +3038,11 @@ jobs:
 
   cli-api-snapshot-freshness:
     name: CLI API snapshot freshness
-    # Fork-PR guard mirrors the other jobs (kept unchanged by #4626). Runs on
-    # a GitHub-hosted runner: it needs only Go, uv and public egress.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # No fork-PR guard (#4835): it runs on a GitHub-hosted runner (the
+    # internal pool in merge-queue runs, #6325) and needs only Go, uv and
+    # public egress, so a fork pull request may run it.
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -2913,7 +3071,8 @@ jobs:
         # Same `sudo -n apt-get` pattern as the go-lint-test C-toolchain
         # step; baking make into the base image is the long-term fix.
         # The GitHub-hosted runner this job uses since #4626 ships make,
-        # so the step is a no-op there and stays for a possible move back.
+        # so the step is a no-op there. Merge-queue runs use the internal
+        # pool (#6325), where this step is needed.
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -2972,9 +3131,11 @@ jobs:
 
   helm-lint-template:
     name: Helm (lint + template + kubeconform)
-    # Fork-PR guard mirrors the other jobs. Runs on a GitHub-hosted runner
-    # since #4626: helm + kubeconform need only public egress.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # No fork-PR guard (#4835): it runs on a GitHub-hosted runner since #4626
+    # and helm + kubeconform need only public egress, so a fork pull request
+    # may run it.
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -3008,7 +3169,7 @@ jobs:
         # / CI run 25644668781). Appending to $GITHUB_PATH surfaces
         # the binary to subsequent steps without relying on the install
         # step's frozen PATH. $HOME/.local/bin works the same on the
-        # GitHub-hosted runner this job uses since #4626.
+        # GitHub-hosted runner and on the internal pool.
         run: |
           set -euo pipefail
           # shellcheck source=/dev/null
@@ -3125,8 +3286,10 @@ jobs:
   # call is checked; a failed or unreadable call only means "look again
   # next minute", and no branch check runs while the jobs' state is
   # unknown), it is not a required check, and
-  # it runs on a GitHub-hosted runner so it never takes a slot from the
-  # jobs it watches. The queue builds at most 4 groups at once, so at most
+  # it runs on the internal `meho-runners-ci` pool (#6325). It holds one
+  # slot there for the whole run; the test shards it watches run on the
+  # heavy pools, so it does not take their slots. The queue builds at most
+  # 4 groups at once, so at most
   # 4 watchdogs run at the same time: about 480 of the 1,000 API calls an
   # hour that the job token may make per repository, worst case.
   # ---------------------------------------------------------------------------
@@ -3135,7 +3298,8 @@ jobs:
     # Only merge-queue runs. A pull-request run must still show every failing
     # job, and a push to `main` has no queue group that can be dropped.
     if: github.event_name == 'merge_group'
-    runs-on: ubuntu-latest
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # Backstop only: the loop below stops itself, with success, after 170
     # minutes. A green merge-queue run took at most 78 minutes (#4732), and
     # the queue itself gives up on a group long before this cap.
@@ -3147,6 +3311,28 @@ jobs:
       contents: read
       actions: write
     steps:
+      - name: Install gh and jq
+        # The internal runner image ships without the `gh` CLI (#3171).
+        # Same `sudo -n apt-get` pattern as the go-lint-test C-toolchain
+        # step. continue-on-error keeps the watchdog from ever failing: if
+        # the install fails, every gh call below fails too, and the loop
+        # only looks again next minute.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          missing=()
+          command -v gh >/dev/null 2>&1 || missing+=(gh)
+          command -v jq >/dev/null 2>&1 || missing+=(jq)
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "gh and jq are already installed"
+            exit 0
+          fi
+          if ! { sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y \
+            && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}" \
+            && gh --version; }; then
+            echo "::warning::Could not install ${missing[*]}. The watchdog cannot call the API and will not cancel this run."
+            exit 1
+          fi
       - name: Cancel this run once the queue has dropped its group
         env:
           GH_TOKEN: ${{ github.token }}

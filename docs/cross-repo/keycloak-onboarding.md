@@ -54,8 +54,11 @@ scripts. The read ops:
 | `client` | `keycloak.client.get` | `GET .../clients/{id}` | read-only |
 | `client_scope` | `keycloak.client_scope.list` | `GET .../client-scopes` | read-only |
 | `user` | `keycloak.user.list` | `GET .../users` (`?username=`/`?max=`) | read-only |
+| `user` | `keycloak.user.otp_status` | `GET .../users` and each user's `.../credentials` (types only) | read-only |
 | `user` | `keycloak.user.get` | `GET .../users/{user-id}` and `.../credentials` (type and date only) | read-only |
 | `user` | `keycloak.user.sessions` | `GET .../users/{user-id}/sessions` (no session id) | read-only |
+| `user` | `keycloak.user.lock_status` | `GET .../attack-detection/brute-force/users/{user-id}` (no IP address) | read-only |
+| `realm` | `keycloak.realm.lock_settings` | `GET /admin/realms/{realm}` (lock rules only) | read-only |
 | `user` | `keycloak.role_mapping.get` | `GET .../users/{id}/role-mappings` | read-only |
 | `role` | `keycloak.role.list` | `GET .../roles` | read-only |
 | `role` | `keycloak.role.users` | `GET .../roles/{role-name}/users` | read-only |
@@ -63,7 +66,7 @@ scripts. The read ops:
 | `group` | `keycloak.group.member.list` | `GET .../groups/{group-id}/members` | read-only |
 | `identity_provider` | `keycloak.identity_provider.list` | `GET .../identity-provider/instances` and the login flows | read-only |
 
-Thirteen read ops. All are `safety_level="safe"` and
+Sixteen read ops. All are `safety_level="safe"` and
 `requires_approval=False`. The write ops (below) are `caution`,
 `dangerous` or `destructive`, and all are `requires_approval=True`.
 Every op dispatches through the same
@@ -120,11 +123,12 @@ approves it through the queue.
 | `group_write` | `keycloak.group.delete` | `DELETE .../groups/{group-id}` | destructive |
 | `realm_write` | `keycloak.realm.delete` | `DELETE /admin/realms/{realm}` | destructive |
 | `user_write` | `keycloak.user.logout` | `POST .../users/{id}/logout` | caution |
+| `user_write` | `keycloak.user.required_actions.update` | `PUT .../users/{id}` (add or remove required actions, for example `CONFIGURE_TOTP`) | dangerous |
 | `user_login_check` | `keycloak.user.check_login` | `POST /realms/{realm}/protocol/openid-connect/token` | caution |
 | `authflow_write` | `keycloak.authflow.ensure_approval_flow` | `.../authentication/flows` and `PUT .../clients/{id}` | caution |
 | `authflow_write` | `keycloak.authflow.ensure_passkey_code_skip` | `.../authentication/flows` and `PUT /admin/realms/{realm}` | caution |
 
-Twenty-one write ops. The group column is the registered group key: use it
+Twenty-two write ops. The group column is the registered group key: use it
 as the `group` argument of `search_operations` (for example
 `group="realm_write"` finds `keycloak.realm.create`).
 

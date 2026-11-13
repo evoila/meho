@@ -1176,7 +1176,8 @@ is not set.
 - `meho_status` (and `GET /api/v1/health`) then answers with
   `operator.tenant_id` and `operator.tenant_role` set to `null`,
   `operator.tenants` (each tenant's `tenant_id`, `name`, `tenant_role`,
-  `current`), `vault.detail = "tenant_not_chosen"`, the database
+  `current`), `vault.checked = false` with
+  `vault.detail = "tenant_not_chosen"`, the database
   state and `server_time` (#5504). It runs no tenant work (no credential check, no add-on
   pairings, no tool comparison). With a current tenant, `meho_status`
   answers as before and also lists `operator.tenants`, with `current`
@@ -1264,7 +1265,7 @@ add-on-family gate.
 | `meho_runbook_abort` | operator | — | Abort an in-progress runbook run. |
 | `meho_runbook_list_runs` | operator | — | List runbook runs (operators see only their own). |
 | `meho_runbook_list_templates` | operator | — | List runbook templates in the tenant. |
-| `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). |
+| `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). Optional `retry` runs a failed step's check again. |
 | `meho_runbook_show_template` | operator | — | Read a runbook template's full body. |
 | `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
 | `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). Since #5239 also the person's tenants with the role in each (`operator.tenants`); it is the one tool a session without a current tenant may call. Since #5504 also the server's time now in UTC (`server_time`, ISO 8601 to the second, for example `2026-10-31T14:34:28Z`), so an agent with no shell can write down a correct time. |
@@ -1276,6 +1277,18 @@ add-on-family gate.
 | `search_knowledge` | operator | — | Search the tenant knowledge base, and the tenant's own wiki when one is set (`kb.md`). |
 | `search_memory` | operator | — | Search the operator's accessible memories. |
 | `search_operations` | operator | — | Hybrid BM25 + cosine search over a connector's operations. With `op_id` (exact-op mode) it returns that one operation's call contract instead: the stored `parameter_schema`, small examples, the target-by-name rule, the result shape and retry rules (#3668). |
+
+**`meho_status` and the Vault check.** The tool is open to every role,
+but its Vault check runs only for a caller with the `operator` role or
+higher. That is the rule of `GET /api/v1/health`
+(`_federation_status_for` in `api/v1/health.py`). The check logs in to
+Vault as the caller and reads a secret. A `read_only` caller gets every
+other part of the answer, and `vault.checked = false` with
+`vault.detail = "not checked: needs the operator role"`. MEHO makes no
+Vault login and no secret read for that caller. `meho status` prints
+`Vault: not checked (needs the operator role)`, and `meho doctor`
+(which reads the `meho_status` answer) prints
+`vault not checked (needs the operator role)`.
 
 ### Operator surface (`mcp:admin` elevation required)
 
@@ -1310,8 +1323,8 @@ session (on top of the Role + Extra-gate columns).
 | `meho_broadcast_overrides_set` | tenant_admin | — | Create a broadcast-detail override rule. |
 | `meho_connector_delete` | tenant_admin | — | Delete a connector's ingested rows / auto-registered shim. |
 | `meho_connector_disable` | tenant_admin | — | Disable every group of a connector (regression roll-back). |
-| `meho_connector_edit_group` | tenant_admin | — | Edit an operation group's `when_to_use` prose or name. |
-| `meho_connector_edit_op` | tenant_admin | — | Edit one operation's per-op overrides. |
+| `meho_connector_edit_group` | tenant_admin | — | Edit an operation group's `when_to_use` prose or name; with `POLICY_CLASSIFICATION` on, ask for its category or labels. |
+| `meho_connector_edit_op` | tenant_admin | — | Edit one operation's per-op overrides; with `POLICY_CLASSIFICATION` on, ask for its category or labels. |
 | `meho_connector_enable` | tenant_admin | — | Enable every group of a connector. |
 | `meho_connector_enable_reads` | tenant_admin | — | Bulk-enable a connector's read-class operations. |
 | `meho_connector_ingest` | tenant_admin | — | Ingest one or more OpenAPI specs into a connector. |
@@ -1325,12 +1338,14 @@ session (on top of the Role + Extra-gate columns).
 | `meho_runbook_publish_template` | tenant_admin | — | Publish a draft template. |
 | `meho_runbook_reassign` | tenant_admin | — | Reassign an in-progress run to another operator. |
 | `meho_scheduler_cancel` | tenant_admin | — | Cancel a scheduled trigger by id. |
-| `meho_scheduler_create` | tenant_admin | — | Create a scheduled trigger (cron / one-off / event). |
+| `meho_scheduler_create` | tenant_admin | — | Create a scheduled trigger (cron / one-off / event). While `CHECKS_AGENT_EVENTS` is on, an event trigger can take `check_source` (a Sensor or a Dashboard, optionally only when it gets worse) instead of `event_filter`; while it is off, the tool shows and accepts no `check_source`. |
 | `meho_scheduler_list` | operator | — | List scheduled triggers. |
 | `meho_sensor_create` | tenant_admin | — | Create a sensor (op + assertion + cadence + severity). |
 | `meho_sensor_delete` | tenant_admin | — | Hard-delete a sensor by id. |
 | `meho_sensor_list` | operator | — | List sensors with their latest-result projection. |
+| `meho_sensor_pause` | tenant_admin | — | Pause a sensor: the runner stops running it; its history stays. |
 | `meho_sensor_results` | operator | — | Per-tick evidence trend history for one sensor. |
+| `meho_sensor_resume` | tenant_admin | — | Resume a paused sensor; it runs again at once. |
 | `meho_targets_register` | tenant_admin | — | Register a new target in the tenant. |
 | `meho_targets_update` | tenant_admin | — | Change fields of one target in the tenant, by its id. |
 | `meho_topology_annotate` | tenant_admin | — | Assert a curated graph edge auto-discovery can't infer. |
@@ -1542,9 +1557,10 @@ Five synthetic connectors follow this mould (natural key
 | `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |
 | `targets-registry-1.x` | `targets.probe` | (dispatch-only; a `safe` op that detects a target's product and version and stores them, the same code as `POST /api/v1/targets/{name}/probe`) | #5653 |
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
+| `spaces-records-1.x` | `spaces.assign`, `spaces.unassign`, `spaces.reassign`, `spaces.member.disable`, `spaces.overview` | (dispatch-only; the four writes are `caution` + `requires_approval` and need `tenant_admin`; the overview is a `safe` read) | #4933 |
 | `inventory-1.x` | `inventory.export` | (dispatch-only; a `safe` read that turns stored or inline inventories into a file in a named format) | #5218 |
 
-**Per-op role floor.** `targets.register`, `targets.update` and the five `topology.*`
+**Per-op role floor.** `targets.register`, `targets.update`, the four `spaces.*` writes and the five `topology.*`
 writes need the `tenant_admin` role from a person, the same as their
 REST routes and `meho_*` tools. Those fronts check the role at the door,
 but `call_operation` (and the REST dispatch route and the CLI) needs only
@@ -1689,6 +1705,51 @@ Two switches take text away while they are off:
 A third switch works the other way: `MCP_SHORT_TOOL_TEXTS` (off by
 default) gives the biggest tools a short text while it is on. One session
 can also ask for these texts. See "Short tool texts" below.
+
+A fourth switch adds an input while it is on: `MCP_REVEAL_FETCH` (off by
+default). With it on, `call_operation` has the input
+`approval_request_id` and a paragraph about it, added after the short
+text, so both switches can be on. With it off, the tool is the registered
+one and a call that sends the input is refused with `-32602`. See "Getting
+an approved secret value on MCP" below.
+
+## Getting an approved secret value on MCP (`MCP_REVEAL_FETCH`, off by default)
+
+A call with `reveal_secret: true` on a secret read waits for a second
+person's approval, and the approval runs nothing. The person who asked
+then fetches the value once, within 15 minutes of the approval
+([approvals.md](approvals.md#an-approved-secret-reveal-runs-when-the-person-who-asked-fetches-it)).
+On MCP that person calls:
+
+```
+call_operation(connector_id, op_id, approval_request_id)
+```
+
+- The code is in `mcp/tools/_call_operation_reveal.py`. The
+  `call_operation` handler hands the call over when it has
+  `approval_request_id`; it writes no call record.
+- Only `connector_id`, `op_id` and `approval_request_id` may be sent.
+  Any other input is refused with `-32602` (`reveal_fetch_extra_inputs`):
+  what runs is the stored request, never new params.
+- `connector_id` and `op_id` must be the ones of the request
+  (`reveal_wrong_operation`). An agent is refused
+  (`reveal_agent_refused`). These checks run before the fetch, so a
+  refused call does not use up the one-time permission.
+- The rest is `fetch_approved_reveal`: the same person and tenant
+  (`not_request_owner`, `approval_request_not_found`), once
+  (`reveal_already_used`), within the time limit (`reveal_window_passed`).
+- A refused fetch answers `status: "denied"` (`isError: true`) with
+  `extras.error_code` and `extras.approval_request_id`. Nothing ran.
+- When the answer holds the value, it is marked
+  (`no_store.mark_answer_holds_secret`; also for an operation that makes
+  a new credential), and the `/mcp` route sends it
+  with `Cache-Control: no-store` and `Pragma: no-cache`
+  (`no_store.answer_scope`). A run that was refused or ended with an
+  error holds no value and keeps the usual headers.
+- With the switch off, a person who works through MCP gets the value on
+  the command line (`meho secret read --approval <id> --field <name>`), in
+  the console ("Show value") or with `POST /api/v1/approvals/{id}/reveal`.
+- Tests: `tests/test_mcp_reveal_fetch.py`.
 
 ## Short tool texts (`MCP_SHORT_TOOL_TEXTS`, off by default)
 

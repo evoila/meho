@@ -275,7 +275,7 @@ async def test_export_shape_and_no_secrets(client: TestClient) -> None:
     assert doc["apiVersion"] == "meho.evoila.com/v1"
     assert doc["kind"] == "Settings"
     assert set(doc["metadata"]) == {"exportedAt", "exportedFrom"}
-    assert doc["metadata"]["exportedFrom"]["migrationHead"] == "0158"
+    assert doc["metadata"]["exportedFrom"]["migrationHead"] == "0164"
     (tenant,) = doc["spec"]["tenants"]
     assert tenant["id"] == str(_TENANT)
     assert tenant["policies"] == {
@@ -540,7 +540,7 @@ async def test_import_turns_on_run_approval_target_kinds(client: TestClient) -> 
 async def test_import_sets_the_knowledge_wiki_collection(
     client: TestClient, value: str, stored: str | None
 ) -> None:
-    """The settings file names the docs collection of the team wiki (#5976)."""
+    """The settings file names the docs collection of the tenant's wiki."""
     content = (
         "apiVersion: meho.evoila.com/v1\nkind: Settings\n"
         f"spec:\n  tenants:\n    - policies: {{knowledge_wiki_collection: {value}}}\n"

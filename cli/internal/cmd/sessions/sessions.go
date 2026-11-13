@@ -6,13 +6,18 @@
 //
 //   - `meho sessions list [--project P] [--state S] [--limit N] [--all]`
 //     — GET /api/v1/sessions. Role operator and up.
+//
 //   - `meho sessions show <session-id>` — GET /api/v1/sessions/{id}: the
 //     index row, the file hashes and the uploads. Role operator and up.
+//
 //   - `meho sessions delete <session-id> [--confirm]` — DELETE
 //     /api/v1/sessions/{id}: the session and its files. tenant_admin only.
 //
-// Every call writes an audit row on the server. The upload itself is a
-// separate command (`meho sessions push`, a later change).
+//   - `meho sessions push [--dry-run] [--outbox DIR]` — POST
+//     /api/v1/sessions: upload the sessions of the local outbox, with
+//     the person's own login. Any tenant role.
+//
+// Every call writes an audit row on the server.
 package sessions
 
 import (
@@ -33,13 +38,14 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sessions",
-		Short: "List, show and delete stored agent sessions",
+		Short: "Upload, list, show and delete stored agent sessions",
 		Long: "The agent session store keeps a copy of agent sessions that people " +
-			"uploaded. These commands list the sessions of your tenant, show one " +
-			"session, and delete one. Listing and showing need the operator role; " +
+			"uploaded. push uploads the sessions of your local outbox. The other " +
+			"commands list the sessions of your tenant, show one session, and delete one. Listing and showing need the operator role; " +
 			"deleting needs tenant_admin. Every call is audited.",
 		SilenceUsage: true,
 	}
+	cmd.AddCommand(newPushCmd())
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newShowCmd())
 	cmd.AddCommand(newDeleteCmd())

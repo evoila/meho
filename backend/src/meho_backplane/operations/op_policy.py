@@ -48,6 +48,15 @@ The rules:
   (:mod:`meho_backplane.operations.credential_read`) is at least
   ``caution`` and waits for approval. No override removes this.
 
+* **Classification.** With the ``POLICY_CLASSIFICATION`` switch on, an
+  operation also gets a category, labels and the rule that set them, and
+  a classification entry can raise its risk level or make it always wait
+  (:mod:`meho_backplane.policy.classification`). It is applied after the
+  overrides and before the floors, so it can never lower a level below
+  the code's value or end a wait that a floor needs. With the switch off
+  nothing of it is read, and ``category``, ``labels`` and ``rule_ref`` stay
+  empty.
+
 Dispatch, preview, search and the operation contract all read the
 effective values through :func:`apply_effective_policy` /
 :func:`effective_policy_map`, so they always agree.
@@ -56,8 +65,8 @@ effective values through :func:`apply_effective_policy` /
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
 from uuid import UUID
@@ -66,12 +75,20 @@ from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
 from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
 )
 from meho_backplane.operations.credential_read import raise_for_credential_read
+from meho_backplane.policy.classification import Classification
+from meho_backplane.policy.store import (
+    InvalidStoredPolicyError,
+    classification_enabled,
+    classify_rows,
+    classify_step,
+)
 
 __all__ = [
     "SAFETY_RANK",
@@ -82,10 +99,12 @@ __all__ = [
     "PolicyEditResult",
     "apply_effective_policy",
     "apply_policy_edit",
+    "apply_step_classification",
     "effective_policy",
     "effective_policy_map",
     "list_overrides",
     "load_overrides",
+    "register_policy_repair_op",
     "remove_override",
 ]
 
@@ -149,10 +168,23 @@ class OpKey:
 
 @dataclass(frozen=True)
 class EffectivePolicy:
-    """The risk level and approval flag that apply after overrides."""
+    """The risk level and approval flag that apply after overrides.
+
+    ``category``, ``labels``, ``rule_ref`` (the classification entry
+    that set them) and ``always_wait`` are filled only with the
+    ``POLICY_CLASSIFICATION`` switch on; otherwise they are ``None``,
+    empty, ``None`` and ``False``. ``always_wait`` is ``True`` when a
+    classification entry makes the operation always wait, or two entries
+    conflict: then a person approves each call, and no standing grant or
+    run approval clears it.
+    """
 
     safety_level: str
     requires_approval: bool
+    category: str | None = None
+    labels: Mapping[str, str] = field(default_factory=dict)
+    rule_ref: str | None = None
+    always_wait: bool = False
 
 
 def _approval(code_approval: bool, overrides: Iterable[OperationPolicyOverride]) -> bool:
@@ -228,29 +260,88 @@ async def load_overrides(
     return found
 
 
+#: Built-in operations that replace a stored policy, as ``(impl_id, op_id)``.
+_POLICY_REPAIR_OPS: set[tuple[str, str]] = set()
+
+
+def register_policy_repair_op(impl_id: str, op_id: str) -> None:
+    """Let the built-in *op_id* run while a stored policy document is not valid.
+
+    Such an operation is the way to replace the bad document, so it must
+    not need that document to be classified. Its own checks (its risk
+    level, its approval, the role and second-person rules) still apply.
+    """
+    _POLICY_REPAIR_OPS.add((impl_id, op_id))
+
+
+def _is_policy_repair_op(row: EndpointDescriptor) -> bool:
+    return row.tenant_id is None and (row.impl_id, row.op_id) in _POLICY_REPAIR_OPS
+
+
 async def effective_policy_map(
     session: AsyncSession,
     *,
     tenant_id: UUID | None,
     rows: Sequence[EndpointDescriptor],
+    group_keys: Mapping[UUID, str | None] | None = None,
 ) -> dict[OpKey, EffectivePolicy]:
     """Return the effective policy of every row in *rows* for *tenant_id*.
 
-    The two floors run last, after the overrides: a credential read and an
-    operation with a parameter that holds an address MEHO connects to stay
-    at least ``caution`` with approval, also when an override turned
-    approval off, and also for a row stored before the floor existed.
+    The order: the classification (with the ``POLICY_CLASSIFICATION``
+    switch on) after the overrides, and the two floors last: a credential
+    read and an operation with a parameter that holds an address MEHO
+    connects to stay at least ``caution`` with approval, also when an
+    override turned approval off, and also for a row stored before the
+    floor existed.
+
+    *group_keys* maps a row id to its group key when the caller already
+    joined the group; the classification loads the others. It is not
+    used with the switch off.
     """
     overrides = await load_overrides(session, tenant_id=tenant_id, keys=map(OpKey.of, rows))
-    return {
-        OpKey.of(row): _with_floors(
-            row,
-            effective_policy(
-                row.safety_level, row.requires_approval, overrides.get(OpKey.of(row), [])
-            ),
-        )
+    policies = [
+        effective_policy(row.safety_level, row.requires_approval, overrides.get(OpKey.of(row), []))
         for row in rows
+    ]
+    if classification_enabled():
+        try:
+            classified = await classify_rows(
+                session,
+                tenant_id=tenant_id,
+                rows=rows,
+                overrides=[overrides.get(OpKey.of(row), []) for row in rows],
+                group_keys=group_keys,
+            )
+        except InvalidStoredPolicyError:
+            if not rows or not all(_is_policy_repair_op(row) for row in rows):
+                raise
+            # The import that replaces the bad document runs without it.
+            return {
+                OpKey.of(row): _with_floors(row, p) for row, p in zip(rows, policies, strict=True)
+            }
+        policies = [_with_classification(p, c) for p, c in zip(policies, classified, strict=True)]
+    return {
+        OpKey.of(row): _with_floors(row, policy) for row, policy in zip(rows, policies, strict=True)
     }
+
+
+def _with_classification(policy: EffectivePolicy, classified: Classification) -> EffectivePolicy:
+    """Add the classification to *policy*: it can only raise the level or add a wait.
+
+    The level stays at least the one after the overrides (so never below
+    the code's), and ``always_wait: false`` leaves the approval as it is.
+    A destructive level always waits.
+    """
+    safety = _max_level([policy.safety_level, classified.risk or "safe"])
+    approval = policy.requires_approval or classified.always_wait or safety == "destructive"
+    return EffectivePolicy(
+        safety_level=safety,
+        requires_approval=approval,
+        category=classified.category,
+        labels=dict(classified.labels),
+        rule_ref=classified.rule_ref,
+        always_wait=classified.always_wait,
+    )
 
 
 def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectivePolicy:
@@ -265,7 +356,7 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
         safety_level=safety_level,
         requires_approval=requires_approval,
     )
-    return EffectivePolicy(safety_level=safety_level, requires_approval=requires_approval)
+    return replace(policy, safety_level=safety_level, requires_approval=requires_approval)
 
 
 async def apply_effective_policy(
@@ -273,17 +364,52 @@ async def apply_effective_policy(
     *,
     tenant_id: UUID | None,
     row: EndpointDescriptor,
+    group_keys: Mapping[UUID, str | None] | None = None,
 ) -> EndpointDescriptor:
     """Detach *row* from *session* and set its effective risk level and approval.
 
     The row is expunged first, so the changed values are never written
-    back: the stored row keeps the classification.
+    back: the stored row keeps the classification. *group_keys* is passed
+    to :func:`effective_policy_map`. ``row.policy_always_wait`` (not a
+    column) gets :attr:`EffectivePolicy.always_wait`, so the grant checks
+    see it.
     """
-    policy = (await effective_policy_map(session, tenant_id=tenant_id, rows=[row]))[OpKey.of(row)]
+    policies = await effective_policy_map(
+        session, tenant_id=tenant_id, rows=[row], group_keys=group_keys
+    )
+    policy = policies[OpKey.of(row)]
     session.expunge(row)
     row.safety_level = policy.safety_level
     row.requires_approval = policy.requires_approval
+    row.policy_always_wait = policy.always_wait
     return row
+
+
+async def apply_step_classification(
+    *, tenant_id: UUID | None, step: EndpointDescriptor
+) -> EndpointDescriptor:
+    """Apply the classification to *step*, the in-memory row of a composite step.
+
+    A multi-step operation checks each write step against a row built from
+    the step's declared risk level and approval flag. This raises them the
+    same way :func:`_with_classification` does for a stored row, and sets
+    ``step.policy_always_wait``, so no standing grant and no approval of
+    the run clears an "always wait" step. With the
+    ``POLICY_CLASSIFICATION`` switch off, *step* is returned unchanged and
+    no database session is opened.
+    """
+    if not classification_enabled():
+        return step
+    async with get_sessionmaker()() as session:
+        classified = await classify_step(session, tenant_id=tenant_id, step=step)
+    policy = _with_classification(
+        EffectivePolicy(safety_level=step.safety_level, requires_approval=step.requires_approval),
+        classified,
+    )
+    step.safety_level = policy.safety_level
+    step.requires_approval = policy.requires_approval
+    step.policy_always_wait = policy.always_wait
+    return step
 
 
 # ---------------------------------------------------------------------------
@@ -735,11 +861,17 @@ async def _store(
     operator: Operator,
     approval_edited: bool,
 ) -> None:
-    """Write, update or delete the override of this scope."""
+    """Write, update or delete the override of this scope.
+
+    A row that keeps a category or labels is kept, also when the edit
+    leaves no risk level and no approval in it.
+    """
     if safety_field is None and approval_field is None:
-        if mine is not None:
+        if mine is not None and mine.category is None and not mine.labels:
             await session.delete(mine)
-        return
+            return
+        if mine is None:
+            return
     if mine is None:
         mine = OperationPolicyOverride(
             tenant_id=scope_tenant_id,
@@ -803,18 +935,21 @@ async def list_overrides(
 async def _scope_policy(session: AsyncSession, row: OperationPolicyOverride) -> EffectivePolicy:
     """Return the effective policy of *row*'s operation in *row*'s scope.
 
-    Like dispatch, the two floors run last, so the report never
-    lists approval as off for an operation that still waits for it. With no
-    descriptor (the operation is gone) the lowest values apply, so only the
-    overrides count.
+    The same steps as dispatch (:func:`effective_policy_map`): the
+    overrides, then the classification (with the ``POLICY_CLASSIFICATION``
+    switch on), then the floors. So the report never lists approval as off
+    for an operation that a classification entry or a floor still makes
+    wait, and ``rule_ref`` says which entry decided it. With no descriptor
+    (the operation is gone) the lowest values apply, so only the overrides
+    count.
     """
     key = OpKey(row.product, row.version, row.impl_id, row.op_id)
     descriptor = await _scope_descriptor(session, key, row.tenant_id)
-    overrides = (await load_overrides(session, tenant_id=row.tenant_id, keys=[key])).get(key, [])
     if descriptor is None:
-        return effective_policy("safe", False, overrides)
-    policy = effective_policy(descriptor.safety_level, descriptor.requires_approval, overrides)
-    return _with_floors(descriptor, policy)
+        overrides = await load_overrides(session, tenant_id=row.tenant_id, keys=[key])
+        return effective_policy("safe", False, overrides.get(key, []))
+    policies = await effective_policy_map(session, tenant_id=row.tenant_id, rows=[descriptor])
+    return policies[key]
 
 
 async def _classification(

@@ -136,6 +136,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -163,7 +165,8 @@ jobs:
   validate:
     name: Lint + template + kubeconform (PR build gate)
     # Fork-PR guard: fork PRs are skipped entirely (mirrors image.yml).
-    # The job runs on a GitHub-hosted runner: helm and kubeconform come from
+    # The job runs on a GitHub-hosted runner (own pool in the merge queue):
+    # helm and kubeconform come from
     # public releases. push events (main, v*) short-circuit the OR. The trailing `needs.changes.outputs.chart` clause skips this job
     # (→ reported Success) on PRs that don't touch the chart.
     needs: changes
@@ -171,7 +174,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.chart == 'true')
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -832,10 +835,9 @@ jobs:
     #      tripped Docker Hub's rate-limit on this repo's other CI
     #      lanes -- pre-loading sidesteps it.
     #
-    # Runs on ``ubuntu-latest`` (NOT ``meho-runners-ci``) because kind
-    # needs Docker-in-Docker support that the self-hosted runner
-    # pool isn't configured for; the GitHub-hosted runners ship
-    # Docker pre-installed and helm/kind-action works out of the box.
+    # Runs on ``ubuntu-latest`` for every event, the merge queue too.
+    # kind installs need more CPU than the own heavy-queue pool has today;
+    # back to an own pool when the second runner pool exists (#6026).
     #
     # #4099 -- ``helm install`` and ``helm test`` run as a namespace
     # admin (``--kube-as-user``), not as kind's cluster admin, so a chart
@@ -2651,6 +2653,8 @@ jobs:
     # there. The gate skips too, so it does not fail on the skipped `changes`.
     if: always() && github.event_name != 'workflow_dispatch'
     needs: [changes, validate, helm-test, helm-test-byo, upgrade-from-release]
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

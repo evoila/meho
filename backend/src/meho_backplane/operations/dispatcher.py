@@ -283,7 +283,6 @@ import hvac.exceptions
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
 
-from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
@@ -307,6 +306,7 @@ from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundE
 from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
+from meho_backplane.no_store import mark_answer_holds_secret
 from meho_backplane.operations._audit import (
     AuditCommitError,
     audit_rejection_safe,
@@ -396,6 +396,7 @@ from meho_backplane.operations._preview import (
     build_proposed_effect,
     describe_preview_provenance,
 )
+from meho_backplane.operations._preview_steps import agent_acts as _agent_acts
 from meho_backplane.operations._preview_steps import agent_step_refusal
 from meho_backplane.operations._request_preview import (
     compute_preview_hash,
@@ -426,6 +427,7 @@ from meho_backplane.operations._vendor_text import (
     redact_error_result,
     withhold_vendor_text,
 )
+from meho_backplane.operations.approved_step_check import approved_step_refusal
 from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
@@ -1086,7 +1088,9 @@ def _protect_secret_values(
     are put back as the connector returned them (:func:`reveal_hidden_values`),
     and the redaction of the other fields stays. An operation that makes a
     new credential (*secret_view* is ``None``) returns the redacted answer,
-    so the caller gets the credential it asked for.
+    so the caller gets the credential it asked for. A revealed answer is
+    marked (:func:`~meho_backplane.no_store.mark_answer_holds_secret`), so
+    the HTTP answer that carries it says ``Cache-Control: no-store``.
 
     ``raw`` -- the copy the audit row stores as ``raw_payload`` -- gets a
     keyed fingerprint in place of every value the default view hides, whether
@@ -1108,6 +1112,8 @@ def _protect_secret_values(
         caller = shown
     elif secret_view == "revealed":
         caller = reveal_hidden_values(redaction.raw, redacted, shown)
+        # The answer carries the values: no browser or proxy may keep it.
+        mark_answer_holds_secret()
     else:
         caller = redacted
     return redaction.model_copy(
@@ -1122,17 +1128,16 @@ def _secret_view(*, makes_new_secret: bool, reveal_secret: bool) -> SecretView |
     return "revealed" if reveal_secret else "hidden"
 
 
-def _agent_acts(operator: Operator) -> bool:
-    """True when an agent makes this call: an agent principal, or a hosted agent run."""
-    return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
-
-
 async def _agent_step_refusal(
-    *, operator: Operator, op_id: str, connector_id: str, target: Any
+    *, operator: Operator, descriptor: EndpointDescriptor, connector_id: str, target: Any
 ) -> str | None:
     """Refuse a multi-step call up front when the agent may not run a write step.
 
-    A write step with no grant (#6189), or with a ``deny`` grant (#6285).
+    A write step with no grant (#6189), or with a ``deny`` grant (#6285),
+    or a multi-step operation that changes something and declares no
+    steps (#6298). Run before the call waits for approval. An approved
+    call is checked again by :func:`approved_step_refusal` (#6314).
+
     Only for an agent with ``AGENT_GRANT_REQUIRED`` not ``off`` and only at
     the top level: the steps of the call are checked here, with the same
     list the preview checks, so the call never stops half-way at a step the
@@ -1147,7 +1152,7 @@ async def _agent_step_refusal(
     ):
         return None
     return await agent_step_refusal(
-        operator=operator, op_id=op_id, connector_id=connector_id, target=target
+        operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
     )
 
 
@@ -4005,7 +4010,10 @@ async def _dispatch_now(
                 verdict = PermissionVerdict.NEEDS_APPROVAL
             if verdict is not PermissionVerdict.DENY:
                 step_refusal = await _agent_step_refusal(
-                    operator=operator, op_id=op_id, connector_id=connector_id, target=target
+                    operator=operator,
+                    descriptor=descriptor,
+                    connector_id=connector_id,
+                    target=target,
                 )
                 if step_refusal is not None:
                     verdict, gate_reason = PermissionVerdict.DENY, step_refusal
@@ -4138,6 +4146,29 @@ async def _dispatch_now(
                     error_extras=_error_extras_for_audit(denied),
                 )
                 return with_audit_receipt(denied, receipt)
+            # #6298, #6314: an agent's grants may have changed while the
+            # call waited. Check its steps again before the first one runs,
+            # also when a person runs the call from an approvals surface,
+            # so the resumed call does not stop half-way. The approval
+            # request then ends as a failed run with this reason.
+            step_refusal = await approved_step_refusal(
+                operator=operator,
+                descriptor=descriptor,
+                connector_id=connector_id,
+                target=target,
+            )
+            if step_refusal is not None:
+                policy_decision_var.set(PermissionVerdict.DENY.value)
+                duration_ms = _elapsed_ms(started)
+                return await _audit_denied_and_return(
+                    result_denied(op_id, step_refusal, duration_ms),
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
+                    duration_ms=duration_ms,
+                )
 
         # --- Step 5: connector resolution ---------------------------------
         connector_instance: Connector | None

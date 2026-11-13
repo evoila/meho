@@ -96,6 +96,7 @@ from meho_backplane.auth.client_identity import (
     apply_client_block,
     build_client_block,
     channel_of,
+    clean_client_text,
     client_identity_enabled,
 )
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
@@ -1429,7 +1430,14 @@ class ResumeRequester(NamedTuple):
     #: The requester's ``client`` block from the stored effect
     #: (AUDIT_CLIENT_IDENTITY). ``None`` when the request has none.
     client: dict[str, Any] | None = None
+    #: The requester record on the card (``permission_preflight["requester"]``),
+    #: so a re-park keeps it (#6314). ``None`` when the card has none.
+    subject: dict[str, Any] | None = None
 
+
+#: Where the card keeps the requester record (#3898, #6314).
+_PERMISSION_PREFLIGHT_KEY = "permission_preflight"
+_REQUESTER_KEY = "requester"
 
 #: The requester of the approval request whose composite is being re-run
 #: (#4217). Bound by :func:`composite_resume_binding` on both resume paths
@@ -1591,6 +1599,7 @@ async def create_pending_request(
         client = build_client_block(operator) if requester is None else requester.client
         if client is not None:
             proposed_effect = {**proposed_effect, CLIENT_PAYLOAD_KEY: client}
+    proposed_effect = _with_requester_record(proposed_effect, operator, requester)
 
     # RFC 8693 ``act`` (#1481): the agent principal acting on the human
     # subject's behalf on a delegated run, read from the same
@@ -1833,9 +1842,9 @@ def _approver_client_fields(operator: Operator, user_agent: str | None) -> dict[
 
     ``approver_azp`` and ``approver_channel`` come from the checked login.
     ``approver_user_agent`` is the ``User-Agent`` header of a REST approve,
-    cut to 256 characters. The tool sends it about itself and MEHO cannot
-    check it, so it is marked ``"self_declared": true``. Empty when the
-    switch is off.
+    cleaned like every client text and cut to 256 characters. The tool sends
+    it about itself and MEHO cannot check it, so it is marked
+    ``"self_declared": true``. Empty when the switch is off.
     """
     if not client_identity_enabled():
         return {}
@@ -1843,11 +1852,9 @@ def _approver_client_fields(operator: Operator, user_agent: str | None) -> dict[
         "approver_azp": operator.azp,
         "approver_channel": channel_of(operator),
     }
-    if user_agent:
-        fields["approver_user_agent"] = {
-            "value": user_agent[:_USER_AGENT_MAX_LENGTH],
-            "self_declared": True,
-        }
+    cleaned = clean_client_text(user_agent, _USER_AGENT_MAX_LENGTH)
+    if cleaned:
+        fields["approver_user_agent"] = {"value": cleaned, "self_declared": True}
     return fields
 
 
@@ -2934,15 +2941,42 @@ async def _refuse_resume_params_unavailable(
 
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:
-    """The requester saved on *request* (#4217), with the requester's ``client`` block."""
-    client = (request.proposed_effect or {}).get(CLIENT_PAYLOAD_KEY)
+    """The requester saved on *request* (#4217), with its ``client`` block and record."""
+    effect = request.proposed_effect or {}
+    client = effect.get(CLIENT_PAYLOAD_KEY)
+    preflight = effect.get(_PERMISSION_PREFLIGHT_KEY)
+    subject = preflight.get(_REQUESTER_KEY) if isinstance(preflight, dict) else None
     return ResumeRequester(
         request.principal_sub,
         request.principal_act,
         request.principal_name,
         request.principal_kind,
         client if isinstance(client, dict) else None,
+        subject if isinstance(subject, dict) else None,
     )
+
+
+def _with_requester_record(
+    proposed_effect: dict[str, Any], operator: Operator, requester: ResumeRequester | None
+) -> dict[str, Any]:
+    """Put the agent requester's record on the card (#6314), when there is one.
+
+    An approvals surface runs the approved call as the person who approved
+    it. It rebuilds the agent from this record to check the agent's grants
+    for the steps again
+    (:func:`~meho_backplane.operations.approved_step_check.approved_step_refusal`).
+    A re-park on behalf of an earlier requester keeps that requester's
+    record. A record the operation's own preflight stored stays.
+    """
+    from meho_backplane.operations.approved_step_check import requester_record
+
+    record = requester_record(operator) if requester is None else requester.subject
+    if record is None:
+        return proposed_effect
+    preflight = proposed_effect.get(_PERMISSION_PREFLIGHT_KEY)
+    preflight = dict(preflight) if isinstance(preflight, dict) else {}
+    preflight.setdefault(_REQUESTER_KEY, record)
+    return {**proposed_effect, _PERMISSION_PREFLIGHT_KEY: preflight}
 
 
 @contextmanager
@@ -3728,6 +3762,13 @@ def _check_approver_role_floor(operator: Operator, request: ApprovalRequest) -> 
         )
 
 
+def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:
+    """Compare the policy evaluator with today's answer, when ``POLICY_ENGINE_SHADOW`` is on."""
+    from meho_backplane.policy.shadow import shadow_approval
+
+    shadow_approval(operator, request, today=today)
+
+
 async def _load_pending_for_approval(
     session: AsyncSession,
     request_id: uuid.UUID,
@@ -3761,8 +3802,13 @@ async def _load_pending_for_approval(
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
     if _deadline_has_passed(request, _now(), _resolve_default_ttl()):
         raise ApprovalRequestExpiredError(request_id)
-    rule = _check_approver_group(operator, request)
-    _check_approver_role_floor(operator, request)
+    try:
+        rule = _check_approver_group(operator, request)
+        _check_approver_role_floor(operator, request)
+    except (UnauthorizedApprovalError, SelfApprovalForbiddenError):
+        _shadow_approval(operator, request, today=False)
+        raise
+    _shadow_approval(operator, request, today=True)
     if params is not None and not params_hash_matches(params, request.params_hash):
         raise ParamsMismatchError(request_id)
     _check_destructive_preview_binding(request)
@@ -4080,6 +4126,11 @@ async def record_approval_step_event(
     No Broadcast event is published (#3758). The stored approval row is
     what waiters, the approvals bell and the console read.
 
+    It also starts the push messages to the browsers of the people who may
+    approve the request (:func:`~meho_backplane.web_push.send.notify_approval_step`).
+    Every caller runs this after its commit, so a message never goes out
+    for a request whose audit row did not commit.
+
     An ``approved`` event also carries ``reviewed_by`` (who approved),
     ``self_approved`` and, when :func:`approve_request` set it,
     ``approval_rule`` (#3328) -- the same fields as the
@@ -4090,7 +4141,12 @@ async def record_approval_step_event(
     (#3596): "this is step k of N waiting under this change ticket".
     """
     from meho_backplane.operations.addon_step_events import AddonStepEventService
+    from meho_backplane.web_push.send import notify_approval_step
 
+    # Push messages to the people who may approve (web_push/send.py). It
+    # only starts a background task, so it never slows the caller, and
+    # never raises.
+    notify_approval_step(tenant_id=tenant_id, request=request, decision=decision)
     payload: dict[str, object] = {
         "approval_request_id": str(request.id),
         "decision": decision,

@@ -159,7 +159,7 @@ Five kinds of drift. Each is a list in the answer, and a count in `counts`:
 | `unassigned_targets` | a live target has no current target assignment |
 | `missing_targets` | a current target assignment points to a target that is deleted or unknown |
 | `unreachable_targets` | the newest reach evidence of an assigned target says it is not reachable (see below). A target with no evidence is not listed. |
-| `missing_objects` | a current machine assignment has a vendor object id that is on no live topology node of its target (see below) |
+| `missing_objects` | a current machine assignment has a vendor object id that is the id of no live machine node of its target (see below) |
 | `state_mismatch` | the assignment's space is disabled (`space_disabled`), or its target has another name than at assignment (`target_renamed`, with `current_name`) |
 
 - `total_count` adds the five counts. The check reads it.
@@ -168,17 +168,25 @@ Five kinds of drift. Each is a list in the answer, and a count in `counts`:
   on the target. The newest one wins, so a check that fails after a good
   probe makes the target unreachable, and a check that passes after a failed
   probe clears it. A check result counts only while it is at most twice its
-  interval old (the same rule as the health in `spaces.overview`). `ok`,
-  `degraded` and `critical` mean the call reached the target. `unknown`
-  counts as not reachable only when the call failed (`dispatch_error`,
-  `dispatch_not_ok`, `evaluation_timeout`); other `unknown` results and
-  `skip` say nothing. Each entry names its `source` (`probe` or
+  interval old (the same rule as the health in `spaces.overview`). The state
+  of a result is its newest state: with confirmation retries on, a new state
+  waits in `pending_state` until it repeats, and that waiting state counts.
+  `ok`, `degraded` and `critical` mean the call reached the target. `unknown`
+  counts as not reachable only when the call ended in a connection failure:
+  `connector_timeout`, or `connector_error` from a failed connection (for
+  example `ConnectError` or `ConnectionRefusedError`). A call that policy
+  refused, a missing connector or secret, an error answer from the target, a
+  bad check and a timeout of the whole check run say nothing about reach.
+  `skip` says nothing too. Each entry names its `source` (`probe` or
   `health_check`) and `seen_at`.
-- A machine matches a live node by its vendor object id: the node's name, or
-  one of the node properties `object_id`, `server_number`, `uid`, `uuid`,
-  `moid`, `id`. When the assignment names a target, only that target's nodes
-  count, so the same id on another target does not hide a missing machine.
-  An assignment without a target matches any node of the tenant.
+- A machine matches a live machine node (kind `vm`, `host` or `node`) by its
+  vendor object id: one of the node properties `object_id`, `server_number`,
+  `uid`, `uuid`, `moid`, `id`. The node's name is a display name and does not
+  count. Other nodes do not count either: a network node may name a server in
+  `server_number`, but it is not that server. When the assignment names a
+  target, only that target's nodes count, so the same id on another target
+  does not hide a missing machine. An assignment without a target matches
+  any machine node of the tenant.
 - `missing_objects` trusts the topology refresh. A target whose topology was
   never refreshed makes its machines show as missing, so refresh first.
 - The lists come back behind a result handle when long; `total_count` stays

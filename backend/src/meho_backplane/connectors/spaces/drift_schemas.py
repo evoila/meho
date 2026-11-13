@@ -30,7 +30,7 @@ DRIFT_RESPONSE: Final[dict[str, Any]] = {
             "Assigned targets whose newest probe or health-check result said not reachable."
         ),
         "missing_objects": _list(
-            "Current machine assignments whose vendor id is on no live topology node of "
+            "Current machine assignments whose vendor id is the id of no live machine node of "
             "their target."
         ),
         "state_mismatch": _list(

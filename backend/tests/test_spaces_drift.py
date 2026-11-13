@@ -269,7 +269,18 @@ def _probe(reachable: bool, age: timedelta) -> dict[str, Any]:
     return {"reachable": reachable, "probed_at": (datetime.now(UTC) - age).isoformat()}
 
 
-_CALL_FAILED = {"last_state": "unknown", "last_evidence": {"reason": "dispatch_error"}}
+def _not_ok(status: str, error: str) -> dict[str, Any]:
+    return {
+        "last_state": "unknown",
+        "last_evidence": {
+            "reason": "dispatch_not_ok",
+            "dispatch_status": status,
+            "dispatch_error": error,
+        },
+    }
+
+
+_CALL_FAILED = _not_ok("error", "connector_timeout: ConnectTimeout")
 
 
 @pytest.mark.asyncio
@@ -318,6 +329,94 @@ async def test_a_stale_or_unrelated_check_result_is_not_reach_evidence(world: _W
     assert (await _drift(world))["unreachable_targets"] == []
 
 
+@pytest.mark.parametrize(
+    "check",
+    [
+        _not_ok("error", "connector_error: ConnectError"),
+        _not_ok("error", "connector_timeout: ReadTimeout"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_connection_failure_makes_a_target_unreachable(
+    world: _World, check: dict[str, Any]
+) -> None:
+    target_id = await _add_target(world.tenant_a, "demo-one", fingerprint=None)
+    await _assign(world.tenant_a, world.space_a, target_id=target_id, name="demo-one")
+    await _check(world.tenant_a, "demo-one", age=timedelta(minutes=10), **check)
+
+    assert [e["name"] for e in (await _drift(world))["unreachable_targets"]] == ["demo-one"]
+
+
+@pytest.mark.parametrize(
+    "check",
+    [
+        _not_ok("denied", "denied: no grant covers this call"),
+        _not_ok("error", "vault_credentials_read_error: the secret could not be read"),
+        _not_ok("error", "no_connector: no connector for this product"),
+        _not_ok("error", "connector_error: KeyError"),
+        _not_ok("error", "connector_error: HTTPStatusError"),
+        {"last_state": "unknown", "last_evidence": {"reason": "dispatch_error"}},
+        {"last_state": "unknown", "last_evidence": {"reason": "evaluation_timeout"}},
+        {
+            "last_state": "unknown",
+            "last_evidence": {"reason": "no_target", "dispatch_error": "no target"},
+        },
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_local_failure_does_not_make_a_target_unreachable(
+    world: _World, check: dict[str, Any]
+) -> None:
+    target_id = await _add_target(
+        world.tenant_a, "demo-one", fingerprint=_probe(True, timedelta(hours=5))
+    )
+    await _assign(world.tenant_a, world.space_a, target_id=target_id, name="demo-one")
+    await _check(world.tenant_a, "demo-one", age=timedelta(minutes=10), **check)
+
+    assert (await _drift(world))["unreachable_targets"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_failure_waiting_for_confirmation_counts(world: _World) -> None:
+    target_id = await _add_target(
+        world.tenant_a, "demo-one", fingerprint=_probe(True, timedelta(hours=5))
+    )
+    await _assign(world.tenant_a, world.space_a, target_id=target_id, name="demo-one")
+    await _check(
+        world.tenant_a,
+        "demo-one",
+        age=timedelta(minutes=10),
+        retry_times=2,
+        pending_count=1,
+        last_evidence=_CALL_FAILED["last_evidence"],
+        last_state="ok",
+        pending_state="unknown",
+    )
+
+    (entry,) = (await _drift(world))["unreachable_targets"]
+    assert (entry["name"], entry["source"]) == ("demo-one", "health_check")
+
+
+@pytest.mark.asyncio
+async def test_a_recovery_waiting_for_confirmation_clears_a_failed_probe(world: _World) -> None:
+    target_id = await _add_target(
+        world.tenant_a, "demo-one", fingerprint=_probe(False, timedelta(hours=5))
+    )
+    await _assign(world.tenant_a, world.space_a, target_id=target_id, name="demo-one")
+    await _check(
+        world.tenant_a,
+        "demo-one",
+        age=timedelta(minutes=10),
+        retry_times=2,
+        pending_count=1,
+        last_evidence={"value": 3},
+        last_state="unknown",
+        pending_state="ok",
+    )
+
+    assert (await _drift(world))["unreachable_targets"] == []
+
+
 @pytest.mark.asyncio
 async def test_an_unreachable_target_in_no_space_is_only_unassigned(world: _World) -> None:
     await _add_target(world.tenant_a, "demo-down", fingerprint={"reachable": False})
@@ -332,6 +431,7 @@ async def _node(
     tenant_id: uuid.UUID,
     name: str,
     *,
+    kind: str = "vm",
     live: bool = True,
     target_id: uuid.UUID | None = None,
     source_scope: str | None = None,
@@ -341,7 +441,7 @@ async def _node(
         session.add(
             GraphNode(
                 tenant_id=tenant_id,
-                kind="vm",
+                kind=kind,
                 name=name,
                 target_id=target_id,
                 source="auto",
@@ -356,9 +456,9 @@ async def _node(
 
 @pytest.mark.asyncio
 async def test_a_machine_in_no_live_topology_node_is_missing(world: _World) -> None:
-    await _node(world.tenant_a, "vm-seen")
-    await _node(world.tenant_a, "vm-dropped", live=False)
-    await _node(world.tenant_b, "vm-other-tenant")
+    await _node(world.tenant_a, "seen", properties={"uid": "vm-seen"})
+    await _node(world.tenant_a, "dropped", live=False, properties={"uid": "vm-dropped"})
+    await _node(world.tenant_b, "other", properties={"uid": "vm-other-tenant"})
     for object_id in ("vm-seen", "vm-dropped", "vm-other-tenant", "vm-never"):
         await _assign(
             world.tenant_a,
@@ -395,6 +495,35 @@ async def test_a_machine_matches_by_vendor_id_not_by_name(world: _World) -> None
     result = await _drift(world)
 
     assert [e["object_id"] for e in result["missing_objects"]] == ["srv-beta"]
+
+
+@pytest.mark.asyncio
+async def test_a_display_name_or_a_reference_is_not_a_machine_id(world: _World) -> None:
+    host = await _add_target(world.tenant_a, "demo-host")
+    await _node(
+        world.tenant_a, "4711", kind="host", target_id=host, properties={"server_number": 9999}
+    )
+    await _node(
+        world.tenant_a,
+        "10.0.0.0/29",
+        kind="network",
+        target_id=host,
+        properties={"server_number": 4711},
+    )
+    await _assign(world.tenant_a, world.space_a, target_id=host, name="demo-host")
+    for object_id in ("4711", "9999"):
+        await _assign(
+            world.tenant_a,
+            world.space_a,
+            kind="object",
+            target_id=host,
+            object_id=object_id,
+            name=f"name of {object_id}",
+        )
+
+    result = await _drift(world)
+
+    assert [e["object_id"] for e in result["missing_objects"]] == ["4711"]
 
 
 @pytest.mark.asyncio

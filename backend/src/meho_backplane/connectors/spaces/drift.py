@@ -17,8 +17,8 @@ Five kinds of drift, each a list plus a count:
   fresh health-check result on the target; the newer one wins. A target with
   no evidence is not listed: unknown is not unreachable.
 * ``missing_objects``: a current machine assignment whose vendor object id
-  is on no live topology node of the assigned target (of the tenant, when
-  the assignment names no target).
+  is the id of no live machine node of the assigned target (of the tenant,
+  when the assignment names no target).
 * ``state_mismatch``: a current assignment that disagrees with the live
   record: its space is disabled (``space_disabled``), or its target now has
   another name than when it was assigned (``target_renamed``).
@@ -54,13 +54,31 @@ DRIFT_KINDS: tuple[str, ...] = (
     "state_mismatch",
 )
 
-#: Node properties that hold a vendor's own object id. Connectors name it
-#: differently (a Hetzner server keeps it in ``server_number``); a node whose
-#: name is the id matches by name.
+#: Topology node kinds that are machines. Other nodes (a network, say) may
+#: carry a machine's id as a reference; that does not make them the machine.
+_MACHINE_KINDS: tuple[str, ...] = ("vm", "host", "node")
+
+#: Properties of a machine node that hold the vendor's own id for it.
+#: Connectors name it differently (a Hetzner server keeps it in
+#: ``server_number``). The node's name is a display name, not an id.
 _OBJECT_ID_KEYS: tuple[str, ...] = ("object_id", "server_number", "uid", "uuid", "moid", "id")
 
-#: ``reason`` of an ``unknown`` check result where the call to the target failed.
-_CALL_FAILED_REASONS = frozenset({"dispatch_error", "dispatch_not_ok", "evaluation_timeout"})
+#: Error codes of a call that did not reach the target. The dispatcher starts
+#: its error text with the code (``connector_timeout: ConnectTimeout``).
+_NOT_REACHED_CODES = frozenset({"connector_timeout"})
+
+#: Exception classes of a ``connector_error`` where no connection was made.
+_NOT_CONNECTED_EXCEPTIONS = frozenset(
+    {
+        "ConnectError",
+        "ConnectionError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "ConnectionAbortedError",
+        "gaierror",
+        "NoValidConnectionsError",
+    }
+)
 
 _REACHED_STATES = frozenset({"ok", "degraded", "critical"})
 
@@ -91,21 +109,49 @@ def _probe_evidence(target: Target) -> _Evidence | None:
     )
 
 
+def _call_did_not_reach(evidence: object) -> bool:
+    """Whether an ``unknown`` result says the call failed to reach the target.
+
+    Only a dispatch that ended in a connection failure counts. A refused call
+    (policy), a missing connector or credential, a bad check and a timeout of
+    the whole evaluation are failures on MEHO's side: they say nothing about
+    the target.
+    """
+    if not isinstance(evidence, dict) or evidence.get("reason") != "dispatch_not_ok":
+        return False
+    if evidence.get("dispatch_status") != "error":
+        return False
+    text = evidence.get("dispatch_error")
+    if not isinstance(text, str):
+        return False
+    code, _, detail = text.partition(": ")
+    if code in _NOT_REACHED_CODES:
+        return True
+    return code == "connector_error" and detail.strip() in _NOT_CONNECTED_EXCEPTIONS
+
+
+def _latest_state(sensor: Sensor) -> str | None:
+    """The state of the newest result of *sensor*.
+
+    With confirmation retries on, a new state waits in ``pending_state`` until
+    it repeats, while ``last_evidence`` already holds the new result.
+    """
+    return sensor.pending_state or sensor.last_state
+
+
 def _check_evidence(sensor: Sensor, now: datetime) -> _Evidence | None:
     """What one health check says about reach, or ``None`` when it says nothing.
 
     A stale result says nothing. ``ok``, ``degraded`` and ``critical`` mean the
-    call reached the target. ``unknown`` counts only when the call failed;
-    ``skip`` and other ``unknown`` reasons (a bad check) say nothing.
+    call reached the target. ``unknown`` counts only when the call failed to
+    reach the target; ``skip`` and other ``unknown`` results say nothing.
     """
     if not check_is_fresh(sensor, now) or sensor.last_evaluated_at is None:
         return None
-    if sensor.last_state in _REACHED_STATES:
+    state = _latest_state(sensor)
+    if state in _REACHED_STATES:
         reachable = True
-    elif sensor.last_state == "unknown" and isinstance(sensor.last_evidence, dict):
-        evidence = sensor.last_evidence
-        if evidence.get("reason") not in _CALL_FAILED_REASONS and "dispatch_error" not in evidence:
-            return None
+    elif state == "unknown" and _call_did_not_reach(sensor.last_evidence):
         reachable = False
     else:
         return None
@@ -139,8 +185,8 @@ async def _sensors_by_target_name(
     return by_name
 
 
-def _node_ids(name: str, properties: object) -> set[str]:
-    ids = {name}
+def _node_ids(properties: object) -> set[str]:
+    ids: set[str] = set()
     if isinstance(properties, dict):
         for key in _OBJECT_ID_KEYS:
             value = properties.get(key)
@@ -159,15 +205,18 @@ def _node_targets(target_id: uuid.UUID | None, source_scope: str | None) -> set[
 async def _live_object_ids(
     session: AsyncSession, tenant_id: uuid.UUID, machines: list[ResourceAssignment]
 ) -> set[tuple[uuid.UUID | None, str]]:
-    """The vendor object ids on live topology nodes, as ``(target, id)`` pairs.
+    """The vendor ids of live machine nodes, as ``(target, id)`` pairs.
 
     Each id also comes as ``(None, id)``: an assignment without a target
     matches any node of the tenant. Only the nodes of the assigned targets are
     read when every machine names its target.
     """
-    stmt = select(
-        GraphNode.name, GraphNode.target_id, GraphNode.source_scope, GraphNode.properties
-    ).where(GraphNode.tenant_id == tenant_id, GraphNode.last_seen.is_not(None), NOT_LEGACY_SCOPE)
+    stmt = select(GraphNode.target_id, GraphNode.source_scope, GraphNode.properties).where(
+        GraphNode.tenant_id == tenant_id,
+        GraphNode.kind.in_(_MACHINE_KINDS),
+        GraphNode.last_seen.is_not(None),
+        NOT_LEGACY_SCOPE,
+    )
     scoped = {row.target_id for row in machines}
     if None not in scoped:
         ids = [t for t in scoped if t is not None]
@@ -178,9 +227,9 @@ async def _live_object_ids(
             )
         )
     found: set[tuple[uuid.UUID | None, str]] = set()
-    for name, target_id, source_scope, properties in await session.execute(stmt):
+    for target_id, source_scope, properties in await session.execute(stmt):
         owners: set[uuid.UUID | None] = {None, *_node_targets(target_id, source_scope)}
-        found.update((owner, oid) for oid in _node_ids(name, properties) for owner in owners)
+        found.update((owner, oid) for oid in _node_ids(properties) for owner in owners)
     return found
 
 

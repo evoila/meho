@@ -221,5 +221,5 @@ attribute values with the tenant's name in them.
 - Tests: `backend/tests/test_policy_bindings.py`,
   `backend/tests/test_policy_bindings_parity.py` (the switch on without
   stored bindings changes no login) and
-  `backend/tests/integration/test_keycloak_policy_bindings_e2e.py` (the
+  `backend/tests/integration/test_keycloak_role_groups_e2e.py` (the
   claims of a real Keycloak with full paths and the `meho-groups` mapper).

@@ -488,9 +488,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// show/apply-views/apply-file/backup/reload) registered by G3.4-
 	// T1..T4 (#587/#588/#589/#590). `meho bind9 record add
 	// esx-1.example.test 192.0.2.25 --zone example.test --target
-	// vcf-router-bind9` replaces the consumer's
-	// `bind9-dns.sh --add-a-record` wrapper (the 2026-05-04 / 2026-05-05
-	// credential surface).
+	// vcf-router-bind9` adds an A record to a zone.
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `bind9` parent.
 	root.AddCommand(bind9.NewRootCmd())

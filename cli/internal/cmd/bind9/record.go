@@ -16,11 +16,9 @@ import (
 // newRecordCmd returns the `meho bind9 record` parent command and
 // assembles its three verbs (get / add / remove).
 //
-// The `record add` invocation is the 1:1 replacement for the
-// consumer's `scripts/bind9-dns.sh --add-a-record ...` call (the
-// 2026-05-04 / 2026-05-05 credential-leak surface in an earlier lab
-// script); the verb shape matches the wrapper's
-// positional / flag conventions.
+// `record add` creates an A record in a zone. It takes the name and
+// the address as positional arguments, and the zone and the target as
+// flags.
 func newRecordCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "record",

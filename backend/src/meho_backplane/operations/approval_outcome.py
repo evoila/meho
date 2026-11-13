@@ -16,6 +16,9 @@ the approved change actually landed:
 * ``audit_id`` -- the audit row the dispatcher wrote for the run.
 * ``execution_outcome`` -- ``uncertain`` when MEHO does not know if the
   change happened (#5025), else ``None``.
+* ``exit_code`` -- the exit code of a finished command or script, when the
+  result body has one (``linux.script.run``). A run can end ``ok`` (MEHO ran
+  it) while the script itself failed, so a non-zero code must be easy to see.
 * ``guidance`` -- the next step a failed multi-step operation names (#5377),
   for example "The VM waits on question _vmx1: ...". For an ``uncertain``
   run it is MEHO's fixed advice (:data:`UNCERTAIN_ADVICE`): do not run it
@@ -80,6 +83,7 @@ class ResumeOutcome:
     audit_id: uuid.UUID | None
     guidance: str | None = None
     execution_outcome: str | None = None
+    exit_code: int | None = None
 
 
 #: Longest ``guidance`` kept in the summary, so a list view stays small.
@@ -102,6 +106,19 @@ def _uuid_or_none(value: object) -> uuid.UUID | None:
         return uuid.UUID(value)
     except ValueError:
         return None
+
+
+def _exit_code_or_none(data: Mapping[str, Any]) -> int | None:
+    """The integer ``exit_code`` of an ``ok`` result body, else ``None``.
+
+    A number only: no text of the vendor or the script leaves the body. A
+    bool is not a code.
+    """
+    body = data.get("result")
+    if data.get("status") != "ok" or not isinstance(body, Mapping):
+        return None
+    code = body.get("exit_code")
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
 
 
 def _extras(data: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -178,6 +195,7 @@ def resume_outcome_from_envelope(
         audit_id=_uuid_or_none(data.get("audit_id")),
         guidance=guidance,
         execution_outcome=UNCERTAIN_OUTCOME if uncertain else None,
+        exit_code=_exit_code_or_none(data),
     )
 
 

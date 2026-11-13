@@ -354,6 +354,9 @@ extend-immutable-calls = [
 [tool.mypy]
 strict = true
 python_version = "3.14"
+# The backplane runs only on Linux. Without this, mypy on macOS fails on
+# Linux-only names such as socket.MSG_ERRQUEUE.
+platform = "linux"
 files = ["src"]
 
 # authlib publishes no type stubs (the maintainer migrated typing

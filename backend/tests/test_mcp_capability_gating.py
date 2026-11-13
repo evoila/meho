@@ -84,7 +84,7 @@ def _operator(
 
 
 # ---------------------------------------------------------------------------
-# AC5 — to_wire() never leaks the MEHO-internal capability field
+# AC5 — to_wire() never exposes the internal capability field
 # ---------------------------------------------------------------------------
 
 

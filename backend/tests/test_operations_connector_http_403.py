@@ -10,8 +10,8 @@ G0.24-T4 (#1649) acceptance criteria:
   :class:`OperationResult` -- NOT the bare ``connector_error:
   HTTPStatusError`` that buried GitHub's actionable 403 (body message +
   ``X-Accepted-GitHub-Permissions`` / ``x-oauth-scopes`` headers) in
-  ``extras["exception_message"]`` (consumer
-  ``claude-rdc-hetzner-dc#1138``). The operator-facing ``error`` names
+  ``extras["exception_message"]`` (reported by a
+  consumer). The operator-facing ``error`` names
   the likely causes (a missing permission, or a wrong password or locked
   account, #6254); ``extras`` carries
   ``http_status=403``, the upstream ``upstream_message``, and the

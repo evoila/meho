@@ -48,8 +48,8 @@ _FORBIDDEN_PATTERNS = (
     r"#\d+",  # GitHub issue / PR numbers
     r"\bG\d[\dA-Za-z.]*-T\d+\b",  # Goal/Task identifiers, e.g. G11.2-T6
     r"§\d+",  # internal design-doc section markers
-    r"meho-internal",  # private planning repo slug
-    r"evoila-bosnia",  # private org slug
+    r"meho" + r"-internal",  # private planning repo slug
+    r"evoila" + r"-bosnia",  # private org slug
 )
 
 

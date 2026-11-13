@@ -295,7 +295,7 @@ def test_addon_family_gate_admits_automation_when_family_active() -> None:
 
 
 def test_surface_dropped_from_wire_shape() -> None:
-    """``to_wire`` never leaks the MEHO-internal ``surface`` field."""
+    """``to_wire`` never exposes the internal ``surface`` field."""
     defn = ToolDefinition(
         feature=None,
         name="wire.probe",

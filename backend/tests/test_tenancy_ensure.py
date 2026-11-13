@@ -176,7 +176,7 @@ async def test_ensure_tenant_does_not_overwrite_existing_row() -> None:
     conflict, never clobber the operator's values back to the derived
     placeholder.
 
-    A throwaway slug (not ``rdc-internal``) keeps this test independent
+    A throwaway slug (not a seeded one) keeps this test independent
     of migration ``0018``'s seeded row in the per-worker schema template
     (:func:`tests.conftest._schema_template_db`); the contract under
     test -- that an operator-named row survives -- is the same

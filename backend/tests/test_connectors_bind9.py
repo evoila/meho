@@ -153,7 +153,7 @@ def test_registry_v2_class_attrs() -> None:
     assert Bind9Connector.product == "bind9"
     assert Bind9Connector.version == "9.x"
     assert Bind9Connector.impl_id == "bind9-ssh"
-    assert Bind9Connector.supported_version_range is None
+    assert Bind9Connector.supported_version_range == ">=9.18,<9.21"
     assert Bind9Connector.priority == 0
 
 

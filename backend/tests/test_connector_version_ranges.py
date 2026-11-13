@@ -30,8 +30,6 @@ _WAITING_FOR_RANGE: dict[str, str] = {
     "Rke2SshConnector": "#6260",
     "PrometheusConnector": "#6262",
     "VaultConnector": "#6263",
-    "PfSenseConnector": "#6264",
-    "Bind9Connector": "#6264",
     "HypervConnector": "the Windows connectors (no Task yet)",
     "MsadConnector": "the Windows connectors (no Task yet)",
     "WindowsDnsConnector": "the Windows connectors (no Task yet)",

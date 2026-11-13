@@ -1346,9 +1346,11 @@ An admin edit (`ReviewService.edit_op`) of `custom_description` or
 NULL means no edit). At the next start the registration keeps the stored
 value of each listed field and does not write the value from code. The
 embedding text is built from the kept description, so search still finds
-the operation by the admin's words. Clearing `custom_description` also
-counts as an edit: the field stays empty. Ingested operations ignore the
-list: a new ingest writes them as before.
+the operation by the admin's words. The edit itself also rebuilds the
+search vector at once. So a start with unchanged code, which keeps the
+saved vector, keeps a vector that matches the admin's words. Clearing
+`custom_description` also counts as an edit: the field stays empty.
+Ingested operations ignore the list: a new ingest writes them as before.
 
 **Upgrade.** An edit made before migration `0165` has no mark. The next
 start writes the value from code, so edit it once more to make it stick.

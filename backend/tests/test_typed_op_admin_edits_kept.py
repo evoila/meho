@@ -7,6 +7,8 @@
 * typed registration at the next start leaves a marked field as it is,
   on the path that keeps the embedding and on the path that makes a new one;
 * the embedding text holds the admin's description, so search finds the op by it;
+* the admin edit itself rebuilds the search vector, so a start with
+  unchanged code keeps a vector that matches the admin's words;
 * a change of the description in code still reaches the row;
 * a field the admin did not edit keeps following the code.
 """
@@ -176,3 +178,30 @@ async def test_without_an_admin_edit_the_code_wins(embedding_service: AsyncMock)
     assert row.custom_description == "New code custom text."
     assert row.llm_instructions == {"notes": "new code notes"}
     assert not row.admin_edited_fields
+
+
+@pytest.mark.asyncio
+async def test_search_vector_follows_the_edit_after_a_start_with_unchanged_code(
+    embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def vector_for(text: str) -> list[float]:
+        return [0.9] * 384 if "Admin words." in text else [0.1] * 384
+
+    embedding_service.encode_one.side_effect = vector_for
+    # The admin edit uses the default embedding service: point it at the mock.
+    monkeypatch.delenv("MEHO_TEST_STUB_DESCRIPTOR_EMBEDDING", raising=False)
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "meho_backplane.operations.embed.get_embedding_service", lambda: embedding_service
+    )
+
+    await _register(embedding_service)
+    await _admin_edit(custom_description="Admin words.")
+    await _register(embedding_service)
+
+    row = await _row()
+    assert row.custom_description == "Admin words."
+    assert list(row.embedding or []) == pytest.approx([0.9] * 384)
+    texts_sent = [call.args[0] for call in embedding_service.encode_one.call_args_list]
+    assert len(texts_sent) == 2
+    assert "Admin words." in texts_sent[1]

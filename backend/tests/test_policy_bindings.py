@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import delete
+from structlog.testing import capture_logs
 
 from meho_backplane.auth import jwt as jwt_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, RoleGroup, TenantRole
@@ -30,6 +31,7 @@ from meho_backplane.policy.bindings import (
     bind_current_tenant,
     bindings_from_document,
     shipped_binding_documents,
+    shipped_bindings,
     token_groups,
 )
 from meho_backplane.policy.document import canonical_sha256, document_of, parse_policy_file
@@ -318,12 +320,36 @@ def test_a_group_attribute_is_not_a_group_path() -> None:
 
 
 def test_token_groups_keeps_only_full_paths() -> None:
-    paths, attributes = token_groups(
-        {"groups": ["/A/B", "B", 3, None, "/C"], "meho_groups": ["x", "", 4]}
-    )
+    paths, attributes = token_groups({"groups": ["/A/B", "B", "/C"], "meho_groups": ["x", ""]})
     assert paths == frozenset({"/A/B", "/C"})
     assert attributes == frozenset({"x"})
-    assert token_groups({"groups": "not-a-path"}) == (frozenset(), frozenset())
+    assert token_groups({}) == (frozenset(), frozenset())
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        pytest.param({"groups": "/MEHO-Operators/Network"}, id="groups-one-text"),
+        pytest.param({"groups": {"/MEHO-Operators/Network": True}}, id="groups-map"),
+        pytest.param({"groups": True}, id="groups-true"),
+        pytest.param({"groups": ["/MEHO-Operators/Network", 42]}, id="groups-number-after"),
+        pytest.param({"groups": [None, "/MEHO-Operators/Network"]}, id="groups-none-before"),
+        pytest.param({"groups": ["/MEHO-Operators/Network", ["/X"]]}, id="groups-nested"),
+        pytest.param({"meho_groups": ["net", 4]}, id="attribute-number"),
+        pytest.param({"meho_groups": {"net": True}}, id="attribute-map"),
+    ],
+)
+def test_a_groups_claim_that_is_not_a_list_of_texts_matches_no_binding(
+    claims: dict[str, Any],
+) -> None:
+    """Anything unclear gives no kind, the same rule as for self-approval today."""
+    net = _entry(RoleGroup.OPERATORS, {"network"}, attribute="net")
+    full = {"groups": ["/MEHO-Operators/Network"], "meho_groups": ["net"], **claims}
+    with capture_logs() as logs:
+        assert token_groups(full) == (frozenset(), frozenset())
+        before = _operator(self_approver=True)
+        assert bind(before, full, [_NETWORK, net]) == before
+    assert "policy_bindings_malformed_groups_claim" in [e["event"] for e in logs]
 
 
 def test_categories_add_up_and_star_means_every_category() -> None:
@@ -431,6 +457,24 @@ def test_the_shipped_bindings_follow_renamed_groups(monkeypatch: pytest.MonkeyPa
         {"match": {"group": "/Corp-Admins"}, "kind": "Admins", "categories": ["*"]},
         {"match": {"group": "/Corp-Self"}, "kind": "SA-Operators", "categories": ["*"]},
     ]
+
+
+def test_a_shipped_operator_group_and_the_self_approval_group_give_sa_operators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Today such a person is an operator who may approve their own changes."""
+    monkeypatch.setenv("JWT_SELF_APPROVER_GROUP", "Ops-Self-Approve")
+    get_settings.cache_clear()
+    claims = {"groups": ["/MEHO-Operators", "/Ops-Self-Approve"]}
+    after = bind(_operator(), claims, shipped_bindings(get_settings()))
+    assert after.bound_kind is RoleGroup.SA_OPERATORS
+    assert after.self_approver is True
+    stored = [
+        _entry(RoleGroup.OPERATORS, {"*"}, group="/MEHO-Operators"),
+        _entry(RoleGroup.SA_OPERATORS, {"*"}, group="/Ops-Self-Approve"),
+    ]
+    with pytest.raises(BoundKindConflictError):
+        bind(_operator(), claims, stored)
 
 
 def test_a_bad_stored_binding_is_a_value_error() -> None:

@@ -46,7 +46,12 @@ The rules (:func:`bind`):
   policy) uses the shipped bindings
   (:func:`shipped_bindings`): the groups of the ``JWT_ROLE_GROUPS`` and
   ``JWT_SELF_APPROVER_GROUP`` settings, as top-level full paths, with
-  every category.
+  every category. They count only for a login without a tenant list
+  (``meho_tenants``). The ``groups`` claim is not per tenant, so for a
+  login with a list the list entry of the tenant decides, as with the
+  switch off. A shipped operator group next to the shipped self-approval
+  group gives ``SA-Operators``, as today.
+* A ``groups`` claim that is not a list of texts matches no binding.
 
 The import refuses a binding of an agent or a service to a kind that may
 approve, any binding of a runner, an unknown category, and bindings in the
@@ -58,7 +63,7 @@ on. With the switch off, the login path is today's path.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -110,6 +115,15 @@ _PRINCIPAL_NAMES: Final[dict[PrincipalKind, str]] = {
 #: The kinds that may approve a change of another person today. Only
 #: Readers never approve.
 _APPROVING_KINDS: Final[frozenset[str]] = frozenset(GROUP_KINDS) - {RoleGroup.READERS.value}
+
+#: Where a shipped binding came from (:func:`shipped_bindings`).
+_SHIPPED: Final[str] = "shipped:"
+
+#: An operator group and the self-approval group of the shipped bindings.
+_OPERATOR_AND_SELF_APPROVAL: Final[list[RoleGroup]] = [
+    RoleGroup.OPERATORS,
+    RoleGroup.SA_OPERATORS,
+]
 
 #: The kind with the fewest rights for each base level.
 _LOWEST_KIND: Final[dict[TenantRole, RoleGroup]] = {
@@ -232,28 +246,44 @@ def shipped_binding_documents(settings: Settings) -> list[dict[str, Any]]:
 def shipped_bindings(settings: Settings) -> list[BindingEntry]:
     """The bindings of a tenant whose stored policy has none."""
     return [
-        _entry(raw, f"shipped:bindings[{index}]")
+        _entry(raw, f"{_SHIPPED}bindings[{index}]")
         for index, raw in enumerate(shipped_binding_documents(settings))
     ]
 
 
-def _strings(value: Any) -> Iterable[str]:
-    if isinstance(value, str):
+def _strings(value: Any, *, single: bool) -> tuple[str, ...] | None:
+    """The texts of a claim, or ``None`` when the claim is not clear.
+
+    A missing claim is empty. A list must hold only texts. A single text
+    counts only when *single* is true.
+    """
+    if value is None:
+        return ()
+    if single and isinstance(value, str):
         return (value,)
-    if isinstance(value, list):
-        return (item for item in value if isinstance(item, str))
-    return ()
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return tuple(value)
+    return None
 
 
 def token_groups(claims: Mapping[str, Any]) -> tuple[frozenset[str], frozenset[str]]:
     """The full group paths and the group attribute values of the token.
 
     Only an entry of the ``groups`` claim that starts with ``/`` is a full
-    path; a short name is left out. A value of another type is left out.
+    path; a short name is left out. The ``groups`` claim must be a list of
+    texts, as for the self-approval group today; the ``meho_groups`` claim
+    may also be one text. When either claim is anything else, the login
+    matches no binding at all: anything unclear gives no kind.
     """
-    paths = frozenset(g for g in _strings(claims.get(GROUPS_CLAIM)) if g.startswith("/"))
-    attributes = frozenset(a for a in _strings(claims.get(GROUP_ATTRIBUTE_CLAIM)) if a)
-    return paths, attributes
+    groups = _strings(claims.get(GROUPS_CLAIM), single=False)
+    values = _strings(claims.get(GROUP_ATTRIBUTE_CLAIM), single=True)
+    if groups is None or values is None:
+        structlog.get_logger(__name__).warning(
+            "policy_bindings_malformed_groups_claim",
+            claim_name=GROUPS_CLAIM if groups is None else GROUP_ATTRIBUTE_CLAIM,
+        )
+        return frozenset(), frozenset()
+    return frozenset(g for g in groups if g.startswith("/")), frozenset(a for a in values if a)
 
 
 def bind(
@@ -272,6 +302,11 @@ def bind(
     matched = [entry for entry in entries if entry.matches(principal, paths, attributes)]
     log = structlog.get_logger(__name__)
     kinds = sorted({entry.kind for entry in matched}, key=lambda kind: GROUP_KINDS.index(kind))
+    if kinds == _OPERATOR_AND_SELF_APPROVAL and all(e.ref.startswith(_SHIPPED) for e in matched):
+        # Today a person in an operator group and in the self-approval group
+        # is an operator who may self-approve. The shipped bindings keep that.
+        kinds = [RoleGroup.SA_OPERATORS]
+        matched = [entry for entry in matched if entry.kind is RoleGroup.SA_OPERATORS]
     if len(kinds) > 1:
         log.warning(
             "multiple_bound_kinds",
@@ -329,15 +364,19 @@ async def bind_current_tenant(operator: Operator, claims: Mapping[str, Any]) -> 
     """Apply the bindings of *operator*'s current tenant (:func:`bind`).
 
     Does nothing while the switch is off, or for a status answer without
-    a chosen tenant. When the stored bindings cannot be read, the login
+    a chosen tenant. When the tenant has no stored bindings, the shipped
+    bindings count only for a login without a tenant list
+    (``meho_tenants``); a login with a list keeps the kind of its list
+    entry. When the stored bindings cannot be read, the login
     gets the kind with the fewest rights of its base level and no
     category, and an error is logged.
     """
     if not routing_enabled() or not operator.tenant_chosen:
         return operator
     document = await _tenant_document(operator)
+    settings = get_settings()
     try:
-        entries = bindings_from_document(document) or shipped_bindings(get_settings())
+        entries = bindings_from_document(document)
     except ValueError as exc:
         structlog.get_logger(__name__).error(
             "policy_bindings_unreadable",
@@ -346,6 +385,12 @@ async def bind_current_tenant(operator: Operator, claims: Mapping[str, Any]) -> 
             reason=str(exc),
         )
         return _with_kind(operator, _LOWEST_KIND[operator.tenant_role], frozenset())
+    if not entries:
+        if settings.jwt_tenants_claim_name in claims:
+            # The ``groups`` claim is not per tenant: a group of another
+            # tenant must not decide the kind here. The list entry decides.
+            return operator
+        entries = shipped_bindings(settings)
     return bind(operator, claims, entries)
 
 

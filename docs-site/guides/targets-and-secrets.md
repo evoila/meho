@@ -99,6 +99,15 @@ Mapping rules the importer applies:
   it, dispatch fails with `connector_tls_verify_failed`, carrying
   Python's own *"IP address mismatch"* text inside
   `extras.exception_message`.
+- If a target has a `tls_ca_pin` and TLS fails, the error says the pin
+  is stale. It does not tell you to set a pin. `extras.pin_stale` is
+  `true`, and `extras.presented_certificate` shows the issuer, the
+  subject and the SHA-256 fingerprint of the certificate the host
+  presents now. This happens when the host certificate was re-issued.
+  For an ESXi host or a vCenter whose certificates come from the VMCA
+  (the vCenter's own certificate authority), pin the **VMCA root CA**,
+  not the host certificate. Then a later re-issue does not break the
+  target. Update the pin with `--update`.
 
 You can leave `secret_ref` out entirely — see the next section.
 

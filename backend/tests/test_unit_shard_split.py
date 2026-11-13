@@ -229,3 +229,27 @@ def test_cli_reads_the_given_durations_file(
 
     out, _ = capfd.readouterr()
     assert out.splitlines() == ["tests/test_a.py"]
+
+
+def test_more_shards_than_files_leaves_a_shard_empty() -> None:
+    """The one real way a shard gets 0 files: the CI step stops it with an error."""
+    shards = splitter.split(["tests/test_a.py", "tests/test_b.py"], {}, 4)
+
+    assert sorted(len(shard) for shard in shards) == [0, 0, 1, 1]
+
+
+def test_zero_files_message_is_only_a_guard_after_the_file_count() -> None:
+    """Run 42953706524 showed "selected 0 test files" in shard 3's log, but only as
+    the step's script text. The shard printed "22 test files" and ran. The message is
+    printed only when the list is empty, and only after the count line."""
+    run = next(
+        step["run"]
+        for step in _integration_shard_job()["steps"]
+        if "_unit_shard_split.py" in step.get("run", "")
+    )
+    count_line = run.index('echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"')
+    guard = run.index('if [ "${#SHARD_FILES[@]}" -eq 0 ]; then')
+    message = run.index("selected 0 test files")
+
+    assert count_line < guard < message
+    assert run.count("selected 0 test files") == 1

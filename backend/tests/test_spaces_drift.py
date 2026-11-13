@@ -334,6 +334,8 @@ async def test_a_stale_or_unrelated_check_result_is_not_reach_evidence(world: _W
     [
         _not_ok("error", "connector_error: ConnectError"),
         _not_ok("error", "connector_timeout: ReadTimeout"),
+        _not_ok("error", "connector_timeout: ConnectError"),
+        _not_ok("error", "connector_timeout: WriteTimeout. The call may have run."),
     ],
 )
 @pytest.mark.asyncio
@@ -355,6 +357,11 @@ async def test_a_connection_failure_makes_a_target_unreachable(
         _not_ok("error", "no_connector: no connector for this product"),
         _not_ok("error", "connector_error: KeyError"),
         _not_ok("error", "connector_error: HTTPStatusError"),
+        _not_ok("error", "connector_timeout: PoolTimeout"),
+        _not_ok("error", "connector_timeout: LocalProtocolError"),
+        _not_ok("error", "connector_timeout: UnsupportedProtocol"),
+        _not_ok("error", "connector_timeout: ProxyError"),
+        _not_ok("error", "connector_timeout"),
         {"last_state": "unknown", "last_evidence": {"reason": "dispatch_error"}},
         {"last_state": "unknown", "last_evidence": {"reason": "evaluation_timeout"}},
         {

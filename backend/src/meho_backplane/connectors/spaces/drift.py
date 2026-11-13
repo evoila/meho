@@ -63,22 +63,28 @@ _MACHINE_KINDS: tuple[str, ...] = ("vm", "host", "node")
 #: ``server_number``). The node's name is a display name, not an id.
 _OBJECT_ID_KEYS: tuple[str, ...] = ("object_id", "server_number", "uid", "uuid", "moid", "id")
 
-#: Error codes of a call that did not reach the target. The dispatcher starts
-#: its error text with the code (``connector_timeout: ConnectTimeout``).
-_NOT_REACHED_CODES = frozenset({"connector_timeout"})
-
-#: Exception classes of a ``connector_error`` where no connection was made.
-_NOT_CONNECTED_EXCEPTIONS = frozenset(
-    {
-        "ConnectError",
-        "ConnectionError",
-        "ConnectionRefusedError",
-        "ConnectionResetError",
-        "ConnectionAbortedError",
-        "gaierror",
-        "NoValidConnectionsError",
-    }
-)
+#: Exception classes, per error code, of a call that did not reach the target.
+#: The dispatcher starts its error text with the code and the class
+#: (``connector_timeout: ConnectTimeout``). A ``connector_timeout`` also comes
+#: from local faults: waiting for a free connection (``PoolTimeout``) or a
+#: request MEHO could not send (``LocalProtocolError``, ``UnsupportedProtocol``).
+#: Those say nothing about the target, so they are not listed.
+_NOT_REACHED: dict[str, frozenset[str]] = {
+    "connector_timeout": frozenset(
+        {"ConnectTimeout", "ReadTimeout", "WriteTimeout", "ConnectError", "ReadError", "WriteError"}
+    ),
+    "connector_error": frozenset(
+        {
+            "ConnectError",
+            "ConnectionError",
+            "ConnectionRefusedError",
+            "ConnectionResetError",
+            "ConnectionAbortedError",
+            "gaierror",
+            "NoValidConnectionsError",
+        }
+    ),
+}
 
 _REACHED_STATES = frozenset({"ok", "degraded", "critical"})
 
@@ -113,9 +119,9 @@ def _call_did_not_reach(evidence: object) -> bool:
     """Whether an ``unknown`` result says the call failed to reach the target.
 
     Only a dispatch that ended in a connection failure counts. A refused call
-    (policy), a missing connector or credential, a bad check and a timeout of
-    the whole evaluation are failures on MEHO's side: they say nothing about
-    the target.
+    (policy), a missing connector or credential, a bad check, a local transport
+    fault and a timeout of the whole evaluation are failures on MEHO's side:
+    they say nothing about the target.
     """
     if not isinstance(evidence, dict) or evidence.get("reason") != "dispatch_not_ok":
         return False
@@ -125,9 +131,8 @@ def _call_did_not_reach(evidence: object) -> bool:
     if not isinstance(text, str):
         return False
     code, _, detail = text.partition(": ")
-    if code in _NOT_REACHED_CODES:
-        return True
-    return code == "connector_error" and detail.strip() in _NOT_CONNECTED_EXCEPTIONS
+    exception_class = detail.split(".", 1)[0].strip()
+    return exception_class in _NOT_REACHED.get(code, frozenset())
 
 
 def _latest_state(sensor: Sensor) -> str | None:

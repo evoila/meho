@@ -175,10 +175,13 @@ Five kinds of drift. Each is a list in the answer, and a count in `counts`:
   waits in `pending_state` until it repeats, and that waiting state counts.
   `ok`, `degraded` and `critical` mean the call reached the target. `unknown`
   counts as not reachable only when the call ended in a connection failure:
-  `connector_timeout`, or `connector_error` from a failed connection (for
-  example `ConnectError` or `ConnectionRefusedError`). A call that policy
-  refused, a missing connector or secret, an error answer from the target, a
-  bad check and a timeout of the whole check run say nothing about reach.
+  `connector_timeout` from a connect, read or write fault (for example
+  `ConnectTimeout` or `ReadError`), or `connector_error` from a failed
+  connection (for example `ConnectError` or `ConnectionRefusedError`). A call
+  that policy refused, a missing connector or secret, an error answer from the
+  target, a local transport fault (for example `PoolTimeout`, a wait for a
+  free connection), a bad check and a timeout of the whole check run say
+  nothing about reach.
   `skip` says nothing too. Each entry names its `source` (`probe` or
   `health_check`) and `seen_at`.
 - A machine matches a live machine node (kind `vm`, `host` or `node`) by its

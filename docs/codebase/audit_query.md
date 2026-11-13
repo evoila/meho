@@ -114,6 +114,43 @@ stays `pending` after the request is approved, rejected or expired. Use
 (`meho approvals list`, or the console's approvals page). Decision record:
 [`docs/decisions/composite-audit-when-a-step-waits.md`](../decisions/composite-audit-when-a-step-waits.md).
 
+### A row that cannot be stored is refused before the call
+
+The dispatcher writes the row of a call after the call. If that write
+fails, the target may already hold the change (`audit_commit_failed`). So
+before it sends a call, the dispatcher checks the part of the row it
+already knows. `operations/audit_row_precheck.py` does this
+(`audit_row_problem`). It checks the values only and sends no statement
+to the database:
+
+- the text columns `operator_sub`, `actor_sub`, `path`, `step_id` and
+  `work_ref`: each text can be encoded as UTF-8 and holds no NUL
+  character;
+- `operator_sub`, `actor_sub` and `work_ref` have an index, so each must
+  also stay under `INDEX_TEXT_MAX_BYTES`;
+- every key and text in `payload`, built by the same function the writer
+  uses (the `client` block and the caller's name included). The caller's
+  name is the token's name, or the client id of a machine login, as the
+  writer stores it;
+- every number in `payload`: NaN and Infinity cannot be stored as JSON, so
+  they are refused too.
+
+When the check itself fails (for example on a payload nested too deep to
+walk), the call is refused with `audit_row_invalid` and the field
+`payload`.
+
+On a problem the call is refused with `audit_row_invalid`. `extras.field`
+names the value (never its content). A payload value is named by its path,
+for example `payload.principal_name`. A key that cannot be stored is named by
+its position (`payload.<key 1>`), so the refusal never holds the bad text. Nothing is sent to the target, no
+approval request is made and no row is written. All ways into the
+dispatcher pass through this one check. `audit_commit_failed` stays for a
+database that is not reachable after the call, and for what is known only
+after the call (`raw_payload`, `redaction_manifest`). The registered agent
+name is known before the call, but it is in the database, and the check
+sends no statement there, so it does not check that name. The module lists how each text and JSON column is covered, and
+`tests/test_audit_row_precheck.py` fails when a new column is in no list.
+
 ### Loose rows: the standing check (#4670)
 
 A **loose row** is an audit record whose `parent_audit_id` names a row

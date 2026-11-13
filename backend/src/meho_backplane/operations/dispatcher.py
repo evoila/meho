@@ -326,6 +326,7 @@ from meho_backplane.operations._branches import (
 )
 from meho_backplane.operations._catalog_guard import select_catalog_for_target
 from meho_backplane.operations._errors import (
+    MESSAGE_SOURCE_KEY,
     is_auth_failed_status,
     is_probe_pool_busy,
     is_probe_refused,
@@ -2079,6 +2080,20 @@ def _error_extras_for_audit(result: OperationResult) -> dict[str, Any] | None:
     return dict(extras) if extras else None
 
 
+def _without_message_source(result: OperationResult) -> OperationResult:
+    """Drop the own-message mark from an error result a handler returned.
+
+    Only :func:`~meho_backplane.operations._errors.result_connector_error`
+    sets the mark, from the type of the raised error. A handler that returns
+    its own result cannot set it, so the vendor text of an operation that
+    sends a secret stays hidden.
+    """
+    if MESSAGE_SOURCE_KEY not in result.extras:
+        return result
+    extras = {key: value for key, value in result.extras.items() if key != MESSAGE_SOURCE_KEY}
+    return result.model_copy(update={"extras": extras})
+
+
 async def _audit_returned_result(
     raw: Any,
     *,
@@ -2128,7 +2143,7 @@ async def _audit_returned_result(
     duration_ms = _elapsed_ms(started)
     if raw.status == "error":
         return await _audit_error_and_return(
-            raw,
+            _without_message_source(raw),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,

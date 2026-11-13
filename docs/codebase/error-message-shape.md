@@ -311,8 +311,17 @@ text from the error result, in one shared place.
   imports it from the connector kit) as a base class of the
   error type. `result_connector_error` then sets
   `extras.message_source = "meho"` and the rule keeps that one field.
-  Every other vendor field stays hidden. `LinuxWriteOwnMessageError`
-  (no sudo credential in the target's secret) is the first use.
+  Every other vendor field stays hidden. The shown message is still
+  cleaned of secrets, like every error text. Only `result_connector_error`
+  sets the mark, from the type of the raised error. It does not set it
+  when the error is also an `httpx.HTTPStatusError` or a
+  `ConnectorUpstreamError`, because their text holds the URL or the
+  vendor's words. When a handler returns an error result itself, the
+  dispatcher drops `message_source` before the rule runs. A test lists
+  every marked error type in the core (`_MARKED_TYPES` in
+  `tests/test_operations_own_message_of_secret_op.py`), so each new one
+  is seen in review. `LinuxWriteOwnMessageError` (no sudo credential in
+  the target's secret) is the first use.
 - **Retries are unchanged.** The rule works on the built result, not on
   the raised error. So the new login and one retry after HTTP 401, and
   the 403 and 429 results, work as before.

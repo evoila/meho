@@ -71,6 +71,8 @@ if TYPE_CHECKING:
     from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
 
 __all__ = [
+    "MESSAGE_SOURCE_KEY",
+    "MESSAGE_SOURCE_MEHO",
     "READ_SCOPE_DENIED_CODE",
     "UPSTREAM_SAID",
     "VAULT_SAID",
@@ -151,14 +153,14 @@ _TEXT_WITHHELD: str = "<diagnostic text withheld: redaction unavailable>"
 #: dispatcher finds the vendor's part by these markers when it hides the
 #: vendor's text of an operation that sends a secret (#4854,
 #: :mod:`meho_backplane.operations._vendor_text`).
+UPSTREAM_SAID: Final = " Upstream said: "
+VAULT_SAID: Final = " Vault said: "
+
 #: ``extras`` key and value that say: the ``exception_message`` is a sentence
 #: MEHO or a connector wrote itself (the error type has the
 #: :class:`~meho_backplane.connectors.base.ConnectorOwnMessage` mark).
 MESSAGE_SOURCE_KEY: Final = "message_source"
 MESSAGE_SOURCE_MEHO: Final = "meho"
-
-UPSTREAM_SAID: Final = " Upstream said: "
-VAULT_SAID: Final = " Vault said: "
 
 
 def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
@@ -1531,7 +1533,10 @@ def result_connector_error(
         "exception_class": type(exc).__name__,
         "exception_message": msg,
     }
-    if isinstance(exc, ConnectorOwnMessage):
+    if isinstance(exc, ConnectorOwnMessage) and not isinstance(
+        exc, (httpx.HTTPStatusError, ConnectorUpstreamError)
+    ):
+        # The text of these two holds the URL or the vendor's words, mark or not.
         extras[MESSAGE_SOURCE_KEY] = MESSAGE_SOURCE_MEHO
     if isinstance(exc, httpx.HTTPStatusError):
         extras["http_status"] = exc.response.status_code

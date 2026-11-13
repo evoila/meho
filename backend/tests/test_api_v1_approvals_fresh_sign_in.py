@@ -59,6 +59,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("PER_ACTION_SIGN_IN_MAX_AGE_SECONDS", raising=False)
     monkeypatch.delenv("KEYCLOAK_CLI_APPROVE_CLIENT_ID", raising=False)
     monkeypatch.delenv("APPROVAL_ONE_TIME_CODE_ACR_VALUES", raising=False)
+    monkeypatch.delenv("APPROVAL_SIGN_IN_LEVEL", raising=False)
     get_settings.cache_clear()
     clear_jwks_cache()
     yield

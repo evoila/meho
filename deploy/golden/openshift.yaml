@@ -338,7 +338,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: 085a9471ac6d5177294135f681c60b714500bcaed4d17f66419a79dc94de30f3
+        checksum/config: d37ceda1e2467f8bf18812fe64e498f6d29385cb47204bcc5600977552cf370f
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.
@@ -750,6 +750,7 @@ data:
   DISPATCH_MAX_CONCURRENT_OPS: "16"
   MCP_SESSION_START_LIMIT_PER_MINUTE: "60"
   APPROVAL_ONE_TIME_CODE_ACR_VALUES: ""
+  APPROVAL_SIGN_IN_LEVEL: "auto"
   # Switches for what the agent sees, off by default until model tests
   # show they help: team knowledge before an operation and in the start
   # text, the similar-entry check on a new knowledge entry, and short

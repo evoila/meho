@@ -360,10 +360,56 @@ Each surface carries the four verbs — `list` / `create` / `delete` plus the
 `results` trend query (#2756): `GET /api/v1/sensors/{id}/results`, the
 `meho_sensor_results` MCP tool, and `meho sensor results <id>`. REST and
 the CLI also carry **edit** (`PATCH /api/v1/sensors/{id}`,
-`meho sensor edit <id>`; see **Edit** below). There is **no** pause /
-resume path — `status` is server-initialized to `active` at create
-(clients cannot supply it; a body carrying `status` is a 422) and
-transitions to `paused` only via #2505's runner parking.
+`meho sensor edit <id>`; see **Edit** below). **Pause and resume** are on
+all three surfaces (see **Pause and resume** below). A client cannot supply
+`status` at create (a body carrying it is a 422).
+
+**Pause and resume** (`PATCH /api/v1/sensors/{id}` with `{"status":
+"paused"}` or `{"status": "active"}`, `meho sensor pause <id>` /
+`meho sensor resume <id>`, MCP `meho_sensor_pause` / `meho_sensor_resume`,
+all `tenant_admin`; code in `checks/sensor_pause.py`). A paused Sensor is
+not claimed by the runner, so it makes no call to its target. The row, its
+`sensor_results` history and its Dashboard memberships stay.
+
+- `status` is sent alone. Mixed with other fields, it is a 422.
+- Pause sets `status_reason='paused_by_operator'`. Resume sets
+  `status='active'`, clears the reason, sets `auth_failure_count` to 0 and
+  makes the Sensor due at once.
+- Both are safe to send twice: a Sensor already in the asked status is not
+  written again.
+- The audit row (`op_id=sensor.edit` for REST, `sensor.pause` /
+  `sensor.resume` for MCP) carries the status before and after.
+- An edit that does not name `status` keeps a paused Sensor paused. Only a
+  Sensor the runner parked for a broken cadence (`invalid_cadence:*`)
+  becomes `active` again. A Dashboard file import that changes the Sensor
+  follows the same rule.
+
+**Pause after refused logins** (`checks/auth_park.py`). When the credential
+of a target is no longer valid, every run starts a new login that fails.
+So the runner counts
+the runs in a row where the dispatcher answered `connector_auth_failed`
+(the run's evidence then carries `error_code`). The count is the column
+`sensor.auth_failure_count` (migration `0164`). It reaches
+`SENSOR_AUTH_FAILURE_PARK_THRESHOLD` (default 3): the runner sets
+`status='paused'` with `status_reason='auth_failed:ConnectorAuthError'` and
+stops calling the target. Only a run whose call to the target succeeded
+sets the count back to 0; a timeout or another failed call leaves it as it
+is. The count,
+the pause and the result commit in one transaction. After the commit, the
+runner mails a warning (reason `target_credential_stale`,
+`checks/park_notify.py`) to the `notify_email` of every Dashboard that holds
+the Sensor. The mail uses the checks mail path: the recipient allowlist, the
+`last_mail_*` columns of the Dashboard and the alert-mail audit row (see
+`checks-notifications.md`). It does not depend on `CHECKS_AGENT_EVENTS`.
+With `CHECKS_AGENT_EVENTS` on, the pause also writes a `check.sensor.parked`
+event (same reason, `checks/events.py`) that an event trigger can match. A
+resume re-arms the Sensor: if the credential is still stale, it is paused
+again after the same number of refused logins.
+
+A claimed evaluation can wait for a free slot (at most 16 run at once). Right
+before it calls the target, it reads the Sensor's status again. A Sensor that
+was paused or deleted in the meantime is not run, and no result is written
+(log event `sensor_evaluation_skipped_not_active`).
 
 **Edit** (`PATCH /api/v1/sensors/{id}` → `checks/sensor_edit.edit_sensor`)
 changes a Sensor in place, so its id, its `sensor_results` history and its
@@ -483,7 +529,9 @@ A Dashboard and its Sensors can move to another site as one JSON file
 - Then, in one transaction with the shared connector-usage lock, Sensors and
   the Dashboard are matched by name in the tenant. A missing one is created,
   a different one is updated (like an edit: due at once, the soft-state
-  window cleared), an equal one is not written. The Dashboard's members
+  window cleared; a Sensor paused by an operator or after refused logins
+  stays paused, only one paused for a broken cadence becomes `active`), an
+  equal one is not written. The Dashboard's members
   become the Sensors of the file; a member that is not in the file leaves
   the Dashboard but is not deleted. The Dashboard's mail address stays. So
   the same file imported twice changes nothing the second time

@@ -238,6 +238,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "scheduler_agent_vault_path_pattern",
         "scheduler_enabled",
         "scheduler_tick_interval_seconds",
+        "sensor_auth_failure_park_threshold",
         "sensor_runner_enabled",
         "sensor_runner_stall_after_ticks",
         "sensor_runner_tick_interval_seconds",

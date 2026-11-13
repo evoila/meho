@@ -78,6 +78,12 @@ const (
 	ApprovalSignInStatusStateOk          ApprovalSignInStatusState = "ok"
 )
 
+// Defines values for AskDocsResponseAnswerSource.
+const (
+	AskDocsResponseAnswerSourceLocal    AskDocsResponseAnswerSource = "local"
+	AskDocsResponseAnswerSourceUpstream AskDocsResponseAnswerSource = "upstream"
+)
+
 // Defines values for AuditEventClass.
 const (
 	AuditEventClassApprovalDecision   AuditEventClass = "approval_decision"
@@ -2164,10 +2170,18 @@ type AskDocsRequest struct {
 // the “link“ shape is produced by the shared
 // :func:`~meho_backplane.docs_search.citation_link_payload` helper, kept as
 // the single source of truth for the citation-link contract.
+//
+// “answer_source“ names the path that wrote the answer: “local“ (the
+// backplane's own pipeline) or “upstream“ (the collection backend's answer
+// endpoint). It names a path, never document content.
 type AskDocsResponse struct {
-	Answer    string                   `json:"answer"`
-	Citations []map[string]interface{} `json:"citations"`
+	Answer       string                       `json:"answer"`
+	AnswerSource *AskDocsResponseAnswerSource `json:"answer_source"`
+	Citations    []map[string]interface{}     `json:"citations"`
 }
+
+// AskDocsResponseAnswerSource defines model for AskDocsResponse.AnswerSource.
+type AskDocsResponseAnswerSource string
 
 // AssertionSpec A full assertion: one select stage feeding one typed comparator.
 //

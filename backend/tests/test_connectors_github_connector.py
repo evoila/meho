@@ -304,7 +304,7 @@ async def test_auth_headers_accepts_shared_service_account(
     """``auth_model="shared_service_account"`` flows through to the loader.
 
     This is the headline G0.16-T2 (#1304) acceptance — the target
-    shape RDC's ``evoila-bosnia-gh`` registers (App credentials in
+    shape the consumer's ``example-gh`` registers (App credentials in
     Vault + ``shared_service_account`` on the row) now reaches the
     loader instead of bouncing off the connector boundary with the
     historical ``NotImplementedError``.
@@ -316,7 +316,7 @@ async def test_auth_headers_accepts_shared_service_account(
 
     conn = GitHubRestConnector(credentials_loader=loader)
     target = _FakeTarget(
-        name="evoila-bosnia-gh",
+        name="example-gh",
         auth_model=AuthModel.SHARED_SERVICE_ACCOUNT.value,
     )
     with respx.mock:

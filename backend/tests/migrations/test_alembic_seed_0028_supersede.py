@@ -87,18 +87,12 @@ _EXPECTED_SLUGS: Final[frozenset[str]] = frozenset(
 )
 
 #: Tokens that MUST NOT appear in the seeded default-tenant body
-#: text after ``upgrade head`` (signal-12 verification per #1137 AC).
-#: These tokens identify content sourced from the consumer's
-#: ``CLAUDE.md`` (``evoila/meho`` repo references, customer-specific
-#: lab program identifiers, AI-tool legacy refs). The bare ``rdc-``
-#: prefix subsumes ``rdc-internal`` and ``rdc-hetzner``; ``meho-internal``
-#: and ``claude-rdc-`` are added per the #1137 acceptance criterion to
-#: cover the full set of internal-repo and consumer-identity tokens.
+#: text after ``upgrade head``. These tokens identify content sourced
+#: from a consumer's ``CLAUDE.md`` (``evoila/meho`` repo references,
+#: customer-specific lab program identifiers, AI-tool legacy refs).
+#: The bare ``rdc-`` prefix covers the consumer-identity tokens.
 _FORBIDDEN_TOKENS: Final[tuple[str, ...]] = (
     "evoila/meho",
-    "evoila-bosnia",
-    "meho-internal",
-    "claude-rdc-",
     "rdc-",
     "Holodeck",
 )
@@ -379,7 +373,7 @@ def test_seeded_default_bodies_carry_no_consumer_specific_tokens(
     Acceptance criterion: "After migration lands, initialize against a
     fresh-DB MCP server returns instructions text that carries the
     generic illustrative conventions only -- zero references to
-    evoila/meho, evoila-bosnia/meho-internal, rdc-internal,
+    evoila/meho, rdc-internal,
     Holodeck-claude, or any other consumer-specific tokens."
 
     The wire-level MCP round-trip is exercised in

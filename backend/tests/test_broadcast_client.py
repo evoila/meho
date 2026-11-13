@@ -124,7 +124,7 @@ class TestSettings:
         "url",
         [
             "redis://localhost:6379",
-            "rediss://broadcast.evba.lab:6379",
+            "rediss://broadcast.example.test:6379",
             "unix:///tmp/redis.sock",
         ],
     )
@@ -140,7 +140,7 @@ class TestSettings:
 
     @pytest.mark.parametrize(
         "url",
-        ["valkey://broadcast.evba.lab:6379", "http://localhost", "localhost:6379"],
+        ["valkey://broadcast.example.test:6379", "http://localhost", "localhost:6379"],
     )
     def test_rejects_unsupported_schemes(self, url: str) -> None:
         """Validator names the supported schemes in the error message."""
@@ -418,9 +418,9 @@ class TestProbeOutcomes:
         "side_effect",
         [
             redis_exceptions.TimeoutError(),
-            redis_exceptions.ConnectionError("broadcast.evba.lab:6379 refused"),
+            redis_exceptions.ConnectionError("broadcast.example.test:6379 refused"),
             redis_exceptions.AuthenticationError("bad creds"),
-            RuntimeError("broadcast.evba.lab:6379 went sideways"),
+            RuntimeError("broadcast.example.test:6379 went sideways"),
         ],
     )
     async def test_detail_never_echoes_url(
@@ -432,7 +432,7 @@ class TestProbeOutcomes:
         await _patched_ping(monkeypatch, side_effect)
         result = await broadcast_readiness_probe()
         detail = result.detail or ""
-        assert "broadcast.evba.lab" not in detail
+        assert "broadcast.example.test" not in detail
         assert "broadcast.test" not in detail
         assert "6379" not in detail
 

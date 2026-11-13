@@ -957,9 +957,9 @@ async def test_since_until_range(session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_target_filter_resolves_by_name(session: AsyncSession) -> None:
-    """``target="rdc-vcenter"`` resolves through the targets table by name."""
+    """``target="example-vcenter"`` resolves through the targets table by name."""
     tenant_id = uuid.uuid4()
-    target_id = await _seed_target(session, tenant_id=tenant_id, name="rdc-vcenter")
+    target_id = await _seed_target(session, tenant_id=tenant_id, name="example-vcenter")
     other_target_id = await _seed_target(session, tenant_id=tenant_id, name="rdc-vault")
     await session.commit()
 
@@ -978,21 +978,21 @@ async def test_target_filter_resolves_by_name(session: AsyncSession) -> None:
     await session.commit()
 
     result = await query_audit(
-        AuditQueryFilters(target="rdc-vcenter"),
+        AuditQueryFilters(target="example-vcenter"),
         tenant_id=tenant_id,
         session=session,
     )
 
     assert len(result.rows) == 1
     assert result.rows[0].target_id == target_id
-    assert result.rows[0].target_name == "rdc-vcenter"
+    assert result.rows[0].target_name == "example-vcenter"
 
 
 @pytest.mark.asyncio
 async def test_target_name_denormalization_left_join(session: AsyncSession) -> None:
     """The LEFT JOIN populates ``target_name`` when present, None otherwise."""
     tenant_id = uuid.uuid4()
-    target_id = await _seed_target(session, tenant_id=tenant_id, name="rdc-vcenter")
+    target_id = await _seed_target(session, tenant_id=tenant_id, name="example-vcenter")
     await session.commit()
 
     await _seed_audit_row(
@@ -1012,7 +1012,7 @@ async def test_target_name_denormalization_left_join(session: AsyncSession) -> N
     result = await query_audit(AuditQueryFilters(), tenant_id=tenant_id, session=session)
 
     by_target = {entry.target_id: entry.target_name for entry in result.rows}
-    assert by_target[target_id] == "rdc-vcenter"
+    assert by_target[target_id] == "example-vcenter"
     assert by_target[None] is None
 
 
@@ -1284,13 +1284,13 @@ async def test_principal_name_surfaced_from_payload(session: AsyncSession) -> No
         session,
         tenant_id=tenant_id,
         occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
-        payload={"op_id": "meho_status", "principal_name": "Damir Topic"},
+        payload={"op_id": "meho_status", "principal_name": "Operator A"},
     )
     await session.commit()
 
     result = await query_audit(AuditQueryFilters(), tenant_id=tenant_id, session=session)
     entry = result.rows[0]
-    assert entry.principal_name == "Damir Topic"
+    assert entry.principal_name == "Operator A"
 
 
 @pytest.mark.asyncio

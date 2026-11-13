@@ -172,7 +172,7 @@ def test_operator_role_is_rejected_with_insufficient_role(
 
 
 # ---------------------------------------------------------------------------
-# meho-internal#289 — grant create / elevate are human-only on every
+# grant create / elevate are human-only on every
 # transport. An agent principal is minted ``tenant_admin``, so it clears the
 # role gate; the human-principal guard must still refuse it so a machine
 # cannot mint or widen its own (or a sibling's) grant over REST.

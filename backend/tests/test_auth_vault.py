@@ -732,7 +732,7 @@ async def test_operator_tenant_maps_to_dedicated_role_when_configured(
 
     This is the core: a sandbox-tenant operator's target-less ``vault.kv.*``
     and ``secret_ref`` reads run under a role whose ``bound_claims`` + policy
-    it satisfies, so one fixed role stops spanning tenants (meho-internal#356).
+    it satisfies, so one fixed role stops spanning tenants.
     """
     monkeypatch.setenv("VAULT_OIDC_ROLE_BY_TENANT", f"{_TENANT_A}=meho-mcp-sandbox")
     get_settings.cache_clear()

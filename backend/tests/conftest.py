@@ -584,7 +584,7 @@ def _default_backplane_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _default_target_ssrf_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
     """Exempt the suite's fixture address space from the target SSRF guard.
 
-    evoila-bosnia/meho-internal#153 rejects targets whose ``host``/
+    The host check rejects targets whose ``host``/
     ``fqdn`` is — or resolves to — a private / loopback / link-local
     address at create/update *and* connect time, overridable only via
     ``MEHO_TARGET_SSRF_ALLOWLIST``. The suite predates that guard and
@@ -1051,8 +1051,8 @@ def mint_token(
     private_key: Any,
     *,
     sub: str = "op-42",
-    name: str | None = "Damir",
-    email: str | None = "damir@example.com",
+    name: str | None = "Operator",
+    email: str | None = "operator-a@example.com",
     issuer: str = DEFAULT_ISSUER,
     audience: str = DEFAULT_AUDIENCE,
     expires_in: int = 3600,

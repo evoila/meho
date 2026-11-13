@@ -65,18 +65,10 @@ from ._targets_helpers import (
     _settings_env,  # noqa: F401
 )
 
-# Pinned snapshot location and provenance. The fixture content
-# derives from the upstream blob at
-# ``evoila-bosnia/claude-rdc-hetzner-dc:rdc-hetzner-dc/targets.yaml``
-# at the SHA recorded below; one historical-leaked-and-rotated
-# password string in a `notes:` field has been redacted to
-# ``[REDACTED — see incident log]`` for security-scanner hygiene,
-# so a byte-for-byte SHA match against upstream is intentionally
-# not asserted. Regenerate together if the consumer file evolves.
-# The entry-count constant below pins to the upstream SHA's
-# structure; mismatches surface as a fixture-drift test failure.
-_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "rdc-hetzner-dc-targets.yaml"
-_FIXTURE_UPSTREAM_SHA = "1e1e6885e1ef79d03001955205d9e44a0bc8e79d"
+# Location of the sample targets file. The entries are made up. The
+# entry-count constant below pins its structure; a mismatch surfaces as a
+# fixture-drift test failure.
+_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "example-targets.yaml"
 _FIXTURE_EXPECTED_ENTRY_COUNT = 24
 
 # Mapping rules mirror the Go side at cli/internal/cmd/targets/import.go.
@@ -107,7 +99,7 @@ def _legacy_layout_guard_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The pinned consumer fixture predates the per-tenant Vault layout
     (#1723): its ``secret_ref`` values live under the consumer's own
-    ``secret/rdc-hetzner-dc/...`` subtree. On a guard-**on** deploy the
+    ``secret/example-dc/...`` subtree. On a guard-**on** deploy the
     #2091 write-time gate now rejects exactly these refs by design (that
     consumer's dispatch-time ``permission denied`` is the signal #2091
     exists to fail fast on) — the reject path is pinned in
@@ -155,16 +147,15 @@ def _entry_to_create_body(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_fixture_parses_and_has_expected_entry_count() -> None:
-    """The pinned fixture matches the upstream entry count."""
+    """The sample targets file has the expected entry count."""
     with _FIXTURE_PATH.open("rb") as f:
         doc = yaml.safe_load(f)
     assert isinstance(doc, dict)
     assert "targets" in doc
     assert len(doc["targets"]) == _FIXTURE_EXPECTED_ENTRY_COUNT, (
-        f"Pinned snapshot drift: fixture has {len(doc['targets'])} entries; "
-        f"expected {_FIXTURE_EXPECTED_ENTRY_COUNT} at upstream SHA "
-        f"{_FIXTURE_UPSTREAM_SHA}. Regenerate the fixture + update the "
-        "constant if the upstream contract intentionally moved."
+        f"Fixture drift: fixture has {len(doc['targets'])} entries; "
+        f"expected {_FIXTURE_EXPECTED_ENTRY_COUNT}. Update the "
+        "constant if the fixture intentionally changed."
     )
 
 
@@ -181,7 +172,7 @@ def test_real_targets_yaml_full_roundtrip(client: TestClient) -> None:
 
     Entries missing the required ``host`` field are filtered out
     here — the consumer's real file legitimately omits ``host`` for
-    a cloud-provider target (``rdc-gcp``, accessed by project ID +
+    a cloud-provider target (``example-cloud``, accessed by project ID +
     account rather than hostname). The Go CLI parser at
     ``cli/internal/cmd/targets/import.go`` would reject such a file
     before firing the first HTTP request (its ``parseTargetsYAML``
@@ -265,7 +256,7 @@ def test_create_rejects_fingerprint_via_extra_forbid(client: TestClient) -> None
             json={
                 "name": "rdc-vault",
                 "product": "vault",
-                "host": "vault.evba.lab",
+                "host": "vault.example.test",
                 # Pydantic v2 ConfigDict(extra='forbid') rejects this.
                 "fingerprint": {"vendor": "hashicorp", "version": "1.15.0"},
             },
@@ -314,7 +305,7 @@ def test_create_accepts_preferred_impl_id_top_level(client: TestClient) -> None:
             json={
                 "name": "vault-tie-break",
                 "product": "vault",
-                "host": "vault.evba.lab",
+                "host": "vault.example.test",
                 "preferred_impl_id": "vault-1.x",
             },
             headers=headers,
@@ -379,12 +370,12 @@ def test_sparse_patch_preserves_omitted_columns(client: TestClient) -> None:
             json={
                 "name": "rdc-rich",
                 "product": "vault",
-                "host": "vault.evba.lab",
+                "host": "vault.example.test",
                 "aliases": ["v1", "vault-main"],
                 "port": 8200,
                 "vpn_required": True,
                 "auth_model": "shared_service_account",
-                "extras": {"sso_realm": "evba.lab"},
+                "extras": {"sso_realm": "example.test"},
                 "notes": "original",
             },
             headers=headers,
@@ -406,7 +397,7 @@ def test_sparse_patch_preserves_omitted_columns(client: TestClient) -> None:
         assert data["port"] == 8200
         assert data["vpn_required"] is True
         assert data["auth_model"] == "shared_service_account"
-        assert data["extras"] == {"sso_realm": "evba.lab"}
+        assert data["extras"] == {"sso_realm": "example.test"}
 
 
 def test_duplicate_name_aborts_default_mode_workflow(client: TestClient) -> None:
@@ -425,18 +416,18 @@ def test_duplicate_name_aborts_default_mode_workflow(client: TestClient) -> None
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         r1 = client.post(
             "/api/v1/targets",
-            json={"name": "rdc-vcenter", "product": "vcenter", "host": "vc.evba.lab"},
+            json={"name": "example-vcenter", "product": "vcenter", "host": "vc.example.test"},
             headers=headers,
         )
         r2 = client.post(
             "/api/v1/targets",
-            json={"name": "rdc-vcenter", "product": "vcenter", "host": "vc.evba.lab"},
+            json={"name": "example-vcenter", "product": "vcenter", "host": "vc.example.test"},
             headers=headers,
         )
     assert r1.status_code == 201
     assert r2.status_code == 409
     detail = r2.json()["detail"]
-    assert "rdc-vcenter" in detail
+    assert "example-vcenter" in detail
 
 
 def test_list_targets_after_import_returns_all_names(client: TestClient) -> None:

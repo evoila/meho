@@ -1,0 +1,226 @@
+# Sample targets file used as a test fixture.
+#
+# Each entry maps a logical target name to its host name, secret path and
+# optional settings. The entries are made up. The file has the same shape as
+# a real targets file: the known columns, extra keys that land in `extras`,
+# multi-line notes, and one cloud entry that has no `host`.
+
+targets:
+  - name: example-vcenter
+    aliases: [example-vcenter-alias, alias-0]
+    product: vcenter
+    host: example-vcenter.example.test
+    secret_ref: secret/example-dc/vcenter/example-vcenter
+    sso_realm: vsphere.local
+    vpn_required: true
+    notes: "Example vcenter target number 1. Used only in tests."
+
+  - name: example-vcenter-b
+    aliases: [example-vcenter-b-alias, alias-1]
+    product: vcenter
+    host: example-vcenter-b.example.test
+    secret_ref: secret/example-dc/vcenter/example-vcenter-b
+    sso_realm: vsphere.local
+    vpn_required: true
+    notes: "Example vcenter target number 2. Used only in tests."
+
+  - name: example-sddc
+    aliases: [example-sddc-alias, alias-2]
+    product: sddc-manager
+    host: example-sddc.example.test
+    secret_ref: secret/example-dc/sddc-manager/example-sddc
+    sso_realm: vsphere.local
+    vpn_required: true
+    notes: "Example sddc-manager target number 3. Used only in tests."
+
+  - name: example-nsx
+    aliases: [example-nsx-alias, alias-3]
+    product: nsx
+    host: example-nsx.example.test
+    secret_ref: secret/example-dc/nsx/example-nsx
+    sso_realm: vsphere.local
+    vpn_required: true
+    notes: "Example nsx target number 4. Used only in tests."
+
+  - name: example-fleet
+    aliases: [example-fleet-alias, alias-4]
+    product: vcf-fleet
+    host: example-fleet.example.test
+    secret_ref: secret/example-dc/vcf-fleet/example-fleet
+    sso_realm: vsphere.local
+    vpn_required: true
+    notes: "Example vcf-fleet target number 5. Used only in tests."
+
+  - name: example-ops
+    aliases: [example-ops-alias, alias-5]
+    product: vcf-operations
+    host: example-ops.example.test
+    secret_ref: secret/example-dc/vcf-operations/example-ops
+    sso_realm: vsphere.local
+    vpn_required: true
+    notes: "Example vcf-operations target number 6. Used only in tests."
+
+  - name: example-auto
+    aliases: [example-auto-alias, alias-6]
+    product: vcf-automation
+    host: example-auto.example.test
+    secret_ref: secret/example-dc/vcf-automation/example-auto
+    fqdn: example-auto.example.test
+    sso_realm: vsphere.local
+    vpn_required: true
+    notes: "Example vcf-automation target number 7. Used only in tests."
+
+  - name: example-firewall
+    aliases: [firewall, perimeter]
+    product: pfsense
+    host: firewall.example.test
+    secret_ref: secret/example-dc/network/firewall
+    vpn_required: true
+    notes: "Example firewall. The web page is plain HTTP on port 80. SSH is on 22."
+
+  - name: example-robot
+    aliases: [robot]
+    product: hetzner-robot
+    host: robot.example.test
+    secret_ref: secret/example-dc/provider/robot
+    vpn_required: false
+    notes: |
+      Example provider API target.
+      The credentials live in the secret store.
+
+      Line three keeps a blank line before it.
+
+  - name: example-supervisor
+    aliases: [supervisor]
+    product: tanzu-supervisor
+    host: supervisor.example.test
+    secret_ref: secret/example-dc/k8s/supervisor
+    port: 6443
+    kubeconfig_field: kubeconfig
+    vpn_required: true
+    notes: "Example supervisor cluster API."
+
+  - name: example-k8s-a
+    aliases: [k8s-a]
+    product: kubernetes
+    host: k8s-a.example.test
+    secret_ref: secret/example-dc/k8s/a
+    port: 6443
+    kubeconfig_field: kubeconfig
+    vpn_required: true
+    notes: |
+      Example Kubernetes cluster A.
+      It has a second line in its notes.
+      And a third one: with a colon and a # sign.
+
+  - name: example-k8s-b
+    aliases: [k8s-b]
+    product: kubernetes
+    host: k8s-b.example.test
+    secret_ref: secret/example-dc/k8s/b
+    port: 6443
+    kubeconfig_field: kubeconfig
+    vpn_required: true
+    notes: "Example Kubernetes cluster B."
+
+  - name: example-router-a
+    aliases: [router-a]
+    product: holodeck
+    host: router-a.example.test
+    vpn_required: true
+    notes: |
+      Example nested router A.
+      No secret is stored for this entry.
+
+  - name: example-router-b
+    aliases: [router-b]
+    product: holodeck
+    host: router-b.example.test
+    vpn_required: true
+    notes: "Example nested router B."
+
+  - name: example-depot
+    aliases: [depot]
+    product: offline-depot
+    host: depot.example.test
+    vpn_required: true
+    notes: "Example offline depot serving files over HTTP."
+
+  - name: example-dns
+    aliases: [dns]
+    product: bind9-dns
+    host: dns.example.test
+    secret_ref: secret/example-dc/dns/ssh
+    vpn_required: true
+    notes: "Example DNS server managed over SSH."
+
+  - name: example-cloud
+    aliases: [cloud]
+    product: gcp
+    project_id: example-project-123
+    account: operator@example.test
+    vpn_required: false
+    notes: "Example cloud project. It has no host, because a cloud project is reached by project ID and account."
+
+  - name: example-sso
+    aliases: [sso]
+    product: keycloak
+    host: sso.example.test
+    secret_ref: secret/example-dc/sso/admin
+    port: 8443
+    vpn_required: true
+    notes: |
+      Example single sign-on server.
+      Realm: example.
+
+  - name: example-meho
+    aliases: [meho]
+    product: meho
+    host: meho.example.test
+    secret_ref: secret/example-dc/meho/admin
+    port: 8443
+    vpn_required: true
+    notes: "Example MEHO instance used as a target."
+
+  - name: example-vault
+    aliases: [vault]
+    product: vault
+    host: vault.example.test
+    secret_ref: secret/example-dc/vault/root
+    port: 8200
+    vpn_required: true
+    notes: |
+      Example secret store.
+      It is reached over HTTPS on port 8200.
+
+  - name: example-linux-1
+    aliases: [linux-1]
+    product: ssh
+    host: linux-1.example.test
+    secret_ref: secret/example-dc/ssh/linux-1
+    vpn_required: true
+    notes: "Example Linux host number 1, reached over SSH."
+
+  - name: example-linux-2
+    aliases: [linux-2]
+    product: ssh
+    host: linux-2.example.test
+    secret_ref: secret/example-dc/ssh/linux-2
+    vpn_required: true
+    notes: "Example Linux host number 2, reached over SSH."
+
+  - name: example-linux-3
+    aliases: [linux-3]
+    product: ssh
+    host: linux-3.example.test
+    secret_ref: secret/example-dc/ssh/linux-3
+    vpn_required: true
+    notes: "Example Linux host number 3, reached over SSH."
+
+  - name: example-linux-4
+    aliases: [linux-4]
+    product: ssh
+    host: linux-4.example.test
+    secret_ref: secret/example-dc/ssh/linux-4
+    vpn_required: true
+    notes: "Example Linux host number 4, reached over SSH."

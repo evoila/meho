@@ -4,7 +4,7 @@
 """Per-target Vault role/auth-mount resolution (#3274).
 
 Pins the ``Target``-side contract frozen with the lab
-(``claude-rdc-hetzner-dc#2814`` / PR ``#2815``): a vault target advertising
+(a consumer repository / PR ``#2815``): a vault target advertising
 ``extras["vault_role"]`` (optionally ``extras["vault_mount"]``) selects that
 role at login; anything else falls through to the settings-global role +
 mount byte-for-byte. The live ``rdc-vault-teardown`` target ships

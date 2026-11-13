@@ -170,6 +170,7 @@ def _answer_hello_only(conn: socket.socket, stop: threading.Event) -> None:
                 else:
                     stop.wait()
         except OSError:
+            # The client closed the connection; this fake server just stops serving it.
             pass
 
 

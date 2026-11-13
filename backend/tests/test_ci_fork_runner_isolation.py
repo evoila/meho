@@ -505,3 +505,6 @@ def test_contributing_fork_steps_start_a_ci_run() -> None:
     # request does.
     assert triggers["push"]["branches"] == ["main"]
     assert "workflow_dispatch" not in triggers
+
+
+# Fork pull request CI test (Task #4835). This line is never merged.

@@ -332,6 +332,7 @@ from meho_backplane.operations._errors import (
     result_ambiguous_connector,
     result_announce_required,
     result_audit_commit_failed,
+    result_audit_row_invalid,
     result_awaiting_approval,
     result_blast_radius_required,
     result_composite_terminal_error,
@@ -428,6 +429,7 @@ from meho_backplane.operations._vendor_text import (
     withhold_vendor_text,
 )
 from meho_backplane.operations.approved_step_check import approved_step_refusal
+from meho_backplane.operations.audit_row_precheck import audit_row_problem
 from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
@@ -3863,6 +3865,24 @@ async def _dispatch_now(
     params_error = _params_error(descriptor, op_id, params, started)
     if params_error is not None:
         return params_error
+
+    # --- Step 3.4: the audit row must be storable ---------------------------
+    # Refuse a call whose audit row can never be stored, before anything is
+    # sent to the target and before an approval request is made. Every path
+    # (direct, a step of a multi-step operation, a call resumed after
+    # approval, runbook, scheduler, agent) comes through here.
+    audit_problem = audit_row_problem(
+        operator=operator, descriptor=descriptor, params_hash=params_hash
+    )
+    if audit_problem is not None:
+        _log.warning(
+            "dispatch_refused_audit_row_invalid",
+            op_id=op_id,
+            field=audit_problem.field,
+        )
+        return result_audit_row_invalid(
+            op_id, audit_problem.field, audit_problem.reason, _elapsed_ms(started)
+        )
 
     # --- Step 3.5: dispatch limits (#3500) --------------------------------
     # Per-principal rate limit + per-principal concurrent-op cap, enforced

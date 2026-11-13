@@ -104,6 +104,10 @@ Examples in current use:
 - `receipt_too_large` (`call_operation`: the receipt of a completed run
   could not fit `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`, so the call is
   refused before dispatch and nothing runs — #3641)
+- `audit_row_invalid` (dispatcher: the audit row of the call can never be
+  stored, so MEHO refused the call before it sent anything. `extras.field`
+  names the value, never its content. `extras.execution_outcome="not_started"`;
+  no approval request is made. Safe to call again with a fixed value)
 - `audit_commit_failed` (dispatcher: the handler finished, but its audit
   row did not commit. `extras.execution_outcome="uncertain"`,
   `extras.retry=false`, no `audit_id`. The caller must not run the call

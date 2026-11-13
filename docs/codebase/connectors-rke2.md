@@ -164,7 +164,9 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
 - **`Rke2SshConnector`** (`connector.py`) — `SshConnector` subclass. Class
   attributes: `product="rke2"`, `version="1.x"`, `impl_id="rke2-ssh"`,
   `supported_version_range=">=1.32,<1.38"` (the same range as the
-  `kubernetes` connector; RKE2 follows the Kubernetes lines). The
+  `kubernetes` connector; RKE2 follows the Kubernetes lines). A target
+  whose known version is outside the range does not run: the operation
+  answers `no_connector` and names the range. The
   token-rotate version check (`rke2_version_rotate_verdict`) is separate
   and unchanged.
   Inherits the asyncssh connection pool (one login per caller and target), `_auth_config`,

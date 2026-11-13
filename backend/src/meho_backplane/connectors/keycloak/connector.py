@@ -1200,6 +1200,16 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_enable(self, operator, target, params)
 
+    async def client_scope_protocol_mapper_update(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.client_scope.protocol_mapper.update``."""
+        from meho_backplane.connectors.keycloak.ops_write_scope_mapper import (
+            keycloak_client_scope_protocol_mapper_update,
+        )
+
+        return await keycloak_client_scope_protocol_mapper_update(self, operator, target, params)
+
     async def user_check_login(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:

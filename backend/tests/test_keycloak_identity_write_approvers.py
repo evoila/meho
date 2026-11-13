@@ -3,9 +3,10 @@
 
 """Who may approve the Keycloak writes that change tenant rights.
 
-MEHO reads tenant rights from the login token. Five Keycloak writes change
+MEHO reads tenant rights from the login token. Six Keycloak writes change
 what goes into that token, or who can sign in as whom: user create,
-password reset, client create, client update and protocol-mapper create.
+password reset, client create, client update, protocol-mapper create and
+the change of a protocol mapper on a client scope.
 
 These tests take each op's risk level from the connector's registration
 table, park a request at that level (the way the dispatcher stamps it), and
@@ -48,6 +49,7 @@ _IDENTITY_WRITES = (
     "keycloak.client.create",
     "keycloak.client.update",
     "keycloak.protocol_mapper.create",
+    "keycloak.client_scope.protocol_mapper.update",
 )
 _LEVELS = {op.op_id: op.safety_level for op in WRITE_OPS}
 _PARAMS: dict[str, Any] = {"representation": {"username": "new-user"}}

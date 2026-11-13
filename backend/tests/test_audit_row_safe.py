@@ -26,6 +26,8 @@ import sqlalchemy.exc as sa_exc
 import structlog
 from sqlalchemy import select
 
+from meho_backplane.audit_query import AuditQueryFilters
+from meho_backplane.audit_query.query import query_audit
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -167,6 +169,21 @@ def _data_error() -> Exception:
     return sa_exc.DataError("INSERT INTO audit_log", {}, Exception("refused"))
 
 
+def _sqlstate_error(sqlstate: str) -> sa_exc.DBAPIError:
+    orig = Exception("x")
+    orig.sqlstate = sqlstate  # type: ignore[attr-defined]
+    return sa_exc.DBAPIError("INSERT INTO audit_log", {}, orig)
+
+
+def _short_payload(error_class: str, result_status: str = "ok") -> dict[str, Any]:
+    return {
+        FULL_ROW_LOST: {"error_class": error_class},
+        "op_id": OP_ID,
+        "op_class": "write",
+        "result_status": result_status,
+    }
+
+
 def _no_text_that_the_table_refuses(value: Any) -> bool:
     text = repr(value)
     return "\x00" not in text and not any("\ud800" <= ch <= "\udfff" for ch in text)
@@ -223,10 +240,15 @@ def test_a_connection_fault_is_unreachable() -> None:
     assert is_database_unreachable(sa_exc.TimeoutError("pool"))
 
 
-def test_a_sqlstate_of_a_connection_fault_is_unreachable() -> None:
-    orig = Exception("x")
-    orig.sqlstate = "08006"  # type: ignore[attr-defined]
-    assert is_database_unreachable(sa_exc.DBAPIError("s", {}, orig))
+@pytest.mark.parametrize("sqlstate", ["08006", "08001", "53300", "57P01", "57P03", "57P05"])
+def test_a_sqlstate_of_a_connection_fault_is_unreachable(sqlstate: str) -> None:
+    assert is_database_unreachable(_sqlstate_error(sqlstate))
+
+
+@pytest.mark.parametrize("sqlstate", ["57014", "53100", "53200"])
+def test_a_cancelled_statement_or_a_resource_error_is_not_unreachable(sqlstate: str) -> None:
+    """57014 is a statement timeout: the database still takes a short row."""
+    assert not is_database_unreachable(_sqlstate_error(sqlstate))
 
 
 def test_a_data_error_is_not_unreachable() -> None:
@@ -360,7 +382,7 @@ async def test_a_short_row_is_stored_when_the_full_row_is_refused_once(demo_op: 
     rows = await _rows()
     assert len(rows) == 1
     row = rows[0]
-    assert row.payload == {FULL_ROW_LOST: {"error_class": "DataError"}}
+    assert row.payload == _short_payload("DataError")
     assert row.raw_payload is None
     assert row.operator_sub == "op-safe"
     assert row.tenant_id == TENANT_ID
@@ -381,8 +403,39 @@ async def test_the_error_path_stores_a_short_row_too(demo_op: None) -> None:
     assert result.status == "error"
     rows = await _rows()
     assert len(rows) == 1
-    assert rows[0].payload == {FULL_ROW_LOST: {"error_class": "DataError"}}
+    assert rows[0].payload == _short_payload("DataError", result_status="error")
     assert rows[0].status_code != 200
+
+
+async def test_a_statement_timeout_on_the_full_row_gives_a_short_row(demo_op: None) -> None:
+    answer["value"] = {"ok": True}
+    listener = _refuse_audit_inserts(_sqlstate_error("57014"), times=1)
+    try:
+        result = await _call()
+    finally:
+        _stop_refusing(listener)
+    assert result.status == "ok", result.error
+    rows = await _rows()
+    assert len(rows) == 1
+    assert rows[0].payload == _short_payload("DBAPIError")
+
+
+async def test_the_operation_filter_finds_a_short_row(demo_op: None) -> None:
+    answer["value"] = {"ok": True}
+    listener = _refuse_audit_inserts(_data_error(), times=1)
+    try:
+        await _call()
+    finally:
+        _stop_refusing(listener)
+    async with get_sessionmaker()() as session:
+        found = await query_audit(
+            AuditQueryFilters(op_id=OP_ID, op_class="write"), tenant_id=TENANT_ID, session=session
+        )
+    assert len(found.rows) == 1
+    entry = found.rows[0]
+    assert FULL_ROW_LOST in entry.payload
+    assert entry.op_id == OP_ID
+    assert entry.op_class == "write"
 
 
 async def test_an_unreachable_database_answers_audit_commit_failed(demo_op: None) -> None:

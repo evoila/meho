@@ -70,14 +70,18 @@ at any depth). The caller still gets the answer unchanged.
 When the insert of the full row fails for any other reason, the writer tries
 once more with a **short row**. It keeps the fixed columns (who, when,
 tenant, target, operation, status code, ticket id, request id, session) and
-has no `raw_payload` and no `redaction_manifest`. Its `payload` is only
-`{"full_row_lost": {"error_class": "<name of the error>"}}`. MEHO also logs
+has no `raw_payload` and no `redaction_manifest`. Its `payload` holds
+`{"full_row_lost": {"error_class": "<name of the error>"}}` and the
+`op_id`, `op_class` and `result_status` of the full row, so the audit search
+still finds the row by its operation. MEHO also logs
 `audit_full_row_lost` with the audit id, the operation, the request id and
 the error class. The same short row is used on the error path, so a call
 that failed at the target also has a row.
 
 No short row is written when the database cannot be reached (a connection
-fault, a timeout, a shutdown). The write then fails at once, and the call
+fault, a connection timeout, too many connections, a shutdown). A statement
+that was cancelled or ran into a statement timeout is not such a case: then
+the short row is tried. The write then fails at once, and the call
 answers `audit_commit_failed`. The same happens when the short row fails
 too.
 

@@ -11,7 +11,7 @@ number that JSON cannot hold (NaN, Infinity). The audit writer runs
 the target said. The answer the caller gets is not changed.
 
 When the full row still cannot be stored, the writer stores a short row that
-holds :data:`FULL_ROW_LOST` and the error class (see
+holds :data:`FULL_ROW_LOST`, the error class and the operation (see
 :func:`short_row_payload`). :func:`is_database_unreachable` tells that case
 apart from "the database cannot be reached": there a short row cannot be
 stored either, so the writer raises at once.
@@ -45,9 +45,22 @@ INVALID_CHARACTER_MARKER: Final[str] = "<invalid character>"
 
 _SURROGATE: Final = re.compile("[\ud800-\udfff]")
 
-#: SQLSTATE classes that mean the database cannot be used right now: a
-#: connection fault (08), a shutdown or restart (57), a resource limit (53).
-_UNREACHABLE_SQLSTATE_CLASSES: Final[tuple[str, ...]] = ("08", "53", "57")
+#: SQLSTATE class of a connection fault: every code in it means "unreachable".
+_CONNECTION_FAULT_CLASS: Final[str] = "08"
+
+#: SQLSTATE codes outside class 08 that mean the database cannot be used now:
+#: too many connections, a shutdown, a crash, "cannot connect now", the
+#: database was dropped, the idle session was closed. Other codes of class 57
+#: (57014, a cancelled statement or a statement timeout) are not here: a
+#: short row can still be stored then.
+_UNREACHABLE_SQLSTATES: Final[frozenset[str]] = frozenset(
+    {"53300", "57P01", "57P02", "57P03", "57P04", "57P05"}
+)
+
+#: Keys of the full ``payload`` that a short row keeps. They hold no text of
+#: the target's answer, and audit readers use them (the operation filter, the
+#: operation class, the result).
+_SHORT_ROW_KEYS: Final[tuple[str, ...]] = ("op_id", "op_class", "result_status")
 
 
 def _safe_text(value: str) -> str:
@@ -80,9 +93,17 @@ def make_storable(value: Any) -> Any:
     return value
 
 
-def short_row_payload(exc: BaseException) -> dict[str, Any]:
-    """The ``payload`` of a short row: the mark and the error class, no text."""
-    return {FULL_ROW_LOST: {"error_class": type(exc).__name__}}
+def short_row_payload(exc: BaseException, payload: dict[str, Any]) -> dict[str, Any]:
+    """The ``payload`` of a short row: the mark, the error class and the operation.
+
+    From the full *payload* it keeps only ``op_id``, ``op_class`` and
+    ``result_status``, so audit readers still find and name the operation.
+    """
+    short: dict[str, Any] = {
+        key: payload[key] for key in _SHORT_ROW_KEYS if isinstance(payload.get(key), str)
+    }
+    short[FULL_ROW_LOST] = {"error_class": type(exc).__name__}
+    return make_storable(short)  # type: ignore[no-any-return]
 
 
 def is_database_unreachable(exc: BaseException) -> bool:
@@ -96,5 +117,5 @@ def is_database_unreachable(exc: BaseException) -> bool:
         if exc.connection_invalidated or isinstance(exc, sa_exc.OperationalError):
             return True
         sqlstate = str(getattr(exc.orig, "sqlstate", None) or "")
-        return sqlstate.startswith(_UNREACHABLE_SQLSTATE_CLASSES)
+        return sqlstate.startswith(_CONNECTION_FAULT_CLASS) or sqlstate in _UNREACHABLE_SQLSTATES
     return False

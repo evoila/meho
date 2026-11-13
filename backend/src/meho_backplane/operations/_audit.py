@@ -754,17 +754,22 @@ async def write_audit_row(
     except Exception as exc:
         if is_database_unreachable(exc):
             raise
-        await _write_short_row(row_fields, event_class, exc)
+        await _write_short_row(row_fields, event_class, payload, exc)
 
 
 async def _write_short_row(
-    row_fields: dict[str, Any], event_class: AuditEventClass, cause: BaseException
+    row_fields: dict[str, Any],
+    event_class: AuditEventClass,
+    payload: dict[str, Any],
+    cause: BaseException,
 ) -> None:
     """Store the short row when the full row of a call could not be stored (#6452).
 
     The short row keeps the fixed columns (who, when, tenant, target,
-    operation, status, ticket id, request id) and a ``full_row_lost`` mark
-    with the error class. It holds none of the text that failed. When this
+    operation, status, ticket id, request id), a ``full_row_lost`` mark with
+    the error class, and the ``op_id``, ``op_class`` and ``result_status`` of
+    the full payload, so audit readers still find the operation. It holds
+    none of the text that failed. When this
     insert fails too, the error is raised: the caller then answers
     ``audit_commit_failed``.
     """
@@ -777,7 +782,11 @@ async def _write_short_row(
     )
     async with get_sessionmaker()() as session:
         session.add(
-            AuditLog(**row_fields, event_class=event_class, payload=short_row_payload(cause))
+            AuditLog(
+                **row_fields,
+                event_class=event_class,
+                payload=short_row_payload(cause, payload),
+            )
         )
         await session.commit()
 

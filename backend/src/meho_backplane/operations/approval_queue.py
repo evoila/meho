@@ -546,6 +546,7 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
     ``docs/decisions/approval-groups-and-self-approval.md``. Subclasses
     :class:`UnauthorizedApprovalError`, so every handler of that error still
     answers 403; the approve routes catch this one first to show its text.
+    *reason* replaces that text (:class:`ApprovalRoutingError` passes its own).
     """
 
     def __init__(
@@ -555,11 +556,12 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
         operator_sub: str,
         role: str,
         safety_level: str,
+        reason: str | None = None,
     ) -> None:
         self.request_id = request_id
         self.safety_level = safety_level
         #: The plain refusal text, without ids, for the web interface.
-        self.reason_text = (
+        self.reason_text = reason or (
             f"You cannot approve this {safety_level} change of another person. "
             f"Only {_HIGH_RISK_APPROVERS_TEXT} may approve dangerous and "
             "destructive changes."
@@ -586,17 +588,8 @@ class ApprovalRoutingError(ApprovalGroupForbiddenError):
     """
 
     def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str, reason: str) -> None:
-        self.request_id = request_id
-        self.safety_level = ""
-        #: The plain refusal text, without ids, for the web interface.
-        self.reason_text = reason
-        UnauthorizedApprovalError.__init__(
-            self,
-            operator_sub=operator_sub,
-            role=role,
-            message=(
-                f"operator {operator_sub!r} may not approve approval_request {request_id}: {reason}"
-            ),
+        super().__init__(
+            request_id, operator_sub=operator_sub, role=role, safety_level="", reason=reason
         )
 
 

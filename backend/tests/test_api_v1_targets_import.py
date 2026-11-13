@@ -31,11 +31,11 @@ Coverage matrix:
   ``setattr`` loop combined with Pydantic v2's "explicit null
   counts as set" rule wiped omitted columns.
 
-The fixture file is pinned to a specific SHA (recorded in the
-helper below). When the upstream `targets.yaml` evolves, regenerate
-the fixture and update both the SHA constant and the entry-count
-assertion below — the test is deliberately tight on shape so that a
-silent drift in the upstream contract surfaces as a CI failure.
+The fixture file `fixtures/example-targets.yaml` holds made-up
+entries in the shape of a real targets file: extra keys, multi-line
+notes and one entry without a host. When you change it, update the
+entry-count assertion below too — the test is deliberately tight on
+shape so that a silent drift in the fixture fails CI.
 """
 
 from __future__ import annotations
@@ -184,11 +184,9 @@ def test_real_targets_yaml_full_roundtrip(client: TestClient) -> None:
     or split cloud-provider targets into a separate file — before
     running ``meho targets import``.
 
-    This is the acceptance-criteria-9 gate from the issue body: "CI
-    integration test against the consumer's real targets.yaml (or a
-    snapshot of it pinned to a specific git SHA)". The "pinned
-    snapshot" arm is what's used here; the constants at the top of
-    this module track which upstream SHA the snapshot reflects.
+    This is the acceptance-criteria-9 gate from the issue body: a CI
+    integration test against a targets file in the consumer's shape.
+    The made-up fixture keeps that shape without copying real data.
     """
     with _FIXTURE_PATH.open("rb") as f:
         doc = yaml.safe_load(f)
@@ -207,7 +205,7 @@ def test_real_targets_yaml_full_roundtrip(client: TestClient) -> None:
     # dropping most of the file, the round-trip claim is hollow.
     assert len(entries) >= 20, (
         f"filter kept only {len(entries)}/{len(all_entries)} entries — "
-        "the upstream consumer file may have drifted in shape"
+        "the fixture file may have drifted in shape"
     )
 
     key = make_rsa_keypair("kid-A")
@@ -254,7 +252,7 @@ def test_create_rejects_fingerprint_via_extra_forbid(client: TestClient) -> None
         r = client.post(
             "/api/v1/targets",
             json={
-                "name": "rdc-vault",
+                "name": "vault-a",
                 "product": "vault",
                 "host": "vault.example.test",
                 # Pydantic v2 ConfigDict(extra='forbid') rejects this.

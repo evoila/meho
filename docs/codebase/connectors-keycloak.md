@@ -385,6 +385,12 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.user.check_login` | caution | `POST /realms/{realm}/protocol/openid-connect/token` (see "Login test") |
 | `keycloak.user.required_actions.update` | dangerous | `PUT .../users/{user-id}` (see "One-time code set-up") |
 
+To make a machine login for an agent seat, with its secret stored in Vault
+and optionally placed in a file on a host, use the three-step recipe in
+[connectors-secret-broker.md](connectors-secret-broker.md), "Ops example — a
+machine login for an agent seat". Step 1 is `keycloak.client.create`, which never returns
+the secret.
+
 Six more writes are `dangerous` because they can change who gets which
 tenant rights, or how strong a sign-in is. MEHO reads the rights from the
 login token, and these writes change what goes into it, who can sign in as

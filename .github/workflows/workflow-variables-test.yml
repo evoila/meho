@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Tests for the repository variables the workflows read.
+#
+# Some workflows read working values from repository variables (the image
+# proxy, the spec shelf repository, the CI cluster's OIDC audience, the
+# name of the proxy CA). .github/tests/test_repo_variables.py checks what
+# each workflow does when a variable is set and when it is not set: which
+# image it pulls, which steps run or skip, and which step fails with a
+# clear message.
+#
+# Not a required check, so the path filter is safe. GitHub-hosted runner:
+# the test needs only Python, PyYAML, pytest and Node, no internal service.
+
+name: workflow-variables-test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/tests/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/tests/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-variables-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Workflow repository variables
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        # Same pinned uv as the Python jobs in ci.yml.
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.13.0"
+          add-problem-matchers: false
+
+      - name: Pytest (.github/tests)
+        # Same pytest and PyYAML versions as backend/uv.lock.
+        run: >-
+          uv run --no-project --with pytest==9.2.0 --with pyyaml==6.0.3
+          python -m pytest -q -p no:cacheprovider .github/tests

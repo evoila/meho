@@ -67,7 +67,9 @@ global):
      tags-when-unchanged) when changed, advance ``updated_at``.
      ``safety_level`` and ``requires_approval`` only move up: a
      stricter value saved on the row (for example by an operator,
-     #5037) stays. The "skip re-embed"
+     #5037) stays. A ``custom_description`` or ``llm_instructions``
+     that an admin edited (listed in ``admin_edited_fields``, #5321)
+     also stays, and the embedding text uses the admin's description. The "skip re-embed"
      branch is the operationally critical path for connector init
      speed on restart -- a connector with 50 typed ops avoids 50
      ONNX inferences (~500-2500 ms total CPU) every pod restart
@@ -1792,6 +1794,22 @@ async def _register_in_session(
                 f"(handler_ref={handler_ref!r}). If this is intentional, "
                 "delete the existing endpoint_descriptor row first."
             )
+
+        # #5321: a field an admin edited keeps the admin's value. The code
+        # value no longer reaches the row, and the embedding text below uses
+        # the admin's description, so search finds the op by it.
+        admin_edited = existing.admin_edited_fields or []
+        if "custom_description" in admin_edited:
+            custom_description = existing.custom_description
+        if "llm_instructions" in admin_edited:
+            llm_instructions = existing.llm_instructions
+        incoming_text = build_embedding_text(
+            summary=summary,
+            description=description,
+            custom_description=custom_description,
+            tags=tags_list,
+        )
+        incoming_hash = compute_embedding_text_hash(incoming_text)
 
         # A built-in network check stored with the old caller-address values
         # goes back to its new values before the raise-only update below.

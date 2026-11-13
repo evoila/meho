@@ -192,9 +192,14 @@ rows in the realm `meho`.
 ## 5. Check the approval sign-in (required)
 
 `meho approvals approve` signs in through its own login flow in realm
-`meho`: `meho approval sign-in`, bound to the client `meho-cli-approve`.
-The flow asks for the password, and for the one-time code when the person
-has set one up. It has no other step. Every install needs this flow and
+`meho`: `meho approval sign-in level`, bound to the client
+`meho-cli-approve`. The flow asks for the password, and for the one-time
+code when the person has set one up. It has no other step. It gives the
+sign-in the approval level `meho-approve` (level 2 of the realm's sign-in
+levels); a sign-in through your company login does not get it. With the
+default `APPROVAL_SIGN_IN_LEVEL=auto`, MEHO requires the level as soon as
+its check of the approval sign-in is `ok`
+([The approval level](../keycloak-realm.md#the-approval-level)). Every install needs this flow and
 its binding.
 
 - **MEHO's built-in Keycloak in front of yours (this page):** the install

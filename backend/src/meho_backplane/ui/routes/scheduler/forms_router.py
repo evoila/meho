@@ -58,7 +58,6 @@ _require_admin_dep = Depends(resolve_operator_or_403)
 #: before the bytes reach the schema.
 _CRON_MAX = 128
 _TIMEZONE_MAX = 64
-_WORK_REF_MAX = 256
 _FIRE_AT_MAX = 64
 _JSON_MAX = 16384
 
@@ -103,7 +102,7 @@ async def _create_submit_handler(
     event_filter: str | None = Form(default=None, max_length=_JSON_MAX),
     inputs: str | None = Form(default=None, max_length=_JSON_MAX),
     in_flight_policy: str = Form(default="fail_into_audit"),
-    work_ref: str | None = Form(default=None, max_length=_WORK_REF_MAX),
+    work_ref: str | None = Form(default=None),
     start_on: str = Form(default="custom", max_length=16),
     check_source_ref: str | None = Form(default=None, max_length=64),
     only_worsening: bool = Form(default=False),

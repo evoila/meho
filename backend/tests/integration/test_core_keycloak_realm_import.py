@@ -300,6 +300,9 @@ def test_one_tenant_login_lists_one_tenant(keycloak: _Keycloak) -> None:
     assert claims["tenant_id"] == _TENANT_ID
     assert claims["tenant_role"] == "operator"
     assert "approver" not in claims
+    # The realm names its sign-in levels (#6281), but a normal login keeps
+    # acr "1": only the approval sign-in flow reaches the named level 2.
+    assert claims["acr"] == "1"
 
 
 def test_confidential_clients_use_the_secrets_from_the_environment(keycloak: _Keycloak) -> None:

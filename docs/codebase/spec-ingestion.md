@@ -1327,6 +1327,32 @@ reason, author and time of an approval exception.
 so it is lost at the next start (typed) or re-ingest (ingested). Existing
 stricter edits on rows stay until then; re-apply them once with
 `edit-op` to make them stick.
+
+### What survives a start for a typed operation (#5321)
+
+Typed and composite operations are registered from code at every start
+(`operations/typed_register.py`). What happens to each field:
+
+| Field | After a start |
+|---|---|
+| `summary`, `description`, `tags`, schemas, `handler_ref`, group | Written from code. A change in code reaches the database. |
+| `safety_level`, `requires_approval` | Only move up on the row. An admin's choice is an override (see above). |
+| `is_enabled` | Kept. |
+| `custom_description`, `llm_instructions` | Kept when an admin edited them. Otherwise written from code. |
+
+An admin edit (`ReviewService.edit_op`) of `custom_description` or
+`llm_instructions` adds the field name to the row's
+`endpoint_descriptor.admin_edited_fields` (migration `0164`, a JSON list;
+NULL means no edit). At the next start the registration keeps the stored
+value of each listed field and does not write the value from code. The
+embedding text is built from the kept description, so search still finds
+the operation by the admin's words. Clearing `custom_description` also
+counts as an edit: the field stays empty. Ingested operations ignore the
+list: a new ingest writes them as before.
+
+**Upgrade.** An edit made before migration `0164` has no mark. The next
+start writes the value from code, so edit it once more to make it stick.
+
 ### Each tenant turns built-in operations on or off (#5029)
 
 A built-in operation row (`endpoint_descriptor.tenant_id IS NULL`) is

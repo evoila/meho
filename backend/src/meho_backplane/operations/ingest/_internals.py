@@ -964,6 +964,13 @@ def validate_edit_op_args(
         )
 
 
+def _mark_admin_edited(op_row: EndpointDescriptor, field: str) -> None:
+    """Record that an admin set *field*, so typed registration keeps it (#5321)."""
+    marked = list(op_row.admin_edited_fields or [])
+    if field not in marked:
+        op_row.admin_edited_fields = [*marked, field]
+
+
 def apply_op_overrides(
     op_row: EndpointDescriptor,
     *,
@@ -990,12 +997,14 @@ def apply_op_overrides(
     if custom_description is not _UNSET:
         op_row.custom_description = custom_description
         fields_updated.append("custom_description")
+        _mark_admin_edited(op_row, "custom_description")
     if is_enabled is not None:
         op_row.is_enabled = is_enabled
         fields_updated.append("is_enabled")
     if llm_instructions is not None:
         op_row.llm_instructions = llm_instructions
         fields_updated.append("llm_instructions")
+        _mark_admin_edited(op_row, "llm_instructions")
     return fields_updated
 
 

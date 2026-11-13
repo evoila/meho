@@ -150,3 +150,46 @@ func TestRunEditSurfacesServerErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestRunPauseAndResumeSendStatusAlone(t *testing.T) {
+	for _, verb := range []string{"pause", "resume"} {
+		want := map[string]string{"pause": "paused", "resume": "active"}[verb]
+		t.Run(verb, func(t *testing.T) {
+			var raw map[string]any
+			var method string
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v1/sensors/"+stubSensorID, func(w http.ResponseWriter, r *http.Request) {
+				method = r.Method
+				body, _ := io.ReadAll(r.Body)
+				if err := json.Unmarshal(body, &raw); err != nil {
+					t.Fatalf("decode body: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(fakeSensor(t, "interval"))
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			seedXDGAndToken(t, srv.URL)
+
+			cmd, stdout, stderr := newRunCmd(t)
+			root := NewRootCmd()
+			root.SetOut(stdout)
+			root.SetErr(stderr)
+			root.SetArgs([]string{verb, stubSensorID, "--backplane", srv.URL})
+			if err := root.ExecuteContext(cmd.Context()); err != nil {
+				t.Fatalf("%s: %v; stderr=%s", verb, err, stderr.String())
+			}
+			if method != http.MethodPatch {
+				t.Errorf("expected PATCH; got %s", method)
+			}
+			if raw["status"] != want {
+				t.Errorf("expected status %q; got %v", want, raw["status"])
+			}
+			for _, key := range []string{"name", "params", "severity"} {
+				if raw[key] != nil {
+					t.Errorf("%s must not be sent; got %v", key, raw[key])
+				}
+			}
+		})
+	}
+}

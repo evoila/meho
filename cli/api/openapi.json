@@ -6617,7 +6617,7 @@
           "knowledge"
         ],
         "summary": "Import Kb Pages",
-        "description": "Import knowledge pages sent in the request into the caller's tenant (#5728).\n\nThe team wiki's CI job calls this after each merge, with the\n``kb_import_only`` login. A ``tenant_admin`` may call it too. Every\npage gets one row in the answer: ``create``, ``update``,\n``unchanged`` or ``skip`` with the reason. ``dry_run`` writes\nnothing. The rules are in :mod:`meho_backplane.kb.page_import`.\n\nBinds ``audit_op_id=\"kb.import\"`` + ``audit_op_class=\"write\"`` and\nthe four counters. The page texts are never in the audit payload.",
+        "description": "Import knowledge pages sent in the request into the caller's tenant (#5728).\n\nThe tenant wiki's CI job calls this after each merge, with the\n``kb_import_only`` login. A ``tenant_admin`` may call it too. Every\npage gets one row in the answer: ``create``, ``update``,\n``unchanged`` or ``skip`` with the reason. ``dry_run`` writes\nnothing. The rules are in :mod:`meho_backplane.kb.page_import`.\n\nBinds ``audit_op_id=\"kb.import\"`` + ``audit_op_class=\"write\"`` and\nthe four counters. The page texts are never in the audit payload.",
         "operationId": "import_kb_pages_api_v1_kb_import_post",
         "parameters": [
           {
@@ -6671,7 +6671,7 @@
           "knowledge"
         ],
         "summary": "Export Kb Pages",
-        "description": "Return the caller's confirmed and candidate generic entries as Markdown pages (#5730).\n\nThe team wiki's CI job calls this with the ``kb_export_only`` login,\nwrites the pages into the wiki and opens a merge request there. An\noperator may call it too (``meho kb export``). MEHO writes nothing.\nThe rules are in :mod:`meho_backplane.kb.page_export`.\n\nBinds ``audit_op_id=\"kb.export\"`` + ``audit_op_class=\"read\"`` and\nthe three counters. The page texts are never in the audit payload.",
+        "description": "Return the caller's confirmed and candidate generic entries as Markdown pages (#5730).\n\nThe tenant wiki's CI job calls this with the ``kb_export_only`` login,\nwrites the pages into the wiki and opens a merge request there. An\noperator may call it too (``meho kb export``). MEHO writes nothing.\nThe rules are in :mod:`meho_backplane.kb.page_export`.\n\nBinds ``audit_op_id=\"kb.export\"`` + ``audit_op_class=\"read\"`` and\nthe three counters. The page texts are never in the audit payload.",
         "operationId": "export_kb_pages_api_v1_kb_export_post",
         "parameters": [
           {
@@ -40185,7 +40185,7 @@
           "wiki": {
             "$ref": "#/components/schemas/KbWikiSearch",
             "nullable": true,
-            "description": "Only with source='kb' on a tenant that keeps its lessons in a team wiki: the wiki's hits, or why the wiki was not searched. Null otherwise."
+            "description": "Only with source='kb' on a tenant that keeps its lessons in a tenant wiki: the wiki's hits, or why the wiki was not searched. Null otherwise."
           }
         },
         "type": "object",

@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 import respx
+import structlog
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -315,6 +316,39 @@ async def test_a_failure_that_is_not_a_refused_login_is_not_counted(
 
 
 @pytest.mark.asyncio
+async def test_only_a_successful_call_sets_the_count_back_to_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout or another failed call between refused logins keeps the count."""
+
+    async def _timeout() -> OperationResult:
+        raise TimeoutError
+
+    async def _error() -> OperationResult:
+        return OperationResult(status="error", op_id="x", error="boom", duration_ms=1.0)
+
+    async def _auth() -> OperationResult:
+        return _auth_failed_result()
+
+    async def _ok() -> OperationResult:
+        return _ok_result({"count": 1})
+
+    steps = [_auth, _timeout, _error, _auth, _ok]
+
+    async def _dispatch(**_kwargs: Any) -> OperationResult:
+        return await steps.pop(0)()
+
+    monkeypatch.setattr("meho_backplane.checks.runner.dispatch", _dispatch)
+    sensor_id = await _create_interval_sensor()
+    assert (await _tick(sensor_id)).auth_failure_count == 1
+    assert (await _tick(sensor_id)).auth_failure_count == 1
+    assert (await _tick(sensor_id)).auth_failure_count == 1
+    assert (await _tick(sensor_id)).auth_failure_count == 2
+    row = await _tick(sensor_id)
+    assert (row.status, row.auth_failure_count) == ("active", 0)
+
+
+@pytest.mark.asyncio
 async def test_resume_after_auth_pause_runs_again_and_resets_count(
     monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
@@ -535,10 +569,15 @@ async def test_mcp_pause_resume_and_not_found() -> None:
     sensor_id = await _seed_sensor(name="mcp")
     other = await _seed_sensor(name="mcp-other", tenant_id=_TENANT_B)
     args = {"sensor_id": str(sensor_id)}
+    structlog.contextvars.clear_contextvars()
     paused = await mcp_sensors._status_handler("pause", mcp_sensors.SensorStatus.PAUSED)(
         _admin(_TENANT_A), args
     )
     assert paused["status"] == "paused"
+    bound = structlog.contextvars.get_contextvars()
+    assert bound["audit_before"] == {"status": "active", "status_reason": None}
+    assert bound["audit_after"] == {"status": "paused", "status_reason": "paused_by_operator"}
+    structlog.contextvars.clear_contextvars()
     again = await mcp_sensors._status_handler("pause", mcp_sensors.SensorStatus.PAUSED)(
         _admin(_TENANT_A), args
     )

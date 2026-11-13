@@ -381,7 +381,8 @@ not claimed by the runner, so it makes no call to its target. The row, its
   `sensor.resume` for MCP) carries the status before and after.
 - An edit that does not name `status` keeps a paused Sensor paused. Only a
   Sensor the runner parked for a broken cadence (`invalid_cadence:*`)
-  becomes `active` again.
+  becomes `active` again. A Dashboard file import that changes the Sensor
+  follows the same rule.
 
 **Pause after refused logins** (`checks/auth_park.py`). When the credential
 of a target is no longer valid, every run starts a new login that fails.
@@ -391,7 +392,9 @@ the runs in a row where the dispatcher answered `connector_auth_failed`
 `sensor.auth_failure_count` (migration `0164`). It reaches
 `SENSOR_AUTH_FAILURE_PARK_THRESHOLD` (default 3): the runner sets
 `status='paused'` with `status_reason='auth_failed:ConnectorAuthError'` and
-stops calling the target. Any other result sets the count to 0. The count,
+stops calling the target. Only a run whose call to the target succeeded
+sets the count back to 0; a timeout or another failed call leaves it as it
+is. The count,
 the pause and the result commit in one transaction. After the commit, the
 runner mails a warning (reason `target_credential_stale`,
 `checks/park_notify.py`) to the `notify_email` of every Dashboard that holds
@@ -526,7 +529,9 @@ A Dashboard and its Sensors can move to another site as one JSON file
 - Then, in one transaction with the shared connector-usage lock, Sensors and
   the Dashboard are matched by name in the tenant. A missing one is created,
   a different one is updated (like an edit: due at once, the soft-state
-  window cleared), an equal one is not written. The Dashboard's members
+  window cleared; a Sensor paused by an operator or after refused logins
+  stays paused, only one paused for a broken cadence becomes `active`), an
+  equal one is not written. The Dashboard's members
   become the Sensors of the file; a member that is not in the file leaves
   the Dashboard but is not deleted. The Dashboard's mail address stays. So
   the same file imported twice changes nothing the second time

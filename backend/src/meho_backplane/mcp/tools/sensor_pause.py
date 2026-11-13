@@ -9,7 +9,8 @@
 
 Both mirror ``PATCH /api/v1/sensors/{id}`` with ``status``. A paused sensor
 keeps its id, result history and dashboards. Both are safe to call twice.
-An absent or cross-tenant id gives ``sensor_not_found``.
+An absent or cross-tenant id gives ``sensor_not_found``. As on the REST
+route, the audit row carries ``before`` and ``after`` with the status.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ def _status_handler(verb: str, status: SensorStatus) -> ToolHandler:
         result = await set_sensor_status(operator.tenant_id, sensor_id, status)
         if result is None:
             raise McpInvalidParamsError("sensor_not_found")
+        structlog.contextvars.bind_contextvars(audit_before=result.before, audit_after=result.after)
         return result.sensor.model_dump(mode="json")
 
     return _handler

@@ -22,8 +22,7 @@ Route inventory
 * ``POST /api/v1/sensors`` -- create a sensor. Body:
   :class:`~meho_backplane.checks.schemas.SensorCreate`. Returns the row
   with HTTP 201. Role: ``tenant_admin``. The safe-only guard refuses a
-  non-safe / unknown op with 422; there is no pause / resume path
-  (status transitions only via #2505's parking).
+  non-safe / unknown op with 422. A new sensor starts ``active``.
 * ``DELETE /api/v1/sensors/{sensor_id}`` -- hard-delete a sensor. Returns
   204. Role: ``tenant_admin``.
 * ``PATCH /api/v1/sensors/{sensor_id}`` -- edit a sensor in place: the id,
@@ -31,7 +30,10 @@ Route inventory
   runs once right after the change. Body:
   :class:`~meho_backplane.checks.sensor_edit.SensorUpdate`. Role:
   ``tenant_admin``. The audit row carries ``before`` / ``after`` with the
-  changed fields.
+  changed fields. A body with only ``status`` (``paused`` or ``active``)
+  pauses or resumes the sensor: a paused sensor is not run and keeps its
+  id, history and dashboards. The runner also pauses a sensor after a few
+  refused logins; a resume runs it again at once.
 
 Tenant scoping + cross-tenant admin
 -----------------------------------

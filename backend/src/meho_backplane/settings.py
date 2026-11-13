@@ -2283,6 +2283,9 @@ class Settings(BaseModel):
     # evaluator (or the test path without a runner) can opt out.
     sensor_runner_enabled: bool = True
     sensor_runner_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    # A Sensor whose target refuses the login this many times in a row is
+    # paused, so a stale credential is not tried on every tick.
+    sensor_auth_failure_park_threshold: int = Field(default=3, ge=1, le=1000)
     # #2763 — evaluation-loop watchdog. A stall is "no completed runner tick
     # for stall_after_ticks x tick_interval_seconds" (default 6 x 10 s = 60 s);
     # the threshold scales with the tick grid so a deployment that slows the
@@ -2539,6 +2542,14 @@ class Settings(BaseModel):
     #: Only the outcome changes, never the hits or their order. Set via
     #: ``SEARCH_CLEAR_LEAD``.
     search_clear_lead: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Node size and reserved room in ``k8s.node.list`` (#4652), behind a
+    #: switch that is off by default. When on, each node row also has
+    #: ``capacity``, ``allocatable``, ``requested`` and ``requests_error``,
+    #: and the op's description, ``llm_instructions`` and response schema
+    #: name them (:mod:`meho_backplane.connectors.kubernetes._node_resources`).
+    #: The node list then also reads the pods of all namespaces. Off: the op
+    #: is as before. Set via ``K8S_NODE_LIST_RESOURCES``.
+    k8s_node_list_resources: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Wider ``preview_operation`` for typed writes (#5074), behind a switch
     #: that is off by default. When on, a typed write previews also when it
     #: does not carry ``requires_approval``, and a credential write with its
@@ -3478,6 +3489,9 @@ def get_settings() -> Settings:
         sensor_runner_tick_interval_seconds=int(
             os.environ.get("SENSOR_RUNNER_TICK_INTERVAL_SECONDS", "10"),
         ),
+        sensor_auth_failure_park_threshold=int(
+            os.environ.get("SENSOR_AUTH_FAILURE_PARK_THRESHOLD", "3"),
+        ),
         sensor_runner_enabled=parse_bool_env(
             os.environ.get("SENSOR_RUNNER_ENABLED", "true"),
         ),
@@ -3571,6 +3585,9 @@ def get_settings() -> Settings:
         ),
         search_clear_lead=parse_bool_env(
             os.environ.get("SEARCH_CLEAR_LEAD"),
+        ),
+        k8s_node_list_resources=parse_bool_env(
+            os.environ.get("K8S_NODE_LIST_RESOURCES"),
         ),
         preview_typed_writes=parse_bool_env(
             os.environ.get("PREVIEW_TYPED_WRITES"),

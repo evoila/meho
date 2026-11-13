@@ -11690,7 +11690,7 @@
           "sensors"
         ],
         "summary": "Edit Sensor",
-        "description": "Change some fields of one sensor; keep its id, history and dashboards.\n\n``tenant_admin`` only. Only the fields in the body change. The changed\nsensor is checked like a new one: an invalid result is 422\n``sensor_edit_invalid``, an unknown or non-safe operation is 422, and a\nname that is taken is 409. A cross-tenant / absent id is 404\n``sensor_not_found``. After the change the sensor is due at once, so the\nrunner checks it on its next tick. The audit row of the request carries\n``before`` and ``after`` with the changed fields (secret-named values\nhidden).",
+        "description": "Change some fields of one sensor; keep its id, history and dashboards.\n\n``tenant_admin`` only. Only the fields in the body change. The changed\nsensor is checked like a new one: an invalid result is 422\n``sensor_edit_invalid``, an unknown or non-safe operation is 422, and a\nname that is taken is 409. A cross-tenant / absent id is 404\n``sensor_not_found``. After the change the sensor is due at once, so the\nrunner checks it on its next tick. The audit row of the request carries\n``before`` and ``after`` with the changed fields (secret-named values\nhidden).\n\n``status`` (``paused`` or ``active``), sent alone, pauses or resumes the\nsensor. A paused sensor is not run and keeps its id, history and\ndashboards. Pause and resume are safe to send twice.",
         "operationId": "edit_sensor_api_v1_sensors__sensor_id__patch",
         "parameters": [
           {
@@ -27567,6 +27567,11 @@
             "type": "string",
             "nullable": true,
             "title": "Execution Outcome"
+          },
+          "exit_code": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Exit Code"
           }
         },
         "type": "object",
@@ -27836,6 +27841,15 @@
             },
             "type": "array",
             "title": "Citations"
+          },
+          "answer_source": {
+            "type": "string",
+            "enum": [
+              "local",
+              "upstream"
+            ],
+            "nullable": true,
+            "title": "Answer Source"
           }
         },
         "type": "object",
@@ -27844,7 +27858,7 @@
           "citations"
         ],
         "title": "AskDocsResponse",
-        "description": "Successful response shape for ``/api/v1/ask_docs``.\n\n``answer`` is the grounded, cited answer -- composed strictly from the\nretrieved chunks (no claim without a citation) or, on an empty\nretrieval, the deterministic\n:data:`~meho_backplane.docs_search.NO_GROUNDED_ANSWER` string. Frozen so\nan accidental post-construction mutation surfaces as a pydantic error\nrather than a silently-altered response.\n\n``citations`` is the subset of retrieved chunks the answer relied on,\neach serialised with its resolved navigable ``link`` (#1919) -- the\n**same** citation shape the MCP ``ask_docs`` tool returns, so a client\nconsuming either face resolves citations identically. The list entries\nare the raw :class:`~meho_backplane.docs_search.DocsChunk` fields plus a\n``link`` member; modelled as ``list[dict]`` (not a typed model) because\nthe ``link`` shape is produced by the shared\n:func:`~meho_backplane.docs_search.citation_link_payload` helper, kept as\nthe single source of truth for the citation-link contract."
+        "description": "Successful response shape for ``/api/v1/ask_docs``.\n\n``answer`` is the grounded, cited answer -- composed strictly from the\nretrieved chunks (no claim without a citation) or, on an empty\nretrieval, the deterministic\n:data:`~meho_backplane.docs_search.NO_GROUNDED_ANSWER` string. Frozen so\nan accidental post-construction mutation surfaces as a pydantic error\nrather than a silently-altered response.\n\n``citations`` is the subset of retrieved chunks the answer relied on,\neach serialised with its resolved navigable ``link`` (#1919) -- the\n**same** citation shape the MCP ``ask_docs`` tool returns, so a client\nconsuming either face resolves citations identically. The list entries\nare the raw :class:`~meho_backplane.docs_search.DocsChunk` fields plus a\n``link`` member; modelled as ``list[dict]`` (not a typed model) because\nthe ``link`` shape is produced by the shared\n:func:`~meho_backplane.docs_search.citation_link_payload` helper, kept as\nthe single source of truth for the citation-link contract.\n\n``answer_source`` names the path that wrote the answer: ``local`` (the\nbackplane's own pipeline) or ``upstream`` (the collection backend's answer\nendpoint). It names a path, never document content."
       },
       "AssertionSpec": {
         "properties": {
@@ -42105,12 +42119,21 @@
           "severity": {
             "$ref": "#/components/schemas/SensorSeverity",
             "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "paused"
+            ],
+            "nullable": true,
+            "title": "Status"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "SensorUpdate",
-        "description": "Request body for ``PATCH /api/v1/sensors/{sensor_id}``.\n\nEvery field is optional. A field that is left out, or sent as ``null``,\nkeeps its value. At least one field must be set.\n\nTo change the cadence kind, send ``cadence_kind`` with its matching\nfield: ``interval_seconds`` for ``interval``, ``cron_expr`` (and\noptionally ``timezone``) for ``cron``. The field of the old kind is\ncleared."
+        "description": "Request body for ``PATCH /api/v1/sensors/{sensor_id}``.\n\nEvery field is optional. A field that is left out, or sent as ``null``,\nkeeps its value. At least one field must be set.\n\nTo change the cadence kind, send ``cadence_kind`` with its matching\nfield: ``interval_seconds`` for ``interval``, ``cron_expr`` (and\noptionally ``timezone``) for ``cron``. The field of the old kind is\ncleared.\n\n``status`` (``paused`` or ``active``) pauses or resumes the Sensor. It is\nsent alone, without other fields."
       },
       "ServiceGrantCreate": {
         "properties": {

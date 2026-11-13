@@ -353,6 +353,7 @@ def test_ask_docs_returns_grounded_cited_answer(client: TestClient) -> None:
     body = response.json()
     assert body["answer"].startswith("NSX 9.0 supports")
     assert len(body["citations"]) == 1
+    assert body["answer_source"] == "local"
     citation = body["citations"][0]
     assert citation["chunk_id"] == "nsx-9.0-maximums-0007"
     # #1919: an https source passes through as the clickable href (SAME shape

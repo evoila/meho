@@ -28,8 +28,6 @@ from meho_backplane.connectors.registry import _eager_import_connectors
 _WAITING_FOR_RANGE: dict[str, str] = {
     "PrometheusConnector": "#6262",
     "VaultConnector": "#6263",
-    "PfSenseConnector": "#6264",
-    "Bind9Connector": "#6264",
     "HypervConnector": "the Windows connectors (no Task yet)",
     "MsadConnector": "the Windows connectors (no Task yet)",
     "WindowsDnsConnector": "the Windows connectors (no Task yet)",

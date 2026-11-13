@@ -78,6 +78,12 @@ const (
 	ApprovalSignInStatusStateOk          ApprovalSignInStatusState = "ok"
 )
 
+// Defines values for AskDocsResponseAnswerSource.
+const (
+	AskDocsResponseAnswerSourceLocal    AskDocsResponseAnswerSource = "local"
+	AskDocsResponseAnswerSourceUpstream AskDocsResponseAnswerSource = "upstream"
+)
+
 // Defines values for AuditEventClass.
 const (
 	AuditEventClassApprovalDecision   AuditEventClass = "approval_decision"
@@ -750,6 +756,12 @@ const (
 const (
 	SensorStatusActive SensorStatus = "active"
 	SensorStatusPaused SensorStatus = "paused"
+)
+
+// Defines values for SensorUpdateStatus.
+const (
+	SensorUpdateStatusActive SensorUpdateStatus = "active"
+	SensorUpdateStatusPaused SensorUpdateStatus = "paused"
 )
 
 // Defines values for SessionDetailState.
@@ -2022,6 +2034,7 @@ type ApprovalResumeOutcomeView struct {
 	AuditId          *openapi_types.UUID `json:"audit_id"`
 	ErrorCode        *string             `json:"error_code"`
 	ExecutionOutcome *string             `json:"execution_outcome"`
+	ExitCode         *int                `json:"exit_code"`
 	Guidance         *string             `json:"guidance"`
 	ResultStatus     *string             `json:"result_status"`
 	ResumedAt        *string             `json:"resumed_at"`
@@ -2157,10 +2170,18 @@ type AskDocsRequest struct {
 // the “link“ shape is produced by the shared
 // :func:`~meho_backplane.docs_search.citation_link_payload` helper, kept as
 // the single source of truth for the citation-link contract.
+//
+// “answer_source“ names the path that wrote the answer: “local“ (the
+// backplane's own pipeline) or “upstream“ (the collection backend's answer
+// endpoint). It names a path, never document content.
 type AskDocsResponse struct {
-	Answer    string                   `json:"answer"`
-	Citations []map[string]interface{} `json:"citations"`
+	Answer       string                       `json:"answer"`
+	AnswerSource *AskDocsResponseAnswerSource `json:"answer_source"`
+	Citations    []map[string]interface{}     `json:"citations"`
 }
+
+// AskDocsResponseAnswerSource defines model for AskDocsResponse.AnswerSource.
+type AskDocsResponseAnswerSource string
 
 // AssertionSpec A full assertion: one select stage feeding one typed comparator.
 //
@@ -10774,6 +10795,9 @@ type SensorStatus string
 // field: “interval_seconds“ for “interval“, “cron_expr“ (and
 // optionally “timezone“) for “cron“. The field of the old kind is
 // cleared.
+//
+// “status“ (“paused“ or “active“) pauses or resumes the Sensor. It is
+// sent alone, without other fields.
 type SensorUpdate struct {
 	// Assertion A full assertion: one select stage feeding one typed comparator.
 	//
@@ -10815,9 +10839,13 @@ type SensorUpdate struct {
 	// ``critical`` one contributes ``critical``. The five-state vocabulary
 	// itself is declared once in #2504's :data:`CheckState`; this is only
 	// the two operator-selectable severities.
-	Severity *SensorSeverity `json:"severity,omitempty"`
-	Timezone *string         `json:"timezone"`
+	Severity *SensorSeverity     `json:"severity,omitempty"`
+	Status   *SensorUpdateStatus `json:"status"`
+	Timezone *string             `json:"timezone"`
 }
+
+// SensorUpdateStatus defines model for SensorUpdate.Status.
+type SensorUpdateStatus string
 
 // ServiceGrantCreate Body for creating a standing scoped auto-approval grant.
 //

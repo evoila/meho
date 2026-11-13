@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import ipaddress
 from typing import Any
-from xml.etree.ElementTree import ParseError, fromstring
+
+from defusedxml.ElementTree import ParseError, fromstring
 
 from meho_backplane.connectors.pfsense.ops_write import _php_squote
 
@@ -115,7 +116,7 @@ def rules_reaching(
     """
     try:
         root = fromstring(xml_text)
-    except ParseError as exc:
+    except (ParseError, ValueError) as exc:  # defusedxml's refusals are ValueErrors
         raise RuntimeError(f"openvpn.user.delete: config.xml could not be read: {exc}") from exc
     if root.tag != "pfsense":
         return []

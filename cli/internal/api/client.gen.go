@@ -4440,17 +4440,12 @@ type ClassificationTaxonomyOut struct {
 //
 // “in_force“ is “null“ when the operation's row is gone.
 type ClassificationValues struct {
-	AlwaysWait bool    `json:"always_wait"`
-	Category   *string `json:"category"`
-
-	// InForce What applies to one operation: the code's value, overrides, classification, floors.
-	//
-	// A floor (a minimum-level rule in the code) can keep a wait or a level
-	// that the classification alone would not set.
-	InForce ClassificationInForce `json:"in_force"`
-	Labels  map[string]string     `json:"labels"`
-	Risk    *string               `json:"risk"`
-	RuleRef string                `json:"rule_ref"`
+	AlwaysWait bool                   `json:"always_wait"`
+	Category   *string                `json:"category"`
+	InForce    *ClassificationInForce `json:"in_force"`
+	Labels     map[string]string      `json:"labels"`
+	Risk       *string                `json:"risk"`
+	RuleRef    string                 `json:"rule_ref"`
 }
 
 // ConfirmVerify Operator answers a yes/no prompt; only an affirmative advances.
@@ -11757,10 +11752,8 @@ type TenantMailRecipientPolicyUpdate struct {
 // (“openai:qwen3“) or the model name alone (“qwen3“). “price“ sets the
 // price; “null“ removes it. Both keys are required.
 type TenantModelPriceUpdate struct {
-	Model string `json:"model"`
-
-	// Price Price of one model, in USD per million tokens.
-	Price ModelPrice `json:"price"`
+	Model string      `json:"model"`
+	Price *ModelPrice `json:"price"`
 }
 
 // TenantModelPrices The tenant's prices for agent models MEHO does not know (#5853).

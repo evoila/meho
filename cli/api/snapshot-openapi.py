@@ -21,6 +21,12 @@
 #      `exclusiveMaximum: true`. oapi-codegen v2 models these fields
 #      as bool and rejects the numeric form outright.
 #
+# One more rewrite is for oapi-codegen itself: a required property that
+# may be null and points to an object schema (`$ref` + `nullable`) is
+# wrapped in `allOf`. oapi-codegen drops `nullable` next to a bare
+# `$ref`, so the Go field would be a plain struct and print `null` as an
+# empty object. With the wrapper it is a pointer, and `null` stays `null`.
+#
 # All transforms are lossless for the current spec; if a richer 3.1
 # construct ever lands in the backplane (`type: ["string","null"]`
 # array form, prefixItems on tuples, etc.) extend this script
@@ -100,12 +106,39 @@ def _downgrade_exclusive_bounds(node: Any) -> Any:
     return node
 
 
+def _wrap_nullable_object_refs(spec: dict) -> dict:
+    """Wrap each required, nullable ``$ref`` to an object schema in ``allOf``.
+
+    oapi-codegen reads ``nullable`` from the schema a ``$ref`` points to,
+    not from the property, so ``{"$ref": ..., "nullable": true}`` turns
+    into a plain Go struct. ``{"allOf": [{"$ref": ...}], "nullable": true}``
+    turns into a pointer without ``omitempty``, so ``null`` survives a
+    round trip. A ``$ref`` to a non-object (an enum) is left as it is.
+    """
+    schemas = spec.get("components", {}).get("schemas", {})
+    for schema in schemas.values():
+        required = set(schema.get("required", []))
+        properties = schema.get("properties") or {}
+        for name, prop in properties.items():
+            ref = prop.get("$ref")
+            if name not in required or not prop.get("nullable") or not isinstance(ref, str):
+                continue
+            target = schemas.get(ref.rsplit("/", 1)[-1], {})
+            if target.get("type") != "object":
+                continue
+            wrapped = {"allOf": [{"$ref": ref}]}
+            wrapped.update({k: v for k, v in prop.items() if k != "$ref"})
+            properties[name] = wrapped
+    return spec
+
+
 def downgrade(spec: dict) -> dict:
     """Apply all 3.1 → 3.0 transforms on a copy of the spec."""
     spec = json.loads(json.dumps(spec))  # deep copy
     spec["openapi"] = "3.0.3"
     spec = _downgrade_anyof_null(spec)
     spec = _downgrade_exclusive_bounds(spec)
+    spec = _wrap_nullable_object_refs(spec)
     return spec
 
 

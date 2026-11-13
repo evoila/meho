@@ -31790,7 +31790,11 @@
             "title": "Rule Ref"
           },
           "in_force": {
-            "$ref": "#/components/schemas/ClassificationInForce",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ClassificationInForce"
+              }
+            ],
             "nullable": true
           }
         },
@@ -44246,7 +44250,11 @@
             "title": "Model"
           },
           "price": {
-            "$ref": "#/components/schemas/ModelPrice",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ModelPrice"
+              }
+            ],
             "nullable": true
           }
         },

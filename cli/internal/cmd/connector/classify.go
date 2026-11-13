@@ -262,8 +262,8 @@ func printClassificationPreview(w io.Writer, preview *api.ClassificationPreviewR
 
 // inForceText is what applies with the values: the code's value, the
 // overrides and the minimum-level rules included. "-" when the operation is gone.
-func inForceText(inForce api.ClassificationInForce) string {
-	if inForce.Risk == "" {
+func inForceText(inForce *api.ClassificationInForce) string {
+	if inForce == nil {
 		return "-"
 	}
 	if inForce.Waits {

@@ -27567,6 +27567,11 @@
             "type": "string",
             "nullable": true,
             "title": "Execution Outcome"
+          },
+          "exit_code": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Exit Code"
           }
         },
         "type": "object",

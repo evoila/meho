@@ -4305,6 +4305,16 @@ for approval
   names the first difference. Fix the flow by hand, then run it again.</li>
 <li><code>meho-cli-approve</code> is missing: MEHO stops before it changes anything.
   Create the client first.</li>
+<li>The target's account lacks the realm-management role <code>manage-realm</code>:
+  MEHO refuses the call before it waits for approval, and names the role
+  and the account. Give the account the role, then run it again.</li>
+<li>The account lacks <code>manage-clients</code>: the call still waits for approval.
+  A Keycloak permission to manage only <code>meho-cli-approve</code> gives the same
+  right, and MEHO cannot see it. The approval card says so. When Keycloak
+  then refuses to change the client, the error names the flow MEHO made.
+  The flow stays; run the operation again after the fix.</li>
+<li>To find the client, the account needs one of the roles <code>query-clients</code>,
+  <code>view-clients</code> or <code>manage-clients</code>. The approval card lists them.</li>
 </ul>
 <p>MEHO reads the client back after the change. <code>browser_flow_id</code> in the
 result is the flow the client now uses. Its other settings stay as they
@@ -4529,6 +4539,17 @@ approval.</p>
   <code>previous_browser_flow_id</code>.</li>
 <li><code>meho-web</code> is missing, or the Keycloak is older than 26.4: MEHO
   stops before it changes anything.</li>
+<li>The target's account lacks the realm-management role <code>manage-realm</code>:
+  MEHO refuses the call before it waits for approval, and names the role
+  and the account. Give the account the role, then run it again.</li>
+<li>The account lacks <code>manage-clients</code>: the call still waits for approval.
+  A Keycloak permission to manage only <code>meho-web</code> gives the same right,
+  and MEHO cannot see it. The approval card says so. When Keycloak then
+  refuses a change of the client, the error names the refused step and
+  what MEHO changed before (the flow, the level map). These changes
+  stay; run the operation again after the fix.</li>
+<li>To find the client, the account needs one of the roles <code>query-clients</code>,
+  <code>view-clients</code> or <code>manage-clients</code>. The approval card lists them.</li>
 </ul>
 <p>The way back: <code>keycloak.client.update</code> on <code>meho-web</code> with
 <code>{"authenticationFlowBindingOverrides": {"browser": ""}}</code>. The console
@@ -5421,6 +5442,9 @@ because it changes how every person of the realm logs in:</p>
 <li><strong>The realm uses its own flow</strong>, or the flow has no conditional one-time
   code sub-flow: MEHO stops and changes nothing. Do the steps below by
   hand.</li>
+<li><strong>The target's account lacks the realm-management role <code>manage-realm</code>:</strong>
+  MEHO refuses the call before it waits for approval, and names the role
+  and the account. Give the account the role, then run it again.</li>
 </ul>
 <p>The Keycloak server must run 26.4 or newer.</p>
 <p><strong>The way back:</strong> make <code>browser</code> the realm's browser flow again:</p>

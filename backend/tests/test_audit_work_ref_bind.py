@@ -452,13 +452,13 @@ async def _fetch_audit_rows(engine: AsyncEngine) -> list[AuditLog]:
         return list(result.scalars().all())
 
 
-def _hit_health(monkeypatch: pytest.MonkeyPatch, **headers: str) -> Any:
+def _hit_health(monkeypatch: pytest.MonkeyPatch, **headers: str | bytes) -> Any:
     """Issue an authenticated ``GET /api/v1/health`` with optional extra headers."""
     key = _make_rsa_keypair("kid-wrh")
     token = _mint_token(key, sub="op-wrh", name="Op", email="op@example.com")
     _install_fake_vault(monkeypatch)
     client = TestClient(app)
-    request_headers = {"Authorization": f"Bearer {token}", **headers}
+    request_headers: dict[str, str | bytes] = {"Authorization": f"Bearer {token}", **headers}
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         return client.get("/api/v1/health", headers=request_headers)
@@ -488,6 +488,25 @@ async def test_absent_header_leaves_work_ref_null(
     rows = await _fetch_audit_rows(isolated_audit_engine)
     assert len(rows) == 1
     assert rows[0].work_ref is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.usefixtures("_http_settings_env")
+async def test_non_ascii_header_stored_as_sent(
+    isolated_audit_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-ASCII ticket id sent as UTF-8 lands on the row as the same text.
+
+    The CLI sends ``Meho-Work-Ref`` as UTF-8 bytes. Reading them as
+    latin-1 would store ``Ã\x84nderung-7``, and a filter by the real id
+    would miss the row.
+    """
+    ref = "Änderung-7"
+    response = _hit_health(monkeypatch, **{"Meho-Work-Ref": ref.encode("utf-8")})
+    assert response.status_code == 200
+    rows = await _fetch_audit_rows(isolated_audit_engine)
+    assert len(rows) == 1
+    assert rows[0].work_ref == ref  # type: ignore[attr-defined]
 
 
 @pytest.mark.usefixtures("_http_settings_env")
@@ -594,3 +613,10 @@ def test_extract_work_ref_header_parsing() -> None:
 
     absent = {"headers": [(b"x-request-id", b"abc")]}
     assert _extract_work_ref(absent) is None  # type: ignore[arg-type]
+
+    utf8 = {"headers": [(b"meho-work-ref", "Änderung-7".encode())]}
+    assert _extract_work_ref(utf8) == "Änderung-7"  # type: ignore[arg-type]
+
+    # Bytes that are not valid UTF-8 still land, read as latin-1.
+    latin1 = {"headers": [(b"meho-work-ref", "CHG-ß1".encode("latin-1"))]}
+    assert _extract_work_ref(latin1) == "CHG-ß1"  # type: ignore[arg-type]

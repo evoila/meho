@@ -219,7 +219,7 @@ class ArgoCdConnector(HttpConnector):
     product = "argocd"
     version = "3.x"
     impl_id = "argocd-api"
-    supported_version_range = ">=2.0,<4.0"
+    supported_version_range = ">=3.0,<4.0"
     priority = 1
     # This class serves the operations of its ingested catalog.
     accepts_ingested_operations = True

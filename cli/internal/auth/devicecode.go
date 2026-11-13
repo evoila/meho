@@ -335,12 +335,13 @@ var (
 	lastCheckMargin = 2 * time.Second
 )
 
-// pollNow and pollSleep are the clock and the wait of the polling
-// loop. Tests replace them with a clock they control, so no test has
-// to wait in real time.
+// pollNow, pollSleep and pollDeadline are the clock, the wait and the
+// code's deadline of the polling loop. Tests replace them with a clock
+// they control, so no test has to wait in real time.
 var (
-	pollNow   = time.Now
-	pollSleep = sleepCtx
+	pollNow      = time.Now
+	pollSleep    = sleepCtx
+	pollDeadline = context.WithDeadline
 )
 
 // errDeviceCodeExpired is returned when the code's lifetime ran out
@@ -379,7 +380,7 @@ func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, cli
 	pollCtx := ctx
 	if !da.Expiry.IsZero() {
 		var cancel context.CancelFunc
-		pollCtx, cancel = context.WithDeadline(ctx, da.Expiry)
+		pollCtx, cancel = pollDeadline(ctx, da.Expiry)
 		defer cancel()
 	}
 	// codeEnded reports whether the code's own deadline, and not the

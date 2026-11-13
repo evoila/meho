@@ -301,8 +301,7 @@ func TestRunDeviceFlowHappyPath(t *testing.T) {
 // it in tooSoon. Such a request does not use up a script entry.
 type pollingFakeIdP struct {
 	srv *httptest.Server
-	// clock is the time the fake and the polling loop share. It is a
-	// fake clock unless the test calls useRealTime.
+	// clock is the fake time the fake and the polling loop share.
 	clock *testClock
 	// lifetime is how long the device code lives, counted on clock
 	// from the device-auth answer.
@@ -318,8 +317,9 @@ type pollingFakeIdP struct {
 	// arrive earlier than this after the device-auth answer are
 	// pending, later ones get the token.
 	approveAfter time.Duration
-	// stall makes the token endpoint hold every request open until
-	// the client gives up on it.
+	// stall makes the token endpoint hold every request open, move
+	// the clock to the code's end, and wait until the client gives up
+	// on the request.
 	stall bool
 }
 
@@ -354,7 +354,9 @@ func newPollingFakeIdP(t *testing.T, expiresIn, interval int, script []string) *
 			f.authHdrs = append(f.authHdrs, r.Header.Get("Authorization"))
 			f.clientIDs = append(f.clientIDs, r.PostForm.Get("client_id"))
 			if f.stall {
+				end := f.started.Add(f.lifetime)
 				f.mu.Unlock()
+				f.clock.advanceTo(end)
 				<-r.Context().Done()
 				return
 			}
@@ -395,39 +397,67 @@ func newPollingFakeIdP(t *testing.T, expiresIn, interval int, script []string) *
 	return f
 }
 
-// testClock is the clock of the polling tests. In fake mode, time
-// stands still and moves only when the loop waits: Sleep adds the wait
-// to the clock and returns at once. So every gap is exactly the wait
-// the loop asked for, however slow the runner is.
+// testClock is the clock of the polling tests. Time stands still and
+// moves only when the loop waits: Sleep adds the wait to the clock and
+// returns at once. So every gap is exactly the wait the loop asked
+// for, however slow the runner is. The code's deadline is on this
+// clock too: it fires when the clock reaches it.
 type testClock struct {
-	mu   sync.Mutex
-	now  time.Time
-	real bool
+	mu        sync.Mutex
+	now       time.Time
+	deadlines []clockDeadline
+}
+
+type clockDeadline struct {
+	at     time.Time
+	cancel context.CancelFunc
 }
 
 func (c *testClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.real {
-		return time.Now()
-	}
 	return c.now
 }
 
 func (c *testClock) Sleep(ctx context.Context, d time.Duration) error {
-	c.mu.Lock()
-	real := c.real
-	c.mu.Unlock()
-	if real {
-		return sleepCtx(ctx, d)
-	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	c.advanceTo(c.Now().Add(d))
+	return ctx.Err()
+}
+
+// WithDeadline returns a context that ends when the clock reaches at.
+func (c *testClock) WithDeadline(parent context.Context, at time.Time) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
 	c.mu.Lock()
-	c.now = c.now.Add(d)
+	c.deadlines = append(c.deadlines, clockDeadline{at: at, cancel: cancel})
 	c.mu.Unlock()
-	return nil
+	c.advanceTo(time.Time{})
+	return ctx, cancel
+}
+
+// advanceTo moves the clock forward to t (never back) and ends every
+// context whose deadline the clock has reached.
+func (c *testClock) advanceTo(t time.Time) {
+	c.mu.Lock()
+	if t.After(c.now) {
+		c.now = t
+	}
+	var due []context.CancelFunc
+	kept := c.deadlines[:0]
+	for _, d := range c.deadlines {
+		if d.at.After(c.now) {
+			kept = append(kept, d)
+		} else {
+			due = append(due, d.cancel)
+		}
+	}
+	c.deadlines = kept
+	c.mu.Unlock()
+	for _, cancel := range due {
+		cancel()
+	}
 }
 
 // installFakeClock makes the polling loop use a fake clock for one
@@ -435,20 +465,10 @@ func (c *testClock) Sleep(ctx context.Context, d time.Duration) error {
 func installFakeClock(t *testing.T) *testClock {
 	t.Helper()
 	c := &testClock{now: time.Now()}
-	oldNow, oldSleep := pollNow, pollSleep
-	pollNow, pollSleep = c.Now, c.Sleep
-	t.Cleanup(func() { pollNow, pollSleep = oldNow, oldSleep })
+	oldNow, oldSleep, oldDeadline := pollNow, pollSleep, pollDeadline
+	pollNow, pollSleep, pollDeadline = c.Now, c.Sleep, c.WithDeadline
+	t.Cleanup(func() { pollNow, pollSleep, pollDeadline = oldNow, oldSleep, oldDeadline })
 	return c
-}
-
-// useRealTime makes the clock follow the real time, for the one test
-// that needs the code's real context deadline to fire. lifetime
-// replaces the code's lifetime, so the test can keep it short.
-func (f *pollingFakeIdP) useRealTime(lifetime time.Duration) {
-	f.clock.mu.Lock()
-	f.clock.real = true
-	f.clock.mu.Unlock()
-	f.lifetime = lifetime
 }
 
 // setExpiry puts the code's end on the test clock. The oauth2 package
@@ -701,19 +721,17 @@ func TestRunDeviceFlowLastCheckKeepsTheGap(t *testing.T) {
 
 // TestRunDeviceFlowStalledAnswerEndsWithTheCode: an answer that never
 // arrives cannot keep the login waiting past the code's end. The code
-// lives 50ms here; the one check runs at once and stalls, and the loop
-// stops at the code's end with the "device code expired" message, not
-// the 10-minute one.
+// lives 2s and the last check is meant for 0.5s before the end, so the
+// one check runs at 1.5s and stalls. Only once that request has
+// reached the fake does the fake move the clock to the code's end. The
+// loop then stops with the "device code expired" message, not the
+// 10-minute one.
 func TestRunDeviceFlowStalledAnswerEndsWithTheCode(t *testing.T) {
 	setPollKnobs(t, 5*time.Second, 30*time.Second, 500*time.Millisecond)
 	f := newPollingFakeIdP(t, 2, 1, nil)
 	f.setStall()
-	// The code's end is a real context deadline, so this test runs in
-	// real time, with a short lifetime.
-	f.useRealTime(50 * time.Millisecond)
-	start := time.Now()
+	start := f.clock.Now()
 	_, err := runFlow(t, f)
-	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatalf("expected an error")
 	}
@@ -724,11 +742,14 @@ func TestRunDeviceFlowStalledAnswerEndsWithTheCode(t *testing.T) {
 		t.Errorf("error must not blame the 10-minute cap: %q", err.Error())
 	}
 	if got := f.requests(); got != 1 {
-		t.Errorf("token requests: %d, want 1", got)
+		t.Fatalf("token requests: %d, want 1", got)
 	}
-	// Lower bound only: a slow runner may end later, never sooner.
-	if elapsed < 50*time.Millisecond {
-		t.Errorf("loop ran %v, should wait until the code's end (50ms)", elapsed)
+	f.mu.Lock()
+	first := f.arrivals[0].Sub(start)
+	f.mu.Unlock()
+	assertGap(t, "stalled check", first, 1500*time.Millisecond)
+	if elapsed := f.clock.Now().Sub(start); elapsed != 2*time.Second {
+		t.Errorf("loop ran %v, should end at the code's end (2s)", elapsed)
 	}
 }
 

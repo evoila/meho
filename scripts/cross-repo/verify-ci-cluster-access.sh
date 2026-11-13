@@ -2,16 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 #
-# verify-rke2-access.sh — verify the rke2-infra <-> evoila/meho handshake.
+# verify-ci-cluster-access.sh — verify the CI cluster <-> evoila/meho handshake.
 #
 # Runs the kubectl half of the verification checks documented in
-# docs/cross-repo/rke2-infra-coordination.md, with one assertion per
+# docs/cross-repo/ci-cluster-coordination.md, with one assertion per
 # acceptance bullet. Either side of the handshake can run it before
 # declaring the contract closed.
 #
 # Usage:
-#   KUBECONFIG=/path/to/kubeconfig ./verify-rke2-access.sh
-#   ./verify-rke2-access.sh --namespace-prefix=meho-ci
+#   KUBECONFIG=/path/to/kubeconfig ./verify-ci-cluster-access.sh
+#   ./verify-ci-cluster-access.sh --namespace-prefix=meho-ci
 #
 # Exits 0 only when every check matches the expected outcome; non-zero
 # on any deviation. Each check prints one line: `[ok] ...` / `[FAIL] ...`.
@@ -29,7 +29,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --namespace-prefix)
             if [[ $# -lt 2 || -z "${2:-}" ]]; then
-                echo "verify-rke2-access.sh: --namespace-prefix requires a value" >&2
+                echo "verify-ci-cluster-access.sh: --namespace-prefix requires a value" >&2
                 exit 2
             fi
             NAMESPACE_PREFIX="$2"
@@ -44,14 +44,14 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         *)
-            echo "verify-rke2-access.sh: unknown argument: $1" >&2
+            echo "verify-ci-cluster-access.sh: unknown argument: $1" >&2
             exit 2
             ;;
     esac
 done
 
 if ! command -v kubectl >/dev/null 2>&1; then
-    echo "verify-rke2-access.sh: kubectl not on PATH" >&2
+    echo "verify-ci-cluster-access.sh: kubectl not on PATH" >&2
     exit 2
 fi
 
@@ -143,7 +143,7 @@ assert_can() {
     fi
 }
 
-echo "verify-rke2-access.sh: checks running against:"
+echo "verify-ci-cluster-access.sh: checks running against:"
 kubectl config current-context | sed 's/^/  context: /'
 echo "  verify namespace: $VERIFY_NS"
 echo
@@ -212,7 +212,7 @@ assert_can "can delete the verification namespace" yes \
 echo
 
 # --- Summary -------------------------------------------------------------
-printf 'verify-rke2-access.sh: %d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
+printf 'verify-ci-cluster-access.sh: %d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 if [[ "$FAIL_COUNT" -gt 0 ]]; then
     exit 1
 fi

@@ -238,7 +238,7 @@ def test_token_for_arbitrary_audience_is_rejected_at_mcp(
         _mock_discovery_and_jwks(router, jwks)
         foreign_token = _mint_mcp_token(
             keypair,
-            audience="https://some-other-service.evba.lab/api",
+            audience="https://some-other-service.example.test/api",
         )
         response = client.post(
             "/mcp",

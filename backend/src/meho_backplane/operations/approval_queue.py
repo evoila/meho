@@ -576,7 +576,7 @@ class NonHumanApprovalError(UnauthorizedApprovalError):
     """A machine (non-human) principal tried to decide an approval request.
 
     Approving / rejecting / deciding a parked op is a **human** decision
-    (v0.1-spec §7, meho-internal#289). Raised by :func:`_check_reviewer_role`
+    (v0.1-spec §7). Raised by :func:`_check_reviewer_role`
     when ``operator.principal_kind`` is a machine kind (agent / service /
     runner), independent of tenant role or the ``approver`` capability — an
     agent principal is minted ``tenant_admin``, so a role/approver check
@@ -3573,7 +3573,7 @@ def _check_reviewer_role(operator: Operator) -> None:
     """
     from meho_backplane.auth.operator import TenantRole, is_human_principal
 
-    # Human-only governance (v0.1-spec §7, meho-internal#289): a machine
+    # Human-only governance (v0.1-spec §7): a machine
     # principal (agent / service / runner) can never decide an approval,
     # regardless of tenant role or the ``approver`` capability. Checked
     # first so a machine token minted ``tenant_admin`` is refused here too.

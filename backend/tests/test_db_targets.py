@@ -764,7 +764,7 @@ async def test_target_round_trip_with_tls_ca_pin() -> None:
                 tenant_id=tenant_id,
                 name="pinned-target",
                 product="vmware-rest",
-                host="vrli.lab",
+                host="vrli.example.test",
                 tls_ca_pin=pem,
                 created_at=now,
                 updated_at=now,

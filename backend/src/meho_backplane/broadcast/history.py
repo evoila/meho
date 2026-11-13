@@ -374,8 +374,7 @@ def dump_event_wire(
 ) -> dict[str, Any]:
     """Serialise *event* for an LLM-facing response, guarding agent prose.
 
-    ``model_dump(mode="json")`` plus the stored-prompt-injection guard
-    (evoila-bosnia/meho-internal#154): on an agent-authored
+    ``model_dump(mode="json")`` plus the stored-prompt-injection guard: on an agent-authored
     :class:`AgentAnnouncementEvent`, each free-text field
     (:data:`_ANNOUNCEMENT_UNTRUSTED_FIELDS`) is wrapped via
     :func:`~meho_backplane.untrusted_text.wrap_untrusted_text` so a

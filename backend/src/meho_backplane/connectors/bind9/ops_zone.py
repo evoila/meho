@@ -280,7 +280,7 @@ def _rdata_to_text(rdata: Any) -> str:
     """Convert a :mod:`dns.rdata` instance to its zonefile text representation.
 
     :meth:`dns.rdata.Rdata.to_text` returns the canonical zonefile form
-    (e.g. ``"10.5.50.2"`` for an A, ``"10 mail.evba.lab."`` for an MX).
+    (e.g. ``"192.0.2.2"`` for an A, ``"10 mail.example.test."`` for an MX).
     Quotes in TXT records are preserved verbatim so the agent sees the
     same shape ``dig`` prints.
     """
@@ -297,11 +297,11 @@ def parse_zonefile(text: str, origin: str) -> list[dict[str, Any]]:
     .. code-block:: python
 
        {
-           "name": "www.evba.lab.",     # absolute, trailing-dot
+           "name": "www.example.test.",     # absolute, trailing-dot
            "ttl": 3600,                 # int seconds
            "class": "IN",               # rdata class string
            "type": "A",                 # rdata type string
-           "rdata": "10.5.50.2",        # canonical zonefile text
+           "rdata": "192.0.2.2",        # canonical zonefile text
        }
 
     Pure function -- delegates to :func:`dns.zone.from_text` for the
@@ -374,8 +374,8 @@ def _resolve_zonefile_path(checkconf_output: str, zone_name: str) -> str:
     """Locate the zonefile path for *zone_name* in ``named-checkconf -p`` output.
 
     Walks the parsed zone-row list, matching by name (the canonicalised
-    form has no trailing dot, so we accept both ``"evba.lab"`` and
-    ``"evba.lab."`` from the caller). Raises :class:`ZonefileReadError`
+    form has no trailing dot, so we accept both ``"example.test"`` and
+    ``"example.test."`` from the caller). Raises :class:`ZonefileReadError`
     if the zone is not configured or carries no ``file`` directive
     (the master / slave / forward types always carry a ``file``;
     type ``hint`` for the root zone may not, but that's not a zone the
@@ -563,7 +563,7 @@ BIND9_ZONE_READ_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Zone name as it appears in ``named-checkconf -p``. "
                 "Trailing dot optional -- the handler normalises. "
-                "Examples: ``evba.lab``, ``50.5.10.in-addr.arpa``."
+                "Examples: ``example.test``, ``2.0.192.in-addr.arpa``."
             ),
         },
     },

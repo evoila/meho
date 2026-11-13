@@ -91,7 +91,7 @@ async def _enable_sqlite_foreign_keys(session: AsyncSession) -> None:
     await session.execute(text("PRAGMA foreign_keys = ON"))
 
 
-async def _seed_tenant(session: AsyncSession, *, slug: str = "rdc-internal") -> uuid.UUID:
+async def _seed_tenant(session: AsyncSession, *, slug: str = "example-tenant") -> uuid.UUID:
     """Return the tenant row's id, inserting it on the first call.
 
     ``agent_run.tenant_id`` carries a real FK to :class:`Tenant`, so the
@@ -101,8 +101,8 @@ async def _seed_tenant(session: AsyncSession, *, slug: str = "rdc-internal") -> 
     The look-up-then-insert shape is defence-in-depth: migration
     ``0028`` seeds the ``default`` tenant into the per-worker schema
     template (:func:`tests.conftest._schema_template_db`) -- after
-    G0.13-T7 (#1137) generalised the seed from ``rdc-internal`` to
-    ``default``. With this helper's default ``slug='rdc-internal'``
+    G0.13-T7 (#1137) generalised the seed from an older tenant slug to
+    ``default``. With this helper's default ``slug='example-tenant'``
     the look-up returns ``None`` and the helper inserts a fresh row;
     callers passing ``slug='default'`` (none today) would land on the
     seeded row instead. Returning the seeded row's id when the slug

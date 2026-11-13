@@ -27,9 +27,8 @@
 // CLAUDE.md postulate 5: agent surface stays narrow-waist meta-tools;
 // vendor-specific tooling lives only in the CLI).
 //
-// The verb tree replaces the consumer's `scripts/bind9-dns.sh`
-// wrapper (the 2026-05-04 / 2026-05-05 credential-leak surface
-// documented in the lab repo). The atomic-
+// The verb tree lets operators read and change bind9 zones, records
+// and config through the shared dispatcher. The atomic-
 // apply rollback contract — invalid `apply_*` / bad `record.add`
 // leaves `/etc/bind/` byte-identical — is enforced by the backend's
 // `_atomic.py` primitive (#589); the CLI exposes the result envelope

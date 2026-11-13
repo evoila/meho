@@ -57,7 +57,7 @@ def test_resources_templates_list_exposes_tenant_info(
     tenant_info = [t for t in templates if t["uriTemplate"] == "meho://tenant/{tenant_id}/info"]
     assert len(tenant_info) == 1
     assert tenant_info[0]["mimeType"] == "application/json"
-    # MEHO-internal RBAC field stripped from the wire shape.
+    # internal RBAC field stripped from the wire shape.
     assert "required_role" not in tenant_info[0]
 
 
@@ -86,7 +86,7 @@ def test_resources_list_publishes_callers_own_tenant_info(
     assert len(listed) == 1
     assert listed[0]["mimeType"] == "application/json"
     assert listed[0]["name"] == "Tenant identity"
-    # MEHO-internal RBAC field stripped from the concrete wire shape.
+    # internal RBAC field stripped from the concrete wire shape.
     assert "required_role" not in listed[0]
 
 

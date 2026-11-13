@@ -34,7 +34,8 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   the Kubernetes lines upstream still maintains (1.35 to 1.37) plus 1.32,
   the oldest line CI tests. CI boots k3s 1.32, 1.35 and 1.37 for
   `tests/integration/test_connectors_k8s_k3d.py` (list in
-  `MEHO_TEST_K3S_IMAGES`). A target outside the range gets the fit
+  `MEHO_TEST_K3S_IMAGES`; the full module runs on the first image, the other
+  two run a smoke set). A target outside the range gets the fit
   warning that names the range (`checks/connector_fit.py`). Caches one
   `kubernetes_asyncio.client.ApiClient` per target, keyed on the
   target's `(tenant_id, id)` from `target_cache_key` (see

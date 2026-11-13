@@ -104,6 +104,36 @@ def _k3s_images() -> list[str]:
     return [single] if single else list(_DEFAULT_K3S_IMAGES)
 
 
+# The full module runs on the first image. The other images run this smoke
+# set only: the read paths that depend most on the server's answer shapes.
+# This keeps the CI shard inside its time limit.
+_SMOKE_TESTS = frozenset(
+    {
+        "test_fingerprint_against_k3s_returns_product_k3s",
+        "test_probe_against_running_k3s_returns_ok",
+        "test_namespace_list_against_k3s_returns_default_set",
+        "test_node_list_against_k3s_returns_at_least_one_node",
+        "test_pod_list_against_k3s_returns_kube_system_pods",
+        "test_deployment_list_against_k3s_kube_system",
+        "test_event_list_against_k3s_returns_namespaced_events",
+        "test_discover_topology_against_k3s_returns_cluster_namespaces_and_nodes",
+        "test_exec_against_k3s_captures_stdout_and_exit_zero",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _smoke_only_on_extra_images(request: pytest.FixtureRequest) -> None:
+    callspec = getattr(request.node, "callspec", None)
+    image = callspec.params.get("k3s_kubeconfig_and_target") if callspec else None
+    if (
+        image is not None
+        and image != _k3s_images()[0]
+        and request.node.originalname not in _SMOKE_TESTS
+    ):
+        pytest.skip("full run is on the first k3s image only; this image runs the smoke set")
+
+
 @pytest.fixture(scope="module", params=_k3s_images(), ids=lambda image: image.rsplit(":", 1)[-1])
 def k3s_kubeconfig_and_target(request: pytest.FixtureRequest) -> Any:
     """Boot a k3s container; yield (kubeconfig_dict, target stub).

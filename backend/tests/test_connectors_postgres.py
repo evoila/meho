@@ -282,23 +282,88 @@ def test_postgres_resolves_versioned_and_wildcard_and_appears_in_registry() -> N
     assert resolve_connector(fresh) is PostgresConnector
 
 
-def test_supported_version_range_excludes_eol_postgres_12() -> None:
-    """AC: the advertised range starts at 13, not the EOL 12.
+def test_supported_version_range_follows_vendor_support() -> None:
+    """AC: the range is 15 to 18, the releases the vendor still supports.
 
-    ``postgres.replication`` reads ``pg_stat_wal_receiver.written_lsn`` /
-    ``flushed_lsn`` -- the columns that replaced 12's single ``received_lsn`` in
-    PostgreSQL 13 (https://www.postgresql.org/docs/13/monitoring-stats.html) --
-    so advertising the (EOL) 12 would parse-error that op on a 12 standby.
-    Matched with the same ``SpecifierSet`` the resolver applies, 12 must fall
-    outside the range while the written_lsn/flushed_lsn-bearing releases stay in.
+    Matched with the same ``SpecifierSet`` the resolver applies. 13 and 14 are
+    out of vendor support, and 19 is not tested yet.
     """
     version_range = PostgresConnector.supported_version_range
     assert version_range is not None
     spec = SpecifierSet(version_range)
-    assert Version("12") not in spec
-    assert Version("13") in spec
-    assert Version("17") in spec
-    assert Version("18") not in spec
+    for version in ("12", "13", "14", "19"):
+        assert Version(version) not in spec, version
+    for version in ("15", "16", "17", "18"):
+        assert Version(version) in spec, version
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "13",
+        "14.12",
+        "19",
+        "13.16 (Debian 13.16-1.pgdg120+1)",
+        "14.13 (Ubuntu 14.13-0ubuntu0.22.04.1)",
+    ],
+)
+def test_resolver_does_not_pick_postgres_outside_the_range(version: str) -> None:
+    """AC: a target with a detected version outside the range is not picked.
+
+    The fallback registration still serves an unknown version, and a probe
+    still finds the connector, so the target can be probed after an upgrade.
+    """
+    from meho_backplane.connectors.resolver import NoMatchingConnector
+
+    target = _PgTarget()
+    target.fingerprint = type("_FP", (), {"version": version})()
+    with pytest.raises(NoMatchingConnector, match=r"postgres-wire supports >=15,<19"):
+        resolve_connector(target)
+    assert resolve_connector(target, for_probe=True) is PostgresConnector
+
+
+@pytest.mark.parametrize("version", ["15", "18.1", "16.4 (Debian 16.4-1.pgdg120+2)"])
+def test_resolver_picks_postgres_inside_the_range(version: str) -> None:
+    """A detected version inside the range still resolves."""
+    target = _PgTarget()
+    target.fingerprint = type("_FP", (), {"version": version})()
+    assert resolve_connector(target) is PostgresConnector
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["13", "13.16 (Debian 13.16-1.pgdg120+1)"])
+async def test_dispatch_on_old_postgres_returns_no_connector_naming_the_range(
+    _stub_embedding: AsyncMock, session: AsyncSession, version: str
+) -> None:
+    """AC: a call on a PostgreSQL 13 target is refused; the error names the range.
+
+    The version as the probe stores it, with the distribution's build text,
+    is refused too.
+    """
+    await PostgresConnector.register_operations()
+    target = _PgTarget(secret_ref=None)
+    target.fingerprint = type("_FP", (), {"version": version})()
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id="postgres.databases",
+        target=target,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.error.startswith("no_connector")
+    assert ">=15,<19" in str(result.extras["exception_message"])
+
+
+def test_connector_fit_names_the_range_for_an_old_postgres() -> None:
+    """AC: a target on PostgreSQL 13 is not served; the warning names the range."""
+    from meho_backplane.checks.connector_fit import connector_fit
+
+    target = _PgTarget()
+    target.fingerprint = type("_FP", (), {"version": "13"})()
+    fit = connector_fit("postgres-wire-16", target)
+    assert fit.warning is not None
+    assert PostgresConnector.supported_version_range in fit.warning
 
 
 def test_every_op_is_safe_read_only_with_closed_schema() -> None:

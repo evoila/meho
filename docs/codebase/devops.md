@@ -1881,16 +1881,21 @@ failed test. The runner container was most likely killed because it ran out
 of memory. The files of the container are gone, but GitHub keeps the job log
 lines it already got.
 
-So the unit shards and the coverage shards print memory lines into the log
-of their pytest step. The sampler is `scripts/ci/memory_sampler.sh`:
+So the unit shards, the coverage shards and the integration shards print
+memory lines into the log of their pytest step. The sampler is
+`scripts/ci/memory_sampler.sh`:
 
 - One line every 15 seconds, starting with `[memory]`: the time, the
   memory in use (without the file cache that the kernel frees first), the
-  limit, and the process with the most memory.
-- Above 85 % of the limit, the line is followed by the test that each pytest
-  worker runs at that moment. The workers write their running test to a
-  small file in `MEHO_CI_PROGRESS_DIR` (the hook `pytest_runtest_logstart`
-  in `backend/tests/conftest.py`). Without those files the line says so.
+  limit, and the pytest worker with the most memory.
+- Each process that runs tests writes its process id and its running test
+  to a small file in `MEHO_CI_PROGRESS_DIR` (the hook
+  `pytest_runtest_protocol` in `backend/tests/conftest.py`). The sampler
+  reads the memory of only these processes, so a bigger process that is not
+  a pytest worker is never named.
+- Above 85 % of the limit, the line is followed by one line for each worker:
+  its memory and the test it runs at that moment. Without progress files
+  the line says so.
 - The lines are not in a log group: a group would also hide the test output
   that comes between them. Search the log for `[memory]` instead.
 
@@ -1898,7 +1903,8 @@ Where to look when a runner dies: open the log of the pytest step, go to
 the end, and read the last `[memory]` lines. If memory was high, the lines
 under it name the tests that ran. The "Print peak memory" step at the end
 of the job does not run when the runner dies, so these lines are the only
-trace.
+trace. The integration shards have no "Print peak memory" step; a short
+"Stop memory sampling" step ends the sampler there.
 
 ### Merge queue (#769, #3253)
 

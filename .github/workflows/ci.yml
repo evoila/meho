@@ -2417,6 +2417,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      - name: Start memory sampling
+        # The same sampler as the unit shards (scripts/ci/memory_sampler.sh):
+        # one "[memory]" line every 15 s in the log of the pytest step, so a
+        # runner killed for memory still leaves a trace. It never fails the
+        # job; "Stop memory sampling" ends it.
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +e
+          bash "${GITHUB_WORKSPACE}/scripts/ci/memory_sampler.sh" run </dev/null >/dev/null 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
+          echo "Memory sampling started: one sample per second, one log line every 15 s."
+
       - name: List the required spec-shelf files
         # The required vendor API files are listed in ci/spec-shelf/, one
         # small file per product version, so this workflow names none of
@@ -2506,12 +2520,21 @@ jobs:
         # when the cluster cannot pull an image; without the reason a green
         # lane hides that nothing ran on the cluster.
         env:
+          MEHO_CI_PROGRESS_DIR: ${{ runner.temp }}/pytest-progress
           # Time limits in tests (marker slow_runner_tolerant) do not fail
           # this required job; the tests still run and their other checks
           # still count. The non-required python-timing-tests job checks
           # the limits (#6270, tests/_time_limits.py).
           MEHO_SKIP_TIME_LIMITS: "1"
         run: |
+          # Show the memory lines of the sampler in this log (see
+          # scripts/ci/memory_sampler.sh). The running test comes from
+          # MEHO_CI_PROGRESS_DIR.
+          mkdir -p "${MEHO_CI_PROGRESS_DIR}"
+          touch "${RUNNER_TEMP}/memory-log.txt"
+          tail -n +1 -F "${RUNNER_TEMP}/memory-log.txt" 2>/dev/null &
+          MEMORY_TAIL_PID=$!
+          trap 'kill "${MEMORY_TAIL_PID}" 2>/dev/null' EXIT
           # Split by measured file time, the same tool as the unit shards
           # (tests/_unit_shard_split.py) with the integration measurements
           # in tests/_integration_shard_durations.json. Every file lands in
@@ -2532,6 +2555,16 @@ jobs:
           # test case.
           uv run pytest -x -rs -o junit_family=xunit1 \
             --junitxml=pytest-integration-shard.xml "${SHARD_FILES[@]}"
+
+      - name: Stop memory sampling
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          if [ -r "${RUNNER_TEMP}/memory-sampler.pid" ]; then
+            kill "$(cat "${RUNNER_TEMP}/memory-sampler.pid")" 2>/dev/null || true
+          fi
 
       - name: Upload per-test times (input for the shard split)
         # Refresh tests/_integration_shard_durations.json from these

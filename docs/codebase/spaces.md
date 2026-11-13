@@ -148,8 +148,8 @@ and subject. Example with made-up names:
 ## Nightly drift check
 
 `spaces.drift` compares the current assignments of the tenant with the live
-data MEHO already stores: targets and their last probe, and the topology
-graph. It makes no vendor call, writes nothing and repairs nothing. A person
+data MEHO already stores: targets and their last probe, the newest
+health-check results, and the topology graph. It makes no vendor call, writes nothing and repairs nothing. A person
 decides each repair (`spaces.assign`, `spaces.unassign`, `spaces.reassign`).
 
 Five kinds of drift. Each is a list in the answer, and a count in `counts`:
@@ -158,11 +158,27 @@ Five kinds of drift. Each is a list in the answer, and a count in `counts`:
 |---|---|
 | `unassigned_targets` | a live target has no current target assignment |
 | `missing_targets` | a current target assignment points to a target that is deleted or unknown |
-| `unreachable_targets` | an assigned target's last probe said `reachable: false`. A target never probed is not listed. |
-| `missing_objects` | a current machine assignment has a vendor object id that is the name of no live topology node of the tenant |
+| `unreachable_targets` | the newest reach evidence of an assigned target says it is not reachable (see below). A target with no evidence is not listed. |
+| `missing_objects` | a current machine assignment has a vendor object id that is on no live topology node of its target (see below) |
 | `state_mismatch` | the assignment's space is disabled (`space_disabled`), or its target has another name than at assignment (`target_renamed`, with `current_name`) |
 
 - `total_count` adds the five counts. The check reads it.
+- Reach evidence is the last probe (`reachable` and `probed_at` in the
+  target's detected product data) and the newest result of each health check
+  on the target. The newest one wins, so a check that fails after a good
+  probe makes the target unreachable, and a check that passes after a failed
+  probe clears it. A check result counts only while it is at most twice its
+  interval old (the same rule as the health in `spaces.overview`). `ok`,
+  `degraded` and `critical` mean the call reached the target. `unknown`
+  counts as not reachable only when the call failed (`dispatch_error`,
+  `dispatch_not_ok`, `evaluation_timeout`); other `unknown` results and
+  `skip` say nothing. Each entry names its `source` (`probe` or
+  `health_check`) and `seen_at`.
+- A machine matches a live node by its vendor object id: the node's name, or
+  one of the node properties `object_id`, `server_number`, `uid`, `uuid`,
+  `moid`, `id`. When the assignment names a target, only that target's nodes
+  count, so the same id on another target does not hide a missing machine.
+  An assignment without a target matches any node of the tenant.
 - `missing_objects` trusts the topology refresh. A target whose topology was
   never refreshed makes its machines show as missing, so refresh first.
 - The lists come back behind a result handle when long; `total_count` stays

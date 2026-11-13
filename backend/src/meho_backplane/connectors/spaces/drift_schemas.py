@@ -26,8 +26,13 @@ DRIFT_RESPONSE: Final[dict[str, Any]] = {
     "properties": {
         "unassigned_targets": _list("Live targets that no space owns."),
         "missing_targets": _list("Current target assignments whose target is gone."),
-        "unreachable_targets": _list("Assigned targets whose last probe said not reachable."),
-        "missing_objects": _list("Current machine assignments seen in no live topology node."),
+        "unreachable_targets": _list(
+            "Assigned targets whose newest probe or health-check result said not reachable."
+        ),
+        "missing_objects": _list(
+            "Current machine assignments whose vendor id is on no live topology node of "
+            "their target."
+        ),
         "state_mismatch": _list(
             "Current assignments that disagree with the live record: the space is "
             "disabled, or the target was renamed."

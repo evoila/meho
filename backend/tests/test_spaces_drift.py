@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -24,7 +24,15 @@ from meho_backplane.connectors.spaces.drift import DRIFT_KINDS, spaces_drift
 from meho_backplane.connectors.spaces.drift_template import drift_sensor_template
 from meho_backplane.connectors.spaces.registry import register_spaces_operations
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import GraphNode, Target, Tenant
+from meho_backplane.db.models import (
+    GraphNode,
+    Sensor,
+    SensorCadenceKind,
+    SensorSeverity,
+    SensorStatus,
+    Target,
+    Tenant,
+)
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 from meho_backplane.spaces import store
@@ -224,7 +232,90 @@ async def test_only_a_probe_that_said_not_reachable_is_unreachable(world: _World
     result = await _drift(world)
 
     (entry,) = result["unreachable_targets"]
-    assert (entry["name"], entry["probed_at"]) == ("demo-down", "2026-11-01T01:00:00+00:00")
+    assert (entry["name"], entry["source"], entry["seen_at"]) == (
+        "demo-down",
+        "probe",
+        "2026-11-01T01:00:00+00:00",
+    )
+
+
+async def _check(tenant_id: uuid.UUID, target_name: str, *, age: timedelta, **over: Any) -> None:
+    fields: dict[str, Any] = {
+        "tenant_id": tenant_id,
+        "name": f"check-{uuid.uuid4().hex[:6]}",
+        "connector_id": "demo-1.x",
+        "op_id": "demo.list",
+        "target": {"name": target_name},
+        "params": {},
+        "assertion": {
+            "select": {"path": "$.count"},
+            "compare": {"type": "threshold", "op": "lt", "critical": 10},
+        },
+        "status": SensorStatus.ACTIVE.value,
+        "cadence_kind": SensorCadenceKind.INTERVAL.value,
+        "interval_seconds": 3600,
+        "severity": SensorSeverity.CRITICAL.value,
+        "for_seconds": 0,
+        "last_state": "ok",
+        "last_evaluated_at": datetime.now(UTC) - age,
+        "created_by_sub": "admin-1",
+    }
+    fields.update(over)
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(Sensor(**fields))
+
+
+def _probe(reachable: bool, age: timedelta) -> dict[str, Any]:
+    return {"reachable": reachable, "probed_at": (datetime.now(UTC) - age).isoformat()}
+
+
+_CALL_FAILED = {"last_state": "unknown", "last_evidence": {"reason": "dispatch_error"}}
+
+
+@pytest.mark.asyncio
+async def test_a_newer_failed_check_makes_a_probed_target_unreachable(world: _World) -> None:
+    target_id = await _add_target(
+        world.tenant_a, "demo-one", fingerprint=_probe(True, timedelta(hours=5))
+    )
+    await _assign(world.tenant_a, world.space_a, target_id=target_id, name="demo-one")
+    await _check(world.tenant_a, "demo-one", age=timedelta(minutes=10), **_CALL_FAILED)
+
+    result = await _drift(world)
+
+    (entry,) = result["unreachable_targets"]
+    assert (entry["name"], entry["source"]) == ("demo-one", "health_check")
+    assert entry["check_id"] is not None
+
+
+@pytest.mark.asyncio
+async def test_a_newer_passing_check_clears_an_old_failed_probe(world: _World) -> None:
+    target_id = await _add_target(
+        world.tenant_a, "demo-one", fingerprint=_probe(False, timedelta(hours=5))
+    )
+    await _assign(world.tenant_a, world.space_a, target_id=target_id, name="demo-one")
+    await _check(world.tenant_a, "demo-one", age=timedelta(minutes=10), last_state="critical")
+
+    assert (await _drift(world))["unreachable_targets"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_stale_or_unrelated_check_result_is_not_reach_evidence(world: _World) -> None:
+    stale = await _add_target(
+        world.tenant_a, "demo-stale", fingerprint=_probe(True, timedelta(days=2))
+    )
+    bad_check = await _add_target(world.tenant_a, "demo-bad-check", fingerprint=None)
+    for target_id, name in ((stale, "demo-stale"), (bad_check, "demo-bad-check")):
+        await _assign(world.tenant_a, world.space_a, target_id=target_id, name=name)
+    await _check(world.tenant_a, "demo-stale", age=timedelta(hours=3), **_CALL_FAILED)
+    await _check(
+        world.tenant_a,
+        "demo-bad-check",
+        age=timedelta(minutes=10),
+        last_state="unknown",
+        last_evidence={"reason": "op_descriptor_missing"},
+    )
+
+    assert (await _drift(world))["unreachable_targets"] == []
 
 
 @pytest.mark.asyncio
@@ -237,15 +328,25 @@ async def test_an_unreachable_target_in_no_space_is_only_unassigned(world: _Worl
     assert result["counts"]["unassigned_targets"] == 1
 
 
-async def _node(tenant_id: uuid.UUID, name: str, *, live: bool = True) -> None:
+async def _node(
+    tenant_id: uuid.UUID,
+    name: str,
+    *,
+    live: bool = True,
+    target_id: uuid.UUID | None = None,
+    source_scope: str | None = None,
+    properties: dict[str, Any] | None = None,
+) -> None:
     async with get_sessionmaker()() as session, session.begin():
         session.add(
             GraphNode(
                 tenant_id=tenant_id,
                 kind="vm",
                 name=name,
+                target_id=target_id,
                 source="auto",
-                properties={},
+                source_scope=source_scope,
+                properties=properties or {},
                 discovered_by="demo",
                 first_seen=_NOW,
                 last_seen=_NOW if live else None,
@@ -277,20 +378,50 @@ async def test_a_machine_in_no_live_topology_node_is_missing(world: _World) -> N
 
 
 @pytest.mark.asyncio
-async def test_many_machines_are_checked_in_chunks(
-    world: _World, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("meho_backplane.connectors.spaces.drift._NAME_CHUNK", 2)
-    for i in range(5):
-        await _node(world.tenant_a, f"vm-{i}")
+async def test_a_machine_matches_by_vendor_id_not_by_name(world: _World) -> None:
+    host = await _add_target(world.tenant_a, "demo-host")
+    await _node(world.tenant_a, "srv-alpha", target_id=host, properties={"server_number": 4711})
+    await _assign(world.tenant_a, world.space_a, target_id=host, name="demo-host")
+    for object_id in ("4711", "srv-beta"):
         await _assign(
-            world.tenant_a, world.space_a, kind="object", object_id=f"vm-{i}", name=f"n{i}"
+            world.tenant_a,
+            world.space_a,
+            kind="object",
+            target_id=host,
+            object_id=object_id,
+            name=f"name of {object_id}",
         )
-    await _assign(world.tenant_a, world.space_a, kind="object", object_id="vm-x", name="nx")
 
     result = await _drift(world)
 
-    assert [e["object_id"] for e in result["missing_objects"]] == ["vm-x"]
+    assert [e["object_id"] for e in result["missing_objects"]] == ["srv-beta"]
+
+
+@pytest.mark.asyncio
+async def test_a_machine_is_only_found_on_its_assigned_target(world: _World) -> None:
+    first = await _add_target(world.tenant_a, "demo-first")
+    second = await _add_target(world.tenant_a, "demo-second")
+    third = await _add_target(world.tenant_a, "demo-third")
+    await _node(world.tenant_a, "vm-on-first", target_id=first, properties={"uid": "obj-1"})
+    await _node(
+        world.tenant_a,
+        "vm-on-second",
+        source_scope=f"target:{second}",
+        properties={"uid": "obj-1"},
+    )
+    for target_id in (first, second, third):
+        await _assign(
+            world.tenant_a,
+            world.space_a,
+            kind="object",
+            target_id=target_id,
+            object_id="obj-1",
+            name="shared id",
+        )
+
+    result = await _drift(world)
+
+    assert [e["target_id"] for e in result["missing_objects"]] == [str(third)]
 
 
 @pytest.mark.asyncio

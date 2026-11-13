@@ -168,6 +168,8 @@ targets:
     host: sso.example.test
     secret_ref: secret/example-dc/sso/admin
     port: 8443
+    extras:
+      managed_realm: example
     vpn_required: true
     notes: |
       Example single sign-on server.

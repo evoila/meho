@@ -110,6 +110,27 @@ _CONFIG_ADDS = (
     "</staticroutes></pfsense>"
 )
 
+_VPN_SERVER = (
+    "<openvpn-server><vpnid>{vpnid}</vpnid><mode>server_user</mode>"
+    "<tunnel_network>198.51.100.0/24</tunnel_network></openvpn-server>"
+)
+_VPN_USER = _user("vpn.guest-2", "2001")
+_VPN_TAGGED_RULE = (
+    "<rule><tracker>123456789</tracker><type>pass</type><interface>openvpn</interface>"
+    "<ipprotocol>inet</ipprotocol><source><address>198.51.100.5</address></source>"
+    "<destination><address>192.0.2.0/24</address></destination>"
+    "<descr>meho-vpn-user:vpn.guest-2</descr></rule>"
+)
+
+
+def _vpn_config(*, vpnid: str = "1", rules: str = "", groups: str = "") -> str:
+    """A config with one user-login OpenVPN server and the user ``vpn.guest-2``."""
+    return (
+        f"<pfsense><system>{_VPN_USER}{groups}</system><filter>{rules}</filter>"
+        f"<openvpn>{_VPN_SERVER.format(vpnid=vpnid)}</openvpn></pfsense>"
+    )
+
+
 #: (op_id, config.xml, params, refusal code).
 _REFUSALS: list[tuple[str, str, dict[str, Any], str]] = [
     ("pfsense.nat.delete", _CONFIG_DUP_TRACKER, {"tracker": "1585165239"}, "ambiguous"),
@@ -154,6 +175,55 @@ _REFUSALS: list[tuple[str, str, dict[str, Any], str]] = [
         {"network": "10.9.0.0/24", "gateway": "OTHER_GW"},
         "conflict",
     ),
+    (
+        "pfsense.openvpn.csc.sync",
+        _vpn_config(),
+        {"entries": [{"name": "vpn.guest-2", "server_vpnid": "7"}]},
+        "refused",
+    ),
+    (
+        "pfsense.openvpn.rule.sync",
+        _vpn_config(),
+        {"rules": [{"name": "nobody", "source": "198.51.100.5", "destination": "192.0.2.0/24"}]},
+        "refused",
+    ),
+    (
+        "pfsense.openvpn.rule.sync",
+        _vpn_config(),
+        {
+            "rules": [
+                {"name": "vpn.guest-2", "source": "198.51.100.5", "destination": "192.0.2.0/24"}
+            ]
+        },
+        "refused",
+    ),
+    (
+        "pfsense.openvpn.user.delete",
+        _vpn_config(groups="<group><name>admins</name><member>2001</member></group>"),
+        {"name": "vpn.guest-2"},
+        "protected",
+    ),
+    (
+        "pfsense.openvpn.user.create",
+        _CONFIG_USERS,
+        {"name": "vpn.guest-1", "vault_path": f"tenants/{_TENANT_ID}/vpn/guest-1"},
+        "ambiguous",
+    ),
+    ("pfsense.openvpn.user.delete", _CONFIG_USERS, {"name": "vpn.guest-1"}, "ambiguous"),
+    ("pfsense.openvpn.user.delete", _CONFIG_USERS, {"name": "admin"}, "protected"),
+    ("pfsense.openvpn.user.delete", _vpn_config(), {"name": "vpn.guest-2"}, "connected"),
+    (
+        "pfsense.openvpn.user.delete",
+        _vpn_config(vpnid="x"),
+        {"name": "vpn.guest-2"},
+        "connection_unknown",
+    ),
+    (
+        "pfsense.openvpn.user.delete",
+        _vpn_config(rules=_VPN_TAGGED_RULE),
+        {"name": "vpn.guest-2", "force": True},
+        "rules_remain",
+    ),
 ]
 
 
@@ -174,6 +244,12 @@ def _reset_caches() -> Iterator[None]:
     reset_dispatcher_caches()
 
 
+_VPN_SESSION = (
+    "TITLE,x\nHEADER,CLIENT_LIST,Common Name,Real Address,Virtual Address,Username\n"
+    "CLIENT_LIST,vpn.guest-2,203.0.113.77:1194,198.51.100.5,vpn.guest-2\nEND\n"
+)
+
+
 def _proc(stdout: str = "", exit_status: int = 0) -> Any:
     proc = MagicMock()
     proc.stdout = stdout
@@ -182,7 +258,11 @@ def _proc(stdout: str = "", exit_status: int = 0) -> Any:
 
 
 class _RecordingPfSense(PfSenseConnector):
-    """A PfSenseConnector that replays one config.xml and records each command."""
+    """A PfSenseConnector that replays one config.xml and records each command.
+
+    An OpenVPN server's management socket answers that ``vpn.guest-2`` is
+    connected.
+    """
 
     def __init__(self, config: str) -> None:
         super().__init__()
@@ -204,6 +284,8 @@ class _RecordingPfSense(PfSenseConnector):
         self.commands.append(cmd)
         if cmd == "cat /cf/conf/config.xml":
             return _proc(self._config)
+        if cmd.endswith("/sock"):
+            return _proc(_VPN_SESSION)
         return _proc("", 0)
 
     @property

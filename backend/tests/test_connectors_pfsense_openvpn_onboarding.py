@@ -2447,6 +2447,18 @@ async def test_the_delete_preview_names_a_rule_that_holds_the_address_through_an
     assert preview is not None and preview["refusal"] == "rules_remain"
 
 
+async def test_a_url_alias_rule_does_not_block_the_delete_of_a_user_with_no_address() -> None:
+    rule = _guest_rule("1700000091", "<address>urls</address>")
+    extra = _aliases("urls", "urltable", "")
+    before = _config(users=_user("guest-1", "2000"), rules=rule).replace(
+        "</pfsense>", f"{extra}</pfsense>"
+    )
+    after = _config(rules=rule).replace("</pfsense>", f"{extra}</pfsense>")
+    fake = _Fake([before, after], sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY})
+    out = await _delete(fake)
+    assert out["status"] == "deleted" and out["applied"]
+
+
 def _php_rule_config(
     source: dict[str, Any], interface: str, extra: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2518,6 +2530,27 @@ def test_delete_fragment_run_in_php_goes_on_when_no_source_holds_the_address(
     printed, out = _run_php(tmp_path, before, fragment)
     assert printed == ""
     assert ["write_config", "meho: delete VPN user guest-1"] in out["calls"]
+
+
+@_needs_php
+def test_delete_fragment_run_in_php_ignores_a_url_alias_for_a_user_with_no_address(
+    tmp_path: Path,
+) -> None:
+    users = [
+        {"name": "admin", "uid": "0", "scope": "system"},
+        {"name": "guest-1", "uid": "2000", "scope": "user"},
+    ]
+    before = _php_config([], users)
+    before["filter"] = {"rule": [{"tracker": "7", "source": {"address": "urls"}}]}
+    before.update(_PHP_ALIASES)
+    printed, out = _run_php(tmp_path, before, user_module.build_user_delete_playback("guest-1"))
+    assert printed == ""
+    assert ["write_config", "meho: delete VPN user guest-1"] in out["calls"]
+    # The rule tag still counts for a user with no address.
+    before["filter"]["rule"].append({"tracker": "8", "descr": "meho-vpn-user:guest-1"})
+    printed, out = _run_php(tmp_path, before, user_module.build_user_delete_playback("guest-1"))
+    assert printed.strip() == "MEHO_VPN_RULES_REMAIN=1"
+    assert out["config"] == before and out["calls"] == []
 
 
 @_needs_php

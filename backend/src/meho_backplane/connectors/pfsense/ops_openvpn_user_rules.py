@@ -17,7 +17,8 @@ an address when it is
 
 A URL alias has contents that ``config.xml`` does not hold. A rule with
 such a source counts as a rule that may let the address in: unknown is
-not "no rule". The Python check (:func:`rules_reaching`) and the PHP
+not "no rule". A user with no address has no rule that lets it in, also
+not through a URL alias. The Python check (:func:`rules_reaching`) and the PHP
 check of the fragment (:func:`source_check_php`) follow the same rules.
 
 Checked against the pfSense 2.8 sources: aliases are ``<aliases><alias>``
@@ -176,9 +177,10 @@ def source_check_php() -> list[str]:
         "    $meho_alias[$meho_an] = preg_split('/\\s+/', $meho_list, -1, PREG_SPLIT_NO_EMPTY);",
         "  }",
         "}",
-        "$meho_reach = function ($meho_s) use ($meho_holds, $meho_alias, $meho_alias_unknown,",
-        "    $config) {",
-        "  if (!is_array($meho_s) || isset($meho_s['any']) || isset($meho_s['not'])) {",
+        "$meho_reach = function ($meho_s) use ($meho_ips, $meho_holds, $meho_alias,",
+        "    $meho_alias_unknown, $config) {",
+        "  if (count($meho_ips) === 0 || !is_array($meho_s) || isset($meho_s['any'])",
+        "      || isset($meho_s['not'])) {",
         "    return false;",
         "  }",
         "  if (isset($meho_s['network'])) {",

@@ -235,6 +235,10 @@ capability — so the two surfaces diverged. The operator decision on
 # refinements within a single collection.
 meho docs search "nsx config maximums" --collection vmware
 meho docs search "nsx config maximums" --collection vmware --json
+
+# A cited answer from one collection, with its numbered sources and the
+# path that wrote it (local or upstream).
+meho docs ask "What is new in release X.Y.Z?" --collection vmware
 ```
 
 ## Generated client

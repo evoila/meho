@@ -84,7 +84,15 @@ from meho_backplane.core.keycloak_api import (
     expect,
     id_from,
 )
-from meho_backplane.core.keycloak_flows import OVERRIDES, ensure_flows, flow_overrides
+from meho_backplane.core.keycloak_flows import (
+    OVERRIDES,
+    bound_clients,
+    ensure_flows,
+    ensure_levels,
+    flow_overrides,
+    stage_flows,
+    stage_levels,
+)
 from meho_backplane.core.keycloak_recovery import ensure_recovery_codes
 from meho_backplane.core.secrets import (
     CoreSecretsError,
@@ -907,9 +915,14 @@ async def finish_realm(
     for tenant in plan.tenants:
         for group in tenant_groups(tenant):
             await realm.ensure_group(group, drop=OLD_ACCESS_ATTRIBUTES)
-    flow_ids = await ensure_flows(admin, realm_file.get("authenticationFlows") or [])
+    clients = realm_file.get("clients") or []
+    flows = stage_flows(realm_file.get("authenticationFlows") or [], clients)
+    settings = realm_file.get("authenticatorConfig")
+    flow_ids = await ensure_flows(admin, flows, settings)
+    levels = stage_levels(realm_file.get("attributes") or {}, flows, settings)
+    await ensure_levels(admin, levels, bound_clients(clients))
     await ensure_recovery_codes(admin)
-    for want in realm_file.get("clients") or []:
+    for want in clients:
         await realm.ensure_client(want, scope_ids, flow_ids)
     if plan.ci.enabled:
         await _ensure_ci(realm, plan, environ, store, scope_ids)

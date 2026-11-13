@@ -19,6 +19,10 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// ApprovalACR is the sign-in level an approval sign-in asks for. Only
+// the realm's approval sign-in flow gives it (#6281).
+const ApprovalACR = "meho-approve"
+
 // FreshSignInTimeout is how long RunFreshSignIn waits for the person
 // to finish the browser sign-in.
 const FreshSignInTimeout = 5 * time.Minute
@@ -70,7 +74,9 @@ func freshSignInConfig(doc *DiscoveryDocument, clientID, redirectURL string) *oa
 // PKCE and a loopback redirect (RFC 8252 §7.3) on 127.0.0.1 with a
 // random port. The request carries prompt=login and max_age=0 (OIDC
 // Core §3.1.2.1), so the identity provider asks for the credentials
-// again even when the browser already has a session.
+// again even when the browser already has a session. It also asks for
+// the approval level with acr_values=meho-approve (ApprovalACR, #6281):
+// MEHO can require that level on an approve.
 //
 // The caller keeps the token in memory only and must not store it: the
 // token proves a fresh sign-in for approvals (#3979, #5515).
@@ -111,6 +117,7 @@ func RunFreshSignIn(ctx context.Context, doc *DiscoveryDocument, clientID string
 		oauth2.S256ChallengeOption(verifier),
 		oauth2.SetAuthURLParam("prompt", "login"),
 		oauth2.SetAuthURLParam("max_age", "0"),
+		oauth2.SetAuthURLParam("acr_values", ApprovalACR),
 	)
 
 	results := make(chan callbackResult, 1)

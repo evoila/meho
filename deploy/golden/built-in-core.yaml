@@ -328,7 +328,7 @@ data:
       "attributes": {
         "adminEventsExpiration": "15552000",
         "CreateDefaultClientScopes": "true",
-        "acr.loa.map": "{\"meho-touch\":3}"
+        "acr.loa.map": "{\"meho-approve\":2,\"meho-touch\":3}"
       },
       "clientScopes": [
         {
@@ -444,32 +444,57 @@ data:
       ],
       "authenticationFlows": [
         {
-          "id": "5d2b8f3e-6a41-4c0b-9e57-3f1a8c6d2b10",
-          "alias": "meho approval sign-in",
-          "description": "Sign-in of `meho approvals approve`: always asks for the password, and for the one-time code when the person has set one up.",
+          "id": "b7e3c1d9-4a26-4f80-9c5e-1d8a2f6b3e47",
+          "alias": "meho approval sign-in level",
+          "description": "Sign-in of `meho approvals approve`. It gives the approval level 2 (acr meho-approve) and nothing else gives it: the password form, then the one-time code when the person has set one up, every time.",
           "providerId": "basic-flow",
           "topLevel": true,
           "builtIn": false,
           "authenticationExecutions": [
             {
-              "authenticator": "auth-username-password-form",
-              "authenticatorFlow": false,
-              "requirement": "REQUIRED",
-              "priority": 10,
-              "userSetupAllowed": false
-            },
-            {
               "authenticatorFlow": true,
               "requirement": "CONDITIONAL",
-              "priority": 20,
-              "flowAlias": "meho approval sign-in - one-time code",
+              "priority": 10,
+              "flowAlias": "meho approval sign-in level - level 2",
               "userSetupAllowed": false
             }
           ]
         },
         {
-          "id": "9a7c4e21-0b3d-4f68-8d15-6e2f0a9b4c73",
-          "alias": "meho approval sign-in - one-time code",
+          "id": "6f2a9d41-8c3b-4e57-a1d6-0b4e7c9f2a18",
+          "alias": "meho approval sign-in level - level 2",
+          "description": "Level 2: the password, then the one-time code. Asked for again at every sign-in.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "conditional-level-of-authentication",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "authenticatorConfig": "meho approval sign-in level - level 2",
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "auth-username-password-form",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 20,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "CONDITIONAL",
+              "priority": 30,
+              "flowAlias": "meho approval sign-in level - one-time code",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "id": "3c8e5b27-1f4d-4a9b-8e60-7d2c9a1b5f34",
+          "alias": "meho approval sign-in level - one-time code",
           "description": "Asks for the one-time code when the person has set one up.",
           "providerId": "basic-flow",
           "topLevel": false,
@@ -672,6 +697,13 @@ data:
         }
       ],
       "authenticatorConfig": [
+        {
+          "alias": "meho approval sign-in level - level 2",
+          "config": {
+            "loa-condition-level": "2",
+            "loa-max-age": "0"
+          }
+        },
         {
           "alias": "meho approval touch - level 1",
           "config": {
@@ -881,7 +913,7 @@ data:
         {
           "clientId": "meho-cli-approve",
           "name": "MEHO CLI approvals",
-          "description": "Public client for the fresh browser sign-in of `meho approvals approve` (loopback, PKCE). Only its tokens can approve on the command line or REST.",
+          "description": "Public client for the fresh browser sign-in of `meho approvals approve` (loopback, PKCE). Only its tokens can approve on the command line or REST. Its own login flow gives the approval level (acr meho-approve).",
           "enabled": true,
           "protocol": "openid-connect",
           "publicClient": true,
@@ -898,7 +930,7 @@ data:
             "client.use.lightweight.access.token.enabled": "false"
           },
           "authenticationFlowBindingOverrides": {
-            "browser": "5d2b8f3e-6a41-4c0b-9e57-3f1a8c6d2b10"
+            "browser": "b7e3c1d9-4a26-4f80-9c5e-1d8a2f6b3e47"
           },
           "redirectUris": [
             "http://127.0.0.1:*"
@@ -2421,7 +2453,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: b84b6174053ef8a3c242bedd269fdfc4c98ec42e8fdefa65fd4e4632120f73b9
+        checksum/config: 50ec78c096ce8ae2c0299a973bb246f1df4ea2ccedf4f6562b16dd4fb98119f8
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.
@@ -3689,6 +3721,7 @@ data:
   DISPATCH_MAX_CONCURRENT_OPS: "16"
   MCP_SESSION_START_LIMIT_PER_MINUTE: "60"
   APPROVAL_ONE_TIME_CODE_ACR_VALUES: ""
+  APPROVAL_SIGN_IN_LEVEL: "auto"
   # Switches for what the agent sees, off by default until model tests
   # show they help: team knowledge before an operation and in the start
   # text, the similar-entry check on a new knowledge entry, and short

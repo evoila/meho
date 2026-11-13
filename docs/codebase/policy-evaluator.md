@@ -119,6 +119,32 @@ up a delete grant, because today's gate never uses one there. Run
 approvals (the approval of a whole run's operation list) are not
 compared.
 
+### The rule on the audit row and the approval request (#6044)
+
+With the switch on, the gate also keeps the rule the evaluator matched
+(`policy/stamp.py`: `RuleStamp`, `keep_rule`, `take_rule`). The
+dispatcher takes it right after its gate and binds it to
+`policy_rule_var` (`operations/_audit.py`). Each `dispatch` clears the
+rule when it starts and puts the caller's rule back when it returns. So
+a step of a multi-step operation that is refused before its own gate
+(for example a target of the wrong kind) names no rule. The step gate of a multi-step operation binds the
+step's rule only for its own rows, so the parent's row keeps the
+parent's rule. Then:
+
+- `audit_log.policy_rule` holds `<source>:<rule id> (shadow)`, and
+  `audit_log.policy_version` the policy file version (empty today).
+- A new `approval_request` gets `policy_rule` as
+  `{"source", "rule_id", "text", "decided": false}` and
+  `policy_version`. The approvals console shows it in the request
+  details.
+
+`(shadow)` and `decided: false` mean: the evaluator matched this rule,
+but today's checks decided. The rule can differ from today's answer;
+the mismatch line says when it does. With the switch off, or when the
+shadow fails, nothing is kept and the columns stay empty. Each gate
+first drops a rule an earlier gate kept (a preview, for example), so a
+row never gets the rule of another call.
+
 ## How to read a mismatch line
 
 ```
@@ -167,7 +193,12 @@ switch off and on.
 - `backend/tests/test_policy_shadow.py`: switch off, a forced difference,
   a failure, no grant use, and a table of caller kind x risk level x
   approval flag x delete sign x grant x gate in and out of sandbox mode
-  with no difference.
+  with no difference; the kept rule (#6044).
+- `backend/tests/test_operations_dispatcher.py`,
+  `backend/tests/test_approval_queue.py`, `backend/tests/test_ui_approvals.py`
+  and `backend/tests/migrations/test_migration_0167_add_policy_rule_columns.py`:
+  the rule on audit rows, approval requests and the console, and the
+  migration on PostgreSQL with the append-only trigger (#6044).
 - `backend/tests/test_policy_shadow_load.py`: the load check.
 
 ## References

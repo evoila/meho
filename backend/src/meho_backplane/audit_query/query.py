@@ -483,6 +483,8 @@ def _build_audit_entry(
         agent_session_id=row.agent_session_id,
         work_ref=row.work_ref,
         policy_decision=row.policy_decision,
+        policy_rule=row.policy_rule,
+        policy_version=row.policy_version,
         event_class=row.event_class,
         sandbox_mode=row.sandbox_mode,
         actor_sub=row.actor_sub,

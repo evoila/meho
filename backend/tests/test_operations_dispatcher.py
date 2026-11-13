@@ -3504,6 +3504,80 @@ async def test_audit_row_stamps_policy_decision_per_verdict(
     assert by_path["vault.kv.deny"].event_class == "policy_decision"
     assert by_path["approval.request"].event_class == "policy_decision"
 
+    # #6044: POLICY_ENGINE_SHADOW is off, so no row names a policy rule.
+    for row in by_path.values():
+        assert (row.policy_rule, row.policy_version) == (None, None)
+    assert (parked_request.policy_rule, parked_request.policy_version) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_audit_rows_name_the_shadow_rule_when_the_switch_is_on(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6044: with POLICY_ENGINE_SHADOW on, each row names the evaluator's rule.
+
+    The rule is marked as not deciding: ``(shadow)`` on the audit row,
+    ``decided: false`` on the approval request. Today's verdicts stay.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+
+    monkeypatch.setenv("POLICY_ENGINE_SHADOW", "true")
+    get_settings.cache_clear()
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    for op_id, safety in (("vault.kv.autoexec", "safe"), ("vault.kv.needsapproval", "caution")):
+        await register_typed_operation(
+            product="vault",
+            version="1.x",
+            impl_id="vault",
+            op_id=op_id,
+            handler=_module_handler_returning_dict,
+            summary=f"{safety} op.",
+            description=f"A {safety} operation.",
+            parameter_schema={"type": "object"},
+            safety_level=safety,
+            when_to_use=None,
+            embedding_service=stub_embedding_service,
+        )
+    target = _FakeTarget(product="vault")
+
+    auto = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.autoexec",
+        target=target,
+        params={},
+    )
+    assert auto.status == "ok", auto.error
+    parked = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+        connector_id="vault-1.x",
+        op_id="vault.kv.needsapproval",
+        target=target,
+        params={},
+    )
+    assert parked.status == "awaiting_approval", parked.error
+
+    async with get_sessionmaker()() as fresh:
+        by_path = {row.path: row for row in (await fresh.execute(select(AuditLog))).scalars().all()}
+        parked_request = await fresh.get(
+            ApprovalRequest, UUID(parked.extras["approval_request_id"])
+        )
+        assert parked_request is not None
+
+    auto_row = by_path["vault.kv.autoexec"]
+    assert auto_row.policy_decision == "auto-execute"
+    assert auto_row.policy_rule == "default:person.safe (shadow)"
+    assert auto_row.policy_version is None
+    request_row = by_path["approval.request"]
+    assert request_row.policy_decision == "needs-approval"
+    assert request_row.policy_rule is not None
+    assert request_row.policy_rule.endswith(" (shadow)")
+    rule = parked_request.policy_rule
+    assert rule is not None
+    assert rule["decided"] is False
+    assert request_row.policy_rule == f"{rule['source']}:{rule['rule_id']} (shadow)"
+    assert parked_request.policy_version is None
+
 
 async def _register_human_op(
     stub_embedding_service: AsyncMock, *, op_id: str, safety_level: str
@@ -4284,6 +4358,48 @@ async def test_composite_parent_row_keeps_its_own_verdict_after_step_gate(
     assert parent_rows[0].payload["result_status"] == "ok"
     assert parent_rows[0].policy_decision == "auto-execute"
     assert step_rows[0].parent_audit_id == parent_rows[0].id
+
+
+@pytest.mark.asyncio
+async def test_composite_step_row_names_the_step_rule_and_the_parent_keeps_its_own(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6044: the step gate binds the step's rule only for its own rows.
+
+    With POLICY_ENGINE_SHADOW on, the step's ``denied`` row names the rule
+    the evaluator matched for the step; the parent's row names the parent's.
+    """
+    from meho_backplane.operations._preview import _PERMISSION_PREFLIGHTS
+
+    monkeypatch.setenv("POLICY_ENGINE_SHADOW", "true")
+    get_settings.cache_clear()
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _seed_gated_composite(
+        stub_embedding_service.encode_one.return_value,
+        op_id="vault.composite.reports_refused_step",
+        handler="_module_composite_handler_reports_refused_step",
+    )
+    _register_refusing_preflight("vault.kv.gated_step")
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.composite.reports_refused_step",
+            target=_FakeTarget(product="vault"),
+            params={"path": "meho/test/x"},
+        )
+    finally:
+        _PERMISSION_PREFLIGHTS.pop("vault.kv.gated_step", None)
+
+    assert result.status == "ok", result.error
+    step_rows = await _audit_rows("vault.kv.gated_step")
+    parent_rows = await _audit_rows("vault.composite.reports_refused_step")
+    assert len(step_rows) == 1
+    assert len(parent_rows) == 1
+    assert step_rows[0].policy_rule is not None
+    assert step_rows[0].policy_rule.endswith(" (shadow)")
+    assert parent_rows[0].policy_rule == "default:person.safe (shadow)"
+    assert step_rows[0].policy_rule != parent_rows[0].policy_rule
 
 
 @pytest.mark.asyncio

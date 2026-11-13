@@ -220,6 +220,9 @@ def project_request_to_view(
     release the request was made under. The reason keys are ``None`` for a
     request that is not expired.
 
+    ``policy_rule`` and ``policy_version`` (#6044): see
+    :func:`_project_policy_rule`.
+
     ``target_id``, ``target_name`` and ``run_started_at`` (#5026): see
     :func:`_project_target_and_run_start`. ``outcome_unknown`` and
     ``outcome_check`` (#5026): see :func:`_project_outcome_check`.
@@ -252,9 +255,21 @@ def project_request_to_view(
         "expired_reason": expired_reason.value if expired_reason else None,
         "expired_message": EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
         "release_id": row.release_id,
+        **_project_policy_rule(row),
         **_project_target_and_run_start(row, target_name),
         **_project_outcome_check(row),
     }
+
+
+def _project_policy_rule(row: ApprovalRequest) -> dict[str, Any]:
+    """The policy rule keys of the template dict (#6044).
+
+    ``policy_rule`` is the rule that matched the call when it was made
+    (``{"source", "rule_id", "text", "decided"}``) and ``policy_version``
+    the policy file version. Both are ``None`` when the
+    ``POLICY_ENGINE_SHADOW`` switch was off at that time.
+    """
+    return {"policy_rule": row.policy_rule, "policy_version": row.policy_version}
 
 
 def _project_target_and_run_start(row: ApprovalRequest, target_name: str | None) -> dict[str, Any]:

@@ -50,7 +50,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.main import app
 from meho_backplane.operations import reset_dispatcher_caches
-from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._audit import policy_rule_var, work_ref_var
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, register_preview_builder
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
@@ -63,6 +63,7 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
+from meho_backplane.policy.stamp import RuleStamp
 from meho_backplane.settings import get_settings
 from tests.test_destructive_preview_binding import (
     _CONNECTOR_ID,
@@ -357,6 +358,48 @@ async def test_overdue_pending_request_is_expired_and_a_new_one_parks(
         approved = await approve_request(s, second.id, operator=_operator(sub="op-approver"))
         await s.commit()
     assert approved.status == ApprovalRequestStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
+async def test_expiry_during_a_retry_does_not_take_the_retry_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The expiry row of the old request names no policy rule (#6044).
+
+    The retry writes that row while its own rule is bound. Only the retry's
+    new request and its "request" row name the rule.
+    """
+    first = await _park_direct()
+    assert first.expires_at is not None
+    late = first.expires_at + timedelta(seconds=1)
+    monkeypatch.setattr(approval_queue_module, "_now", lambda: late)
+
+    stamp = RuleStamp(source="default", rule_id="person.write", text="a write waits")
+    token = policy_rule_var.set(stamp)
+    try:
+        second = await _park_direct()
+    finally:
+        policy_rule_var.reset(token)
+
+    assert second._expired_request.id == first.id  # type: ignore[attr-defined]
+    async with get_sessionmaker()() as s:
+        expiry = (
+            await s.execute(select(AuditLog).where(AuditLog.path == "approval.decision"))
+        ).scalar_one()
+        requests = {
+            row.payload["approval_request_id"]: row
+            for row in (
+                await s.execute(select(AuditLog).where(AuditLog.path == "approval.request"))
+            ).scalars()
+        }
+        new_request = await s.get(ApprovalRequest, second.id)
+    assert expiry.payload["decision"] == "expired"
+    assert (expiry.policy_rule, expiry.policy_version) == (None, None)
+    assert requests[str(first.id)].policy_rule is None
+    assert requests[str(second.id)].policy_rule == "default:person.write (shadow)"
+    assert new_request is not None
+    assert new_request.policy_rule is not None
+    assert new_request.policy_rule["rule_id"] == "person.write"
 
 
 @pytest.mark.asyncio

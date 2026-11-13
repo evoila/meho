@@ -686,6 +686,16 @@ class AuditLog(Base):
         nullable=False,
         server_default=sa.false(),
     )
+    # The policy rule that matched the call, and the version of the policy
+    # file (#6044). The writers read both from
+    # :data:`meho_backplane.operations._audit.policy_rule_var`, which the
+    # dispatcher binds next to ``policy_decision_var``. Today only the
+    # policy evaluator in shadow mode (``POLICY_ENGINE_SHADOW``) sets it,
+    # so the text ends with ``(shadow)``: the evaluator matched this rule,
+    # but today's checks decided. NULL with the switch off, on rows where no
+    # gate ran, and on every row from before migration ``0167``.
+    policy_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    policy_version: Mapped[int | None] = mapped_column(sa.Integer(), nullable=True, default=None)
 
     __table_args__ = (
         sa.CheckConstraint(
@@ -7479,6 +7489,16 @@ class ApprovalRequest(Base):
     # The request changes who has rights: only another admin approves it.
     # See the class docstring. Added by migration ``0153``.
     rights_change: Mapped[bool | None] = mapped_column(sa.Boolean(), nullable=True, default=None)
+    # The policy rule that matched the call when it was made, and the
+    # version of the policy file (#6044): ``{"source", "rule_id", "text",
+    # "decided"}``. ``decided`` is ``false`` while the policy evaluator runs
+    # in shadow mode (``POLICY_ENGINE_SHADOW``): it names the rule, but
+    # today's checks decided. NULL with the switch off and on rows from
+    # before migration ``0167``.
+    policy_rule: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON, nullable=True, default=None
+    )
+    policy_version: Mapped[int | None] = mapped_column(sa.Integer(), nullable=True, default=None)
     # An operator checked the target of an approved run whose outcome MEHO
     # does not know, and wrote down what they found (#5026): the verdict
     # (``happened`` / ``did_not_happen``), a note, who and when. NULL until

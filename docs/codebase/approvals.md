@@ -1271,6 +1271,19 @@ and counts the metric `policy_shadow_mismatch_total`. Today's answer still
 decides. Run approvals are not compared. See
 [policy-evaluator.md](policy-evaluator.md).
 
+### The policy rule on the request (#6044)
+
+With the same switch on, a new request also stores the policy rule that
+the evaluator matched for the call: `approval_request.policy_rule`
+(`{"source", "rule_id", "text", "decided"}`) and `policy_version`
+(migration `0167`). Its `approval.request` audit row has the same rule in
+`audit_log.policy_rule`. The `approval.decision` rows name no rule, also
+an expiry that a retry writes for an old overdue request. `decided` is
+`false` in shadow mode: today's
+checks decided. The console shows a "Policy rule" line in the request
+details, with "(shadow: watched only, today's checks decided)". With the
+switch off both columns stay empty and the line is not shown.
+
 ## Delegated decisions: the reason-line convention (#3692)
 
 Sometimes an approver decides because **another person told them to, in

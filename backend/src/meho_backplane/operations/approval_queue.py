@@ -120,6 +120,8 @@ from meho_backplane.operations._audit import (
     agent_session_id_var,
     parent_audit_id_var,
     policy_decision_var,
+    policy_rule_columns,
+    policy_rule_var,
     resolve_agent_session_id,
     work_ref_var,
 )
@@ -1287,6 +1289,14 @@ def _bounded_expires_at(
     return min(requested, ceiling)
 
 
+def _policy_rule_fields() -> dict[str, Any]:
+    """``policy_rule`` and ``policy_version`` of a new request, from ``policy_rule_var``."""
+    stamp = policy_rule_var.get()
+    if stamp is None:
+        return {}
+    return {"policy_rule": stamp.as_json(), "policy_version": stamp.policy_version}
+
+
 async def _write_audit_row(
     session: AsyncSession,
     *,
@@ -1362,6 +1372,12 @@ async def _write_audit_row(
     policy_kwargs: dict[str, Any] = {}
     if hasattr(AuditLog, "policy_decision"):
         policy_kwargs["policy_decision"] = policy_decision_var.get()
+    # The matched policy rule (#6044), only on the "request" row. A
+    # "decision" row can be written on the task of another call: a retry
+    # that expires an old overdue request writes that request's decision
+    # row while the retry's own rule is bound.
+    if path == "approval.request":
+        policy_kwargs.update(policy_rule_columns())
     # Session-replay lineage (#2086), off the request row — the durable
     # source of truth, same discipline as ``work_ref`` below. The
     # "request" row and the "decision" rows are written on *different*
@@ -1682,6 +1698,7 @@ async def create_pending_request(
             session, tenant_id=operator.tenant_id, target_id=target_id
         ),
         reveal_secret=reveal_secret,
+        **_policy_rule_fields(),
     )
     if rights_change or is_rights_change(request):
         request.rights_change = True

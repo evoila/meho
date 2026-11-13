@@ -34,6 +34,7 @@ from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
+from meho_backplane.operations._audit import policy_rule_var
 from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import PreviewContext
 from meho_backplane.operations._request_preview import preview_dispatch
@@ -41,6 +42,8 @@ from meho_backplane.operations._target_connector_match import (
     TARGET_CONNECTOR_MISMATCH,
     target_connector_mismatch,
 )
+from meho_backplane.operations.composite import composite_depth_var
+from meho_backplane.policy.stamp import RuleStamp
 from meho_backplane.settings import get_settings
 
 _TENANT = UUID("00000000-0000-0000-0000-00000000c5c5")
@@ -275,6 +278,32 @@ async def test_host_op_on_cluster_target_is_refused_with_a_clear_message() -> No
     assert _RUNS == []
     assert await _audit_statuses("hostos.about") == [TARGET_CONNECTOR_MISMATCH]
     assert result.audit_id is not None
+
+
+@pytest.mark.asyncio
+async def test_refused_step_does_not_write_the_parent_rule() -> None:
+    """#6044: a step refused before its own policy gate names no policy rule.
+
+    The parent's rule is bound while the step runs. The step's audit row
+    must not take it, and the parent gets its rule back after the step.
+    """
+    await _register("hostos.about", _HostConnector.about)
+    parent_rule = RuleStamp(source="default", rule_id="person.safe", text="a safe call runs")
+    rule_token = policy_rule_var.set(parent_rule)
+    depth_token = composite_depth_var.set(1)
+    try:
+        result = await _call("hostos.about", _Target("clusteros"))
+        assert policy_rule_var.get() is parent_rule
+    finally:
+        composite_depth_var.reset(depth_token)
+        policy_rule_var.reset(rule_token)
+
+    assert result.extras["error_code"] == TARGET_CONNECTOR_MISMATCH
+    async with get_sessionmaker()() as s:
+        row = (
+            await s.execute(select(AuditLog).where(AuditLog.path == "hostos.about"))
+        ).scalar_one()
+    assert (row.policy_rule, row.policy_version) == (None, None)
 
 
 @pytest.mark.asyncio

@@ -229,6 +229,46 @@ func TestPrintEntrySummaryShowsDashForNullFields(t *testing.T) {
 		"agent_session_id:  -",
 		"broadcast_event_id: -",
 		"payload:           -",
+		"policy_decision:   -",
+		"policy_rule:       -",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q in %s", want, out)
+		}
+	}
+	if strings.Contains(out, "policy_version:") {
+		t.Errorf("summary shows policy_version with no version: %s", out)
+	}
+}
+
+// TestPrintEntrySummaryShowsPolicyRule — the summary names the policy
+// rule that matched the call, and the policy version when there is one
+// (#6044).
+func TestPrintEntrySummaryShowsPolicyRule(t *testing.T) {
+	var buf bytes.Buffer
+	decision := "needs-approval"
+	rule := "default:person.token (shadow)"
+	version := 3
+	printEntrySummary(&buf, &api.AuditEntry{
+		Id:             mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+		Ts:             mustTS(t, "2026-05-13T00:00:00Z"),
+		PrincipalSub:   "damir",
+		Method:         "DISPATCH",
+		Path:           "x.y",
+		StatusCode:     200,
+		OpId:           "x.y",
+		OpClass:        "write",
+		ResultStatus:   "ok",
+		Payload:        map[string]any{},
+		PolicyDecision: &decision,
+		PolicyRule:     &rule,
+		PolicyVersion:  &version,
+	})
+	out := buf.String()
+	for _, want := range []string{
+		"policy_decision:   needs-approval",
+		"policy_rule:       default:person.token (shadow)",
+		"policy_version:    3",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary missing %q in %s", want, out)

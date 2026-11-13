@@ -10,7 +10,9 @@
   approved the import (the ``policy.apply`` operation,
   :mod:`meho_backplane.connectors.policy.apply`). It plans again first:
   when the stored policy changed after the plan, nothing is written.
-* :func:`export_policy` writes the stored policy as a file.
+* :func:`export_policy` writes the stored policy as a file. A tenant
+  entry that tries to set back an install-wide "always wait" gets a
+  comment that says it has no effect.
 * :func:`list_history` returns the imported files, newest first.
 
 The import replaces the whole policy of its scope (a tenant, or the
@@ -39,6 +41,8 @@ from meho_backplane.policy.classification import (
     Taxonomy,
     classify,
     entries_from_document,
+    install_wait_text,
+    install_wait_undone,
     taxonomy_from_documents,
 )
 from meho_backplane.policy.document import (
@@ -301,7 +305,7 @@ async def build_plan(
             other = await _override_entries_for(session, tenant_id)
     ops = await load_known_ops(session, scope=scope, tenant_id=tenant_id)
     try:
-        plan.mistakes, plan.warnings = check_document(
+        plan.mistakes = check_document(
             document,
             scope=scope,
             install_document=install_document,
@@ -427,19 +431,61 @@ class _NoAliasDumper(yaml.SafeDumper):  # type: ignore[misc]  # yaml has no stub
         return True
 
 
-async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.UUID | None) -> str:
-    """The stored policy of *scope* as a ``policy: v1`` file."""
-    stored = await _stored_row(session, scope, tenant_id)
-    document = normalise_document(stored.document if stored is not None else None)
-    out: dict[str, Any] = {"policy": POLICY_VERSION}
-    for key in ("description", "taxonomy"):
-        if key in document:
-            out[key] = document[key]
-    out["classifications"] = list(document.get("classifications") or [])
+def _dump(value: Any) -> str:
     text: str = yaml.dump(
-        out, Dumper=_NoAliasDumper, sort_keys=False, allow_unicode=True, default_flow_style=False
+        value, Dumper=_NoAliasDumper, sort_keys=False, allow_unicode=True, default_flow_style=False
     )
     return text
+
+
+async def _no_effect_notes(
+    session: AsyncSession, tenant_id: uuid.UUID | None, entries: list[dict[str, Any]]
+) -> dict[int, str]:
+    """The tenant entries that try to set back an install-wide "always wait", by index."""
+    install_row = await _stored_row(session, "install", None)
+    install_entries = _entries_or_note(
+        install_row.document if install_row is not None else None,
+        "install",
+        "the install's stored policy",
+        [],
+    )
+    if not any(e.always_wait for e in install_entries):
+        return {}
+    ops = await load_known_ops(session, scope="tenant", tenant_id=tenant_id)
+    notes: dict[int, str] = {}
+    for index, raw in enumerate(entries):
+        try:
+            entry = entries_from_document({"classifications": [raw]}, scope="tenant")[0]
+        except (ValueError, IndexError):
+            continue
+        found = install_wait_undone(entry, (op.coords for op in ops), install_entries)
+        if found is not None:
+            notes[index] = install_wait_text(f"`classifications[{index}]`", *found)
+    return notes
+
+
+async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.UUID | None) -> str:
+    """The stored policy of *scope* as a ``policy: v1`` file.
+
+    In a tenant's file, an entry that tries to set back an "always wait"
+    of the install's policy gets a ``# Has no effect:`` comment above it.
+    """
+    stored = await _stored_row(session, scope, tenant_id)
+    document = normalise_document(stored.document if stored is not None else None)
+    head: dict[str, Any] = {"policy": POLICY_VERSION}
+    for key in ("description", "taxonomy"):
+        if key in document:
+            head[key] = document[key]
+    entries = list(document.get("classifications") or [])
+    if not entries:
+        return _dump({**head, "classifications": []})
+    notes = await _no_effect_notes(session, tenant_id, entries) if scope == "tenant" else {}
+    parts = [_dump(head), "classifications:\n"]
+    for index, entry in enumerate(entries):
+        if index in notes:
+            parts.append(f"# Has no effect: {notes[index]}\n")
+        parts.append(_dump([entry]))
+    return "".join(parts)
 
 
 async def list_history(

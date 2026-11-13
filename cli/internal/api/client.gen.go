@@ -3261,14 +3261,15 @@ type BodyUiBroadcastOverridesCreateUiBroadcastOverridesPost struct {
 
 // BodyUiConnectorsCreateSubmitUiConnectorsCreatePost defines model for Body_ui_connectors_create_submit_ui_connectors_create_post.
 type BodyUiConnectorsCreateSubmitUiConnectorsCreatePost struct {
-	Aliases   *string `json:"aliases"`
-	AuthModel *string `json:"auth_model,omitempty"`
-	Host      *string `json:"host,omitempty"`
-	Name      *string `json:"name,omitempty"`
-	Notes     *string `json:"notes"`
-	Port      *string `json:"port"`
-	Product   *string `json:"product,omitempty"`
-	SecretRef *string `json:"secret_ref"`
+	Aliases      *string `json:"aliases"`
+	AuthModel    *string `json:"auth_model,omitempty"`
+	Host         *string `json:"host,omitempty"`
+	ManagedRealm *string `json:"managed_realm"`
+	Name         *string `json:"name,omitempty"`
+	Notes        *string `json:"notes"`
+	Port         *string `json:"port"`
+	Product      *string `json:"product,omitempty"`
+	SecretRef    *string `json:"secret_ref"`
 
 	// SessionCtx Per-request session identity exposed on ``request.state``.
 	//

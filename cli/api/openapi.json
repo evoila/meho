@@ -29938,6 +29938,12 @@
             "nullable": true,
             "title": "Notes"
           },
+          "managed_realm": {
+            "type": "string",
+            "maxLength": 200,
+            "nullable": true,
+            "title": "Managed Realm"
+          },
           "session_ctx": {
             "$ref": "#/components/schemas/UISessionContext",
             "nullable": true

@@ -101,6 +101,18 @@ Examples in current use:
   rke2 (search_operations on connector <connector-id>).` When both kinds are the same product but
   another connector of that product was picked, the message names both
   connectors and the target's `preferred_impl_id` — #5948)
+- `no_connector` for a version outside the range (`call_operation` and
+  `preview_operation`: the target's known version is outside the
+  `supported_version_range` of the connector picked for it. This happens
+  when the connector also has a fallback entry that accepts every
+  version. Refused right after `target_connector_mismatch`, before the
+  policy check and any wait for approval. A refused call writes one audit
+  row; a refused preview writes none. `extras` names `product`, `version`,
+  `supported_version_range` and `connector_id`. Message: `no_connector:
+  Target '<name>' runs version v1.31.9. Connector k8s-1.x serves only
+  versions >=1.32,<1.38. Upgrade the target, or probe it again if its
+  version changed.` A target with no known version is not refused, and the
+  probe does not run this check — `operations/_target_version_range.py`)
 - `receipt_too_large` (`call_operation`: the receipt of a completed run
   could not fit `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`, so the call is
   refused before dispatch and nothing runs — #3641)

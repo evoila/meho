@@ -25,6 +25,11 @@ import, and do a few steps by hand. MEHO has no command for it.
       under `identityProviderMappers`, but the partial import does not
       read them. A mapper puts people from an identity provider into
       their group. You add each one again by hand.
+    - **The second login step.** The partial import does not bring
+      login flows, so a code from an authenticator app is not asked
+      for until you set it up again. The people's authenticator apps
+      do not move either: each person sets up the app again at their
+      first login.
 
     Keycloak itself says the admin console export is not a backup, and
     not meant to move a whole realm. Here you use it only for the
@@ -114,7 +119,13 @@ Follow the recipe [Active Directory / LDAP](login/ad-ldap.md) on the
 new install:
 
 - step 2, "Connect the directory",
-- step 3, "Bring the directory groups in".
+- step 3, "Bring the directory groups in",
+- step 5, "Add a second login step", when the old install asks for a
+  code from an authenticator app. To check this, open
+  **Authentication** in the old admin console and look at the flow
+  marked **Used by: Browser flow**. Do this step now, before step 4:
+  nobody can log in through the directory until step 4 types the bind
+  password, so nobody logs in without the code.
 
 Use the same values as on the old install. You can read them in the
 old Keycloak admin console under **User federation**, or in the export
@@ -139,6 +150,12 @@ directory, a person from each identity provider. A person who comes
 from the directory or from an identity provider gets their group from
 there. Check that each one gets the right tenant and role.
 
+When the old install asked for a code from an authenticator app, check
+that the new install asks for it too. The first login of each person
+asks them to set up the app. Every later login asks for the code. If a
+login works with the password only, stop and do step 5 of the recipe
+[Active Directory / LDAP](login/ad-ldap.md) before anyone else logs in.
+
 ## 6. Add the other group members
 
 Only the people who do not get their group from a directory or an
@@ -148,8 +165,21 @@ identity provider. For example, people you made by hand in Keycloak.
 
     ```bash
     meho keycloak group list --target <keycloak-target> --json
-    meho keycloak group member list --target <keycloak-target> --id <group-id>
+    meho keycloak group member list --target <keycloak-target> \
+      --id <group-id> --max 100000
     ```
+
+    Always pass `--max`. Without it, Keycloak returns only the first
+    100 members, and the count MEHO shows counts only these. Pick a
+    number larger than your biggest group. When the list has exactly
+    that many members, the list may be cut: run it again with a larger
+    number.
+
+    Then check the list is complete. In the **old** Keycloak admin
+    console, open **Groups**, open the group and click the **Members**
+    tab. Leave **Include sub-group users** off. The tab shows a few
+    members per page: page through to the end, and check that each
+    member there is on your list.
 
 2. On the **new** install, each person must exist first. Make them as
    in [Add a tenant](../guides/tenant-bootstrap.md).

@@ -173,12 +173,18 @@ Operators move it by hand. The public page
    by hand: partial import does not read `identityProviderMappers`, and
    without its group mapper an identity provider's people get no group.
 3. Add the LDAP connection and its group mapper again by hand. Partial
-   import does not read user federation.
+   import does not read user federation. It does not bring login flows
+   either: when the old install asks for an authenticator code, bind
+   that flow again before the bind password goes in. People set up
+   their authenticator app again at first login.
 4. Type the secrets again: each imported identity provider's client
    secret, and the LDAP bind password. The export masks them with `*`.
 5. Add the group members that no directory or identity provider brings,
    with `keycloak.group.member.add`. Each add waits for a person's
-   approval. The export carries no users.
+   approval. The export carries no users. Read the old members with
+   `keycloak.group.member.list` and a `max` above the group size:
+   without it Keycloak returns only the first 100. Check the list against
+   the group's **Members** tab in the old admin console.
 
 The new install needs the same `coreKeycloak.firstTenantId`,
 `coreKeycloak.tenantName` and `coreKeycloak.tenants` Helm values, so its

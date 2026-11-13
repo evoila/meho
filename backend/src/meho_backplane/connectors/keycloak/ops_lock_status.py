@@ -20,6 +20,12 @@ sign-in (``lastIPFailure``) is personal data, so it is never returned. A read
 that fails, or a body of the wrong shape, is an error: it is never read as
 "not locked". Keycloak gives times in milliseconds; they are returned as
 ISO 8601 in UTC. A last failure of 0 means "no failure yet" and is ``null``.
+
+Keycloak answers the lock status read with ``locked: false`` and zero counts
+for an id it does not know, and for every user when the realm's lock is off.
+So ``lock_status`` with an ``id`` reads the user first, and a not-locked
+answer only means something when ``keycloak.realm.lock_settings`` shows the
+lock is on.
 """
 
 from __future__ import annotations
@@ -29,12 +35,14 @@ from typing import TYPE_CHECKING, Any
 from meho_backplane.connectors.keycloak._paths import (
     _ADMIN_REALM_PATH,
     _USER_BRUTE_FORCE_PATH,
+    _USER_PATH,
     fill_path,
 )
 from meho_backplane.connectors.keycloak.ops_read import _UUID_PATTERN, KeycloakOp
 from meho_backplane.connectors.keycloak.ops_user_state import _iso, _not_found, _user_id
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
+    _opt_str,
     get_or_none,
 )
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
@@ -53,28 +61,42 @@ __all__ = [
 _STATUS_OP = "keycloak.user.lock_status"
 _SETTINGS_OP = "keycloak.realm.lock_settings"
 
-_SETTING_FIELDS = (
-    "bruteForceProtected",
-    "permanentLockout",
-    "failureFactor",
-    "waitIncrementSeconds",
-    "maxFailureWaitSeconds",
-    "maxDeltaTimeSeconds",
-    "minimumQuickLoginWaitSeconds",
-    "quickLoginCheckMilliSeconds",
-    "maxTemporaryLockouts",
+_SETTING_FIELDS: tuple[tuple[str, type], ...] = (
+    ("bruteForceProtected", bool),
+    ("permanentLockout", bool),
+    ("failureFactor", int),
+    ("waitIncrementSeconds", int),
+    ("maxFailureWaitSeconds", int),
+    ("maxDeltaTimeSeconds", int),
+    ("minimumQuickLoginWaitSeconds", int),
+    ("quickLoginCheckMilliSeconds", int),
+    ("maxTemporaryLockouts", int),
 )
 
 
-def _opt_int(value: Any) -> int | None:
-    """An integer count; ``None`` when absent or not a number."""
-    if isinstance(value, bool) or not isinstance(value, int):
+def _typed(rep: dict[str, Any], field: str, kind: type) -> Any:
+    """``rep[field]`` when it is a ``kind``; ``None`` when absent; else an error.
+
+    ``True`` is never an ``int`` here, though Python counts ``bool`` as one.
+    """
+    value = rep.get(field)
+    if value is None:
         return None
-    return value
+    if isinstance(value, kind) and (kind is bool or not isinstance(value, bool)):
+        return value
+    raise KeycloakUnexpectedResponseError(
+        f"'{field}' is {type(value).__name__}, not {kind.__name__}"
+    )
 
 
-def _opt_bool(value: Any) -> bool | None:
-    return value if isinstance(value, bool) else None
+def _last_failure(rep: dict[str, Any]) -> str | None:
+    """``lastFailure`` as ISO 8601 UTC; ``None`` when absent or 0; an error when not a number."""
+    value = rep.get("lastFailure")
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int | float)):
+        raise KeycloakUnexpectedResponseError(
+            f"'lastFailure' is {type(value).__name__}, not a number"
+        )
+    return _iso(value)
 
 
 async def keycloak_user_lock_status(
@@ -87,10 +109,12 @@ async def keycloak_user_lock_status(
     realm = resolve_realm_config(target).managed_realm
     realm_segment = quote_segment(realm)
     user_id = await _user_id(self, operator, target, realm, params, _STATUS_OP)
-    path = fill_path(
-        _USER_BRUTE_FORCE_PATH, {"realm": realm_segment, "user-id": quote_segment(user_id)}
-    )
-    rep = await get_or_none(self, target, path, operator)
+    segments = {"realm": realm_segment, "user-id": quote_segment(user_id)}
+    # The lock status read answers "not locked" for an unknown id; the user read gives 404.
+    by_id = _opt_str(params.get("id")) is not None
+    if by_id and await get_or_none(self, target, fill_path(_USER_PATH, segments), operator) is None:
+        raise _not_found(_STATUS_OP, user_id)
+    rep = await get_or_none(self, target, fill_path(_USER_BRUTE_FORCE_PATH, segments), operator)
     if rep is None:
         raise _not_found(_STATUS_OP, user_id)
     disabled = rep.get("disabled")
@@ -99,9 +123,9 @@ async def keycloak_user_lock_status(
     return {
         "userId": user_id,
         "locked": disabled,
-        "numFailures": _opt_int(rep.get("numFailures")),
-        "numTemporaryLockouts": _opt_int(rep.get("numTemporaryLockouts")),
-        "lastFailure": _iso(rep.get("lastFailure")),
+        "numFailures": _typed(rep, "numFailures", int),
+        "numTemporaryLockouts": _typed(rep, "numTemporaryLockouts", int),
+        "lastFailure": _last_failure(rep),
     }
 
 
@@ -118,7 +142,7 @@ async def keycloak_realm_lock_settings(
     )
     if "bruteForceProtected" not in row:
         raise KeycloakUnexpectedResponseError("the realm answer has no 'bruteForceProtected'")
-    return {"realm": realm, **{field: row.get(field) for field in _SETTING_FIELDS}}
+    return {"realm": realm, **{field: _typed(row, field, kind) for field, kind in _SETTING_FIELDS}}
 
 
 _STATUS_PARAMS: dict[str, Any] = {
@@ -151,7 +175,10 @@ _STATUS_RESPONSE: dict[str, Any] = {
         "userId": {"type": "string"},
         "locked": {
             "type": "boolean",
-            "description": "True when the account is locked now (temporary or permanent).",
+            "description": (
+                "True when the account is locked now (temporary or permanent). "
+                "False with zero counts is also the answer when the realm's lock is off."
+            ),
         },
         "numFailures": {
             "type": ["integer", "null"],
@@ -236,7 +263,9 @@ LOCK_STATUS_OPS: tuple[KeycloakOp, ...] = (
             },
             "output_shape": (
                 "``{userId, locked, numFailures, numTemporaryLockouts, lastFailure}``. "
-                "lastFailure is ISO 8601 UTC, or null when there was no failure."
+                "lastFailure is ISO 8601 UTC, or null when there was no failure. "
+                "locked false with zero counts is also the answer when the realm's "
+                "lock is off: check bruteForceProtected in keycloak.realm.lock_settings."
             ),
             "next_step": (
                 "Call keycloak.realm.lock_settings to see how many failures cause "

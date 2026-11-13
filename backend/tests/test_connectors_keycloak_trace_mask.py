@@ -350,6 +350,9 @@ async def test_lock_status_trace_and_agent_copy_hold_no_failure_ip(
         mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": "kc-admin-token", "expires_in": 300}
         )
+        mock.get(f"/admin/realms/{_MANAGED_REALM}/users/{_USER_UUID}").respond(
+            200, json={"id": _USER_UUID, "username": "event-guest"}
+        )
         mock.get(
             f"/admin/realms/{_MANAGED_REALM}/attack-detection/brute-force/users/{_USER_UUID}"
         ).respond(200, json=_LOCK_ANSWER)
@@ -368,10 +371,12 @@ async def test_lock_status_trace_and_agent_copy_hold_no_failure_ip(
     # The stored trace: the vendor answer is recorded, with the failure IP masked.
     header, spans = await _stored_spans(operator.tenant_id)
     assert header.redaction_uncertain is False
+    # Two vendor calls: the user read, then the lock status read.
     vendor_calls = [span for span in spans if span.span_kind == "vendor_call"]
-    assert len(vendor_calls) == 1
-    body = vendor_calls[0].attributes["response_body"]
-    assert vendor_calls[0].attributes["body_recorded"] is True
+    assert len(vendor_calls) == 2
+    lock_call = vendor_calls[-1]
+    body = lock_call.attributes["response_body"]
+    assert lock_call.attributes["body_recorded"] is True
     assert body["numFailures"] == 5
     assert body["lastIPFailure"] == REDACTED
     assert _FAILURE_IP not in json.dumps([span.attributes for span in spans])

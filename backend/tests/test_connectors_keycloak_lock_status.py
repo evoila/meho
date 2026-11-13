@@ -45,6 +45,7 @@ _REALM = "meho"
 _ADMIN_REALM = "master"
 _USER_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _LOCK_PATH = f"/admin/realms/{_REALM}/attack-detection/brute-force/users/{_USER_UUID}"
+_USER_PATH = f"/admin/realms/{_REALM}/users/{_USER_UUID}"
 _REALM_PATH = f"/admin/realms/{_REALM}"
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000005371")
 
@@ -147,6 +148,16 @@ _LOCKED = {
     "lastFailure": _MS,
 }
 _CLEAN = {"numFailures": 0, "disabled": False, "lastIPFailure": "n/a", "lastFailure": 0}
+# What Keycloak 26.3 answers for an id it does not know, and when the realm's lock is off.
+_DEFAULTS = {
+    "disabled": False,
+    "numFailures": 0,
+    "numTemporaryLockouts": 0,
+    "lastFailure": 0,
+    "lastIPFailure": "n/a",
+    "failedLoginNotBefore": 0,
+}
+_USER_ROW = {"id": _USER_UUID, "username": "event-guest", "enabled": True}
 _REALM_ROW = {
     "realm": _REALM,
     "bruteForceProtected": True,
@@ -178,8 +189,10 @@ async def test_both_ops_are_safe_reads(kc: KeycloakConnector, op_id: str) -> Non
 async def test_locked_user_by_id_shows_counts_and_no_ip(kc: KeycloakConnector) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
+        user_read = mock.get(_USER_PATH).respond(200, json=_USER_ROW)
         mock.get(_LOCK_PATH).respond(200, json=_LOCKED)
         result = await _run(_STATUS_OP, {"id": _USER_UUID})
+    assert user_read.called
     assert result["status"] == "ok", result
     assert result["result"] == {
         "userId": _USER_UUID,
@@ -202,8 +215,10 @@ async def test_user_with_no_failures_is_not_locked(kc: KeycloakConnector) -> Non
                 {"id": _USER_UUID, "username": "Event-Guest"},
             ],
         )
+        user_read = mock.get(_USER_PATH).respond(200, json=_USER_ROW)
         mock.get(_LOCK_PATH).respond(200, json=_CLEAN)
         result = await _run(_STATUS_OP, {"username": "event-guest"})
+    assert not user_read.called
     assert result["status"] == "ok", result
     assert result["result"] == {
         "userId": _USER_UUID,
@@ -220,11 +235,73 @@ async def test_unknown_user_is_not_found(kc: KeycloakConnector) -> None:
         _mount_token(mock)
         mock.get(f"/admin/realms/{_REALM}/users").respond(200, json=[])
         by_name = await _run(_STATUS_OP, {"username": "nobody"})
-        mock.get(_LOCK_PATH).respond(404, json={"error": "User not found"})
+        mock.get(_USER_PATH).respond(404, json={"error": "User not found"})
+        lock_read = mock.get(_LOCK_PATH).respond(200, json=_DEFAULTS)
         by_id = await _run(_STATUS_OP, {"id": _USER_UUID})
     for result in (by_name, by_id):
         assert result["status"] != "ok"
         assert "user not found" in str(result)
+    assert not lock_read.called
+
+
+async def test_unknown_id_with_default_lock_answer_is_not_found(kc: KeycloakConnector) -> None:
+    """Keycloak answers 200 with "not locked" for an unknown id; the user read decides."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_USER_PATH).respond(404, json={"error": "User not found"})
+        mock.get(_LOCK_PATH).respond(200, json=_DEFAULTS)
+        result = await _run(_STATUS_OP, {"id": _USER_UUID})
+    assert result["status"] != "ok", result
+    assert "user not found" in str(result)
+    assert "locked" not in str(result.get("result"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("lastFailure", "yesterday"),
+        ("lastFailure", True),
+        ("numFailures", "5"),
+        ("numFailures", True),
+        ("numTemporaryLockouts", 1.5),
+    ],
+)
+async def test_status_field_of_wrong_type_is_an_error(
+    kc: KeycloakConnector, field: str, value: Any
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_USER_PATH).respond(200, json=_USER_ROW)
+        mock.get(_LOCK_PATH).respond(200, json={**_LOCKED, field: value})
+        result = await _run(_STATUS_OP, {"id": _USER_UUID})
+    assert result["status"] != "ok", result
+    assert field in str(result)
+
+
+async def test_absent_or_null_last_failure_is_null(kc: KeycloakConnector) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_USER_PATH).respond(200, json=_USER_ROW)
+        route = mock.get(_LOCK_PATH).respond(200, json={"disabled": False})
+        absent = await _run(_STATUS_OP, {"id": _USER_UUID})
+        route.respond(200, json={"disabled": False, "lastFailure": None})
+        null = await _run(_STATUS_OP, {"id": _USER_UUID})
+    for result in (absent, null):
+        assert result["status"] == "ok", result
+        assert result["result"]["lastFailure"] is None
+
+
+async def test_status_output_shape_says_a_switched_off_lock_also_reads_not_locked(
+    kc: KeycloakConnector,
+) -> None:
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == _STATUS_OP)
+            )
+        ).scalar_one()
+    assert "lock is off" in row.llm_instructions["output_shape"]
+    assert "lock is off" in row.response_schema["properties"]["locked"]["description"]
 
 
 async def test_without_id_or_username_and_traversal_are_refused(kc: KeycloakConnector) -> None:
@@ -235,6 +312,7 @@ async def test_without_id_or_username_and_traversal_are_refused(kc: KeycloakConn
 async def test_status_vendor_failures_are_errors_not_unlocked(kc: KeycloakConnector) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
+        mock.get(_USER_PATH).respond(200, json=_USER_ROW)
         route = mock.get(_LOCK_PATH).respond(500, json={"error": "boom"})
         server_error = await _run(_STATUS_OP, {"id": _USER_UUID})
         route.respond(200, json=[])
@@ -277,3 +355,35 @@ async def test_realm_lock_settings_failures_are_errors(kc: KeycloakConnector) ->
         wrong_shape = await _run(_SETTINGS_OP, {})
     for result in (server_error, no_field, wrong_shape):
         assert result["status"] != "ok", result
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("bruteForceProtected", "true"),
+        ("permanentLockout", 1),
+        ("failureFactor", "5"),
+        ("failureFactor", True),
+        ("maxFailureWaitSeconds", 900.5),
+        ("maxTemporaryLockouts", [0]),
+    ],
+)
+async def test_realm_lock_setting_of_wrong_type_is_an_error(
+    kc: KeycloakConnector, field: str, value: Any
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json={**_REALM_ROW, field: value})
+        result = await _run(_SETTINGS_OP, {})
+    assert result["status"] != "ok", result
+    assert field in str(result)
+
+
+async def test_realm_lock_setting_absent_is_null(kc: KeycloakConnector) -> None:
+    row = {k: v for k, v in _REALM_ROW.items() if k != "maxTemporaryLockouts"}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json=row)
+        result = await _run(_SETTINGS_OP, {})
+    assert result["status"] == "ok", result
+    assert result["result"]["maxTemporaryLockouts"] is None

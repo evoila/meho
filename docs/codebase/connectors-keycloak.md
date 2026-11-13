@@ -255,13 +255,13 @@ rejects a whitespace-only secret rather than setting an empty password.
 
 ## Read ops (G3.13-T2, extended by #2843 + #3280)
 
-Ten `safety_level="safe"` / `requires_approval=False` read ops in this
-table (an eleventh, `keycloak.identity_provider.list`, is described with the
-approval sign-in flow; three more are in "Login setup reads" below, and two
-more, `keycloak.user.get` and `keycloak.user.sessions`, are described with the
-user reads below, and two lock reads in "Lock status reads"), all
-tagged `read-only`, all dispatching via the admin-auth path. The realm is
-the target's `managed_realm` (no per-op realm param):
+Fourteen `safety_level="safe"` / `requires_approval=False` read ops in this
+table. `keycloak.user.get` and `keycloak.user.sessions` are described more
+with the user reads below, and the two lock reads in "Lock status reads".
+Four more reads are not in this table: `keycloak.identity_provider.list`
+(described with the approval sign-in flow) and three in "Login setup reads"
+below. All are tagged `read-only` and dispatch via the admin-auth path. The
+realm is the target's `managed_realm` (no per-op realm param):
 
 | op_id | Admin REST API | returns |
 |---|---|---|
@@ -369,13 +369,25 @@ apart:
   `GET .../attack-detection/brute-force/users/{user-id}`. The result is
   `{userId, locked, numFailures, numTemporaryLockouts, lastFailure}`. The IP
   address of the last failure (`lastIPFailure`) is personal data and is never
-  returned. The trace mask hides it in the flight recorder trace too. `lastFailure` is ISO 8601 UTC, or `null` when there was no
-  failure. An unknown user raises "user not found". An answer without the
-  `disabled` flag is an error, never "not locked".
+  returned. The trace mask hides it in the flight recorder trace too.
+  `lastFailure` is ISO 8601 UTC, or `null` when it is absent or 0 (no
+  failure yet).
+- Keycloak 26 answers the lock status read with 200, `disabled: false` and
+  zero counts for an id it does not know. So with an `id`, the op first reads
+  `GET .../users/{user-id}`. That read gives 404 for an unknown id, and the op
+  raises "user not found". With a `username`, the exact-match lookup already
+  finds the user.
+- Keycloak gives the same "not locked, zero counts" answer for every user
+  when the realm's lock is off. The op's `output_shape` text says so: check
+  `bruteForceProtected` in `keycloak.realm.lock_settings`.
+- An answer without the `disabled` flag is an error, never "not locked". A
+  count or `lastFailure` of the wrong type is an error too.
 - `keycloak.realm.lock_settings` reads the realm and copies only the lock
   rules: `bruteForceProtected`, `permanentLockout`, `failureFactor`,
   `waitIncrementSeconds`, `maxFailureWaitSeconds`, `maxDeltaTimeSeconds` and
-  the quick-login fields.
+  the quick-login fields. Each field is checked: a flag must be a boolean and
+  a number an integer. An absent field is `null`; a field of the wrong type is
+  an error.
 
 Keycloak does not say until when a temporary lock lasts. Not built here: an
 unlock operation.

@@ -771,7 +771,7 @@ async def test_refresh_with_k8s_style_populator_is_idempotent_on_recall() -> Non
     Mirrors the issue body's "first call ``added_nodes >= 2``;
     immediate second call ``added_nodes == 0, updated_nodes == 0``"
     contract under the refresh service's diff/apply sweep — the same
-    sweep that runs against the live rke2-infra cluster in the v0.7.x
+    sweep that runs against the live k8s-infra cluster in the v0.7.x
     deploy.
     """
     register_connector_v2(

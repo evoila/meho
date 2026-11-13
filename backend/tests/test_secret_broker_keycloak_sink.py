@@ -71,7 +71,7 @@ _KC_HOST = "keycloak-secret-sink.test.invalid"
 _KC_BASE_URL = f"https://{_KC_HOST}"
 _ADMIN_TOKEN = "kc-admin-token-secret-sink"
 _TARGET_NAME = "rdc-keycloak-secret-sink"
-_REALM = "evba"
+_REALM = "example-realm"
 _USERNAME = "operator-a"
 _USER_UUID = "44444444-4444-4444-4444-444444444444"
 

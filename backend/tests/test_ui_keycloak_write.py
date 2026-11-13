@@ -642,7 +642,7 @@ def _make_ok_double() -> Any:
         if op_id in ("keycloak.client.list", "keycloak.client_scope.list"):
             result = {"rows": [], "total": 0}
         elif op_id == "keycloak.realm.get":
-            result = {"realm": {"realm": "evba", "enabled": True}}
+            result = {"realm": {"realm": "example-realm", "enabled": True}}
         return {
             "status": "ok",
             "op_id": op_id,

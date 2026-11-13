@@ -331,9 +331,9 @@ def _index_envelopes() -> dict[str, dict[str, Any]]:
             "keycloak.realm.get",
             {
                 "realm": {
-                    "realm": "evba",
+                    "realm": "example-realm",
                     "enabled": True,
-                    "displayName": "EVBA Realm",
+                    "displayName": "Example Realm",
                     "accessTokenLifespan": 300,
                 }
             },
@@ -397,7 +397,7 @@ def test_keycloak_ui_index_renders_three_surfaces_with_pinned_connector_id(
     assert "data-keycloak-clients" in body
     assert "data-keycloak-scopes" in body
     # Projected fields from each surface.
-    assert "evba" in body  # realm name
+    assert "example-realm" in body  # realm name
     assert "meho-web" in body  # client clientId
     assert "profile" in body  # client scope name
     # The pinned connector id was used on every dispatch; the bare slug was

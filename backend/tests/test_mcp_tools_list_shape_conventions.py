@@ -4,7 +4,7 @@
 """Schema-pairwise pinning test for the MCP ``tools/list`` surface.
 
 G0.18-T5 (#1358) of Initiative #1353 closed the SEV-4 shape
-inconsistencies surfaced by ``claude-rdc-hetzner-dc#789`` Finding N4:
+inconsistencies surfaced by a consumer dogfood run (Finding N4):
 the 51-tool ``tools/list`` had sibling-tool drift around the
 forward-cursor parameter name, the ``<noun>_id`` UUID convention,
 the cross-tenant ``tenant_id`` name, the ``status`` enum surface, the

@@ -731,6 +731,16 @@ def _run_php(tmp_path: Path, config: dict[str, Any], fragment: str) -> tuple[str
     return printed, json.loads(tail)
 
 
+_CSC_USERS = ("old", "new", "bystander", "dup", "x", "third")
+
+
+def _php_csc_config(csc: list[dict[str, Any]]) -> dict[str, Any]:
+    """A config whose local users include every name the override tests use."""
+    users = [{"name": "admin", "uid": "0", "scope": "system"}]
+    users += [{"name": n, "uid": "2000", "scope": "user"} for n in _CSC_USERS]
+    return _php_config(csc, users)
+
+
 def _php_config(
     csc: list[dict[str, Any]], users: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
@@ -773,7 +783,7 @@ def test_csc_fragment_shape_is_the_same_for_every_allowed_value() -> None:
 
 @_needs_php
 def test_csc_fragment_run_in_php_touches_only_the_named_entries(tmp_path: Path) -> None:
-    before = _php_config(
+    before = _php_csc_config(
         [
             _csc_row("old", "1", "198.51.100.5/24", "192.0.2.0/25"),
             _csc_row("bystander", "1", "198.51.100.6/24", "192.0.2.0/24"),
@@ -815,7 +825,7 @@ def test_csc_fragment_run_in_php_touches_only_the_named_entries(tmp_path: Path) 
 def test_csc_fragment_run_in_php_does_not_add_a_second_entry_or_edit_a_duplicate(
     tmp_path: Path,
 ) -> None:
-    before = _php_config(
+    before = _php_csc_config(
         [_csc_row("dup", "1", "198.51.100.5/24"), _csc_row("dup", "1", "198.51.100.6/24")]
     )
     plan = _plan_for(
@@ -836,7 +846,7 @@ def test_csc_fragment_run_in_php_keeps_a_route_added_after_the_plan(tmp_path: Pa
         _config(csc=_csc("old", "1", "198.51.100.5/24", "192.0.2.0/25")),
         [_entry("old", routes=["192.0.2.0/24"]), _entry("new", tunnel_address="198.51.100.9")],
     )
-    now = _php_config([_csc_row("old", "1", "198.51.100.5/24", "192.0.2.0/25, 10.77.0.0/16")])
+    now = _php_csc_config([_csc_row("old", "1", "198.51.100.5/24", "192.0.2.0/25, 10.77.0.0/16")])
     printed, out = _run_php(tmp_path, now, build_csc_sync_playback(plan, 1))
     assert printed == "MEHO_CSC_CHANGED=old@1\n"
     assert out["config"] == now and out["calls"] == []
@@ -864,7 +874,7 @@ def test_csc_fragment_run_in_php_writes_nothing_after_other_changes(
         _config(csc=_csc("old", "1", "198.51.100.5/24", "192.0.2.0/25")),
         [_entry("old", routes=["192.0.2.0/24"]), _entry("new", tunnel_address="198.51.100.9")],
     )
-    config = _php_config(now)
+    config = _php_csc_config(now)
     printed, out = _run_php(tmp_path, config, build_csc_sync_playback(plan, 1))
     assert printed.startswith("MEHO_CSC_CHANGED=")
     assert out["config"] == config and out["calls"] == []
@@ -877,7 +887,7 @@ def test_csc_fragment_run_in_php_accepts_spaces_in_an_unchanged_route_list(
     """The parser trims the route list; the fragment's check compares it the same way."""
     xml = _config(csc=_csc("old", "1", " 198.51.100.5/24 ", "192.0.2.0/25 , 10.7.0.0/16"))
     plan = _plan_for(xml, [_entry("old", routes=["192.0.2.0/24"])])
-    now = _php_config([_csc_row("old", "1", " 198.51.100.5/24 ", "192.0.2.0/25 , 10.7.0.0/16")])
+    now = _php_csc_config([_csc_row("old", "1", " 198.51.100.5/24 ", "192.0.2.0/25 , 10.7.0.0/16")])
     printed, out = _run_php(tmp_path, now, build_csc_sync_playback(plan, 1))
     assert printed == ""
     assert out["config"]["openvpn"]["openvpn-csc"][0]["local_network"] == (
@@ -887,7 +897,7 @@ def test_csc_fragment_run_in_php_accepts_spaces_in_an_unchanged_route_list(
 
 @_needs_php
 def test_csc_fragment_run_in_php_creates_the_section_when_missing(tmp_path: Path) -> None:
-    before = _php_config([])
+    before = _php_csc_config([])
     del before["openvpn"]["openvpn-csc"]
     plan = _plan_for(_config(), [_entry("new", tunnel_address="198.51.100.9")])
     _, out = _run_php(tmp_path, before, build_csc_sync_playback(plan, 0))
@@ -910,7 +920,9 @@ class _FakeVault:
         fail: bool = False,
         read_fails: bool = False,
         concurrent: bool = False,
+        mount_version: Any = "2",
     ) -> None:
+        self.mount_version = mount_version  # what the mount info says (None: no options)
         self.data = data  # None: nothing is stored at the path yet
         self.version = 0 if data is None else 3
         self.fail = fail
@@ -950,6 +962,12 @@ class _FakeVault:
                 fake.writes.append((dict(secret), cas, mount_point + "/" + path))
                 return {}
 
+            def mount_info(url: str) -> dict[str, Any]:
+                assert url.startswith("/v1/sys/internal/ui/mounts/")
+                options = None if fake.mount_version is None else {"version": fake.mount_version}
+                return {"data": {"type": "kv", "options": options}}
+
+            client.adapter.get = mount_info
             client.secrets.kv.v2.read_secret_version = read
             client.secrets.kv.v2.create_or_update_secret = create
             yield client
@@ -1971,7 +1989,8 @@ def test_delete_fragment_run_in_php_writes_nothing_while_a_rule_has_the_address_
     }
     fragment = user_module.build_user_delete_playback("guest-1", ["198.51.100.5"])
     printed, out = _run_php(tmp_path, before, fragment)
-    assert printed.strip() == "MEHO_VPN_RULES_REMAIN=1"
+    # The rule on the LAN tab counts too: the source is the address.
+    assert printed.strip() == "MEHO_VPN_RULES_REMAIN=2"
     assert out["config"] == before and out["calls"] == []
 
 
@@ -2215,3 +2234,342 @@ async def test_the_override_sync_preview_declines_bad_input() -> None:
         params={"entries": "x"},
     )
     assert await _csc_preview(ctx) is None
+
+
+# ===========================================================================
+# Gaps left after the first release (one name rule, KV version, rules,
+# override sync, a second cancel)
+# ===========================================================================
+
+
+@pytest.mark.parametrize("name", [".", "..", ".x", ".guest-1"])
+async def test_user_disable_and_enable_refuse_a_name_with_a_leading_dot(name: str) -> None:
+    from meho_backplane.connectors.pfsense.ops_user_write import USER_WRITE_OPS
+
+    for op in USER_WRITE_OPS:
+        assert re.fullmatch(op.parameter_schema["properties"]["name"]["pattern"], name) is None
+    fake = _Fake([_config(users=_user(name, "2000"))])
+    with pytest.raises(ValueError, match="no leading dot"):
+        await fake.user_disable(None, {"name": name}, _operator())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="no leading dot"):
+        await fake.user_enable(None, {"name": name}, _operator())  # type: ignore[arg-type]
+    assert fake.commands == []
+
+
+def test_the_user_name_rule_is_the_same_for_every_pfsense_user_operation() -> None:
+    from meho_backplane.connectors.pfsense import ops_openvpn_rule
+    from meho_backplane.connectors.pfsense.ops_user_write import USER_NAME_RE
+
+    assert user_module._VPN_USER_NAME_RE is USER_NAME_RE
+    assert ops_openvpn_rule.USER_NAME_RE is USER_NAME_RE
+    assert USER_NAME_RE.fullmatch(".x") is None
+    assert USER_NAME_RE.fullmatch("a.b_c-9") is not None
+
+
+@_needs_php
+@pytest.mark.parametrize("name", _DOT_NAMES)
+@pytest.mark.parametrize("disable", [True, False])
+def test_the_user_flag_fragment_run_in_php_never_reaches_local_user_set_for_a_dot_name(
+    tmp_path: Path, name: str, disable: bool
+) -> None:
+    from meho_backplane.connectors.pfsense.ops_user_write import build_user_flag_playback
+
+    users = [
+        {"name": "admin", "uid": "0", "scope": "system"},
+        {"name": name, "uid": "2000", "scope": "user"},
+    ]
+    before = _php_config([], users)
+    fragment = _with_name(build_user_flag_playback("guest-1", disable=disable), name)
+    printed, out = _run_php(tmp_path, before, fragment)
+    assert printed == ""
+    assert out["config"] == before and out["calls"] == []
+
+
+async def test_create_refuses_a_new_path_on_a_mount_that_is_not_kv_version_2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for version in ("1", None, "", "3"):
+        fake_vault = _FakeVault(mount_version=version)  # a new path: the read says "not found"
+        monkeypatch.setattr(user_module, "vault_client_for_operator", fake_vault)
+        fake = _created_fake()
+        with pytest.raises(PfSenseRefusedError, match=r"refused \(vault_version_unknown\)"):
+            await _create(fake)
+        assert not fake.wrote and fake_vault.writes == []
+
+
+async def test_create_refuses_a_mount_whose_version_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_vault = _FakeVault()
+    original = fake_vault.__call__
+
+    def _broken(operator: Any, **kw: Any) -> Any:
+        ctx = original(operator, **kw)
+
+        @asynccontextmanager
+        async def _wrapped() -> AsyncIterator[Any]:
+            async with ctx as client:
+                client.adapter.get = MagicMock(side_effect=hvac.exceptions.Forbidden("denied"))
+                yield client
+
+        return _wrapped()
+
+    monkeypatch.setattr(user_module, "vault_client_for_operator", _broken)
+    fake = _created_fake()
+    with pytest.raises(RuntimeError, match="reading the Vault path failed"):
+        await _create(fake)
+    assert not fake.wrote
+
+
+async def test_the_create_preview_says_unknown_for_a_mount_that_is_not_kv_version_2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from meho_backplane.operations._preview import PreviewContext
+
+    monkeypatch.setattr(user_module, "vault_client_for_operator", _FakeVault(mount_version="1"))
+    ctx = PreviewContext(
+        descriptor=MagicMock(),
+        connector_instance=_Fake([_config()]),
+        operator=_operator(),
+        target=None,
+        params=_CREATE,
+    )
+    preview = await user_module._create_preview(ctx)
+    assert preview is not None and preview["vault"]["path_state"] == "unknown"
+
+
+def _alias(name: str, kind: str, address: str) -> str:
+    return f"<alias><name>{name}</name><type>{kind}</type><address>{address}</address></alias>"
+
+
+def _aliases(name: str, kind: str, address: str) -> str:
+    return f"<aliases>{_alias(name, kind, address)}</aliases>"
+
+
+def _guest_rule(tracker: str, source: str, interface: str = "lan") -> str:
+    """A pass rule written by hand (no tag) with the given ``<source>`` content."""
+    return (
+        f"<rule><tracker>{tracker}</tracker><type>pass</type><interface>{interface}</interface>"
+        f"<ipprotocol>inet</ipprotocol><source>{source}</source>"
+        "<destination><any></any></destination><descr>by hand</descr></rule>"
+    )
+
+
+def _guest_config(rules: str, extra: str = "", *, with_user: bool = True) -> str:
+    users = _user("guest-1", "2000") if with_user else ""
+    csc = _csc("guest-1", "1", "198.51.100.5/24") if with_user else ""
+    xml = _config(users=users, csc=csc, rules=rules)
+    return xml.replace("</pfsense>", f"{extra}</pfsense>")
+
+
+_HOST_ALIAS = _aliases("vpn_guests", "host", "192.0.2.9 198.51.100.5")
+_NESTED_ALIAS = (
+    "<aliases>"
+    + _alias("outer", "network", "192.0.2.0/24 inner")
+    + _alias("inner", "network", "198.51.100.0/25")
+    + "</aliases>"
+)
+_OPT_NET = (
+    "<interfaces><opt2><if>ovpns1</if><ipaddr>198.51.100.1</ipaddr><subnet>24</subnet></opt2>"
+    "</interfaces>"
+)
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize(
+    ("source", "interface", "extra"),
+    [
+        ("<address>198.51.100.5</address>", "lan", ""),
+        ("<address>198.51.100.0/24</address>", "wan", ""),
+        ("<address>vpn_guests</address>", "lan", _HOST_ALIAS),
+        ("<address>outer</address>", "opt1", _NESTED_ALIAS),
+        ("<address>vpn_guests</address>", "VPNGroup", _HOST_ALIAS),
+        ("<address>198.51.100.5</address>", "opt2", _OPT_NET),
+        ("<address>198.51.100.5</address>", "lan,wan", ""),
+        ("<network>opt2</network>", "lan", _OPT_NET),
+        ("<network>opt2ip</network>", "lan", _OPT_NET.replace("198.51.100.1", "198.51.100.5")),
+        ("<address>urls</address>", "lan", _aliases("urls", "urltable", "")),
+    ],
+)
+async def test_delete_is_refused_while_any_rule_source_holds_the_users_address(
+    source: str, interface: str, extra: str, force: bool
+) -> None:
+    config = _guest_config(_guest_rule("1700000088", source, interface), extra)
+    fake = _Fake([config], sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY})
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(rules_remain\).*1700000088"):
+        await _delete(fake, force=force)
+    assert not fake.wrote
+
+
+@pytest.mark.parametrize(
+    ("source", "extra"),
+    [
+        ("<address>198.51.100.6</address>", ""),
+        ("<address>203.0.114.0/24</address>", ""),
+        (
+            "<address>vpn_guests</address>",
+            _aliases("vpn_guests", "host", "192.0.2.9"),
+        ),
+        (
+            "<address>names</address>",
+            _aliases("names", "host", "host.example.test"),
+        ),
+        ("<address>loop</address>", _aliases("loop", "network", "loop")),
+        ("<any></any>", ""),
+        ("<not></not><address>198.51.100.5</address>", ""),
+        ("<network>opt2</network>", _OPT_NET.replace("198.51.100.1", "203.0.114.1")),
+        ("<network>opt9</network>", _OPT_NET),
+        ("<network>(self)</network>", ""),
+    ],
+)
+async def test_delete_goes_on_when_no_rule_source_holds_the_users_address(
+    source: str, extra: str
+) -> None:
+    before = _guest_config(_guest_rule("1700000089", source), extra)
+    after = _guest_config(_guest_rule("1700000089", source), extra, with_user=False)
+    fake = _Fake([before, after], sockets={"1": _SOCK_EMPTY, "2": _SOCK_EMPTY})
+    out = await _delete(fake)
+    assert out["status"] == "deleted" and out["applied"]
+
+
+async def test_the_delete_preview_names_a_rule_that_holds_the_address_through_an_alias() -> None:
+    from meho_backplane.operations._preview import PreviewContext
+
+    config = _guest_config(_guest_rule("1700000090", "<address>vpn_guests</address>"), _HOST_ALIAS)
+    ctx = PreviewContext(
+        descriptor=MagicMock(),
+        connector_instance=_Fake([config]),
+        operator=_operator(),
+        target=None,
+        params={"name": "guest-1"},
+    )
+    preview = await user_module._delete_preview(ctx)
+    assert preview is not None and preview["refusal"] == "rules_remain"
+
+
+def _php_rule_config(
+    source: dict[str, Any], interface: str, extra: dict[str, Any]
+) -> dict[str, Any]:
+    users = [
+        {"name": "admin", "uid": "0", "scope": "system"},
+        {"name": "guest-1", "uid": "2000", "scope": "user"},
+    ]
+    before = _php_config([_csc_row("guest-1", "1", "198.51.100.5/24")], users)
+    before["filter"] = {"rule": [{"tracker": "7", "interface": interface, "source": source}]}
+    before.update(extra)
+    return before
+
+
+_PHP_ALIASES = {
+    "aliases": {
+        "alias": [
+            {"name": "vpn_guests", "type": "host", "address": "192.0.2.9 198.51.100.5"},
+            {"name": "outer", "type": "network", "address": "192.0.2.0/24 inner"},
+            {"name": "inner", "type": "network", "address": "198.51.100.0/25"},
+            {"name": "loop", "type": "network", "address": "loop"},
+            {"name": "urls", "type": "urltable", "address": ""},
+        ]
+    }
+}
+_PHP_OPT = {"interfaces": {"opt2": {"ipaddr": "198.51.100.1", "subnet": "24"}}}
+
+
+@_needs_php
+@pytest.mark.parametrize(
+    ("source", "interface", "extra"),
+    [
+        ({"address": "198.51.100.5"}, "lan", {}),
+        ({"address": "198.51.100.0/24"}, "wan", {}),
+        ({"address": "vpn_guests"}, "lan", _PHP_ALIASES),
+        ({"address": "outer"}, "opt1", _PHP_ALIASES),
+        ({"address": "urls"}, "lan", _PHP_ALIASES),
+        ({"address": "198.51.100.5"}, "VPNGroup", {}),
+        ({"network": "opt2"}, "lan", _PHP_OPT),
+    ],
+)
+def test_delete_fragment_run_in_php_writes_nothing_while_a_source_holds_the_address(
+    tmp_path: Path, source: dict[str, Any], interface: str, extra: dict[str, Any]
+) -> None:
+    before = _php_rule_config(source, interface, extra)
+    fragment = user_module.build_user_delete_playback("guest-1", ["198.51.100.5"])
+    printed, out = _run_php(tmp_path, before, fragment)
+    assert printed.strip() == "MEHO_VPN_RULES_REMAIN=1"
+    assert out["config"] == before and out["calls"] == []
+
+
+@_needs_php
+@pytest.mark.parametrize(
+    ("source", "extra"),
+    [
+        ({"address": "198.51.100.6"}, {}),
+        ({"address": "203.0.114.0/24"}, {}),
+        ({"address": "loop"}, _PHP_ALIASES),
+        ({"address": "198.51.100.5", "not": ""}, {}),
+        ({"any": ""}, {}),
+        ({"network": "opt2"}, {"interfaces": {"opt2": {"ipaddr": "203.0.114.1", "subnet": "24"}}}),
+        ({"network": "opt9"}, _PHP_OPT),
+    ],
+)
+def test_delete_fragment_run_in_php_goes_on_when_no_source_holds_the_address(
+    tmp_path: Path, source: dict[str, Any], extra: dict[str, Any]
+) -> None:
+    before = _php_rule_config(source, "lan", extra)
+    fragment = user_module.build_user_delete_playback("guest-1", ["198.51.100.5"])
+    printed, out = _run_php(tmp_path, before, fragment)
+    assert printed == ""
+    assert ["write_config", "meho: delete VPN user guest-1"] in out["calls"]
+
+
+@_needs_php
+def test_csc_fragment_run_in_php_writes_nothing_when_the_user_is_gone(tmp_path: Path) -> None:
+    plan = _plan_for(
+        _config(csc=_csc("old", "1", "198.51.100.5/24", "192.0.2.0/25"), users=_users("old")),
+        [_entry("old", routes=["192.0.2.0/24"])],
+    )
+    # The user was deleted after the plan was made.
+    now = _php_config([_csc_row("old", "1", "198.51.100.5/24", "192.0.2.0/25")])
+    printed, out = _run_php(tmp_path, now, build_csc_sync_playback(plan, 1))
+    assert printed == "MEHO_CSC_NO_USER=old\n"
+    assert out["config"] == now and out["calls"] == []
+
+
+async def test_sync_writes_nothing_when_the_user_is_gone_after_the_plan() -> None:
+    base = _csc("old", "1", "198.51.100.5/24", "192.0.2.0/25")
+    fake = _Fake([_config(csc=base, users=_users("old"))], playback_out="MEHO_CSC_NO_USER=old\n")
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(user_not_found\).*'old'"):
+        await _sync(fake, [_entry("old", routes=["192.0.2.0/24"])])
+    # No read-back: the fragment wrote nothing, so nothing is reported as synced.
+    assert fake.commands.count("cat /cf/conf/config.xml") == 1
+
+
+async def test_a_second_cancel_during_the_undo_still_says_the_user_may_exist(
+    monkeypatch: pytest.MonkeyPatch, vault: _FakeVault
+) -> None:
+    async def _cancelled(*args: Any, **kw: Any) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(user_module, "_store_password", _cancelled)
+    fake = _CancelOn(
+        "pfSsh.php playback meho_openvpn_user_undo",
+        [_config(), _config(users=_user("guest-1", "2000"))],
+        playback_out=_CREATED_OUT,
+    )
+    with pytest.raises(asyncio.CancelledError) as err:
+        await _create(fake)
+    text = str(err.value)
+    assert "may exist on the firewall now" in text and "password is not stored" in text
+
+
+async def test_a_second_cancel_during_the_undo_after_a_vault_failure_says_it_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(user_module, "vault_client_for_operator", _FakeVault(fail=True))
+    fake = _CancelOn(
+        "pfSsh.php playback meho_openvpn_user_undo",
+        [_config(), _config(users=_user("guest-1", "2000"))],
+        playback_out=_CREATED_OUT,
+    )
+    with pytest.raises(asyncio.CancelledError) as err:
+        await _create(fake)
+    text = str(err.value)
+    assert "may exist on the firewall now" in text and "password is not stored" in text

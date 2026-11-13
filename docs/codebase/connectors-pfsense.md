@@ -1079,9 +1079,10 @@ the user has no certificate). They are in the group `vpn`.
 | `pfsense.openvpn.csc.sync` | Creates or extends client overrides (fixed address and pushed routes). Has a compare-only mode. | `caution`, approval |
 | `pfsense.openvpn.rule.sync` | Adds the missing tagged per-user pass rules on the OpenVPN rule tab. Has a compare-only mode. | `dangerous`, approval |
 
+| `pfsense.openvpn.user.delete` | Removes a VPN user and the overrides with its name. | `dangerous`, approval of each call |
+
 A call of `csc.sync` or `rule.sync` with `compare_only` also waits for
 approval, like any other call of these ops.
-| `pfsense.openvpn.user.delete` | Removes a VPN user and the overrides with its name. | `dangerous`, approval of each call |
 
 `user.create` and `user.delete` give or take a login, so a person approves
 each call: a standing grant never covers them (`declare_per_call_approval` in
@@ -1092,9 +1093,10 @@ History).
 Code: `openvpn_config.py` (parsers and the rendered-file read, shared),
 `ops_openvpn_csc.py` (next free address and the override sync),
 `ops_openvpn_user.py` (user create and delete), `ops_openvpn_rule.py` (the
-per-user rule sync). Checked against the pfSense
-2.7.2 sources `openvpn.inc`, `vpn_openvpn_csc.php` and
-`system_usermanager.php`.
+per-user rule sync), `ops_openvpn_user_rules.py` (which firewall rules still
+let a user's tunnel address in). Checked against the pfSense 2.7.2 sources
+`openvpn.inc`, `vpn_openvpn_csc.php` and `system_usermanager.php`. See
+"Versions read" below.
 
 - **Next free address.** Two sources hold a client's fixed address, and they do
   not always agree: the overrides in `config.xml` (`<openvpn><openvpn-csc>`) and
@@ -1126,13 +1128,21 @@ per-user rule sync). Checked against the pfSense
   first checks that the overrides are still as the plan saw them (same
   number, no override yet for a new entry, same address and routes on an
   entry it extends). When one changed, for example a route added in the web
-  page meanwhile, it writes nothing and the op fails with "run again".
-- **User names.** Both user ops refuse a name that starts with a dot (`.`,
-  `..`, `.x`): pfSense uses `/home/<name>` as the user's home directory, and
-  a delete removes it. The name pattern refuses it before the approval card
-  is made, and the fragments of create, delete and the undo check it again:
-  they print `MEHO_VPN_DOT_NAME` and call neither `local_user_set()` nor
-  `local_user_del()` (`dot_name`).
+  page meanwhile, it writes nothing and the op fails with "run again". The
+  fragment also checks again, just before it writes, that a local user with
+  each name still exists. When one is gone, it prints `MEHO_CSC_NO_USER` and
+  writes nothing, and the op is refused (`user_not_found`).
+- **User names.** Every pfSense user operation uses one name rule
+  (`USER_NAME_RE` in `ops_user_write.py`): letters, digits, dot, dash and
+  underscore, at most 32 characters, and no leading dot or dash. This holds
+  for `pfsense.user.disable`, `pfsense.user.enable`, the VPN user ops and the
+  override and rule syncs. pfSense uses `/home/<name>` as the user's home
+  directory, and a delete removes it, so `.`, `..` and `.x` are refused. The
+  name pattern refuses it before the approval card is made. The fragments of
+  create, delete and the undo check it again: they print `MEHO_VPN_DOT_NAME`
+  and call neither `local_user_set()` nor `local_user_del()` (`dot_name`). The
+  fragments of `user.disable` and `user.enable` change nothing for such a
+  name.
 - **User create.** The handler checks the Vault path against the tenant path
   first. This check is skipped when the tenant prefix setting
   (`VAULT_KV_TENANT_SCOPE_PREFIX`) is empty. An existing user is left alone (`exists`, a normal answer: safe to
@@ -1140,10 +1150,20 @@ per-user rule sync). Checked against the pfSense
   `PfSenseRefusedError`). Before any change on the firewall, the Vault path
   is checked: it must not be the credential path (`secret_ref`) of any
   target (`vault_path_is_target_secret`), and the handler reads it with the
-  caller's Vault login. When the field already holds a value, the call fails
-  (`vault_field_exists`). When Vault answers without a whole-number
-  `metadata.version` (the mount may not be KV version 2), the call fails
-  (`vault_version_unknown`) and changes nothing. The approval card says whether the path is `new`,
+  caller's Vault login. This target check reaches every target row of every
+  tenant, also a removed one, whose credential reference is a Vault path. It
+  compares the path alone (the mount is not part of a target's path) and only
+  for the same whole path: a path below or above a target's path, and a
+  credential held in another store, are not caught. When the field already holds a value, the call fails
+  (`vault_field_exists`). The handler first asks Vault for the mount
+  (`sys/internal/ui/mounts/<mount>`, which a token may read for any path it
+  has access to). The mount must say KV version 2. A mount that is version 1,
+  or whose version cannot be told, fails the call (`vault_version_unknown`)
+  before the firewall is changed: on a version 1 mount a read of a new path
+  looks like "nothing stored yet", so the read alone proves nothing. The
+  same happens when Vault answers without a whole-number `metadata.version`.
+  A mount whose info cannot be read fails the call and changes nothing. The
+  approval card says whether the path is `new`,
   `holds_other_fields`, `field_exists`, `target_secret` or `outside_tenant`
   (no value is shown). For a path outside the caller's tenant path it looks
   up nothing, neither the targets nor Vault. The fragment refuses a name that is in `/etc/passwd` or
@@ -1166,9 +1186,11 @@ per-user rule sync). Checked against the pfSense
   without it the error says the user was not removed. The Vault write runs
   in a thread and can still finish after a cancel: the password may then be
   stored at the path although the user was removed, and a new create at
-  this path stops with `vault_field_exists`. The error of the cancel says so. When the playback itself fails or is cancelled, the error
-  says that a user with this name may exist and that its password is not
-  stored. The broadcast class is `credential_mint`.
+  this path stops with `vault_field_exists`. The error of the cancel says so.
+  A second cancel during the undo is raised again too, with the message that a
+  user with this name may exist and that its password is not stored. When the
+  playback itself fails or is cancelled, the error says that a user with this
+  name may exist and that its password is not stored. The broadcast class is `credential_mint`.
 - **User delete.** The op deletes only VPN users. A user that is already
   gone is a normal answer (`not_found`). Every refusal below changes nothing
   and fails the call: it raises `PfSenseRefusedError` with the reason as its
@@ -1177,10 +1199,23 @@ per-user rule sync). Checked against the pfSense
   user with any permission, and the user the target's SSH login uses. The
   approval card shows the user's groups and permissions. It is refused
   (`rules_remain`) while a firewall rule carries the user's tag
-  `meho-vpn-user:<name>`, or a rule on the OpenVPN tab has the user's fixed
-  tunnel address as its source, tagged or not; also with `force`. Such a
-  rule grants access by tunnel address, and the delete frees that address,
-  so `pfsense.openvpn.address.next_free` could give it to the next user.
+  `meho-vpn-user:<name>`, or a rule has a source that holds the user's fixed
+  tunnel address, tagged or not; also with `force`. Such a rule grants access
+  by tunnel address, and the delete frees that address, so
+  `pfsense.openvpn.address.next_free` could give it to the next user. The
+  check reaches every rule in the `<filter>` section of `config.xml`, on any
+  interface tab: a normal interface, an interface group, a floating rule and
+  an OpenVPN server assigned as its own interface. A source holds the address
+  when it is the address, a network that contains it, an alias (host or
+  network type, also nested) with such an entry, or an interface network
+  (`lan`, `opt2`; or `lanip`) with a static address and subnet that hold it.
+  Not covered: a negated source (it does not grant by that address), a
+  destination, IPv6, a host name in an alias (it is not resolved) and an
+  interface that gets its address by DHCP. A URL alias has contents that
+  `config.xml` does not hold, so a rule with one counts as a rule that may
+  let the address in. A rule that holds the address only through a network
+  that is wider than the user's tunnel (for example the whole tunnel network)
+  also blocks the delete: remove or narrow it first.
   Remove the rules with `pfsense.filter.rule.delete` first; the error lists
   their `ridentifier`. The fragment checks again on the config as it is at
   that moment, and changes nothing when a check fails: it counts these rules
@@ -1219,6 +1254,27 @@ per-user rule sync). Checked against the pfSense
   else changed. Each new rule gets a new 9-digit `ridentifier`.
 - **Not covered here.** DNS host entries for VPN clients (the web page also
   reloads the resolver) are not touched.
+
+### Versions read
+
+The connector declares pfSense 2.7 to below 2.10. The VPN fragments call
+`local_user_set()`, `local_user_set_password()`, `local_user_del()`,
+`index_users()`, `openvpn_resync_csc()` and `openvpn_delete_csc()`. The
+published pfSense CE sources have a tag up to 2.7.2 and the development
+branch (`2.9.0-DEVELOPMENT`); there is no published source for 2.8. So these
+two were read:
+
+- **2.7.2** (`RELENG_2_7_2`): the fragments match it. This is the version they
+  are written for.
+- **Development branch (2.9.0-DEVELOPMENT)**: `local_user_set()`,
+  `local_user_del()`, `index_users()` and `openvpn_delete_csc()` do the same
+  work as in 2.7.2 (only logging calls changed). `openvpn_resync_csc()` has
+  new override options but the same call. **`local_user_set_password()` takes
+  a different argument here**: an item wrapper (`['item' => &$user, 'idx' =>
+  ...]`) instead of the user array. The create fragment passes the user array,
+  as in 2.7.2. So `pfsense.openvpn.user.create` is checked only against
+  2.7.2 and may fail on a release that has the new form. It is not checked on
+  a 2.8 or 2.9 firewall.
 
 ## References
 

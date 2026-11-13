@@ -223,13 +223,17 @@ async def approver_set_for(
     return route(entries, category=category, connector_id=connector_id, level=level, op_id=op_id)
 
 
-async def stamp_approver_set(session: AsyncSession, request: ApprovalRequest) -> None:
+async def stamp_approver_set(
+    session: AsyncSession, request: ApprovalRequest, *, category: str | None
+) -> None:
     """Store on *request* the group kinds that may approve it, and the rule.
 
     Does nothing while the switch is off and for a change of rights (only
-    another admin approves it, as today). The risk level and the category
-    are the ones the dispatcher stamped on ``proposed_effect``; a request
-    without a category matches only entries without one.
+    another admin approves it, as today). The risk level is the one the
+    dispatcher stamped on ``proposed_effect``. *category* is the one the
+    classification gave the looked-up row (``policy_category``, set while
+    the ``POLICY_CLASSIFICATION`` switch is on); a request without a
+    category matches only entries without one.
     """
     if not routing_enabled() or request.rights_change:
         return
@@ -240,7 +244,7 @@ async def stamp_approver_set(session: AsyncSession, request: ApprovalRequest) ->
         connector_id=request.connector_id,
         op_id=request.op_id,
         level=_text(effect.get("safety_level")),
-        category=_text(effect.get("category")),
+        category=category,
     )
     request.approver_roles = list(found.kinds)
     request.approver_rule = found.rule

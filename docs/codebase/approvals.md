@@ -1229,9 +1229,12 @@ How the kinds are found:
 4. A change of rights is not routed (both columns stay NULL). Only another
    admin approves it, as today.
 
-The risk level and the category come from `proposed_effect`
-(`safety_level`, and `category` while `POLICY_CLASSIFICATION` is on). A
-request without a category fits only entries without `category`.
+The risk level comes from `proposed_effect` (`safety_level`). The
+category is the one the classification gave the looked-up operation
+(`EndpointDescriptor.policy_category`, set by `apply_effective_policy` and
+`apply_step_classification` while `POLICY_CLASSIFICATION` is on). The
+dispatcher and the step gate pass it to `create_pending_request`. A request
+without a category fits only entries without `category`.
 
 **At the click** (`_load_pending_for_approval`) today's checks run first,
 in their order: a person only, the read-only check, still pending, the

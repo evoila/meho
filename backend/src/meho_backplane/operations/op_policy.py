@@ -372,7 +372,8 @@ async def apply_effective_policy(
     back: the stored row keeps the classification. *group_keys* is passed
     to :func:`effective_policy_map`. ``row.policy_always_wait`` (not a
     column) gets :attr:`EffectivePolicy.always_wait`, so the grant checks
-    see it.
+    see it, and ``row.policy_category`` the category, so approver routing
+    can match it.
     """
     policies = await effective_policy_map(
         session, tenant_id=tenant_id, rows=[row], group_keys=group_keys
@@ -382,6 +383,7 @@ async def apply_effective_policy(
     row.safety_level = policy.safety_level
     row.requires_approval = policy.requires_approval
     row.policy_always_wait = policy.always_wait
+    row.policy_category = policy.category
     return row
 
 
@@ -409,6 +411,7 @@ async def apply_step_classification(
     step.safety_level = policy.safety_level
     step.requires_approval = policy.requires_approval
     step.policy_always_wait = policy.always_wait
+    step.policy_category = policy.category
     return step
 
 

@@ -103,3 +103,26 @@ async def test_with_the_switch_off_the_list_keeps_todays_rule(
     read = await RunApprovalService().approve(_approver(role=TenantRole.OPERATOR), approval_id)
 
     assert read.status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_a_category_entry_routes_a_classified_entry_of_the_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The category comes from the classification of the looked-up operation."""
+    _switch(monkeypatch, True)
+    monkeypatch.setenv("POLICY_CLASSIFICATION", "true")
+    get_settings.cache_clear()
+    await _store_policy(
+        {
+            "classifications": [{"match": {"connector": _CONNECTOR}, "category": "network"}],
+            "routing": [{"match": {"category": "network"}, "approvers": ["Admins"]}],
+        }
+    )
+    approval_id = await _request_list()
+
+    with pytest.raises(RunApprovalGroupError, match=r"routing rule `install:routing\[0\]`"):
+        await RunApprovalService().approve(_approver(role=TenantRole.OPERATOR), approval_id)
+    read = await RunApprovalService().approve(_approver(role=TenantRole.TENANT_ADMIN), approval_id)
+
+    assert read.status == "approved"

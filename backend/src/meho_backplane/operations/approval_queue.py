@@ -1500,6 +1500,7 @@ async def create_pending_request(
     requester: ResumeRequester | None = None,
     reveal_secret: bool = False,
     rights_change: bool = False,
+    category: str | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -1578,6 +1579,10 @@ async def create_pending_request(
             run deleted the payload. It is not part of *params_hash*, so
             the retry check and the approval surfaces compare the call
             without it.
+        category: The category the classification gave the operation
+            (the looked-up row's ``policy_category``). Approver routing
+            matches a ``category`` entry on it
+            (:func:`~meho_backplane.policy.routing.stamp_approver_set`).
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -1713,7 +1718,7 @@ async def create_pending_request(
     )
     if rights_change or is_rights_change(request):
         request.rights_change = True
-    await stamp_approver_set(session, request)
+    await stamp_approver_set(session, request, category=category)
     if idempotency_key is None:
         session.add(request)
         await session.flush()

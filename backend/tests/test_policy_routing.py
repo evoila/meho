@@ -97,8 +97,6 @@ async def _park(
     op_id: str = "demo.change",
 ) -> uuid.UUID:
     effect: dict[str, Any] = {"op_id": op_id, "safety_level": level}
-    if category is not None:
-        effect["category"] = category
     async with get_sessionmaker()() as session:
         request = await create_pending_request(
             session,
@@ -111,6 +109,7 @@ async def _park(
             proposed_effect=effect,
             preview_hash="preview-hash" if level == "destructive" else None,
             rights_change=rights_change,
+            category=category,
         )
         await session.commit()
         return request.id

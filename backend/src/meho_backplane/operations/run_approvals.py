@@ -318,8 +318,7 @@ async def _check_routed_entry(
         connector_id=entry.connector_id,
         op_id=entry.op_id,
         level=descriptor.safety_level,
-        # Set by the lookup while the POLICY_CLASSIFICATION switch is on.
-        category=getattr(descriptor, "policy_category", None),
+        category=descriptor.policy_category,
     )
     refusal = routing_refusal(operator, list(found.kinds), found.rule)
     if refusal is not None:

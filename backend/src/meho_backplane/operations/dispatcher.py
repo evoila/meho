@@ -3551,6 +3551,7 @@ async def _handle_needs_approval(
                 preview_hash=preview_hash,
                 idempotency_key=idempotency_key,
                 reveal_secret=reveal_secret,
+                category=descriptor.policy_category,
             )
             await session.commit()
         if getattr(request, "_reused", False):

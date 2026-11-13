@@ -246,7 +246,7 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Final, get_args
+from typing import Final, cast, get_args
 
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
@@ -2017,6 +2017,11 @@ class EndpointDescriptor(Base):
     #: wait (or two entries conflict). Then no standing grant and no run
     #: approval clears a call: a person approves each one.
     policy_always_wait = False
+    #: Not a column. With the ``POLICY_CLASSIFICATION`` switch on, the
+    #: category the classification gave the row that ``apply_effective_policy``
+    #: or ``apply_step_classification`` returned; ``None`` otherwise. Approver
+    #: routing matches a ``routing`` entry's ``category`` on it.
+    policy_category = cast("str | None", None)
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,

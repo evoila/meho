@@ -41,7 +41,7 @@ repository:
   # Topics intentionally NOT set:
   #
   # - `vmware`  — v0.1 has no VMware connector; this was a leftover from
-  #               the MEHO.X "multi-vendor IaC" framing. Re-add when a
+  #               an older "multi-vendor IaC" framing. Re-add when a
   #               real vCenter / VCF connector lands (v0.2+).
   # - `cncf`    — aspirational only; do not claim until the project is
   #               actually filed with the CNCF Sandbox process.

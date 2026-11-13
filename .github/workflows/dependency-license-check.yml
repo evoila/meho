@@ -4,8 +4,8 @@
 # Dependency license check.
 #
 # Verifies all Python and npm dependencies are compatible with the
-# project's outbound license: **Apache 2.0** (per evoila-bosnia/MEHO.X
-# decision #701 / #727). Apache 2.0 is permissive and combines cleanly
+# project's outbound license: **Apache 2.0** (a project
+# decision). Apache 2.0 is permissive and combines cleanly
 # with most permissive and weak-copyleft licenses; the explicit forbid
 # list is AGPL (would force the combined work to AGPL), proprietary
 # EULAs, SSPL, BUSL, Elastic License v2, CC-BY-NC.

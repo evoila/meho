@@ -688,26 +688,26 @@ jobs:
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      # Route testcontainers pulls through the in-cluster Harbor proxy
-      # cache (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` public,
-      # anonymous consumer auth, wired into runner DinD via
-      # meho-internal#75). The test code reads these env vars with a
-      # docker.io short-name default — see backend/tests/test_db_engine.py
+      # Route testcontainers pulls through the image proxy cache of the CI
+      # cluster. The repository variable CI_IMAGE_PROXY (`<host>/<project>`)
+      # holds its prefix; the project is public with anonymous access.
+      # Without the variable the images come from Docker Hub (`docker.io`) directly. The
+      # test code reads these env vars with a docker.io short-name default — see backend/tests/test_db_engine.py
       # `MEHO_TEST_PGVECTOR_IMAGE`, backend/tests/test_broadcast_client.py
       # `MEHO_TEST_VALKEY_IMAGE` — so the env-only swap requires no
       # source-code changes.
-      # `docker/login-action` below stays load-bearing until #78's Half
-      # B sees a green cache-hit week and retires it.
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
-      MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
+      # `docker/login-action` below stays load-bearing until the proxy
+      # has shown a week of green cache hits.
+      MEHO_TEST_PGVECTOR_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+      MEHO_TEST_VALKEY_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/valkey/valkey:8
       # Vault dev-mode container for the G3.3-T7 kv/sys/auth e2e suite
       # (backend/tests/integration/test_connectors_vault_dev_e2e.py).
       # Same env-knob shape as the rows above: the test reads this with
       # a docker.io short-name default (`hashicorp/vault:1.18`), so the
-      # Harbor-proxy swap is config-only — no source change. Pinned to
+      # proxy swap is config-only — no source change. Pinned to
       # the 1.18 LTS minor (not `:latest`) so an upstream Vault release
       # never breaks an unrelated PR.
-      MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+      MEHO_TEST_VAULT_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/hashicorp/vault:1.18
       # #2949 — vendor vCenter spec-shelf wiring (see the checkout step
       # below + docs/decisions/vendor-spec-ci-provisioning.md).
       # SPEC_SHELF_TOKEN_PRESENT surfaces *presence* of the
@@ -717,7 +717,7 @@ jobs:
       # DOCKERHUB_USERNAME row above works around). Unlike that row,
       # only the presence flag is surfaced, never the token value, so
       # the secret is not exported into every step's environment.
-      SPEC_SHELF_TOKEN_PRESENT: ${{ secrets.SPEC_SHELF_TOKEN != '' }}
+      SPEC_SHELF_TOKEN_PRESENT: ${{ secrets.SPEC_SHELF_TOKEN != '' && vars.SPEC_SHELF_REPOSITORY != '' }}
       # Points the spec-shelf resolver (tests/_spec_shelf.py) at the
       # spec-shelf checkout. Set UNCONDITIONALLY: when the shelf checkout
       # was skipped (secret absent — fork PRs, Dependabot runs,
@@ -802,7 +802,7 @@ jobs:
         if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          repository: evoila-bosnia/claude-rdc-hetzner-dc
+          repository: ${{ vars.SPEC_SHELF_REPOSITORY }}
           token: ${{ secrets.SPEC_SHELF_TOKEN }}
           path: spec-shelf
           # Cone-mode sparse checkout of the shelf directories only +
@@ -841,13 +841,9 @@ jobs:
         # (https://docs.docker.com/docker-hub/usage/pulls/). Same
         # org-level secrets security-scan.yml uses, provisioned at
         # the evoila org level (visibility `all`) with 1Password
-        # vault custody — see meho-internal#74 for the regression
-        # context this addresses, and meho-internal
-        # `docs/dockerhub-ci-credential-custody.md` for where the
-        # credential actually lives and how to rotate it (the vault
-        # and item names stay in the internal repo; this one is
-        # public). Long-term, the in-cluster proxy cache from
-        # claude-rdc-hetzner-dc#463 retires this step.
+        # vault custody. How to rotate the credential is documented
+        # outside this public repo. Long-term, the in-cluster image
+        # proxy cache retires this step.
         #
         # The `if:` guard is what keeps Dependabot PRs green. A
         # Dependabot-triggered run reads the *Dependabot* secret store,
@@ -856,7 +852,7 @@ jobs:
         # password required" instead of no-opping, which failed this job
         # (and every other job carrying this step) on all 19 open
         # Dependabot PRs. Skipping the login is safe: every image above
-        # resolves through the harbor.evba.lab proxy cache, so an
+        # resolves through the image proxy cache, so an
         # unauthenticated run still pulls — it only gives up the Docker
         # Hub rate-limit headroom the login buys.
         #
@@ -1757,12 +1753,12 @@ jobs:
     # CORRECTION (#3172, 2026-08-27): the "<13.67 GiB pod limit" this job was
     # originally sized against NEVER existed — 13.67 GiB was #1982's measured
     # local peak, mistaken for the runner's cap. The live heavy-pool runner
-    # container limit (rdc-gitops apps/rke2-ci/meho-runners-heavy) was 8Gi,
+    # container limit (the pod template of the heavy pool) was 8Gi,
     # so the 12.48-GiB serial sweep never fit: every main-push run since
     # ~2026-06-20 died as an OOM runner-loss (absorbed job failure, null step
     # telemetry) or a memory-thrash wedge (pytest crawls to the 45-min step
     # cap, combine hangs on the debris — the v0.31.0 tag-gate blocker).
-    # rdc-gitops#115 resizes the pool to 14Gi (request == limit,
+    # a later change resized the pool to 14Gi (request == limit,
     # node-exclusive by memory), giving the sweep ~1.5 GiB of real headroom
     # on this same runs-on label.
     # The "offline" shape (per-worker parallel data + `coverage combine`/`xml`
@@ -1821,7 +1817,7 @@ jobs:
     # push from 2026-06-20, collapsing SonarCloud coverage 65.8% -> ~24% (see
     # the memory table above and docs/codebase/sonarcloud.md) — was the pool's
     # 8Gi runner limit vs this job's 12.48-GiB serial sweep. Fixed IN PLACE by
-    # rdc-gitops#115 (heavy pool resized to 14Gi request==limit); this
+    # a later change (heavy pool resized to 14Gi request==limit); this
     # `runs-on:` label is correct and stays. An OOM would still only skip one
     # coverage upload (job stays non-blocking); quality-gate.yml makes that
     # skip fail-visible via an error annotation (#2513).
@@ -1869,9 +1865,9 @@ jobs:
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
-      MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
-      MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+      MEHO_TEST_PGVECTOR_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+      MEHO_TEST_VALKEY_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/valkey/valkey:8
+      MEHO_TEST_VAULT_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/hashicorp/vault:1.18
     defaults:
       run:
         working-directory: backend
@@ -2443,17 +2439,17 @@ jobs:
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
-      MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
-      MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+      MEHO_TEST_PGVECTOR_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+      MEHO_TEST_VALKEY_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/valkey/valkey:8
+      MEHO_TEST_VAULT_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/hashicorp/vault:1.18
       # G3.2-T6 (#326) — k3s container fixture for the K8s typed-connector
       # E2E acceptance harness (tests/integration/test_connectors_k8s_e2e.py
       # and the existing tests/integration/test_connectors_k8s_k3d.py).
       # Pinned to the same minor the k3d/k3s fixture's in-code default
-      # uses (rancher/k3s:v1.32.5-k3s1) so the Harbor proxy serves the
+      # uses (rancher/k3s:v1.32.5-k3s1) so the image proxy serves the
       # exact tag the testcontainers fixture asks for, without a docker.io
       # round-trip.
-      MEHO_TEST_K3S_IMAGE: harbor.evba.lab/dockerhub-proxy/rancher/k3s:v1.32.5-k3s1
+      MEHO_TEST_K3S_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/rancher/k3s:v1.32.5-k3s1
       # The k3d test module runs once for each k3s tag in this list: the
       # oldest line the Kubernetes connector serves (1.32) and two lines
       # that upstream still maintains (1.35 and 1.37). The test takes the
@@ -2469,17 +2465,17 @@ jobs:
       # unauthenticated docker.io pull would reliably exhaust the
       # cluster's shared NAT egress bucket, so the fixture skips when
       # MEHO_TEST_KEYCLOAK_IMAGE is unset rather than falling back. The
-      # Harbor-proxied tag is the only path that runs the suite to
+      # proxied tag is the only path that runs the suite to
       # pass; everywhere else (local dev sandboxes, agent sandboxes,
       # any future fork PR job that doesn't see this env) the test
       # skips cleanly with a clear remediation message.
-      MEHO_TEST_KEYCLOAK_IMAGE: harbor.evba.lab/dockerhub-proxy/keycloak/keycloak:26.0
+      MEHO_TEST_KEYCLOAK_IMAGE: ${{ vars.CI_IMAGE_PROXY && format('{0}/keycloak/keycloak:26.0', vars.CI_IMAGE_PROXY) || '' }}
       # #2949 — vendor spec-shelf wiring for the tests/integration
       # real-spec lanes. See the comment on the python-unit-shard job's
       # occurrence of these two rows for the full rationale
       # (presence-flag gating; the unconditional docs-root that degrades
       # to lane-skip when the shelf checkout was skipped).
-      SPEC_SHELF_TOKEN_PRESENT: ${{ secrets.SPEC_SHELF_TOKEN != '' }}
+      SPEC_SHELF_TOKEN_PRESENT: ${{ secrets.SPEC_SHELF_TOKEN != '' && vars.SPEC_SHELF_REPOSITORY != '' }}
       MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
     defaults:
       run:
@@ -2528,7 +2524,7 @@ jobs:
         if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          repository: evoila-bosnia/claude-rdc-hetzner-dc
+          repository: ${{ vars.SPEC_SHELF_REPOSITORY }}
           token: ${{ secrets.SPEC_SHELF_TOKEN }}
           path: spec-shelf
           sparse-checkout: ${{ steps.spec-shelf-list.outputs.paths }}
@@ -2826,10 +2822,10 @@ jobs:
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       # The 3 forward-compat rollback tests spin up pgvector via
-      # testcontainers; route the pull through the Harbor proxy cache like
+      # testcontainers; route the pull through the image proxy cache like
       # the sibling jobs (never `:latest`).
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
-      MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
+      MEHO_TEST_PGVECTOR_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+      MEHO_TEST_VALKEY_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/valkey/valkey:8
     defaults:
       run:
         working-directory: backend

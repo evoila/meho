@@ -32,8 +32,8 @@ import (
 // fixture-bloat.
 type adminClient struct {
 	httpClient *http.Client
-	baseURL    string // e.g. "https://keycloak.evba.lab"
-	realm      string // target realm (where clients land), e.g. "evba"
+	baseURL    string // e.g. "https://keycloak.example.test"
+	realm      string // target realm (where clients land), e.g. "example"
 	token      string // master-realm admin access token
 	dryRun     bool   // writes are answered by dryRunTransport
 }

@@ -3094,7 +3094,7 @@ smoke capacity scales linearly with PR throughput.
 
 Cluster auth + RBAC for `meho-ci-*` namespaces is provisioned in the
 consumer's own repo, not in this repo — see
-[`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md)
+[`docs/cross-repo/ci-cluster-coordination.md`](../cross-repo/ci-cluster-coordination.md)
 for the full contract (Section 1: auth options; Section 2: RBAC verb
 set; Verification: end-to-end check).
 
@@ -3390,7 +3390,7 @@ options (OIDC trust preferred over a long-lived kubeconfig secret),
 namespace-scoped RBAC for `meho-ci-*`, the `meho-image-pushed`
 `repository_dispatch` event shape, and the verification commands
 either side can run to prove the contract holds — lives in
-[`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md).
+[`docs/cross-repo/ci-cluster-coordination.md`](../cross-repo/ci-cluster-coordination.md).
 The companion script
 [`scripts/cross-repo/verify-rke2-access.sh`](../../scripts/cross-repo/verify-rke2-access.sh)
 automates the kubectl portion of the check.
@@ -3467,4 +3467,4 @@ commands.
 - External Secrets Operator: https://external-secrets.io/
 - ESO Vault provider: https://external-secrets.io/latest/provider/hashicorp-vault/
 - ESO ExternalSecret API: https://external-secrets.io/latest/api/externalsecret/
-- Cross-repo handshake spec: [`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md)
+- Cross-repo handshake spec: [`docs/cross-repo/ci-cluster-coordination.md`](../cross-repo/ci-cluster-coordination.md)

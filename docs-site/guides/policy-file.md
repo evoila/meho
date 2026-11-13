@@ -40,8 +40,12 @@ Until you import a file for the whole install, MEHO uses this file. So
 importing it changes nothing:
 
 ```bash
+meho policy validate --scope install small-team.yaml # no mistakes
 meho policy diff --scope install small-team.yaml     # answers "No change."
 ```
+
+Check this file with `--scope install`. Without it, `validate` checks the
+file as a tenant's file and reports `taxonomy.default` as a mistake.
 
 On a fresh install, `meho policy export --scope install` writes the same
 policy, without the comments. To start your own policy:
@@ -49,7 +53,8 @@ policy, without the comments. To start your own policy:
 1. Export the install's policy, or copy `small-team.yaml`.
 2. Add your entries under `classifications`, and your own categories under
    `taxonomy.categories`.
-3. Run `meho policy diff --scope install` to see what changes.
+3. Run `meho policy validate --scope install` to check it, and
+   `meho policy diff --scope install` to see what changes.
 4. Import it. A second admin approves the import.
 
 The "small team" file is for the whole install (`--scope install`). A

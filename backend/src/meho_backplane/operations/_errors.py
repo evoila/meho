@@ -2724,7 +2724,29 @@ def result_connector_vault_forbidden(
         msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
     secret_ref = getattr(target, "secret_ref", None)
     target_name = getattr(target, "name", None) or "the target"
-    if secret_ref:
+    derived = (
+        bool(secret_ref)
+        and expected_secret_ref is not None
+        and (str(secret_ref).strip() == expected_secret_ref)
+    )
+    if secret_ref and derived:
+        # MEHO built the ref from the target name and the install does not let
+        # it read that path. Do not send the user to store the secret there.
+        summary = (
+            f"connector_vault_forbidden: Vault denied the credential read for "
+            f"{target_name} (permission denied). The target has no secret_ref "
+            f"of its own, so MEHO built {secret_ref!r} from the target name. "
+            f"This install does not let MEHO read that path. To fix, store the "
+            f"credential at a path MEHO may read, then run "
+            f"`meho targets update {target_name} --secret-ref <path>` and "
+            f"retry. Do NOT widen the backplane's Vault policy — it is "
+            f"deploy-owned and re-applied on every upgrade. See "
+            f"docs/codebase/connectors-vault-tenant-scope.md for the "
+            f"namespace convention and "
+            f"docs/codebase/error-message-shape.md for the dispatch error "
+            f"convention."
+        )
+    elif secret_ref:
         expected_clause = (
             f"stage the credential at {expected_secret_ref!r} on the 'secret' mount "
             if expected_secret_ref is not None
@@ -2737,7 +2759,9 @@ def result_connector_vault_forbidden(
             f"per-tenant subtree — the canonical layout stores a target's "
             f"credential at 'tenants/<tenant_id>/<name>' (#1723, enforced by "
             f"the rendered VAULT_KV_TENANT_SCOPE_PREFIX). To fix, "
-            f"{expected_clause}and update the target's secret_ref, then "
+            f"{expected_clause}or at another path MEHO may read, and update "
+            f"the target's secret_ref "
+            f"(`meho targets update {target_name} --secret-ref <path>`), then "
             f"retry. Do NOT widen the backplane's Vault policy — it is "
             f"deploy-owned and re-applied on every upgrade. See "
             f"docs/codebase/connectors-vault-tenant-scope.md for the "
@@ -2759,22 +2783,27 @@ def result_connector_vault_forbidden(
             "docs/codebase/error-message-shape.md for the dispatch error "
             "convention."
         )
-    if msg:
-        # hvac renders Forbidden as "permission denied, on GET <url>" —
-        # the URL is the operator-supplied path, never secret material.
-        summary = f"{summary}{VAULT_SAID}{msg}"
+    extras: dict[str, Any] = {
+        "error_code": "connector_vault_forbidden",
+        "secret_ref": secret_ref,
+        "secret_ref_derived": derived,
+        "expected_secret_ref": expected_secret_ref,
+        "exception_class": type(exc).__name__,
+    }
+    if not secret_ref:
+        # Target-less denial: the raw Vault text is the only detail. A refused
+        # read of a target's own ref shows the cause above instead, because the
+        # Vault text names the Vault address.
+        if msg:
+            # hvac renders Forbidden as "permission denied, on GET <url>".
+            summary = f"{summary}{VAULT_SAID}{msg}"
+        extras["exception_message"] = msg
     return OperationResult(
         status="error",
         op_id=op_id,
         error=summary,
         duration_ms=duration_ms,
-        extras={
-            "error_code": "connector_vault_forbidden",
-            "secret_ref": secret_ref,
-            "expected_secret_ref": expected_secret_ref,
-            "exception_class": type(exc).__name__,
-            "exception_message": msg,
-        },
+        extras=extras,
     )
 
 

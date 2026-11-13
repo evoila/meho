@@ -341,15 +341,40 @@ def test_builder_shape_with_secret_ref_names_cause_and_convention() -> None:
     assert "Do NOT widen the backplane's Vault policy" in out.error
     assert "docs/codebase/connectors-vault-tenant-scope.md" in out.error
     assert "docs/codebase/error-message-shape.md" in out.error
-    # The hvac message tails the operator-facing string.
-    assert "Vault said:" in out.error
-    assert "permission denied" in out.error
+    # The raw Vault text and its address are not shown.
+    assert "Vault said:" not in out.error
+    assert "http" not in out.error
     # Structured, machine-usable extras.
     assert out.extras["error_code"] == "connector_vault_forbidden"
     assert out.extras["secret_ref"] == "secret/meho/vcf-logs/logmaster"
     assert out.extras["expected_secret_ref"] == f"tenants/{_TENANT}/vcf-prod"
+    assert out.extras["secret_ref_derived"] is False
     assert out.extras["exception_class"] == "Forbidden"
-    assert "permission denied" in out.extras["exception_message"]
+    assert "exception_message" not in out.extras
+    assert "http" not in str(out.extras)
+
+
+def test_builder_derived_ref_says_meho_built_it_and_does_not_advise_storing_there() -> None:
+    """A ref MEHO built from the name: say so, and do not advise the same path."""
+    derived = f"tenants/{_TENANT}/vcf-prod"
+    out = result_connector_vault_forbidden(
+        "GET:/api/v1/events",
+        _make_forbidden(),
+        _FakeTarget(secret_ref=derived),
+        duration_ms=1.0,
+        expected_secret_ref=derived,
+    )
+
+    assert out.error is not None
+    assert "MEHO built" in out.error
+    assert "--secret-ref <path>" in out.error
+    assert "store the credential at a path MEHO may read" in out.error
+    assert f"stage the credential at {derived!r}" not in out.error
+    assert "Vault said:" not in out.error
+    assert "http" not in out.error
+    assert out.extras["secret_ref_derived"] is True
+    assert "exception_message" not in out.extras
+    assert "http" not in str(out.extras)
 
 
 def test_builder_shape_without_target_is_generic() -> None:
@@ -369,6 +394,7 @@ def test_builder_shape_without_target_is_generic() -> None:
     assert out.extras["error_code"] == "connector_vault_forbidden"
     assert out.extras["secret_ref"] is None
     assert out.extras["expected_secret_ref"] is None
+    assert out.extras["secret_ref_derived"] is False
     assert out.extras["exception_class"] == "Forbidden"
 
 
@@ -387,11 +413,11 @@ def test_builder_shape_without_expected_ref_falls_back_to_convention() -> None:
 
 
 def test_builder_caps_oversized_message() -> None:
-    """A pathological hvac message is capped like the sibling builders."""
+    """A pathological hvac message is capped on a target-less denial."""
     out = result_connector_vault_forbidden(
-        "GET:/x",
+        "vault.token.create",
         hvac.exceptions.Forbidden("x" * 400),
-        _FakeTarget(),
+        None,
         duration_ms=0.5,
     )
     message = out.extras["exception_message"]
@@ -408,9 +434,9 @@ def test_builder_empty_message_has_no_dangling_tail() -> None:
     pins the guard for any future raise shape.
     """
     out = result_connector_vault_forbidden(
-        "GET:/x",
+        "vault.token.create",
         Exception(),
-        _FakeTarget(),
+        None,
         duration_ms=0.5,
     )
     assert out.error is not None
@@ -719,3 +745,43 @@ async def test_dispatch_other_hvac_errors_fall_through_to_connector_error(
     # Did NOT get reclassified as the Forbidden shape.
     assert "connector_vault_forbidden" not in result.error
     assert "expected_secret_ref" not in result.extras
+
+
+@pytest.mark.asyncio
+async def test_dispatch_derived_ref_forbidden_marks_derived_and_hides_vault_text(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """A denied read of the ref MEHO built from the name says so, with no Vault address."""
+    register_connector_v2(
+        product="vfb",
+        version="9",
+        impl_id="vfb-rest",
+        cls=_VaultForbiddenConnector,
+    )
+    await _insert_ingested_descriptor(
+        session=session,
+        product="vfb",
+        version="9",
+        impl_id="vfb-rest",
+        op_id="GET:/api/v1/events",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+    derived = f"tenants/{_TENANT}/vcf-prod"
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vfb-rest-9",
+        op_id="GET:/api/v1/events",
+        target=_FakeTarget(secret_ref=derived),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.extras["error_code"] == "connector_vault_forbidden"
+    assert result.extras["secret_ref_derived"] is True
+    assert "MEHO built" in result.error
+    assert "http" not in result.error
+    assert "http" not in str(result.extras)
+    assert f"stage the credential at {derived!r}" not in result.error

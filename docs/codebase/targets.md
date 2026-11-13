@@ -293,7 +293,11 @@ from Vault there.
   names the target and the ref, says whether MEHO built the ref from
   the target name, and says how to fix it: store the credential at
   that path, or run `meho targets update <name> --secret-ref <path>`.
-  It never shows the hvac text or the Vault URL. The builder is
+  It never shows the hvac text or the Vault URL. `POST
+  /api/v1/targets/{name}/probe` answers the same fields in a 422 with
+  `error: target_secret_not_found`. When Vault refuses the read
+  (`connector_vault_forbidden`), the error also never shows the Vault
+  text, and `secret_ref_derived` says whether MEHO built the ref. The builder is
   `operations/_errors_target_secret.py`.
 - **A machine login gets only the own path, unless a person approves.**
   A call of `targets.register` from an agent, a service login or a

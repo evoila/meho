@@ -232,6 +232,9 @@ _HISTORY_PAGE_SIZE: Final[int] = 25
 #: reads every pending request of the view, one batch at a time.
 _WAITING_SCAN_BATCH: Final[int] = 500
 
+#: The bell counts the requests for a person up to here; it shows "99+" from 100.
+_BADGE_COUNT_CAP: Final[int] = 100
+
 #: Maximum work_ref length accepted by the history filter. ``work_ref`` is
 #: an opaque external change-ticket string (e.g. ``"gh:evoila/meho#1"``);
 #: bounding the wire shape rejects an oversized paste at the form boundary
@@ -509,6 +512,32 @@ async def _list_pending_waiting_first(
     return pager.page()
 
 
+async def _count_waiting_for(session: UISessionContext, operator: Operator) -> int:
+    """Count the pending requests *operator* may approve, up to :data:`_BADGE_COUNT_CAP`.
+
+    Reads the whole pending queue in batches, like
+    :func:`_list_pending_waiting_first`, so a request waiting for this
+    person counts also when many newer requests wait for other groups. The
+    scan stops at the cap: the badge shows "99+" from there on.
+    """
+    count = 0
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        last: ApprovalRequest | None = None
+        while True:
+            batch = await list_pending(
+                db_session,
+                tenant_id=session.tenant_id,
+                status="pending",
+                limit=_WAITING_SCAN_BATCH,
+                after=last,
+            )
+            count += sum(1 for row in batch if approve_right(operator, row).may_approve)
+            if count >= _BADGE_COUNT_CAP or len(batch) < _WAITING_SCAN_BATCH:
+                return min(count, _BADGE_COUNT_CAP)
+            last = batch[-1]
+
+
 async def _get_request_or_404(session: UISessionContext, request_id: uuid.UUID) -> ApprovalRequest:
     """Fetch one approval request, tenant-isolated, mapping absence to 404."""
     sessionmaker = get_sessionmaker()
@@ -678,13 +707,12 @@ async def _render_badge(request: Request, session: UISessionContext) -> HTMLResp
     a recent backlog, not the full pending set). Tenant-scoped via the
     session.
     """
-    pending = await _list_pending_for_session(session)
-    count, for_you = len(pending), False
     operator = await _operator_or_none(session) if routing_enabled() else None
     if operator is not None:
         # Approver routing: count only what this person may approve.
-        count = sum(1 for row in pending if approve_right(operator, row).may_approve)
-        for_you = True
+        count, for_you = await _count_waiting_for(session, operator), True
+    else:
+        count, for_you = len(await _list_pending_for_session(session)), False
     context: dict[str, object] = {"pending_count": count, "for_you": for_you}
     return get_templates().TemplateResponse(request, "approvals/_badge.html", context)
 

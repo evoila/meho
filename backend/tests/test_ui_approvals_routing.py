@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -180,6 +181,46 @@ def test_the_bell_counts_only_what_the_person_may_approve() -> None:
     assert code == 200, body
     assert 'data-pending-count="1"' in body
     assert "for you" in body
+
+
+@pytest.mark.usefixtures("_routing_on")
+def test_the_bell_counts_a_request_for_the_person_behind_fifty_newer_ones() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    now = datetime.now(UTC)
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="demo.compute.change",
+        proposed_effect={"safety_level": "caution"},
+        created_at=now - timedelta(hours=2),
+    )
+    for minute in range(50):
+        _seed_request(
+            tenant_id=_TENANT_A,
+            op_id="demo.network.change",
+            proposed_effect={"safety_level": "caution"},
+            created_at=now - timedelta(minutes=minute),
+        )
+
+    async def _route() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            for op_id, kinds in (
+                ("demo.compute.change", ["Operators"]),
+                ("demo.network.change", ["SA-Operators", "Admins"]),
+            ):
+                await session.execute(
+                    update(ApprovalRequest)
+                    .where(ApprovalRequest.op_id == op_id)
+                    .values(approver_roles=kinds, approver_rule="install:routing[0]")
+                )
+
+    asyncio.run(_route())
+
+    # Small batches, so the count also reads past the first batch.
+    with patch("meho_backplane.ui.routes.approvals.routes._WAITING_SCAN_BATCH", 20):
+        code, body = _get("/ui/approvals/badge", _operator(tenant_id=_TENANT_A))
+
+    assert code == 200, body
+    assert 'data-pending-count="1"' in body
 
 
 def test_with_the_switch_off_the_bell_counts_every_pending_request() -> None:

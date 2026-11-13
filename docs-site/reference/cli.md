@@ -1751,6 +1751,21 @@ Search the meho-docs vendor-document add-on
 meho docs
 ```
 
+### `meho docs ask`
+
+Ask one vendor-document collection a question (cited answer)
+
+```
+meho docs ask <question> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--collection` — collection key to ask (required; exactly one)
+- `--json` — emit the raw AskDocsResponse JSON (answer, citations, answer_source)
+- `--limit` — max chunks to ground the answer on (1..50, server default 10 when omitted)
+- `--product` — optional vendor-product refinement
+- `--version` — optional product-version refinement
+
 ### `meho docs collections`
 
 List, create, update, delete, and probe / toggle doc collections

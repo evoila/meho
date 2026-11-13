@@ -67,7 +67,7 @@ _TICKET_VALUE = "PVE:fake-ticket-DO-NOT-LEAK"
 _CSRF_TOKEN = "fake:csrf:token"
 
 _CONNECTOR_ID = "proxmox-api-8.x"
-_TARGET_NAME = "rdc-proxmox-e2e"
+_TARGET_NAME = "proxmox-e2e"
 _PVE_HOST = "proxmox-e2e.test.invalid"
 _PVE_PORT = 8006
 _PVE_BASE_URL = f"https://{_PVE_HOST}:{_PVE_PORT}"

@@ -366,7 +366,7 @@ def test_sparse_patch_preserves_omitted_columns(client: TestClient) -> None:
         r = client.post(
             "/api/v1/targets",
             json={
-                "name": "rdc-rich",
+                "name": "site-rich",
                 "product": "vault",
                 "host": "vault.example.test",
                 "aliases": ["v1", "vault-main"],
@@ -382,7 +382,7 @@ def test_sparse_patch_preserves_omitted_columns(client: TestClient) -> None:
 
         # Sparse PATCH — only `notes`.
         r2 = client.patch(
-            "/api/v1/targets/rdc-rich",
+            "/api/v1/targets/site-rich",
             json={"notes": "updated"},
             headers=headers,
         )

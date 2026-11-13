@@ -57,7 +57,7 @@ from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.targets.resolver import resolve_target
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
-_TARGET_NAME = "rdc-keycloak-group-e2e"
+_TARGET_NAME = "keycloak-group-e2e"
 _KC_HOST = "keycloak-group-e2e.test.invalid"
 _KC_BASE_URL = f"https://{_KC_HOST}"
 _ADMIN_TOKEN = "kc-admin-token-group-e2e"

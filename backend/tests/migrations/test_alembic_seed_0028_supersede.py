@@ -91,17 +91,16 @@ _EXPECTED_SLUGS: Final[frozenset[str]] = frozenset(
 #: text after ``upgrade head``. These tokens identify content sourced
 #: from a consumer's ``CLAUDE.md`` (``evoila/meho`` repo references,
 #: customer-specific lab program identifiers, AI-tool legacy refs).
-#: The bare ``rdc-`` prefix covers the consumer-identity tokens.
 _FORBIDDEN_TOKENS: Final[tuple[str, ...]] = (
     "evoila/meho",
-    "rdc-",
     "Holodeck",
 )
 
-#: Three private repository names, as ``(length, sha256 of the lowercase
-#: name)``, so this public file does not name them. See
-#: :func:`tests._hashed_tokens.find_hashed_token`.
+#: Three private repository names and the consumer-identity prefix, as
+#: ``(length, sha256 of the lowercase name)``, so this public file does
+#: not name them. See :func:`tests._hashed_tokens.find_hashed_token`.
 _FORBIDDEN_HASHED_TOKENS: Final[tuple[tuple[int, str], ...]] = (
+    (4, "f43a3b35ec5bd2ff114dd9e6d15ca4cdb8a4be4f76836af170b69572932a08dc"),
     (13, "885ce5f27302f8e3cd4bd676054d0a9ee000282de4948755c338fa861dfa3559"),
     (13, "06676ff72a3ffffb4e398600c0ff4f1c1e4a6d7a25ad98027fd4f78abb49799c"),
     (11, "5f13f91242342656476ae9bcdfa2335287a39404e7622fe348ab4e2a8b13a97e"),
@@ -414,7 +413,7 @@ def test_seeded_default_bodies_carry_no_consumer_specific_tokens(
     hashed_hit = find_hashed_token(blob, _FORBIDDEN_HASHED_TOKENS)
     assert hashed_hit is None, (
         f"forbidden token {hashed_hit!r} found in seeded default conventions -- "
-        "the seed must contain no private repository names"
+        "the seed must contain no private names"
     )
 
 

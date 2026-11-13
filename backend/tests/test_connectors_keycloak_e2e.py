@@ -56,7 +56,7 @@ from meho_backplane.operations.meta_tools import call_operation, search_operatio
 from meho_backplane.operations.reducer import PassThroughReducer
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
-_TARGET_NAME = "rdc-keycloak-e2e"
+_TARGET_NAME = "keycloak-e2e"
 _KC_HOST = "keycloak-e2e.test.invalid"
 _KC_BASE_URL = f"https://{_KC_HOST}"
 _ADMIN_TOKEN = "kc-admin-token-e2e"

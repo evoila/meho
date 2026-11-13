@@ -327,7 +327,7 @@ async def test_probe_ambiguous_connector_returns_409(client: TestClient) -> None
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rdc-clash",
+        name="site-clash",
         product="kclash",
         host="10.0.0.7",
     )
@@ -335,7 +335,7 @@ async def test_probe_ambiguous_connector_returns_409(client: TestClient) -> None
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.post(
-            "/api/v1/targets/rdc-clash/probe",
+            "/api/v1/targets/site-clash/probe",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 409
@@ -1131,7 +1131,7 @@ def test_create_target_accepts_sddc_short_token(client: TestClient) -> None:
             "/api/v1/targets",
             json={
                 "product": "sddc",
-                "name": "rdc-sddc",
+                "name": "site-sddc",
                 "host": "sddc.corp.internal",
             },
             headers={"Authorization": f"Bearer {_admin_token(key)}"},
@@ -1157,7 +1157,7 @@ def test_create_target_rejects_retired_sddc_manager_long_token(client: TestClien
             "/api/v1/targets",
             json={
                 "product": "sddc-manager",
-                "name": "rdc-sddc-long",
+                "name": "site-sddc-long",
                 "host": "sddc.corp.internal",
             },
             headers={"Authorization": f"Bearer {_admin_token(key)}"},

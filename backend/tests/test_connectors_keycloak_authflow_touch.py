@@ -484,7 +484,7 @@ def test_op_flow_is_the_flow_of_the_realm_file() -> None:
     web = next(c for c in realm["clients"] if c["clientId"] == "meho-web")
     file_mapper = next(m for m in web["protocolMappers"] if m["name"] == "amr")
     assert file_mapper == AMR_MAPPER
-    assert json.loads(realm["attributes"]["acr.loa.map"]) == {"meho-touch": 3}
+    assert json.loads(realm["attributes"]["acr.loa.map"]) == {"meho-approve": 2, "meho-touch": 3}
 
 
 # ---------------------------------------------------------------------------

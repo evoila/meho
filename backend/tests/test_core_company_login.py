@@ -124,7 +124,8 @@ class CompanyKeycloak(FakeKeycloak):
 
     def _get(self, path: str, body: Any, params: dict[str, str]) -> Reply:
         if path == _BASE:
-            return Reply(200, {"realm": "meho", "browserFlow": "browser"})
+            realm = {"realm": "meho", "browserFlow": "browser"}
+            return Reply(200, {**realm, "attributes": copy.deepcopy(self.realm_attributes)})
         if path == f"{_BASE}/authentication/flows/browser/executions":
             return Reply(
                 200,
@@ -135,7 +136,10 @@ class CompanyKeycloak(FakeKeycloak):
             )
         if match := re.fullmatch(rf"{_BASE}/authentication/config/([^/]+)", path):
             config = self.auth_configs.get(match.group(1))
-            return Reply(200, copy.deepcopy(config)) if config else Reply(404, None)
+            if config:
+                return Reply(200, copy.deepcopy(config))
+            if match.group(1) not in self.configs:
+                return Reply(404, None)
         if match := re.fullmatch(rf"{_BASE}/groups/([^/]+)/members", path):
             assert params["briefRepresentation"] == "true"
             name = next(n for n, g in self.groups.items() if g["id"] == match.group(1))
@@ -272,14 +276,16 @@ async def test_off_by_default_touches_nothing_of_the_company_login() -> None:
     await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
     # The realm stage lists the login flows and reads the steps of the
     # realm file's own flows.
-    own = f"{_BASE}/authentication/flows/{quote('meho approval sign-in', safe='')}/executions"
+    own = f"{_BASE}/authentication/flows/{quote('meho approval sign-in level', safe='')}/executions"
+    # The settings of its level step, and the realm for its sign-in levels.
+    own_settings = tuple(f"{_BASE}/authentication/config/{config_id}" for config_id in kc.configs)
     # The recovery-code stage also reads the "Configure OTP" action and the
     # steps of the browser flow. These do not belong to the company login.
     recovery = (
         f"{_BASE}/authentication/required-actions/CONFIGURE_TOTP",
         f"{_BASE}/authentication/flows/browser/executions",
     )
-    allowed = (f"{_BASE}/authentication/flows", own, *recovery)
+    allowed = (f"{_BASE}/authentication/flows", _BASE, own, *own_settings, *recovery)
     calls = [path for _, path in kc.calls if path not in allowed]
     assert not any(kc._company_path(path) for path in calls)
     assert CompanyLoginPlan().enabled is False

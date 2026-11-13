@@ -29,7 +29,7 @@ Source: `backend/src/meho_backplane/connectors/argocd/`.
 
 - **`ArgoCdConnector`** (`connector.py`) — `HttpConnector` subclass. Class
   attributes: `product="argocd"`, `version="3.x"`, `impl_id="argocd-api"`,
-  `supported_version_range=">=2.0,<4.0"`, `priority=1`. The priority outranks
+  `supported_version_range=">=3.0,<4.0"`, `priority=1`. The priority outranks
   a future `GenericRestConnector` auto-shim (priority=0) defensively if both
   somehow register for the same triple.
 - **`ArgoCdTargetLike`** (`session.py`) — runtime-checkable Protocol capturing

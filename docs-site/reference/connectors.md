@@ -18,9 +18,9 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 
 | Connector | Product | What it does | Built for | Tested live on | Kind | Docs |
 | --- | --- | --- | --- | --- | --- | --- |
-| `argocd-api-3.x` | `argocd` | — | >=2.0,<4.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-argocd.md) |
+| `argocd-api-3.x` | `argocd` | — | >=3.0,<4.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-argocd.md) |
 | `azure-arm-2026.10` | `azure` | Reads Azure subscriptions (VMs, Kubernetes clusters, networks, storage, costs, security and policy), changes tags and starts patch checks. | Azure has no product version. Each call names the API version of its resource type. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-azure.md) |
-| `bind9-ssh-9.x` | `bind9` | — | no range stated | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-bind9.md) |
+| `bind9-ssh-9.x` | `bind9` | — | >=9.18,<9.21 | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-bind9.md) |
 | `entra-graph-1.0` | `entra` | Reads Microsoft Entra ID users, groups, app registrations, service principals and role assignments. | Entra ID has no product version. The connector calls Microsoft Graph v1.0. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-entra.md) |
 | `freeipa-jsonrpc-4.x` | `freeipa` | Reads FreeIPA users, groups, hosts and access rules; creates users, groups, host groups and rules, adds members, deletes hosts, users and roles, and sets the password policy. | >=4.9,<5.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-freeipa.md) |
 | `gcloud-rest-1.0` | `gcloud` | — | Google Cloud has no product version. Each call uses the versioned path of its API. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-gcloud.md) |
@@ -28,20 +28,20 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `harbor-rest-2.x` | `harbor` | — | >=2.0,<3.0 | not yet recorded | generic | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-harbor.md) |
 | `hetzner-rest-2026.04` | `hetzner` | — | Hetzner Robot has no product version. The connector version 2026.04 is a date. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-hetzner-robot.md) |
 | `hyperv-ssh-2022.x` | `hyperv` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-hyperv.md) |
-| `k8s-1.x` | `k8s` | — | no range stated | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-kubernetes.md) |
+| `k8s-1.x` | `k8s` | — | >=1.32,<1.38 | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-kubernetes.md) |
 | `keycloak-admin-26.x` | `keycloak` | — | >=26.0,<27.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-keycloak.md) |
 | `linux-ssh-1.x` | `linux` | — | Any Linux host that runs systemd fits. A rule for the distribution applies, not a range. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-linux.md) |
 | `loki-api-3.x` | `loki` | — | >=2.9,<4.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-loki.md) |
 | `mongodb-wire-7` | `mongodb` | — | >=5,<9 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-mongodb.md) |
 | `msad-ssh-2022.x` | `msad` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-msad.md) |
 | `mssql-tds-2022.x` | `mssql` | — | >=13,<17 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-mssql.md) |
-| `pfsense-ssh-2.7` | `pfsense` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-pfsense.md) |
+| `pfsense-ssh-2.7` | `pfsense` | — | >=2.7,<2.10 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-pfsense.md) |
 | `phpipam-rest-1.x` | `phpipam` | Lists phpIPAM subnets and free addresses, and reserves or releases an IP address. | The phpIPAM API reports no version. The connector is built from the 1.8.2 API reference. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-phpipam.md) |
 | `postgres-wire-16` | `postgres` | — | >=13,<18 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-postgres.md) |
 | `prometheus-api-2.x` | `prometheus` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-prometheus.md) |
 | `proxmox-api-8.x` | `proxmox` | — | >=7.0,<9.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-proxmox.md) |
 | `rabbitmq-management-3.x` | `rabbitmq` | — | >=3.8,<5.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rabbitmq.md) |
-| `rke2-ssh-1.x` | `rke2` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rke2.md) |
+| `rke2-ssh-1.x` | `rke2` | — | >=1.32,<1.38 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rke2.md) |
 | `tempo-api-2.x` | `tempo` | — | >=2.0,<3.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-tempo.md) |
 | `vault-1.x` | `vault` | — | no range stated | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-vault.md) |
 | `windns-ssh-2016.x` | `windns` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-windows-dns.md) |

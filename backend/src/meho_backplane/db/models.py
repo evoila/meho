@@ -937,7 +937,7 @@ class Tenant(Base):
         server_default=sa.false(),
     )
     # Where the tenant keeps its lessons (#5976): the key of one docs
-    # collection, the team wiki loaded into a knowledge index.
+    # collection, the tenant's wiki loaded into a knowledge index.
     # ``search_knowledge`` and ``meho kb search`` also search it, and
     # ``add_to_knowledge`` says the lesson goes there as a candidate page
     # (:mod:`meho_backplane.kb.wiki_search`). ``NULL`` (default): lessons

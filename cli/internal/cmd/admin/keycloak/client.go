@@ -150,8 +150,9 @@ func (c *adminClient) do(
 	body any,
 ) (int, []byte, error) {
 	endpoint := fmt.Sprintf("%s/admin/realms/%s", c.baseURL, c.realm)
-	if p := strings.TrimLeft(pathRelative, "/"); p != "" {
-		endpoint += "/" + p
+	if rel := strings.TrimLeft(pathRelative, "/"); rel != "" {
+		// An empty path is the realm itself, without a trailing slash.
+		endpoint += "/" + rel
 	}
 
 	var reader io.Reader

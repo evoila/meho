@@ -111,6 +111,7 @@ from meho_backplane.operations.operation_run_service import MAX_RUN_WAIT_SECONDS
 from meho_backplane.recall import RECALL_KEY
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import with_data_notice
+from meho_backplane.work_ref import WorkRefError, normalize_work_ref_input
 
 __all__: list[str] = []
 
@@ -190,6 +191,24 @@ async def _search_operations_handler(
         raise McpInvalidParamsError(str(exc), data=exc.as_error_data()) from exc
 
 
+def _clean_work_ref_argument(call_arguments: dict[str, Any]) -> None:
+    """Clean the ``work_ref`` input with the one shared rule, or refuse the call.
+
+    This runs before anything else happens with the call: no target is
+    resolved, no policy check runs, and no row is written.
+    """
+    if call_arguments.get("work_ref") is None:
+        return
+    try:
+        call_arguments["work_ref"] = normalize_work_ref_input(call_arguments["work_ref"])
+    except WorkRefError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "invalid_work_ref"}) from exc
+    if not isinstance(call_arguments["work_ref"], str):
+        raise McpInvalidParamsError(
+            "work_ref must be a string", data={"reason": "invalid_work_ref"}
+        )
+
+
 async def _call_operation_handler(
     operator: Operator,
     arguments: dict[str, Any],
@@ -215,6 +234,7 @@ async def _call_operation_handler(
     if APPROVAL_REQUEST_ID in arguments:
         return await fetch_reveal_over_mcp(operator, arguments)
     call_arguments = dict(arguments)
+    _clean_work_ref_argument(call_arguments)
     run_async = bool(call_arguments.pop("async", False))
     run_id = call_arguments.pop("run_id", None)
     wait_seconds = call_arguments.pop("wait_seconds", None)

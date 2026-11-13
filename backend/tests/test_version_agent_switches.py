@@ -83,6 +83,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "approval_outcome_unknown_after_minutes",
         "approval_presence_touch_valid_seconds",
         "approval_reveal_fetch_window_seconds",
+        "approval_sign_in_level",
         "audit_client_identity",
         "audit_wrapper_rows_retired",
         "backplane_url",

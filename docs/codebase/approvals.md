@@ -965,8 +965,9 @@ request field, header or command-line flag can set it.
 
 **The approval sign-in flow is checked (#6280).** The client
 `meho-cli-approve` must sign in through its own Keycloak login flow
-`meho approval sign-in`: the password form, then the one-time code step
-when the person has a code app. No other step. The built-in realm has it
+`meho approval sign-in level`: one conditional sub-flow with the level
+step (approval level 2, maximum age 0), the password form, then the
+one-time code step when the person has a code app. No other step. The built-in realm has it
 from the realm file; the bootstrap Job makes it and binds the client on
 every upgrade, and stops when `meho-admin` lacks `manage-realm`
 (docs/codebase/core-bootstrap.md). On a customer's own Keycloak an admin
@@ -981,18 +982,95 @@ the backplane's Keycloak admin client and puts the state into
 | `flow_missing` | The realm has no flow with that name. |
 | `flow_differs` | The flow has other steps; `detail` names the first difference. The realm stage and the operation never bind the client to it. |
 | `not_bound` | The flow is right, but the client is missing, has no own browser flow, or uses another flow (`detail`). |
-| `not_checked` | The read failed; `detail` is a reason word: `keycloak_admin_not_configured`, `no_right_to_read_login_flows`, `no_right_to_read_clients`, `keycloak_timeout` (5 seconds for the whole check), `keycloak_unexpected_answer` or `keycloak_unreachable`. |
+| `not_checked` | The check could not run; `detail` is a reason word. A setup MEHO knows: `keycloak_admin_not_configured`, `no_right_to_read_login_flows`, `no_right_to_read_realm`, `no_right_to_read_clients`. A failed read (`read_failed`): `keycloak_timeout` (5 seconds for the whole check), `keycloak_unexpected_answer`, `keycloak_unreachable` or `keycloak_check_error` (any other error). |
 
 A failed read is never `ok`. The answer is kept for 60 seconds per
 admin URL and client (`_KEEP_S`), because `/api/v1/health` and
 `meho_status` are called often; a fix in Keycloak shows up within a
-minute. The expected steps are the ones of
+minute. A failed read is kept only 5 seconds (`_KEEP_FAILED_S`), so one
+short error does not hold approvals back for a minute. The expected steps are the ones of
 `keycloak.authflow.ensure_approval_flow` (`approval_flow_difference` in
 `connectors/keycloak/ops_authflow.py`), so the check, the operation and the
 realm file agree. `meho doctor` turns the state into its line `approval
 sign-in` (`cli/internal/cmd/doctor_approval.go`): `ok` passes, every other
-state is a warning with the fix. The check only reports; the approve path
-does not read it.
+state is a warning with the fix. Under `auto`, the approve path reads this
+check to decide whether it requires the approval level (see below).
+
+**The approval level (#6281).** With no level names in the realm,
+Keycloak gives `acr` `"1"` to every sign-in that asked for credentials,
+whatever flow ran. So the realm names its levels in the realm attribute
+`acr.loa.map`, one table shared with the passkey touch:
+
+| Level | `acr` | Given by |
+|---|---|---|
+| 1 | `"1"` (no name) | any normal sign-in |
+| 2 | `meho-approve` | the approval sign-in flow (its level step: level 2, maximum age 0) |
+| 3 | `meho-touch` | the passkey touch flow |
+
+A higher level counts where a lower one is asked for
+(`APPROVAL_LEVEL_ACRS` in `auth/approval_sign_in.py`). `meho approvals
+approve` sends `acr_values=meho-approve` (`cli/internal/auth/freshsignin.go`).
+Keycloak's level condition is true on the first pass of a sign-in, so the
+flow reaches level 2 also without the request. A sign-in through a
+company login does not run the flow's steps: Keycloak gives it no level,
+so `acr` stays `"1"`.
+
+`APPROVAL_SIGN_IN_LEVEL` (`off` | `observe` | `auto` | `required`,
+default `auto`) decides what `check_fresh_approval_sign_in` does with a
+token of the approval client whose `acr` is not one of those names
+(`has_approval_level`). The routes resolve the setting first with
+`sign_in_level_in_force` (`auth/approval_sign_in_flow.py`). `auto` is
+`observe` only when MEHO knows for sure that the realm does not give the
+level: the read worked and the state is `flow_missing`, `flow_differs` or
+`not_bound`, or the state is `not_checked` for a setup MEHO knows (no
+admin client, no right to read). In every other case `auto` is
+`required`: when the state is `ok`, and also when the read failed. A
+failure means "refuse", never "allow". A caller that passes no resolved
+value gets an unresolved `auto` as `required` (fail closed).
+
+- `off`: accepted as before;
+- `observe`: accepted, the warning `approval_sign_in_level_missing` is
+  logged, and `approval_auth.level_missing` is `true` in the
+  `approval.decision` audit row (next to the `acr` it saw);
+- `required`: the same `401` as an old sign-in. When the level is the
+  one missing part, the detail ends with `LEVEL_MISSING_REMEDIATION`
+  ("Your sign-in did not reach the approval level. An admin must check
+  approvals.sign_in in /api/v1/health."). When `auto` requires the
+  level only because the read failed, the detail ends with
+  `LEVEL_UNCHECKED_REMEDIATION` instead ("MEHO could not check the
+  approval sign-in of the realm. Try again in a moment."). The refusal
+  log `approval_sign_in_not_fresh` carries `approval_level`.
+
+The `approval.decision` audit row records the mode in force for the
+approve in `approval_auth.level_in_force` (`off`, `observe` or
+`required`), next to the `acr` it saw.
+
+The web path (`check_fresh_web_approval_sign_in`) does not check the
+level. `/api/v1/health` shows the value in `approvals.sign_in_level`,
+what is in force in `approvals.sign_in_level_in_force`, and
+`approvals.sign_in_level_warning` whenever the level is not required in
+practice, and its own warning when the read failed ("MEHO could not
+check the approval sign-in of the realm ..."). When MEHO has no admin
+client, or the admin client may not read, the warning names that fix:
+the admin client settings, or the realm-management role `view-realm`
+(`view-clients` for `no_right_to_read_clients`). `meho doctor` shows the last two in its line `approval level`.
+`approvals.sign_in` is `ok` only when the realm really gives the level:
+the flow steps, the level step settings (`loa-condition-level` 2,
+`loa-max-age` 0), `acr.loa.map` with `meho-approve` = 2 and no other name
+on level 2, no own `acr.loa.map` on the client, and the binding. Direct
+grant or device grant on the client is `flow_differs` too. The
+realm stage (`core/keycloak_flows.py:ensure_levels`, and step settings in
+`ensure_flows`), `meho admin keycloak bootstrap-clients` and
+`keycloak.authflow.ensure_approval_flow` all add `meho-approve` to
+`acr.loa.map` and keep the names already there. All three stop before
+they write when another name already has level 2, or when the approval
+client has its own `acr.loa.map` (shared rules in
+`core/keycloak_levels.py`; the Go copy is in `flows.go`). The realm stage
+makes only the login flows that the realm file binds to a client other
+than `meho-web` (`stage_flows`), so it never makes or binds a flow of the
+console client, such as the passkey touch flow. The flow got a new name
+with the level, so an upgraded realm gets the new flow and the client is
+bound to it; the earlier flow `meho approval sign-in` stays unused.
 
 Every approval records who approved (`reviewed_by`), whether it was a
 self-approval (`self_approved`), which rule allowed it (`approval_rule`)
@@ -3314,14 +3392,14 @@ CLI) the token must prove it:
   Keycloak 26 gives `"1"` to a sign-in that asked for the password and
   `"0"` to one that did not (`AcrProtocolMapper`, from the client
   session; a refreshed token keeps it). The approval client's own login
-  flow `meho approval sign-in` has only the password form and the
-  conditional one-time code step, so its tokens carry `"1"` or a mapped
-  level. A token without `acr` is refused.
+  flow `meho approval sign-in level` has only the level step, the
+  password form and the conditional one-time code step, so its tokens
+  carry `meho-approve`. A token without `acr` is refused.
 - **A passkey sign-in counts (#6006).** A passkey (WebAuthn) sign-in is
   not made from the session cookie, so Keycloak gives it `acr` `"1"` and
   a new `auth_time`, like a password sign-in. The checks need no passkey
   case: they never read `amr`. The password form of both the browser
-  flow and `meho approval sign-in` offers the passkey when the realm has
+  flow and `meho approval sign-in level` offers the passkey when the realm has
   passkeys on. Only the browser flow has Keycloak's step that skips the
   one-time code after a passkey, so on the command line a person with a
   code still types it. `tests/test_approval_passkey_sign_in.py` pins a
@@ -3504,7 +3582,7 @@ flow, PKCE and `http://127.0.0.1:*` only, no device flow, no
 `offline_access`, no refresh token (`use.refresh.tokens` `false`) and an
 access token that lasts 900 seconds (`access.token.lifespan`), the claim
 mappers of `meho-cli` without the MCP
-audience, and its own login flow `meho approval sign-in`
+audience, and its own login flow `meho approval sign-in level`
 (`authenticationFlowBindingOverrides.browser`) — is set by `meho admin keycloak bootstrap-clients`, the
 bundled realm `deploy/charts/meho/charts/keycloak/files/meho-realm.json`
 (new installs; the realm stage adds the flow to a running realm when it

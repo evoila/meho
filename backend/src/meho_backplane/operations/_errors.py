@@ -2964,7 +2964,9 @@ def result_write_capability_denied(
     reason). Its ``granted`` / ``required`` / ``path`` / ``reason`` fields
     ride in ``extras`` next to the ``doc_ref`` for the write policy. The
     ``reason`` may hold a probe exception class or a target lookup problem,
-    so it goes through :func:`_sanitize_free_text`.
+    so it goes through :func:`_sanitize_free_text`. A check that is not a
+    Vault check sets ``remediation`` (the next step) and ``doc_ref``; without
+    them the text points at the Vault write policy.
     """
     path = preflight.get("path")
     granted = list(preflight.get("granted") or [])
@@ -2976,11 +2978,20 @@ def result_write_capability_denied(
         detail += f" (needs {required}, has {granted})"
     if reason:
         detail += f" (check result: {reason})"
+    # A check of another vendor names its own next step and doc.
+    remediation = preflight.get("remediation")
+    doc_ref = preflight.get("doc_ref")
+    if not isinstance(remediation, str) or not remediation:
+        remediation = (
+            f"Add the write grant (see {_VAULT_WRITE_POLICY_DOC} section 6), "
+            "then call the operation again."
+        )
+    if not isinstance(doc_ref, str) or not doc_ref:
+        doc_ref = f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface"
     summary = (
         f"write_capability_denied: the identity this write runs under cannot "
         f"perform it{detail}. MEHO did not create an approval request, because "
-        f"the write would fail after approval. Add the write grant (see "
-        f"{_VAULT_WRITE_POLICY_DOC} section 6), then call the operation again."
+        f"the write would fail after approval. {remediation}"
     )
     return OperationResult(
         status="denied",
@@ -2993,7 +3004,7 @@ def result_write_capability_denied(
             "granted": granted,
             "required": required,
             "reason": reason,
-            "doc_ref": f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface",
+            "doc_ref": doc_ref,
         },
     )
 

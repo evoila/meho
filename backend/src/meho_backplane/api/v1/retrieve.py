@@ -63,7 +63,7 @@ One exception, set by the instance and not by the caller: with
 ``source="kb"`` the hits also include the shared knowledge entries of
 the tenants listed in ``KB_SHARED_TENANT_IDS``
 (:func:`meho_backplane.kb.service.add_shared_hits`). And when the tenant
-keeps its lessons in a team wiki (``tenant.knowledge_wiki_collection``),
+keeps its lessons in a tenant wiki (``tenant.knowledge_wiki_collection``),
 ``source="kb"`` also searches that docs collection and returns its hits in
 ``wiki`` (:func:`meho_backplane.kb.wiki_search.search_wiki`), the same as
 the ``search_knowledge`` tool.

@@ -3,8 +3,8 @@
 
 """Write the matched policy rule on audit rows and approval requests.
 
-Revision ID: 0166
-Revises: 0165
+Revision ID: 0167
+Revises: 0166
 Create Date: 2026-11-13
 
 Four nullable columns, so anyone who reads the audit log or an approval
@@ -34,8 +34,8 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
 # revision identifiers, used by Alembic.
-revision: str = "0166"
-down_revision: str | None = "0165"
+revision: str = "0167"
+down_revision: str | None = "0166"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

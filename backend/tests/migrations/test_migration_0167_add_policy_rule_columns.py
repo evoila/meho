@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0166_add_policy_rule_columns``.
+"""Behavioural tests for ``0167_add_policy_rule_columns``.
 
 The migration only adds four nullable columns: ``policy_rule`` and
 ``policy_version`` on ``audit_log`` and on ``approval_request``. An old
@@ -14,8 +14,8 @@ place after the upgrade, and that it still refuses an ``UPDATE``, also of
 a new column. They run where Docker is there (CI), like the other
 PostgreSQL migration tests.
 
-Every step targets this migration's own revision (``0166``) and its
-``down_revision`` (``0165``), never ``head``.
+Every step targets this migration's own revision (``0167``) and its
+``down_revision`` (``0166``), never ``head``.
 """
 
 from __future__ import annotations
@@ -38,8 +38,8 @@ from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 from tests._pgvector_image import pgvector_test_image
 
-_REVISION = "0166"
-_DOWN_REVISION = "0165"
+_REVISION = "0167"
+_DOWN_REVISION = "0166"
 _AUDIT_ID = "a" * 32
 _REQUEST_ID = "c" * 32
 _TENANT_ID = "b" * 32
@@ -53,7 +53,7 @@ _INSERT_AUDIT = (
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0166.db"
+    db_path = tmp_path / "migration_0167.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
@@ -192,7 +192,7 @@ _TRIGGER = (
 
 @pytest.fixture(scope="module")
 def pg_url() -> Iterator[str]:
-    """One PostgreSQL for the module, at ``0165`` with one audit row and the trigger."""
+    """One PostgreSQL for the module, at ``0166`` with one audit row and the trigger."""
     from testcontainers.postgres import PostgresContainer
 
     with PostgresContainer(pgvector_test_image()) as container:

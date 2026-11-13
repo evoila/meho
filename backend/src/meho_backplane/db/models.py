@@ -693,7 +693,7 @@ class AuditLog(Base):
     # policy evaluator in shadow mode (``POLICY_ENGINE_SHADOW``) sets it,
     # so the text ends with ``(shadow)``: the evaluator matched this rule,
     # but today's checks decided. NULL with the switch off, on rows where no
-    # gate ran, and on every row from before migration ``0166``.
+    # gate ran, and on every row from before migration ``0167``.
     policy_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     policy_version: Mapped[int | None] = mapped_column(sa.Integer(), nullable=True, default=None)
 
@@ -7494,7 +7494,7 @@ class ApprovalRequest(Base):
     # "decided"}``. ``decided`` is ``false`` while the policy evaluator runs
     # in shadow mode (``POLICY_ENGINE_SHADOW``): it names the rule, but
     # today's checks decided. NULL with the switch off and on rows from
-    # before migration ``0166``.
+    # before migration ``0167``.
     policy_rule: Mapped[dict[str, object] | None] = mapped_column(
         _PORTABLE_JSON, nullable=True, default=None
     )

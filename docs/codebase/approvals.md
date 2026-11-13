@@ -1276,7 +1276,7 @@ decides. Run approvals are not compared. See
 With the same switch on, a new request also stores the policy rule that
 the evaluator matched for the call: `approval_request.policy_rule`
 (`{"source", "rule_id", "text", "decided"}`) and `policy_version`
-(migration `0166`). Its `approval.request` audit row has the same rule in
+(migration `0167`). Its `approval.request` audit row has the same rule in
 `audit_log.policy_rule`. The `approval.decision` rows name no rule, also
 an expiry that a retry writes for an old overdue request. `decided` is
 `false` in shadow mode: today's

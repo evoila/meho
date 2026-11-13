@@ -52,12 +52,11 @@
 #        [FAIL] lines above).
 #   2  → CLI usage error (missing args, curl/jq/meho not on PATH).
 #
-# Usage (called from the consumer's smoke.sh wrapper on
-# `claude-rdc-hetzner-dc/manifests/meho/smoke.sh`, or directly by the
-# operator):
+# Usage (called from the consumer's own smoke wrapper,
+# or directly by the operator):
 #
 #   bash scripts/acceptance/smoke.sh \
-#     --backplane https://meho.evba.lab \
+#     --backplane https://meho.example.test \
 #     --namespace meho \
 #     --release meho
 #
@@ -66,13 +65,13 @@
 # is non-interactive (no TTY assumed). The recommended consumer-side
 # pattern is:
 #
-#   meho login https://meho.evba.lab           # interactive (browser)
+#   meho login https://meho.example.test           # interactive (browser)
 #   bash scripts/acceptance/smoke.sh ...       # non-interactive
 #
 # Flags:
-#   --backplane <url>             Backplane base URL (default:
-#                                 https://meho.evba.lab). The five legs
-#                                 run against this host.
+#   --backplane <url>             Backplane base URL, for example
+#                                 https://meho.example.test. Required.
+#                                 The five legs run against this host.
 #   --namespace <ns>              Kubernetes namespace the chart was
 #                                 installed into (default: meho). Used
 #                                 by the optional cluster-side
@@ -173,7 +172,7 @@ exit code:
 
 Usage:
   bash scripts/acceptance/smoke.sh \
-    --backplane https://meho.evba.lab \
+    --backplane https://meho.example.test \
     --namespace meho \
     --release meho
 
@@ -182,8 +181,8 @@ script. Subsequent legs read the bearer token from MEHO_ACCESS_TOKEN
 (set by the wrapper) or from the CLI's keyring / 0600 file fallback.
 
 Flags:
-  --backplane <url>             Backplane base URL
-                                (default: https://meho.evba.lab).
+  --backplane <url>             Backplane base URL, for example
+                                https://meho.example.test. Required.
   --namespace <ns>              Kubernetes namespace (default: meho).
   --release <name>              Helm release name (default: meho).
   --cacert <path>               CA bundle for ingress TLS verify
@@ -213,7 +212,7 @@ HELP
 }
 
 # --- Defaults ----------------------------------------------------------
-BACKPLANE="https://meho.evba.lab"
+BACKPLANE=""
 NAMESPACE="meho"
 RELEASE="meho"
 CACERT=""
@@ -249,6 +248,10 @@ done
 
 # Normalise: strip any trailing slash from the backplane URL so the
 # curl invocations below don't double up on `//api/...`.
+if [[ -z "$BACKPLANE" ]]; then
+    echo "smoke.sh: --backplane is required" >&2
+    exit 2
+fi
 BACKPLANE="${BACKPLANE%/}"
 
 # --- Tooling pre-flight ------------------------------------------------

@@ -53,14 +53,14 @@
 # directly by the operator):
 #
 #   bash scripts/acceptance/rollback-verify.sh \
-#     --host meho.evba.lab \
+#     --host meho.example.test \
 #     --n-image-sha <git-sha-of-N> \
 #     --namespace meho \
 #     --release meho \
 #     --expected-schema-columns payload_summary
 #
 # Flags:
-#   --host <hostname>             Ingress hostname (default: meho.evba.lab).
+#   --host <hostname>             Ingress hostname. Required.
 #                                 The verifier hits https://<hostname>/...
 #                                 for the public-surface probes.
 #   --n-image-sha <sha>           The git SHA of the N image — i.e. the
@@ -144,14 +144,14 @@ The verifier's exit code IS the rollback exercise's exit code:
 
 Usage:
   bash scripts/acceptance/rollback-verify.sh \
-    --host meho.evba.lab \
+    --host meho.example.test \
     --n-image-sha "$N_SHA" \
     --namespace meho \
     --release meho \
     --expected-schema-columns payload_summary
 
 Flags:
-  --host <hostname>             Ingress hostname (default: meho.evba.lab).
+  --host <hostname>             Ingress hostname. Required.
   --n-image-sha <sha>           Git SHA of the N image — the image the
                                 rollback returned to. /version must
                                 report this value post-rollback. Required.
@@ -177,7 +177,7 @@ HELP
 }
 
 # --- Defaults ----------------------------------------------------------
-HOST="meho.evba.lab"
+HOST=""
 N_IMAGE_SHA=""
 NAMESPACE="meho"
 RELEASE="meho"
@@ -217,6 +217,11 @@ while [[ $# -gt 0 ]]; do
         *) echo "rollback-verify.sh: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+if [[ -z "$HOST" ]]; then
+    echo "rollback-verify.sh: --host is required" >&2
+    exit 2
+fi
 
 if [[ -z "$N_IMAGE_SHA" ]]; then
     echo "rollback-verify.sh: --n-image-sha is required" >&2

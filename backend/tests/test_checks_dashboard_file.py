@@ -29,7 +29,7 @@ from typing import Any
 import pytest
 import respx
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
@@ -484,6 +484,42 @@ async def test_import_updates_changed_sensor_and_drops_extra_member(
     assert sorted(m["name"] for m in dash["members"]) == ["items-a", "items-b", "items-c"]
     assert dash["description"] == "new text"
     assert dash["notify_email"] == "site-b@example.com"  # the site's own mail setting stays
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "status_after"),
+    [
+        ("paused_by_operator", "paused"),
+        ("auth_failed:ConnectorAuthError", "paused"),
+        ("invalid_cadence:bad cron", "active"),
+    ],
+)
+async def test_import_keeps_a_paused_sensor_paused(
+    client: TestClient, key: Any, reason: str, status_after: str
+) -> None:
+    """Only a Sensor paused for a broken cadence is active again after an import."""
+    exported = await _setup(client, key)
+    headers_b = _headers(key, tenant_id=_TENANT_B)
+    first = client.post(_IMPORT, json={"file": exported, "target_map": _MAP_B}, headers=headers_b)
+    assert first.status_code == 200, first.text
+    async with get_sessionmaker()() as session, session.begin():
+        row = (await _sensors(_TENANT_B))["items-a"]
+        await session.execute(
+            update(Sensor).where(Sensor.id == row.id).values(status="paused", status_reason=reason)
+        )
+
+    changed = dict(exported)
+    changed["sensors"] = [
+        {**s, "interval_seconds": 300} if s["name"] == "items-a" else s for s in exported["sensors"]
+    ]
+    resp = client.post(_IMPORT, json={"file": changed, "target_map": _MAP_B}, headers=headers_b)
+    assert resp.status_code == 200, resp.text
+
+    row = (await _sensors(_TENANT_B))["items-a"]
+    assert row.interval_seconds == 300
+    assert row.status == status_after
+    assert row.status_reason == (reason if status_after == "paused" else None)
 
 
 @pytest.mark.asyncio

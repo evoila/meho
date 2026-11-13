@@ -487,7 +487,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// the 11 ops (about, zone list/read, record get/add/remove, config
 	// show/apply-views/apply-file/backup/reload) registered by G3.4-
 	// T1..T4 (#587/#588/#589/#590). `meho bind9 record add
-	// esx-dc6.evba.lab 10.5.50.25 --zone evba.lab --target
+	// esx-1.example.test 192.0.2.25 --zone example.test --target
 	// vcf-router-bind9` replaces the consumer's
 	// `bind9-dns.sh --add-a-record` wrapper (the 2026-05-04 / 2026-05-05
 	// credential surface).
@@ -586,8 +586,8 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// the connector ID on every invocation. Ships the 8 read-only ops
 	// (about, config show, pod list/info, service list, k8s exec
 	// (read-only), logs tail, networking show) registered by G3.8-T1/T2
-	// (#853/#854). `meho holodeck pod list --target holorouter` replaces
-	// the consumer's `holodeck.sh --target holorouter 'pwsh -c
+	// (#853/#854). `meho holodeck pod list --target my-router` replaces
+	// the consumer's `holodeck.sh --target my-router 'pwsh -c
 	// "Get-HoloDeckPod | Format-Table"'` invocation 1:1. The sister
 	// `clone-holodeck-instance.sh` wrapper (multi-step nested-lab
 	// bring-up) stays in the wrapper for v0.2 and surfaces as a Runbook

@@ -760,10 +760,10 @@ func runBootstrapOnce(t *testing.T, fake *fakeKeycloak, opts BootstrapOptions) (
 // defaults fill in the rest via withDefaults().
 func fullOpts() BootstrapOptions {
 	return BootstrapOptions{
-		Realm:             "evba",
+		Realm:             "example",
 		AdminUsername:     "admin",
 		AdminPassword:     "hunter2",
-		MCPResourceURI:    "https://meho.evba.lab/mcp",
+		MCPResourceURI:    "https://meho.example.test/mcp",
 		TenantID:          "438fdfa5-95ae-4303-90d6-8742123234cc",
 		AdminUserUsername: "deployer@example.com",
 		AdminUserPassword: "deploypw",
@@ -949,7 +949,7 @@ func TestBootstrap_RefusesConfidentialClientName(t *testing.T) {
 
 func TestBootstrap_RefusesTrailingSlashOnMCPURI(t *testing.T) {
 	opts := fullOpts()
-	opts.MCPResourceURI = "https://meho.evba.lab/mcp/"
+	opts.MCPResourceURI = "https://meho.example.test/mcp/"
 	_, _, err := runBootstrapOnce(t, newFakeKeycloak(), opts)
 	if err == nil {
 		t.Fatalf("expected refusal for trailing-slash MCP URI")
@@ -1078,7 +1078,7 @@ func TestBootstrap_MapperShapeMatchesReferenceScript(t *testing.T) {
 
 	// meho-mcp-audience — custom-audience form.
 	mcp := byName["meho-mcp-audience"]
-	if mcp.Config["included.custom.audience"] != "https://meho.evba.lab/mcp" {
+	if mcp.Config["included.custom.audience"] != "https://meho.example.test/mcp" {
 		t.Errorf("mcp mapper audience = %q",
 			mcp.Config["included.custom.audience"])
 	}
@@ -1347,7 +1347,7 @@ func TestBootstrapClientsCmd_CLIOfflineAccessZeroParses(t *testing.T) {
 // Keycloak verbatim).
 func TestBootstrap_RejectsNegativeCLIOfflineIdle(t *testing.T) {
 	opts := fullOpts()
-	opts.KeycloakBaseURL = "https://keycloak.evba.lab"
+	opts.KeycloakBaseURL = "https://keycloak.example.test"
 	opts.CLIOfflineSessionIdleSeconds = -1
 	err := opts.withDefaults().validate()
 	if err == nil {

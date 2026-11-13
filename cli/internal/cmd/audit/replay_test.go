@@ -27,7 +27,7 @@ func twoLevelReplay(t *testing.T) api.AuditReplayResult {
 	grandchild := api.ReplayNode{
 		Id:           mustUUID(t, "44444444-4444-4444-4444-444444444444"),
 		Ts:           mustTS(t, "2026-05-13T10:00:02Z"),
-		PrincipalSub: "damir",
+		PrincipalSub: "operator-a",
 		Method:       "GET",
 		Path:         "/x/task",
 		StatusCode:   500,
@@ -41,7 +41,7 @@ func twoLevelReplay(t *testing.T) api.AuditReplayResult {
 	child := api.ReplayNode{
 		Id:           mustUUID(t, "33333333-3333-3333-3333-333333333333"),
 		Ts:           mustTS(t, "2026-05-13T10:00:01Z"),
-		PrincipalSub: "damir",
+		PrincipalSub: "operator-a",
 		Method:       "POST",
 		Path:         "/x/power",
 		StatusCode:   200,
@@ -56,7 +56,7 @@ func twoLevelReplay(t *testing.T) api.AuditReplayResult {
 	root1 := api.ReplayNode{
 		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:           mustTS(t, "2026-05-13T10:00:00Z"),
-		PrincipalSub: "damir",
+		PrincipalSub: "operator-a",
 		Method:       "POST",
 		Path:         "/x/migrate",
 		StatusCode:   200,
@@ -70,7 +70,7 @@ func twoLevelReplay(t *testing.T) api.AuditReplayResult {
 	root2 := api.ReplayNode{
 		Id:           mustUUID(t, "22222222-2222-2222-2222-222222222222"),
 		Ts:           mustTS(t, "2026-05-13T10:05:00Z"),
-		PrincipalSub: "damir",
+		PrincipalSub: "operator-a",
 		Method:       "GET",
 		Path:         "/x/list",
 		StatusCode:   200,
@@ -413,7 +413,7 @@ func TestFormatReplayNodeNullDuration(t *testing.T) {
 	got := formatReplayNode(&api.ReplayNode{
 		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:           mustTS(t, "2026-05-13T10:00:00Z"),
-		PrincipalSub: "damir",
+		PrincipalSub: "operator-a",
 		Method:       "GET",
 		Path:         "/x",
 		StatusCode:   200,
@@ -435,7 +435,7 @@ func TestFormatReplayNodeShowsTenant(t *testing.T) {
 		n := &api.ReplayNode{
 			Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 			Ts:           mustTS(t, "2026-05-13T10:00:00Z"),
-			PrincipalSub: "damir",
+			PrincipalSub: "operator-a",
 			Method:       "GET",
 			Path:         "/x",
 			StatusCode:   200,
@@ -472,7 +472,7 @@ func TestFormatReplayNodeShowsActor(t *testing.T) {
 	node := &api.ReplayNode{
 		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:           mustTS(t, "2026-05-13T10:00:00Z"),
-		PrincipalSub: "damir",
+		PrincipalSub: "operator-a",
 		OpId:         "x.y",
 		ResultStatus: "denied",
 		ActorSub:     &actor,

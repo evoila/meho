@@ -18,7 +18,7 @@ import (
 func TestConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	want := Config{BackplaneURL: "https://meho.evba.lab"}
+	want := Config{BackplaneURL: "https://meho.example.test"}
 	if err := SaveConfigAt(path, want); err != nil {
 		t.Fatalf("SaveConfigAt: %v", err)
 	}

@@ -145,6 +145,7 @@ from meho_backplane.ui.routes.agents.views import (
     _fetch_agent_or_404,
     is_htmx_request,
 )
+from meho_backplane.ui.routes.work_ref_form import form_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = [
@@ -303,7 +304,7 @@ async def submit_run(
     The actual run executes inside the GET bridge the fragment subscribes
     to (one ``EventSource`` connection = one run's lifetime).
     """
-    cleaned_work_ref = work_ref.strip() if work_ref else None
+    cleaned_work_ref = form_work_ref(work_ref)
     # Reject a blank / whitespace-only prompt up front. The REST
     # ``AgentRunRequest`` model only enforces ``min_length=1`` (so a
     # single space would pass and burn a turn on an empty instruction);

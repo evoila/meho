@@ -136,6 +136,7 @@ from decimal import Decimal
 from typing import Any, Final, Literal
 
 import structlog
+from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from meho_backplane.audit_cutover import (
@@ -159,6 +160,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import decode_work_ref_header, work_ref_var
 from meho_backplane.request_usage.collector import open_request_usage
+from meho_backplane.work_ref import WorkRefError
 
 __all__ = ["AuditMiddleware", "bind_preallocated_audit_id"]
 
@@ -851,7 +853,17 @@ class AuditMiddleware:
         # carry the header too. A ``work_ref`` tool argument still wins:
         # ``call_operation`` binds it over this value for its dispatch.
         work_ref_token = None
-        work_ref_header = _extract_work_ref(scope)
+        try:
+            work_ref_header = _extract_work_ref(scope)
+        except WorkRefError as exc:
+            # A ticket id that breaks the rule is refused before anything
+            # else happens with the request: no policy check, no call, no
+            # row. The message names the rule.
+            await JSONResponse(
+                {"detail": f"Meho-Work-Ref header: {exc}"},
+                status_code=400,
+            )(scope, receive, send)
+            return
         if work_ref_header is not None:
             work_ref_token = work_ref_var.set(work_ref_header)
         try:

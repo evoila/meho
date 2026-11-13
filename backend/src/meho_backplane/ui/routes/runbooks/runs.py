@@ -129,6 +129,7 @@ from meho_backplane.ui.auth.middleware import (
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.runbooks.editor import set_csrf_cookie
+from meho_backplane.ui.routes.work_ref_form import form_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["register_runs_routes"]
@@ -379,7 +380,7 @@ async def _build_start_request(
     if not target:
         return await _render_start_error(request, session, "Target is required.")
     params = _parse_params_or_422(form.params_raw)
-    work_ref = form.work_ref.strip() or None
+    work_ref = form_work_ref(form.work_ref)
     return StartRunRequest(template_slug=slug, target=target, params=params, work_ref=work_ref)
 
 

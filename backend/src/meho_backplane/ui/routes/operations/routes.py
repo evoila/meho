@@ -220,6 +220,7 @@ from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
     resolve_role_probe,
 )
+from meho_backplane.ui.routes.work_ref_form import form_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_operations_router"]
@@ -935,7 +936,7 @@ async def _render_call_result(
     }
     # ``work_ref`` is an opaque per-op override; bind it only when non-empty so
     # a bare run does not clobber an ambient ``Meho-Work-Ref`` (#1657).
-    work_ref_value = work_ref.strip()
+    work_ref_value = form_work_ref(work_ref)
     if work_ref_value:
         arguments["work_ref"] = work_ref_value
     # The hash of the preview the run window showed. A destructive op needs it

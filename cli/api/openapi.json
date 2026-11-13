@@ -30872,8 +30872,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
-            "minLength": 1,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -31208,7 +31206,6 @@
           },
           "work_ref": {
             "type": "string",
-            "minLength": 1,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -40214,8 +40211,6 @@
         "properties": {
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
-            "minLength": 1,
             "title": "Work Ref",
             "description": "The run reference. Calls of the run send it in the Meho-Work-Ref header."
           },
@@ -41135,7 +41130,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
           }

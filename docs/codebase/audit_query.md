@@ -372,6 +372,39 @@ query_audit(filters, tenant_id, session)
                    if has_more else None
 ```
 
+## One rule for a ticket id (work ref)
+
+Every door cleans a ticket id with `normalize_work_ref` in
+`meho_backplane/work_ref.py`, so one ticket id is the same text
+wherever it enters MEHO. An audit search (`filter-work-ref`) then finds
+every row of one ticket, and a run approval covers exactly the calls of
+that ticket, whichever door they came through.
+
+The doors: the `Meho-Work-Ref` header (the audit middleware, also for
+`/mcp`), the `call_operation` body and MCP input, the MCP agent run and
+announce inputs, the REST announce body, a runbook start, a scheduler
+trigger, a run approval request, and the console forms.
+
+The rule:
+
+- White space at both ends is removed.
+- An empty value is refused.
+- A control character (also NUL, a line break and a tab), an invisible
+  format character (zero-width and direction marks), a line or paragraph
+  separator and a lone surrogate are refused.
+- The text is at most 256 characters, counted after NFC.
+- The text is stored in Unicode form NFC.
+
+A value that breaks the rule is refused with a message that names the
+rule. The check runs before anything else happens with the request:
+before the policy gate, before an operation is sent and before a row is
+written. Nothing is cut or changed without a word, apart from the strip
+and NFC.
+
+Rows stored before this rule are not changed. A ticket id stored before
+this release may carry white space at the ends, so an exact-match filter
+or a run approval made for the cleaned text does not match such a row.
+
 ## Per-session replay (G8.2-T3 #1011)
 
 `replay.py` adds `replay_session(session_id, *, tenant_id, session,

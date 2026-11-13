@@ -2083,14 +2083,25 @@ type ApprovalSignInStatusState string
 // :func:`meho_backplane.features.build_features_block`; they are state
 // words only, never a key value. “sign_in“ is the state of the
 // approval client's own login flow in Keycloak (#6280,
-// :mod:`meho_backplane.auth.approval_sign_in_flow`).
+// :mod:`meho_backplane.auth.approval_sign_in_flow`). “sign_in_level“
+// is the value of “APPROVAL_SIGN_IN_LEVEL“ (#6281): “off“,
+// “observe“, “auto“ or “required“. “sign_in_level_in_force“ is
+// what MEHO does now with an approval sign-in that lacks the approval
+// level: “off“, “observe“ or “required“ (“auto“ is “observe“
+// only while “sign_in“ shows for sure that the realm does not give the
+// level, and “required“ when it is “ok“ or its read failed).
+// “sign_in_level_warning“ is a short sentence whenever the level is not
+// required in practice or the read failed, else “None“.
 type ApprovalsStatus struct {
 	Custody                  string `json:"custody"`
 	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
 	EffectivePosture         string `json:"effective_posture"`
 
 	// SignIn The state of the approval sign-in flow and its binding (#6280).
-	SignIn *ApprovalSignInStatus `json:"sign_in,omitempty"`
+	SignIn             *ApprovalSignInStatus `json:"sign_in,omitempty"`
+	SignInLevel        *string               `json:"sign_in_level"`
+	SignInLevelInForce *string               `json:"sign_in_level_in_force"`
+	SignInLevelWarning *string               `json:"sign_in_level_warning"`
 }
 
 // ApproveRequestBody POST body for “…/approve“.
@@ -6932,7 +6943,15 @@ type HealthResponse struct {
 	// :func:`meho_backplane.features.build_features_block`; they are state
 	// words only, never a key value. ``sign_in`` is the state of the
 	// approval client's own login flow in Keycloak (#6280,
-	// :mod:`meho_backplane.auth.approval_sign_in_flow`).
+	// :mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``
+	// is the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,
+	// ``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is
+	// what MEHO does now with an approval sign-in that lacks the approval
+	// level: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``
+	// only while ``sign_in`` shows for sure that the realm does not give the
+	// level, and ``required`` when it is ``ok`` or its read failed).
+	// ``sign_in_level_warning`` is a short sentence whenever the level is not
+	// required in practice or the read failed, else ``None``.
 	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 

@@ -2913,9 +2913,13 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      `meho-cli-approve`, `--cli-approve-client-id`; it must match the
      chart's `config.keycloakCliApproveClientId`). It gets the same
      mappers except `meho-mcp-audience` and the same 4 default scopes,
-     and it uses its own login flow `meho approval sign-in` (password
-     form, then the one-time code when the person has one), which the
-     verb makes when it is missing (`bootstrap.go`, step 3a).
+     and it uses its own login flow `meho approval sign-in level` (password
+     form, then the one-time code when the person has one; it gives the
+     approval level `meho-approve`), which the verb makes when it is
+     missing, with the level step's settings and the level name in the
+     realm's `acr.loa.map` (`bootstrap.go`, step 3a; `flows.go`).
+     `meho approvals approve` asks for that level with
+     `acr_values=meho-approve` (`internal/auth/freshsignin.go`).
   2. Public authorization-code+PKCE MCP client (default name
      `meho-mcp`, `standardFlowEnabled=true`,
      `pkce.code.challenge.method=S256`, default redirect URIs for the

@@ -45,8 +45,10 @@ login flow with the passkey touch level. Three more safe reads show the
 login setup: `keycloak.auth_flow.step.list`, `keycloak.required_action.list`
 and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
 `keycloak.user.sessions`, show one user's state after a logout or a password
-reset. In total the connector registers 42
-operations: 17 `safe` reads and 25 writes that wait for
+reset. Two more, `keycloak.user.lock_status` and
+`keycloak.realm.lock_settings`, show whether a user is locked after failed
+sign-ins. In total the connector registers 44
+operations: 19 `safe` reads and 25 writes that wait for
 approval (7 `caution`, 14 `dangerous`, 4 `destructive`).
 `keycloak.user.required_actions.update` makes a user set up a one-time code
 (OTP) at the next login, and `keycloak.user.otp_status` shows who has one
@@ -253,13 +255,13 @@ rejects a whitespace-only secret rather than setting an empty password.
 
 ## Read ops (G3.13-T2, extended by #2843 + #3280)
 
-Ten `safety_level="safe"` / `requires_approval=False` read ops in this
-table (an eleventh, `keycloak.identity_provider.list`, is described with the
-approval sign-in flow; three more are in "Login setup reads" below, and two
-more, `keycloak.user.get` and `keycloak.user.sessions`, are described with the
-user reads below), all
-tagged `read-only`, all dispatching via the admin-auth path. The realm is
-the target's `managed_realm` (no per-op realm param):
+Fourteen `safety_level="safe"` / `requires_approval=False` read ops in this
+table. `keycloak.user.get` and `keycloak.user.sessions` are described more
+with the user reads below, and the two lock reads in "Lock status reads".
+Four more reads are not in this table: `keycloak.identity_provider.list`
+(described with the approval sign-in flow) and three in "Login setup reads"
+below. All are tagged `read-only` and dispatch via the admin-auth path. The
+realm is the target's `managed_realm` (no per-op realm param):
 
 | op_id | Admin REST API | returns |
 |---|---|---|
@@ -270,6 +272,8 @@ the target's `managed_realm` (no per-op realm param):
 | `keycloak.user.list` | `GET .../users` (`?username=`/`?max=`) | `{rows, total}`, no credentials |
 | `keycloak.user.get` | `GET .../users/{user-id}` and `.../credentials` | one user's state, credential type and date only |
 | `keycloak.user.sessions` | `GET .../users/{user-id}/sessions` | `{count, sessions}`, no session id, no token |
+| `keycloak.user.lock_status` | `GET .../attack-detection/brute-force/users/{user-id}` | `{locked, numFailures, numTemporaryLockouts, lastFailure}`, no IP address |
+| `keycloak.realm.lock_settings` | `GET /admin/realms/{realm}` | the realm's lock rules only |
 | `keycloak.role_mapping.get` | `GET .../users/{id}/role-mappings` | realm + client role mappings |
 | `keycloak.role.list` | `GET .../roles` | `{rows, total}` — realm role catalogue |
 | `keycloak.role.users` | `GET .../roles/{role-name}/users` | `{rows, total}`, no credentials — role members |
@@ -314,9 +318,11 @@ the general posture (see "Write ops" below).
 The flight recorder stores the vendor answer of each recorded call, before
 the handler's scrub runs. So the connector masks the trace body too:
 `KeycloakConnector.trace_response_body` (`connectors/keycloak/connector.py`)
-parses the Admin REST answer and returns `redact_secret_fields(payload)`,
-the same scrub the result gets. The stored trace and the agent copy of it
-show `***REDACTED***` where the result does. This covers every admin read
+parses the Admin REST answer and returns `redact_trace_fields(payload)`:
+the same scrub the result gets, plus personal fields that an op leaves out
+of its result (today `lastIPFailure`, the IP address of a user's last failed
+sign-in). The stored trace and the agent copy of it show `***REDACTED***`
+for these fields. This covers every admin read
 that goes through the recorded `_get_admin_json` path: the curated read
 ops, and the client reads inside `keycloak.client.update`, the client
 delete lookup and the realm delete. An empty answer is recorded as it is; an
@@ -324,8 +330,9 @@ answer that is not JSON is replaced by a fixed marker. The shared trace
 engine (`docs/codebase/redaction.md`) still runs on what the hook returns
 and masks secret-named fields by name as well.
 `tests/test_connectors_keycloak_trace_mask.py` dispatches
-`keycloak.client.get` with the recorder on and checks that a made-up client
-secret is in neither the stored trace nor the agent copy.
+`keycloak.client.get` and `keycloak.user.lock_status` with the recorder on
+and checks that a made-up client secret and the failure IP are in neither
+the stored trace nor the agent copy.
 
 ## User state reads (`ops_user_state.py`)
 
@@ -351,6 +358,39 @@ other times in milliseconds; a `notBefore` of 0 (never set) is `null`. Use
 both after `keycloak.user.logout` or `keycloak.user.reset_password` to check
 the result. A failed read, or a body of the wrong shape, is an error, never
 an empty answer.
+
+## Lock status reads (`ops_lock_status.py`)
+
+Keycloak shows "Invalid username or password" for a wrong password and for an
+account locked after too many failed sign-ins. Two `safe` reads tell them
+apart:
+
+- `keycloak.user.lock_status` takes `id` or an exact `username`. It reads
+  `GET .../attack-detection/brute-force/users/{user-id}`. The result is
+  `{userId, locked, numFailures, numTemporaryLockouts, lastFailure}`. The IP
+  address of the last failure (`lastIPFailure`) is personal data and is never
+  returned. The trace mask hides it in the flight recorder trace too.
+  `lastFailure` is ISO 8601 UTC, or `null` when it is absent or 0 (no
+  failure yet).
+- Keycloak 26 answers the lock status read with 200, `disabled: false` and
+  zero counts for an id it does not know. So with an `id`, the op first reads
+  `GET .../users/{user-id}`. That read gives 404 for an unknown id, and the op
+  raises "user not found". With a `username`, the exact-match lookup already
+  finds the user.
+- Keycloak gives the same "not locked, zero counts" answer for every user
+  when the realm's lock is off. The op's `output_shape` text says so: check
+  `bruteForceProtected` in `keycloak.realm.lock_settings`.
+- An answer without the `disabled` flag is an error, never "not locked". A
+  count or `lastFailure` of the wrong type is an error too.
+- `keycloak.realm.lock_settings` reads the realm and copies only the lock
+  rules: `bruteForceProtected`, `permanentLockout`, `failureFactor`,
+  `waitIncrementSeconds`, `maxFailureWaitSeconds`, `maxDeltaTimeSeconds` and
+  the quick-login fields. Each field is checked: a flag must be a boolean and
+  a number an integer. An absent field is `null`; a field of the wrong type is
+  an error.
+
+Keycloak does not say until when a temporary lock lasts. Not built here: an
+unlock operation.
 
 ## Write ops (G3.13-T4, extended by #3280)
 

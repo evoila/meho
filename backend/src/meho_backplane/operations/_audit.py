@@ -209,12 +209,15 @@ policy_decision_var: ContextVar[str | None] = ContextVar(
     default=None,
 )
 
-#: The policy rule that matched the in-flight dispatch (#6044). Bound and
-#: reset with :data:`policy_decision_var` by the dispatcher (and by the
-#: step gate of a multi-step operation). The same two writers read it, for
+#: The policy rule that matched the in-flight dispatch (#6044). Cleared at
+#: the start of each ``dispatch`` and reset when it returns, so a step
+#: refused before its own gate names no rule. Set right after the policy
+#: gate (and by the step gate of a multi-step operation). The same two
+#: writers as :data:`policy_decision_var` read it, for
 #: ``audit_log.policy_rule`` and ``policy_version``; the approval queue
-#: also writes it on the new ``approval_request`` row. ``None`` while the
-#: ``POLICY_ENGINE_SHADOW`` switch is off and where no gate ran.
+#: writes it only on its "request" row and on the new ``approval_request``
+#: row. ``None`` while the ``POLICY_ENGINE_SHADOW`` switch is off and where
+#: no gate ran.
 policy_rule_var: ContextVar[RuleStamp | None] = ContextVar(
     "policy_rule",
     default=None,

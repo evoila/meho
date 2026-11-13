@@ -124,8 +124,10 @@ compared.
 With the switch on, the gate also keeps the rule the evaluator matched
 (`policy/stamp.py`: `RuleStamp`, `keep_rule`, `take_rule`). The
 dispatcher takes it right after its gate and binds it to
-`policy_rule_var` (`operations/_audit.py`), with the same scope as
-`policy_decision_var`. The step gate of a multi-step operation binds the
+`policy_rule_var` (`operations/_audit.py`). Each `dispatch` clears the
+rule when it starts and puts the caller's rule back when it returns. So
+a step of a multi-step operation that is refused before its own gate
+(for example a target of the wrong kind) names no rule. The step gate of a multi-step operation binds the
 step's rule only for its own rows, so the parent's row keeps the
 parent's rule. Then:
 

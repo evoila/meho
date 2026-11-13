@@ -14,7 +14,9 @@ Kind ``"linux"`` is a **write-only** store for ``secret.move``. The ref is::
   and ``linux:seat-host//home/app/.config/app/key#app`` name the same path.
 * ``<owner>`` -- the Linux user who will own the file. A normal user: never
   ``root``, and never a user whose user id is below the host's first normal
-  user id (``UID_MIN`` in ``/etc/login.defs``; 1000 when the file gives none).
+  user id (``UID_MIN`` in ``/etc/login.defs``; 1000 when the file gives none),
+  and never a user whose user id is above the host's last normal user id
+  (``UID_MAX`` in ``/etc/login.defs``; 60000 when the file gives none).
 
 What the adapter does
 =====================
@@ -139,7 +141,8 @@ _REALPATH_CHECK = (
 )
 #: Both scripts check the owner: a known normal user. User id 0 is refused as
 #: ``root-owner``, a user id below the host's first normal user id (``UID_MIN``
-#: in ``/etc/login.defs``, 1000 when the file gives none) as ``system-owner``.
+#: in ``/etc/login.defs``, 1000 when the file gives none) or above its last
+#: (``UID_MAX``, 60000 when the file gives none) as ``system-owner``.
 _OWNER_CHECK = (
     'ouid="$(id -u -- "$owner" 2>/dev/null)" '
     f'|| {{ echo "{_SINK_ERR_PREFIX}owner===" >&2; exit 5; }}\n'
@@ -147,7 +150,10 @@ _OWNER_CHECK = (
     'uid_min="$(awk \'$1 == "UID_MIN" {print $2}\' /etc/login.defs 2>/dev/null | tail -n 1)"\n'
     'case "$uid_min" in ""|*[!0-9]*) uid_min=1000;; esac\n'
     'case "$ouid" in ""|*[!0-9]*) ouid=0;; esac\n'
-    f'[ "$ouid" -ge "$uid_min" ] || {{ echo "{_SINK_ERR_PREFIX}system-owner===" >&2; exit 5; }}'
+    'uid_max="$(awk \'$1 == "UID_MAX" {print $2}\' /etc/login.defs 2>/dev/null | tail -n 1)"\n'
+    'case "$uid_max" in ""|*[!0-9]*) uid_max=60000;; esac\n'
+    f'[ "$ouid" -ge "$uid_min" ] || {{ echo "{_SINK_ERR_PREFIX}system-owner===" >&2; exit 5; }}\n'
+    f'[ "$ouid" -le "$uid_max" ] || {{ echo "{_SINK_ERR_PREFIX}system-owner===" >&2; exit 5; }}'
 )
 _ERR_MARKER = re.compile(r"===MEHO_SINK_ERR:([a-z-]+)===")
 _HOME_MARKER = re.compile(r"^===MEHO_SINK_HOME:(.*)===$", re.MULTILINE)
@@ -202,6 +208,7 @@ _NOT_A_HOME: tuple[str, ...] = (
 #: * ``folders`` -- folder names, as parts that follow each other anywhere in
 #:   the path: SSH (``.ssh``), user services (``.config/systemd``) and
 #:   programs started at login (``.config/autostart``).
+#:   A ``site-packages`` folder under ``.local/lib`` is refused too.
 #: * ``names`` -- file names refused in any folder: SSH login keys, shell
 #:   start and end files, desktop session start files, login settings, mail
 #:   forwarding and mail filters.
@@ -216,6 +223,12 @@ _SYSTEM_RUNS: dict[str, tuple[tuple[str, ...], ...]] = {
         (".config", "environment.d"),
         (".config", "plasma-workspace"),
         (".local", "share", "systemd"),
+        (".config", "nvim"),
+        (".config", "git", "config"),
+        (".local", "bin"),
+        ("bin",),
+        (".local", "share", "bash-completion"),
+        (".oh-my-zsh",),
     ),
     "names": (
         ("authorized_keys",),
@@ -249,6 +262,11 @@ _SYSTEM_RUNS: dict[str, tuple[tuple[str, ...], ...]] = {
         (".procmailrc",),
         (".mailfilter",),
         (".qmail",),
+        (".gitconfig",),
+        (".vimrc",),
+        (".inputrc",),
+        (".tmux.conf",),
+        (".bash_completion",),
     ),
 }
 
@@ -261,9 +279,16 @@ def _system_runs(path: str) -> bool:
     parts = path.lower().split("/")
     if (parts[-1],) in _SYSTEM_RUNS["names"]:
         return True
-    return any(
+    if any(
         tuple(parts[i : i + len(folder)]) == folder
         for folder in _SYSTEM_RUNS["folders"]
+        for i in range(len(parts))
+    ):
+        return True
+    # A ``site-packages`` folder under ``.local/lib``: the Python version
+    # folder in between has a different name on each host.
+    return any(
+        parts[i : i + 2] == [".local", "lib"] and "site-packages" in parts[i + 2 :]
         for i in range(len(parts))
     )
 

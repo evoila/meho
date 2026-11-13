@@ -142,13 +142,47 @@ secret check and the CI check (below) catch secret-shaped values anywhere.
 - Target passwords. Only `secret_ref` paths.
 - The machine name, IP address, DNS and NTP servers; ingress class, storage
   class, host names, network ranges. These live in the install form.
-- Who is in which Keycloak group, and the realm setup. These move only with
-  the stretch Task #4049. Adding someone to an approving group is a
-  privilege grant (#3325), so v1 carries no approver list.
+- Who is in which Keycloak group, and the realm setup. Adding someone to an
+  approving group is a privilege grant (#3325), so the file carries no
+  approver list. These move with Keycloak's own tools (see
+  [Moving the login setup](#moving-the-login-setup)).
 - Fields the server manages: `id` (of a target or convention), `tenant_id`,
   `fingerprint`, `created_at`, `updated_at`, `deleted_at`.
 - Settings that exist only as environment variables (the per-tenant maps,
   `APPROVAL_ALLOW_SELF_APPROVAL`).
+
+## Moving the login setup
+
+The login setup lives in Keycloak, not in MEHO's database: the identity
+providers, the directory (LDAP) connection, the groups with their mappers,
+and who is in which group. The settings file does not carry it, and MEHO
+has no code to move it. The owner decided this on 12 November 2026
+(#6400, replacing #4049): carrying it would need more Keycloak rights for
+MEHO's own account in every install, and Keycloak's partial import drops
+the LDAP connection.
+
+Operators move it by hand. The public page
+`docs-site/install/move-login-setup.md` has the full steps:
+
+1. Export the realm `meho` from the old install with Keycloak's partial
+   export (groups and roles, no clients).
+2. Import it into the new install with Keycloak's partial import: only
+   groups and identity providers, and **Skip** for what exists. The new
+   install keeps its own clients, roles and the login its Helm values
+   set up.
+3. Add the LDAP connection and its group mapper again by hand. Partial
+   import does not read user federation.
+4. Type the secrets again: each imported identity provider's client
+   secret, and the LDAP bind password. The export masks them with `*`.
+5. Add the group members that no directory or identity provider brings,
+   with `keycloak.group.member.add`. Each add waits for a person's
+   approval. The export carries no users.
+
+The new install needs the same `coreKeycloak.firstTenantId`,
+`coreKeycloak.tenantName` and `coreKeycloak.tenants` Helm values, so its
+role groups carry the same tenant ids as the settings file. A company login
+set up with `coreKeycloak.companyLogin` moves with the Helm values and its
+Secret, not with the export.
 
 ## Checks on the file
 

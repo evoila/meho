@@ -431,6 +431,14 @@
           <dd class="text-right font-semibold">Another admin must approve</dd>
         </div>
       {% endif %}
+      {#- Approver routing: the login groups the request went to. Shown only
+          when routing stored them; otherwise today's rule applies. -#}
+      {% if request.who_can_approve %}
+        <div class="flex items-baseline justify-between gap-4" data-approval-who-can-approve>
+          <dt class="shrink-0 text-base-content/55">Who can approve</dt>
+          <dd class="text-right [overflow-wrap:anywhere]">{{ request.who_can_approve }}</dd>
+        </div>
+      {% endif %}
       {% if request.reveal_secret %}
         <div class="flex items-baseline justify-between gap-4" data-approval-reveal-secret>
           <dt class="shrink-0 text-base-content/55">Hidden values</dt>

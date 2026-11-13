@@ -7227,6 +7227,21 @@ class ApprovalRequest(Base):
       (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
       NULL on every other request. Added by migration ``0153``.
 
+    * ``approver_roles`` -- JSON nullable. The login group kinds that may
+      approve the request (for example ``["SA-Operators", "Admins"]``),
+      worked out from the policy file's ``routing`` section when the
+      request started to wait (:mod:`meho_backplane.policy.routing`). Group
+      kinds only, never people. At the click the person must be in one of
+      them, next to today's checks. NULL when the
+      ``POLICY_APPROVER_ROUTING`` switch was off, for a change of rights,
+      and on rows saved before this column: today's rule decides. Added by
+      migration ``0164``.
+
+    * ``approver_rule`` -- Text nullable. The routing entry that set
+      ``approver_roles`` (``tenant:routing[0]``, ``install:routing[2]``),
+      or ``default`` when no entry fits and today's rule set them. NULL
+      when ``approver_roles`` is NULL. Added by migration ``0164``.
+
     * ``reveal_secret`` -- Boolean NOT NULL DEFAULT ``false``. The requester
       asked for the hidden values of the answer (``reveal_secret: true``;
       an agent is refused before the call waits). It is not a parameter of
@@ -7471,6 +7486,10 @@ class ApprovalRequest(Base):
     # The request changes who has rights: only another admin approves it.
     # See the class docstring. Added by migration ``0153``.
     rights_change: Mapped[bool | None] = mapped_column(sa.Boolean(), nullable=True, default=None)
+    # The login group kinds that may approve the request, and the routing
+    # entry that set them. See the class docstring. Added by migration ``0164``.
+    approver_roles: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
+    approver_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # An operator checked the target of an approved run whose outcome MEHO
     # does not know, and wrote down what they found (#5026): the verdict
     # (``happened`` / ``did_not_happen``), a note, who and when. NULL until

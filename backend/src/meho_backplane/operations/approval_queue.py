@@ -174,6 +174,7 @@ from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
 from meho_backplane.operations.uncertain_outcome import envelope_is_uncertain
+from meho_backplane.policy.routing import routing_enabled, routing_refusal, stamp_approver_set
 from meho_backplane.version import running_release_id
 
 __all__ = [
@@ -189,6 +190,7 @@ __all__ = [
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
     "ApprovalRoleFloorError",
+    "ApprovalRoutingError",
     "ApprovalRule",
     "ApprovalSignInReusedError",
     "ApprovalSignInTooOldError",
@@ -568,6 +570,32 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
             message=(
                 f"operator {operator_sub!r} may not approve approval_request "
                 f"{request_id}: {self.reason_text}"
+            ),
+        )
+
+
+class ApprovalRoutingError(ApprovalGroupForbiddenError):
+    """The person is not in a login group kind the request is routed to.
+
+    Raised by :func:`approve_request` when the ``POLICY_APPROVER_ROUTING``
+    switch is on, the request stored the group kinds that may approve it
+    (:mod:`meho_backplane.policy.routing`), and the person's kind is not one
+    of them. Subclasses :class:`ApprovalGroupForbiddenError`, so every
+    approve route answers 403 with :attr:`reason_text`: one sentence that
+    names who may approve.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str, reason: str) -> None:
+        self.request_id = request_id
+        self.safety_level = ""
+        #: The plain refusal text, without ids, for the web interface.
+        self.reason_text = reason
+        UnauthorizedApprovalError.__init__(
+            self,
+            operator_sub=operator_sub,
+            role=role,
+            message=(
+                f"operator {operator_sub!r} may not approve approval_request {request_id}: {reason}"
             ),
         )
 
@@ -1685,6 +1713,7 @@ async def create_pending_request(
     )
     if rights_change or is_rights_change(request):
         request.rights_change = True
+    await stamp_approver_set(session, request)
     if idempotency_key is None:
         session.add(request)
         await session.flush()
@@ -1957,6 +1986,9 @@ async def approve_request(
         ApprovalGroupForbiddenError: Another person's ``dangerous`` or
             ``destructive`` change, and the approver is not in a group that
             may approve it (#3328).
+        ApprovalRoutingError: With approver routing on, the person is not
+            in a login group kind the request stored as the ones that may
+            approve it (:mod:`meho_backplane.policy.routing`).
         ApprovalRoleFloorError: The operation needs a role from the person
             who runs it, and the approver's role is below it.
         ParamsMismatchError: Hash of *params* != stored ``params_hash``
@@ -3762,6 +3794,25 @@ def _check_approver_role_floor(operator: Operator, request: ApprovalRequest) -> 
         )
 
 
+def _check_routed_approver(operator: Operator, request: ApprovalRequest) -> None:
+    """Raise :class:`ApprovalRoutingError` when *operator* is not in the stored group kinds.
+
+    Runs after today's checks. Does nothing while the
+    ``POLICY_APPROVER_ROUTING`` switch is off, or when the request stored no
+    group kinds (it keeps today's rule).
+    """
+    if not routing_enabled():
+        return
+    refusal = routing_refusal(operator, request.approver_roles, request.approver_rule)
+    if refusal is not None:
+        raise ApprovalRoutingError(
+            request.id,
+            operator_sub=operator.sub,
+            role=operator.tenant_role.value,
+            reason=refusal,
+        )
+
+
 def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:
     """Compare the policy evaluator with today's answer, when ``POLICY_ENGINE_SHADOW`` is on."""
     from meho_backplane.policy.shadow import shadow_approval
@@ -3782,7 +3833,8 @@ async def _load_pending_for_approval(
     the most specific reason first: role gate → tenant-scoped load (under a
     row lock) → pending guard → deadline guard (security F12 / #274) →
     self-approval and group rule (#1401, #3328) → the op's role floor
-    (:func:`_check_approver_role_floor`) → params-hash check (only when
+    (:func:`_check_approver_role_floor`) → the stored approver group kinds
+    (:func:`_check_routed_approver`) → params-hash check (only when
     *params* is supplied) → destructive preview-binding re-verification
     (#3197). Returns the validated pending row and the
     rule that allowed the approval; the caller flips status + writes the
@@ -3809,6 +3861,7 @@ async def _load_pending_for_approval(
         _shadow_approval(operator, request, today=False)
         raise
     _shadow_approval(operator, request, today=True)
+    _check_routed_approver(operator, request)
     if params is not None and not params_hash_matches(params, request.params_hash):
         raise ParamsMismatchError(request_id)
     _check_destructive_preview_binding(request)

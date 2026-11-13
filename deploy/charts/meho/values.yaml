@@ -737,9 +737,15 @@ config:
   # today's checks and logs every difference. It decides nothing. When
   # `"false"` (the default), it does not run. See
   # `docs/codebase/policy-evaluator.md`.
+  # `policy.approverRouting` is rendered into `POLICY_APPROVER_ROUTING`.
+  # When `"true"`, a waiting request stores the login group kinds that may
+  # approve it, from the policy file's `routing` section, and MEHO checks
+  # them at the click. When `"false"` (the default), today's rule decides
+  # who may approve. See `docs/codebase/approvals.md`.
   policy:
     classification: "false"
     engineShadow: "false"
+    approverRouting: "false"
   # -- Tenants whose knowledge entries marked `shared` every tenant on
   # this instance can read. Comma-separated tenant ids. Rendered into
   # `KB_SHARED_TENANT_IDS`. Empty (the default): no tenant may share, and

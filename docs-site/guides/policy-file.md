@@ -2,8 +2,8 @@
 
 The policy file says which category each connector, operation group and
 operation is in, which labels it has, and which operations always wait
-for approval. Later, approvals will be routed by category: for example,
-only the network team approves network changes.
+for approval. It can also route approvals: for example, only
+MEHO-SA-Operators and MEHO-Admins approve network changes.
 
 You keep the policy as one file, `policy: v1`. You can:
 
@@ -46,6 +46,45 @@ classifications:
   (`safe`, `caution`, `dangerous`, `destructive`) and `always_wait`.
 - `labels` follow the same rules as a single label change: at most 32
   labels, a key of 1 to 63 characters, a value of 1 to 255 characters.
+
+## Who approves: routing
+
+The `routing` section says which login groups may approve a change that
+waits. It needs the setting `POLICY_APPROVER_ROUTING` (Helm
+`config.policy.approverRouting`), off by default.
+
+```yaml
+routing:
+  - match: {category: network}
+    approvers: [SA-Operators, Admins]
+  - match: {connector: "<connector-id-pattern>", risk: destructive}
+    approvers: [Admins]
+```
+
+- `match` names a `category`, a `connector` (`*` is any text) and a
+  `risk` level, or some of them. All that it names must fit.
+- `approvers` lists login group kinds: `Readers`, `Operators`,
+  `SA-Operators`, `Admins`, `Approvers`.
+- The first entry that fits wins. A tenant's entries come before the
+  install's. When no entry fits, the same people as today may approve.
+- Routing only makes the list shorter. A group never approves more than it
+  may today: for example, Operators and Approvers never approve another
+  person's `dangerous` or `destructive` change.
+- MEHO refuses an entry that asks a group that may approve none of its
+  changes, and an entry that leaves a risk level that nobody may approve.
+- A change of rights (for example a policy import) is not routed. Another
+  admin approves it, as today.
+
+When a change starts to wait, MEHO stores the groups that may approve it.
+The approvals page shows "Who can approve", and the **For you** tab lists
+the changes you may approve. A person outside the stored groups gets one
+sentence that names who may approve. A change that started to wait before
+the setting was on keeps today's rule.
+
+MEHO ships a starting file, "separated duties"
+(`deploy/policy-profiles/separated-duties.yaml`): identity and secret
+changes only Admins approve, network and storage changes only
+SA-Operators and Admins.
 
 ## Rules that no file can loosen
 

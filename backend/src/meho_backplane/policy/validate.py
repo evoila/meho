@@ -17,7 +17,10 @@ Each problem is one sentence that names the entry
 (``classifications[N]``) and the operation. :func:`check_document` also
 refuses an unknown category or risk level, a ``taxonomy.default`` in a
 tenant's file, and two entries that give one operation different
-categories at the same level.
+categories at the same level. The ``routing`` entries are checked by
+:func:`meho_backplane.policy.routing.routing_mistakes`: a group kind that
+may approve none of the changes an entry routes, and a change that nobody
+may approve.
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ from meho_backplane.policy.classification import (
     entries_from_document,
     taxonomy_from_documents,
 )
+from meho_backplane.policy.routing import routing_mistakes
 
 __all__ = ["MAX_MISTAKES", "KnownOp", "check_document", "load_known_ops"]
 
@@ -214,6 +218,7 @@ def check_document(
     raw_entries: list[dict[str, Any]] = list(document.get("classifications") or [])
     mistakes = _taxonomy_mistakes(document, scope=scope, taxonomy=taxonomy)
     mistakes.extend(_entry_value_mistakes(raw_entries, taxonomy))
+    mistakes.extend(routing_mistakes(list(document.get("routing") or []), taxonomy))
     if mistakes:
         return _capped(mistakes), []
     entries = entries_from_document(document, scope=scope)

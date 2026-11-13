@@ -160,6 +160,19 @@ a standing grant covers such an operation:
 Marked today: `msad.group.add-member` and `msad.group.remove-member`. A group
 membership gives rights in the domain.
 
+## Approver routing
+
+With the `POLICY_APPROVER_ROUTING` switch on, each entry of the list is
+routed like a single request ([approvals.md](approvals.md), "Approver
+routing"). When a person approves the list, `_check_routed_entry` works
+out the login group kinds that may approve each entry, from the policy
+file's `routing` section, the entry's risk level and connector in this
+tenant, and its category when the lookup gave one. A person whose group
+kind is not among them gets 403 `approval_group_required` with the entry
+and one sentence that names who may approve. A change of rights is not
+routed. A run approval stores no kinds: they are worked out at the
+approve. With the switch off, nothing changes.
+
 ## REST
 
 | Verb | Path | Who |
@@ -185,5 +198,5 @@ There is no MCP tool. Approving is a person's decision (v0.1-spec §7).
 
 `tests/test_run_approvals.py` (call time, dispatch, revoke, end, expiry,
 destructive, root commands, tenants, target kinds), `tests/test_api_v1_run_approvals.py`
-(REST rules), `tests/migrations/test_migration_0143_add_run_approval.py`,
+(REST rules), `tests/test_run_approvals_routing.py` (approver routing), `tests/migrations/test_migration_0143_add_run_approval.py`,
 `cli/internal/cmd/approvals/runs_test.go`.

@@ -451,7 +451,9 @@ class ApprovalRequestView(BaseModel):
     may_approve: bool | None = None
     #: Why the caller may or may not approve (#3329): ``ok``,
     #: ``own_change``, ``wrong_group``, ``role_too_low``, ``rights_change``,
-    #: ``no_approval_access``, ``not_a_person`` or ``not_pending``. With
+    #: ``no_approval_access``, ``not_a_person``, ``not_pending`` or
+    #: ``not_routed`` (approver routing sends the request to other login
+    #: groups). With
     #: ``may_approve`` true, ``own_change`` means a self-approval is
     #: allowed. ``None`` when ``may_approve`` is ``None``.
     may_approve_reason: str | None = None

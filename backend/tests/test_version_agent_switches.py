@@ -205,6 +205,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "per_action_sign_in_max_age_seconds",
         "policy_classification",
         "policy_engine_shadow",
+        "policy_approver_routing",
         "raw_payload_prune_enabled",
         "raw_payload_prune_interval_seconds",
         "raw_payload_retention_days",

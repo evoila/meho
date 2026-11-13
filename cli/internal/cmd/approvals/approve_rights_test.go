@@ -146,6 +146,7 @@ func TestPrintListTableShowsTheApproveColumn(t *testing.T) {
 		{ptr(true), ptr("own_change"), "yes:own_change"},
 		{ptr(false), ptr("own_change"), "no:own_change"},
 		{ptr(false), ptr("wrong_group"), "no:wrong_group"},
+		{ptr(false), ptr("not_routed"), "no:not_routed"},
 		{ptr(false), ptr("not_pending"), "-"},
 		{nil, nil, "-"},
 	}
@@ -177,6 +178,7 @@ func TestPrintDetailShowsMayApprove(t *testing.T) {
 		{ptr(false), ptr("own_change"), "May approve:  no, it is your own change"},
 		{ptr(false), ptr("wrong_group"), "May approve:  no, another person's dangerous or destructive change needs a MEHO-SA-Operator or a MEHO-Admin"},
 		{ptr(false), ptr("rights_change"), "May approve:  no, it is a change of rights and another admin must approve it"},
+		{ptr(false), ptr("not_routed"), "May approve:  no, approvals of this change go to other login groups"},
 		{ptr(false), ptr("something_new"), "May approve:  no (something_new)"},
 	}
 	for _, c := range cases {

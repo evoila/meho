@@ -35,11 +35,16 @@ class WaitingFirstPager:
     ``offset + size + 1`` rows of each group, which is all a page at
     *offset* can need. So memory stays small for a long queue, and a
     request waiting for this person is still on page one when hundreds of
-    newer requests are not.
+    newer requests are not. With *only_waiting* (the "For you" tab) the
+    other group stays empty, so the page holds only the requests waiting
+    for this person.
     """
 
-    def __init__(self, operator: Operator, *, offset: int, size: int) -> None:
+    def __init__(
+        self, operator: Operator, *, offset: int, size: int, only_waiting: bool = False
+    ) -> None:
         self._operator = operator
+        self._only_waiting = only_waiting
         self._offset = offset
         self._size = size
         self._keep = offset + size + 1
@@ -50,6 +55,8 @@ class WaitingFirstPager:
         """Split one batch of *rows* into the two groups."""
         for row in rows:
             waiting = approve_right(self._operator, row).may_approve
+            if not waiting and self._only_waiting:
+                continue
             group = self._waiting if waiting else self._others
             if len(group) < self._keep:
                 group.append(row)

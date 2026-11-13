@@ -102,7 +102,7 @@ without reading `audit_log`, so it works when the audit row of a call was
 never stored. Query parameters: `request_id` (UUID), `caller` (the exact
 `operator_sub`), `since` (default `24h`), `until`, `limit` (1 to 100, default
 20). Newest first. 200 body: `{"items": [TraceView, ...]}`, each with its
-spans. Migration `0166` added `request_id` and `operator_sub` to
+spans. Migration `0167` added `request_id` and `operator_sub` to
 `dispatch_trace`; an older trace has neither and is found by time only.
 Access rules are those of the single trace read: a person reads every trace
 of the tenant, an agent reads none unless the tenant lets agents read

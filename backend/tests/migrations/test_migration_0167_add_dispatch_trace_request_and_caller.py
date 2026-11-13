@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0165_add_endpoint_descriptor_admin_edited_fields`` (#5321).
+"""Tests for Alembic migration ``0167_add_dispatch_trace_request_and_caller``.
 
 * The upgrade adds exactly two columns, ``dispatch_trace.request_id`` and
   ``dispatch_trace.operator_sub``, and both are nullable. No other table or
@@ -24,14 +24,14 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0166"
-_DOWN_REVISION = "0165"
+_REVISION = "0167"
+_DOWN_REVISION = "0166"
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0166.db"
+    db_path = tmp_path / "migration_0167.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

@@ -6,8 +6,10 @@ The `pfsense` connector is the typed `Connector` subclass that dispatches
 operator-facing pfSense operations over SSH. It is registered under the
 `(product="pfsense", version="2.7", impl_id="pfsense-ssh")` registry triple
 and is the second typed-SSH tier child of the `SshConnector` adapter (G0.2-T4
-#243), after `Bind9Connector`. The `2.7` version targets the pfSense CE 2.7.x
-release series (FreeBSD 14.1 base, as of 2.7.2).
+#243), after `Bind9Connector`. The label `2.7` stays so the connector id
+`pfsense-ssh-2.7` does not change. The connector declares the range
+`>=2.7,<2.10`: pfSense CE 2.7.x, 2.8.x and 2.9.x. The vendor's supported
+releases are 2.8.1 and 2.9.0.
 
 The connector replaces the operator's `scripts/pfsense.sh` wrapper in the
 consumer repository. The G3.7-T1 (#844) skeleton ships
@@ -206,6 +208,9 @@ adapter's `_resolve_secret` (operator-context Vault read, #2155), then:
 
 `parse_pfsense_version()` extracts `version` (e.g. `"2.7.2-RELEASE"`), `build`
 (the full first line), and `kernel` (the first `FreeBSD <token>` fragment).
+`fingerprint()` stores the version without the `-RELEASE` suffix (`2.7.2`),
+because the resolver compares it with the range as a PEP 440 version. The
+full first line stays in `build`.
 Unreachable targets (`OSError` or `asyncssh.Error` from `_run_command`), and
 credential failures (`ValueError`, `VaultClientError`, `CredentialsReadError`), return
 `reachable=False` with `extras["error"]` holding the exception message.

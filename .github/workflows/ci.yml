@@ -745,36 +745,13 @@ jobs:
         shell: bash
         run: |
           set +e
-          cg=/sys/fs/cgroup
-          if [ ! -r "${cg}/memory.current" ] || [ ! -r "${cg}/memory.stat" ]; then
-            echo "No cgroup v2 memory files here, so no sampling."
-            exit 0
-          fi
-          sample() {
-            total_max=0; ws_max=0; anon_max=0; n=0
-            while :; do
-              read -r total < "${cg}/memory.current"
-              anon=0; inactive_file=0
-              while read -r key value; do
-                case "${key}" in
-                  anon) anon=${value} ;;
-                  inactive_file) inactive_file=${value} ;;
-                esac
-              done < "${cg}/memory.stat"
-              total=${total:-0}
-              ws=$(( total - inactive_file ))
-              if [ "${total}" -gt "${total_max}" ]; then total_max=${total}; fi
-              if [ "${ws}" -gt "${ws_max}" ]; then ws_max=${ws}; fi
-              if [ "${anon}" -gt "${anon_max}" ]; then anon_max=${anon}; fi
-              n=$(( n + 1 ))
-              echo "${total_max} ${ws_max} ${anon_max} ${n}" > "${RUNNER_TEMP}/memory-samples.tmp"
-              mv -f "${RUNNER_TEMP}/memory-samples.tmp" "${RUNNER_TEMP}/memory-samples.txt"
-              sleep 1
-            done
-          }
-          sample </dev/null >/dev/null 2>&1 &
+          # The script is scripts/ci/memory_sampler.sh. It also writes one
+          # short line every 15 s to ${RUNNER_TEMP}/memory-log.txt; the pytest
+          # step shows that file in the job log (a killed runner keeps no
+          # file, but GitHub keeps the log lines it already received).
+          bash "${GITHUB_WORKSPACE}/scripts/ci/memory_sampler.sh" run </dev/null >/dev/null 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
-          echo "Memory sampling started: one sample per second."
+          echo "Memory sampling started: one sample per second, one log line every 15 s."
 
       - name: List the required spec-shelf files
         # The required vendor API files are listed in ci/spec-shelf/, one
@@ -1139,6 +1116,7 @@ jobs:
         # perf-budget check below can never mask a red suite.
         shell: bash
         env:
+          MEHO_CI_PROGRESS_DIR: ${{ runner.temp }}/pytest-progress
           # Time limits in tests (marker slow_runner_tolerant) do not fail
           # this required job; the tests still run and their other checks
           # still count. The non-required python-timing-tests job checks
@@ -1200,6 +1178,14 @@ jobs:
         # non-blocking, sharded `python-coverage` + `python-coverage-combine`
         # jobs below (#1982/#1987/#3172).
         run: |
+          # Show the memory lines of the sampler in this log (see
+          # scripts/ci/memory_sampler.sh). The test names of the workers come
+          # from MEHO_CI_PROGRESS_DIR.
+          mkdir -p "${MEHO_CI_PROGRESS_DIR}"
+          touch "${RUNNER_TEMP}/memory-log.txt"
+          tail -n +1 -F "${RUNNER_TEMP}/memory-log.txt" 2>/dev/null &
+          MEMORY_TAIL_PID=$!
+          trap 'kill "${MEMORY_TAIL_PID}" 2>/dev/null' EXIT
           # Deterministic split by measured file time (#4809; #3251 used
           # every TOTAL-th file of the sorted list, which put the slow
           # files unevenly: shard 4 ran 613 s against 465 s for shard 2).
@@ -1883,36 +1869,13 @@ jobs:
         shell: bash
         run: |
           set +e
-          cg=/sys/fs/cgroup
-          if [ ! -r "${cg}/memory.current" ] || [ ! -r "${cg}/memory.stat" ]; then
-            echo "No cgroup v2 memory files here, so no sampling."
-            exit 0
-          fi
-          sample() {
-            total_max=0; ws_max=0; anon_max=0; n=0
-            while :; do
-              read -r total < "${cg}/memory.current"
-              anon=0; inactive_file=0
-              while read -r key value; do
-                case "${key}" in
-                  anon) anon=${value} ;;
-                  inactive_file) inactive_file=${value} ;;
-                esac
-              done < "${cg}/memory.stat"
-              total=${total:-0}
-              ws=$(( total - inactive_file ))
-              if [ "${total}" -gt "${total_max}" ]; then total_max=${total}; fi
-              if [ "${ws}" -gt "${ws_max}" ]; then ws_max=${ws}; fi
-              if [ "${anon}" -gt "${anon_max}" ]; then anon_max=${anon}; fi
-              n=$(( n + 1 ))
-              echo "${total_max} ${ws_max} ${anon_max} ${n}" > "${RUNNER_TEMP}/memory-samples.tmp"
-              mv -f "${RUNNER_TEMP}/memory-samples.tmp" "${RUNNER_TEMP}/memory-samples.txt"
-              sleep 1
-            done
-          }
-          sample </dev/null >/dev/null 2>&1 &
+          # The script is scripts/ci/memory_sampler.sh. It also writes one
+          # short line every 15 s to ${RUNNER_TEMP}/memory-log.txt; the pytest
+          # step shows that file in the job log (a killed runner keeps no
+          # file, but GitHub keeps the log lines it already received).
+          bash "${GITHUB_WORKSPACE}/scripts/ci/memory_sampler.sh" run </dev/null >/dev/null 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
-          echo "Memory sampling started: one sample per second."
+          echo "Memory sampling started: one sample per second, one log line every 15 s."
 
       - name: Docker Hub login (for testcontainers pulls)
         # Empty-secret guard — see the python-tests job's login step for
@@ -1995,6 +1958,7 @@ jobs:
         # cancel the run, but it must read as a step FAILURE, not a false green.
         shell: bash
         env:
+          MEHO_CI_PROGRESS_DIR: ${{ runner.temp }}/pytest-progress
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
           # Each xdist worker is a subprocess; coverage's a1_coverage.pth hook
           # calls coverage.process_startup() when COVERAGE_PROCESS_START points
@@ -2037,6 +2001,14 @@ jobs:
         # FAILURE the job's continue-on-error absorbs — `shell: bash` above
         # guarantees PIPESTATUS + pipefail on this self-hosted pool.
         run: |
+          # Show the memory lines of the sampler in this log (see
+          # scripts/ci/memory_sampler.sh). The test names of the workers come
+          # from MEHO_CI_PROGRESS_DIR.
+          mkdir -p "${MEHO_CI_PROGRESS_DIR}"
+          touch "${RUNNER_TEMP}/memory-log.txt"
+          tail -n +1 -F "${RUNNER_TEMP}/memory-log.txt" 2>/dev/null &
+          MEMORY_TAIL_PID=$!
+          trap 'kill "${MEMORY_TAIL_PID}" 2>/dev/null' EXIT
           # Deterministic stride shard (#3172): the sorted test-file list,
           # every 8th file to this shard. File-level split keeps conftest
           # semantics identical to a full run; stride (vs contiguous
@@ -2489,6 +2461,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      - name: Start memory sampling
+        # The same sampler as the unit shards (scripts/ci/memory_sampler.sh):
+        # one "[memory]" line every 15 s in the log of the pytest step, so a
+        # runner killed for memory still leaves a trace. It never fails the
+        # job; "Stop memory sampling" ends it.
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +e
+          bash "${GITHUB_WORKSPACE}/scripts/ci/memory_sampler.sh" run </dev/null >/dev/null 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
+          echo "Memory sampling started: one sample per second, one log line every 15 s."
+
       - name: List the required spec-shelf files
         # The required vendor API files are listed in ci/spec-shelf/, one
         # small file per product version, so this workflow names none of
@@ -2578,12 +2564,21 @@ jobs:
         # when the cluster cannot pull an image; without the reason a green
         # lane hides that nothing ran on the cluster.
         env:
+          MEHO_CI_PROGRESS_DIR: ${{ runner.temp }}/pytest-progress
           # Time limits in tests (marker slow_runner_tolerant) do not fail
           # this required job; the tests still run and their other checks
           # still count. The non-required python-timing-tests job checks
           # the limits (#6270, tests/_time_limits.py).
           MEHO_SKIP_TIME_LIMITS: "1"
         run: |
+          # Show the memory lines of the sampler in this log (see
+          # scripts/ci/memory_sampler.sh). The running test comes from
+          # MEHO_CI_PROGRESS_DIR.
+          mkdir -p "${MEHO_CI_PROGRESS_DIR}"
+          touch "${RUNNER_TEMP}/memory-log.txt"
+          tail -n +1 -F "${RUNNER_TEMP}/memory-log.txt" 2>/dev/null &
+          MEMORY_TAIL_PID=$!
+          trap 'kill "${MEMORY_TAIL_PID}" 2>/dev/null' EXIT
           # Split by measured file time, the same tool as the unit shards
           # (tests/_unit_shard_split.py) with the integration measurements
           # in tests/_integration_shard_durations.json. Every file lands in
@@ -2604,6 +2599,16 @@ jobs:
           # test case.
           uv run pytest -x -rs -o junit_family=xunit1 \
             --junitxml=pytest-integration-shard.xml "${SHARD_FILES[@]}"
+
+      - name: Stop memory sampling
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          if [ -r "${RUNNER_TEMP}/memory-sampler.pid" ]; then
+            kill "$(cat "${RUNNER_TEMP}/memory-sampler.pid")" 2>/dev/null || true
+          fi
 
       - name: Upload per-test times (input for the shard split)
         # Refresh tests/_integration_shard_durations.json from these

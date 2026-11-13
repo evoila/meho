@@ -398,9 +398,24 @@ Steps of the realm stage, in order:
    older realm the scope `offline_access` and the idle limit, and `meho
    login` gets a long login.
    Before the clients come the **login flows** of the realm file
-   (`core/keycloak_flows.py`, #5515). Today that is one flow, `meho
-   approval sign-in`: the password form, then the one-time code when the
-   person has set one up. A missing flow is made with its steps. A run
+   (`core/keycloak_flows.py`). Today that is one flow, `meho
+   approval sign-in level`: the level step (approval level 2, maximum age
+   0), the password form, then the one-time code when the person has set
+   one up. A missing flow is made with its steps. A step with settings in
+   the file (`authenticatorConfig`) gets them; a step whose settings have
+   other values makes the flow one with other steps. After the flows,
+   `ensure_levels` adds the level names of the file's `acr.loa.map` that
+   the flows of this stage use (`stage_levels`: `meho-approve`: 2, not
+   `meho-touch`: 3) to the realm and keeps the names it has (output:
+   `sign-in levels: set (...)` or `kept (...)`); it writes the whole
+   attribute map back, because Keycloak drops realm attributes a write
+   leaves out. It stops before it writes when another name already has
+   level 2, or when a client whose flow this stage binds
+   (`meho-cli-approve`; `bound_clients`, never `meho-web`) has its own
+   `acr.loa.map`. The stage makes only
+   the flows that the file binds to a client other than `meho-web`
+   (`stage_flows`): it never makes or binds a flow of the console client,
+   such as the passkey touch flow, which has its own explicit step. A run
    that stops half-way (a timeout, a restart) can leave a flow with
    missing steps or steps that are still off; the next run adds the
    missing steps and sets the requirements of the file (output:
@@ -416,20 +431,22 @@ Steps of the realm stage, in order:
    binding is not changed. A client that names a flow in
    `authenticationFlowBindingOverrides` (only `meho-cli-approve`) is bound
    to it (output: `kept (login flow set)`). Reading and making login flows
-   needs `manage-realm`. Without it the Job stops (#6280) with
-   `login flow meho approval sign-in: meho-admin may not read or change
+   needs `manage-realm`. Without it the Job stops with
+   `login flow meho approval sign-in level: meho-admin may not read or change
    login flows, ...`, which names the role and the fix in
    docs-site/install/upgrades.md, "The bootstrap Job needs manage-realm".
    It never goes on with an approval client that may lack its own flow. A
    fresh install gets the flow and the binding from the realm import and
    the role from the realm file.
-   A flow whose steps need settings (`authenticatorConfig` in the realm
-   file) is not made here, and no client is bound to it; the step prints
-   `not checked here (its steps need settings); no client is bound to it
-   by this stage`. Today that is `meho approval touch`, the console's
-   flow with the passkey touch level (#6213): made without its settings
-   it would change the console login. A running realm gets it through
-   the operation `keycloak.authflow.ensure_approval_touch`.
+   The console's flow with the passkey touch level, `meho approval touch`
+   (#6213), is bound only by `meho-web`, so the stage does not make it,
+   binds no client to it, and does not add its level name `meho-touch`;
+   the step prints `not made here (no client of the realm file but
+   meho-web binds it); no client is bound to it by this stage`. A
+   running realm gets it through the operation
+   `keycloak.authflow.ensure_approval_touch`. A flow with a step whose
+   settings the realm file lacks is not made either (`not checked here
+   (the realm file lacks the settings of its steps)`).
 4. **CI login**, when on.
    Then the **company login**, when on (see "The company login").
 5. **First login.** Read `<release>-core-first-login`; make it when missing

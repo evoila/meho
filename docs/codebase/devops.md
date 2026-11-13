@@ -1076,7 +1076,7 @@ on a person directly: the claim always comes from the group.
 | --- | --- | --- |
 | `meho-backplane` | confidential, no login flow | the token audience only |
 | `meho-cli` | public, device flow | `meho login`; optional scope `offline_access`; offline login idle limit 48 hours (as `bootstrap-clients` with its default `--cli-offline-access`) |
-| `meho-cli-approve` | public, authorization code + PKCE (S256) | redirect `http://127.0.0.1:*`; the approval sign-in: its own login flow `meho approval sign-in` (password, then the one-time code), a 15-minute access token and no refresh token |
+| `meho-cli-approve` | public, authorization code + PKCE (S256) | redirect `http://127.0.0.1:*`; the approval sign-in: its own login flow `meho approval sign-in level` (password, then the one-time code; gives `acr` `meho-approve`), a 15-minute access token and no refresh token |
 | `meho-mcp` | public, authorization code + PKCE (S256) | redirect URIs `http://localhost:*`, `http://127.0.0.1:*`; optional scopes `offline_access`, `mcp:read`, `mcp:execute`, `mcp:admin`; offline login idle limit 48 hours |
 | `meho-web` | confidential, authorization code + PKCE (S256) | redirect `https://<host>/ui/auth/callback`, after logout `https://<host>/ui/auth/login` |
 | `meho-admin` | confidential, service account | realm-management roles `manage-clients`, `manage-realm` (the login flows, #6280) and `manage-users`; with the company login on, the chart adds `manage-identity-providers` (#4592) |
@@ -1873,6 +1873,38 @@ to a **fan-in** (`python-unit-lane`) over a lint job (`python-lint`) and a
 6-way pytest matrix (`python-unit-shard`). The required-context
 _string_ is unchanged, so branch protection / the ruleset are untouched —
 see [Sharded unit lane (#3251)](#sharded-unit-lane-3251) below.
+
+### When a test runner dies (memory lines in the job log)
+
+Sometimes a test job ends with "lost communication with the server" and no
+failed test. The runner container was most likely killed because it ran out
+of memory. The files of the container are gone, but GitHub keeps the job log
+lines it already got.
+
+So the unit shards, the coverage shards and the integration shards print
+memory lines into the log of their pytest step. The sampler is
+`scripts/ci/memory_sampler.sh`:
+
+- One line every 15 seconds, starting with `[memory]`: the time, the
+  memory in use (without the file cache that the kernel frees first), the
+  limit, and the pytest worker with the most memory.
+- Each process that runs tests writes its process id and its running test
+  to a small file in `MEHO_CI_PROGRESS_DIR` (the hook
+  `pytest_runtest_protocol` in `backend/tests/conftest.py`). The sampler
+  reads the memory of only these processes, so a bigger process that is not
+  a pytest worker is never named.
+- Above 85 % of the limit, the line is followed by one line for each worker:
+  its memory and the test it runs at that moment. Without progress files
+  the line says so.
+- The lines are not in a log group: a group would also hide the test output
+  that comes between them. Search the log for `[memory]` instead.
+
+Where to look when a runner dies: open the log of the pytest step, go to
+the end, and read the last `[memory]` lines. If memory was high, the lines
+under it name the tests that ran. The "Print peak memory" step at the end
+of the job does not run when the runner dies, so these lines are the only
+trace. The integration shards have no "Print peak memory" step; a short
+"Stop memory sampling" step ends the sampler there.
 
 ### Merge queue (#769, #3253)
 

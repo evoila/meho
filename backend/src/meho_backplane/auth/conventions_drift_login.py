@@ -3,7 +3,7 @@
 
 """The login that may only run the conventions drift check.
 
-The team wiki's CI job uses it to ask MEHO whether the tenant's operational
+The tenant wiki's CI job uses it to ask MEHO whether the tenant's operational
 conventions still match the team rules. Its token carries the claim
 ``conventions_drift_only: true`` (:attr:`Operator.conventions_drift_only`).
 :func:`reject_conventions_drift_only_elsewhere` runs in

@@ -3,7 +3,7 @@
 
 """``POST /api/v1/settings/conventions-drift`` and its login.
 
-The team wiki's CI job sends the team rules as a settings file that holds
+The tenant wiki's CI job sends the team rules as a settings file that holds
 only conventions. MEHO answers what differs from the tenant's operational
 conventions: added, changed, and only in MEHO. Covers each kind of drift, that
 the check saves nothing, the mistakes it reports, and that the

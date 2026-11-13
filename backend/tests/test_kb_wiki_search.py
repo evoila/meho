@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Knowledge search reads the team wiki through the knowledge index (#5976).
+"""Knowledge search reads the tenant's wiki through the knowledge index.
 
 A tenant setting (``tenant.knowledge_wiki_collection``) names one docs
 collection where the tenant keeps its lessons. These tests cover:

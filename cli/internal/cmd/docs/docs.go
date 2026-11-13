@@ -85,6 +85,7 @@ func NewRootCmd() *cobra.Command {
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newSearchCmd())
+	cmd.AddCommand(newAskCmd())
 	cmd.AddCommand(newReadCmd())
 	cmd.AddCommand(newCollectionsCmd())
 	return cmd

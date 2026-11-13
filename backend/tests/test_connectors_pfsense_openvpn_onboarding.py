@@ -161,6 +161,7 @@ class _Fake(pfsense.PfSenseConnector):
         playback_out: str = "",
         sockets: dict[str, tuple[str, int]] | None = None,
         playback_fails: bool = False,
+        undo_out: str = "MEHO_VPN_REMOVED\n",
     ) -> None:
         super().__init__()
         self._configs = list(configs)
@@ -169,6 +170,7 @@ class _Fake(pfsense.PfSenseConnector):
         self._playback_out = playback_out
         self._sockets = sockets or {}
         self._playback_fails = playback_fails
+        self._undo_out = undo_out
         self.commands: list[str] = []
         self.played: list[str] = []
         self.staged: list[str] = []
@@ -197,6 +199,8 @@ class _Fake(pfsense.PfSenseConnector):
             return _proc()
         if cmd.startswith("pfSsh.php playback"):
             self.played.append(cmd)
+            if cmd.startswith("pfSsh.php playback meho_openvpn_user_undo"):
+                return _proc(self._undo_out)
             return _proc(self._playback_out, 1 if self._playback_fails else 0)
         for key, (out, code) in self._sockets.items():
             if f"/server{key}/sock" in cmd:
@@ -337,6 +341,7 @@ def _plan_for(
         parse_openvpn_servers(config),
         parse_csc_entries(config),
         rows,
+        frozenset(e["name"] for e in entries),
     )
 
 
@@ -469,13 +474,18 @@ async def test_sync_rejects_bad_input_before_any_ssh_call(entries: Any) -> None:
 # ===========================================================================
 
 
-def _after_config(extra_csc: str, base_csc: str = "") -> str:
-    return _config(csc=base_csc + extra_csc)
+def _users(*names: str) -> str:
+    """Local users with these names: the sync plans overrides only for them."""
+    return "".join(_user(n, str(2000 + i)) for i, n in enumerate(names))
+
+
+def _after_config(extra_csc: str, base_csc: str = "", users: str = "") -> str:
+    return _config(csc=base_csc + extra_csc, users=users)
 
 
 async def test_compare_only_returns_the_plan_and_writes_nothing() -> None:
     base = _csc("old", "1", "198.51.100.5/24", "192.0.2.0/25")
-    fake = _Fake([_config(csc=base)])
+    fake = _Fake([_config(csc=base, users=_users("new", "old"))])
     out = await _sync(
         fake,
         [
@@ -495,7 +505,7 @@ async def test_compare_only_counts_when_every_entry_is_fine() -> None:
     base = _csc("old", "1", "198.51.100.5/24", "192.0.2.0/25") + _csc(
         "ok", "1", "198.51.100.6/24", "192.0.2.0/24"
     )
-    fake = _Fake([_config(csc=base)])
+    fake = _Fake([_config(csc=base, users=_users("new", "old", "ok"))])
     out = await _sync(
         fake,
         [
@@ -512,7 +522,7 @@ async def test_compare_only_counts_when_every_entry_is_fine() -> None:
 
 
 async def test_one_refused_entry_stops_the_whole_call() -> None:
-    fake = _Fake([_config()])
+    fake = _Fake([_config(users=_users("a", "b"))])
     with pytest.raises(PfSenseRefusedError) as info:
         await _sync(
             fake,
@@ -527,11 +537,13 @@ async def test_one_refused_entry_stops_the_whole_call() -> None:
 
 async def test_sync_writes_and_verifies_without_a_rollback_copy() -> None:
     base = _csc("old", "1", "198.51.100.5/24", "192.0.2.0/25")
+    users = _users("new", "old")
     after = _after_config(
         _csc("new", "1", "198.51.100.9/24", "192.0.2.0/24"),
         _csc("old", "1", "198.51.100.5/24", "192.0.2.0/25,192.0.2.0/24"),
+        users,
     )
-    fake = _Fake([_config(csc=base), after])
+    fake = _Fake([_config(csc=base, users=users), after])
     out = await _sync(
         fake,
         [
@@ -546,23 +558,44 @@ async def test_sync_writes_and_verifies_without_a_rollback_copy() -> None:
     assert not any("cp /cf/conf/config.xml" in c for c in fake.commands)
 
 
+async def test_sync_plans_no_override_for_a_name_without_a_local_user() -> None:
+    fake = _Fake([_config(users=_users("guest-1"))])
+    entries = [
+        _entry(tunnel_address="198.51.100.9"),
+        _entry("nobody", tunnel_address="198.51.100.10"),
+    ]
+    out = await _sync(fake, entries, compare_only=True)
+    assert out["status"] == "refused"
+    row = out["entries"][1]
+    assert (row["action"], row["reason"]) == ("refused", "user_not_found")
+    assert row["detail"].startswith("no such user")
+    with pytest.raises(PfSenseRefusedError) as info:
+        await _sync(fake, entries)
+    assert "nobody on server 1: user_not_found" in info.value.guidance
+    assert not fake.wrote
+
+
 async def test_sync_is_safe_to_run_twice() -> None:
     base = _csc("old", "1", "198.51.100.5/24", "192.0.2.0/24")
-    fake = _Fake([_config(csc=base)])
+    fake = _Fake([_config(csc=base, users=_users("old"))])
     out = await _sync(fake, [_entry("old", tunnel_address="198.51.100.5", routes=["192.0.2.0/24"])])
     assert out["status"] == "nothing_to_do"
     assert not fake.wrote
 
 
 async def test_sync_fails_when_the_read_back_does_not_hold_the_entry() -> None:
-    fake = _Fake([_config()])  # the config never changes: the playback "did not persist"
+    # The config never changes: the playback "did not persist".
+    fake = _Fake([_config(users=_users("guest-1"))])
     with pytest.raises(RuntimeError, match="verification failed"):
         await _sync(fake, [_entry(tunnel_address="198.51.100.9")])
 
 
 async def test_sync_fails_when_something_else_changed_during_the_write() -> None:
-    after = _config(csc=_csc("new", "1", "198.51.100.9/24"), users=_user("intruder", "2005"))
-    fake = _Fake([_config(), after])
+    users = _users("new")
+    after = _config(
+        csc=_csc("new", "1", "198.51.100.9/24"), users=users + _user("intruder", "2005")
+    )
+    fake = _Fake([_config(users=users), after])
     with pytest.raises(RuntimeError, match=r"other parts of config\.xml"):
         await _sync(fake, [_entry("new", tunnel_address="198.51.100.9")])
 
@@ -570,7 +603,7 @@ async def test_sync_fails_when_something_else_changed_during_the_write() -> None
 async def test_sync_writes_nothing_when_an_override_changed_after_the_plan() -> None:
     """The fragment found the entry changed (a route added in the web page meanwhile)."""
     base = _csc("old", "1", "198.51.100.5/24", "192.0.2.0/25")
-    fake = _Fake([_config(csc=base)], playback_out="MEHO_CSC_CHANGED=old@1\n")
+    fake = _Fake([_config(csc=base, users=_users("old"))], playback_out="MEHO_CSC_CHANGED=old@1\n")
     with pytest.raises(RuntimeError, match=r"changed after the plan was made \(old@1\)"):
         await _sync(fake, [_entry("old", routes=["192.0.2.0/24"])])
     assert len(fake.played) == 1
@@ -586,7 +619,7 @@ async def test_sync_fails_when_a_failed_read_of_the_rendered_files() -> None:
 
 
 async def test_sync_fails_when_the_playback_fails() -> None:
-    fake = _Fake([_config()], playback_fails=True)
+    fake = _Fake([_config(users=_users("guest-1"))], playback_fails=True)
     with pytest.raises(RuntimeError, match="playback"):
         await _sync(fake, [_entry(tunnel_address="198.51.100.9")])
 
@@ -1669,6 +1702,101 @@ def test_undo_fragment_run_in_php_leaves_a_user_with_another_uid(tmp_path: Path)
     assert out["config"] == before and out["calls"] == []
 
 
+@_needs_php
+def test_undo_fragment_run_in_php_prints_a_marker_when_it_removed_the_user(
+    tmp_path: Path,
+) -> None:
+    users = [
+        {"name": "admin", "uid": "0", "scope": "system"},
+        {"name": "guest-1", "uid": "2000", "scope": "user"},
+    ]
+    fragment = user_module.build_user_undo_playback("guest-1", "2000")
+    printed, _ = _run_php(tmp_path, _php_config([], users), fragment)
+    assert printed == "MEHO_VPN_REMOVED\n"
+    printed, _ = _run_php(tmp_path, _php_config([], users[:1]), fragment)
+    assert printed == ""
+
+
+async def test_an_undo_without_the_removed_marker_says_the_user_was_not_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(user_module, "vault_client_for_operator", _FakeVault(fail=True))
+    fake = _created_fake(undo_out="")
+    with pytest.raises(RuntimeError, match="'guest-1' was not removed again") as err:
+        await _create(fake)
+    assert "was removed again" not in str(err.value)
+    assert "password is not stored" in str(err.value)
+    assert len(fake.played) == 2  # the create, then the undo
+
+
+@pytest.mark.parametrize("version", [None, "3", True, 0])
+async def test_create_refuses_a_vault_answer_without_a_version(
+    monkeypatch: pytest.MonkeyPatch, version: Any
+) -> None:
+    fake_vault = _FakeVault(data={"username": "guest-1"})
+    fake_vault.version = version
+    monkeypatch.setattr(user_module, "vault_client_for_operator", fake_vault)
+    fake = _created_fake()
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(vault_version_unknown\)"):
+        await _create(fake)
+    assert not fake.wrote and fake_vault.writes == []
+
+
+# ===========================================================================
+# User names that start with a dot (pfSense uses /home/<name>)
+# ===========================================================================
+
+_DOT_NAMES = [".", "..", "...", ".x"]
+
+
+@pytest.mark.parametrize("name", _DOT_NAMES)
+async def test_a_name_that_starts_with_a_dot_is_refused_before_the_firewall(
+    vault: _FakeVault, name: str
+) -> None:
+    for op in user_module.OPENVPN_USER_OPS:
+        assert re.fullmatch(op.parameter_schema["properties"]["name"]["pattern"], name) is None
+    fake = _Fake([_config()])
+    with pytest.raises(ValueError, match="no leading dot"):
+        await _create(fake, {**_CREATE, "name": name})
+    with pytest.raises(ValueError, match="no leading dot"):
+        await fake.openvpn_user_delete(None, {"name": name}, None)  # type: ignore[arg-type]
+    for build in (
+        lambda: user_module.build_user_create_playback(name, "d"),
+        lambda: user_module.build_user_delete_playback(name),
+        lambda: user_module.build_user_undo_playback(name, "2000"),
+    ):
+        with pytest.raises(ValueError, match="no leading dot"):
+            build()
+    assert fake.commands == [] and vault.opened == 0
+
+
+def _with_name(fragment: str, name: str) -> str:
+    """Put *name* into a fragment built for ``guest-1``, past the handler's own check."""
+    line = "$meho_name = 'guest-1';"
+    assert fragment.count(line) == 1
+    return fragment.replace(line, f"$meho_name = '{name}';")
+
+
+@_needs_php
+@pytest.mark.parametrize("name", _DOT_NAMES)
+@pytest.mark.parametrize("kind", ["create", "delete", "undo"])
+def test_the_fragments_run_in_php_stop_for_a_name_that_starts_with_a_dot(
+    tmp_path: Path, name: str, kind: str
+) -> None:
+    users = [{"name": "admin", "uid": "0", "scope": "system"}]
+    if kind != "create":
+        users.append({"name": name, "uid": "2000", "scope": "user"})
+    before = _php_config([_csc_row(name, "1", "198.51.100.5/24")], users)
+    built = {
+        "create": lambda: user_module.build_user_create_playback("guest-1", "d"),
+        "delete": lambda: user_module.build_user_delete_playback("guest-1"),
+        "undo": lambda: user_module.build_user_undo_playback("guest-1", "2000"),
+    }[kind]()
+    printed, out = _run_php(tmp_path, before, _with_name(built, name))
+    assert printed == "MEHO_VPN_DOT_NAME\n"
+    assert out["config"] == before and out["calls"] == []
+
+
 def test_undo_fragment_needs_a_numeric_uid() -> None:
     with pytest.raises(ValueError, match="uid"):
         user_module.build_user_undo_playback("guest-1", "1' || '1")
@@ -1694,6 +1822,7 @@ def test_delete_fragment_run_in_php_writes_nothing_when_its_own_guard_fails(
     [
         ("MEHO_VPN_SYSTEM_NAME\n", "system_name"),
         ("MEHO_VPN_SYSTEM_NAMES_UNREADABLE\n", "system_names_unreadable"),
+        ("MEHO_VPN_DOT_NAME\n", "dot_name"),
     ],
 )
 async def test_create_refuses_a_system_name_of_the_firewall(
@@ -1752,8 +1881,11 @@ async def test_a_cancel_during_the_vault_write_undoes_the_user_and_cancels_again
 
     monkeypatch.setattr(user_module, "_store_password", _cancelled)
     fake = _created_fake()
-    with pytest.raises(asyncio.CancelledError, match="was removed again"):
+    with pytest.raises(asyncio.CancelledError, match="was removed again") as err:
         await _create(fake)
+    # The write runs in a thread and may still finish after the undo.
+    assert f"may be stored at secret/{_VAULT_PATH}" in str(err.value)
+    assert "vault_field_exists" in str(err.value)
     assert len(fake.played) == 2  # the create, then the undo
     assert any("meho_openvpn_user_undo" in c for c in fake.staged)
 
@@ -2056,7 +2188,7 @@ async def test_the_override_sync_preview_shows_the_whole_plan() -> None:
     from meho_backplane.operations._preview import PreviewContext
 
     entries = [_entry(f"u{i}", tunnel_address=f"198.51.100.{i + 2}") for i in range(60)]
-    fake = _Fake([_config()])
+    fake = _Fake([_config(users=_users(*(e["name"] for e in entries)))])
     ctx = PreviewContext(
         descriptor=MagicMock(),
         connector_instance=fake,

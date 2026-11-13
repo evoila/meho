@@ -697,7 +697,10 @@ OPENVPN_RULE_OPS: tuple[PfSenseOp, ...] = (
             ),
             "parameter_hints": {
                 "rules": "Required. One object per user, source and destination.",
-                "compare_only": "Optional. true returns the plan and writes nothing.",
+                "compare_only": (
+                    "Optional. true returns the plan and writes nothing. The call still "
+                    "waits for approval."
+                ),
             },
             "output_shape": (
                 "``{status, compare_only, applied, verified, counts, rules, guidance}``. "

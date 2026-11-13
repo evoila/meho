@@ -30,7 +30,8 @@ The create steps
    credential path (``secret_ref``) of any target
    (``vault_path_is_target_secret``), and it is read with the caller's
    Vault login. When the field already holds a value, the call is refused
-   (``vault_field_exists``). The version read is kept for step 5.
+   (``vault_field_exists``); when Vault gives no whole-number version, too
+   (``vault_version_unknown``). The version read is kept for step 5.
 4. One ``pfSsh.php playback`` fragment does what the pfSense web page does
    for a new user. It refuses a name that is in ``/etc/passwd`` or
    ``/etc/group`` on the firewall (``system_name``), or any name when it
@@ -50,12 +51,21 @@ The create steps
    When the write fails or the call is cancelled, the handler removes the
    user it just made (found by name AND the printed ``uid``; overrides
    with the name stay), so no user is left whose password nobody knows.
-   When the removal fails too, the error says so and names the user. When
+   The undo prints ``MEHO_VPN_REMOVED`` when it removed the user. When the
+   removal fails or this marker is missing, the error says so and names the
+   user. The write runs in a thread, so after a cancel it may still finish:
+   the error of the cancel says that the password may then be stored
+   although the user was removed. When
    the playback itself fails or is cancelled, the error says that a user
    with this name may exist and that its password is not stored.
 6. ``config.xml`` is read again: the user must be there once, with the
    printed ``uid``, and no other user may have changed. When this read or
    check fails, the password is already in Vault; the error says so.
+
+No name that starts with a dot reaches the firewall: pfSense makes the
+home directory ``/home/<name>``, and a delete removes it. The handlers
+refuse such a name, and each fragment checks it again
+(``MEHO_VPN_DOT_NAME``, refused as ``dot_name``).
 
 The password is held only in memory. It is never part of the result, an
 error message, the approval input or a log line; the exception chain of a
@@ -128,10 +138,8 @@ from meho_backplane.connectors.pfsense.ops_filter_rule import parse_filter_rules
 from meho_backplane.connectors.pfsense.ops_openvpn_rule import rule_tag
 from meho_backplane.connectors.pfsense.ops_read import _xml_text
 from meho_backplane.connectors.pfsense.ops_user_write import (
-    USER_NAME_RE,
     _refusal,
     _user_rows,
-    _validate_user_name,
 )
 from meho_backplane.connectors.pfsense.ops_write import (
     _apply_playback,
@@ -180,6 +188,14 @@ _PROTECTED_RE: Final = re.compile(rf"^{_PROTECTED_MARKER}\s*$", re.MULTILINE)
 _SYSTEM_NAME_MARKER: Final = "MEHO_VPN_SYSTEM_NAME"
 _SYSTEM_UNREADABLE_MARKER: Final = "MEHO_VPN_SYSTEM_NAMES_UNREADABLE"
 _SYSTEM_FILES: Final = ("/etc/passwd", "/etc/group")
+_DOT_NAME_MARKER: Final = "MEHO_VPN_DOT_NAME"
+_REMOVED_MARKER: Final = "MEHO_VPN_REMOVED"
+_REMOVED_RE: Final = re.compile(rf"^{_REMOVED_MARKER}\s*$", re.MULTILINE)
+
+#: A pfSense user name (``USER_NAME_RE`` of ``ops_user_write``) that does not start with a dot.
+#: pfSense makes the home directory ``/home/<name>`` for a new user and a
+#: delete removes it, so ``.``, ``..`` or ``.x`` must never be used.
+_VPN_USER_NAME_RE: Final = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,31}$")
 
 _MOUNT_RE: Final = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _VAULT_PATH_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
@@ -193,6 +209,16 @@ _DELETE_OP_ID: Final = "pfsense.openvpn.user.delete"
 # ---------------------------------------------------------------------------
 # Input
 # ---------------------------------------------------------------------------
+
+
+def _validate_vpn_user_name(value: Any) -> str:
+    """Return *value* if it is an allowed VPN user name, else raise ``ValueError``."""
+    if not isinstance(value, str) or not _VPN_USER_NAME_RE.fullmatch(value):
+        raise ValueError(
+            f"name must match {_VPN_USER_NAME_RE.pattern} (letters, digits, dot, dash, "
+            f"underscore; no leading dot or dash); got {value!r}"
+        )
+    return value
 
 
 def _validate_vault_target(params: dict[str, Any]) -> tuple[str, str, str]:
@@ -256,6 +282,20 @@ def _system_name_check(condition: str, own_uid: str | None) -> list[str]:
     ]
 
 
+def _dot_name_check() -> list[str]:
+    """Return PHP lines that set ``$meho_dot`` to 1 for an empty name or one that starts with a dot.
+
+    The handler refuses such a name already. This check stays in the fragment
+    so that no such name reaches ``local_user_set()`` or ``local_user_del()``.
+    """
+    return [
+        "$meho_dot = (strlen($meho_name) === 0 || $meho_name[0] === '.') ? 1 : 0;",
+        "if ($meho_dot === 1) {",
+        f"  echo '{_DOT_NAME_MARKER}' . \"\\n\";",
+        "}",
+    ]
+
+
 def _system_markers(condition: str) -> list[str]:
     return [
         f"if ({condition} && $meho_system === 1) {{",
@@ -277,12 +317,13 @@ def build_user_create_playback(name: str, descr: str) -> str:
     ``MEHO_VPN_SYSTEM_NAME`` (or ``MEHO_VPN_SYSTEM_NAMES_UNREADABLE`` when it
     cannot read the files). In each of these cases it changes nothing.
     """
-    name = _validate_user_name(name)
+    name = _validate_vpn_user_name(name)
     users = "$config['system']['user']"
     lines = [
         "global $config, $userindex;",
         "require_once('auth.inc');",
         f"$meho_name = {_php_squote(name)};",
+        *_dot_name_check(),
         "$meho_found = 0;",
         f"if (isset({users}) && is_array({users})) {{",
         f"  foreach ({users} as $meho_u) {{",
@@ -291,8 +332,8 @@ def build_user_create_playback(name: str, descr: str) -> str:
         "    }",
         "  }",
         "}",
-        *_system_name_check("$meho_found === 0", None),
-        "if ($meho_found === 0 && $meho_system === 0) {",
+        *_system_name_check("$meho_dot === 0 && $meho_found === 0", None),
+        "if ($meho_dot === 0 && $meho_found === 0 && $meho_system === 0) {",
         f"  $meho_alphabet = {_php_squote(_PASSWORD_ALPHABET)};",
         "  $meho_pw = '';",
         f"  for ($meho_k = 0; $meho_k < {_PASSWORD_LENGTH}; $meho_k++) {{",
@@ -326,10 +367,10 @@ def build_user_create_playback(name: str, descr: str) -> str:
         f"  write_config({_php_squote(f'meho: add VPN user {name}')});",
         f"  echo '{_CREATED_MARKER}' . $meho_user['uid'] . \"\\n\";",
         f"  echo '{_PASSWORD_MARKER}' . $meho_pw . \"\\n\";",
-        "} elseif ($meho_found > 0) {",
+        "} elseif ($meho_dot === 0 && $meho_found > 0) {",
         f"  echo '{_EXISTS_MARKER}' . \"\\n\";",
         "}",
-        *_system_markers("$meho_found === 0"),
+        *_system_markers("$meho_dot === 0 && $meho_found === 0"),
     ]
     return "\n".join(lines) + "\n"
 
@@ -355,6 +396,7 @@ def build_user_undo_playback(name: str, uid: str) -> str:
 
     Acts only when exactly one user has the name AND it has *uid* (not 0).
     The client overrides with the name stay: they may be older than the user.
+    It prints ``MEHO_VPN_REMOVED`` after it removed the user.
     """
     if not isinstance(uid, str) or not _UID_RE.fullmatch(uid):
         raise ValueError(f"uid must be a number; got {uid!r}")
@@ -362,11 +404,14 @@ def build_user_undo_playback(name: str, uid: str) -> str:
 
 
 def _build_user_remove_playback(name: str, *, uid: str | None, addresses: list[str]) -> str:
-    name = _validate_user_name(name)
+    name = _validate_vpn_user_name(name)
     users = "$config['system']['user']"
     csc = "$config['openvpn']['openvpn-csc']"
     rules = "$config['filter']['rule']"
-    guard = f"$meho_found === 1 && (string){users}[$meho_idx]['uid'] !== '0' && $meho_system === 0"
+    guard = (
+        f"$meho_dot === 0 && $meho_found === 1 && (string){users}[$meho_idx]['uid'] !== '0'"
+        " && $meho_system === 0"
+    )
     if uid is not None:
         guard += f" && (string){users}[$meho_idx]['uid'] === {_php_squote(uid)}"
     else:
@@ -437,6 +482,7 @@ def _build_user_remove_playback(name: str, *, uid: str | None, addresses: list[s
         "require_once('auth.inc');",
         *(["require_once('openvpn.inc');"] if uid is None else []),
         f"$meho_name = {_php_squote(name)};",
+        *_dot_name_check(),
         "$meho_found = 0;",
         "$meho_idx = null;",
         f"if (isset({users}) && is_array({users})) {{",
@@ -448,7 +494,7 @@ def _build_user_remove_playback(name: str, *, uid: str | None, addresses: list[s
         "  }",
         "}",
         *(protected + tagged if uid is None else []),
-        *_system_name_check("$meho_found === 1", f"{users}[$meho_idx]['uid']"),
+        *_system_name_check("$meho_dot === 0 && $meho_found === 1", f"{users}[$meho_idx]['uid']"),
         f"if ({guard}) {{",
         f"  $meho_user = {users}[$meho_idx];",
         *(overrides if uid is None else []),
@@ -457,8 +503,9 @@ def _build_user_remove_playback(name: str, *, uid: str | None, addresses: list[s
         f"  {users} = array_values({users});",
         "  $userindex = index_users();",
         f"  write_config({_php_squote(f'meho: {what} {name}')});",
+        *([f"  echo '{_REMOVED_MARKER}' . \"\\n\";"] if uid is not None else []),
         "}",
-        *_system_markers("$meho_found === 1"),
+        *_system_markers("$meho_dot === 0 && $meho_found === 1"),
     ]
     if uid is None:
         lines += [
@@ -512,8 +559,10 @@ async def _vault_state(operator: Operator, mount: str, path: str) -> tuple[int, 
     """Read ``<mount>/<path>`` with the caller's Vault login: ``(version, data)``.
 
     ``(0, {})`` when nothing is stored there yet. A latest version that was
-    deleted gives its number and no data. The exception chain is cut: no
-    message from the client can reach the caller.
+    deleted gives its number and no data. An answer without a whole-number
+    ``metadata.version`` is refused (``vault_version_unknown``): the mount
+    may not be KV version 2. The exception chain is cut: no message from the
+    client can reach the caller.
     """
     try:
         async with vault_client_for_operator(operator) as client:
@@ -535,10 +584,14 @@ async def _vault_state(operator: Operator, mount: str, path: str) -> tuple[int, 
     data = body.get("data")
     metadata = body.get("metadata")
     version = metadata.get("version") if isinstance(metadata, dict) else None
-    return (
-        version if isinstance(version, int) else 0,
-        dict(data) if isinstance(data, dict) else {},
-    )
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise PfSenseRefusedError(
+            _CREATE_OP_ID,
+            "vault_version_unknown",
+            f"Vault gave no version number for {mount}/{path}; the mount may not be KV "
+            "version 2. Nothing changed.",
+        )
+    return version, dict(data) if isinstance(data, dict) else {}
 
 
 async def _store_password(
@@ -606,7 +659,13 @@ def _other_users(rows: list[dict[str, Any]], name: str) -> Counter[tuple[str, st
 
 
 def _system_refusal(op_id: str, name: str, played: str) -> PfSenseRefusedError | None:
-    """Return the refusal for a system-name marker in *played*, else ``None``."""
+    """Return the refusal for a name marker in *played*, else ``None``."""
+    if re.search(rf"^{_DOT_NAME_MARKER}\s*$", played, re.MULTILINE):
+        return PfSenseRefusedError(
+            op_id,
+            "dot_name",
+            f"{name!r} starts with a dot; the firewall refused it and nothing changed",
+        )
     if re.search(rf"^{_SYSTEM_NAME_MARKER}\s*$", played, re.MULTILINE):
         return PfSenseRefusedError(
             op_id,
@@ -660,7 +719,7 @@ async def pfsense_openvpn_user_create(
     operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Handler for ``pfsense.openvpn.user.create`` (VPN user, password to Vault)."""
-    name = _validate_user_name(params.get("name"))
+    name = _validate_vpn_user_name(params.get("name"))
     descr = _validate_descr(params.get("description"), f"meho: VPN user {name}")
     mount, path, field = _validate_vault_target(params)
     if operator is None:
@@ -729,7 +788,10 @@ async def pfsense_openvpn_user_create(
     except asyncio.CancelledError as exc:
         undone = await _undo_create(self, target, name, uid, operator)
         raise asyncio.CancelledError(
-            f"openvpn.user.create was cancelled while the password was written to Vault; {undone}"
+            f"openvpn.user.create was cancelled while the password was written to Vault; "
+            f"{undone} The write may still finish: the password may be stored at {mount}/{path} "
+            "although the user was removed, and a new create at this path then stops with "
+            "vault_field_exists."
         ) from exc
     stored = {**result["vault"], "stored": True}
     await _verify_create(self, target, operator, name, uid, before, f"{mount}/{path}")
@@ -792,6 +854,11 @@ async def _undo_create(
     refused = _system_refusal(_CREATE_OP_ID, name, played)
     if refused is not None:
         return f"the new user {name!r} was not removed again ({refused.code}). {lost}"
+    if _REMOVED_RE.search(played) is None:
+        return (
+            f"the new user {name!r} was not removed again (the firewall did not confirm "
+            f"the removal). {lost}"
+        )
     return f"the new user {name!r} was removed again."
 
 
@@ -973,7 +1040,7 @@ async def pfsense_openvpn_user_delete(
     operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Handler for ``pfsense.openvpn.user.delete`` -- remove a VPN user and its overrides."""
-    name = _validate_user_name(params.get("name"))
+    name = _validate_vpn_user_name(params.get("name"))
     force = bool(params.get("force", False))
     result: dict[str, Any] = {
         "op_class": "write",
@@ -1075,7 +1142,7 @@ async def pfsense_openvpn_user_delete(
 
 async def _create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     try:
-        name = _validate_user_name(ctx.params.get("name"))
+        name = _validate_vpn_user_name(ctx.params.get("name"))
         mount, path, field = _validate_vault_target(ctx.params)
     except ValueError:
         return None
@@ -1124,7 +1191,7 @@ async def _vault_path_state(ctx: PreviewContext, mount: str, path: str, field: s
 
 async def _delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     try:
-        name = _validate_user_name(ctx.params.get("name"))
+        name = _validate_vpn_user_name(ctx.params.get("name"))
     except ValueError:
         return None
     preview: dict[str, Any] = {
@@ -1173,8 +1240,11 @@ def register_pfsense_openvpn_user_preview_builders() -> None:
 
 _NAME_PROPERTY: dict[str, Any] = {
     "type": "string",
-    "pattern": USER_NAME_RE.pattern,
-    "description": "Exact VPN user name. Letters, digits, dot, dash, underscore; at most 32.",
+    "pattern": _VPN_USER_NAME_RE.pattern,
+    "description": (
+        "Exact VPN user name. Letters, digits, dot, dash, underscore; at most 32. It may "
+        "not start with a dot or a dash."
+    ),
 }
 
 _CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
@@ -1330,8 +1400,9 @@ OPENVPN_USER_OPS: tuple[PfSenseOp, ...] = (
                     "``{status, name, nothing_to_do, applied, verified, vault: {mount, path, "
                     "field, stored}, guidance}``. The password is never returned; read it "
                     "from Vault. A refusal (``ambiguous``, ``vault_path_is_target_secret``, "
-                    "``vault_field_exists``, ``system_name``, ``system_names_unreadable``) "
-                    "fails the call and changes nothing."
+                    "``vault_field_exists``, ``vault_version_unknown``, ``system_name``, "
+                    "``system_names_unreadable``, ``dot_name``) fails the call and changes "
+                    "nothing."
                 ),
                 "next_step": (
                     "Find an address with ``pfsense.openvpn.address.next_free`` and set it "
@@ -1382,7 +1453,8 @@ OPENVPN_USER_OPS: tuple[PfSenseOp, ...] = (
                     "applied, verified, guidance}``. ``status`` is ``deleted`` after a "
                     "verified removal, or ``not_found`` when the user is already gone. A "
                     "refusal (``ambiguous``, ``protected``, ``system_name``, "
-                    "``system_names_unreadable``, ``connected``, ``connection_unknown``, "
+                    "``system_names_unreadable``, ``dot_name``, ``connected``, "
+                    "``connection_unknown``, "
                     "``rules_remain``) fails the call and changes nothing; the error names "
                     "the reason and, for ``rules_remain``, the ``ridentifier`` of each rule."
                 ),

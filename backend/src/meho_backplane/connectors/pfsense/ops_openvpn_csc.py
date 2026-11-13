@@ -22,10 +22,11 @@ firewall (the user itself is made by
 How the sync works
 ------------------
 
-1. Every wanted entry is checked first (server exists and logs users in,
-   the address is inside the server's network and free, the existing entry
-   has no other address). One refused entry stops the whole call: nothing
-   is written, and outside compare-only mode the call fails with
+1. Every wanted entry is checked first (a local user with the name exists,
+   the server exists and logs users in, the address is inside the server's
+   network and free, the existing entry has no other address). One refused
+   entry stops the whole call: nothing is written, and outside compare-only
+   mode the call fails with
    :class:`~meho_backplane.connectors.pfsense.refusal.PfSenseRefusedError`
    (code ``refused``) that names each refused entry.
 2. In compare-only mode the call returns the plan and stops: which entries
@@ -85,7 +86,11 @@ from meho_backplane.connectors.pfsense.openvpn_config import (
     used_addresses,
 )
 from meho_backplane.connectors.pfsense.ops import PfSenseOp
-from meho_backplane.connectors.pfsense.ops_user_write import USER_NAME_RE, _validate_user_name
+from meho_backplane.connectors.pfsense.ops_user_write import (
+    USER_NAME_RE,
+    _user_rows,
+    _validate_user_name,
+)
 from meho_backplane.connectors.pfsense.ops_write import (
     _ALWAYS_REWRITTEN_SECTIONS,
     _apply_playback,
@@ -310,6 +315,7 @@ def _plan_one(
     csc: list[CscEntry],
     rendered: list[tuple[str, str, ipaddress.IPv4Address]],
     claimed: dict[tuple[str, ipaddress.IPv4Address], str],
+    users: frozenset[str],
 ) -> dict[str, Any]:
     name, vpnid, want = entry["name"], entry["server_vpnid"], entry["tunnel_address"]
     row: dict[str, Any] = {
@@ -327,6 +333,8 @@ def _plan_one(
     def refuse(code: str, detail: str) -> dict[str, Any]:
         return {**row, "reason": code, "detail": detail}
 
+    if name not in users:
+        return refuse("user_not_found", f"no such user: the firewall has no local user {name!r}")
     server = servers.get(vpnid)
     if server is None:
         return refuse("server_not_found", f"no OpenVPN server with vpnid {vpnid}")
@@ -409,11 +417,20 @@ def plan_csc_sync(
     servers: list[OpenVpnServer],
     csc: list[CscEntry],
     rendered: list[tuple[str, str, ipaddress.IPv4Address]],
+    users: frozenset[str],
 ) -> list[dict[str, Any]]:
-    """Return one plan row per entry: create, update, unchanged or refused."""
+    """Return one plan row per entry: create, update, unchanged or refused.
+
+    *users* are the names of the local users on the firewall. An entry for
+    another name is refused (``user_not_found``).
+    """
     by_id = {s.vpnid: s for s in servers}
     claimed: dict[tuple[str, ipaddress.IPv4Address], str] = {}
-    return [_plan_one(entry, by_id, csc, rendered, claimed) for entry in entries]
+    return [_plan_one(entry, by_id, csc, rendered, claimed, users) for entry in entries]
+
+
+def _user_names(xml_text: str) -> frozenset[str]:
+    return frozenset(r["name"] for r in _user_rows(xml_text))
 
 
 # ---------------------------------------------------------------------------
@@ -654,7 +671,7 @@ async def pfsense_openvpn_csc_sync(
     before = await _read_config_xml(self, target, operator)
     rendered = await read_rendered_addresses(self, target, operator)
     csc = parse_csc_entries(before)
-    plan = plan_csc_sync(entries, parse_openvpn_servers(before), csc, rendered)
+    plan = plan_csc_sync(entries, parse_openvpn_servers(before), csc, rendered, _user_names(before))
     counts = _summary(plan)
     result: dict[str, Any] = {
         "op_class": "write",
@@ -963,13 +980,17 @@ OPENVPN_CSC_OPS: tuple[PfSenseOp, ...] = (
                     "already right is ``unchanged``. The approval card shows the plan."
                 ),
                 "preconditions": (
-                    "The user exists (``pfsense.openvpn.user.create``). Get each address "
+                    "The user exists (``pfsense.openvpn.user.create``); else the entry is "
+                    "refused (``user_not_found``). Get each address "
                     "from ``pfsense.openvpn.address.next_free``. Run with ``compare_only: "
                     "true`` first and read the counts."
                 ),
                 "parameter_hints": {
                     "entries": "Required. One object per user and server.",
-                    "compare_only": "Optional. true returns the plan and writes nothing.",
+                    "compare_only": (
+                        "Optional. true returns the plan and writes nothing. The call still "
+                        "waits for approval."
+                    ),
                 },
                 "output_shape": (
                     "``{status, compare_only, applied, verified, counts, entries, "
@@ -1010,7 +1031,11 @@ async def _csc_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     before = await _read_config_xml(connector, ctx.target, ctx.operator)
     rendered = await read_rendered_addresses(connector, ctx.target, ctx.operator)
     plan = plan_csc_sync(
-        entries, parse_openvpn_servers(before), parse_csc_entries(before), rendered
+        entries,
+        parse_openvpn_servers(before),
+        parse_csc_entries(before),
+        rendered,
+        _user_names(before),
     )
     return {**preview, "counts": _summary(plan), "entries": [_public_row(r) for r in plan]}
 

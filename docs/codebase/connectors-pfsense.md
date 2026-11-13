@@ -1071,8 +1071,11 @@ the user has no certificate). They are in the group `vpn`.
 |---|---|---|
 | `pfsense.openvpn.address.next_free` | Finds the lowest address offset that is free on every user-login server. Read only. | `safe` |
 | `pfsense.openvpn.user.create` | Makes the user. The password is made on the firewall and written to Vault. | `dangerous`, approval of each call |
-| `pfsense.openvpn.csc.sync` | Creates or extends client overrides (fixed address and pushed routes). Has a compare-only mode. | `caution` |
+| `pfsense.openvpn.csc.sync` | Creates or extends client overrides (fixed address and pushed routes). Has a compare-only mode. | `caution`, approval |
 | `pfsense.openvpn.rule.sync` | Adds the missing tagged per-user pass rules on the OpenVPN rule tab. Has a compare-only mode. | `dangerous`, approval |
+
+A call of `csc.sync` or `rule.sync` with `compare_only` also waits for
+approval, like any other call of these ops.
 | `pfsense.openvpn.user.delete` | Removes a VPN user and the overrides with its name. | `dangerous`, approval of each call |
 
 `user.create` and `user.delete` give or take a login, so a person approves
@@ -1099,8 +1102,10 @@ per-user rule sync). Checked against the pfSense
   network cannot be counted and shows up in `warnings`.
 - **Override sync.** One entry per user and server: `name`, `server_vpnid`,
   `tunnel_address` (needed for a new entry), `routes`. All entries are checked
-  first (server, address in range and free, no other address on an existing
-  entry); one refusal stops the whole call. Without `compare_only` a refusal
+  first (a local user with the name exists, server, address in range and
+  free, no other address on an existing entry); one refusal stops the whole
+  call. A name with no local user on the firewall is refused
+  (`user_not_found`), and the approval card shows it as "no such user". Without `compare_only` a refusal
   fails the call: it raises `PfSenseRefusedError` (code `refused`) and the
   error names each refused entry and why. With `compare_only` the call
   returns the plan (`create`, `update`, `unchanged`, `refused` per entry) as a
@@ -1117,14 +1122,23 @@ per-user rule sync). Checked against the pfSense
   number, no override yet for a new entry, same address and routes on an
   entry it extends). When one changed, for example a route added in the web
   page meanwhile, it writes nothing and the op fails with "run again".
+- **User names.** Both user ops refuse a name that starts with a dot (`.`,
+  `..`, `.x`): pfSense uses `/home/<name>` as the user's home directory, and
+  a delete removes it. The name pattern refuses it before the approval card
+  is made, and the fragments of create, delete and the undo check it again:
+  they print `MEHO_VPN_DOT_NAME` and call neither `local_user_set()` nor
+  `local_user_del()` (`dot_name`).
 - **User create.** The handler checks the Vault path against the tenant path
-  first. An existing user is left alone (`exists`, a normal answer: safe to
+  first. This check is skipped when the tenant prefix setting
+  (`VAULT_KV_TENANT_SCOPE_PREFIX`) is empty. An existing user is left alone (`exists`, a normal answer: safe to
   run twice). Two users with the name fail the call (`ambiguous`, raised as
   `PfSenseRefusedError`). Before any change on the firewall, the Vault path
   is checked: it must not be the credential path (`secret_ref`) of any
   target (`vault_path_is_target_secret`), and the handler reads it with the
   caller's Vault login. When the field already holds a value, the call fails
-  (`vault_field_exists`). The approval card says whether the path is `new`,
+  (`vault_field_exists`). When Vault answers without a whole-number
+  `metadata.version` (the mount may not be KV version 2), the call fails
+  (`vault_version_unknown`) and changes nothing. The approval card says whether the path is `new`,
   `holds_other_fields`, `field_exists`, `target_secret` or `outside_tenant`
   (no value is shown). For a path outside the caller's tenant path it looks
   up nothing, neither the targets nor Vault. The fragment refuses a name that is in `/etc/passwd` or
@@ -1143,7 +1157,11 @@ per-user rule sync). Checked against the pfSense
   password is never in the answer, the approval, an error or a log. When the
   Vault write fails or the call is cancelled during it, the user is removed
   again, by name and `uid` (overrides with the name stay), and a cancel is
-  raised again. When the playback itself fails or is cancelled, the error
+  raised again. The undo prints `MEHO_VPN_REMOVED` when it removed the user;
+  without it the error says the user was not removed. The Vault write runs
+  in a thread and can still finish after a cancel: the password may then be
+  stored at the path although the user was removed, and a new create at
+  this path stops with `vault_field_exists`. The error of the cancel says so. When the playback itself fails or is cancelled, the error
   says that a user with this name may exist and that its password is not
   stored. The broadcast class is `credential_mint`.
 - **User delete.** The op deletes only VPN users. A user that is already

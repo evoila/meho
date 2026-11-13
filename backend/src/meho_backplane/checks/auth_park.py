@@ -10,7 +10,9 @@ ended with a refused login (``connector_auth_failed``). At the limit
 with ``status_reason='auth_failed:ConnectorAuthError'`` and stops calling the
 target.
 
-Any other result sets the count back to 0. An operator resumes the Sensor
+Only an evaluation whose call to the target succeeded sets the count back
+to 0. Another failure (a timeout, an error of the target) leaves it as it
+is: it says nothing about the login. An operator resumes the Sensor
 with ``meho sensor resume`` once the credential is fixed. A resume sets the
 count back to 0 as well.
 """
@@ -41,9 +43,13 @@ async def count_auth_outcome(
     sensor_id: uuid.UUID,
     *,
     auth_failed: bool,
+    dispatch_ok: bool,
     threshold: int,
 ) -> bool:
     """Count one evaluation result. Return ``True`` when this one paused the Sensor.
+
+    *auth_failed* adds one to the count. *dispatch_ok* (the call to the
+    target succeeded) sets it back to 0. Any other result leaves it alone.
 
     Runs in the caller's open transaction, so the count and the result
     commit together. A Sensor that is gone, or is not active, is left alone.
@@ -52,7 +58,7 @@ async def count_auth_outcome(
     if row is None or row.status != SensorStatus.ACTIVE.value:
         return False
     if not auth_failed:
-        if row.auth_failure_count:
+        if dispatch_ok and row.auth_failure_count:
             row.auth_failure_count = 0
         return False
     row.auth_failure_count += 1

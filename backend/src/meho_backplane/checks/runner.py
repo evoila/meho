@@ -350,6 +350,31 @@ async def _sensor_operator(snap: _SensorSnapshot) -> Operator:
     )
 
 
+#: ``reason`` of an ``unknown`` outcome where the call to the target did not
+#: succeed (or did not run). A target that does not resolve also has no
+#: successful call; its outcome carries ``dispatch_error`` in the evidence.
+_NO_DISPATCH_OK_REASONS = frozenset(
+    {
+        "op_descriptor_missing",
+        "op_not_safe_at_dispatch",
+        "op_is_write_at_dispatch",
+        "evaluation_timeout",
+        "dispatch_error",
+        "dispatch_not_ok",
+    }
+)
+
+
+def _dispatch_was_ok(outcome: AssertionOutcome) -> bool:
+    """Whether *outcome* comes from a call to the target that succeeded."""
+    if outcome.state != "unknown":
+        return True
+    evidence = outcome.evidence
+    return (
+        evidence.get("reason") not in _NO_DISPATCH_OK_REASONS and "dispatch_error" not in evidence
+    )
+
+
 def _unknown_outcome(reason: str, **extra: object) -> AssertionOutcome:
     """An ``unknown`` outcome carrying *reason* (+ any extra evidence)."""
     evidence: dict[str, object] = {"reason": reason}
@@ -568,6 +593,9 @@ async def _count_auth_outcome(
 ) -> ParkNotice | None:
     """Count a refused login. Pause the Sensor at the limit.
 
+    Only a result whose call to the target succeeded sets the count back
+    to 0.
+
     Runs in the open transaction of :func:`_persist_outcome`, so the count,
     the pause and the event commit together with the result. Returns the
     warning mail to send once that transaction commits, or ``None``.
@@ -577,6 +605,7 @@ async def _count_auth_outcome(
         session,
         snap.id,
         auth_failed=outcome.evidence.get("error_code") == AUTH_FAILED_ERROR_CODE,
+        dispatch_ok=_dispatch_was_ok(outcome),
         threshold=settings.sensor_auth_failure_park_threshold,
     )
     if not parked or row is None:

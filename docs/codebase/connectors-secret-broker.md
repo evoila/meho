@@ -149,8 +149,11 @@ do that, and nobody sees the value:
    handoff_token, handoff_ttl_seconds}`.
 2. **On B: `secret.handoff.import`.** Params: `handoff_token`, `store`
    (the name of a target on B, product `vault`, whose host is A's Vault
-   or OpenBao), `to` (`<kind>:<ref>` sink on B), optional
+   or OpenBao), `to` (a `vault:` place on B), optional
    `expect_fingerprint`, `reason`. The handler:
+   - refuses a `to` of any other kind, for example `linux:`, before it
+     uses the handoff. Only `secret.move` writes to a `linux:` place, and
+     a person approves each move;
    - builds the sink and runs its write check first
      (`VaultKvSecretEndpoint.check_write_allowed`, the tenant check), so
      a wrong sink path does not use up the handoff;
@@ -268,6 +271,220 @@ The same move over MCP is `call_operation(connector_id="secret-broker-1.x",
 op_id="secret.move", params={"from": "keycloak:…#secret", "to": "vault:…#client_secret",
 "reason": "…"})`.
 
+## Ops example — a machine login for an agent seat
+
+An operator makes a machine login for an agent seat only through MEHO. A
+machine login is a Keycloak client that signs in without a person. An
+agent seat is a machine where an AI agent works with its own MEHO login.
+Nobody sees the client secret: not the operator, not the agent, not the
+result, not the audit row.
+
+The recipe is three governed calls. Each one waits for approval. Run them
+in order.
+
+**1. Create the client** with `keycloak.client.create` on the Keycloak
+target. Use this `representation`. Replace the three placeholders: the
+client id, the tenant id, and the MEHO audience (the audience your MEHO
+checks, `KEYCLOAK_AUDIENCE`). `tenant_role` is the tenant role the seat
+gets. Keep it `operator`. Never use `tenant_admin`.
+
+Step 1 creates a new login with tenant rights. A second admin should approve
+it before it runs.
+
+<!-- recipe:keycloak-client-representation -->
+```json
+{
+  "clientId": "<client-id>",
+  "enabled": true,
+  "publicClient": false,
+  "serviceAccountsEnabled": true,
+  "standardFlowEnabled": false,
+  "implicitFlowEnabled": false,
+  "directAccessGrantsEnabled": false,
+  "defaultClientScopes": ["basic", "roles", "web-origins", "acr"],
+  "protocolMappers": [
+    {
+      "name": "audience-mapper",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-audience-mapper",
+      "config": {
+        "included.custom.audience": "<audience>",
+        "id.token.claim": "false",
+        "access.token.claim": "true"
+      }
+    },
+    {
+      "name": "tenant-id-claim",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-hardcoded-claim-mapper",
+      "config": {
+        "claim.name": "tenant_id",
+        "claim.value": "<tenant-id>",
+        "jsonType.label": "String",
+        "access.token.claim": "true",
+        "id.token.claim": "false",
+        "userinfo.token.claim": "false"
+      }
+    },
+    {
+      "name": "tenant-role-claim",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-hardcoded-claim-mapper",
+      "config": {
+        "claim.name": "tenant_role",
+        "claim.value": "operator",
+        "jsonType.label": "String",
+        "access.token.claim": "true",
+        "id.token.claim": "false",
+        "userinfo.token.claim": "false"
+      }
+    },
+    {
+      "name": "principal-kind-claim",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-hardcoded-claim-mapper",
+      "config": {
+        "claim.name": "principal_kind",
+        "claim.value": "service",
+        "jsonType.label": "String",
+        "access.token.claim": "true",
+        "id.token.claim": "false",
+        "userinfo.token.claim": "false"
+      }
+    }
+  ]
+}
+```
+
+The `defaultClientScopes` line is what puts `sub` into the token. The
+answer holds the client id and its internal id, never the secret.
+
+**2. Move the secret into Vault or OpenBao** (`secret.move`):
+
+```
+meho secret move \
+  --from 'keycloak:<keycloak-target>/<realm>/clients/<client-id>#secret' \
+  --to   'vault:tenants/<tenant-id>/<seat-name>#client_secret' \
+  --reason 'store the seat login secret'
+```
+
+**3. Optional: put the secret in a file on the seat's host** (`secret.move`
+to a `linux:` ref):
+
+```
+meho secret move \
+  --from 'vault:tenants/<tenant-id>/<seat-name>#client_secret' \
+  --to   'linux:<host-target>/home/<owner>/.config/meho/client-secret#<owner>' \
+  --reason 'place the seat login secret for the agent'
+```
+
+The file gets mode 0600 and the owner you name. A file that already exists
+at the path is replaced. The path must be inside the owner's home, and the
+owner is never `root`. See "The `linux:` store" below.
+
+The audit rows and the approval previews of the three calls show only the
+client id, the target names, and the paths. For a `linux:` move the approval
+card shows the path and the owner, never the content. The person who approves
+reads both: the path says where the secret goes, the owner says who can read
+it.
+
+A person approves each `secret.move`. No standing grant and no run approval
+covers it, because a move writes a secret into a store or onto a host.
+
+**Safe to run twice.** A second run changes nothing that matters. The client
+create answers `conflict` and leaves the client as it is. The two moves
+write the same value again. This holds as long as nobody rotated the
+secret in between. The recipe does not rotate a secret.
+
+## The `linux:` store (a file on a Linux host)
+
+`linux` is a **write-only** store (a sink). It puts a secret into a file on
+a host that a `linux-ssh` target reaches. Reading from a `linux:` ref
+fails with an error that names no value.
+
+```
+linux:<target>/<absolute path>#<owner>
+```
+
+- `<target>` is a `linux-ssh` target name (or alias). MEHO refuses a target
+  of another kind before it reads any credential or opens SSH.
+- `<absolute path>` is the file. One slash or two after the target both work.
+- `<owner>` is the Linux user who will own the file. A user name only:
+  lower-case letters, digits, `_` and `-`. A normal user: never `root`,
+  never a user with user id 0, and never a system user (a user id below the
+  host's first normal user id).
+- A ref has no spaces, because the `secret.move` parameter schema refuses
+  them.
+
+What MEHO does on the host:
+
+- The only allowed place is the home directory of `<owner>`. A short list of
+  allowed places can be complete; a list of refused places never is.
+- It writes the value in one atomic step: a temp file, then a rename. The
+  owner does every step (`runuser -u <owner>`): the folders, the temp file
+  and the rename. Root only checks; it never writes the file and never
+  makes a folder. So root never follows a link that the owner could have
+  made.
+- The owner walks from the home to the file one folder at a time, and checks
+  the real folder after each step. A link in any folder of the path below the
+  home stops the write with the reason `link`. A link could lead into a
+  refused place or out of the home. The temp file and the rename happen in
+  the folder the owner already stands in, so a link made after the check
+  cannot move the write. A link in place of the file itself is replaced,
+  never followed.
+- The file gets mode 0600. A missing parent directory is made with mode
+  0700.
+- Before it opens any SSH connection, MEHO refuses:
+  - a relative path, `..`, a backslash, and any character that is not
+    printable (for example a tab, ESC or a right-to-left mark);
+  - a place that is never a home: `/etc`, `/run`, `/usr` (also
+    `/usr/local`), `/var/lib`, `/opt`, `/srv`, `/proc`, `/sys`, `/dev`,
+    `/boot`, `/bin`, `/sbin`, `/lib*` and `/tmp`. A normal user's home under
+    `/var` (for example `/var/home/app`) is allowed;
+  - a place inside a home that the system runs or reads for logins
+    (`_SYSTEM_RUNS` in the code): a `.ssh` folder anywhere in the path, the
+    folders `.config/systemd`, `.config/autostart`, `.config/fish`,
+    `.config/environment.d`, `.config/plasma-workspace` and
+    `.local/share/systemd`, and the file names `authorized_keys`,
+    `authorized_keys2`, `.bashrc`, `.bash_profile`, `.bash_login`,
+    `.bash_logout`, `.bash_aliases`, `.profile`, `.zshrc`, `.zshenv`,
+    `.zprofile`, `.zlogin`, `.zlogout`, `.cshrc`, `.tcshrc`, `.login`,
+    `.logout`, `.kshrc`, `.mkshrc`, `.xprofile`, `.xinitrc`, `.xsession`,
+    `.xsessionrc`, `.pam_environment`, `.forward`, `.procmailrc`,
+    `.mailfilter`, `.qmail`, `.rhosts`, `.shosts`, `.k5login`. Names are
+    compared in lower case, so `.BashRC` is refused too.
+- `secret.move` runs the same checks before the call can wait for approval.
+  A refused place makes no approval card: the call fails with
+  `invalid_params`.
+- Both scripts on the host first check that `realpath -m` works. When it
+  does not, they stop with the reason `realpath` and write nothing.
+- MEHO then asks the host for the owner's home (`getent passwd`). This short
+  script carries no secret. It stops with:
+  - the reason `root-owner` for an owner with user id 0;
+  - the reason `system-owner` for an owner whose user id is below the
+    host's first normal user id (`UID_MIN` in `/etc/login.defs`; 1000 when
+    the file gives none). A system user's home is often a folder that others
+    read or share, for example a web root or a mail spool, so a secret
+    written there would not stay with one user;
+  - the reason `no-home` when the home does not exist.
+
+  When the path is not inside the home, MEHO stops before it sends the
+  secret. So a normal user's home in any place works, for example
+  `/data/app`.
+- The script that writes the file checks the owner and the home again, with
+  the path as the caller wrote it. It uses the same reasons.
+- The value travels only inside the SSH channel (standard input), through
+  the same sudo helper as `linux.file.write`. During the write the helper
+  keeps the script in a temp file of mode 0600 on the host, and removes the
+  file when the script ends. It is never in the remote
+  command line, a log line, or an error text. An error names only a short
+  reason such as `place` or `owner`.
+
+Code: `backend/src/meho_backplane/connectors/linux/secret_endpoint.py`.
+Tests: `backend/tests/test_secret_broker_linux_sink.py`; the machine login
+itself is tested against a real Keycloak in
+`backend/tests/integration/test_service_principal_recipe.py`.
+
 ## Control flow
 
 A move dispatches through the standard typed-op path:
@@ -358,8 +575,8 @@ the posture and relies on the existing gate). The policy refinement
 - The handoff import does not support a store target with a pinned CA
   (`tls_ca_pin`) yet; it refuses such a target with a plain error.
 - vault-kv (source+sink) and keycloak (user-password sink #1578 +
-  client-secret source #3619, dual-dispatched under the one kind) are the
-  registered adapter kinds; further kinds are separate tasks reusing the
+  client-secret source #3619, dual-dispatched under the one kind) and linux
+  (a file on a host, sink only) are the registered adapter kinds; further kinds are separate tasks reusing the
   `SecretEndpoint` contract.
 - The vault adapter forwards the `ref` to hvac's `path=` and defaults the
   mount to `"secret"`; a non-default mount is a richer-ref-grammar

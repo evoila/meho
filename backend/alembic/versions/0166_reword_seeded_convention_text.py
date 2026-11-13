@@ -81,18 +81,26 @@ def upgrade() -> None:
                 sa.text("UPDATE tenant_conventions SET body = :new WHERE id = :id"),
                 {"new": _NEW_BODY, "id": row_id},
             )
-    for column in ("body_before", "body_after"):
-        history_rows = bind.execute(
+    # One fixed statement pair per history column (no built-up SQL).
+    statements = (
+        (
             sa.text(
-                f"SELECT id, {column} FROM tenant_convention_history WHERE {column} IS NOT NULL"
+                "SELECT id, body_before FROM tenant_convention_history"
+                " WHERE body_before IS NOT NULL"
             ),
-        ).all()
-        for row_id, body in history_rows:
+            sa.text("UPDATE tenant_convention_history SET body_before = :new WHERE id = :id"),
+        ),
+        (
+            sa.text(
+                "SELECT id, body_after FROM tenant_convention_history WHERE body_after IS NOT NULL"
+            ),
+            sa.text("UPDATE tenant_convention_history SET body_after = :new WHERE id = :id"),
+        ),
+    )
+    for select_stmt, update_stmt in statements:
+        for row_id, body in bind.execute(select_stmt).all():
             if _is_old(body):
-                bind.execute(
-                    sa.text(f"UPDATE tenant_convention_history SET {column} = :new WHERE id = :id"),
-                    {"new": _NEW_BODY, "id": row_id},
-                )
+                bind.execute(update_stmt, {"new": _NEW_BODY, "id": row_id})
 
 
 def downgrade() -> None:

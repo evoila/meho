@@ -491,15 +491,17 @@ def test_unit_lane_says_when_a_fork_pull_request_ran_no_unit_tests() -> None:
     # ci.yml has no trigger for a plain branch push, so the maintainer
     # step must open a pull request to start CI.
     assert "draft pull request" in script
+    assert "full SHA" in script
 
 
 def test_contributing_fork_steps_start_a_ci_run() -> None:
     text = (_REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
     section = text.split("### Pull requests from forks", 1)[1].split("\n## ", 1)[0]
     assert "gh pr create --draft" in section
+    # The maintainer pushes the exact commit they read, not the fork branch.
+    assert "git push origin <full-sha>:refs/heads/ci/pr-<number>" in section
     triggers = _triggers(_load_workflow(_WORKFLOWS_DIR / "ci.yml"))
     # A pushed ci/pr-<number> branch alone starts no run; the draft pull
     # request does.
     assert triggers["push"]["branches"] == ["main"]
     assert "workflow_dispatch" not in triggers
-    assert triggers["push"]["branches"] == ["main"]

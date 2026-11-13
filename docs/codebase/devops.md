@@ -2187,15 +2187,19 @@ shape (deterministic file-level matrix + fan-in):
 - **`python-unit-lane`** — the **fan-in** carrying the exact
   branch-protection required context `Python (ruff + mypy + pytest)`. It
   `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`
-  and, via `if: always()
-  && <fork guard>`, runs regardless of upstream results, then inspects
+  and, via `if: always()`, runs regardless of upstream results, then inspects
   `needs.*.result`. `always()` is load-bearing: a plain `needs:` gate would
   be *skipped* when a shard fails, and a skipped required check counts as
   Success (#2140) — i.e. a red shard would let the PR merge. A hung shard
   hits its own `timeout-minutes` → `cancelled` leg → aggregate
-  `cancelled`/`failure` → the gate FAILS (not open). On a fork PR the fork
-  guard skips this job (and the shards), reporting the required context as
-  Success exactly as the old single job did. Since #3252 the step first
+  `cancelled`/`failure` → the gate FAILS (not open). The job runs on a fork
+  PR too (#4835). There the shards skip, because they use our own pool.
+  The job passes when lint passed, or when lint skipped for a docs-only or
+  no-backend diff. A failed or cancelled lint or shard, a lint that did not
+  run for a diff with backend code, or a failed detector fails it. When it
+  passes, its step summary says that the unit tests did not run and gives
+  the maintainer the commands to start a full run on the exact commit (see
+  [Fork-PR guard](#fork-pr-guard)). Since #3252 the step first
   fails CLOSED if the `changes` detector did not itself succeed, then
   branches on `needs.changes.outputs.docs_only` (and, since #5296,
   `backend_python`): on the **docs-only fast
@@ -2727,12 +2731,13 @@ guard since #4835: `changes`, `python-lint`, `go-lint-test`,
 `python-unit-lane`. On a pull request they run on GitHub-hosted runners
 with a read-only token and no secret, so a fork pull request runs them.
 The unit shards still skip on a fork PR. The `python-unit-lane` fan-in
-then passes when lint passed, and its step summary says that the unit
-tests did not run. `test_ci_fork_runner_isolation.py` pins both sides:
+then passes when lint passed, or when lint skipped for a docs-only or
+no-backend diff, and its step summary says that the unit tests did not
+run. `test_ci_fork_runner_isolation.py` pins both sides:
 the six jobs have no guard, and every job on our own pool keeps it.
 `CONTRIBUTING.md`, "Pull requests from forks", has the maintainer steps
-to get a full CI run: push the head commit to a branch here and open a
-draft pull request from it.
+to get a full CI run: push the exact commit the maintainer read, by its
+full SHA, to a branch here and open a draft pull request from it.
 
 This guard is `ci.yml`'s arm of the repo-wide untrusted-PR isolation
 model — the full inventory, the disposable-runner routing pattern, and

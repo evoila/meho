@@ -626,7 +626,9 @@ jobs:
     # Fork-PR guard: never execute project code from a fork on the self-hosted
     # runner pool. Same stance as the old lane — job-level so no step ever
     # starts on a fork PR. On a fork PR all six legs skip (→ reported
-    # Success), which the fan-in's own fork guard mirrors. Plus the #3252
+    # Success). The fan-in still runs on a fork PR (#4835): it fails when
+    # lint failed and says in its step summary that the legs did not run.
+    # Plus the #3252
     # docs-only skip (identical shape to python-lint): a proven docs-only PR
     # skips all six legs → the fan-in reports success-by-skip. `needs:
     # changes` makes `docs_only` readable; a detect-job failure skip-cascades
@@ -1528,9 +1530,11 @@ jobs:
     #  2. Honest fork-PR behaviour (#4835). The unit shards skip on a fork PR
     #     (they use our own pool), and a job skipped by its own `if:` counts
     #     as success (#2140). So this job runs on a fork PR too and says in
-    #     its step summary that the shards did not run. It still passes when
-    #     lint passed: the merge queue runs the full matrix before the code
-    #     lands on `main`, and CONTRIBUTING.md names the maintainer steps.
+    #     its step summary that the shards did not run. It passes when lint
+    #     passed, or when lint skipped for a docs-only or no-backend diff. A
+    #     failed, cancelled or wrongly skipped lint fails it. The merge queue
+    #     runs the full matrix before the code lands on `main`, and
+    #     CONTRIBUTING.md names the maintainer steps.
     #  3. Docs-only fast path WITHOUT weakening the code path (#3252). On a
     #     proven docs-only PR, python-lint + every shard skip via their own
     #     detect-gated `if:` and the step below must PASS on their `skipped`
@@ -1544,8 +1548,8 @@ jobs:
     #                                skip paths are fork-PR or docs-only, and we
     #                                are in neither — so treat it as failure and
     #                                fail CLOSED). This is STRICTER than the
-    #                                pre-#3252 gate; the fork path is handled by
-    #                                this job's own `if:` skip, not by this step.
+    #                                pre-#3252 gate. A fork PR takes its own
+    #                                branch first (#4835, property 2).
     #     And FIRST: if `changes` did not itself succeed, the docs_only value is
     #     untrustworthy, so the gate fails CLOSED regardless.
     #
@@ -1570,6 +1574,8 @@ jobs:
       - name: Assert lint + typecheck + every pytest shard passed
         env:
           IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         # needs.<job>.result is one of success / failure / cancelled / skipped.
         # For the matrix job, needs.python-unit-shard.result is the AGGREGATE:
         # success only if every leg succeeded, otherwise failure/cancelled.
@@ -1599,10 +1605,19 @@ jobs:
           fail=0
           if [ "${IS_FORK_PR}" = "true" ]; then
             # FORK PR (#4835) — the shards and the outside-backend tests use
-            # our own pool, so they skip on a fork PR. Lint ran when the diff
-            # has backend code (skipped otherwise). A red or cancelled job
-            # still fails the lane. A green lane here is NOT a test pass.
-            for r in "${lint}" "${shards}" "${outside}"; do
+            # our own pool, so they skip on a fork PR. Lint must pass when the
+            # diff has backend code; it may skip only for a docs-only or
+            # no-backend diff. A red or cancelled job still fails the lane. A
+            # green lane here is NOT a test pass.
+            if [ "${docs_only}" = "true" ] || [ "${backend_python}" = "false" ]; then
+              case "${lint}" in
+                success|skipped) ;;
+                *) fail=1 ;;
+              esac
+            elif [ "${lint}" != "success" ]; then
+              fail=1
+            fi
+            for r in "${shards}" "${outside}"; do
               case "${r}" in
                 success|skipped) ;;
                 *) fail=1 ;;
@@ -1615,7 +1630,13 @@ jobs:
                 echo "- The unit test shards run on our own runners. A fork pull request cannot use them, so they were skipped. A skipped job shows as green. Green here does **not** mean the tests passed."
                 echo "- Lint and type check (ruff + mypy): ${lint}."
                 echo "- The merge queue runs the full test matrix before this code lands on \`main\`."
-                echo "- Maintainer: before you approve, push the head commit to a branch in this repository (for example \`ci/pr-<number>\`), open a draft pull request from it to \`main\`, and link its CI run in the review. A pushed branch alone starts no CI. See \"Pull requests from forks\" in CONTRIBUTING.md."
+                echo "- Maintainer: read the change first. Then push the exact commit you read, by its full SHA, to a branch in this repository, open a draft pull request from it to \`main\`, and link its CI run in the review. A pushed branch alone starts no CI. See \"Pull requests from forks\" in CONTRIBUTING.md."
+                echo
+                echo '```bash'
+                echo "git fetch origin pull/${PR_NUMBER}/head"
+                echo "git push origin ${HEAD_SHA}:refs/heads/ci/pr-${PR_NUMBER}"
+                echo "gh pr create --draft --base main --head ci/pr-${PR_NUMBER} --title \"CI run for #${PR_NUMBER}\" --body \"CI only. Do not merge.\""
+                echo '```'
               } >> "${GITHUB_STEP_SUMMARY}"
               echo "Unit lane GREEN for a fork pull request, but the unit test shards did not run (lint: ${lint}). The merge queue runs them. See the step summary."
             fi
@@ -1645,8 +1666,9 @@ jobs:
           else
             # FULL RUN — require STRICT success. A `skipped` lint/shard here is
             # anomalous (no skip-cascade is possible: `changes` succeeded above,
-            # and their only other skip paths are fork-PR / docs-only, neither
-            # of which holds), so treat skipped as a failure and fail CLOSED.
+            # the fork branch above took every fork PR, and the docs-only
+            # branch took every docs-only diff), so treat skipped as a failure
+            # and fail CLOSED.
             for r in "${lint}" "${shards}"; do
               case "${r}" in
                 success) ;;

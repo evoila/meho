@@ -65,6 +65,7 @@ from sqlalchemy import text
 from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
+from tests._hashed_tokens import find_hashed_token
 
 #: The legacy seed marker ``0018`` wrote on every row.
 _LEGACY_SEED_ACTOR_SUB: Final[str] = "migration:seed-rdc-conventions"
@@ -90,15 +91,20 @@ _EXPECTED_SLUGS: Final[frozenset[str]] = frozenset(
 #: text after ``upgrade head``. These tokens identify content sourced
 #: from a consumer's ``CLAUDE.md`` (``evoila/meho`` repo references,
 #: customer-specific lab program identifiers, AI-tool legacy refs).
-#: The bare ``rdc-`` prefix covers the consumer-identity tokens. The
-#: private names are built from pieces so this file does not name them.
+#: The bare ``rdc-`` prefix covers the consumer-identity tokens.
 _FORBIDDEN_TOKENS: Final[tuple[str, ...]] = (
     "evoila/meho",
-    "evoila" + "-bosnia",
-    "meho" + "-internal",
-    "claude" + "-rdc-",
     "rdc-",
     "Holodeck",
+)
+
+#: Three private repository names, as ``(length, sha256 of the lowercase
+#: name)``, so this public file does not name them. See
+#: :func:`tests._hashed_tokens.find_hashed_token`.
+_FORBIDDEN_HASHED_TOKENS: Final[tuple[tuple[int, str], ...]] = (
+    (13, "885ce5f27302f8e3cd4bd676054d0a9ee000282de4948755c338fa861dfa3559"),
+    (13, "06676ff72a3ffffb4e398600c0ff4f1c1e4a6d7a25ad98027fd4f78abb49799c"),
+    (11, "5f13f91242342656476ae9bcdfa2335287a39404e7622fe348ab4e2a8b13a97e"),
 )
 
 
@@ -405,6 +411,11 @@ def test_seeded_default_bodies_carry_no_consumer_specific_tokens(
             "the seed must contain no references to a specific consumer's "
             "operational discipline or repo identifiers"
         )
+    hashed_hit = find_hashed_token(blob, _FORBIDDEN_HASHED_TOKENS)
+    assert hashed_hit is None, (
+        f"forbidden token {hashed_hit!r} found in seeded default conventions -- "
+        "the seed must contain no private repository names"
+    )
 
 
 def test_operator_curated_rdc_internal_content_survives_supersede(

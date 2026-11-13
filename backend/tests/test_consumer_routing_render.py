@@ -20,12 +20,15 @@ files *match* the source).
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import pathlib
 import sys
 import types
 
 import pytest
+
+from tests._hashed_tokens import find_hashed_token
 
 _REPO_ROOT: pathlib.Path = pathlib.Path(__file__).resolve().parents[2]
 _GEN_SCRIPT: pathlib.Path = _REPO_ROOT / "scripts" / "ci" / "gen_consumer_routing.py"
@@ -99,10 +102,30 @@ def test_check_mode_passes_on_the_committed_tree() -> None:
     assert _gen.main(["--check"]) == 0
 
 
+#: Two private lab name prefixes and one private realm name, as ``(length,
+#: sha256 of the lowercase name)``, so this public file does not name them.
+#: See :func:`tests._hashed_tokens.find_hashed_token`.
+_HASHED_ESTATE_TOKENS: tuple[tuple[int, str], ...] = (
+    (9, "af7f591151eea693b4438f969fa208be3eec2501216cbc902188c4ff0e0b26be"),
+    (11, "5ae0e879fac4c83d2a0cd3463da029a3b6b0833a8ed5415f0796401367abaaef"),
+    (4, "5e3fa72247c98373e86c072e5a7e4a350b8f910fa857114cce93e533facb9328"),
+)
+
+
 def test_renderings_carry_no_estate_identifiers() -> None:
     """No estate hostname/realm/IP leaks survive into a rendered vehicle."""
-    forbidden = (".lab", "rdc-vault", "rdc-hetzner", "ev" + "ba", "v0.2 transition")
+    forbidden = (".lab", "v0.2 transition")
     for path, content in _RENDERED.items():
         lowered = content.lower()
         for token in forbidden:
             assert token not in lowered, f"{token!r} leaked into {path.relative_to(_REPO_ROOT)}"
+        hashed_hit = find_hashed_token(lowered, _HASHED_ESTATE_TOKENS)
+        assert hashed_hit is None, f"{hashed_hit!r} found in {path.relative_to(_REPO_ROOT)}"
+
+
+def test_hashed_token_check_finds_a_known_token() -> None:
+    """The hash check finds a token inside a longer text, and only then."""
+    digest = hashlib.sha256(b"neutral-name").hexdigest()
+    tokens = ((len("neutral-name"), digest),)
+    assert find_hashed_token("host a.neutral-name.test", tokens) == "neutral-name"
+    assert find_hashed_token("host a.neutral.test", tokens) is None

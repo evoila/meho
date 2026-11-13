@@ -84,7 +84,6 @@ from meho_backplane.ui.routes.agents.principals_views import (
 )
 from meho_backplane.ui.routes.agents.run import (
     INPUT_MAX,
-    WORK_REF_MAX,
     cancel_run,
     render_run_console,
     stream_run_events,
@@ -149,7 +148,7 @@ async def _run_submit_handler(
     request: Request,
     name: str,
     input_: str = Form(default="", alias="input", max_length=INPUT_MAX),
-    work_ref: str | None = Form(default=None, max_length=WORK_REF_MAX),
+    work_ref: str | None = Form(default=None),
     session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_run_operator_dep,
 ) -> HTMLResponse:

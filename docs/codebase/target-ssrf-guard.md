@@ -53,7 +53,10 @@ off-switch.
     connector's own base URL (`HttpConnector._dial_port`), so a connector
     with another default scheme is checked on its own default port. The
     Postgres, MSSQL, MongoDB and SSH paths pass the port they dial (the
-    target port, else their default). An entry with a port never matches
+    target port, else their default). For them (`connect_checked`) that
+    port is the one checked, also when the host has a port in it: these
+    drivers get only the checked address and dial their own port
+    (`use_embedded_port=False`). An entry with a port never matches
     while the port is unknown, so the guard stays closed. A target update
     that sends `host`, `fqdn` or `port` checks the new destination: the
     sent values, else the stored ones (`screen_destination_change`).

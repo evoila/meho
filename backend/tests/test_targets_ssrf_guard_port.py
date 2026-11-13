@@ -23,7 +23,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from meho_backplane.api.v1.targets import _screen_sent_destination
-from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
+from meho_backplane.connectors._shared.dial_guard import connect_checked, screen_dial_addresses
 from meho_backplane.connectors._shared.pinned_transport import _PortPinnedAsyncBackend
 from meho_backplane.connectors.adapters import ssh as ssh_module
 from meho_backplane.connectors.adapters.http import (
@@ -425,3 +425,72 @@ async def test_databases_without_a_port_check_their_default_port(
     assert pg == [postgres_session.DEFAULT_PORT]
     assert mongo == [mongodb_session.DEFAULT_PORT]
     assert mssql == [mssql_session.DEFAULT_PORT]
+
+
+async def test_connect_checked_checks_the_driver_port_not_the_embedded_one(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    _allow(_guard_live, "192.168.7.10:443")
+    dialed: list[str] = []
+
+    async def _connect(address: str) -> str:
+        dialed.append(address)
+        return address
+
+    with pytest.raises(TargetDestinationBlockedError):
+        await connect_checked("192.168.7.10:443", _connect, port=22)
+    assert dialed == []
+    assert await connect_checked("192.168.7.10:443", _connect, port=443) == "192.168.7.10"
+
+
+def _record_dial(monkeypatch: pytest.MonkeyPatch, owner: Any, name: str) -> list[Any]:
+    calls: list[Any] = []
+
+    def _fake(*args: Any, **kwargs: Any) -> Any:
+        calls.append((args, kwargs))
+        raise _DialedError
+
+    monkeypatch.setattr(owner, name, _fake)
+    return calls
+
+
+@pytest.mark.parametrize("port", [None, 2222])
+async def test_ssh_checks_its_own_port_not_a_port_in_the_host(
+    _guard_live: pytest.MonkeyPatch, port: int | None
+) -> None:
+    _allow(_guard_live, "192.168.7.10:443")
+    calls = _record_dial(_guard_live, ssh_module.asyncssh, "connect")
+    target = types.SimpleNamespace(name="db", host="192.168.7.10:443", port=port, secret_ref=None)
+    with pytest.raises(TargetDestinationBlockedError):
+        await ssh_module._dial(target, {"username": "u", "known_hosts": None})
+    assert calls == []
+
+
+@pytest.mark.parametrize("port", [None, 15432])
+async def test_databases_check_their_own_port_not_a_port_in_the_host(
+    _guard_live: pytest.MonkeyPatch, port: int | None
+) -> None:
+    _allow(_guard_live, "192.168.7.10:443")
+    pg = _record_dial(_guard_live, postgres_session.asyncpg, "connect")
+    mongo = _record_dial(_guard_live, mongodb_session, "AsyncMongoClient")
+    mssql = _record_dial(_guard_live, mssql_session, "_blocking_connect")
+    target = types.SimpleNamespace(name="db", host="192.168.7.10:443", port=port, secret_ref=None)
+    with pytest.raises(TargetDestinationBlockedError):
+        await postgres_session.connect_read_only(target, None)
+    with pytest.raises(TargetDestinationBlockedError):
+        await mongodb_session.connect_client(target, None)
+    with pytest.raises(TargetDestinationBlockedError):
+        await mssql_session._connect(target, {}, database=None, query_timeout=5)
+    assert pg == mongo == mssql == []
+
+
+async def test_driver_port_that_matches_the_entry_is_admitted(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    _allow(_guard_live, "192.168.7.10:2222")
+    calls = _record_dial(_guard_live, ssh_module.asyncssh, "connect")
+    target = types.SimpleNamespace(name="db", host="192.168.7.10:443", port=2222, secret_ref=None)
+    with pytest.raises(_DialedError):
+        await ssh_module._dial(target, {"username": "u", "known_hosts": None})
+    assert calls[0][0][0] == "192.168.7.10"
+    assert calls[0][1]["port"] == 2222

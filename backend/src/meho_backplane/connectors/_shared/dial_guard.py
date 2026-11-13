@@ -87,7 +87,9 @@ def _unresolved(host: str) -> list[str] | None:
     )
 
 
-def screen_dial_addresses(host: str, port: int | None = None) -> list[str] | None:
+def screen_dial_addresses(
+    host: str, port: int | None = None, *, use_embedded_port: bool = True
+) -> list[str] | None:
     """Check *host* at connect time and return the addresses to dial.
 
     Returns the checked IP addresses, in resolver order. Returns ``None``
@@ -98,23 +100,32 @@ def screen_dial_addresses(host: str, port: int | None = None) -> list[str] | Non
     host is empty).
 
     *port* is the port the caller will dial, when it knows it; an allowlist
-    entry written with a port matches only that port.
+    entry written with a port matches only that port. A port embedded in
+    *host* wins, unless *use_embedded_port* is false: then *port* is the
+    port that is checked (a driver that dials only the checked address).
     """
-    addresses = screen_and_resolve(host, port)
+    addresses = screen_and_resolve(host, port, use_embedded_port=use_embedded_port)
     if addresses:
         return addresses
     candidate = host.strip()
-    if candidate and is_allowlisted(_dialed_host(candidate), _effective_port(candidate, port)):
+    if candidate and is_allowlisted(
+        _dialed_host(candidate),
+        _effective_port(candidate, port, use_embedded_port=use_embedded_port),
+    ):
         return None
     return _unresolved(host)
 
 
-async def screen_dial_addresses_async(host: str, port: int | None = None) -> list[str] | None:
+async def screen_dial_addresses_async(
+    host: str, port: int | None = None, *, use_embedded_port: bool = True
+) -> list[str] | None:
     """Run :func:`screen_dial_addresses` in a worker thread.
 
     The DNS lookup blocks, so it must not run on the event loop.
     """
-    return await asyncio.to_thread(screen_dial_addresses, host, port)
+    return await asyncio.to_thread(
+        screen_dial_addresses, host, port, use_embedded_port=use_embedded_port
+    )
 
 
 async def connect_checked[T](
@@ -136,8 +147,12 @@ async def connect_checked[T](
     fails, the last error is raised. Any other error is raised at once. A
     host name listed verbatim on the allowlist is handed to *connect* as
     written, once.
+
+    *port* is the port the driver dials. It is the port that is checked: a
+    port embedded in *host* is ignored, because the driver gets only the
+    address and dials *port*.
     """
-    addresses = await screen_dial_addresses_async(host, port)
+    addresses = await screen_dial_addresses_async(host, port, use_embedded_port=False)
     if addresses is None:
         return await connect(host)
     last_exc: BaseException | None = None

@@ -56,6 +56,8 @@ An entry can also carry a port: ``host.name:8443``, ``10.1.2.3:8443`` or
 port**; a bare entry still admits every port. A port is checked only when
 the caller knows it (the HTTP dial path and a port embedded in the stored
 host do); where no port is known, a port entry does not match the dial.
+A driver that dials only the checked address on its own port (SSH, the
+database drivers) is checked on that port, never on a port in the host.
 
 **Fail-open on unresolvable hostnames — by design.** A hostname that
 does not resolve is allowed through at both layers: at create time the
@@ -292,16 +294,24 @@ def _dialed_host(candidate: str) -> str:
     return _dialed_url(candidate).host
 
 
-def _effective_port(candidate: str, port: int | None) -> int | None:
+def _effective_port(
+    candidate: str, port: int | None, *, use_embedded_port: bool = True
+) -> int | None:
     """The port a dial of *candidate* uses, or ``None`` when it is not known.
 
     A port embedded in the stored value wins, because httpx parses it out of
     ``https://{candidate}`` and dials it. Otherwise the caller's *port* is
     used. An unparseable value has no known port (the screen refuses it).
 
+    A driver that is handed only the checked IP address (SSH, the database
+    drivers) never dials the embedded port: it dials its own *port*. Such a
+    caller passes ``use_embedded_port=False``, and *port* is used as it is.
+
     httpx drops an explicit ``:443`` from ``https://host:443`` (it is the
     scheme default), so the embedded port is read from the raw value too.
     """
+    if not use_embedded_port:
+        return port
     try:
         embedded = _dialed_url(candidate).port
     except TargetDestinationBlockedError:
@@ -412,7 +422,9 @@ def _reject_blocked(
         )
 
 
-def _screen(host: str, port: int | None = None) -> list[str] | None:
+def _screen(
+    host: str, port: int | None = None, *, use_embedded_port: bool = True
+) -> list[str] | None:
     """Screen *host* and return the validated addresses it may dial.
 
     The shared core of both public entry points. *host* may be an
@@ -437,15 +449,17 @@ def _screen(host: str, port: int | None = None) -> list[str] | None:
     address, on refused URL structure, or on an unparseable value.
 
     *port* is the port the caller will dial, when it knows it. A port
-    embedded in *host* wins. An allowlist entry written with a port
-    (``host:8443``) admits the destination only on that port, so it never
-    matches while the port is unknown.
+    embedded in *host* wins, unless the caller passes
+    ``use_embedded_port=False`` (see :func:`_effective_port`). An
+    allowlist entry written with a port (``host:8443``) admits the
+    destination only on that port, so it never matches while the port is
+    unknown.
     """
     candidate = host.strip()
     if not candidate:
         return None
     allow = _parse_allowlist()
-    port = _effective_port(candidate, port)
+    port = _effective_port(candidate, port, use_embedded_port=use_embedded_port)
     literal = (
         candidate[1:-1] if candidate.startswith("[") and candidate.endswith("]") else candidate
     )
@@ -485,7 +499,9 @@ def assert_public_destination(host: str, port: int | None = None) -> None:
     _screen(host, port)
 
 
-def screen_and_resolve(host: str, port: int | None = None) -> list[str] | None:
+def screen_and_resolve(
+    host: str, port: int | None = None, *, use_embedded_port: bool = True
+) -> list[str] | None:
     """Screen *host* and return the addresses a connection may pin to.
 
     The connect-time arm consumed by the pinning transport
@@ -506,7 +522,7 @@ def screen_and_resolve(host: str, port: int | None = None) -> list[str] | None:
     succeeds naturally). Raises :class:`TargetDestinationBlockedError`
     identically to :func:`assert_public_destination`.
     """
-    return _screen(host, port)
+    return _screen(host, port, use_embedded_port=use_embedded_port)
 
 
 async def assert_public_destination_async(host: str, port: int | None = None) -> None:

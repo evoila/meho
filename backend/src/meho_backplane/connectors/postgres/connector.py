@@ -129,13 +129,15 @@ class PostgresConnector(Connector):
     product loses the resolver tie-break. ``supported_version_range`` is the PostgreSQL releases the
     vendor still supports (15 to 18); CI runs the container tests on 16, 17 and
     18. The catalog + statistics views this connector reads are stable across
-    them.
+    them. ``strict_version_range`` makes the fallback registration refuse a
+    target whose known version is outside the range.
     """
 
     product = "postgres"
     version = "16"
     impl_id = "postgres-wire"
     supported_version_range = ">=15,<19"
+    strict_version_range = True
     priority = 1
 
     # ------------------------------------------------------------------

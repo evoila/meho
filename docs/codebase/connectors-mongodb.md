@@ -1,4 +1,4 @@
-# Connector: mongodb (MongoDB 5–8, read-only)
+# Connector: mongodb (MongoDB 7–8, read-only)
 
 ## Overview
 
@@ -227,3 +227,6 @@ CI runs the container tests on MongoDB 7 and 8
 (`backend/tests/integration/test_connectors_mongodb_container.py`). MongoDB 9
 stays outside the range until a CI run on 9 is green. A target detected as
 MongoDB 5 or 6 is not picked; the error names the range.
+`strict_version_range = True` makes the fallback registration `("mongodb",
+"", "")` check the range too. It still serves a target whose version is not
+known yet, and a probe still finds the connector.

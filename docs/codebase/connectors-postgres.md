@@ -1,4 +1,4 @@
-# Connector: postgres (PostgreSQL 13–17, read-only)
+# Connector: postgres (PostgreSQL 15–18, read-only)
 
 ## Overview
 
@@ -213,12 +213,10 @@ operator-less probe path resolves here), `tcp_unreachable` (`OSError`), and
 
 ## Known issues / scope
 
-- **Lower bound is PostgreSQL 13, not 12.** `postgres.replication` reads
-  `pg_stat_wal_receiver.written_lsn` / `flushed_lsn`, the columns that replaced
-  12's single `received_lsn` in PostgreSQL 13
-  (<https://www.postgresql.org/docs/13/monitoring-stats.html>). PostgreSQL 12 is
-  EOL (2024-11-21), so `supported_version_range` starts at `13` rather than
-  carrying a version-branched wal_receiver query.
+- **Lower bound is PostgreSQL 15.** The range follows the releases the vendor
+  still supports (see "Supported versions"). `postgres.replication` reads
+  `pg_stat_wal_receiver.written_lsn` / `flushed_lsn`, which every release in
+  the range has.
 - **A user-defined function is not inspected.** The deny list matches names
   in the statement text. A function a database owner wrote that calls an
   admin function inside is not seen; what it can do is bounded by the login
@@ -261,3 +259,6 @@ The range is `>=15,<19`: the PostgreSQL releases the vendor still supports.
 CI runs the container tests on PostgreSQL 16, 17 and 18
 (`backend/tests/integration/test_connectors_postgres_container.py`). A target
 detected as PostgreSQL 13 or 14 is not picked; the error names the range.
+`strict_version_range = True` makes the fallback registration `("postgres",
+"", "")` check the range too. It still serves a target whose version is not
+known yet, and a probe still finds the connector.

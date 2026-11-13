@@ -295,6 +295,50 @@ def test_supported_version_range_follows_vendor_support() -> None:
         assert Version(version) in spec, version
 
 
+@pytest.mark.parametrize("version", ["5.0.31", "6", "9"])
+def test_resolver_does_not_pick_mongodb_outside_the_range(version: str) -> None:
+    """AC: a target with a detected version outside the range is not picked.
+
+    The fallback registration still serves an unknown version, and a probe
+    still finds the connector, so the target can be probed after an upgrade.
+    """
+    from meho_backplane.connectors.resolver import NoMatchingConnector
+
+    target = _MongoTarget()
+    target.fingerprint = type("_FP", (), {"version": version})()
+    with pytest.raises(NoMatchingConnector, match=r"mongodb-wire supports >=7,<9"):
+        resolve_connector(target)
+    assert resolve_connector(target, for_probe=True) is MongoDbConnector
+
+
+@pytest.mark.parametrize("version", ["7.0.14", "8"])
+def test_resolver_picks_mongodb_inside_the_range(version: str) -> None:
+    """A detected version inside the range still resolves."""
+    target = _MongoTarget()
+    target.fingerprint = type("_FP", (), {"version": version})()
+    assert resolve_connector(target) is MongoDbConnector
+
+
+@pytest.mark.asyncio
+async def test_dispatch_on_old_mongodb_returns_no_connector_naming_the_range(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """AC: a call on a MongoDB 6 target is refused; the error names the range."""
+    await MongoDbConnector.register_operations()
+    target = _MongoTarget(secret_ref=None)
+    target.fingerprint = type("_FP", (), {"version": "6"})()
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id="mongodb.databases",
+        target=target,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.error.startswith("no_connector")
+    assert ">=7,<9" in str(result.extras["exception_message"])
+
+
 def test_connector_fit_names_the_range_for_an_old_mongodb() -> None:
     """AC: a target on MongoDB 6 is not served; the warning names the range."""
     from meho_backplane.checks.connector_fit import connector_fit

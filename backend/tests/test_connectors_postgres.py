@@ -297,6 +297,50 @@ def test_supported_version_range_follows_vendor_support() -> None:
         assert Version(version) in spec, version
 
 
+@pytest.mark.parametrize("version", ["13", "14.12", "19"])
+def test_resolver_does_not_pick_postgres_outside_the_range(version: str) -> None:
+    """AC: a target with a detected version outside the range is not picked.
+
+    The fallback registration still serves an unknown version, and a probe
+    still finds the connector, so the target can be probed after an upgrade.
+    """
+    from meho_backplane.connectors.resolver import NoMatchingConnector
+
+    target = _PgTarget()
+    target.fingerprint = type("_FP", (), {"version": version})()
+    with pytest.raises(NoMatchingConnector, match=r"postgres-wire supports >=15,<19"):
+        resolve_connector(target)
+    assert resolve_connector(target, for_probe=True) is PostgresConnector
+
+
+@pytest.mark.parametrize("version", ["15", "18.1"])
+def test_resolver_picks_postgres_inside_the_range(version: str) -> None:
+    """A detected version inside the range still resolves."""
+    target = _PgTarget()
+    target.fingerprint = type("_FP", (), {"version": version})()
+    assert resolve_connector(target) is PostgresConnector
+
+
+@pytest.mark.asyncio
+async def test_dispatch_on_old_postgres_returns_no_connector_naming_the_range(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """AC: a call on a PostgreSQL 13 target is refused; the error names the range."""
+    await PostgresConnector.register_operations()
+    target = _PgTarget(secret_ref=None)
+    target.fingerprint = type("_FP", (), {"version": "13"})()
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id="postgres.databases",
+        target=target,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.error.startswith("no_connector")
+    assert ">=15,<19" in str(result.extras["exception_message"])
+
+
 def test_connector_fit_names_the_range_for_an_old_postgres() -> None:
     """AC: a target on PostgreSQL 13 is not served; the warning names the range."""
     from meho_backplane.checks.connector_fit import connector_fit

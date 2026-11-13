@@ -8178,10 +8178,32 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-sensor-pause" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho sensor pause
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-sensor-results" class="md-nav__link">
     <span class="md-ellipsis">
       
         meho sensor results
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-sensor-resume" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho sensor resume
       
     </span>
   </a>
@@ -15604,10 +15626,32 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-sensor-pause" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho sensor pause
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-sensor-results" class="md-nav__link">
     <span class="md-ellipsis">
       
         meho sensor results
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-sensor-resume" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho sensor resume
       
     </span>
   </a>
@@ -21216,7 +21260,7 @@
 <li><code>--target</code> — Vault target slug to dispatch against (resolved server-side)</li>
 </ul>
 <h2 id="meho-sensor"><code>meho sensor</code><a class="headerlink" href="#meho-sensor" title="Permanent link">&para;</a></h2>
-<p>Manage deterministic-check sensors (list / create / edit / delete / results / ack)</p>
+<p>Manage deterministic-check sensors (list / create / edit / pause / resume / delete / results / ack)</p>
 <div class="highlight"><pre><span></span><code>meho sensor
 </code></pre></div>
 <h3 id="meho-sensor-ack"><code>meho sensor ack</code><a class="headerlink" href="#meho-sensor-ack" title="Permanent link">&para;</a></h3>
@@ -21296,6 +21340,15 @@
 <li><code>--status</code> — filter by sensor status: active | paused</li>
 <li><code>--tenant</code> — target tenant UUID (platform_admin only; operator role is locked to its own tenant)</li>
 </ul>
+<h3 id="meho-sensor-pause"><code>meho sensor pause</code><a class="headerlink" href="#meho-sensor-pause" title="Permanent link">&para;</a></h3>
+<p>Pause one sensor (tenant_admin)</p>
+<div class="highlight"><pre><span></span><code>meho sensor pause &lt;sensor_id&gt; [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--json</code> — emit raw Sensor JSON instead of the human summary</li>
+<li><code>--tenant</code> — target tenant UUID (platform_admin cross-tenant change)</li>
+</ul>
 <h3 id="meho-sensor-results"><code>meho sensor results</code><a class="headerlink" href="#meho-sensor-results" title="Permanent link">&para;</a></h3>
 <p>Show a sensor's per-tick evidence history (trend query)</p>
 <div class="highlight"><pre><span></span><code>meho sensor results &lt;sensor_id&gt; [flags]
@@ -21308,6 +21361,15 @@
 <li><code>--limit</code> — max rows per page (1..500, server default 100 when omitted)</li>
 <li><code>--state</code> — filter by state: ok | degraded | critical | unknown | skip</li>
 <li><code>--to</code> — inclusive upper bound on evaluated_at (RFC 3339, e.g. 2026-08-02T00:00:00Z)</li>
+</ul>
+<h3 id="meho-sensor-resume"><code>meho sensor resume</code><a class="headerlink" href="#meho-sensor-resume" title="Permanent link">&para;</a></h3>
+<p>Resume a paused sensor (tenant_admin)</p>
+<div class="highlight"><pre><span></span><code>meho sensor resume &lt;sensor_id&gt; [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--json</code> — emit raw Sensor JSON instead of the human summary</li>
+<li><code>--tenant</code> — target tenant UUID (platform_admin cross-tenant change)</li>
 </ul>
 <h2 id="meho-service-principals"><code>meho service-principals</code><a class="headerlink" href="#meho-service-principals" title="Permanent link">&para;</a></h2>
 <p>Manage service-principal operator surfaces</p>

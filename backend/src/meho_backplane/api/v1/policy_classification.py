@@ -41,6 +41,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.policy.bulk import (
     ClassificationEditError,
     ClassificationOffError,
+    one_thing_refusal,
     preview_classification_edit,
     request_classification_edit,
 )
@@ -54,6 +55,7 @@ from meho_backplane.policy.store import (
 __all__ = [
     "CLASSIFICATION_PATCH_RESPONSES",
     "ClassificationEditBody",
+    "ClassificationInForce",
     "ClassificationRequestResponse",
     "ConnectorClassificationBody",
     "classification_patch",
@@ -142,14 +144,29 @@ class ConnectorClassificationBody(BaseModel):
     always_wait: bool | None = None
 
 
+class ClassificationInForce(BaseModel):
+    """What applies to one operation: the code's value, overrides, classification, floors.
+
+    A floor (a minimum-level rule in the code) can keep a wait or a level
+    that the classification alone would not set.
+    """
+
+    risk: str
+    waits: bool
+
+
 class ClassificationValues(BaseModel):
-    """The classified values of one operation, before the floors."""
+    """The classified values of one operation, before the floors, and what is in force.
+
+    ``in_force`` is ``null`` when the operation's row is gone.
+    """
 
     category: str | None
     labels: dict[str, str]
     risk: str | None
     always_wait: bool
     rule_ref: str
+    in_force: ClassificationInForce | None
 
 
 class ClassificationPreviewRow(BaseModel):
@@ -304,7 +321,9 @@ def classification_patch(
 
     ``category`` and ``labels`` are a change of rights that waits for a
     second admin, so they cannot ride along with fields that are stored at
-    once: a body with both is refused with ``400``.
+    once: a body with both is refused with ``400``. The route edits one
+    group or operation, so an id with ``*``, ``?`` or ``[`` is refused with
+    ``400`` too.
     """
     category = getattr(body, "category", None)
     labels = getattr(body, "labels", None)
@@ -319,7 +338,18 @@ def classification_patch(
                 f"so send them in a request of their own, without {', '.join(mixed)}."
             ),
         )
+    _refuse_a_pattern(match)
     return ClassificationEdit(match=match, category=category, labels=labels, always_wait=None)
+
+
+def _refuse_a_pattern(match: dict[str, str]) -> None:
+    """``400`` when an id in the path of a one-thing route holds a wildcard."""
+    refusal = one_thing_refusal(match)
+    if refusal is not None:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=f"classification_wildcard: {refusal}",
+        )
 
 
 @router.get("", response_model=ClassificationListResponse)
@@ -398,8 +428,11 @@ async def classify_connector(
     """Ask to set the category, labels or "always wait" of one whole connector.
 
     Its groups and operations take these values unless they have their own.
-    Waits until another tenant admin approves it.
+    Waits until another tenant admin approves it. A connector id with
+    ``*``, ``?`` or ``[`` is refused with ``400``: this route edits one
+    connector, never a pattern.
     """
+    _refuse_a_pattern({"connector": connector_id})
     edit = ClassificationEdit(
         match={"connector": connector_id},
         category=body.category,

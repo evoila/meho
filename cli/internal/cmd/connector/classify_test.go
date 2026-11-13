@@ -57,9 +57,19 @@ func TestClassifyDryRunIsTheDefault(t *testing.T) {
 					"connector_id": "k8s-1.x", "group_key": "workload", "op_id": "k8s.deployment.scale",
 					"changes": true,
 					"before": map[string]any{"category": "other", "labels": map[string]any{}, "risk": nil,
-						"always_wait": false, "rule_ref": "taxonomy.default"},
+						"always_wait": true, "rule_ref": "taxonomy.default",
+						"in_force": map[string]any{"risk": "caution", "waits": true}},
 					"after": map[string]any{"category": "compute", "labels": map[string]any{"team": "ops"},
-						"risk": nil, "always_wait": false, "rule_ref": "tenant:classifications[0]"},
+						"risk": nil, "always_wait": false, "rule_ref": "tenant:classifications[0]",
+						"in_force": map[string]any{"risk": "caution", "waits": true}},
+				}, map[string]any{
+					"connector_id": "k8s-1.x", "group_key": "workload", "op_id": "k8s.deployment.gone",
+					"changes": true,
+					"before": map[string]any{"category": "other", "labels": map[string]any{}, "risk": nil,
+						"always_wait": false, "rule_ref": "taxonomy.default", "in_force": nil},
+					"after": map[string]any{"category": "compute", "labels": map[string]any{},
+						"risk": nil, "always_wait": false, "rule_ref": "tenant:classifications[0]",
+						"in_force": nil},
 				}},
 			})
 		},
@@ -80,7 +90,10 @@ func TestClassifyDryRunIsTheDefault(t *testing.T) {
 	if labels["team"] != "ops" {
 		t.Errorf("labels = %v", got["labels"])
 	}
-	for _, want := range []string{"Dry run: 1 operation(s) matched", "k8s.deployment.scale", "other -> compute", "--apply"} {
+	for _, want := range []string{
+		"Dry run: 1 operation(s) matched", "k8s.deployment.scale", "other -> compute", "--apply",
+		"IN FORCE", "true -> false", "caution, waits -> caution, waits", "- -> -",
+	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("output misses %q:\n%s", want, stdout)
 		}

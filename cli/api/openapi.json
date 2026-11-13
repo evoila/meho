@@ -29239,7 +29239,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 512,
             "title": "Work Ref",
             "default": ""
           },
@@ -29507,7 +29506,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 512,
             "title": "Work Ref",
             "default": ""
           }
@@ -29814,7 +29812,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -30579,7 +30576,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
           },

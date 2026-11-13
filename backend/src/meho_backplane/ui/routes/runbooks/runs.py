@@ -165,10 +165,6 @@ _PUBLISHED_PICKER_LIMIT: Final[int] = 200
 _MAX_SLUG_LENGTH: Final[int] = 256
 _MAX_TARGET_LENGTH: Final[int] = 512
 
-#: Cap on the ``work_ref`` form field (an opaque external change-ticket
-#: reference -- a GitHub issue ref, a Jira key, a CR id).
-_MAX_WORK_REF_LENGTH: Final[int] = 512
-
 #: Cap on the raw ``params`` JSON textarea before parsing. A substitution
 #: context is small; this guards the JSON parser against an unbounded paste.
 _MAX_PARAMS_JSON_LENGTH: Final[int] = 16_384
@@ -472,7 +468,7 @@ def register_runs_routes(router: APIRouter) -> None:
         template_slug: str = Form(default="", max_length=_MAX_SLUG_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
         params: str = Form(default="", max_length=_MAX_PARAMS_JSON_LENGTH),
-        work_ref: str = Form(default="", max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Form(default=""),
     ) -> HTMLResponse:
         form = _StartForm(
             template_slug=template_slug,

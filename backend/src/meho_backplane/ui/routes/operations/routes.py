@@ -265,12 +265,6 @@ _MAX_TARGET_LENGTH: Final[int] = 256
 #: at 256 KiB; this is the surface-specific, friendlier-error bound.
 _MAX_PARAMS_LENGTH: Final[int] = 64 * 1024
 
-#: Maximum ``work_ref`` length accepted on the run form. The work_ref is an
-#: opaque external change-ticket reference (``gh:evoila/meho#7``); a short
-#: bound rejects an oversized paste while leaving room for a real URI. The
-#: meta-tool treats it as an opaque string (no validation, #1657).
-_MAX_WORK_REF_LENGTH: Final[int] = 512
-
 #: Maximum ``preview_hash`` length accepted on the run form. The hash is a
 #: SHA-256 hex string (64 characters) from a prior preview of the same call;
 #: a destructive op needs it to wait for approval (#5015).
@@ -500,7 +494,7 @@ def build_operations_router() -> APIRouter:
         op_id: str = Form(max_length=_MAX_OP_ID_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
         params: str = Form(default="", max_length=_MAX_PARAMS_LENGTH),
-        work_ref: str = Form(default="", max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Form(default=""),
         preview_hash: str = Form(default="", max_length=_MAX_PREVIEW_HASH_LENGTH),
     ) -> HTMLResponse:
         """Dispatch the chosen op in-process; render the ``OperationResult`` inline.

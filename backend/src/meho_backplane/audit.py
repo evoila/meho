@@ -636,9 +636,11 @@ def _extract_work_ref(scope: Scope) -> str | None:
     §5.1, so the comparison lower-cases the wire name; the value is
     decoded as UTF-8 (latin-1 when it is not valid UTF-8) and stripped
     by :func:`decode_work_ref_header`, so a non-ASCII ticket id lands as
-    the client sent it. An absent header, or a present-but-empty value,
-    both return ``None`` so the audit row's ``work_ref`` lands NULL --
-    the correct quiet path for a call carrying no ticket.
+    the client sent it. An absent header returns ``None`` so the audit
+    row's ``work_ref`` lands NULL -- the quiet path for a call carrying no
+    ticket. A present header that is empty or blank breaks the rule and
+    raises :class:`~meho_backplane.work_ref.WorkRefError`, like any other
+    bad value.
     """
     for name, value in scope.get("headers", ()):
         if name.lower() == _WORK_REF_HEADER:

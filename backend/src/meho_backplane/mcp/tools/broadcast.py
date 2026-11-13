@@ -738,7 +738,6 @@ register_mcp_tool(
                 "work_ref": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": WORK_REF_MAX_CHARS,
                     "description": (
                         "Optional change-ticket reference, e.g. 'gh:org/repo#123'. "
                         "Set by the server inside a hosted run."

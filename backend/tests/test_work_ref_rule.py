@@ -10,15 +10,21 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import jsonschema
 import pytest
+from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from starlette.testclient import TestClient
 from starlette.types import Receive, Scope, Send
 
+from meho_backplane.api.request_validation import request_validation_exception_handler
 from meho_backplane.api.v1.broadcast import BroadcastAnnounceRequest
 from meho_backplane.audit import AuditMiddleware
+from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools import operations as mcp_operations
+from meho_backplane.mcp.tools import scheduler as _mcp_scheduler  # noqa: F401  (registers the tool)
 from meho_backplane.mcp.tools.agent_runs import _run_handler
 from meho_backplane.mcp.tools.broadcast import _parse_announce_claims
 from meho_backplane.operations._audit import decode_work_ref_header, work_ref_var
@@ -31,6 +37,10 @@ from meho_backplane.work_ref import WorkRefError, normalize_work_ref
 
 _NFD = unicodedata.normalize("NFD", "Änderung-7")
 _NFC = unicodedata.normalize("NFC", "Änderung-7")
+
+#: 130 composed characters written as 260 code points in NFD form: within
+#: the rule, but longer than 256 before NFC.
+_LONG_NFD = unicodedata.normalize("NFD", "Ä" * 130)
 
 _ZWSP = chr(0x200B)
 _RLO = chr(0x202E)
@@ -128,6 +138,30 @@ def test_mcp_announce_door() -> None:
         _parse_announce_claims({"work_ref": "CHG\n1"})
 
 
+@pytest.mark.parametrize(
+    ("tool", "path"),
+    [
+        ("meho_broadcast_announce", ("work_ref",)),
+        ("meho_scheduler_create", ("work_ref",)),
+    ],
+)
+def test_mcp_schema_counts_length_after_nfc(tool: str, path: tuple[str, ...]) -> None:
+    """The MCP input check leaves the length to the shared rule."""
+    entry = mcp_registry.get_tool(tool)
+    assert entry is not None
+    schema = entry[0].inputSchema["properties"]
+    for key in path:
+        schema = schema[key]
+    jsonschema.validate(_LONG_NFD, schema, cls=jsonschema.Draft202012Validator)
+
+
+def test_long_nfd_id_passes_the_mcp_and_model_doors() -> None:
+    nfc = "Ä" * 130
+    assert _parse_announce_claims({"work_ref": _LONG_NFD}).work_ref == nfc
+    assert _scheduler(_LONG_NFD).work_ref == nfc
+    assert form_work_ref(_LONG_NFD) == nfc
+
+
 def test_console_form_door() -> None:
     assert form_work_ref(None) is None
     assert form_work_ref("   ") is None
@@ -196,7 +230,9 @@ async def test_mcp_call_operation_cleans_work_ref() -> None:
 
 def test_header_decode_follows_the_rule() -> None:
     assert decode_work_ref_header(b"  CHG1 ") == "CHG1"
-    assert decode_work_ref_header(b"   ") is None
+    for blank in (b"", b"   "):
+        with pytest.raises(WorkRefError, match="empty"):
+            decode_work_ref_header(blank)
     assert decode_work_ref_header("Änderung-7".encode()) == "Änderung-7"
     with pytest.raises(WorkRefError):
         decode_work_ref_header(b"CHG\x001")
@@ -218,6 +254,24 @@ def test_header_door_refuses_before_the_request_runs() -> None:
     assert response.status_code == 400
     assert "work_ref" in response.json()["detail"]
     assert reached == []
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_header_door_refuses_a_blank_value(blank: str) -> None:
+    """A header that is sent but blank is refused; only a missing header means no ticket."""
+    reached: list[str | None] = []
+    client = _app_with_middleware(reached)
+    response = client.get("/mcp", headers={"Meho-Work-Ref": blank})
+    assert response.status_code == 400
+    assert "must not be empty" in response.json()["detail"]
+    assert reached == []
+
+
+def test_header_door_without_header_binds_nothing() -> None:
+    reached: list[str | None] = []
+    client = _app_with_middleware(reached)
+    assert client.get("/mcp").status_code == 200
+    assert reached == [None]
 
 
 def test_header_door_refuses_a_long_value() -> None:
@@ -251,3 +305,46 @@ def test_one_ticket_id_is_the_same_text_at_every_door() -> None:
         _parse_announce_claims({"work_ref": sent}).work_ref,
     }
     assert texts == {"CHG1"}
+
+
+# ---------------------------------------------------------------- unencodable input
+
+
+def _body_app() -> TestClient:
+    app = FastAPI()
+    app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
+
+    @app.post("/call")
+    async def _call(body: CallOperationBody) -> dict[str, str | None]:
+        return {"work_ref": body.work_ref}
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_body_with_a_lone_surrogate_gets_a_safe_422() -> None:
+    """A lone surrogate is valid JSON but cannot be sent back as UTF-8."""
+    response = _body_app().post(
+        "/call",
+        content=b'{"connector_id": "c", "op_id": "o", "work_ref": "\\ud800CHG"}',
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 422
+    (error,) = response.json()["detail"]
+    assert error["loc"] == ["body", "work_ref"]
+    assert "must not contain control or invisible characters" in error["msg"]
+    assert "U+D800" in error["msg"]
+    assert error["input"] == "\\ud800CHG"
+
+
+def test_body_422_is_unchanged_for_encodable_input() -> None:
+    response = _body_app().post("/call", json={"connector_id": "c", "op_id": "o", "work_ref": " "})
+    assert response.status_code == 422
+    (error,) = response.json()["detail"]
+    assert error["input"] == " "
+    assert "must not be empty" in error["msg"]
+
+
+def test_app_uses_the_safe_422_handler() -> None:
+    from meho_backplane.main import app
+
+    assert app.exception_handlers[RequestValidationError] is request_validation_exception_handler

@@ -174,24 +174,23 @@ work_ref_var: ContextVar[str | None] = ContextVar(
 )
 
 
-def decode_work_ref_header(raw: bytes) -> str | None:
-    """Return the text of a ``Meho-Work-Ref`` header value, or ``None``.
+def decode_work_ref_header(raw: bytes) -> str:
+    """Return the text of a ``Meho-Work-Ref`` header value.
 
     Clients send the header as UTF-8 (the CLI sends a ticket id such as
     ``Änderung-7`` as its UTF-8 bytes). ASGI hands the raw bytes over, so
     decode them as UTF-8 to keep the text the client sent. Bytes that are
     not valid UTF-8 fall back to latin-1, which maps every byte, so an
     older client's value still lands. The value follows the one rule for a
-    ticket id (:func:`meho_backplane.work_ref.normalize_work_ref`): a blank
-    value returns ``None`` so the row's ``work_ref`` stays NULL, and a value
-    that breaks the rule raises :class:`~meho_backplane.work_ref.WorkRefError`.
+    ticket id (:func:`meho_backplane.work_ref.normalize_work_ref`). A value
+    that breaks the rule, also an empty or blank value, raises
+    :class:`~meho_backplane.work_ref.WorkRefError`. A call without a ticket
+    sends no header at all.
     """
     try:
         decoded = raw.decode("utf-8")
     except UnicodeDecodeError:
         decoded = raw.decode("latin-1")
-    if not decoded.strip():
-        return None
     return normalize_work_ref(decoded)
 
 

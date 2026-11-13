@@ -149,7 +149,6 @@ from meho_backplane.ui.routes.work_ref_form import form_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = [
-    "WORK_REF_MAX",
     "cancel_run",
     "render_run_console",
     "stream_run_events",
@@ -157,12 +156,6 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
-
-#: Max length of the optional ``work_ref`` form field. Mirrors the
-#: change-ticket reference the run row stamps (work_ref I3-T2 #1662); a
-#: generous cap that bounds the form-body parse before it reaches the
-#: token mint.
-WORK_REF_MAX: Final[int] = 256
 
 #: Max length of the prompt textarea. Generous (a run prompt can be a
 #: multi-paragraph instruction) but bounded so a pathological submit

@@ -3508,9 +3508,9 @@ release. The rollback contract has the full checklist.</p>
 <h2 id="the-bootstrap-job-needs-manage-realm">The bootstrap Job needs <code>manage-realm</code><a class="headerlink" href="#the-bootstrap-job-needs-manage-realm" title="Permanent link">&para;</a></h2>
 <p>This applies to the built-in Keycloak (<code>coreKeycloak.enabled</code>).</p>
 <p>After every install and upgrade, the bootstrap Job keeps the approval
-sign-in up to date: it makes the login flow <code>meho approval sign-in</code> with
-the steps of the realm file, and binds the client <code>meho-cli-approve</code> to
-it. For this, its account <code>meho-admin</code> needs the realm-management role
+sign-in up to date: it makes the login flow <code>meho approval sign-in level</code>
+with the steps of the realm file, names the approval level in the realm,
+and binds the client <code>meho-cli-approve</code> to the flow. For this, its account <code>meho-admin</code> needs the realm-management role
 <code>manage-realm</code>. A new install gets the role from the realm file.</p>
 <p>An install whose first start was older, and had the company login off,
 may lack the role. What you see depends on when MEHO finds out.</p>
@@ -3539,7 +3539,7 @@ Helm says only:</p>
 install or upgrade:</p>
 <div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>-n<span class="w"> </span>&lt;namespace&gt;<span class="w"> </span>logs<span class="w"> </span>job/&lt;release&gt;-core-bootstrap
 </code></pre></div>
-<div class="highlight"><pre><span></span><code>core_bootstrap_failed: login flow meho approval sign-in: meho-admin may not read or change login flows, ...
+<div class="highlight"><pre><span></span><code>core_bootstrap_failed: login flow meho approval sign-in level: meho-admin may not read or change login flows, ...
 </code></pre></div>
 <p>With <code>helm upgrade --atomic</code>, Helm rolls the release back when the Job
 stops, so the old version keeps running until you add the role.</p>
@@ -3641,6 +3641,11 @@ groups and clients.</p>
 <td><strong>v0.47.0</strong></td>
 <td>With the built-in Keycloak, the bootstrap Job keeps the approval sign-in flow and its binding to <code>meho-cli-approve</code> up to date on every upgrade. It needs the role <code>manage-realm</code> on <code>meho-admin</code>, and it stops when the role is missing. <code>/api/v1/health</code> shows the state of the approval sign-in (<code>approvals.sign_in</code>), and <code>meho doctor</code> shows it in one line.</td>
 <td><strong>Built-in Keycloak, first started before v0.47.0 with the company login off:</strong> give <code>meho-admin</code> the role <code>manage-realm</code> before the upgrade, as <a href="#the-bootstrap-job-needs-manage-realm">The bootstrap Job needs <code>manage-realm</code></a> says. Otherwise the upgrade stops at the Job. <strong>Your own Keycloak:</strong> give the backplane's Keycloak admin client the realm-management role <code>view-realm</code>, so MEHO can check the approval sign-in, and make sure the flow is set up (<a href="../keycloak-realm/#the-approval-client-meho-cli-approve">The approval client</a>).</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>An approval sign-in carries its own level. The approval client <code>meho-cli-approve</code> signs in through the new login flow <code>meho approval sign-in level</code>, which gives the level <code>meho-approve</code> (level 2 in the realm attribute <code>acr.loa.map</code>). The new setting <code>APPROVAL_SIGN_IN_LEVEL</code> (chart <code>config.approvalSignInLevel</code>: <code>auto</code>, <code>off</code>, <code>observe</code> or <code>required</code>) says whether an approve on the command line or REST needs this level. The default <code>auto</code> requires the level as soon as MEHO's check of the approval sign-in (<code>approvals.sign_in.state</code> in <code>/api/v1/health</code>) is <code>ok</code>. MEHO only logs an approve without the level while the check shows that the realm does not give the level yet (<code>flow_missing</code>, <code>flow_differs</code>, <code>not_bound</code>), or while MEHO cannot read the realm at all (no admin client, or no right to read); <code>approvals.sign_in_level_warning</code> then says so. When the read of the realm fails (a timeout, Keycloak not reachable, an odd answer), MEHO requires the level and refuses an approve without it: "MEHO could not check the approval sign-in of the realm. Try again in a moment." The audit row of an approval records the mode in force (<code>level_in_force</code>). A CLI of an earlier release keeps working: Keycloak gives the approval level also when the CLI does not ask for it.</td>
+<td><strong>Built-in Keycloak:</strong> nothing to do. The bootstrap Job makes the flow, names the level and binds the client, so MEHO requires the level right after the upgrade. It stops with a message when another name already has level 2, or when <code>meho-cli-approve</code> has its own sign-in levels. With the company login on: once MEHO requires the level, a person with only a company account approves in the web interface. <strong>Your own Keycloak:</strong> 1. Run <code>keycloak.authflow.ensure_approval_flow</code> on the Keycloak target, or add the level and the flow by hand (<a href="../keycloak-realm/#the-approval-level">The approval level</a>). 2. Turn off direct grant and device grant on <code>meho-cli-approve</code>. 3. Give MEHO's Keycloak admin client <code>view-realm</code>, so MEHO can check the realm. 4. Check that <code>approvals.sign_in.state</code> is <code>ok</code> and <code>approvals.sign_in_level_warning</code> is empty (or run <code>meho doctor</code>). Until then MEHO only logs an approve without the level, except after a failed read of the realm. A person with only a company account approves in the web interface.</td>
 </tr>
 <tr>
 <td><strong>v0.47.0</strong></td>

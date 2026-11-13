@@ -3495,9 +3495,14 @@ that system. When you use your Keycloak in place of MEHO's, set the same
 rows in the realm <code>meho</code>.</p>
 <h2 id="5-check-the-approval-sign-in-required">5. Check the approval sign-in (required)<a class="headerlink" href="#5-check-the-approval-sign-in-required" title="Permanent link">&para;</a></h2>
 <p><code>meho approvals approve</code> signs in through its own login flow in realm
-<code>meho</code>: <code>meho approval sign-in</code>, bound to the client <code>meho-cli-approve</code>.
-The flow asks for the password, and for the one-time code when the person
-has set one up. It has no other step. Every install needs this flow and
+<code>meho</code>: <code>meho approval sign-in level</code>, bound to the client
+<code>meho-cli-approve</code>. The flow asks for the password, and for the one-time
+code when the person has set one up. It has no other step. It gives the
+sign-in the approval level <code>meho-approve</code> (level 2 of the realm's sign-in
+levels); a sign-in through your company login does not get it. With the
+default <code>APPROVAL_SIGN_IN_LEVEL=auto</code>, MEHO requires the level as soon as
+its check of the approval sign-in is <code>ok</code>
+(<a href="../../keycloak-realm/#the-approval-level">The approval level</a>). Every install needs this flow and
 its binding.</p>
 <ul>
 <li><strong>MEHO's built-in Keycloak in front of yours (this page):</strong> the install

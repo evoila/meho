@@ -134,7 +134,9 @@ and subject. Example with made-up names:
   `no_account`, `disabled_in_meho`. `assigned_elsewhere_in_meho`,
   `ended_in_meho` and `disabled_in_meho` mean MEHO holds a newer record. The
   import never brings back a disabled person, an old owner, or an assignment
-  or membership that an administrator ended. A `write_failed`
+  or membership that an administrator ended. Each of these conflicts
+  starts with "MEHO record is newer" and names both values ("MEHO: ...
+  Import: ..."). A `write_failed`
   conflict lists a lab whose transaction failed.
 - The preview (the approval card, `preview_operation`) plans with the same
   code and writes nothing. Apply writes one transaction per lab and uses the

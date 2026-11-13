@@ -50,6 +50,7 @@
   "tests/integration/test_retrieve_principal_isolation_e2e.py": 4.35,
   "tests/integration/test_runbook_retry_overlap_pg.py": 5.98,
   "tests/integration/test_scheduler_vault_credentials_dev_e2e.py": 11.34,
+  "tests/integration/test_service_principal_recipe.py": 33.02,
   "tests/integration/test_tenant_isolation.py": 5.79,
   "tests/integration/test_tenant_operation_settings_pg.py": 2.78,
   "tests/integration/test_tenant_row_authoritative_pg.py": 3.26,

@@ -15,8 +15,9 @@ What is true with this feature:
 - A session that is still open can be uploaded again and again. MEHO adds
   only the new bytes. The index row says whether the session is open,
   ended or unfinished.
-- Admins list, read and delete sessions with `meho sessions list`, `show`
-  and `delete`.
+- Admins list, read, download and delete sessions with `meho sessions
+  list`, `show`, `get` and `delete`. `list --since --until` shows the
+  sessions of one week (or any other time).
 - A cleanup job removes sessions older than the tenant's retention period,
   with their files.
 - Every upload, read and delete writes an audit row.
@@ -214,12 +215,42 @@ upload as in quarantine.
   with filters `project` and `state`. The answer is
   `{items, next_cursor}`; follow `next_cursor` to read every page.
   `meho sessions list --all` does that.
+- The time filter: `since` and `until` (ISO 8601 with a time zone; a
+  time without one is `422 since_needs_time_zone` or
+  `until_needs_time_zone`, and `since` after `until` is
+  `422 since_after_until`). A session matches when its last upload is at
+  or after `since` and it started before `until`. A session without a
+  start time counts from its first upload. So a session that started
+  before the week and got an upload in it is part of the week.
+  `meho sessions list --since <time> --until <time>` sends both.
 - `GET /api/v1/sessions/{session_id}` returns the index row, the file
   hashes and every upload.
 - `GET /api/v1/sessions/{session_id}/uploads/{seq}` returns the stored
   archive of one upload. Put the tails of all uploads together in `seq`
   order to get the whole (checked) files; each upload row says where its
   tail starts.
+- `meho sessions get <session-id> <folder>` does that
+  (`cli/internal/cmd/sessions/get.go`, `assemble.go`):
+  1. It reads the session (`show`), then downloads every upload in `seq`
+     order. Each download writes its own audit row on the server.
+  2. It checks each archive: the hash must match the upload row, and the
+     archive must hold exactly the files the row names. Like the server,
+     it refuses a link or device, a path with `..`, a leading `/`, a
+     backslash or a control character, and a path that comes twice.
+  3. It joins the tails of each file. The `offset` and `added` of a row
+     count the uploaded bytes, before the secret check, so they only
+     prove that no tail is missing: each tail must start where the last
+     one ended. The checked tails are joined as they are.
+  4. Only when every check passed, it writes the files under
+     `<folder>/<session-id>/`, with the paths of the archive. The writes
+     go through `os.Root`, so no write leaves that folder.
+
+  A quarantined upload that the caller may not open (`403
+  session_upload_quarantined`) is skipped, and the command says so. A
+  file that has a part in a skipped upload is written only up to that
+  part and is marked incomplete; when its first part is skipped, it is
+  not written. `--json` prints each file with `bytes`, `written`,
+  `complete` and `missing_uploads`, and the skipped uploads.
 - `DELETE /api/v1/sessions/{session_id}` locks the session row (an upload
   locks it too), deletes the files, then the rows. So an upload at the same
   time ends before the files are listed, or waits until the rows are gone.
@@ -403,6 +434,10 @@ console follows them live through `GET /ui/agents/runs/{handle}/events`
   `backend/tests/test_hosted_run_events.py`,
   `backend/tests/test_session_store_units.py`,
   `backend/tests/test_session_store_worker.py`,
+  `backend/tests/test_session_store_week_read.py`,
+  `cli/internal/cmd/sessions/sessions_test.go`,
+  `cli/internal/cmd/sessions/get_test.go`,
   `backend/tests/migrations/test_migration_0152_create_agent_session_store.py`.
 - boto3 S3 client: <https://docs.aws.amazon.com/boto3/latest/reference/services/s3.html>
 - botocore `Config`: <https://docs.aws.amazon.com/botocore/latest/reference/config.html>
+- Go `os.Root`: <https://pkg.go.dev/os#Root>

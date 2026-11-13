@@ -10601,7 +10601,7 @@
           "sessions"
         ],
         "summary": "List Agent Sessions",
-        "description": "List the tenant's sessions, newest upload first.",
+        "description": "List the tenant's sessions, newest upload first.\n\nWith ``since`` and ``until`` (ISO 8601, with a time zone) only the\nsessions active in that time: the last upload is at or after\n``since``, and the start is before ``until``.",
         "operationId": "list_agent_sessions_api_v1_sessions_get",
         "parameters": [
           {
@@ -10652,6 +10652,32 @@
               "nullable": true,
               "title": "Cursor"
             }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "description": "Only sessions with an upload at or after this time.",
+              "title": "Since"
+            },
+            "description": "Only sessions with an upload at or after this time."
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "description": "Only sessions that started before this time.",
+              "title": "Until"
+            },
+            "description": "Only sessions that started before this time."
           },
           {
             "name": "authorization",

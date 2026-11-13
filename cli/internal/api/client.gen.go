@@ -13791,11 +13791,17 @@ type RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostP
 
 // ListAgentSessionsApiV1SessionsGetParams defines parameters for ListAgentSessionsApiV1SessionsGet.
 type ListAgentSessionsApiV1SessionsGetParams struct {
-	Project       *string                                       `form:"project,omitempty" json:"project,omitempty"`
-	State         *ListAgentSessionsApiV1SessionsGetParamsState `form:"state,omitempty" json:"state,omitempty"`
-	Limit         *int                                          `form:"limit,omitempty" json:"limit,omitempty"`
-	Cursor        *string                                       `form:"cursor,omitempty" json:"cursor,omitempty"`
-	Authorization *string                                       `json:"authorization,omitempty"`
+	Project *string                                       `form:"project,omitempty" json:"project,omitempty"`
+	State   *ListAgentSessionsApiV1SessionsGetParamsState `form:"state,omitempty" json:"state,omitempty"`
+	Limit   *int                                          `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor  *string                                       `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Since Only sessions with an upload at or after this time.
+	Since *time.Time `form:"since,omitempty" json:"since,omitempty"`
+
+	// Until Only sessions that started before this time.
+	Until         *time.Time `form:"until,omitempty" json:"until,omitempty"`
+	Authorization *string    `json:"authorization,omitempty"`
 }
 
 // ListAgentSessionsApiV1SessionsGetParamsState defines parameters for ListAgentSessionsApiV1SessionsGet.
@@ -39207,6 +39213,38 @@ func NewListAgentSessionsApiV1SessionsGetRequest(server string, params *ListAgen
 		if params.Cursor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Until != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "until", runtime.ParamLocationQuery, *params.Until); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

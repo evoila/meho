@@ -7,7 +7,8 @@
   (``multipart/form-data``: the ``archive`` file and the session fields).
   Every person of the tenant may upload their own sessions, one at a time.
 * ``GET /api/v1/sessions`` -- list the tenant's sessions (role
-  ``operator`` and up).
+  ``operator`` and up), optionally only those of one time window
+  (``since`` / ``until``).
 * ``GET /api/v1/sessions/{session_id}`` -- one session with its file
   hashes and uploads (``operator`` and up).
 * ``GET /api/v1/sessions/{session_id}/uploads/{seq}`` -- the stored archive
@@ -22,7 +23,8 @@ Only a person may call these routes. Errors: ``404 session_not_found``
 (also for another tenant's session), ``409 session_conflict`` /
 ``session_owned_by_another_person`` / ``session_upload_in_progress`` /
 ``session_is_a_hosted_run`` (the session id is a hosted agent run's),
-``413 session_archive_too_large``, ``422 archive_*``, ``429
+``413 session_archive_too_large``, ``422 archive_*`` /
+``since_after_until`` / ``*_needs_time_zone``, ``429
 session_upload_already_running`` / ``session_uploads_busy``, ``503
 session_store_not_configured``, ``502 session_store_unavailable``. See
 ``docs/codebase/session-store.md``.
@@ -60,6 +62,7 @@ from meho_backplane.session_store.schemas import (
 from meho_backplane.session_store.service import (
     QuarantinedError,
     SessionNotFoundError,
+    SessionWindow,
     delete_session,
     get_retention,
     list_sessions,
@@ -225,13 +228,30 @@ async def list_agent_sessions(
     state: Annotated[SessionState | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query(pattern=r"^[0-9]{1,9}$")] = None,
+    since: Annotated[
+        datetime | None, Query(description="Only sessions with an upload at or after this time.")
+    ] = None,
+    until: Annotated[
+        datetime | None, Query(description="Only sessions that started before this time.")
+    ] = None,
 ) -> SessionListResponse:
-    """List the tenant's sessions, newest upload first."""
+    """List the tenant's sessions, newest upload first.
+
+    With ``since`` and ``until`` (ISO 8601, with a time zone) only the
+    sessions active in that time: the last upload is at or after
+    ``since``, and the start is before ``until``.
+    """
+    window = SessionWindow(since=_aware(since, "since"), until=_aware(until, "until"))
+    if window.since is not None and window.until is not None and window.since > window.until:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT, detail="since_after_until"
+        )
     return await list_sessions(
         operator,
         path=request.url.path,
         project=project,
         state=state,
+        window=window,
         limit=limit,
         offset=int(cursor) if cursor else 0,
     )

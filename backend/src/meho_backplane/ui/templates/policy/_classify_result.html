@@ -1,0 +1,106 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Result fragment of the classify page (#6038). One of three states:
+
+    * ``error``     -- str: the edit is refused; nothing was asked.
+    * ``preview``   -- dict: the dry run (``ClassificationPreview.to_dict``):
+                       every matched operation, before and after. With no
+                       conflict it carries a button that asks for the change
+                       with the same fields (``form``).
+    * ``requested`` -- dict: {status, approval_request_id, error,
+                       matched_operations}: the answer to the request.
+
+  The ask button's form has no ``hx-headers``, and it does not inherit the
+  page form's: ``#classify-result`` sits next to that form, not inside it.
+  It still sends the CSRF token, because ``static/src/app/csrf-token.js``
+  adds the ``X-CSRF-Token`` header from the ``meho_csrf`` cookie to every
+  htmx request.
+
+  "In force" is what applies with the values: the code's value, the
+  overrides and the minimum-level rules (floors) included. So a floor that
+  keeps a wait still shows "waits" when "Always wait" goes to "no".
+-#}
+{%- macro in_force(values) -%}
+  {%- if values -%}
+    {{ values.risk }}, {{ "waits" if values.waits else "runs at once" }}
+  {%- else -%}
+    -
+  {%- endif -%}
+{%- endmacro -%}
+{% if error %}
+  <p class="alert alert-error text-sm" data-classify-error>{{ error }}</p>
+{% elif requested %}
+  {% if requested.status == "awaiting_approval" %}
+    <p class="alert alert-info text-sm" data-classify-requested data-approval-request-id="{{ requested.approval_request_id }}">
+      The change for {{ requested.matched_operations }} operation(s) waits until
+      another tenant admin approves it.
+      <a class="link" href="/ui/approvals">Open the approvals page</a>
+    </p>
+  {% else %}
+    <p class="alert alert-warning text-sm" data-classify-request-status="{{ requested.status }}">
+      {{ requested.error or requested.status }}
+    </p>
+  {% endif %}
+{% elif preview %}
+  <div class="space-y-2" data-classify-preview-result
+       data-matched="{{ preview.matched_operations }}" data-changed="{{ preview.changed_operations }}">
+    <p class="text-sm">
+      The entry matches {{ preview.matched_operations }} operation(s);
+      {{ preview.changed_operations }} of them change. Nothing is stored yet.
+    </p>
+    {% if preview.conflict %}
+      <p class="alert alert-error text-sm" data-classify-conflict>{{ preview.conflict }}</p>
+    {% elif preview.matched_operations == 0 %}
+      <p class="alert alert-warning text-sm" data-classify-no-match>
+        The match finds no operation your tenant can see.
+      </p>
+    {% else %}
+      <form hx-post="/ui/policy/classify/request" hx-target="#classify-result" hx-swap="innerHTML"
+            hx-confirm="Ask for this change of {{ preview.matched_operations }} operation(s)? Another tenant admin must approve it.">
+        {% for name, value in form.items() %}
+          <input type="hidden" name="{{ name }}" value="{{ value }}" />
+        {% endfor %}
+        <button type="submit" class="btn btn-sm btn-warning" data-classify-request>Ask for this change</button>
+      </form>
+    {% endif %}
+    <div class="overflow-x-auto">
+      <table class="table table-sm" data-classify-preview-table>
+        <thead>
+          <tr>
+            <th>Connector</th>
+            <th>Group</th>
+            <th>Operation</th>
+            <th>Category</th>
+            <th>Labels</th>
+            <th>Always wait</th>
+            <th>In force</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in preview.operations %}
+            <tr data-classify-row data-op-id="{{ row.op_id }}" data-changes="{{ 'true' if row.changes else 'false' }}"
+                class="{{ '' if row.changes else 'opacity-60' }}">
+              <td class="font-mono text-xs">{{ row.connector_id }}</td>
+              <td class="font-mono text-xs">{{ row.group_key or "" }}</td>
+              <td class="font-mono text-xs">{{ row.op_id }}</td>
+              <td class="text-xs">{{ row.before.category or "-" }} &rarr; {{ row.after.category or "-" }}</td>
+              <td class="text-xs">
+                {% for key, value in row.before.labels.items() %}{{ key }}={{ value }} {% endfor %}
+                &rarr;
+                {% for key, value in row.after.labels.items() %}{{ key }}={{ value }} {% endfor %}
+              </td>
+              <td class="text-xs">
+                {{ "yes" if row.before.always_wait else "no" }} &rarr; {{ "yes" if row.after.always_wait else "no" }}
+              </td>
+              <td class="text-xs" data-classify-in-force>
+                {{ in_force(row.before.in_force) }} &rarr; {{ in_force(row.after.in_force) }}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endif %}

@@ -107,7 +107,7 @@ func TestBootstrap_DryRunOnFreshRealmCreatesNothing(t *testing.T) {
 		"[would create] client meho-mcp ",
 		"[would create] mapper tenant-id ",
 		"[would create] group MEHO-Admins ",
-		`[would create] login flow "meho approval sign-in"`,
+		`[would create] login flow "meho approval sign-in level"`,
 	} {
 		if eventWith(res, want) == "" {
 			t.Errorf("no event %q in %v", want, res.MapperEventsLog)
@@ -196,7 +196,7 @@ func TestBootstrap_DryRunOnHalfMadeFlow(t *testing.T) {
 	fake := newFakeKeycloak()
 	fake.flows[approvalFlowAlias] = &fakeFlow{ID: "flow-1", TopLevel: true}
 	res, _ := runDryRun(t, fake, fullOpts())
-	want := `[would update] login flow "meho approval sign-in": finished`
+	want := `[would update] login flow "meho approval sign-in level": finished`
 	if eventWith(res, want) == "" {
 		t.Errorf("no event %q in %v", want, res.MapperEventsLog)
 	}
@@ -268,15 +268,15 @@ func TestBootstrap_DryRunDoesNotBindAFlowWithOtherSteps(t *testing.T) {
 	flowLines := func(res *Result) []string {
 		var lines []string
 		for _, e := range res.MapperEventsLog {
-			if strings.Contains(e, "login flow") {
+			if strings.Contains(e, approvalFlowAlias) {
 				lines = append(lines, dryRunEvent(e))
 			}
 		}
 		return lines
 	}
 	want := []string{
-		`[would update] login flow "meho approval sign-in": finished the steps an earlier run left out`,
-		`[skip] login flow "meho approval sign-in" has other steps than the bootstrap makes; the approval client is not bound to it`,
+		`[would update] login flow "meho approval sign-in level": finished the steps an earlier run left out`,
+		`[skip] login flow "meho approval sign-in level" has other steps than the bootstrap makes; the approval client is not bound to it`,
 	}
 	dry, _ := runDryRun(t, seed(), fullOpts())
 	if got := flowLines(dry); !slices.Equal(got, want) {

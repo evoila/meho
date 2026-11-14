@@ -926,6 +926,7 @@ data:
   DISPATCH_MAX_CONCURRENT_OPS: "16"
   MCP_SESSION_START_LIMIT_PER_MINUTE: "60"
   APPROVAL_ONE_TIME_CODE_ACR_VALUES: ""
+  APPROVAL_SIGN_IN_LEVEL: "auto"
   # Switches for what the agent sees, off by default until model tests
   # show they help: team knowledge before an operation and in the start
   # text, the similar-entry check on a new knowledge entry, and short
@@ -933,6 +934,14 @@ data:
   TEAM_KNOWLEDGE_RECALL: "false"
   KB_SIMILAR_CHECK: "false"
   MCP_SHORT_TOOL_TEXTS: "false"
+  # Claude Code and Claude Desktop sign in with their own login client.
+  MCP_CLIENT_PER_TOOL_KIND: "false"
+  # Category, labels and "always wait" on connectors, groups and
+  # operations. Off by default.
+  POLICY_CLASSIFICATION: "false"
+  # The policy evaluator runs next to today's checks and logs every
+  # difference. It decides nothing. Off by default.
+  POLICY_ENGINE_SHADOW: "false"
   # The shared knowledge scope and the weekly knowledge upkeep. Rendered
   # always; the defaults match the backplane's own defaults (nothing
   # shared, upkeep on, once a week).

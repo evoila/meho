@@ -32,8 +32,8 @@ import (
 // fixture-bloat.
 type adminClient struct {
 	httpClient *http.Client
-	baseURL    string // e.g. "https://keycloak.evba.lab"
-	realm      string // target realm (where clients land), e.g. "evba"
+	baseURL    string // e.g. "https://keycloak.example.test"
+	realm      string // target realm (where clients land), e.g. "example"
 	token      string // master-realm admin access token
 	dryRun     bool   // writes are answered by dryRunTransport
 }
@@ -142,15 +142,18 @@ func newAdminClient(
 // "already exists" (409 / 404 on GET-by-id) or a real failure.
 //
 // pathRelative is appended after /admin/realms/{realm}/ — leading
-// slash is stripped so callers can pass either form.
+// slash is stripped so callers can pass either form. An empty
+// pathRelative is the realm itself.
 func (c *adminClient) do(
 	ctx context.Context,
 	method, pathRelative string,
 	body any,
 ) (int, []byte, error) {
-	endpoint := fmt.Sprintf(
-		"%s/admin/realms/%s/%s",
-		c.baseURL, c.realm, strings.TrimLeft(pathRelative, "/"))
+	endpoint := fmt.Sprintf("%s/admin/realms/%s", c.baseURL, c.realm)
+	if rel := strings.TrimLeft(pathRelative, "/"); rel != "" {
+		// An empty path is the realm itself, without a trailing slash.
+		endpoint += "/" + rel
+	}
 
 	var reader io.Reader
 	if body != nil {

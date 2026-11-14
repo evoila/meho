@@ -50,6 +50,7 @@ from typing import Final
 
 import structlog
 from fastapi import Depends, FastAPI, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -63,6 +64,7 @@ from meho_backplane.agents import (
     stop_grant_expiry_sweeper,
 )
 from meho_backplane.api.openapi_maturity import inject_maturity_extensions
+from meho_backplane.api.request_validation import request_validation_exception_handler
 from meho_backplane.api.v1.addon_capability import router as api_v1_addon_capability_router
 from meho_backplane.api.v1.addon_pairing import router as api_v1_addon_pairing_router
 from meho_backplane.api.v1.agent_budgets import router as api_v1_agent_budgets_router
@@ -115,6 +117,13 @@ from meho_backplane.api.v1.operation_overrides import (
 )
 from meho_backplane.api.v1.operation_runs import router as api_v1_operation_runs_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
+from meho_backplane.api.v1.policy import router as api_v1_policy_router
+from meho_backplane.api.v1.policy_classification import (
+    connector_router as api_v1_connector_classification_router,
+)
+from meho_backplane.api.v1.policy_classification import (
+    router as api_v1_policy_classification_router,
+)
 from meho_backplane.api.v1.read_docs import router as api_v1_read_docs_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_operation_picks import (
@@ -1066,6 +1075,9 @@ app.add_middleware(RequestBodyLimitMiddleware)
 # ``fastapi.HTTPException`` raises from route dependencies too (the
 # FastAPI handling-errors override pattern).
 app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
+# A 422 for a bad request body that encodes even when the refused input
+# holds a lone surrogate (FastAPI's stock handler answers that with a 500).
+app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
 
 app.include_router(health_router)
 app.include_router(first_start_router)
@@ -1140,6 +1152,10 @@ app.include_router(api_v1_tenants_router)
 # tenant_admin (own tenant) or platform_admin (several tenants); human-only
 # import. Operator-plane REST + CLI only; no MCP tool.
 app.include_router(api_v1_instance_settings_router)
+# The policy file (policy: v1): /api/v1/policy/validate, /import
+# (?preview=true), /export, /history. tenant_admin or platform_admin; the
+# import is human-only and waits for a second admin. REST + CLI only.
+app.include_router(api_v1_policy_router)
 # T3 (#2880) -- event_source registry admin surface at
 # /api/v1/event-sources*. Tenant-scoped CRUD (operator reads,
 # tenant_admin writes) the inbound webhook ingest (#2881) resolves a
@@ -1194,6 +1210,10 @@ app.include_router(api_v1_connectors_ingest_router)
 # #4711 -- the override report: operator overrides of risk levels and
 # approval flags, and the "operations running with reduced approval" list.
 app.include_router(api_v1_operation_overrides_router)
+# #6038 -- read and edit the classification of operations (category,
+# labels, "always wait"): dry run, then a request a second admin approves.
+app.include_router(api_v1_policy_classification_router)
+app.include_router(api_v1_connector_classification_router)
 # #5029 -- each tenant turns built-in operations on or off for itself.
 app.include_router(api_v1_connector_tenant_settings_router)
 # G4.1-T2 (#416) -- knowledge-base REST surface at /api/v1/kb*.
@@ -1561,8 +1581,8 @@ def build_openapi_schema() -> dict[str, object]:
     the ``product`` property on the ``TargetCreate`` request schema
     renders as a JSON Schema enum populated from the live connector
     registry. Without this hook the schema would surface ``product`` as
-    a free-form string — the dogfood signal 5 UX miss in
-    ``claude-rdc-hetzner-dc#697`` (operator typed ``'kubernetes'``,
+    a free-form string — the dogfood signal 5 UX miss
+    in consumer feedback (operator typed ``'kubernetes'``,
     resolver matched on ``'k8s'``, no early signal). Paired with the
     runtime 422 in :func:`~meho_backplane.api.v1.targets.create_target`
     (Options A + C from the task body, sharing one source-of-truth

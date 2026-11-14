@@ -58,6 +58,35 @@ Out of scope (honouring #1683's dispositions):
   `status="unavailable"` rather than fabricating one.
 - **Error-echo on the dispatch path** is deferred (see Known issues).
 
+### Typed writes, behind the `PREVIEW_TYPED_WRITES` switch (#5074)
+
+The backplane switch `PREVIEW_TYPED_WRITES` (an env var, off by default)
+widens the synthetic preview to more typed writes. It changes what an agent
+sees, so it stays off until a before-and-after measurement shows it helps.
+
+- **Off:** the same answers, the same `preview_hash` values and the same
+  tool texts as before the switch existed. The rules above hold.
+- **On:**
+  - A typed or composite op that is not a read previews, also when it does
+    not carry `requires_approval`. Example: `targets.register` runs at once
+    only from the web interface. A call with a token (CLI, MCP, an agent)
+    waits for approval. A `safe` typed op is a read and stays `unavailable`.
+  - A credential-class op with its own preview builder previews too.
+    Example: `keycloak.user.reset_password`. The preview shows only the
+    builder's plan as `proposed_effect`. `redacted_body` is `null`: the
+    params are never copied. `params_digest` (a keyed digest of every param
+    value) keeps `preview_hash` bound to the params.
+  - A credential-class op with no builder of its own stays `unavailable`.
+  - Destructive and approval-gated ops give the same answer and the same
+    hash as with the switch off.
+  - The `preview_operation` tool text says the new rule (full and short
+    text). The registered text is the "off" text, so the reference docs
+    show it.
+- **Code:** `_is_previewable` and `is_credential_builder_op` in
+  `operations/_request_preview.py`; the tool text in
+  `mcp/tools/_preview_typed_writes_text.py`. Tests:
+  `tests/test_operations_preview_typed_writes.py`.
+
 ## Key types
 
 - `meho_backplane.operations._branches.IngestedRequest` — a frozen
@@ -109,6 +138,10 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │       error_code=target_connector_mismatch (same answer and order as
         │       /call: before the catalog choice and before the check before
         │       the wait for approval, no audit row, #5948)
+        ├─ the target's known version is outside its connector's
+        │       supported_version_range ? → status=error error_code=no_connector
+        │       (same answer and order as /call; the error names the range;
+        │       no audit row; operations/_target_version_range.py)
         ├─ choose_catalog_for_target → sibling fits ? → use the sibling (#3600)
         │       → refused ? → status=error error_code=unqualified_target_version
         │       (same reason and target fields as dispatch, no audit row, #4984;

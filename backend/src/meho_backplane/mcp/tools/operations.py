@@ -66,14 +66,19 @@ from meho_backplane.mcp.registry import (
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.short_texts import with_short_text
 from meho_backplane.mcp.tools._call_operation_async import poll_call, submit_async_call
+from meho_backplane.mcp.tools._call_operation_reveal import (
+    APPROVAL_REQUEST_ID,
+    fetch_reveal_over_mcp,
+    reveal_fetch_for_settings,
+)
 from meho_backplane.mcp.tools._operation_recall import (
     RECALL_OUTPUT_SCHEMA,
     recall_schema_for_settings,
     with_recall,
 )
+from meho_backplane.mcp.tools._preview_typed_writes_text import preview_tool_for_settings
 from meho_backplane.mcp.tools._short_tool_texts import (
     CALL_OPERATION_SHORT,
-    PREVIEW_OPERATION_SHORT,
     SEARCH_OPERATIONS_SHORT,
 )
 from meho_backplane.operation_picks.recorder import (
@@ -86,6 +91,7 @@ from meho_backplane.operations._contract_guidance import (
     GUIDANCE_MAX_CHARS,
     GUIDANCE_VALUE_MAX_CHARS,
 )
+from meho_backplane.operations._secret_values import REVEAL_NOT_IN_BACKGROUND, asks_reveal
 from meho_backplane.operations.meta_tools import (
     SEARCH_NARROWING_MAX,
     SEARCH_OUTCOMES,
@@ -101,6 +107,7 @@ from meho_backplane.operations.operation_run_service import MAX_RUN_WAIT_SECONDS
 from meho_backplane.recall import RECALL_KEY
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import with_data_notice
+from meho_backplane.work_ref import WorkRefError, normalize_work_ref_input
 
 __all__: list[str] = []
 
@@ -180,6 +187,24 @@ async def _search_operations_handler(
         raise McpInvalidParamsError(str(exc), data=exc.as_error_data()) from exc
 
 
+def _clean_work_ref_argument(call_arguments: dict[str, Any]) -> None:
+    """Clean the ``work_ref`` input with the one shared rule, or refuse the call.
+
+    This runs before anything else happens with the call: no target is
+    resolved, no policy check runs, and no row is written.
+    """
+    if call_arguments.get("work_ref") is None:
+        return
+    try:
+        call_arguments["work_ref"] = normalize_work_ref_input(call_arguments["work_ref"])
+    except WorkRefError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "invalid_work_ref"}) from exc
+    if not isinstance(call_arguments["work_ref"], str):
+        raise McpInvalidParamsError(
+            "work_ref must be a string", data={"reason": "invalid_work_ref"}
+        )
+
+
 async def _call_operation_handler(
     operator: Operator,
     arguments: dict[str, Any],
@@ -195,9 +220,17 @@ async def _call_operation_handler(
     (:mod:`meho_backplane.mcp.tools._operation_recall`), also when it
     starts in the background with ``async: true``. A check of a run with
     ``run_id`` does not. Each call (not a check) writes one call record
-    (:mod:`meho_backplane.operation_picks`).
+    (:mod:`meho_backplane.operation_picks`). With ``MCP_REVEAL_FETCH`` on,
+    ``approval_request_id`` fetches the value of the caller's approved
+    secret reveal instead (:mod:`._call_operation_reveal`); it writes no
+    call record. A reveal call cannot run in the background:
+    ``reveal_secret: true`` with ``async: true`` is refused
+    (``reveal_secret_with_async``).
     """
+    if APPROVAL_REQUEST_ID in arguments:
+        return await fetch_reveal_over_mcp(operator, arguments)
     call_arguments = dict(arguments)
+    _clean_work_ref_argument(call_arguments)
     run_async = bool(call_arguments.pop("async", False))
     run_id = call_arguments.pop("run_id", None)
     wait_seconds = call_arguments.pop("wait_seconds", None)
@@ -214,6 +247,10 @@ async def _call_operation_handler(
             )
         return with_data_notice(
             await poll_call(operator, call_arguments, str(run_id), wait_seconds=wait_seconds or 0)
+        )
+    if run_async and asks_reveal(call_arguments.get("params")):
+        raise McpInvalidParamsError(
+            REVEAL_NOT_IN_BACKGROUND, data={"reason": "reveal_secret_with_async"}
         )
     if run_async:
         result = await recorded_background_call(
@@ -662,6 +699,18 @@ register_mcp_tool(
 )
 
 
+_call_operation_short_text = with_short_text(CALL_OPERATION_SHORT, then=recall_schema_for_settings)
+
+
+def _call_operation_for_settings(definition: ToolDefinition, operator: Operator) -> ToolDefinition:
+    """``call_operation`` as shown under the current settings.
+
+    The fetch text of ``MCP_REVEAL_FETCH`` is added last, so the short text
+    of ``MCP_SHORT_TOOL_TEXTS`` does not replace it.
+    """
+    return reveal_fetch_for_settings(_call_operation_short_text(definition, operator))
+
+
 register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
@@ -884,7 +933,7 @@ register_mcp_tool(
         # full-detail shape for the envelope row — operators can still
         # see the request params on the SSE feed.
         op_class="tool_call",
-        for_settings=with_short_text(CALL_OPERATION_SHORT, then=recall_schema_for_settings),
+        for_settings=_call_operation_for_settings,
     ),
     handler=_call_operation_handler,
 )
@@ -1100,7 +1149,7 @@ register_mcp_tool(
         # ``call_operation``'s ``"tool_call"`` envelope, which wraps a
         # dispatch whose true class lives on the inner DISPATCH row).
         op_class="read",
-        for_settings=with_short_text(PREVIEW_OPERATION_SHORT, then=recall_schema_for_settings),
+        for_settings=preview_tool_for_settings,
     ),
     handler=_preview_operation_handler,
 )

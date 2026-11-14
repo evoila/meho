@@ -122,6 +122,7 @@ from meho_backplane.mcp.short_texts import (
     parse_tool_texts,
 )
 from meho_backplane.mcp.tenant_gate import allowed_without_tenant
+from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operations.caller_gone import watch_caller
 from meho_backplane.request_usage.collector import (
     note_request_fallback_status,
@@ -1000,8 +1001,8 @@ def _issue_mcp_session_id(response: Response) -> uuid.UUID:
     G0.15-T4 (#1213) closed the regression where MEHO's chain captured
     the inbound header into the structlog contextvar (and from there
     into ``audit_log.agent_session_id``) but never **issued** one to
-    begin with. The visible symptom on `claude-rdc-hetzner-dc#753`
-    finding 2 was eight Claude Code MCP rows with
+    begin with. The visible symptom in consumer
+    feedback finding 2 was eight Claude Code MCP rows with
     ``agent_session_id: null`` despite ``meho_status`` /
     ``/ready.features.audit_replay`` advertising a populated
     ``capture_mode`` — both surfaces correctly reported the **capture**
@@ -1184,6 +1185,22 @@ def _build_success_response(
         )
     response = JsonRpcResponse(id=request_id, result=result_body)
     return JSONResponse(content=_serialize_response(response))
+
+
+async def _dispatch_no_store(
+    jrpc: JsonRpcRequest,
+    is_notification: bool,
+    operator: Operator,
+) -> Response:
+    """Run :func:`_dispatch_to_handler`; a revealed secret value is never cached.
+
+    A tool whose answer carries a revealed secret value marks it inside
+    :func:`~meho_backplane.no_store.answer_scope`; that answer then says
+    ``Cache-Control: no-store`` (:mod:`meho_backplane.no_store`).
+    """
+    with answer_scope() as mark:
+        response = await _dispatch_to_handler(jrpc, is_notification, operator)
+    return set_no_store(response) if mark.holds_secret else response
 
 
 async def _dispatch_to_handler(
@@ -1460,7 +1477,7 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
     # #3696: the body is fully read here, so the watcher can notice a
     # caller that disconnects while a long tool call runs.
     async with watch_caller(request.receive):
-        response = await _dispatch_to_handler(jrpc, is_notification, operator)
+        response = await _dispatch_no_store(jrpc, is_notification, operator)
     issued = _maybe_issue_initialize_session_id(request, jrpc.method, is_notification, response)
     return await _audit_session_open(request, jrpc, operator, response, issued=issued)
 

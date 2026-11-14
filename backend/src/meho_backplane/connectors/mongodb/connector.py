@@ -119,13 +119,15 @@ class MongoDbConnector(Connector):
     ``1`` so a future ``GenericRestConnector`` auto-shim registering the same
     product loses the resolver tie-break. ``supported_version_range`` covers the
     maintained MongoDB releases; the diagnostic commands this connector reads
-    are stable across them.
+    are stable across them. ``strict_version_range`` makes the fallback
+    registration refuse a target whose known version is outside the range.
     """
 
     product = "mongodb"
     version = "7"
     impl_id = "mongodb-wire"
-    supported_version_range = ">=5,<9"
+    supported_version_range = ">=7,<9"
+    strict_version_range = True
     priority = 1
 
     # ------------------------------------------------------------------

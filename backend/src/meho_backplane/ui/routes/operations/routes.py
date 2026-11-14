@@ -193,6 +193,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operations._lookup import enabled_for_tenant_clause, parse_connector_id
 from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import (
@@ -219,6 +220,7 @@ from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
     resolve_role_probe,
 )
+from meho_backplane.ui.routes.work_ref_form import form_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_operations_router"]
@@ -262,12 +264,6 @@ _MAX_TARGET_LENGTH: Final[int] = 256
 #: an oversized paste. The CSRF middleware already caps the buffered body
 #: at 256 KiB; this is the surface-specific, friendlier-error bound.
 _MAX_PARAMS_LENGTH: Final[int] = 64 * 1024
-
-#: Maximum ``work_ref`` length accepted on the run form. The work_ref is an
-#: opaque external change-ticket reference (``gh:evoila/meho#7``); a short
-#: bound rejects an oversized paste while leaving room for a real URI. The
-#: meta-tool treats it as an opaque string (no validation, #1657).
-_MAX_WORK_REF_LENGTH: Final[int] = 512
 
 #: Maximum ``preview_hash`` length accepted on the run form. The hash is a
 #: SHA-256 hex string (64 characters) from a prior preview of the same call;
@@ -498,7 +494,7 @@ def build_operations_router() -> APIRouter:
         op_id: str = Form(max_length=_MAX_OP_ID_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
         params: str = Form(default="", max_length=_MAX_PARAMS_LENGTH),
-        work_ref: str = Form(default="", max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Form(default=""),
         preview_hash: str = Form(default="", max_length=_MAX_PREVIEW_HASH_LENGTH),
     ) -> HTMLResponse:
         """Dispatch the chosen op in-process; render the ``OperationResult`` inline.
@@ -913,6 +909,11 @@ async def _render_call_result(
     A blank target field sends no target (see :func:`_form_target`), so a
     target-less op runs; an op that needs a target answers
     ``target_required``, shown as that inline ``400``.
+
+    A ``reveal_secret: true`` in ``params`` that shows the values at once
+    makes the page say ``Cache-Control: no-store`` and ``Pragma: no-cache``
+    (:mod:`meho_backplane.no_store`), so no browser or proxy keeps them.
+    Other pages keep the usual headers.
     """
     operator = await _resolve_operator(session)
 
@@ -929,7 +930,7 @@ async def _render_call_result(
     }
     # ``work_ref`` is an opaque per-op override; bind it only when non-empty so
     # a bare run does not clobber an ambient ``Meho-Work-Ref`` (#1657).
-    work_ref_value = work_ref.strip()
+    work_ref_value = form_work_ref(work_ref)
     if work_ref_value:
         arguments["work_ref"] = work_ref_value
     # The hash of the preview the run window showed. A destructive op needs it
@@ -939,7 +940,8 @@ async def _render_call_result(
     if preview_hash_value:
         arguments["preview_hash"] = preview_hash_value
 
-    envelope = await call_operation(operator, arguments)
+    with answer_scope() as mark:
+        envelope = await call_operation(operator, arguments)
     # #136: target-resolution failures ride the envelope (``target_required`` /
     # ``no_target``) instead of raising; render them as the inline form error,
     # preserving the pre-#136 UX. Every other envelope status renders normally.
@@ -957,7 +959,8 @@ async def _render_call_result(
         # the ticket's oldest-first view.
         "chain": await parked_request_chain(operator.tenant_id, envelope),
     }
-    return get_templates().TemplateResponse(request, "operations/_result.html", context)
+    response = get_templates().TemplateResponse(request, "operations/_result.html", context)
+    return set_no_store(response) if mark.holds_secret else response
 
 
 def _render_call_form_error(

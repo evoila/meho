@@ -446,7 +446,7 @@ consumer's real `targets.yaml`; the snapshot lives in
 
 ## References
 
-- Sibling handshake: [`./rke2-infra-coordination.md`](./rke2-infra-coordination.md) — per-PR ephemeral smoke + `repository_dispatch`
+- Sibling handshake: [`./ci-cluster-coordination.md`](./ci-cluster-coordination.md) — per-PR ephemeral smoke + `repository_dispatch`
 - Green-counter contract: [`docs/acceptance/green-counter.md`](../acceptance/green-counter.md)
 - Smoke acceptance contract: [`docs/acceptance/smoke.md`](../acceptance/smoke.md) — federation chain legs the probe relies on
 - Consumer-side draft issue body: [`./issue-58-consumer-ticket-body.md`](./issue-58-consumer-ticket-body.md)

@@ -21,6 +21,8 @@ This chapter does not need it.
 | **Kubernetes cluster** | Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx) and a default storage class. The built-in parts keep their data on disks the cluster makes. |
 | **Helm** | [Helm](https://helm.sh/) 3.8 or newer on your workstation, so it can install from an OCI registry. Helm 4 is recommended. |
 | **A DNS name** | A hostname for MEHO, for example `meho.example.com`, that points to your ingress controller. |
+| **Cluster capacity** | With the default values, all parts together (MEHO, PostgreSQL, Keycloak, OpenBao and Valkey) ask for 0.77 CPU and 2.2 GiB of memory (requests). They may use up to 4.2 CPU and 5.1 GiB of memory (limits). They need 20 GiB of disk: 10 GiB for PostgreSQL and 10 GiB for OpenBao. Short setup jobs and the migration step run at install and upgrade. Each asks for 0.05 CPU and 256 MiB, so leave a little room. Bigger estates need more. See `values.yaml` to change each part. |
+| **A browser** | The web console is built with Tailwind CSS 4, which is made for Chrome 111, Safari 16.4 and Firefox 128 or newer. Use a browser at least that new. |
 
 Everything else ships inside the Helm release: the activity-feed store
 (Valkey), the database migrations and the operations catalog.
@@ -70,6 +72,23 @@ That is all. Leave `postgres.credentialsSecret`, `vault.address`,
 `config.vaultAddr`, `config.keycloakIssuerUrl` and `keycloak.issuer`
 empty. The chart sets them, and Helm stops with an error that names the
 key if you set one. You never type a database password.
+
+### Give hosted agents a model (optional)
+
+Hosted agents and the sensor investigator need a model and its key. Set
+`agent.modelBackend`: `anthropic` (the default), `openai` for an
+OpenAI-compatible server such as vLLM, `bedrock`, or `vcf-paif`. Then
+give the key:
+
+- **Anthropic:** set `agent.enabled: true` and `agent.secretName` to a
+  Secret that holds the key (under `api_key`, or the name in
+  `agent.secretKey`).
+- **OpenAI-compatible server:** set `agent.openai.enabled: true`,
+  `agent.openai.baseUrl`, `agent.openai.defaultModel` and
+  `agent.openai.secretName`.
+
+Without a model and key, every agent run fails at the start. Every tier
+of every agent uses the one backend you set here.
 
 ### Let MEHO reach the systems it manages
 
@@ -255,8 +274,9 @@ meho status
 ### VKS (vSphere Kubernetes Service)
 
 VKS is the Kubernetes that VMware Cloud Foundation (VCF) runs on a
-vSphere Supervisor. MEHO is tested on a VKS cluster with Kubernetes
-v1.35.5 on VCF 9.1. The chart needs no change for VKS. Every command,
+vSphere Supervisor. MEHO is tested on two VKS clusters: Kubernetes
+v1.35.5 on VCF 9.1, and Kubernetes v1.32.10 on vSphere 8.0 Update 3
+(VCF 5.2). The chart needs no change for VKS. Every command,
 step by step, is on [Install MEHO on VKS by hand](form-3-vks.md). The
 steps above stay the same, with these differences:
 
@@ -298,6 +318,11 @@ steps above stay the same, with these differences:
 - **vCenter and NSX.** List their networks in
   `networkPolicy.extraEgress`, as in Step 3. Without it, MEHO cannot
   reach the vCenter it runs on.
+- **vSphere 8.** The install is the same as on VCF 9.1, with the same
+  `values-vks.yaml`. A vSphere 8 Supervisor offers an older Kubernetes:
+  v1.32.10 in our test. MEHO needs 1.28 or newer. In our test the
+  load balancer was the NSX load balancer of the Supervisor and the
+  disks were on NFS storage. Both worked with no extra setting.
 
 !!! warning "No firewall rule between the nodes"
 

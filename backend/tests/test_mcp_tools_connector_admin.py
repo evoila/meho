@@ -62,6 +62,7 @@ from meho_backplane.operations.ingest import (
     ConnectorListItem,
     ConnectorNotFoundError,
     ConnectorReviewGroup,
+    ConnectorReviewOp,
     ConnectorReviewPayload,
     ConnectorScopeCandidate,
     ConnectorUser,
@@ -450,7 +451,7 @@ def test_admin_tool_input_schemas_are_strict_2020_12(
         )
         # Schema itself validates as Draft 2020-12.
         jsonschema.Draft202012Validator.check_schema(schema)
-        # MEHO-internal fields are stripped from the wire shape.
+        # internal fields are stripped from the wire shape.
         assert "required_role" not in tools[name]
         assert "op_class" not in tools[name]
 
@@ -2334,3 +2335,142 @@ def test_call_meho_connector_list_with_target_over_the_wire(
     payload = _unwrap_text_content(response.json())
     assert payload["target_fit"]["result"] == "compatible"
     assert [row["connector_id"] for row in payload["connectors"]] == ["vmware-rest-9.0"]
+
+
+# ---------------------------------------------------------------------------
+# The review answer keeps its shape while POLICY_CLASSIFICATION is off
+# ---------------------------------------------------------------------------
+
+#: The keys of one op in the review answer before ``category`` / ``labels``.
+_REVIEW_OP_KEYS: frozenset[str] = frozenset(
+    {
+        "op_id",
+        "summary",
+        "description",
+        "custom_description",
+        "safety_level",
+        "requires_approval",
+        "is_enabled",
+        "tags",
+        "needs_reingest",
+        "classified_safety_level",
+        "classified_requires_approval",
+        "tenant_enabled",
+    },
+)
+
+
+def _classified_op(op_id: str) -> ConnectorReviewOp:
+    return ConnectorReviewOp(
+        op_id=op_id,
+        summary="List the VMs",
+        description=None,
+        custom_description=None,
+        safety_level="safe",
+        requires_approval=False,
+        is_enabled=True,
+        tags=["vm"],
+        category="compute",
+        labels={"team": "ops"},
+    )
+
+
+def _classified_payload() -> ConnectorReviewPayload:
+    """A review payload with one grouped and one ungrouped op, both classified."""
+    return ConnectorReviewPayload(
+        connector_id="vmware-rest-9.0",
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        tenant_id=None,
+        groups=[
+            ConnectorReviewGroup(
+                group_key="vm-lifecycle",
+                name="VM Lifecycle",
+                when_to_use="Use for VM CRUD ops.",
+                review_status="staged",
+                op_count=1,
+                ops=[_classified_op("vm.list")],
+            ),
+        ],
+        total_op_count=1,
+        ungrouped_op_count=1,
+        ungrouped_ops=[_classified_op("vm.get")],
+    )
+
+
+class _ClassifiedReviewService:
+    def __init__(self, operator: Operator) -> None:
+        del operator
+
+    async def get_review_payload(self, *args: Any, **kwargs: Any) -> ConnectorReviewPayload:
+        del args, kwargs
+        return _classified_payload()
+
+
+@pytest.fixture
+def classified_review(monkeypatch: pytest.MonkeyPatch) -> Iterator[ConnectorReviewPayload]:
+    """Stub the review service; yield the payload it answers with."""
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.setattr(ca_mod, "ReviewService", _ClassifiedReviewService)
+    yield _classified_payload()
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("switch", ["false", None])
+async def test_review_answer_has_no_classification_fields_while_switch_off(
+    monkeypatch: pytest.MonkeyPatch,
+    classified_review: ConnectorReviewPayload,
+    switch: str | None,
+) -> None:
+    """Switch off (or not set): the whole answer is the shape it was before.
+
+    Grouped and ungrouped ops lose ``category`` and ``labels``; nothing
+    else in the answer changes.
+    """
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+    from meho_backplane.settings import get_settings
+
+    if switch is None:
+        monkeypatch.delenv("POLICY_CLASSIFICATION", raising=False)
+    else:
+        monkeypatch.setenv("POLICY_CLASSIFICATION", switch)
+    get_settings.cache_clear()
+
+    answer = await ca_mod._review_handler(
+        build_operator(TenantRole.OPERATOR),
+        {"connector_id": "vmware-rest-9.0"},
+    )
+
+    expected = classified_review.model_dump(mode="json")
+    for op in [*expected["groups"][0]["ops"], *expected["ungrouped_ops"]]:
+        del op["category"]
+        del op["labels"]
+    assert answer == expected
+    assert set(answer["groups"][0]["ops"][0]) == _REVIEW_OP_KEYS
+    assert set(answer["ungrouped_ops"][0]) == _REVIEW_OP_KEYS
+
+
+async def test_review_answer_has_classification_fields_while_switch_on(
+    monkeypatch: pytest.MonkeyPatch,
+    classified_review: ConnectorReviewPayload,
+) -> None:
+    """Switch on: each op carries its ``category`` and ``labels``."""
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.setenv("POLICY_CLASSIFICATION", "true")
+    get_settings.cache_clear()
+
+    answer = await ca_mod._review_handler(
+        build_operator(TenantRole.OPERATOR),
+        {"connector_id": "vmware-rest-9.0"},
+    )
+
+    assert answer == classified_review.model_dump(mode="json")
+    for op in [answer["groups"][0]["ops"][0], answer["ungrouped_ops"][0]]:
+        assert set(op) == _REVIEW_OP_KEYS | {"category", "labels"}
+        assert op["category"] == "compute"
+        assert op["labels"] == {"team": "ops"}

@@ -29,6 +29,11 @@ phases the parent Initiative names:
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
    Invalid -> structured ``invalid_params`` error. So for a guarded op a
    target the catalogs cannot serve is reported before bad params.
+   Then check that the audit row of the call can be stored
+   (:func:`~meho_backplane.operations.audit_row_precheck.audit_row_problem`,
+   values only, no database statement). A row that can never be stored ->
+   structured ``audit_row_invalid`` error naming the field; nothing is sent
+   to the target and no approval request is made.
 4. Policy gate (G11.2-T3 + T4;
    :func:`~meho_backplane.operations._validate.policy_gate`). **Agent**
    principals resolve a three-state
@@ -88,6 +93,9 @@ Detail payloads land in ``extras``. Codes:
 * ``unknown_connector`` -- the ``connector_id`` matches no connector the
   caller can see (#4031), the same test the discovery meta-tools use.
 * ``invalid_params`` -- params failed JSON Schema validation.
+* ``audit_row_invalid`` -- the audit row of the call can never be stored
+  (for example a NUL character in the ticket id). Refused before the call;
+  ``extras["field"]`` names the value, never its content.
 * ``invalid_op_schema`` -- the **stored** ``parameter_schema`` itself is
   broken: it carries a ``$ref`` the validator cannot resolve within the
   stored schema document (a descriptor ingested before #3095's
@@ -283,7 +291,6 @@ import hvac.exceptions
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
 
-from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
@@ -307,6 +314,7 @@ from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundE
 from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
+from meho_backplane.no_store import mark_answer_holds_secret
 from meho_backplane.operations._audit import (
     AuditCommitError,
     audit_rejection_safe,
@@ -332,6 +340,7 @@ from meho_backplane.operations._errors import (
     result_ambiguous_connector,
     result_announce_required,
     result_audit_commit_failed,
+    result_audit_row_invalid,
     result_awaiting_approval,
     result_blast_radius_required,
     result_composite_terminal_error,
@@ -396,6 +405,7 @@ from meho_backplane.operations._preview import (
     build_proposed_effect,
     describe_preview_provenance,
 )
+from meho_backplane.operations._preview_steps import agent_acts as _agent_acts
 from meho_backplane.operations._preview_steps import agent_step_refusal
 from meho_backplane.operations._request_preview import (
     compute_preview_hash,
@@ -410,6 +420,7 @@ from meho_backplane.operations._secret_values import (
     split_reveal_secret,
 )
 from meho_backplane.operations._target_connector_match import refuse_target_connector_mismatch
+from meho_backplane.operations._target_version_range import refuse_version_outside_range
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
     InvalidOpSchemaError,
@@ -426,6 +437,8 @@ from meho_backplane.operations._vendor_text import (
     redact_error_result,
     withhold_vendor_text,
 )
+from meho_backplane.operations.approved_step_check import approved_step_refusal
+from meho_backplane.operations.audit_row_precheck import audit_row_problem
 from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
@@ -680,7 +693,7 @@ async def _resolve_connector_instance(
     :func:`~meho_backplane.connectors.resolve_connector_or_label`
     helper so the dispatcher and the ``/api/v1/targets/{name}/probe``
     route reach the same yes/no/ambiguous answer for the same target
-    (consumer feedback signal 19, ``claude-rdc-hetzner-dc#697``).
+    (consumer feedback signal 19).
     """
     if descriptor.source_kind == "ingested":
         await _restore_saved_ingest_profiles(target)
@@ -1086,7 +1099,9 @@ def _protect_secret_values(
     are put back as the connector returned them (:func:`reveal_hidden_values`),
     and the redaction of the other fields stays. An operation that makes a
     new credential (*secret_view* is ``None``) returns the redacted answer,
-    so the caller gets the credential it asked for.
+    so the caller gets the credential it asked for. A revealed answer is
+    marked (:func:`~meho_backplane.no_store.mark_answer_holds_secret`), so
+    the HTTP answer that carries it says ``Cache-Control: no-store``.
 
     ``raw`` -- the copy the audit row stores as ``raw_payload`` -- gets a
     keyed fingerprint in place of every value the default view hides, whether
@@ -1108,6 +1123,8 @@ def _protect_secret_values(
         caller = shown
     elif secret_view == "revealed":
         caller = reveal_hidden_values(redaction.raw, redacted, shown)
+        # The answer carries the values: no browser or proxy may keep it.
+        mark_answer_holds_secret()
     else:
         caller = redacted
     return redaction.model_copy(
@@ -1122,17 +1139,16 @@ def _secret_view(*, makes_new_secret: bool, reveal_secret: bool) -> SecretView |
     return "revealed" if reveal_secret else "hidden"
 
 
-def _agent_acts(operator: Operator) -> bool:
-    """True when an agent makes this call: an agent principal, or a hosted agent run."""
-    return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
-
-
 async def _agent_step_refusal(
-    *, operator: Operator, op_id: str, connector_id: str, target: Any
+    *, operator: Operator, descriptor: EndpointDescriptor, connector_id: str, target: Any
 ) -> str | None:
     """Refuse a multi-step call up front when the agent may not run a write step.
 
-    A write step with no grant (#6189), or with a ``deny`` grant (#6285).
+    A write step with no grant (#6189), or with a ``deny`` grant (#6285),
+    or a multi-step operation that changes something and declares no
+    steps (#6298). Run before the call waits for approval. An approved
+    call is checked again by :func:`approved_step_refusal` (#6314).
+
     Only for an agent with ``AGENT_GRANT_REQUIRED`` not ``off`` and only at
     the top level: the steps of the call are checked here, with the same
     list the preview checks, so the call never stops half-way at a step the
@@ -1147,7 +1163,7 @@ async def _agent_step_refusal(
     ):
         return None
     return await agent_step_refusal(
-        operator=operator, op_id=op_id, connector_id=connector_id, target=target
+        operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
     )
 
 
@@ -2320,7 +2336,7 @@ async def _handle_http_status_error(
 
     G0.24-T4 (#1649): an upstream 403 or 422 carries actionable detail the
     generic ``connector_error`` arm would bury in ``extras.exception_message``
-    (consumer ``claude-rdc-hetzner-dc#1138``), because the shared
+    (consumer feedback), because the shared
     ``HttpConnector`` adapter does no error mapping. 403 -> insufficient
     permission (authenticated but lacking the op's scope); 422 -> invalid
     payload (the upstream parsed the request and rejected its content).
@@ -3822,6 +3838,17 @@ async def _dispatch_now(
     )
     if mismatch is not None:
         return mismatch
+    # A target whose known version is outside the range of the connector
+    # picked for it (through the fallback entry) is refused the same way.
+    outside = await refuse_version_outside_range(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+    )
+    if outside is not None:
+        return outside
 
     # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility
@@ -3858,6 +3885,24 @@ async def _dispatch_now(
     params_error = _params_error(descriptor, op_id, params, started)
     if params_error is not None:
         return params_error
+
+    # --- Step 3.4: the audit row must be storable ---------------------------
+    # Refuse a call whose audit row can never be stored, before anything is
+    # sent to the target and before an approval request is made. Every path
+    # (direct, a step of a multi-step operation, a call resumed after
+    # approval, runbook, scheduler, agent) comes through here.
+    audit_problem = audit_row_problem(
+        operator=operator, descriptor=descriptor, params_hash=params_hash
+    )
+    if audit_problem is not None:
+        _log.warning(
+            "dispatch_refused_audit_row_invalid",
+            op_id=op_id,
+            field=audit_problem.field,
+        )
+        return result_audit_row_invalid(
+            op_id, audit_problem.field, audit_problem.reason, _elapsed_ms(started)
+        )
 
     # --- Step 3.5: dispatch limits (#3500) --------------------------------
     # Per-principal rate limit + per-principal concurrent-op cap, enforced
@@ -4005,7 +4050,10 @@ async def _dispatch_now(
                 verdict = PermissionVerdict.NEEDS_APPROVAL
             if verdict is not PermissionVerdict.DENY:
                 step_refusal = await _agent_step_refusal(
-                    operator=operator, op_id=op_id, connector_id=connector_id, target=target
+                    operator=operator,
+                    descriptor=descriptor,
+                    connector_id=connector_id,
+                    target=target,
                 )
                 if step_refusal is not None:
                     verdict, gate_reason = PermissionVerdict.DENY, step_refusal
@@ -4138,6 +4186,29 @@ async def _dispatch_now(
                     error_extras=_error_extras_for_audit(denied),
                 )
                 return with_audit_receipt(denied, receipt)
+            # #6298, #6314: an agent's grants may have changed while the
+            # call waited. Check its steps again before the first one runs,
+            # also when a person runs the call from an approvals surface,
+            # so the resumed call does not stop half-way. The approval
+            # request then ends as a failed run with this reason.
+            step_refusal = await approved_step_refusal(
+                operator=operator,
+                descriptor=descriptor,
+                connector_id=connector_id,
+                target=target,
+            )
+            if step_refusal is not None:
+                policy_decision_var.set(PermissionVerdict.DENY.value)
+                duration_ms = _elapsed_ms(started)
+                return await _audit_denied_and_return(
+                    result_denied(op_id, step_refusal, duration_ms),
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
+                    duration_ms=duration_ms,
+                )
 
         # --- Step 5: connector resolution ---------------------------------
         connector_instance: Connector | None

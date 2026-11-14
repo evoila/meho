@@ -4,8 +4,8 @@
 
 A space is an area inside one tenant that belongs to one person or a small
 team. It lists its members and the systems assigned to it. This page covers
-the three tables and the history rule. Operations, routes and the overview
-come in later Tasks of the same Initiative.
+the three tables, the history rule and the seven operations. Routes come in
+later Tasks of the same Initiative.
 
 The words:
 
@@ -47,18 +47,173 @@ key, not the name.
   is "not found".
 - The callers commit.
 
+## Operations
+
+The built-in connector `spaces-records-1.x` (code in
+`backend/src/meho_backplane/connectors/spaces/`) has seven operations. They
+are typed operations, like the ones of `audit-integrity-1.x`.
+
+| Operation | What it does | Risk level |
+|---|---|---|
+| `spaces.assign` | Assigns a target, a machine, a service or a fact to a space. Needs a reason. The same thing twice in one space changes nothing. | `caution` |
+| `spaces.unassign` | Ends an assignment. The row stays, with an end time. | `caution` |
+| `spaces.reassign` | Ends an assignment and starts a new one in another space, in one step. | `caution` |
+| `spaces.member.disable` | "Leave a lab": ends one person's membership in one space (a new row with state `disabled` starts). Nothing is deleted. It never calls the Keycloak connector; the company account is a separate step. | `caution` |
+| `spaces.import` | Loads a site's ownership records from a manifest (see below). | `caution` |
+| `spaces.overview` | Per space: owner, members, assigned systems. Per target: product, version, when it was detected, and health. Reads stored data only. | `safe` |
+| `spaces.drift` | Lists where the ownership record and the live targets disagree (see "Nightly drift check"). Reads stored data only. | `safe` |
+
+- The five writes need a reason, and they only work in the caller's tenant.
+  A person needs the `tenant_admin` role (the operation's role floor), and
+  only a `tenant_admin` can approve a waiting call. An agent's call runs
+  under the agent's own login after that approval.
+- The audit row of every write holds who made it and the reason
+  (`reason` in its payload). Assign, reassign and member.disable also save
+  `changed_by` and `reason` on the new row.
+- "The same thing" means the same kind on the same target: two targets can
+  have objects with the same vendor id, or services with the same name.
+- The five writes have `requires_approval` on, so every call waits for an
+  approval click, also in the web interface. This keeps the operation
+  contract rules (`test_operation_contracts.py`).
+- "Owner left": when a person with role `owner` is disabled and the space
+  has no active owner, `spaces.member.disable` lists the current assignments
+  of the space, and `spaces.overview` shows `owner_left: true` on the space
+  and on each of its assignments. They wait for `spaces.reassign`. No column
+  stores this; it is read from the member rows.
+- Health of a target: the state of the newest run of the checks (Sensors)
+  that watch the target by name. When that run is older than twice the
+  check's interval, or has no time, the health is `unknown`. For a cron
+  check the interval is the gap between two runs.
+- A long overview comes back behind a result handle (JSONFlux); `count`
+  stays in the answer.
+
+## Import from a manifest
+
+`spaces.import` takes a manifest that the site builds offline. The same
+shape also feeds the fleet import of the automation add-on, so a site builds
+one manifest. MEHO's import is generic; the builder stays at the site.
+Targets are named as MEHO knows them. Owners and users are Keycloak issuer
+and subject. Example with made-up names:
+
+```json
+{
+  "environments": [
+    {
+      "name": "lab-one",
+      "targets": ["demo-target-1", "demo-target-2"],
+      "owner": {"issuer": "<issuer-url>", "subject": "<subject-ann>"},
+      "users": [{"issuer": "<issuer-url>", "subject": "<subject-bob>"}]
+    }
+  ],
+  "people": [
+    {"issuer": "<issuer-url>", "subject": "<subject-ann>", "display_name": "Ann"},
+    {"issuer": "<issuer-url>", "subject": "<subject-bob>", "display_name": "Bob"}
+  ]
+}
+```
+
+- `owner` is one person. A list of two or more people is accepted and
+  listed as the conflict `two_owners`.
+- `people` lists the accounts that exist. `display_name` is read but not
+  stored; MEHO keeps no person record.
+- `only` (a list of lab names) imports part of the manifest. Other labs are
+  not read, planned or counted. A name that is not in the manifest is an
+  error.
+- Every input row lands in exactly one bucket: `created`, `changed`,
+  `unchanged` or `conflict`. The rows are the labs (kind `space`, with the
+  owner), the people, the target names (`assignment`) and the users
+  (`member`). A person row is always `unchanged`. The answer holds the counts
+  per kind, the total (equal to the input) and every conflict with a code.
+- `changed`: the space exists with the same owner, but its owner has no
+  current owner record yet, or only a plain member record.
+- Lab-level conflicts skip the whole lab and list all its rows: `no_owner`,
+  `two_owners`, `owner_has_no_account`, `duplicate_lab` (the name twice),
+  `space_disabled`, `owner_differs_in_meho`, `owner_disabled_in_meho`,
+  `owner_ended_in_meho`.
+- Row-level conflicts leave the rest of the lab to import: `unknown_target`,
+  `target_in_two_labs`, `assigned_elsewhere_in_meho`, `ended_in_meho`,
+  `no_account`, `disabled_in_meho`. `assigned_elsewhere_in_meho`,
+  `ended_in_meho` and `disabled_in_meho` mean MEHO holds a newer record. The
+  import never brings back a disabled person, an old owner, or an assignment
+  or membership that an administrator ended. Each of these conflicts
+  starts with "MEHO record is newer" and names both values ("MEHO: ...
+  Import: ..."). A `write_failed`
+  conflict lists a lab whose transaction failed.
+- The preview (the approval card, `preview_operation`) plans with the same
+  code and writes nothing. Apply writes one transaction per lab and uses the
+  same store and audit path as the other writes. The second run changes
+  nothing.
+- The answer keeps `status`, `total_rows`, `conflict_count` and
+  `labs_written` inline; a long conflict list comes back behind a result
+  handle.
+
+## Nightly drift check
+
+`spaces.drift` compares the current assignments of the tenant with the live
+data MEHO already stores: targets and their last probe, the newest
+health-check results, and the topology graph. It makes no vendor call, writes nothing and repairs nothing. A person
+decides each repair (`spaces.assign`, `spaces.unassign`, `spaces.reassign`).
+
+Five kinds of drift. Each is a list in the answer, and a count in `counts`:
+
+| Kind | A row is listed when |
+|---|---|
+| `unassigned_targets` | a live target has no current target assignment |
+| `missing_targets` | a current target assignment points to a target that is deleted or unknown |
+| `unreachable_targets` | the newest reach evidence of an assigned target says it is not reachable (see below). A target with no evidence is not listed. |
+| `missing_objects` | a current machine assignment has a vendor object id that is the id of no live machine node of its target (see below) |
+| `state_mismatch` | the assignment's space is disabled (`space_disabled`), or its target has another name than at assignment (`target_renamed`, with `current_name`) |
+
+- `total_count` adds the five counts. The check reads it.
+- Reach evidence is the last probe (`reachable` and `probed_at` in the
+  target's detected product data) and the newest result of each health check
+  on the target. The newest one wins, so a check that fails after a good
+  probe makes the target unreachable, and a check that passes after a failed
+  probe clears it. A check result counts only while it is at most twice its
+  interval old (the same rule as the health in `spaces.overview`). The state
+  of a result is its newest state: with confirmation retries on, a new state
+  waits in `pending_state` until it repeats, and that waiting state counts.
+  `ok`, `degraded` and `critical` mean the call reached the target. `unknown`
+  counts as not reachable only when the call ended in a connection failure:
+  `connector_timeout` from a connect, read or write fault (for example
+  `ConnectTimeout` or `ReadError`), or `connector_error` from a failed
+  connection (for example `ConnectError` or `ConnectionRefusedError`). A call
+  that policy refused, a missing connector or secret, an error answer from the
+  target, a local transport fault (for example `PoolTimeout`, a wait for a
+  free connection), a bad check and a timeout of the whole check run say
+  nothing about reach.
+  `skip` says nothing too. Each entry names its `source` (`probe` or
+  `health_check`) and `seen_at`.
+- A machine matches a live machine node (kind `vm`, `host` or `node`) by its
+  vendor object id: one of the node properties `object_id`, `server_number`,
+  `uid`, `uuid`, `moid`, `id`. The node's name is a display name and does not
+  count. Other nodes do not count either: a network node may name a server in
+  `server_number`, but it is not that server. When the assignment names a
+  target, only that target's nodes count, so the same id on another target
+  does not hide a missing machine. An assignment without a target matches
+  any machine node of the tenant.
+- `missing_objects` trusts the topology refresh. A target whose topology was
+  never refreshed makes its machines show as missing, so refresh first.
+- The lists come back behind a result handle when long; `total_count` stays
+  in the answer.
+- The template `drift_sensor_template()`
+  (`connectors/spaces/drift_template.py`) is a ready `POST /api/v1/sensors`
+  body. It runs at 02:00 UTC every night and goes `degraded` when
+  `total_count` is above 0. Its arguments set the bounds: `degraded_above`
+  (default 0) and an optional `critical_above` (then severity is `critical`).
+  Send it with `meho` or the sensors API; it only reports.
+
 ## Dependencies
 
 - The setting `SPACES_ENABLED` (off by default) turns spaces on. The tables
-  exist either way and are empty. With the setting off, nothing changes for
-  an install.
+  exist either way and are empty. With the setting off, all seven operations
+  answer "Spaces are off" and nothing else changes for an install.
 
 ## Known issues
 
-- Only the tables and the store exist. No operation, route, or CLI verb uses
-  them yet.
+- No route or CLI verb uses the store yet.
 
 ## References
 
-- Tests: `backend/tests/test_spaces_store.py`,
+- Tests: `backend/tests/test_spaces_ops.py`, `backend/tests/test_spaces_import.py`, `backend/tests/test_spaces_drift.py`, `backend/tests/test_spaces_store.py`,
   `backend/tests/migrations/test_migration_0156_create_spaces_tables.py`.

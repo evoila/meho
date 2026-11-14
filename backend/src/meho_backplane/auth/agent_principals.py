@@ -61,6 +61,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from meho_backplane.agents.grant_sets import (
+    StartingGrants,
+    require_pick,
+    resolve_scopes,
+    write_starting_grants,
+)
 from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminClient,
     KeycloakClientConflictError,
@@ -141,6 +147,9 @@ class AgentPrincipalCreate(BaseModel):
 
     name: str = Field(max_length=NAME_MAX_LENGTH)
     owner_sub: str | None = None
+    #: The agent's first grants (#6191). Required while
+    #: ``AGENT_GRANT_REQUIRED`` is not ``off``.
+    starting_grants: StartingGrants | None = None
 
 
 class AgentPrincipalRead(BaseModel):
@@ -177,9 +186,11 @@ class AgentPrincipalService:
     ) -> AgentPrincipalRead:
         """Register a new agent principal.
 
-        Creates the Keycloak client first, captures its generated
-        ``client_credentials`` secret, and persists that secret to Vault
-        via :meth:`_persist_secret_to_vault` (so the operator-less
+        Checks the starting grant pick and resolves its target names
+        first, so a bad pick creates nothing. Then creates the Keycloak
+        client, captures its generated ``client_credentials`` secret, and
+        persists that secret to Vault via :meth:`_persist_secret_to_vault`
+        (so the operator-less
         scheduler can read it back — G0.19-T2 #1478); on success inserts
         the DB row. If any step fails the Keycloak client is rolled back
         and the DB row is never written.
@@ -190,6 +201,9 @@ class AgentPrincipalService:
             When *name* contains characters outside the safe alphabet.
         AgentPrincipalExistsError
             Duplicate ``(tenant_id, name)`` (DB unique-index or Keycloak 409).
+        StartingGrantsError
+            No starting grant pick while the switch is not ``off``, or a
+            target name that does not resolve (a ``ValueError``).
         KeycloakAdminNotConfiguredError / KeycloakAdminError
             Keycloak admin unconfigured / any Admin API failure.
         SchedulerVaultBrokerError
@@ -203,6 +217,9 @@ class AgentPrincipalService:
                 "outside the safe set (allowed: letters, digits, hyphen, "
                 "underscore, dot)"
             )
+        require_pick(payload.starting_grants)
+        async with get_sessionmaker()() as session:
+            grant_scopes = await resolve_scopes(session, tenant_id, payload.starting_grants)
         owner = payload.owner_sub or created_by_sub
         client_id = _keycloak_client_id(payload.name)
         audience = get_settings().keycloak_audience
@@ -227,8 +244,9 @@ class AgentPrincipalService:
             name=payload.name,
         )
 
-        # Phase 2: insert the DB row (rolls back the Keycloak client on
-        # any failure — see _insert_row).
+        # Phase 2: insert the DB row and the starting grants in one
+        # transaction (rolls back the Keycloak client on any failure — see
+        # _insert_row).
         row = AgentPrincipal(
             tenant_id=tenant_id,
             name=payload.name,
@@ -238,7 +256,9 @@ class AgentPrincipalService:
             revoked=False,
             created_by_sub=created_by_sub,
         )
-        entry = await self._insert_row(row, internal_id=internal_id, name=payload.name)
+        entry = await self._insert_row(
+            row, internal_id=internal_id, name=payload.name, grant_scopes=grant_scopes
+        )
         self._log.info(
             "agent_principal_register",
             tenant_id=str(tenant_id),
@@ -308,8 +328,12 @@ class AgentPrincipalService:
         *,
         internal_id: str,
         name: str,
+        grant_scopes: list[str],
     ) -> AgentPrincipalRead:
         """Insert the agent-principal DB row; roll back the KC client on failure.
+
+        The starting grant rows (*grant_scopes*) go in the same transaction,
+        so a failed grant write leaves no principal row either.
 
         If anything fails after the Keycloak client was created, delete
         that client before surfacing the error: a created client with no
@@ -328,6 +352,13 @@ class AgentPrincipalService:
                     if _is_unique_violation(exc):
                         raise AgentPrincipalExistsError(name) from exc
                     raise
+                await write_starting_grants(
+                    session,
+                    tenant_id=row.tenant_id,
+                    principal_sub=row.keycloak_client_id,
+                    created_by_sub=row.created_by_sub,
+                    scopes=grant_scopes,
+                )
                 await session.refresh(row)
                 entry = AgentPrincipalRead.model_validate(row)
                 await session.commit()

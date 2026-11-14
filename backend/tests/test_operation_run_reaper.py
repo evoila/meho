@@ -54,7 +54,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-async def _seed_tenant(session: AsyncSession, *, slug: str = "rdc-internal") -> uuid.UUID:
+async def _seed_tenant(session: AsyncSession, *, slug: str = "example-tenant") -> uuid.UUID:
     existing: uuid.UUID | None = await session.scalar(
         select(Tenant.id).where(Tenant.slug == slug),
     )

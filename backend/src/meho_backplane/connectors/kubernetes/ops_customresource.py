@@ -65,6 +65,12 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
+from meho_backplane.connectors.kubernetes.ops_customresource_fields import (
+    FIELD_PATH_PATTERN,
+    MAX_FIELD_PATHS,
+    omitted_top_level_keys,
+    select_fields,
+)
 from meho_backplane.connectors.kubernetes.redaction import (
     HELM_CHART_KIND,
     LAST_APPLIED_ANNOTATION,
@@ -197,7 +203,7 @@ def _bounded_annotations(annotations: Any) -> tuple[dict[str, str], bool]:
     return out, truncated
 
 
-def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
+def custom_resource_row(obj: dict[str, Any], fields: list[str] | None = None) -> dict[str, Any]:
     """Project a raw custom-resource dict into the bounded wire shape.
 
     Custom resources have no generated typed model, so *obj* is the
@@ -232,6 +238,11 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
     otherwise untouched by the walk.
     ``k8s.secret.list`` / ``k8s.secret.info`` are the dedicated way to
     look at a core Secret's key names.
+
+    A cut excerpt names the top-level keys it lost in
+    ``spec_omitted_keys`` / ``status_omitted_keys``. *fields* (paths such
+    as ``spec.schedule``) are read from the full redacted object, uncut,
+    into ``fields``; paths not in the object are in ``fields_missing``.
     """
     kind = obj.get("kind")
     is_secret = kind == SECRET_KIND
@@ -259,6 +270,16 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
         "status_excerpt": status_excerpt,
         "status_truncated": status_truncated,
     }
+    if truncated:
+        row["spec_omitted_keys"] = omitted_top_level_keys(
+            obj.get("spec"), CR_SPEC_EXCERPT_MAX_BYTES
+        )
+    if status_truncated:
+        row["status_omitted_keys"] = omitted_top_level_keys(
+            obj.get("status"), CR_SPEC_EXCERPT_MAX_BYTES
+        )
+    if fields:
+        row["fields"], row["fields_missing"] = select_fields(obj, fields)
     if is_secret:
         row["data"] = obj.get("data") or {}
         row["string_data"] = obj.get("stringData") or {}
@@ -314,6 +335,22 @@ _CR_NAME_PARAM: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
     "description": "Name of the specific custom-resource object to read.",
+}
+
+
+_FIELDS_PARAM: dict[str, Any] = {
+    "type": "array",
+    "minItems": 1,
+    "maxItems": MAX_FIELD_PATHS,
+    "items": {"type": "string", "pattern": FIELD_PATH_PATTERN},
+    "description": (
+        "Optional paths to read in full, never cut, from ``spec`` or "
+        "``status`` (e.g. ``spec.schedule``, ``status.conditions``, "
+        "``status.nodeInfo``). A number picks a list item "
+        "(``spec.addresses.0``). Use it when ``spec_truncated`` or "
+        "``status_truncated`` is true. Values come back in ``fields``; "
+        "paths not in the object are in ``fields_missing``."
+    ),
 }
 
 
@@ -387,6 +424,7 @@ K8S_CR_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
         "version": _VERSION_PARAM,
         "plural": _PLURAL_PARAM,
         "namespace": _CR_NAMESPACE_PARAM,
+        "fields": _FIELDS_PARAM,
     },
     "required": ["group", "version", "plural"],
     "additionalProperties": False,
@@ -410,6 +448,13 @@ _CR_ROW_ITEM_SCHEMA: dict[str, Any] = {
         "spec_truncated": {"type": "boolean"},
         "status_excerpt": {"type": ["string", "null"]},
         "status_truncated": {"type": "boolean"},
+        # Present only when the matching excerpt is cut: the top-level
+        # keys that are not whole in it.
+        "spec_omitted_keys": {"type": "array", "items": {"type": "string"}},
+        "status_omitted_keys": {"type": "array", "items": {"type": "string"}},
+        # Present only when the call asked for ``fields``.
+        "fields": {"type": "object"},
+        "fields_missing": {"type": "array", "items": {"type": "string"}},
         # Present only for a ``kind: Secret`` object (#3501): the redacted
         # ``data`` / ``stringData`` key inventory -- key names kept, every
         # value replaced with a placeholder + keyed fingerprint.
@@ -457,7 +502,11 @@ _CR_ROW_NOTES = (
     "``spec_excerpt`` / ``status_excerpt`` are the JSON .spec / .status, "
     f"each capped at {CR_SPEC_EXCERPT_MAX_BYTES} bytes; when the matching "
     "``*_truncated`` flag is true the excerpt is a preview (not parseable "
-    "JSON). ``annotations`` values are cut at "
+    "JSON), and ``spec_omitted_keys`` / ``status_omitted_keys`` name the "
+    "top-level keys that were lost. Pass ``fields`` (e.g. "
+    "``['spec.schedule', 'status.conditions']``) to read those paths in "
+    "full: they come back in ``fields``, missing ones in "
+    "``fields_missing``. ``annotations`` values are cut at "
     f"{CR_ANNOTATION_VALUE_MAX_BYTES} bytes (``annotations_truncated``) "
     "and ``kubectl.kubernetes.io/last-applied-configuration`` is left "
     "out. On a Secret every annotation value is a redacted placeholder "
@@ -483,6 +532,7 @@ K8S_CR_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
         "version": "Served version, e.g. ``v1beta1``. From k8s.crd.list.",
         "plural": "Plural name, e.g. ``ipaddresspools``. NOT the kind.",
         "namespace": "Optional; omit for cluster-scoped or all-namespaces listing.",
+        "fields": "Optional paths to read uncut, e.g. ['spec.schedule', 'status.conditions'].",
     },
     "output_shape": (f"{{'rows': [{_CR_ROW_SHAPE}], 'total': <int>}}. {_CR_ROW_NOTES}"),
 }
@@ -496,6 +546,7 @@ K8S_CR_INFO_PARAMETER_SCHEMA: dict[str, Any] = {
         "plural": _PLURAL_PARAM,
         "name": _CR_NAME_PARAM,
         "namespace": _CR_NAMESPACE_PARAM,
+        "fields": _FIELDS_PARAM,
     },
     "required": ["group", "version", "plural", "name"],
     "additionalProperties": False,
@@ -521,6 +572,7 @@ K8S_CR_INFO_LLM_INSTRUCTIONS: dict[str, Any] = {
         "plural": "Plural name, e.g. ``ipaddresspools``. NOT the kind.",
         "name": "The object's metadata.name.",
         "namespace": "Required for a namespaced CRD; omit for cluster-scoped.",
+        "fields": "Optional paths to read uncut, e.g. ['spec.schedule', 'status.conditions'].",
     },
     "output_shape": (
         f"Single object (not a rows/total envelope): {_CR_ROW_SHAPE}. {_CR_ROW_NOTES}"

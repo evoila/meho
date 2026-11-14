@@ -24,35 +24,55 @@ The check then goes into that list too, at every level.
 
 Each step is checked with the same :func:`policy_gate` the step gate runs,
 with the same declared facts (``dangerous``, no ``requires_approval``,
-the level every shipped write step uses), and with ``decide_only=True``,
-so nothing is written and no grant is used.
+the level every shipped write step uses), raised by the classification
+like at the step gate, and with ``decide_only=True``, so nothing is
+written and no grant is used.
 
 With ``AGENT_GRANT_REQUIRED=on`` (#6189) the dispatcher checks the same
 list for an agent call before anything runs
 (:func:`agent_step_refusal`): a write step that no grant covers
 refuses the whole call with ``agent_no_grant``, and a write step that a
-``deny`` grant meets refuses it with ``agent_grant_denied`` (#6285). So
-the call never stops half-way.
+``deny`` grant meets refuses it with ``agent_grant_denied`` (#6285). A
+multi-step operation that changes something and declares no steps is
+refused with ``agent_steps_not_declared`` (#6298). The dispatcher runs the
+check again when an approved call resumes. So the call never stops
+half-way.
 """
 
 from __future__ import annotations
 
 from typing import Any, Final
 
-from meho_backplane.auth.operator import Operator
+import structlog
+
+from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.auth.permissions import agent_grant_name, agent_no_grant_already_logged
+from meho_backplane.broadcast.history import WRITE_OP_CLASSES
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.operations._audit import descriptor_op_class
 from meho_backplane.operations._lookup import parse_connector_id
 from meho_backplane.operations._validate import policy_gate
 from meho_backplane.operations.deny_reasons import (
     AGENT_GRANT_DENIED,
     AGENT_NO_GRANT,
+    AGENT_STEPS_NOT_DECLARED,
     deny_reason_code,
     is_agent_no_grant,
 )
-from meho_backplane.operations.governed_subops import governed_subops_for
+from meho_backplane.operations.governed_subops import governed_subops_for, steps_declared
+from meho_backplane.operations.op_policy import apply_step_classification
 from meho_backplane.settings import get_settings
 
-__all__ = ["agent_step_refusal", "preview_step_verdict"]
+__all__ = [
+    "agent_acts",
+    "agent_step_refusal",
+    "has_steps_to_check",
+    "mark_step_lines_logged",
+    "preview_step_verdict",
+]
+
+_log = structlog.get_logger(__name__)
 
 _READ_PREFIXES: Final[tuple[str, ...]] = ("GET:", "HEAD:")
 _STEP_SAFETY_LEVEL: Final = "dangerous"
@@ -100,6 +120,7 @@ async def _step_verdict(
         requires_approval=False,
         parameter_schema={},
     )
+    await apply_step_classification(tenant_id=operator.tenant_id, step=step)
     return await policy_gate(
         operator=operator,
         descriptor=step,
@@ -139,10 +160,70 @@ async def preview_step_verdict(
     )
 
 
+def agent_acts(operator: Operator) -> bool:
+    """True when an agent makes this call: an agent login, or a hosted agent run."""
+    return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
+
+
+def _agent_label(operator: Operator) -> str:
+    """The agent a grant is for: the run's agent, or ``agent:<name>`` of the login."""
+    return resolve_actor_sub() or agent_grant_name(operator)
+
+
+def _how_to_change_grant(agent: str) -> str:
+    return (
+        f"An admin changes the grant with `meho agent grant list --principal {agent}` "
+        "and `meho agent grant revoke <grant-id>`, or in the console under Agents."
+    )
+
+
+def _undeclared_write_composite(descriptor: EndpointDescriptor) -> bool:
+    """True for a multi-step operation that changes something and lists no steps."""
+    return (
+        descriptor.source_kind == "composite"
+        and descriptor_op_class(descriptor) in WRITE_OP_CLASSES
+        and not steps_declared(descriptor.op_id)
+    )
+
+
+def has_steps_to_check(descriptor: EndpointDescriptor) -> bool:
+    """True when :func:`agent_step_refusal` has something to check for this operation.
+
+    That is a listed write step, or a multi-step write that lists no steps.
+    """
+    return bool(_write_steps(descriptor.op_id)) or _undeclared_write_composite(descriptor)
+
+
+def _steps_not_declared_refusal(operator: Operator, descriptor: EndpointDescriptor) -> str | None:
+    """Refuse an agent's call of a multi-step write that lists no steps (#6298).
+
+    MEHO cannot check the agent's grants for steps it does not know, so the
+    call could stop half-way at a step the grants refuse. ``on`` refuses
+    the call; ``observe`` logs one line and lets it go on.
+    """
+    agent = _agent_label(operator)
+    if get_settings().agent_grant_required != "on":
+        _log.info(
+            "agent_steps_not_declared_would_deny",
+            agent=agent,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+        )
+        return None
+    return (
+        f"{AGENT_STEPS_NOT_DECLARED}: agent {agent} may not run the multi-step "
+        f"operation {descriptor.op_id!r}: it changes something, but its connector "
+        "does not list its steps, so MEHO cannot check the agent's grants for each "
+        "step and refuses the call before it starts. The connector must declare "
+        "the steps of the operation (register_governed_subops), or declare that it "
+        "has none (declare_no_governed_subops)."
+    )
+
+
 async def agent_step_refusal(
     *,
     operator: Operator,
-    op_id: str,
+    descriptor: EndpointDescriptor,
     connector_id: str,
     target: Any,
 ) -> str | None:
@@ -152,15 +233,23 @@ async def agent_step_refusal(
     reaches it if no grant covers it, or if a ``deny`` grant meets it
     (#6285). The multi-step operation would then stop half-way. The
     dispatcher calls this before it stores an approval request or runs a
-    step, with the same step list the preview checks, and refuses the
-    whole call instead. A step with no grant gives a reason that starts
-    with ``agent_no_grant:``. A step with a ``deny`` grant gives a reason
-    with the grant's own text, so its code is ``agent_grant_denied``.
+    step, and again when an approved call resumes (#6298), with the same
+    step list the preview checks, and refuses the whole call instead. A
+    step with no grant gives a reason that starts with ``agent_no_grant:``.
+    A step with a ``deny`` grant gives a reason that names the agent, the
+    step and the grant's own text, so its code is ``agent_grant_denied``.
 
-    With ``observe`` only the ``agent_no_grant_would_deny`` lines are
-    written and this returns ``None``: a ``deny`` grant on a step is left
-    to the step gate, as before.
+    A multi-step operation that changes something and declares no steps
+    is refused for an agent with ``agent_steps_not_declared:`` (#6298).
+
+    With ``observe`` only the ``agent_no_grant_would_deny`` and
+    ``agent_steps_not_declared_would_deny`` lines are written and this
+    returns ``None``: a ``deny`` grant on a step is left to the step gate,
+    as before.
     """
+    op_id = descriptor.op_id
+    if agent_acts(operator) and _undeclared_write_composite(descriptor):
+        return _steps_not_declared_refusal(operator, descriptor)
     refuse_denied_steps = get_settings().agent_grant_required == "on"
     for step_op_id in _write_steps(op_id):
         verdict, reason = await _step_verdict(
@@ -175,8 +264,26 @@ async def agent_step_refusal(
                 f"before any step runs ({reason})"
             )
         if refuse_denied_steps and deny_reason_code(reason) == AGENT_GRANT_DENIED:
+            agent = _agent_label(operator)
             return (
-                f"the operation {op_id!r} has a write step {step_op_id} that a "
-                f"grant denies, so MEHO refuses the call before any step runs ({reason})"
+                f"agent {agent} may not run the operation {op_id!r}: it has a write "
+                f"step {step_op_id} that a grant denies, so MEHO refuses the call "
+                f"before any step runs ({reason}). {_how_to_change_grant(agent)}"
             )
     return None
+
+
+async def mark_step_lines_logged(
+    *, operator: Operator, descriptor: EndpointDescriptor, connector_id: str, target: Any
+) -> None:
+    """Mark the ``agent_no_grant_would_deny`` lines of the write steps as written.
+
+    With ``observe`` :func:`agent_step_refusal` wrote them when the call was
+    made. An approved call that resumes runs this first, so the step gate
+    of the resumed call does not write them again (#6314).
+    """
+    with agent_no_grant_already_logged():
+        for step_op_id in _write_steps(descriptor.op_id):
+            await _step_verdict(
+                operator=operator, step_op_id=step_op_id, connector_id=connector_id, target=target
+            )

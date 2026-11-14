@@ -155,6 +155,10 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 | `linux.journal.tail` | `log` | `unit?`, `since?`, `until?`, `priority?`, `lines?` | `{rows, total, truncated}` (+ `warning?`); row = `{ts, unit, priority, message, message_truncated}` |
 | `linux.fs.usage` | `storage` | `path` | `{path, filesystem, fstype, size_bytes, used_bytes, avail_bytes, inodes_total, inodes_used}` |
 | `linux.dir.list` | `file` | `path`, `depth?`, `include_hidden?` | `{rows, total, path, exists, truncated, incomplete}`; row = `{name, type, size_bytes, mtime, mode, owner}` |
+| `linux.tool.which` | `system` | `names` (1 to 20 program names) | `{tools: [{name, found, path}]}` |
+| `linux.identity.show` | `system` | — | `{user, uid, gid, groups, is_root, sudo_installed, sudo_passwordless, sudo_exit_code}` |
+| `linux.http.head` | `network` | `url` | `{url, reachable, status_code, status_line, headers, curl_exit_code, error}` — `caution` + approval (see below) |
+| `linux.user.password_status` | `system` | `user` | `{user, last_change, expires, inactive, account_expires, min_days, max_days, warn_days, must_change, days_until_expiry, expired}` |
 
 `linux.about` is the identity canary (its handler wraps `fingerprint`).
 `linux.firewall.show` reads the rules as root. When the login is not root,
@@ -223,6 +227,34 @@ allow-list**: `LINUX_READ_ROOTS` plus `/srv`, `/mnt`, `/media`, `/data`,
 password deny list of `file.read` applies too. Overlap with the host
 readiness reads: `linux.fs.usage` is the one `df` read.
 
+### Password expiry of a local user (`linux.user.password_status`)
+
+`linux.user.password_status` answers: how many days are left until a local
+user's password expires? It runs `LC_ALL=C chage -l -- <user>`. `chage -l`
+prints dates and day counts only, never the hash. The op never reads
+`/etc/shadow`; the `shadow*` read deny list stays.
+
+- **Input.** `user` is checked against `^[A-Za-z_][A-Za-z0-9_-]{0,31}$`
+  before any command is built. A space, `;`, `$(`, a quote or a leading `-`
+  is refused with a `ValueError` and never reaches the host.
+- **Who runs it.** When the login of the target is root or the same user,
+  `chage` runs directly, so a host without sudo still answers. Any other login reads through sudo, the same way as
+  `linux.firewall.show` (an empty sudo password when the secret holds none).
+- **Output.** `last_change`, `expires`, `inactive`, `account_expires` are ISO
+  dates, `never`, or (`last_change`, `expires`) `password must be changed`.
+  `min_days`, `max_days`, `warn_days` are numbers. `days_until_expiry` is the
+  number of days from today (UTC) to `expires`: `null` for `never`, `0` when
+  the password must be changed now. `expired` is true when the date has
+  passed (a negative number) or the password must be changed. `must_change`
+  says which of the two.
+- **Errors.** An unknown user (`unknown_user`), a refused sudo
+  (`permission_denied`) and any other failed read (`read_failed`) raise an
+  error. Partial or odd `chage` output also raises. The error text names the
+  user and the kind only, never host output.
+- **Sensor.** Use `$.days_until_expiry` with a `threshold` compare, `lt`,
+  `degraded: 14`, `critical: 3`. A `never` password gives `null`, which the
+  sensor reads as unknown.
+
 ### DNS lookup on the host (`linux.dns.lookup`)
 
 `linux.dns.lookup` answers one question: can this host resolve a name
@@ -257,6 +289,52 @@ and cannot show that a host's resolver is broken.
   `{"type": "bool", "expect": true}` — and alert when the host's resolver
   stops answering. `resolvectl query` (which DNS server answered) is not
   part of this op.
+
+### Host-readiness checks (`ops_diagnose.py`)
+
+Use these before `linux.script.run` for a routine readiness check. A script
+waits for a person once per run, and the person must read a shell script.
+These ops are fixed commands with checked inputs, so there is nothing to
+read but the few values.
+
+| Question | Op |
+|---|---|
+| Is a program installed? | `linux.tool.which` |
+| Which user is the login, and does `sudo` work without a password? | `linux.identity.show` |
+| Is there free space on the filesystem of a path? | `linux.fs.usage` |
+| Can the host reach a URL? | `linux.http.head` |
+| Can the host resolve a name? | `linux.dns.lookup` |
+| Is the expected export mounted? | `linux.mount.list` |
+
+- **`linux.tool.which`.** `names` is a list of 1 to 20 distinct program
+  names, each checked against `^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$` (no path,
+  no option, no shell character) before any command is built. The command
+  is a `command -v` loop. A name with no answer in the output raises an
+  error, so a loop that stopped early is never read as "not installed".
+  `path` is `null` for a shell builtin.
+- **`linux.identity.show`.** No parameters. It runs `id` and one constant
+  `sudo -n true`. `sudo_passwordless` is true only when that exits 0.
+  It checks only sudo without a password. A change that needs root can
+  still work with a stored sudo password, so `false` does not mean it fails.
+  `sudo_installed` is false when the host has no `sudo`. An unreadable
+  user or uid raises an error.
+- **`linux.http.head`.** `url` must be a plain `http` or `https` URL (host
+  name or bracketed IPv6, optional port, path and query). No user name or
+  password, no `&`, no `#`, no quote, no space. `curl` sends one HEAD
+  request (`curl -q -sS -I -g --proto '=http,https'`), follows no redirect and
+  stops after 15 seconds. `-q` comes first, so `curl` does not read the
+  login's `.curlrc`, and that file cannot change the request. Any HTTP
+  status gives `reachable: true`. A network
+  failure (no DNS answer, refused, timeout, TLS) gives `reachable: false`
+  with `curl_exit_code` and `error`. A missing `curl` or a request `curl`
+  cannot make (exit 1 to 4) raises an error. `Set-Cookie` headers are
+  removed, at most 64 headers are returned, and each value is cut at 512
+  characters.
+- **Approval for `linux.http.head`.** The URL is an address the host
+  connects to. MEHO's address floor
+  (`operations/caller_address.py`) therefore makes the op `caution` with
+  approval, so a person approves each probe. The other two ops are `safe`.
+  Disk usage is the existing `linux.fs.usage`.
 
 ### Path confinement
 
@@ -486,6 +564,29 @@ file stays as it was and the op returns `written: false`. A new file is
 created `0600` and owned by root. If a non-root service must read a new
 file, change its mode afterwards.
 
+### Put a secret in a file (`secret.move` to `linux:`)
+
+`linux.file.write` takes the file content as a parameter, so the caller must
+know it. It is the wrong tool for a secret. The secret broker has a `linux`
+store for this (write side only): `secret.move --to
+'linux:<target>/<absolute path>#<owner>'`. It writes only inside the home
+directory of `<owner>` (MEHO reads it from the host), and only as the owner:
+`<owner>` is a normal user, never `root` and never a system user (a user id
+below the host's first normal user id). The file gets mode 0600, and a missing parent
+directory gets mode 0700. The value goes over the SSH channel's standard
+input through the same sudo helper as `file.write`, and never appears in a
+result, an audit row, a preview, a log line or an error. It refuses places
+outside a home (`/etc`, `/run`, `/usr`, `/var/lib`, `/opt`, `/srv` and the
+system folders), places in a home that the system runs or reads for logins
+(for example a `.ssh` folder, `.config/systemd` or `.bashrc`, compared in
+lower case), a home that does not exist, a link in
+any folder of the path below the home, and a target that is not a
+`linux-ssh` target. A person approves each move. The ref
+grammar and the full rules are in
+[connectors-secret-broker.md](connectors-secret-broker.md), "The `linux:`
+store".
+Code: `connectors/linux/secret_endpoint.py`.
+
 ### Root elevation
 
 Every write that needs root funnels through `_sudo.py`'s
@@ -683,6 +784,8 @@ it in its own body, where the approver reads it.
   confinement primitives.
 - Per-domain op modules: `ops_file.py` (file.read / log.tail),
   `ops_host.py` (service.status / sysctl.read / dns.lookup),
+  `ops_diagnose.py` (tool.which / identity.show / http.head),
+  `ops_user.py` (user.password_status),
   `ops_firewall.py` (firewall.show), `ops_storage.py` (mount.list) — each
   ships its handler, command builder, output parser, and `LinuxOp` rows.
 - `ops_firewall_rollback.py` — the timed load of `firewall.load` and the

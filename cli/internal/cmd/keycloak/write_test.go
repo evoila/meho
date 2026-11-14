@@ -77,14 +77,14 @@ func TestRoleMappingHasAssign(t *testing.T) {
 func TestLoadRepresentationHappy(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rep.json")
-	if err := os.WriteFile(path, []byte(`{"realm":"evba","enabled":true}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"realm":"example","enabled":true}`), 0o600); err != nil {
 		t.Fatalf("write rep: %v", err)
 	}
 	rep, serr := loadRepresentation(path)
 	if serr != nil {
 		t.Fatalf("loadRepresentation: %v", serr)
 	}
-	if rep["realm"] != "evba" {
+	if rep["realm"] != "example" {
 		t.Errorf("realm: got %v", rep["realm"])
 	}
 }

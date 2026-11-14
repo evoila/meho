@@ -478,6 +478,17 @@ class LinuxSshConnector(SshConnector):
 
         return await linux_dns_lookup(self, target, params, operator)
 
+    async def user_password_status(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.user.password_status`` (group ``system``)."""
+        from meho_backplane.connectors.linux.ops_user import linux_user_password_status
+
+        return await linux_user_password_status(self, target, params, operator)
+
     async def firewall_show(
         self,
         target: Target,
@@ -532,6 +543,39 @@ class LinuxSshConnector(SshConnector):
         from meho_backplane.connectors.linux.ops_inspect import linux_dir_list
 
         return await linux_dir_list(self, target, params, operator)
+
+    async def tool_which(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.tool.which`` (group ``system``)."""
+        from meho_backplane.connectors.linux.ops_diagnose import linux_tool_which
+
+        return await linux_tool_which(self, target, params, operator)
+
+    async def identity_show(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.identity.show`` (group ``system``)."""
+        from meho_backplane.connectors.linux.ops_diagnose import linux_identity_show
+
+        return await linux_identity_show(self, target, params, operator)
+
+    async def http_head(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.http.head`` (group ``network``)."""
+        from meho_backplane.connectors.linux.ops_diagnose import linux_http_head
+
+        return await linux_http_head(self, target, params, operator)
 
     async def file_write(
         self,

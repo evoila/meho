@@ -110,7 +110,7 @@ def test_tools_list_exposes_recent_for_operator(
     body = resp.json()
     names = {t["name"] for t in body["result"]["tools"]}
     assert "meho_broadcast_recent" in names
-    # MEHO-internal RBAC fields stripped from the wire shape.
+    # internal RBAC fields stripped from the wire shape.
     recent_def = next(t for t in body["result"]["tools"] if t["name"] == "meho_broadcast_recent")
     assert "required_role" not in recent_def
     assert "op_class" not in recent_def

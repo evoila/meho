@@ -65,7 +65,7 @@ index.
 | --- | --- | --- |
 | Backplane | Python 3.14 + FastAPI | [`backend/README.md`](./backend/README.md) — `uv sync`, pytest layout |
 | Helm chart | YAML + Helm 3 | [`deploy/charts/meho/`](./deploy/charts/meho/) — `helm template`, `helm lint`; [`deploy/values-examples/README.md`](./deploy/values-examples/README.md) covers the install flow |
-| Operator CLI | Go 1.26.10+ | [`cli/README.md`](./cli/README.md) — `go build`, oapi-codegen wiring, `meho version` smoke |
+| Operator CLI | Go (version in `cli/go.mod`) | [`cli/README.md`](./cli/README.md) — `go build`, oapi-codegen wiring, `meho version` smoke |
 
 To exercise the full deploy contract on your laptop, follow the
 **Deploy → Local (kind, ~5 min)** section in [`README.md`](./README.md).
@@ -116,6 +116,67 @@ pull request. A pull request that changes a decision record, the
 approval rules or a security default also needs the project owner's
 approval. Authors cannot approve their own pull request: `main` needs
 one approval from someone else, given after the last push.
+
+### Pull requests from forks
+
+A pull request from a fork gets less CI than one from a branch in this
+repository. Our own runners must not run code from a fork, so the jobs
+on them skip.
+
+CI on a fork pull request starts only after a maintainer approves the
+workflow run on the pull request page.
+
+What runs on a fork pull request:
+
+- Change detection, lint and type check (ruff + mypy), Go lint and
+  tests, the CLI API snapshot check and the Helm checks. They run on
+  GitHub-hosted runners. Lint and type check skip when the diff changes
+  only docs or no backend code.
+- The required check "Python (ruff + mypy + pytest)" runs too. Its job
+  summary says that the unit tests did not run. It fails when lint
+  fails, and when lint did not run for a diff with backend code.
+
+What does not run:
+
+- The unit test shards, the integration tests, the migration tests and
+  the coverage jobs. They use our own runners and show as skipped. A
+  skipped job counts as green, so **green here does not mean the tests
+  passed**.
+
+The merge queue runs the full matrix on the exact code that will land on
+`main`. But a reviewer should see test results before that. What a
+maintainer does before merge:
+
+1. Look at the changed files first. The CI result of a fork pull
+   request counts only when the pull request changes nothing under
+   `.github/`, `scripts/ci/` and `backend/tests/_unit_*.py`. If it
+   changes one of them, read that change first. Take the commands from
+   this guide, not from the job summary.
+2. Read the change, and note the full SHA of the commit you read. The
+   next step pushes it to a branch in this repository. Then the
+   workflow files of that commit run with this repository's settings
+   and secrets, on our own runners. A push of a commit that changes a
+   file under `.github/workflows/` needs a token with the `workflow`
+   scope.
+3. Push the exact commit you read, by its full SHA, to a branch in this
+   repository, for example `ci/pr-<number>`. Do not push the branch of
+   the fork: it may have a newer commit that you did not read. Then
+   open a draft pull request from that branch to `main`. CI runs only
+   on pull requests (and in the merge queue), so a pushed branch alone
+   starts nothing. The draft pull request runs the full matrix:
+
+   ```bash
+   git fetch origin pull/<number>/head
+   git push origin <full-sha>:refs/heads/ci/pr-<number>
+   gh pr create --draft --base main --head ci/pr-<number> \
+     --title "CI run for #<number>" --body "CI only. Do not merge."
+   ```
+
+4. Link that CI run in the review of the fork pull request.
+5. If you cannot push the branch, run ruff, mypy and the tests of the
+   changed code on your machine and write the result in the review.
+6. When the review is done, close the draft pull request and delete
+   the `ci/pr-<number>` branch.
 
 ## Code style
 

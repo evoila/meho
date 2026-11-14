@@ -164,7 +164,7 @@ names.
 
 ```text
 cli/
-├── go.mod                  # github.com/evoila/meho/cli; Go 1.26.10.
+├── go.mod                  # github.com/evoila/meho/cli; Go version set by its `go` directive.
 ├── Makefile                # build / test / lint / install / generate / snapshot / release.
 ├── .golangci.yml           # linter config (rationale below).
 ├── .goreleaser.yaml        # GoReleaser v2 release config (rationale: § Release pipeline).
@@ -713,6 +713,29 @@ implementations. `NewTokenStore` picks the backend at runtime:
   `0600` and its parent directory mode `0700` via an atomic
   tmpfile-then-rename so a partial flush can never truncate
   existing credentials.
+* **Profiles.** The global `--profile` flag (or `MEHO_PROFILE`; flag
+  wins) picks a named login. `applyProfile` (`internal/cmd/profile.go`)
+  puts the name on the command context; `auth.KeyForContext` turns it
+  into the store key. The `default` profile uses the plain backplane
+  URL key, so existing logins keep working. A named profile adds
+  `#profile=<name>` to the service part of that key (the URL part
+  stays the plain URL), so every profile has its own slot in the same
+  keyring or the same credentials file. The suffix is not on the URL
+  because a URL can hold a `#` itself; then two (URL, profile) pairs
+  could share one slot. A profile with no
+  login is not found; it never falls back to another profile.
+  `applyProfile` also calls `output.SetLoginProfile`, and
+  `RenderError` turns each `meho login` in an error hint into
+  `meho --profile <name> login`, so following the hint fills the right
+  profile. For the default profile the hint stays `meho login`, except
+  when `MEHO_PROFILE` names another profile: then a plain `meho login`
+  would fill that one, so the hint says `meho --profile default login`.
+  `meho doctor` checks the profile on the context in both its offline
+  and its online layer, so it never sends another profile's token. It
+  reports a named profile as `Profile: <name>` (JSON: `profile`), and
+  its hints follow the same rule. All profiles share the saved
+  backplane URL; `meho login` prints one line when it replaces that URL
+  (`printBackplaneChange`).
 
 The escape hatch (`MEHO_KEYRING_DISABLE=1`) is documented for
 shared dev hosts where the local keyring belongs to a different
@@ -1076,8 +1099,9 @@ versions:
   The CLI and the backplane share release tags, so the backplane's
   version names the CLI release to install.
 - No warning when the comparison makes no sense: a `dev` CLI build, a
-  backplane without `chart_version`, or a main-branch backplane build
-  (date-based `0.1.<YYYYMMDD>-<sha>` chart version).
+  backplane without `chart_version`, or any version that is not a plain
+  `X.Y.Z` release (a release candidate, or a main-branch build such as
+  `0.1.<YYYYMMDD>-<sha>` or `0.1.0-main-<sha>`).
 - The check is best effort. A missing route, a timeout, or a bad body
   prints nothing and never changes the exit code. stdout is not
   touched, so `meho status --json` stays one JSON document.
@@ -1096,8 +1120,10 @@ all three lists name them so a new status is added in one place.
 
 ## Global work-ref (`--work-ref`, `MEHO_WORK_REF`, #3804)
 
-A change-ticket reference (`gh:<owner>/<repo>#<n>`) links an audit row
-to the change that allowed it. The backplane audit middleware reads it
+A change-ticket reference links an audit row to the change that
+allowed it. It can be any ticket id: a GitHub issue
+(`gh:<owner>/<repo>#<n>`), a ServiceNow change (`CHG0012345`) or a
+Jira key (`OPS-123`). The backplane audit middleware reads it
 from the `Meho-Work-Ref` request header and writes it to
 `audit_log.work_ref` on the row for that request (#1657). The CLI sets
 that header from one place, so every verb gets it without its own flag.
@@ -1105,9 +1131,32 @@ that header from one place, so every verb gets it without its own flag.
 - The root command has a persistent `--work-ref` flag. When the flag is
   not set, the CLI reads `MEHO_WORK_REF`. The flag wins.
 - The root `PersistentPreRunE` (`applyWorkRef` in `root.go`) checks the
-  shape once. A bad value stops the command before any request leaves
-  the CLI. A good value goes on the command context
-  (`api.WithWorkRef`).
+  value once with `api.ValidWorkRef`. The CLI check is simpler than the
+  backplane rule (below). It refuses only a blank value and a value with
+  a control character such as a line break, because the `Meho-Work-Ref`
+  header cannot carry one. The backplane then applies its one rule to
+  every ticket id, so it also refuses a tab inside the id, invisible
+  characters and a value over 256 characters. A given flag is
+  always checked, so `--work-ref ""` is refused. An empty
+  `MEHO_WORK_REF` means "not set". The variable is checked before the
+  CLI trims it, so a trailing line break is refused too. A bad value
+  stops the command before any request leaves the CLI. A good value
+  goes on the command context (`api.WithWorkRef`).
+- `meho operation call` has its own `--work-ref` flag, which goes into
+  the request body. It is checked and trimmed the same way, so
+  `--work-ref " CHG1 "` stores `CHG1`, like the global flag.
+- The backplane rule for a ticket id (`meho_backplane/work_ref.py`):
+  white space at both ends is removed; an empty value is refused; a
+  control character (also NUL, a line break and a tab), an invisible
+  format character (zero-width and direction marks) and a line or
+  paragraph separator are refused; the text is at most 256 characters
+  and is stored in Unicode form NFC. A value that breaks the rule is
+  refused with a message that names the rule (HTTP 400 for the header,
+  422 for a body, an invalid-params error for MCP). It is never cut or
+  changed without a word, apart from the strip and NFC.
+- The header carries the text as UTF-8. The backplane reads it as UTF-8
+  (`decode_work_ref_header` in `operations/_audit.py`), so a non-ASCII
+  ticket id such as `Änderung-7` lands on the audit row unchanged.
 - Commands that send no backplane request skip the check:
   `help`, `completion` and its children, `__complete` /
   `__completeNoDesc` (shell completion), `version` and
@@ -1154,10 +1203,10 @@ that header from one place, so every verb gets it without its own flag.
   ticket X. For one release, a `--work-ref` on these commands still
   filters too when `--filter-work-ref` is not given, and
   `workref.Filter` (`cli/internal/cmd/workref/`) prints one warning
-  line on stderr that names `--filter-work-ref`. A filter value need
-  not have the `gh:<owner>/<repo>#<n>` shape: when it does not,
-  `applyWorkRef` skips the tag on these commands instead of failing,
-  and the value only filters. When `--filter-work-ref` is given, also
+  line on stderr that names `--filter-work-ref`. A filter value that
+  `api.ValidWorkRef` refuses (for example one with a line break) does
+  not fail there: `applyWorkRef` skips the tag on these commands, and
+  the value only filters. When `--filter-work-ref` is given, also
   empty (`--filter-work-ref=""` means no filter), `--work-ref` only
   tags, and a bad value is an error like on every other command.
   `MEHO_WORK_REF` never filters. `TestWorkRefFlagHasOneMeaning` walks
@@ -1560,10 +1609,10 @@ end-to-end reconnect / 401 / 403 / Ctrl-C tests need the
 [oapi-codegen v2.5](https://github.com/oapi-codegen/oapi-codegen)
 from `cli/api/openapi.json` — a committed snapshot of the
 backplane's OpenAPI document. v2.5 is the last v2.x release that
-supports Go 1.22. The CLI module itself requires Go 1.26.10: Go 1.25
-gets no more security fixes, 1.26.9 is the first 1.26 release
-that fixes nine standard-library CVEs, and 1.26.10 also fixes
-GO-2026-6809 in `crypto/x509`. The generator itself runs
+supports Go 1.22. The CLI module itself requires the Go version in
+`cli/go.mod` (read it with `go mod edit -json cli/go.mod`). It is
+raised when a Go release fixes a standard-library security problem.
+The generator itself runs
 on a newer Go toolchain (downloaded automatically by `go install`
 when the host has Go 1.21+) so this is a build-time vs.
 runtime split.
@@ -1669,7 +1718,7 @@ narrow-waist contract.
   `tenant_admin` (#3668). With `--op-id <op_id>` (no query needed) it
   prints that one operation's call contract instead: parameter
   schema, examples, target rule, result shape and retry rules.
-- `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--work-ref gh:<owner>/<repo>#<n>] [--preview-hash <hash>] [--async]`
+- `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--work-ref <ticket>] [--preview-hash <hash>] [--async]`
   — calls `POST /api/v1/operations/call`. Invokes the G0.6 dispatcher
   end-to-end (parameter validation, policy gate, audit, JSONFlux,
   broadcast). The dispatcher always returns a structured
@@ -1776,10 +1825,12 @@ narrow-waist contract.
   render modes. The human renderer labels it `result handle`; its
   `handle_id` is the UUID accepted by `meho operation result-query`. This is
   distinct from any `flight_recorder_trace_handle` in `extras`.
-- `--work-ref gh:<owner>/<repo>#<n>` (call only) — an external change-ticket
-  reference for this dispatch. The CLI rejects malformed values before issuing
-  the request, then threads a valid reference into `CallOperationBody.WorkRef`
-  so the dispatch's approval and audit rows retain their change-ticket linkage.
+- `--work-ref <ticket>` (call only) — an external change-ticket reference for
+  this dispatch, for example `gh:evoila/meho#13` or `CHG0012345`. The CLI
+  refuses an empty or blank value, or one with a line break, before it sends the request,
+  with the same check as the global flag. It puts a good value into
+  `CallOperationBody.WorkRef`, so the dispatch's approval and audit rows keep
+  their change-ticket link.
 
 ### HTTP shape
 
@@ -2807,12 +2858,12 @@ Direct:
   "Login flow" step 5), plus `Config.TokenSource` for the T3 refresh
   path. Pinned at
   `v0.27.0`; the Go 1.22 minimum constraint that previously blocked
-  upgrades is lifted now that the module requires Go 1.26.10.
+  upgrades is lifted now that the module requires a recent Go.
 * `github.com/oapi-codegen/runtime` — runtime helpers the generated
   client uses (JSON merging for `oneOf` unions, parameter styling
   per RFC 6570). Pinned at `v1.1.1`; the Go 1.22 compatibility
   constraint that blocked upgrades is lifted now that the module
-  requires Go 1.26.10 — upgrade tracked as a follow-up.
+  requires a recent Go — upgrade tracked as a follow-up.
 
 Build-time tool (not in `go.mod`; installed under `bin/` via
 `make tools`):
@@ -2820,7 +2871,7 @@ Build-time tool (not in `go.mod`; installed under `bin/` via
 * `github.com/oapi-codegen/oapi-codegen/v2` — the OpenAPI → Go
   client generator itself. Pinned at `v2.5.0`, the last v2.x
   release whose module go directive was compatible with Go 1.22;
-  now that the module requires Go 1.26.10, a newer v2.x may be
+  now that the module requires a recent Go, a newer v2.x may be
   used — upgrade tracked as a follow-up. `make tools` runs
   `go install …@v2.5.0` with
   `GOBIN=$PWD/bin`; the generator itself executes on a Go 1.24+
@@ -2873,9 +2924,13 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      `meho-cli-approve`, `--cli-approve-client-id`; it must match the
      chart's `config.keycloakCliApproveClientId`). It gets the same
      mappers except `meho-mcp-audience` and the same 4 default scopes,
-     and it uses its own login flow `meho approval sign-in` (password
-     form, then the one-time code when the person has one), which the
-     verb makes when it is missing (`bootstrap.go`, step 3a).
+     and it uses its own login flow `meho approval sign-in level` (password
+     form, then the one-time code when the person has one; it gives the
+     approval level `meho-approve`), which the verb makes when it is
+     missing, with the level step's settings and the level name in the
+     realm's `acr.loa.map` (`bootstrap.go`, step 3a; `flows.go`).
+     `meho approvals approve` asks for that level with
+     `acr_values=meho-approve` (`internal/auth/freshsignin.go`).
   2. Public authorization-code+PKCE MCP client (default name
      `meho-mcp`, `standardFlowEnabled=true`,
      `pkce.code.challenge.method=S256`, default redirect URIs for the

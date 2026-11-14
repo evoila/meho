@@ -88,6 +88,7 @@ from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
 from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from ._oidc_jwt_helpers import public_jwks as _public_jwks
+from ._rest_write_helpers import run_writes_at_once
 
 _TENANT_ID = UUID("11111111-1111-1111-1111-111111111111")
 
@@ -130,7 +131,7 @@ def _build_app() -> FastAPI:
     app.add_middleware(AuditMiddleware)
     app.add_middleware(RequestContextMiddleware)
     app.include_router(topology_router)
-    return app
+    return run_writes_at_once(app)
 
 
 @pytest.fixture

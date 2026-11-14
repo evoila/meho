@@ -14,6 +14,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -97,6 +98,7 @@ func newAddCmd() *cobra.Command {
 			"rest (a target created without `--secret-ref` derives the " +
 			"per-tenant default credential path; `--verify-tls=false` opts " +
 			"out of TLS verification).\n\n" +
+			dispatch.RESTWriteApprovalNote +
 			"For a target that needs no credential, pass `--no-secret-ref`. " +
 			"It sends an explicit null, so the target is stored with no " +
 			"credential path and the connector calls it without one. " +
@@ -308,6 +310,9 @@ func runAdd(cmd *cobra.Command, opts addOptions) error {
 	raw, err := doAuthedRequest(cmd.Context(), backplaneURL, http.MethodPost, "/api/v1/targets", payload)
 	if err != nil {
 		return renderImportRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if parked, err := dispatch.RenderRESTParked(cmd.OutOrStdout(), raw, opts.JSONOut); parked {
+		return err
 	}
 	var t api.Target
 	if err := json.Unmarshal(raw, &t); err != nil {

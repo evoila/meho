@@ -804,6 +804,19 @@ model, or resume endpoint):
      waits. MEHO does not try to tell who is behind a token, because an
      AI tool can use a person's login.
 
+   The REST target writes (`POST`, `PATCH`, `DELETE /api/v1/targets`)
+   and the four REST topology graph writes follow the same rule. A
+   person's token call goes to the matching `targets.*` or `topology.*`
+   operation through the dispatcher and answers 202 with the approval
+   request id (`api/v1/_wait_for_approval.py`); the console writes at
+   once. See [targets.md](targets.md) and [topology.md](topology.md).
+   `meho targets import` sends one write per row, so each row makes its
+   own approval request. For a large file, a person imports it in the web
+   console, or runs the import with `--work-ref`. Then a person goes
+   through all its rows with
+   `meho approvals approve --filter-work-ref <ref> --in-order`, which asks
+   for a yes at each row.
+
    Only `verify_access_token_with_refresh`
    (`backend/src/meho_backplane/ui/auth/refresh.py`) sets
    `web_session=True`. No token claim, header or request field can set

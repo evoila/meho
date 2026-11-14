@@ -5,12 +5,13 @@
 
 * **Machine logins** -- a service login with the ``tenant_admin`` role
   gets 403 ``human_principal_required`` on all three writes. The text
-  names ``targets.register`` and ``targets.remove``. An agent login gets
+  names ``targets.register``, ``targets.update`` and ``targets.remove``. An agent login gets
   403 ``insufficient_role`` (MEHO caps its role at ``operator``). Nothing
   is written in any case.
 * **Reads** -- a service login still lists and describes targets.
-* **People** -- a ``tenant_admin`` person (the CLI uses these routes)
-  still creates, changes and removes a target.
+* **People** -- a ``tenant_admin`` person in the web interface creates,
+  changes and removes a target at once. A person's token call waits for
+  approval (``test_rest_token_writes_wait_for_approval.py``).
 * **Wrong role** -- a person with the ``operator`` role still gets
   ``insufficient_role``.
 """
@@ -111,6 +112,7 @@ async def test_a_service_login_with_tenant_admin_cannot_write_targets(
     detail = response.json()["detail"]
     assert detail == f"human_principal_required: {MACHINE_TARGET_WRITE_REMEDIATION}"
     assert "targets.register" in detail
+    assert "targets.update" in detail
     assert "targets.remove" in detail
     await _assert_nothing_written()
 
@@ -147,7 +149,9 @@ async def test_a_service_login_still_reads_targets(client: TestClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_person_creates_changes_and_removes_a_target(client: TestClient) -> None:
+async def test_a_person_in_the_web_interface_creates_changes_and_removes_a_target(
+    client: TestClient,
+) -> None:
     await _insert_target(name=_EXISTING, host=_EXISTING_HOST)
     key = make_rsa_keypair("kid-A")
     token = _admin_token(key)

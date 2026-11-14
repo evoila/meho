@@ -3262,6 +3262,16 @@ output), `--backplane` (override the configured backplane URL),
 `--secret-field connector_field=source_field` (repeatable; adds the
 pair to every target's secret field map).
 
+**Each row waits for approval.** The import sends one `POST` or `PATCH`
+per row with the person's token, so each row makes its own approval
+request and the summary counts it as "waiting for approval" (see
+[targets.md](targets.md)). The help text (`importManyRowsNote`) says
+what to do with a large file: import it in the web console, where it is
+written at once, or run it with `--work-ref`. Then a person goes
+through all its rows with
+`meho approvals approve --filter-work-ref <ref> --in-order`, which asks
+for a yes at each row.
+
 **Mapping rules.** The CLI parses the YAML as a generic
 `map[string]any` per entry and partitions every key:
 

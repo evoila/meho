@@ -21,6 +21,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -119,6 +120,18 @@ var skipSilent = map[string]struct{}{
 	"fingerprint": {},
 }
 
+// importManyRowsNote is the help text paragraph that says what a file
+// with many rows does: each row is its own write, so each row makes its
+// own approval request.
+const importManyRowsNote = "Each row of the file makes its own approval " +
+	"request. A file with 50 rows makes 50 requests, and a person approves " +
+	"each one. For a large file, import it in the web console, where it is " +
+	"written at once. Or give the import a change ticket, for example " +
+	"`meho --work-ref gh:acme/ops#42 targets import <file>`. Then a person " +
+	"goes through all its rows with one command: " +
+	"`meho approvals approve --filter-work-ref gh:acme/ops#42 --in-order`. " +
+	"It shows each row and asks for a yes.\n\n"
+
 // --- Plan model --------------------------------------------------------
 
 // action describes what the import would do for one entry.
@@ -149,6 +162,10 @@ type planEntry struct {
 	// field `fingerprint`: server-managed"). Surfaced in dry-run
 	// output and on apply.
 	Warnings []string `json:"warnings,omitempty"`
+	// ApprovalRequestID is set when the write waits for approval: a call
+	// made with a token waits, and only a person in the web interface
+	// writes at once.
+	ApprovalRequestID string `json:"approval_request_id,omitempty"`
 }
 
 // plan is the full set of actions, partitioned for `--json` output.
@@ -199,6 +216,8 @@ func newImportCmd() *cobra.Command {
 		Short: "Bulk-import targets from a targets.yaml file",
 		Long: "import reads a YAML file shaped as `targets: [<entry>, ...]` and " +
 			"applies each entry against the backplane.\n\n" +
+			dispatch.RESTWriteApprovalNote +
+			importManyRowsNote +
 			"Mapping rules. Top-level columns recognised on the API's " +
 			"TargetCreate / TargetUpdate models are mapped 1:1: name, aliases, " +
 			"product, host, port, fqdn, secret_ref, auth_model, vpn_required, " +
@@ -749,8 +768,31 @@ func renderApplyResult(cmd *cobra.Command, p *plan, jsonOut bool) error {
 		return output.PrintJSON(cmd.OutOrStdout(), p)
 	}
 	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "Applied: %d created, %d updated.\n",
-		len(p.Create), len(p.Update))
+	var waiting []planEntry
+	for _, e := range append(append([]planEntry{}, p.Create...), p.Update...) {
+		if e.ApprovalRequestID != "" {
+			waiting = append(waiting, e)
+		}
+	}
+	created, updated := len(p.Create), len(p.Update)
+	for _, e := range waiting {
+		if e.Action == actionCreate {
+			created--
+		} else {
+			updated--
+		}
+	}
+	if len(waiting) == 0 {
+		fmt.Fprintf(w, "Applied: %d created, %d updated.\n", created, updated)
+		return nil
+	}
+	fmt.Fprintf(w, "Applied: %d created, %d updated, %d waiting for approval.\n",
+		created, updated, len(waiting))
+	for _, e := range waiting {
+		fmt.Fprintf(w, "  %s %q: approval id %s — inspect with: meho approvals show %s\n",
+			e.Action, e.Name, e.ApprovalRequestID, e.ApprovalRequestID)
+	}
+	fmt.Fprintf(w, "  %s\n", dispatch.ParkedHint)
 	return nil
 }
 
@@ -810,24 +852,38 @@ func listExistingNames(ctx context.Context, doer httpDoer) (map[string]struct{},
 // surprises (audit log row interleaving, partial-failure
 // rollback semantics); v0.2 deliberately stays serial.
 func executePlan(ctx context.Context, doer httpDoer, p *plan) error {
-	for _, e := range p.Create {
+	for i := range p.Create {
+		e := &p.Create[i]
 		body, err := json.Marshal(e.Body)
 		if err != nil {
 			return fmt.Errorf("marshal create body for %q: %w", e.Name, err)
 		}
-		if _, err := doer(ctx, http.MethodPost, "/api/v1/targets", body); err != nil {
+		raw, err := doer(ctx, http.MethodPost, "/api/v1/targets", body)
+		if err != nil {
 			return fmt.Errorf("create %q: %w", e.Name, err)
 		}
+		recordParked(e, raw)
 	}
-	for _, e := range p.Update {
+	for i := range p.Update {
+		e := &p.Update[i]
 		body, err := json.Marshal(e.Body)
 		if err != nil {
 			return fmt.Errorf("marshal update body for %q: %w", e.Name, err)
 		}
 		path := "/api/v1/targets/" + url.PathEscape(e.Name)
-		if _, err := doer(ctx, http.MethodPatch, path, body); err != nil {
+		raw, err := doer(ctx, http.MethodPatch, path, body)
+		if err != nil {
 			return fmt.Errorf("update %q: %w", e.Name, err)
 		}
+		recordParked(e, raw)
 	}
 	return nil
+}
+
+// recordParked notes the approval request id on e when the answer says
+// the write waits for approval.
+func recordParked(e *planEntry, raw []byte) {
+	if parked, ok := dispatch.ParseRESTParked(raw); ok {
+		e.ApprovalRequestID = parked.ApprovalRequestID
+	}
 }

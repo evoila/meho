@@ -14,6 +14,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -92,6 +93,7 @@ func newAnnotateCmd() *cobra.Command {
 			"and the recoverability lever for an incorrectly auto-" +
 			"discovered edge (the §6 supersede flow). Idempotent — a " +
 			"repeat call upserts the same row. Requires tenant_admin.\n\n" +
+			dispatch.RESTWriteApprovalNote +
 			"<kind> is any lowercase kind slug (2-63 chars; letters/" +
 			"digits joined by `.`, `_` or `-`) — prefer a well-known " +
 			"kind from the table below when one fits. <from> and <to> " +
@@ -186,6 +188,11 @@ func runAnnotate(cmd *cobra.Command, opts annotateOptions) error {
 	edge, statusCode, body, err := postAnnotate(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if statusCode == http.StatusAccepted {
+		if parked, err := dispatch.RenderRESTParked(cmd.OutOrStdout(), body, opts.JSONOut); parked {
+			return err
+		}
 	}
 	if statusCode != http.StatusCreated {
 		return renderHTTPStatus(cmd, backplaneURL, statusCode, body, opts.JSONOut)

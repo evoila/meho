@@ -30,8 +30,9 @@ Approval and role:
   waits until a person with ``tenant_admin`` approves it. ``host`` and
   ``fqdn`` are addresses MEHO connects to (``x-meho-caller-address``), and
   the call can also change ``secret_ref``, so a changed target is checked
-  by a person before MEHO uses it. People who change a target at once use
-  REST ``PATCH``, ``meho targets update`` or the web console.
+  by a person before MEHO uses it. REST ``PATCH`` with a token (``meho
+  targets update``) becomes a call of this op; only the web console
+  changes a target at once.
 * The role floor is ``tenant_admin``, the same as REST ``PATCH``. It is
   registered below, so the policy gate refuses a person with a lower role
   on every path (``call_operation``, the REST dispatch route, the CLI,

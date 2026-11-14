@@ -1144,7 +1144,7 @@
           "targets"
         ],
         "summary": "Create Target",
-        "description": "Create a new target in the requesting tenant.\n\nReturns 409 when a target with the same ``name`` already exists in\nthe tenant. The ``id`` and timestamps are generated server-side.\n``tenant_id`` is always taken from the JWT \u2014 the body cannot override\nit.\n\nG0.14-T3 (#1144). The ``product`` field is validated at request time\nagainst :func:`~meho_backplane.connectors.registry.registered_product_tokens`.\nAn unknown product yields a structured 422 (see\n:func:`_build_unknown_product_detail`); the OpenAPI schema also\nexposes the enum (see :func:`meho_backplane.main.build_openapi_schema`)\nso Swagger / generator tooling surfaces the valid set before the\nrequest leaves the editor. Both layers share the same source-of-\ntruth helper so they cannot drift.\n\nValidation is skipped when the registry is empty \u2014 that state means\n\"no connectors imported\" (test isolation, or a deploy booted before\n:func:`_eager_import_connectors` ran). In production the lifespan\npopulates the registry before the first request arrives, so the\nskip branch never fires; a misregistered deploy that *did* hit it\nis recoverable via T4 #1145's PATCH-product or DELETE path.\n\n#2091. An explicit ``secret_ref`` outside the operator's tenant\nsubtree is rejected with a structured 422\n(``kind=\"secret_ref_outside_tenant_scope\"``) \u2014 such a target would\nimport clean and then fail every dispatch with an opaque Vault\n``permission denied``. Omitting ``secret_ref`` derives the\nper-tenant default (#1723) and always passes; no-op when the guard\nis disabled. See :func:`_enforce_secret_ref_tenant_scope`.",
+        "description": "Create a new target in the requesting tenant (``tenant_admin``, a person).\n\nA person in the web interface creates it at once (201). A call made\nwith a token is checked first (product, ``preferred_impl_id``,\n``secret_ref`` scope, Vault login keys) and then waits for approval as\n``targets.register`` (202 with the approval request id). Returns 409\nwhen the name already exists in the tenant.",
         "operationId": "create_target_api_v1_targets_post",
         "parameters": [
           {
@@ -1175,6 +1175,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Target"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The call came with a token, so it waits for approval. Nothing is written until a person approves the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WriteAwaitingApproval"
                 }
               }
             }
@@ -1312,7 +1322,7 @@
           "targets"
         ],
         "summary": "Update Target",
-        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.\n\n#2091. An explicit non-null ``secret_ref`` outside the operator's tenant subtree\nis rejected with a structured 422 (``kind=\"secret_ref_outside_tenant_scope\"``) \u2014 the\nsame write-time gate as POST. An explicit ``{\"secret_ref\": null}`` (clear) and a\nPATCH not sending the field are untouched; no-op when the guard is disabled. See\n:func:`_enforce_secret_ref_tenant_scope`. The path value is a name, an alias or an\nid (:func:`resolve_route_target`). The change itself is\n:func:`apply_target_update`.",
+        "description": "Change a target (``tenant_admin``, a person). Only the sent fields change.\n\nThe path value is a name, an alias or an id. A person in the web\ninterface changes the target at once (200). A call made with a token is\nchecked first and then waits for approval as ``targets.update``, with\nthe id of the target, so the approved change goes to this target even\nwhen a name or alias changes later (202 with the approval request id).",
         "operationId": "update_target_api_v1_targets__name__patch",
         "parameters": [
           {
@@ -1356,6 +1366,16 @@
               }
             }
           },
+          "202": {
+            "description": "The call came with a token, so it waits for approval. Nothing is written until a person approves the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WriteAwaitingApproval"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -1373,7 +1393,7 @@
           "targets"
         ],
         "summary": "Delete Target",
-        "description": "Soft-delete a target.\n\nG0.14-T4 (#1145) \u2014 recovery path for misregistered targets\n(signal 6 in consumer feedback). Stamps\n``deleted_at`` on the row instead of removing it so the\nappend-only :attr:`AuditLog.target_id` soft-FK keeps pointing\nat *something* (audit is append-only per v0.1-spec \u00a76); every\nread path filters ``deleted_at IS NULL`` so the row is\ninvisible to dispatch / probe / list / discover after the\nDELETE returns.\n\nCascade-check: counts ``graph_node.target_id`` references\n(G9.1-T1 #448 substrate) and defaults to **409 with the\ncount + a ``?force=true`` hint** when the target is wired\ninto the topology graph. ``?force=true`` proceeds with the\nsoft-delete anyway \u2014 the FK is\n``ON DELETE SET NULL`` so the graph rows survive the delete\nsafely; the operator confirms by passing ``force=true``.\nAudit references are not counted because the audit table\naccumulates a row per authenticated request against the\ntarget and would always block the delete.\n\nReturns 204 on success. The audit row is written by the\n:class:`~meho_backplane.audit.AuditMiddleware` with\n``audit_op_id='targets.delete'`` (mirrors the\n``meho_connector_edit_*`` precedent so cross-tenant audit\nqueries can filter by op id prefix).\n\nThe path value is a name, an alias or an id (see\n:func:`resolve_route_target`). Re-deletes collapse to 404 \u2014\nevery lookup step filters ``deleted_at IS NULL``, so the row no\nlonger resolves once the first DELETE flushes.\n\n``tenant_admin`` role required (cross-tenant DELETE, by name or\nby id, returns the standard 404).",
+        "description": "Soft-delete a target (``tenant_admin``, a person).\n\nThe path value is a name, an alias or an id. A person in the web\ninterface deletes it at once (204). A call made with a token waits for\napproval as ``targets.remove``, with the id of the target (202 with the\napproval request id). Both answer 409 ``target_has_references`` first\nwhen topology rows point at the target and ``force`` is not set.",
         "operationId": "delete_target_api_v1_targets__name__delete",
         "parameters": [
           {
@@ -1409,6 +1429,16 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "202": {
+            "description": "The call came with a token, so it waits for approval. Nothing is written until a person approves the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WriteAwaitingApproval"
+                }
+              }
+            }
           },
           "409": {
             "description": "Target is referenced by ``graph_node`` rows; retry with ``?force=true`` to soft-delete anyway (``graph_node.target_id`` is ``ON DELETE SET NULL`` so the topology rows survive). See ``docs/codebase/error-message-shape.md`` for the convention.",
@@ -3287,6 +3317,16 @@
               }
             }
           },
+          "202": {
+            "description": "The call came with a token, so it waits for approval. Nothing is written until a person approves the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WriteAwaitingApproval"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -3457,6 +3497,16 @@
           "204": {
             "description": "Successful Response"
           },
+          "202": {
+            "description": "The call came with a token, so it waits for approval. Nothing is written until a person approves the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WriteAwaitingApproval"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -3503,6 +3553,16 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "202": {
+            "description": "The call came with a token, so it waits for approval. Nothing is written until a person approves the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WriteAwaitingApproval"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -3554,6 +3614,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/_BulkImportResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The call came with a token, so it waits for approval. Nothing is written until a person approves the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WriteAwaitingApproval"
                 }
               }
             }
@@ -45216,6 +45286,42 @@
         "type": "object",
         "title": "WithdrawRequestBody",
         "description": "POST body for ``\u2026/withdraw`` (#4987)."
+      },
+      "WriteAwaitingApproval": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "awaiting_approval",
+            "title": "Status",
+            "description": "Always `awaiting_approval`: nothing is written yet."
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id",
+            "description": "The operation that runs after approval, for example `targets.register`."
+          },
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id",
+            "description": "Id of the approval request. A person approves it in the console, with `meho approvals approve <id>`, or on REST."
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "What happens next, in plain words."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status",
+          "op_id",
+          "approval_request_id",
+          "message"
+        ],
+        "title": "WriteAwaitingApproval",
+        "description": "The 202 answer of a REST write that waits for approval."
       },
       "_AnnotateEdgeRequest": {
         "properties": {

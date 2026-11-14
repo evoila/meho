@@ -3,7 +3,7 @@
 **Repository:** `evoila/meho`
 **Location:** `meho/`
 **License:** Apache 2.0
-**Status:** Released (core chassis); selected features are Beta or Experimental — see the maturity table in §6.
+**Status:** Released (core chassis); selected features are Beta or Experimental â€” see the maturity table in Â§6.
 **Started:** 2026-05-09 (fresh start; prior codebase deprecated and kept for reference only)
 
 ---
@@ -19,10 +19,10 @@ Every interaction through MEHO is guaranteed to be:
 | Guarantee | What it means | Scope |
 |---|---|---|
 | **Policy-gated** | Operations are authorised against the caller's role and per-target grants before they execute. | Calls through MEHO only |
-| **Credential-federated** | The **agent** never holds a backend credential; the backplane exchanges a short-lived Keycloak OIDC token for a just-in-time backend credential per operation. The connector holds the JIT credential only for the duration of that operation. | Calls through MEHO only |
+| **Credential-isolated** | The **agent** never holds a backend credential; the backplane reads the target's stored credential from the credential backend per operation, under the caller's identity where the store supports it. The connector holds that credential only for the duration of the operation. | Calls through MEHO only |
 | **Server-reduced** | Results are reduced server-side, so the agent sees a compact, relevant view instead of raw firehose output. | Calls through MEHO only |
 | **Broadcast** | Every action is published to a Valkey-backed activity feed (at-most-once pub/sub via SSE). Other agents and humans can watch the feed. | Calls through MEHO only |
-| **Audited** | Every authenticated interaction lands as an audit row in PostgreSQL, attributed to the calling principal; fail-closed (audit insert error ? HTTP 500). | Calls through MEHO only |
+| **Audited** | Every authenticated interaction lands as an audit row in PostgreSQL, attributed to the calling principal; fail-closed (audit insert error â†’ HTTP 500). | Calls through MEHO only |
 | **Tenant-scoped & version-aware** | Every context lookup is scoped to the caller's tenant and aware of resource versions. | Calls through MEHO only |
 
 > **Assumption:** These guarantees hold only for calls that route through MEHO. If an agent has a direct network path or embedded credentials to a target, it can bypass MEHO entirely. Operators must ensure targets accept connections only from the backplane (network segmentation, target-side allowlists).
@@ -35,13 +35,13 @@ Every interaction through MEHO is guaranteed to be:
 flowchart TD
     subgraph Callers["Callers (trusted)"]
         AG["AI agents<br/>(any MCP client)"]
-        OP["Operators<br/>(meho CLI · browser console)"]
-        HU["Human approver<br/>(four-eyes)"]
+        OP["Operators<br/>(meho CLI Â· browser console)"]
+        HU["Human approver<br/>(second approver)"]
     end
 
     subgraph Backplane["MEHO backplane<br/>(trusted, one FastAPI service)"]
-        MCP["/mcp — MCP server<br/>Streamable HTTP + OAuth 2.1"]
-        API["/api — REST API v1"]
+        MCP["/mcp â€” MCP server<br/>Streamable HTTP + OAuth 2.1"]
+        API["/api â€” REST API v1"]
         POL["Policy gate<br/>+ approvals"]
         DISP["Connector<br/>dispatch"]
         RED["Result<br/>reduction"]
@@ -51,7 +51,7 @@ flowchart TD
     subgraph Backing["Backing services (trusted)"]
         KC["Keycloak<br/>(identity / OIDC)"]
         CB["Credential backend<br/>(OpenBao/Vault or<br/>Google Secret Manager)"]
-        PG["PostgreSQL + pgvector<br/>(state · audit · search)"]
+        PG["PostgreSQL + pgvector<br/>(state Â· audit Â· search)"]
         VK["Valkey / Redis<br/>(activity feed, at-most-once)"]
     end
 
@@ -70,20 +70,21 @@ flowchart TD
     POL --> DISP
     DISP --> RED
     POL -.->|"JWT validation / readiness"| KC
-    DISP -.->|"just-in-time credential"| CB
+    DISP -.->|"target credential read"| CB
     RED -.->|"audit rows"| PG
     RED -.->|"broadcast events (SSE)"| VK
     DISP --> TGT
     HU -.->|"approve / reject"| POL
     SAT -->|"outbound poll"| API
     SAT --> TGT
-    SAT -.->|"JIT credential via central"| CB
+    SAT -.->|"credential read via central"| CB
 
     classDef default fill:#f9f9f9,stroke:#333,stroke-width:2px;
     classDef trusted fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
     classDef untrusted fill:#fff3e0,stroke:#e65100,stroke-width:2px;
     class AG,OP,HU,MCP,API,POL,DISP,RED,AUD,KC,CB,PG,VK,SAT trusted;
     class TGT untrusted;
+```
 
 ---
 
@@ -92,11 +93,11 @@ flowchart TD
 | Component | Provided by | Maturity | Notes |
 |---|---|---|---|
 | Backplane container image | **MEHO** (`ghcr.io/evoila/meho`) | GA | One Deployment, rendered by the Helm chart. Multi-arch (linux/amd64 + linux/arm64), non-root uid 1001, cosign-signed. |
-| Valkey (activity feed) | **MEHO** — bundled subchart | GA | Installed by the same Helm release. |
+| Valkey (activity feed) | **MEHO** â€” bundled subchart | GA | Installed by the same Helm release. |
 | PostgreSQL + pgvector | **MEHO** by default, or **you** | GA | Built-in PostgreSQL with pgvector. Turn off (`corePostgres.enabled: false`) to bring your own. |
 | Keycloak | **MEHO** | GA | Built-in Keycloak makes the `meho` realm. Connect your company login (AD/LDAP, Entra ID, authentik, own Keycloak) in front. |
 | Credential backend | **MEHO** by default, or **you** | GA | Built-in OpenBao (open-source Vault fork). Turn off to use your own HashiCorp Vault or Google Secret Manager. |
-| AI agent / MCP client | **You** | — | MEHO governs agents; it does not require or ship a model. Bring Claude, Cursor, or any MCP client. |
+| AI agent / MCP client | **You** | â€” | MEHO governs agents; it does not require or ship a model. Bring Claude, Cursor, or any MCP client. |
 | Hosted agents | **MEHO** (experimental) | Experimental | Optional agents running on the backplane under the same rules. |
 | Browser console (`/ui`) | **MEHO** | Beta | Read-heavy operator surface; off by default, enabled all-or-nothing via chart values. |
 | Satellite gateway | **MEHO** | Beta | Runs inside isolated networks, polls central API outbound. |
@@ -109,21 +110,21 @@ flowchart TD
 ### 4.1 Caller surface (outside the backplane)
 
 - **AI agents** connect to `/mcp` via OAuth 2.1 authorization-code + PKCE (the MCP-mandated flow). Default tools only *read* targets (`list_targets`). Target registration is an operator tool requiring `mcp:admin` scope + `tenant_admin` role. There is **no MCP tool to store a secret**.
-- **Operators** use the `meho` CLI (static Go binary, device-code login — works from private networks/jump hosts because only the browser reaches Keycloak) or the optional browser console (`/ui`, read-heavy, Beta, off by default).
+- **Operators** use the `meho` CLI (static Go binary, device-code login â€” works from private networks/jump hosts because only the browser reaches Keycloak) or the optional browser console (`/ui`, read-heavy, Beta, off by default).
 - **Satellite gateway** runs the same backplane image inside an isolated network, polls the central API for authorized work, executes locally against the same connector surface, and reports results back. Outbound only; cannot self-authorize. `safe` operations by default; `caution` writes need human approval; `dangerous`/`destructive` never run on a satellite (Beta).
-- **Human approver** participates in four-eyes approval flows for `dangerous` and `destructive` operations, and for `caution` writes on satellites.
+- **Human approver** acts as the required second person for approval flows on `dangerous` and `destructive` operations, and for `caution` writes on satellites. A second person must approve, so no one can approve their own request.
 
 ### 4.2 Backplane (Python / FastAPI)
 
 A single Python service exposing two front doors and one governed pipeline behind both:
 
 **Front doors:**
-- `/mcp` — MCP server, JSON-RPC 2.0 over Streamable HTTP. OAuth 2.1 resource-server protection (RFC 8707 audience, RFC 9728 `/.well-known/oauth-protected-resource`, `WWW-Authenticate` on 401). Tool + resource registries with RBAC filtering.
-- `/api` — REST API v1 (~30 router modules: targets, operations, feed, agents, approvals, audit, runbooks, sessions, tenants, connectors, docs retrieval, etc.)
+- `/mcp` â€” MCP server, JSON-RPC 2.0 over Streamable HTTP. OAuth 2.1 resource-server protection (RFC 8707 audience, RFC 9728 `/.well-known/oauth-protected-resource`, `WWW-Authenticate` on 401). Tool + resource registries with RBAC filtering.
+- `/api` â€” REST API v1 (~30 router modules: targets, operations, feed, agents, approvals, audit, runbooks, sessions, tenants, connectors, docs retrieval, etc.)
 
-**Governed pipeline:** `Policy gate + approvals ? Connector dispatch ? Result reduction`
+**Governed pipeline:** `Policy gate + approvals â†’ Connector dispatch â†’ Result reduction`
 
-**Audit** spans the whole pipeline (not just result reduction): one row per authenticated request, written synchronously before the response is yielded. Fail-closed: audit insert error ? HTTP 500.
+**Audit** spans the whole pipeline (not just result reduction): one row per authenticated request, written synchronously before the response is yielded. Fail-closed: audit insert error â†’ HTTP 500.
 
 **Key backend domains** (`backend/src/meho_backplane/`):
 
@@ -131,12 +132,12 @@ A single Python service exposing two front doors and one governed pipeline behin
 |---|---|
 | `mcp/` | MCP transport skeleton, JWT verification + operator binding, tool/resource registries, per-operation audit rows. |
 | `api/v1/` | REST route modules; thin shells over domain services. |
-| `auth/` | JWT validation ? `Operator` model, Vault OIDC login per operator, Keycloak/Vault readiness probes, external doc-corpus search. |
+| `auth/` | JWT validation â†’ `Operator` model, Vault OIDC login per operator, Keycloak/Vault readiness probes, external doc-corpus search. |
 | `connectors/` | `Connector` ABC (`fingerprint`/`probe`; `execute` refuses direct calls), registries v1+v2, resolver with tri-state dispatchability, execution profiles, version splitters, auth schemes. |
 | `operations/` | Dispatcher, policy engine, approval gates, reducer + result reduction, result delivery/spill, flight recorder, typed operation registration, composite operations, deny reasons. |
 | `agents/` | Agent-definition + permission-grant CRUD (tenant-scoped), grant-expiry sweeper. Writes gated to `tenant_admin`; reads to `operator`. |
 | `tenancy/` | Every context lookup scoped to caller's tenant. |
-| `targets/` | Target CRUD (address, credential-backend reference — never the secret itself, TLS trust settings). |
+| `targets/` | Target CRUD (address, credential-backend reference â€” never the secret itself, TLS trust settings). |
 | `sessions/` | Agent sessions. |
 | `broadcast/` | Valkey-backed real-time activity feed + SSE (`/feed`). |
 | `memory/` | Agent memory with expiry sweeper. |
@@ -146,9 +147,9 @@ A single Python service exposing two front doors and one governed pipeline behin
 | `sensors/` / `event_source/` / `events/` | Sensor/event ingestion, event drain. |
 | `gateway/` | Satellite gateway runner, dead-man switch sweeper, unreported-mint security alarm. |
 | `runner/` | Runner workers, queue, repository patterns. |
-| `topology/` | Connector topology discovery hints ? graph nodes/edges diffed and applied as insert/update/soft-delete. |
+| `topology/` | Connector topology discovery hints â†’ graph nodes/edges diffed and applied as insert/update/soft-delete. |
 | `flight_recorder/` | Flight recorder. |
-| `redaction/` | PII redaction; Presidio Tier-2 NER adapter. Redaction is applied to results before they reach the agent and before broadcast publication. |
+| `redaction/` | PII redaction; Presidio Tier-2 NER adapter. Tier-1 pattern redaction always runs at the connector boundary; the Presidio Tier-2 pass runs only when the resolved redaction policy enables it. Redaction is applied to results before they reach the agent and before broadcast publication. |
 | `reflex/` | Reflex rules. |
 | `checks/` | Health/checks, dashboards. |
 | `audit` / `audit_query/` | Immutable audit rows in PostgreSQL; fail-closed audit middleware. |
@@ -160,21 +161,21 @@ A single Python service exposing two front doors and one governed pipeline behin
 ### 4.3 CLI (`cli/`, Go)
 
 - Single static binary, multi-platform (linux/amd64 + linux/arm64), cosign-signed releases via GoReleaser.
-- Cobra-based; `version`, `login` (device-code), `status` today; additional commands are **server-driven** (manifest fetched at startup).
+- Cobra-based; `version`, `login` (device-code), `status`, `doctor`, and a large set of locally registered command groups (connectors, operations, tenants, agents, and more) are compiled into the binary. Server-driven command discovery (`GET /api/v1/commands`) is scaffolded in the CLI, but the backplane endpoint is not shipped yet, so no commands are discovered from the server today.
 - OIDC device-code flow; token store = OS keyring by default, file backend available; config at `$XDG_CONFIG_HOME/meho/config.json`.
 - Typed API client generated by oapi-codegen v2 from the FastAPI OpenAPI snapshot, with an auth-aware wrapper and lazy 401-retry refresh.
 
 ### 4.4 Clients (`clients/`)
 
-- **Claude Code plugin** — skills: `broadcast`, `knowledge`, `memory`, `operations`, `prefer-meho`; hooks + login-guard/signin-lock/token-renewal scripts; `meho-mcp-remote` shim.
-- **Claude Desktop MCP bridge** — `server/index.mjs` + manifest.
+- **Claude Code plugin** â€” skills: `broadcast`, `knowledge`, `memory`, `operations`, `prefer-meho`; hooks + login-guard/signin-lock/token-renewal scripts; `meho-mcp-remote` shim.
+- **Claude Desktop MCP bridge** â€” `server/index.mjs` + manifest.
 
 ### 4.5 Deploy (`deploy/`)
 
 - **Helm chart `meho/`** with subcharts: `broadcast`, `keycloak`, `openbao`, `postgres`, `result-cache`; templates for deployment, ingress, networkpolicy, servicemonitor, prometheusrule, PVC (fastembed cache), migration job, core-secrets job, core-vault-init job, update-strategy job; values examples (kind, openshift, bring-your-own, GSM, etc.).
 - **VMware appliance** (CIS hardening, firststart scripts, ovf rewrite, tests).
 - **Linux server install** (RKE2-based, CIS, tests).
-- **Connector overlay** — enterprise pack mechanism for VMware/VCF connectors.
+- **Connector overlay** â€” enterprise pack mechanism for VMware/VCF connectors.
 
 ---
 
@@ -182,12 +183,16 @@ A single Python service exposing two front doors and one governed pipeline behin
 
 1. **AuthN:** Agent presents a Bearer token (MCP OAuth 2.1) or CLI uses device-code flow against Keycloak; `verify_jwt` / `verify_mcp_jwt_and_bind` validate against Keycloak JWKS and bind an `Operator` (tenant + role).
 2. **Policy gate:** The operation is authorized against the caller's role and per-target grants *before* execution (`op_policy`, RBAC floors, `runner_write_allowlist`).
-3. **Approval gate (if required):** Write/dangerous ops may route to the approval queue. Approvals are bound to a hash of the exact parameters (TOCTOU prevention), have expiry, and forbid self-approval (four-eyes). The agent sees a `pending` status while waiting.
-4. **JIT credential:** The backplane exchanges the Keycloak OIDC token with Vault/OpenBao (or GSM) for a just-in-time backend credential per operation. The connector holds this credential only for the duration of the operation; the **agent never holds it**. The credential is revoked on exit.
+3. **Approval gate (if required):** Write/dangerous ops may route to the approval queue. An approval is bound to a hash of the exact parameters, so an approved request cannot be swapped for a different one between approval and execution. Approvals expire, and a second person must approve (no self-approval). The agent sees a `pending` status while waiting.
+4. **Target credential:** The backplane reads the target's stored credential from the configured credential backend; the **agent never holds it**. The path differs by backend:
+   - **Vault / OpenBao:** the backplane logs in to Vault with the caller's short-lived Keycloak OIDC token, reads the target's secret (for example its stored username and password), and uses it for the operation. On exit it revokes its own Vault access token; it does **not** revoke or rotate the target's stored password.
+   - **Google Secret Manager:** the backplane reads the secret under the deployment's own identity (Application Default Credentials / Workload Identity). When workload identity federation is configured, it can instead exchange the caller's token. No per-operation target credential is minted or revoked.
+
+   In both cases the connector holds the credential only for the duration of the operation.
 5. **Connector dispatch:** The resolver picks the connector (hand-coded beats profiled beats bare), the connector runs against the target via its SDK/protocol/SSH/REST.
 6. **Result reduction:** Results are reduced server-side (JSON flux / reducer) so the agent sees a compact view. Large results spill to result handles. Reduction provenance (what was dropped, reducer used, handle) is recorded so audit can reconstruct the agent's context.
-7. **Audit:** For state-changing operations, an intent row is written before execution and an outcome row after (write-ahead audit). For reads, one row per authenticated request in PostgreSQL `audit_log`, attributed to the calling principal; fail-closed (audit insert error ? HTTP 500). MCP path writes one row per operation.
-8. **Broadcast:** Every action is published to the Valkey-backed activity feed (at-most-once, SSE) watchable by agents and humans. Results are labelled as untrusted data before publication; PII redaction (Presidio) is applied before the agent sees results and before broadcast.
+7. **Audit:** For state-changing operations, an intent row is written before execution and an outcome row after (write-ahead audit). For reads, one row per authenticated request in PostgreSQL `audit_log`, attributed to the calling principal; fail-closed (audit insert error â†’ HTTP 500). MCP path writes one row per operation.
+8. **Broadcast:** Every action is published to the Valkey-backed activity feed (at-most-once, SSE) watchable by agents and humans. Results are labelled as untrusted data before publication. Tier-1 pattern redaction runs at the connector boundary; the Presidio Tier-2 NER pass runs only when the resolved redaction policy enables it. Redaction happens before the agent sees results and before broadcast.
 
 ---
 
@@ -203,7 +208,7 @@ A single Python service exposing two front doors and one governed pipeline behin
 | Hosted agents | Experimental | Runs on backplane under same rules |
 | VMware / VCF connectors | GA (enterprise overlay) | Not in public tree |
 | Result spill / handles | GA | Large results spill to Valkey-backed store |
-| PII redaction | Beta | Presidio Tier-2 NER, lazy-loaded |
+| PII redaction | Beta | Tier-1 patterns always on; Presidio Tier-2 NER only when a policy enables it, lazy-loaded |
 
 ### Documented decisions
 
@@ -212,7 +217,7 @@ A single Python service exposing two front doors and one governed pipeline behin
 - **DCO sign-off, no CLA:** `git commit -s` required; inbound = outbound under Apache 2.0.
 - **`src/`-layout** for Python so tests only resolve the installed package.
 - **Multi-arch container** (linux/amd64 + linux/arm64), non-root uid 1001, read-only root filesystem support, base image pinned by digest, trivy + SBOM + cosign + Sigstore attestations.
-- **Fail-closed defaults:** readiness registry fails closed on empty default; audit middleware fails closed (un-audited request ? HTTP 500); readiness probes flip `not_ready` when Keycloak/Vault unreachable.
+- **Fail-closed defaults:** readiness registry fails closed on empty default; audit middleware fails closed (un-audited request â†’ HTTP 500); readiness probes flip `not_ready` when Keycloak/Vault unreachable.
 - **Connector tri-state:** `none`/`profiled`/`bare` dispatchability so vetted profiles cannot shadow hand-coded connectors. Unclassified operations on profiled and bare connectors default to `deny` (treated as `dangerous`).
 - **Satellite gateway:** central auth/approval/audit; satellite cannot self-authorize; outbound poll only; mTLS/attestation for enrollment; work leases and replay protection.
 - **Version-aware connectors:** version splitters so connectors are aware of resource versions.
@@ -236,7 +241,7 @@ A single Python service exposing two front doors and one governed pipeline behin
 | Credentials | hvac (Vault/OpenBao), Google Secret Manager |
 | Cache / feed | Valkey / Redis |
 | Embeddings | fastembed (ONNX) |
-| AI routing | pydantic-ai (anthropic, bedrock, openai) — hosted agents only, optional |
+| AI routing | pydantic-ai (anthropic, bedrock, openai) â€” hosted agents only, optional |
 | Redaction | Presidio (lazy, Tier-2 NER) |
 | Scheduling | croniter |
 | CLI language | Go |
@@ -259,6 +264,6 @@ A single Python service exposing two front doors and one governed pipeline behin
 
 ## 9. Extensibility
 
-- **Connector kit:** `meho_connector_kit` — one module with the names a package may use and its own version number. External vendors ship connectors in their own repos importing only the kit. Start from `templates/connector-package/`. Third-party connector packages run in-process with access to JIT credentials; they are fully trusted by default. Document signing, allowlisting, or sandboxing for third-party connectors is a stated gap.
+- **Connector kit:** `meho_connector_kit` â€” one module with the names a package may use and its own version number. External vendors ship connectors in their own repos importing only the kit. Start from `templates/connector-package/`. Third-party connector packages run in-process with access to target credentials; they are fully trusted by default. Document signing, allowlisting, or sandboxing for third-party connectors is a stated gap.
 - **Bring your own parts:** PostgreSQL, Keycloak, and the credential backend can all be replaced with your own (expert paths documented).
-- **Server-driven CLI:** commands are discovered from a server-fetched manifest, so new verbs land without CLI recompilation.
+- **Server-driven CLI (planned):** the CLI has scaffolding to register commands from a server-fetched manifest, so in future new verbs could land without CLI recompilation. The backplane's `GET /api/v1/commands` endpoint is not shipped yet; today every command is compiled into the binary.

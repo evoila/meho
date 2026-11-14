@@ -74,9 +74,17 @@ def client() -> Iterator[TestClient]:
     yield TestClient(app)
 
 
-async def _seed_tenant(tenant_id: UUID, slug: str) -> None:
+async def _seed_tenant(tenant_id: UUID, slug: str, *, agent_readable: bool | None = None) -> None:
     async with get_sessionmaker()() as session:
-        session.add(Tenant(id=tenant_id, slug=slug, name=f"Tenant {slug}"))
+        session.add(
+            Tenant(
+                id=tenant_id,
+                slug=slug,
+                name=f"Tenant {slug}",
+                flight_recorder_enabled=True,
+                flight_recorder_agent_readable=agent_readable,
+            )
+        )
         await session.commit()
 
 
@@ -112,10 +120,22 @@ async def _seed(
     return audit_id
 
 
-def _get(client: TestClient, query: str, *, role: TenantRole = TenantRole.OPERATOR) -> Any:
+def _get(
+    client: TestClient,
+    query: str,
+    *,
+    role: TenantRole = TenantRole.OPERATOR,
+    principal_kind: str | None = None,
+) -> Any:
     clear_jwks_cache()
     key = make_rsa_keypair("kid-S")
-    token = mint_token(key, sub="op-1", tenant_role=role.value, tenant_id=str(_TENANT_A))
+    token = mint_token(
+        key,
+        sub="op-1",
+        tenant_role=role.value,
+        tenant_id=str(_TENANT_A),
+        principal_kind=principal_kind,
+    )
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         return client.get(
@@ -260,3 +280,28 @@ async def test_route_needs_the_operator_claim(client: TestClient) -> None:
     await _seed_tenant(_TENANT_A, "tenant-a")
     assert _get(client, "", role=TenantRole.READ_ONLY).status_code == 403
     assert client.get("/api/v1/audit/traces").status_code == 401
+
+
+async def test_route_as_an_agent_reads_nothing_when_the_tenant_switch_is_off(
+    client: TestClient,
+) -> None:
+    await _seed_tenant(_TENANT_A, "tenant-a", agent_readable=False)
+    rid = uuid.uuid4()
+    await _seed(tenant_id=_TENANT_A, request_id=rid, operator_sub="u1", when=datetime.now(UTC))
+    agent = _get(client, f"?request_id={rid}", principal_kind="agent")
+    assert agent.status_code == 200, agent.text
+    assert agent.json()["items"] == []
+    person = _get(client, f"?request_id={rid}")
+    assert len(person.json()["items"]) == 1
+
+
+async def test_route_as_an_agent_never_gets_an_uncertain_trace(client: TestClient) -> None:
+    await _seed_tenant(_TENANT_A, "tenant-a", agent_readable=True)
+    now = datetime.now(UTC)
+    await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub="u1", when=now, uncertain=True)
+    clean = await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub="u1", when=now)
+    agent = _get(client, "?caller=u1", principal_kind="agent")
+    assert agent.status_code == 200, agent.text
+    assert [item["audit_id"] for item in agent.json()["items"]] == [str(clean)]
+    person = _get(client, "?caller=u1")
+    assert len(person.json()["items"]) == 2

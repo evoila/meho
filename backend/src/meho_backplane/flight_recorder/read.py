@@ -84,7 +84,7 @@ class TraceView(BaseModel):
     expires_at: datetime
     redaction_uncertain: bool
     #: Request id and caller of the call; ``None`` on a trace stored before
-    #: migration 0166.
+    #: migration 0167.
     request_id: uuid.UUID | None = None
     operator_sub: str | None = None
     spans: list[TraceSpanView]
@@ -179,7 +179,7 @@ async def find_traces(
     by capture time, or by any mix of these. The newest come first. The
     search reads the trace tables only, so it works when the audit row of a
     call was never stored. The ``tenant_id`` filter is the isolation guard,
-    as in :func:`load_trace`. Traces stored before migration 0166 have no
+    as in :func:`load_trace`. Traces stored before migration 0167 have no
     request id and no caller, so only the time filter finds them.
 
     ``include_redaction_uncertain=False`` leaves out the traces that are

@@ -873,6 +873,7 @@ meho audit query [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--cursor` — opaque forward-pagination cursor from a prior page's NEXT line
 - `--filter-work-ref` — narrow to one external change-ticket reference — "show every write authorised by ticket X"
+- `--full-row-lost` — only the short rows: the database refused the full row, so MEHO stored the row without the target's answer and the error text
 - `--json` — emit raw AuditQueryResult JSON instead of the human table
 - `--limit` — max rows per page (1..1000, server default 100 when omitted)
 - `--op-class` — narrow to one op-class (read|write|credential_read|audit_query|other)
@@ -883,6 +884,7 @@ meho audit query [flags]
 - `--session-id` — narrow to one agent session (UUID); the flat companion to `meho audit replay`
 - `--since` — earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601
 - `--target` — narrow to one target (name or alias; server-side resolution)
+- `--text-changed` — only the rows where MEHO replaced a character or a number (for example a NUL character) so the database could store the row
 - `--until` — latest occurred_at; accepts the same shorthand as --since
 
 ### `meho audit recent`

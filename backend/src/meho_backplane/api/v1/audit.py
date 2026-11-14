@@ -432,7 +432,7 @@ async def search_traces(
     a call was never stored, so ``GET /{audit_id}/trace`` cannot be used.
 
     The trace tables hold the request id and the caller since migration
-    ``0166``; an older trace is found by the time window only. The access
+    ``0167``; an older trace is found by the time window only. The access
     rules are those of the single trace read: a person reads every trace of
     the tenant; an agent login reads none unless the tenant lets agents read
     traces, and never a trace marked ``redaction_uncertain``.

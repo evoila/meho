@@ -8357,7 +8357,7 @@
           "audit"
         ],
         "summary": "Search Traces",
-        "description": "Find stored flight-recorder traces without their audit row (#6452).\n\nFilters: ``request_id`` (the id of the request that made the call),\n``caller`` (the exact login subject of the caller) and the window\n``since`` / ``until`` (duration shorthand or ISO-8601; ``since`` defaults\nto 24 hours). The newest traces come first. Use it when the audit row of\na call was never stored, so ``GET /{audit_id}/trace`` cannot be used.\n\nThe trace tables hold the request id and the caller since migration\n``0166``; an older trace is found by the time window only. The access\nrules are those of the single trace read: a person reads every trace of\nthe tenant; an agent login reads none unless the tenant lets agents read\ntraces, and never a trace marked ``redaction_uncertain``.",
+        "description": "Find stored flight-recorder traces without their audit row (#6452).\n\nFilters: ``request_id`` (the id of the request that made the call),\n``caller`` (the exact login subject of the caller) and the window\n``since`` / ``until`` (duration shorthand or ISO-8601; ``since`` defaults\nto 24 hours). The newest traces come first. Use it when the audit row of\na call was never stored, so ``GET /{audit_id}/trace`` cannot be used.\n\nThe trace tables hold the request id and the caller since migration\n``0167``; an older trace is found by the time window only. The access\nrules are those of the single trace read: a person reads every trace of\nthe tenant; an agent login reads none unless the tenant lets agents read\ntraces, and never a trace marked ``redaction_uncertain``.",
         "operationId": "search_traces_api_v1_audit_traces_get",
         "parameters": [
           {
@@ -28140,6 +28140,16 @@
             "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
+          },
+          "full_row_lost": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Full Row Lost"
+          },
+          "text_changed": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Text Changed"
           }
         },
         "additionalProperties": false,
@@ -28387,6 +28397,16 @@
             "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
+          },
+          "full_row_lost": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Full Row Lost"
+          },
+          "text_changed": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Text Changed"
           },
           "event_class": {
             "$ref": "#/components/schemas/AuditEventClass",

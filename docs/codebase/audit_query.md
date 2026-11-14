@@ -66,28 +66,58 @@ at any depth). The caller still gets the answer unchanged.
 | A NUL character | `<NUL>` |
 | A character that is not valid as text (a lone surrogate) | `<invalid character>` |
 | A number JSON cannot hold (NaN, Infinity) | The text `nan`, `inf` or `-inf` |
+| A `Decimal`, date, time stamp, UUID, bytes or set | Its text form (a set becomes a list) |
+| A key that is not text | Its text form, as JSON writes it (`1`, `true`, `null`) |
+
+When the writer replaced a character or a number (the first two rows, or a
+key that got a `#2` suffix because two keys became equal), it sets
+`"text_changed": true` at the top level of `payload`. Only the writer sets
+this key. A target can send the text `<NUL>`, but it cannot set the key. A
+value of the last two rows is not counted as a change.
 
 When the insert of the full row fails for any other reason, the writer tries
-once more with a **short row**. It keeps the fixed columns (who, when,
-tenant, target, operation, status code, ticket id, request id, session) and
-has no `raw_payload` and no `redaction_manifest`. Its `payload` holds
-`{"full_row_lost": {"error_class": "<name of the error>"}}` and the
-`op_id`, `op_class` and `result_status` of the full row, so the audit search
-still finds the row by its operation. MEHO also logs
-`audit_full_row_lost` with the audit id, the operation, the request id and
-the error class. The same short row is used on the error path, so a call
-that failed at the target also has a row.
+once more with a **short row**. The call still returns its answer, also a
+call that returns hidden values: the short row is its audit row. A short row
+holds:
+
+- the fixed columns: who, when, tenant, target, operation, status code,
+  ticket id, request id, session, run and step;
+- in `payload`, every value that MEHO builds itself: `op_id`, `op_class`,
+  `result_status`, `params_hash`, `source_kind`, the connector product,
+  version and implementation, `principal_name`, `client`,
+  `reveal_secret`, `agent_session_id`, `run_id`, `step_id`,
+  `caller_gone_at`, the parent audit id, the result handle (`handle_id`,
+  `total_rows`), `redaction_policy_id` and the model data of an agent run;
+- `approval_request_id` for a call that waits for approval or was
+  refused. The id comes from the result that MEHO's code built, never
+  from an error text, and only a UUID is kept;
+- `{"full_row_lost": {"error_class": "<name of the error>"}}`.
+
+A short row has no `raw_payload`, no `redaction_manifest`, no `error` and
+none of the extra keys that a connector handler adds: these can hold text of
+the target. MEHO logs `audit_full_row_lost` with the audit id, the
+operation, the request id and the error class. The same short row is used on
+the error path, so a call that failed at the target also has a row.
 
 No short row is written when the database cannot be reached (a connection
-fault, a connection timeout, too many connections, a shutdown). A statement
-that was cancelled or ran into a statement timeout is not such a case: then
-the short row is tried. The write then fails at once, and the call
-answers `audit_commit_failed`. The same happens when the short row fails
-too.
+fault, a connection timeout, too many connections, a shutdown). Then the
+write fails at once, and the call answers `audit_commit_failed`. The same
+happens when the short row fails too. A statement that was cancelled or ran
+into a statement timeout is not such a case: then the short row is tried.
 
-To find short rows, query the audit rows and look for the key `full_row_lost`
-in `payload`. On PostgreSQL: `SELECT id, path, occurred_at, payload FROM
-audit_log WHERE payload ? 'full_row_lost'`.
+The write of a call that ran is not lost when the task is cancelled during
+the write: the write runs to its end, and the cancel is raised after it.
+`duration_ms` is cut to the largest value its column holds (99999999.99).
+
+**How to find these rows:**
+
+- `meho audit query --full-row-lost` (REST: `"full_row_lost": true` in the
+  body of `POST /api/v1/audit/query`) lists the short rows.
+  `meho audit query --text-changed` (`"text_changed": true`) lists the rows
+  where text was changed. Both work with the other filters, for example
+  `--principal`.
+- Two counters: `meho_audit_full_row_lost_total` (by `error_class`) and
+  `meho_audit_text_changed_total`.
 
 A failed audit write is logged as `dispatch_audit_failed`. The line holds the
 request id, the target (name and id), the operation and the caller

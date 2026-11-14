@@ -2249,6 +2249,7 @@ type AuditClassCounts struct {
 type AuditClassCountsRequest struct {
 	AgentSessionId *openapi_types.UUID `json:"agent_session_id"`
 	AuditId        *openapi_types.UUID `json:"audit_id"`
+	FullRowLost    *bool               `json:"full_row_lost"`
 	OpClass        *string             `json:"op_class"`
 	OpId           *string             `json:"op_id"`
 	ParentAuditId  *openapi_types.UUID `json:"parent_audit_id"`
@@ -2256,6 +2257,7 @@ type AuditClassCountsRequest struct {
 	ResultStatus   *string             `json:"result_status"`
 	Since          *string             `json:"since"`
 	Target         *string             `json:"target"`
+	TextChanged    *bool               `json:"text_changed"`
 	Until          *string             `json:"until"`
 	WorkRef        *string             `json:"work_ref"`
 }
@@ -2401,6 +2403,7 @@ type AuditQueryRequest struct {
 	//   with it on they write a decision or execution class, or no row
 	//   (#3757, :mod:`meho_backplane.audit_cutover`).
 	EventClass    *AuditEventClass    `json:"event_class,omitempty"`
+	FullRowLost   *bool               `json:"full_row_lost"`
 	HasTrace      *bool               `json:"has_trace"`
 	Limit         *int                `json:"limit,omitempty"`
 	OpClass       *string             `json:"op_class"`
@@ -2410,6 +2413,7 @@ type AuditQueryRequest struct {
 	ResultStatus  *string             `json:"result_status"`
 	Since         *string             `json:"since"`
 	Target        *string             `json:"target"`
+	TextChanged   *bool               `json:"text_changed"`
 	Until         *string             `json:"until"`
 	WorkRef       *string             `json:"work_ref"`
 }

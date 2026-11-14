@@ -89,6 +89,12 @@ class _AuditFilterFields(BaseModel):
     parent_audit_id: uuid.UUID | None = None
     agent_session_id: uuid.UUID | None = None
     work_ref: str | None = Field(default=None, max_length=256)
+    # ``true``: only the short rows, stored when the database refused the
+    # full row. ``false``: the other rows. Not set: no filter (#6452).
+    full_row_lost: bool | None = None
+    # ``true``: only the rows where the writer replaced a character or a
+    # number so the table could store it. ``false``: the other rows (#6452).
+    text_changed: bool | None = None
 
     def to_filters(self) -> AuditQueryFilters:
         """Return the substrate filters, with ``since`` / ``until`` parsed.

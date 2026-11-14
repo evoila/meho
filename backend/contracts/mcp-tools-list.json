@@ -3136,6 +3136,12 @@
               },
               "tenant_id": {
                 "type": "string"
+              },
+              "warnings": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -3326,6 +3332,12 @@
                   "string",
                   "null"
                 ]
+              },
+              "warnings": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [

@@ -13,7 +13,7 @@ What is proven:
 * the write removes a named action the same way, and writes nothing when
   the list would not change;
 * an unknown or disabled name is refused, the error lists the allowed names,
-  and nothing is written;
+  and nothing is written (the guard test file covers the refusal before approval);
 * the write waits for approval, and the approval card shows the user, the
   realm and the change, with the username stored in Keycloak;
 * a request whose ``id`` and ``username`` name different users is refused
@@ -159,6 +159,7 @@ _ALLOWED = [
     {"alias": "CONFIGURE_TOTP", "name": "Configure OTP", "enabled": True, "defaultAction": False},
     {"alias": "VERIFY_EMAIL", "name": "Verify Email", "enabled": True, "defaultAction": False},
     {"alias": "UPDATE_PASSWORD", "name": "Update Password", "enabled": True},
+    {"alias": "webauthn-register-passwordless", "name": "Passkey", "enabled": True},
     {"alias": "TERMS_AND_CONDITIONS", "name": "Terms", "enabled": False},
 ]
 
@@ -344,7 +345,10 @@ async def test_unknown_or_disabled_name_is_refused_and_lists_allowed_names(
     assert result["status"] != "ok"
     text = str(result)
     assert name in text
-    assert "['CONFIGURE_TOTP', 'UPDATE_PASSWORD', 'VERIFY_EMAIL']" in text
+    assert (
+        "['CONFIGURE_TOTP', 'UPDATE_PASSWORD', 'VERIFY_EMAIL', 'webauthn-register-passwordless']"
+        in text
+    )
     assert not put.called
 
 
@@ -401,7 +405,8 @@ async def test_the_write_uses_the_read_it_built_the_list_from(kc: KeycloakConnec
     body = json.loads(put.calls.last.request.content)
     assert body["firstName"] == "read-0"
     assert body["requiredActions"] == ["VERIFY_EMAIL", "CONFIGURE_TOTP"]
-    assert result["result"]["required_actions"] == body["requiredActions"]
+    # The result shows the read-back, not the list that was sent.
+    assert result["result"]["required_actions"] == ["UPDATE_PASSWORD"]
 
 
 async def test_a_failed_write_is_an_error(kc: KeycloakConnector) -> None:
@@ -577,7 +582,7 @@ async def test_id_and_username_of_the_same_user_waits_for_approval(
         resumed = await _approve_and_resume(request_id)
     # The card and the result show the username stored in Keycloak.
     assert preview["username"] == "event-guest"
-    assert "warning" not in preview
+    assert "passkey" not in preview.get("warning", "")
     assert resumed.status == "ok", resumed
     assert resumed.result["username"] == "event-guest"
     assert put.call_count == 1

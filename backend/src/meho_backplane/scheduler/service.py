@@ -83,6 +83,7 @@ from meho_backplane.scheduler.schemas import (
     ScheduledTriggerRead,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.work_ref import work_ref_filter_values
 
 __all__ = [
     "AgentDefinitionMissingError",
@@ -328,7 +329,7 @@ class SchedulerAdminService:
             if status is not None:
                 stmt = stmt.where(ScheduledTrigger.status == status)
             if work_ref is not None:
-                stmt = stmt.where(ScheduledTrigger.work_ref == work_ref)
+                stmt = stmt.where(ScheduledTrigger.work_ref.in_(work_ref_filter_values(work_ref)))
             result = await session.execute(stmt)
             rows = list(result.scalars().all())
             return [_row_to_read(r) for r in rows]

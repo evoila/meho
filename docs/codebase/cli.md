@@ -1214,10 +1214,10 @@ that header from one place, so every verb gets it without its own flag.
   `api.ValidWorkRef` refuses (for example one with a line break) does
   not fail in the CLI: `applyWorkRef` skips the tag on these commands, and
   the backplane refuses the filter value with the ticket id rule (HTTP
-  422). The backplane strips and NFC-cleans a filter value the same way
-  as a stored ticket id, so a search finds an id however it is typed. A
-  row stored before the rule keeps its old text, so a search for such an
-  id needs the exact old text. When `--filter-work-ref` is given, also
+  422). The backplane matches a filter value both cleaned (stripped and
+  made NFC, like a stored ticket id) and exactly as typed. So a search
+  finds an id however it is typed, and a search with the exact old text
+  still finds a row stored before the rule. When `--filter-work-ref` is given, also
   empty (`--filter-work-ref=""` means no filter), `--work-ref` only
   tags, and a bad value is an error like on every other command.
   `MEHO_WORK_REF` never filters. `TestWorkRefFlagHasOneMeaning` walks

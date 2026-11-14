@@ -447,7 +447,10 @@ and NFC.
   the raw input.
 - A 422 answer for a bad body, query or path value names the rule and
   the code point. It does not show the refused ticket id: the `input`
-  field is left out of the error (`api/request_validation.py`). A header
+  field is left out of the error (`api/request_validation.py`). It is
+  also left out of any other error of the same answer whose input holds
+  the refused ticket id, for example a missing field, which carries the
+  whole body. A header
   that is refused leaves one log line, `work_ref_header_refused`, with
   the request id, the method, the route and the rule that failed
   (`empty`, `invisible_character` or `too_long`). It never holds the
@@ -455,16 +458,21 @@ and NFC.
   header after an upgrade.
 
 Rows stored before this rule are not changed. A ticket id stored before
-this release may carry white space at the ends, so an exact-match filter
-or a run approval made for the cleaned text does not match such a row.
-A search for such an id needs the exact old text, with its white space.
+this release may carry white space at the ends, or another Unicode form,
+so a run approval made for the cleaned text does not match such a row.
+A search filter still finds it with the exact old text (see below).
 
 ### Search filters
 
-A filter on a ticket id follows the same rule as a stored one. The input
-is stripped, made NFC and checked, and a bad value is refused with the
-same message (HTTP 422, or invalid params on MCP). So a search finds a
-ticket id however it is typed. The filters are:
+A filter on a ticket id is checked with the same rule as a stored one
+(the type `WorkRefFilter`), and a bad value is refused with the same
+message (HTTP 422, or invalid params on MCP). A good value matches two
+texts (`work_ref_filter_values` in `work_ref.py`): the cleaned id
+(stripped and made NFC), so a search finds a ticket id however it is
+typed, and the text exactly as typed, so a search with the exact old
+text still finds a row stored before the rule. A filter `"  CHG1  "`
+finds rows stored as `CHG1` and as `  CHG1  `; a filter `CHG1` finds
+only `CHG1`. The filters are:
 
 - the audit search (`POST /api/v1/audit/query`, `POST
   /api/v1/audit/class-counts`, `GET /api/v1/audit/by-work-ref/{ref}`;

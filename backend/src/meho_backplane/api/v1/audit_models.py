@@ -51,7 +51,7 @@ from meho_backplane.audit_query import (
 )
 from meho_backplane.db.models import AuditEventClass
 from meho_backplane.flight_recorder import TraceSpanView, TraceView
-from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRefFilter
 
 __all__ = [
     "AuditClassCounts",
@@ -88,7 +88,7 @@ class _AuditFilterFields(BaseModel):
     audit_id: uuid.UUID | None = None
     parent_audit_id: uuid.UUID | None = None
     agent_session_id: uuid.UUID | None = None
-    work_ref: WorkRef | None = Field(default=None, description=WORK_REF_FIELD_DESCRIPTION)
+    work_ref: WorkRefFilter | None = Field(default=None, description=WORK_REF_FIELD_DESCRIPTION)
 
     def to_filters(self) -> AuditQueryFilters:
         """Return the substrate filters, with ``since`` / ``until`` parsed.

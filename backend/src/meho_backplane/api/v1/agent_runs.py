@@ -86,7 +86,7 @@ from meho_backplane.operations.agent_run import (
     IllegalTransitionError,
     UnauthorizedCancellationError,
 )
-from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRefFilter
 
 __all__ = ["router"]
 
@@ -409,7 +409,7 @@ async def run_agent(
 @router.get("/runs", response_model=list[AgentRunSummaryResponse])
 async def list_runs(
     work_ref: Annotated[
-        WorkRef | None,
+        WorkRefFilter | None,
         Query(
             description=(
                 "Filter by external change-ticket reference (exact match), e.g. "

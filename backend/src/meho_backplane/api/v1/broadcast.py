@@ -44,7 +44,7 @@ from meho_backplane.broadcast import (
     publish_agent_announcement,
     read_announcement_history,
 )
-from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef, WorkRefFilter
 
 __all__ = ["router"]
 
@@ -126,7 +126,7 @@ async def recent_broadcast_events(
     principal: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
     target: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
     actor_sub: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
-    work_ref: Annotated[WorkRef | None, Query(description=WORK_REF_FIELD_DESCRIPTION)] = None,
+    work_ref: Annotated[WorkRefFilter | None, Query(description=WORK_REF_FIELD_DESCRIPTION)] = None,
     active_only: bool = False,
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
 ) -> dict[str, Any]:

@@ -146,7 +146,7 @@ from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.flight_recorder import TraceView, load_trace, should_expose_to_agent
-from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRefFilter
 
 __all__ = ["router"]
 
@@ -296,7 +296,7 @@ async def who_touched(
 
 @router.get("/by-work-ref/{ref:path}", response_model=AuditQueryResult)
 async def by_work_ref(
-    ref: Annotated[WorkRef, Path(description=WORK_REF_FIELD_DESCRIPTION)],
+    ref: Annotated[WorkRefFilter, Path(description=WORK_REF_FIELD_DESCRIPTION)],
     since: str | None = Query(default=None, max_length=32),
     limit: int = Query(default=100, ge=1, le=1000),
     operator: Operator = _require_operator,

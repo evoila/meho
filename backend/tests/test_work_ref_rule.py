@@ -38,7 +38,7 @@ from meho_backplane.operations.run_approval_schemas import RunApprovalCreate
 from meho_backplane.runbooks.runs_schemas import StartRunRequest
 from meho_backplane.scheduler.schemas import ScheduledTriggerCreate
 from meho_backplane.ui.routes.work_ref_form import form_work_ref
-from meho_backplane.work_ref import WorkRefError, normalize_work_ref
+from meho_backplane.work_ref import WorkRefError, normalize_work_ref, work_ref_filter_values
 
 _NFD = unicodedata.normalize("NFD", "Änderung-7")
 _NFC = unicodedata.normalize("NFC", "Änderung-7")
@@ -98,6 +98,15 @@ def test_the_message_names_the_rule_and_never_the_value(raw: str, words: str) ->
 def test_length_is_counted_after_nfc() -> None:
     # 256 composed characters written as 512 code points in NFD form.
     assert normalize_work_ref(unicodedata.normalize("NFD", "Ä" * 256)) == "Ä" * 256
+
+
+def test_a_search_filter_matches_the_cleaned_id_and_the_old_text() -> None:
+    assert work_ref_filter_values("CHG1") == ("CHG1",)
+    assert work_ref_filter_values("  CHG1  ") == ("CHG1", "  CHG1  ")
+    nfd = unicodedata.normalize("NFD", "Ä-1")
+    assert work_ref_filter_values(nfd) == ("Ä-1", nfd)
+    # A console filter box does not check the rule: its text matches exactly.
+    assert work_ref_filter_values("CHG\t1") == ("CHG\t1",)
 
 
 # ---------------------------------------------------------------- doors

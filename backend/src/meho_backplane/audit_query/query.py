@@ -88,6 +88,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import AuditEventClass, AuditLog, DispatchTrace, Target, Tenant
+from meho_backplane.work_ref import work_ref_filter_values
 
 from .cursor import CursorPosition, decode_cursor, encode_cursor
 from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult, EventClassCounts
@@ -276,7 +277,7 @@ def _apply_filters(
         stmt = stmt.where(AuditLog.agent_session_id == filters.agent_session_id)
 
     if filters.work_ref is not None:
-        stmt = stmt.where(AuditLog.work_ref == filters.work_ref)
+        stmt = stmt.where(AuditLog.work_ref.in_(work_ref_filter_values(filters.work_ref)))
 
     if filters.event_class is not None:
         stmt = stmt.where(AuditLog.event_class == filters.event_class.value)

@@ -169,7 +169,7 @@ from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
 from meho_backplane.settings import get_settings
-from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRefFilter
 
 __all__ = ["router"]
 
@@ -897,7 +897,7 @@ async def list_approvals(
         ),
     ),
     work_ref: Annotated[
-        WorkRef | None,
+        WorkRefFilter | None,
         Query(
             description=(
                 "Filter by external change-ticket reference (exact match), e.g. "

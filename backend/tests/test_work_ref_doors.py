@@ -22,7 +22,8 @@ from typing import Any
 from urllib.parse import quote
 
 import pytest
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
+from fastapi.dependencies.models import Dependant
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, BeforeValidator
@@ -45,9 +46,13 @@ from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools import broadcast as mcp_broadcast
 from meho_backplane.mcp.tools._work_ref_argument import work_ref_argument
 from meho_backplane.middleware import verify_jwt_and_bind
-from meho_backplane.work_ref import normalize_work_ref_input
+from meho_backplane.work_ref import check_work_ref_filter_input, normalize_work_ref_input
 
 _ZWSP = chr(0x200B)
+
+#: The validators of the shared types: ``WorkRef`` cleans a stored ticket id,
+#: ``WorkRefFilter`` checks a search filter and keeps its text as typed.
+_SHARED_VALIDATORS = (normalize_work_ref_input, check_work_ref_filter_input)
 
 # ---------------------------------------------------------------- REST doors
 
@@ -77,7 +82,7 @@ _REST_FILTERS: list[tuple[str, str]] = [
 def _uses_shared_type(annotation: Any, metadata: tuple[Any, ...] = ()) -> bool:
     """Whether a field type carries the shared ticket id validator."""
     for item in metadata:
-        if isinstance(item, BeforeValidator) and item.func is normalize_work_ref_input:
+        if isinstance(item, BeforeValidator) and item.func in _SHARED_VALIDATORS:
             return True
     if typing.get_origin(annotation) is typing.Annotated:
         first, *rest = typing.get_args(annotation)
@@ -104,53 +109,63 @@ def _api_routers() -> list[APIRouter]:
     return list(routers.values())
 
 
-def _rest_doors() -> tuple[list[tuple[str, str, bool]], list[tuple[str, bool]]]:
+def _route_doors(
+    routes: list[Any],
+) -> tuple[list[tuple[str, str, bool]], list[tuple[str, bool]]]:
     """Return the parameters and the request model fields named ``work_ref``.
 
     Parameters are ``(route path, name, uses the shared type)``; model fields
-    are ``("<Module>.<Model>.<field>", uses the shared type)``.
+    are ``("<Module>.<Model>.<field>", uses the shared type)``. The walk also
+    goes into every dependency (``Depends(...)``) of a route, at any depth.
     """
     params: list[tuple[str, str, bool]] = []
     fields: dict[str, bool] = {}
+    seen_models: set[type[BaseModel]] = set()
 
-    def walk(model: type[BaseModel], seen: set[type[BaseModel]]) -> None:
-        if model in seen:
+    def walk(model: type[BaseModel]) -> None:
+        if model in seen_models:
             return
-        seen.add(model)
+        seen_models.add(model)
         for name, info in model.model_fields.items():
             if "work_ref" in name:
                 key = f"{model.__module__}.{model.__name__}.{name}"
                 fields[key] = _uses_shared_type(info.annotation, tuple(info.metadata))
             for nested in _models_in(info.annotation):
-                walk(nested, seen)
+                walk(nested)
 
-    seen_models: set[type[BaseModel]] = set()
-    for router in _api_routers():
-        for route in router.routes:
-            if not isinstance(route, APIRoute):
-                continue
-            dependant = route.dependant
-            groups = (
-                dependant.query_params,
-                dependant.header_params,
-                dependant.path_params,
-                dependant.cookie_params,
-                dependant.body_params,
-            )
-            for group in groups:
-                for param in group:
-                    info = param.field_info
-                    if "work_ref" in param.name or "work-ref" in str(param.alias):
-                        params.append(
-                            (
-                                route.path,
-                                param.name,
-                                _uses_shared_type(info.annotation, tuple(info.metadata)),
-                            )
+    def walk_dependant(path: str, dependant: Dependant) -> None:
+        groups = (
+            dependant.query_params,
+            dependant.header_params,
+            dependant.path_params,
+            dependant.cookie_params,
+            dependant.body_params,
+        )
+        for group in groups:
+            for param in group:
+                info = param.field_info
+                if "work_ref" in param.name or "work-ref" in str(param.alias):
+                    params.append(
+                        (
+                            path,
+                            param.name,
+                            _uses_shared_type(info.annotation, tuple(info.metadata)),
                         )
-                    for model in _models_in(info.annotation):
-                        walk(model, seen_models)
+                    )
+                for model in _models_in(info.annotation):
+                    walk(model)
+        for sub in dependant.dependencies:
+            walk_dependant(path, sub)
+
+    for route in routes:
+        if isinstance(route, APIRoute):
+            walk_dependant(route.path, route.dependant)
     return params, sorted(fields.items())
+
+
+def _rest_doors() -> tuple[list[tuple[str, str, bool]], list[tuple[str, bool]]]:
+    """Return the ``work_ref`` parameters and model fields of every REST route."""
+    return _route_doors([route for router in _api_routers() for route in router.routes])
 
 
 def test_every_rest_work_ref_parameter_uses_the_shared_type() -> None:
@@ -201,6 +216,38 @@ def test_the_audit_path_filter_uses_the_shared_type() -> None:
     )
     (ref,) = [p for p in route.dependant.path_params if p.name == "ref"]
     assert _uses_shared_type(ref.field_info.annotation, tuple(ref.field_info.metadata))
+
+
+class _DependencyRequest(BaseModel):
+    work_ref: str
+
+
+class _DependencyBody(BaseModel):
+    work_ref: str
+
+
+def _dependency_body(body: _DependencyBody) -> _DependencyBody:
+    return body
+
+
+def _nested_dependency(body: _DependencyBody = Depends(_dependency_body)) -> _DependencyBody:
+    return body
+
+
+def test_the_walk_finds_a_work_ref_behind_a_dependency() -> None:
+    router = APIRouter()
+
+    @router.get("/query-model")
+    async def _query_model(request: _DependencyRequest = Depends()) -> None:
+        del request
+
+    @router.post("/nested-body")
+    async def _nested_body(body: _DependencyBody = Depends(_nested_dependency)) -> None:
+        del body
+
+    params, fields = _route_doors(list(router.routes))
+    assert ("/query-model", "work_ref", False) in params
+    assert (f"{__name__}._DependencyBody.work_ref", False) in fields
 
 
 # ---------------------------------------------------------------- MCP doors
@@ -330,24 +377,46 @@ def test_a_bad_audit_body_filter_is_refused_with_the_rule(path: str) -> None:
     assert "hidden" not in response.text
 
 
-def test_the_audit_body_filter_is_cleaned() -> None:
+def test_a_422_with_a_second_error_does_not_show_the_refused_ticket_id() -> None:
+    # A missing field carries the whole body as its input, with the ticket id.
+    response = _filter_app().post(
+        "/api/v1/runbooks/runs",
+        json={"template_slug": "tpl", "work_ref": "CHG-hidden" + _ZWSP + "7"},
+    )
+    assert response.status_code == 422, response.text
+    errors = {tuple(error["loc"]): error for error in response.json()["detail"]}
+    assert errors[("body", "target")]["type"] == "missing"
+    assert "input" not in errors[("body", "target")]
+    assert "control or invisible characters" in errors[("body", "work_ref")]["msg"]
+    assert "hidden" not in response.text
+
+
+def test_a_422_without_a_refused_ticket_id_keeps_the_input() -> None:
+    response = _filter_app().post(
+        "/api/v1/runbooks/runs", json={"template_slug": "tpl", "work_ref": "CHG-7"}
+    )
+    assert response.status_code == 422, response.text
+    (error,) = response.json()["detail"]
+    assert error["input"] == {"template_slug": "tpl", "work_ref": "CHG-7"}
+
+
+def test_the_audit_body_filter_keeps_its_text_for_the_search() -> None:
     body = audit_models.AuditQueryRequest(work_ref="  CHG1 ")
-    assert body.work_ref == "CHG1"
-    assert body.to_filters().work_ref == "CHG1"
+    assert body.to_filters().work_ref == "  CHG1 "
 
 
-def test_the_runbook_runs_filter_is_cleaned() -> None:
+def test_the_runbook_runs_filter_keeps_its_text_for_the_search() -> None:
     from meho_backplane.runbooks.runs_schemas import ListRunsFilter
 
-    assert ListRunsFilter(work_ref=" CHG1 ").work_ref == "CHG1"
+    assert ListRunsFilter(work_ref=" CHG1 ").work_ref == " CHG1 "
 
 
 # ---------------------------------------------------------------- filters: MCP
 
 
-def test_the_mcp_filter_argument_is_cleaned_or_refused() -> None:
+def test_the_mcp_filter_argument_is_checked_or_refused() -> None:
     assert work_ref_argument(None) is None
-    assert work_ref_argument("  CHG1 ") == "CHG1"
+    assert work_ref_argument("  CHG1 ") == "  CHG1 "
     for bad in ("", "  ", "CHG" + _ZWSP + "1", "a" * 257):
         with pytest.raises(McpInvalidParamsError):
             work_ref_argument(bad)
@@ -364,8 +433,8 @@ def test_the_mcp_filter_error_names_the_argument_and_not_the_value() -> None:
     assert "hidden" not in message
 
 
-def test_the_broadcast_history_filter_is_cleaned_or_refused() -> None:
-    assert mcp_broadcast._extract_filter({"filter": {"work_ref": " CHG1 "}}).work_ref == "CHG1"
+def test_the_broadcast_history_filter_is_checked_or_refused() -> None:
+    assert mcp_broadcast._extract_filter({"filter": {"work_ref": " CHG1 "}}).work_ref == " CHG1 "
     assert mcp_broadcast._extract_filter({}).work_ref is None
     with pytest.raises(McpInvalidParamsError, match=r"filter\.work_ref"):
         mcp_broadcast._extract_filter({"filter": {"work_ref": "CHG\n1"}})

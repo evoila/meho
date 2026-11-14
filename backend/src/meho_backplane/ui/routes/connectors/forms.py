@@ -91,11 +91,15 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.registry import registered_product_tokens
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.db.models import GraphNode
-from meho_backplane.targets.required_extras import KEYCLOAK_PRODUCT, has_managed_realm
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.routes.connectors.forms_realm import (
+    is_keycloak,
+    realm_extras,
+    realm_field_error,
+)
 from meho_backplane.ui.templating import get_templates
 
 __all__ = [
@@ -249,6 +253,7 @@ async def render_edit_modal(
         "auth_model": target.auth_model,
         "vpn_required": target.vpn_required,
         "notes": target.notes,
+        "managed_realm": (target.extras or {}).get("managed_realm"),
     }
     response = get_templates().TemplateResponse(
         request,
@@ -331,13 +336,11 @@ async def submit_create(
         "notes": notes or "",
         "managed_realm": managed_realm or "",
     }
-    is_keycloak = product.strip().lower() == KEYCLOAK_PRODUCT
-    if is_keycloak and not has_managed_realm({"managed_realm": managed_realm}):
-        realm_error = {"managed_realm": "A Keycloak target must name the realm MEHO manages."}
-        session_id = str(session_ctx.session_id)
+    realm_error = realm_field_error(product, managed_realm)
+    if realm_error is not None:
         return _render_form_with_errors(
             request,
-            csrf_session_id=session_id,
+            csrf_session_id=str(session_ctx.session_id),
             mode="create",
             values=raw_values,
             errors=realm_error,
@@ -365,8 +368,8 @@ async def submit_create(
         }
         if secret_ref and secret_ref.strip():
             create_data["secret_ref"] = secret_ref
-        if is_keycloak and managed_realm:
-            create_data["extras"] = {"managed_realm": managed_realm.strip()}
+        if is_keycloak(product) and managed_realm:
+            create_data["extras"] = realm_extras(None, managed_realm)
         body = TargetCreate.model_validate(create_data)
     except (ValidationError, ValueError) as exc:
         return _render_form_with_errors(
@@ -403,6 +406,7 @@ async def submit_edit(
     vpn_required: bool,
     aliases_raw: str | None,
     notes: str | None,
+    managed_realm: str | None = None,
 ) -> HTMLResponse:
     """Build a :class:`TargetUpdate` and delegate to the REST update handler.
 
@@ -415,6 +419,8 @@ async def submit_edit(
     the edit modal with per-field messages; a valid model goes to
     :func:`~meho_backplane.api.v1.targets.update_target`, which runs the
     product-registry validation and the 404-on-cross-tenant resolve.
+    For a Keycloak target the ``managed_realm`` field is set in the
+    target's extras; every other extras key stays as it is.
     """
     raw_values = {
         "name": target_name,
@@ -426,9 +432,23 @@ async def submit_edit(
         "vpn_required": vpn_required,
         "aliases": aliases_raw or "",
         "notes": notes or "",
+        "managed_realm": managed_realm or "",
     }
+    realm_error = realm_field_error(product, managed_realm)
+    if realm_error is not None:
+        return _render_form_with_errors(
+            request,
+            csrf_session_id=str(session_ctx.session_id),
+            mode="edit",
+            values=raw_values,
+            errors=realm_error,
+        )
+    update_data: dict[str, object] = {}
+    if is_keycloak(product) and managed_realm:
+        target = await resolve_target(db_session, session_ctx.tenant_id, target_name)
+        update_data["extras"] = realm_extras(target.extras, managed_realm)
     try:
-        body = TargetUpdate(
+        update_data.update(
             product=product,
             host=host,
             port=_coerce_port(port),
@@ -438,6 +458,7 @@ async def submit_edit(
             aliases=parse_aliases(aliases_raw),
             notes=notes or None,
         )
+        body = TargetUpdate.model_validate(update_data)
     except (ValidationError, ValueError) as exc:
         return _render_form_with_errors(
             request,

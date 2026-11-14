@@ -180,7 +180,6 @@
   </label>
 </div>
 
-{% if mode == "create" %}
 <label class="flex flex-col gap-1">
   <span class="text-sm font-medium">Managed realm <span class="opacity-60">(Keycloak only)</span></span>
   <input
@@ -194,10 +193,10 @@
   />
   <span id="target-managed-realm-hint" class="text-xs opacity-60">
     The Keycloak realm MEHO manages on this target. Required for a Keycloak target.
+    Give the name as it is: no spaces around it, no / ? # % or \.
   </span>
   {{ error_for('managed_realm') }}
 </label>
-{% endif %}
 
 <label class="flex flex-col gap-1">
   <span class="text-sm font-medium">Notes <span class="opacity-60">(optional)</span></span>

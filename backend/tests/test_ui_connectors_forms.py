@@ -192,6 +192,7 @@ def _seed_target(
     port: int | None = None,
     aliases: list[str] | None = None,
     notes: str | None = None,
+    extras: dict[str, Any] | None = None,
 ) -> uuid.UUID:
     target_id = uuid.uuid4()
     now = datetime.now(UTC)
@@ -212,7 +213,7 @@ def _seed_target(
                     secret_ref=None,
                     auth_model="shared_service_account",
                     vpn_required=False,
-                    extras={},
+                    extras=extras or {},
                     notes=notes,
                     fingerprint=None,
                     preferred_impl_id=None,
@@ -568,11 +569,94 @@ def test_create_modal_has_a_managed_realm_field() -> None:
 
 
 def test_create_submit_keycloak_with_a_realm_persists_it() -> None:
-    response = _post_keycloak_create("kc-ok", "  example ")
+    response = _post_keycloak_create("kc-ok", "example")
     assert response.status_code == 204, response.text
     row = _load_target(_TENANT_A, "kc-ok")
     assert row is not None
     assert row.extras == {"managed_realm": "example"}
+
+
+@pytest.mark.parametrize("managed_realm", [" example ", "a/b", "..", "name?x=", "name#"])
+def test_create_submit_keycloak_with_a_realm_that_is_not_plain_shows_a_field_error(
+    managed_realm: str,
+) -> None:
+    response = _post_keycloak_create("kc-bad", managed_realm)
+    assert response.status_code == 422, response.text
+    assert 'data-error-for="managed_realm"' in response.text
+    assert "not a plain realm name" in response.text
+    assert _load_target(_TENANT_A, "kc-bad") is None
+
+
+def _patch_keycloak_edit(name: str, managed_realm: str | None) -> Any:
+    register_connector_v2(product="keycloak", version="1.0", impl_id="keycloak", cls=_FakeConnector)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    data = {
+        "product": "keycloak",
+        "host": "kc.example.test",
+        "auth_model": "shared_service_account",
+    }
+    if managed_realm is not None:
+        data["managed_realm"] = managed_realm
+    try:
+        return client.patch(f"/ui/connectors/{name}", headers=_form_headers(csrf), data=data)
+    finally:
+        mock.stop()
+
+
+def test_edit_modal_shows_the_managed_realm_of_the_target() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(
+        tenant_id=_TENANT_A,
+        name="kc-shown",
+        product="keycloak",
+        extras={"managed_realm": "example"},
+    )
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/connectors/kc-shown/edit")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert 'name="managed_realm"' in response.text
+    assert 'value="example"' in response.text
+
+
+def test_edit_submit_fixes_an_old_keycloak_target_without_a_realm() -> None:
+    """An old target without a realm gets one in the console; other extras stay."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(
+        tenant_id=_TENANT_A,
+        name="kc-old",
+        product="keycloak",
+        extras={"admin_realm": "master"},
+    )
+    response = _patch_keycloak_edit("kc-old", "example")
+    assert response.status_code == 204, response.text
+    row = _load_target(_TENANT_A, "kc-old")
+    assert row is not None
+    assert row.extras == {"admin_realm": "master", "managed_realm": "example"}
+
+
+@pytest.mark.parametrize("managed_realm", [None, "", " example ", "a/../b"])
+def test_edit_submit_keycloak_without_a_plain_realm_shows_a_field_error(
+    managed_realm: str | None,
+) -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="kc-edit", product="keycloak", extras={})
+    response = _patch_keycloak_edit("kc-edit", managed_realm)
+    assert response.status_code == 422, response.text
+    assert 'data-error-for="managed_realm"' in response.text
+    row = _load_target(_TENANT_A, "kc-edit")
+    assert row is not None
+    assert row.extras == {}
 
 
 @pytest.mark.parametrize("managed_realm", [None, "", "   "])

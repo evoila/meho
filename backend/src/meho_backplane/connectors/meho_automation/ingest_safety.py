@@ -3,9 +3,9 @@
 
 """Safety floor for the meho-automation add-on generic connector.
 
-The connector's op allowlist admits six ops (see the catalog row): four
-**write** POSTs and two run-read GETs (#3699). This floor governs the
-four writes. They are all POSTs, so the generic ingest heuristic
+The connector's op allowlist admits seven ops (see the catalog row): four
+**write** POSTs and three read GETs (two run reads, #3699, and the blueprint
+list). This floor governs the four writes. They are all POSTs, so the generic ingest heuristic
 (``_safety_level_for``: POST/PUT/PATCH -> ``caution``, #3563) classifies every
 one ``caution`` by default. This floor **pins** those decided tiers so a spec
 re-ingest — or any future change to the generic verb heuristic — cannot
@@ -58,11 +58,11 @@ _MEHO_AUTOMATION_VERSION = "0.1.0"
 #: The four add-on WRITE ops are pinned ``caution`` (no approval park). Keyed
 #: by ``(METHOD, canonical path)``. Paths are the add-on's spec paths verbatim
 #: (its OpenAPI declares no servers block, so no mount prefix is stripped at
-#: ingest). The two allowlisted run-read GETs (#3699) are deliberately absent:
-#: reads land ``safe`` under the generic verb heuristic, below the caution
-#: write floor, so they need no pin. A drift-guard test
+#: ingest). The three allowlisted read GETs (the two run reads, #3699, and the
+#: blueprint list) are deliberately absent: reads land ``safe`` under the
+#: generic verb heuristic, below the caution write floor, so they need no pin. A drift-guard test
 #: (``test_operations_ingest_catalog.py``) asserts this set is a subset of the
-#: catalog allowlist, whose only extra entries are those two GET reads.
+#: catalog allowlist, whose only extra entries are those three GET reads.
 _CAUTION_OPS: frozenset[tuple[str, str]] = frozenset(
     {
         ("POST", "/api/v1/runs"),

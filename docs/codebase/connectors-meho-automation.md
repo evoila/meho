@@ -25,12 +25,13 @@ per-op MCP tool family:
   adoption / run DELETEs, fleet import, blueprint / environment / deployment
   CRUD), but this connector's op set is **closed** to exactly launch /
   validate / gate / resume plus the two run-read GETs a governed launcher needs
-  to observe the run it created (#3699) and nudge a failed node in (#3707) — a
+  to observe the run it created (#3699) and nudge a failed node in (#3707),
+  and the blueprint list read (`GET /api/v1/blueprints`) — a
   declarative catalog op-allowlist enforces that closure in code (see
   [Ingest op allowlist](#ingest-op-allowlist) below). The sibling run-node
   **skip** route is human-only in the add-on and is deliberately kept off this
   surface (see [Run-node control](#run-node-control-resume-vs-skip)).
-- **No new agent tools.** The six curated ops ride `op_id` under
+- **No new agent tools.** The seven curated ops ride `op_id` under
   `call_operation`; the MCP working surface is unchanged (no per-op tools).
 
 Dispatch triple: `(product="mehoauto", version="0.1.0",
@@ -64,6 +65,7 @@ eager-imported at boot like every other connector subpackage.
 | `POST:/api/v1/runs/{run_id}/nodes/{node_id}/resume` | Re-check or re-run a failed run node (agent nudge; `action` = `recheck`\|`rerun`) | `caution` (no approval park) |
 | `GET:/api/v1/runs/{run_id}` | Read a single run (carries `awaiting_decision_nodes` + per-node states — the authoritative terminality / gate-readiness source) | `safe` |
 | `GET:/api/v1/runs` | List runs (set-shaped) | `safe` |
+| `GET:/api/v1/blueprints` | List the blueprints an agent can run (set-shaped) | `safe` |
 
 The request body of the write ops follows the add-on's run-launch schema; the
 backplane forwards it verbatim as the `call_operation` params, and the add-on
@@ -84,13 +86,12 @@ against the live `/openapi.json`; the group exists but is empty until the reads
 are allowlisted), so an agent discovers the read surface via
 `list_operation_groups` → `search_operations`.
 
-**`GET /api/v1/blueprints` (published-blueprint list) stays OUT of scope.**
-#3699 flagged it as a lower-priority "consider" for input-contract discovery (a
-launcher enumerating what it may launch). It is deliberately not allowlisted
-here: the task's proven gap is *observing a launched run*, and blueprint-catalog
-discovery is a separate concern that can be added under its own change if a
-governed launcher needs it. Keeping it out holds the op set to the minimum the
-lab proof exercised.
+**Blueprint list (`GET /api/v1/blueprints`).** This read shows which blueprints
+an agent can run, so a launcher can see what it may launch before it calls
+launch. It is read-class, so it lands `safe` and the safety floor pins no key
+for it. The list is set-shaped: a big list comes back as a result handle. Only
+the list route is allowed. Blueprint item reads and the blueprint writes
+(create, update, delete) stay off this surface.
 
 ### Run-node control (resume vs skip)
 
@@ -139,11 +140,11 @@ them:
   surface (see [Run-node control](#run-node-control-resume-vs-skip)), so it is
   neither allowlisted nor floor-pinned.
 
-The two **run-read GETs** (#3699) are read-class: the same verb heuristic
+The three **read GETs** (the two run reads, #3699, and the blueprint list) are read-class: the same verb heuristic
 lands them `safe`, below the `caution` write floor, so the floor pins **no**
 key for them. A drift-guard test keeps this honest — the floor's pinned keys
 must be a subset of the catalog allowlist (a pinned op must be persistable),
-and the allowlist's only extra entries are exactly these two GET reads
+and the allowlist's only extra entries are exactly these three GET reads
 (`test_operations_ingest_catalog.py`).
 
 **Security note — launch executes without a backplane park.** Launch is a
@@ -269,16 +270,17 @@ so the value never transits an operator terminal or shell history.
 
    That OpenAPI document is the add-on's **full** API (~30 mutating routes),
    but the catalog op-allowlist (see below) drops every route except the
-   six curated ops **before persistence** regardless of how wide the
-   document is, so exactly six `EndpointDescriptor` rows land —
+   seven curated ops **before persistence** regardless of how wide the
+   document is, so exactly seven `EndpointDescriptor` rows land —
    `POST /api/v1/runs` (launch),
    `POST /api/v1/blueprints/{blueprint_id}/validate` (validate),
    `POST /api/v1/runs/{run_id}/gates/{node_id}/decision` (gate),
    `POST /api/v1/runs/{run_id}/nodes/{node_id}/resume` (run-node resume),
    `GET /api/v1/runs/{run_id}` (single-run read), and
-   `GET /api/v1/runs` (run list) — **staged / disabled**
+   `GET /api/v1/runs` (run list), and
+   `GET /api/v1/blueprints` (blueprint list) — **staged / disabled**
    (`is_enabled=false`, `source_kind=ingested`) with the tiers above (the
-   four writes pinned `caution`, the two reads `safe`). The ingest result
+   four writes pinned `caution`, the three reads `safe`). The ingest result
    reports the dropped count + the dropped `(method, path)` list. Because the
    ~26 dropped mutating routes — including the human-only run-node `.../skip`
    sibling of resume — are never persisted and never staged, the
@@ -287,7 +289,7 @@ so the value never transits an operator terminal or shell history.
 
 3. **Review the LLM-proposed op groups + per-group hints**, then **enable**
    the connector (staged → enabled) once the surface looks right. Enable is
-   safe: only the six allowlisted ops exist to enable. The two run-read GETs
+   safe: only the seven allowlisted ops exist to enable. The two run-read GETs
    land in the **Run Monitoring** group — confirm its when-to-use hint reads
    well before enabling.
 
@@ -332,8 +334,8 @@ so the value never transits an operator terminal or shell history.
 The add-on's `/openapi.json` publishes its full API — ~30 mutating routes
 across tenant / site / adoption / run (including DELETEs), fleet import, and
 blueprint / environment / deployment CRUD. This connector's design invariant
-is that its op set is **closed** to exactly six operations — four writes and
-the two run-read GETs (#3699):
+is that its op set is **closed** to exactly seven operations — four writes and
+three read GETs (the two run reads, #3699, and the blueprint list):
 
 | op | `(method, path)` | tier |
 |---|---|---|
@@ -343,6 +345,7 @@ the two run-read GETs (#3699):
 | run-node resume | `POST /api/v1/runs/{run_id}/nodes/{node_id}/resume` | `caution` |
 | single-run read | `GET /api/v1/runs/{run_id}` | `safe` |
 | run list | `GET /api/v1/runs` | `safe` |
+| blueprint list | `GET /api/v1/blueprints` | `safe` |
 
 The sibling `POST /api/v1/runs/{run_id}/nodes/{node_id}/skip` route is
 **not** on this list — it is human-only in the add-on (see
@@ -350,7 +353,7 @@ The sibling `POST /api/v1/runs/{run_id}/nodes/{node_id}/skip` route is
 
 That closure is enforced in code, declared in data. The catalog row
 (`operations/ingest/catalog.yaml`, product `mehoauto`) declares an
-`op_allowlist` naming exactly those six `(method, path)` pairs. On the
+`op_allowlist` naming exactly those seven `(method, path)` pairs. On the
 ingest path — for both a first ingest and any re-ingest of a wider spec —
 `operations/ingest/op_allowlist.py` drops every parsed operation outside the
 allowlist **before persistence**: dropped ops are never written and never
@@ -362,11 +365,11 @@ drop.
 The allowlist `(method, path)` pairs are kept consistent with the
 connector-owned safety floor's pinned keys
 (`connectors/meho_automation/ingest_safety.py`) by a drift-guard test. The
-floor pins only the four write ops (`caution`); the two GET reads land `safe`
+floor pins only the four write ops (`caution`); the three GET reads land `safe`
 naturally and need no floor entry. So the invariant the guard enforces is a
 **subset** relation, not equality: every floor-pinned key must be on the
 allowlist (a pinned op must be persistable), and the allowlist's only extra
-entries are exactly the two run-read GETs. The allowlist is generic: any
+entries are exactly the three read GETs. The allowlist is generic: any
 catalog product **may** declare an `op_allowlist`; absence keeps the historical
 behaviour (every parsed op is persisted).
 

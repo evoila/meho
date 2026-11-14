@@ -47,7 +47,7 @@ import structlog
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from meho_backplane.api.v1.targets import apply_target_update
+from meho_backplane.api.v1.targets import apply_target_update, screen_destination_change
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.targets.ops import (
@@ -61,6 +61,7 @@ from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.targets.resolver import resolve_target_by_id
 from meho_backplane.targets.schemas import TargetUpdate
+from meho_backplane.targets.ssrf_guard import TargetDestinationBlockedError
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -263,6 +264,19 @@ def _update_fields(params: dict[str, Any]) -> dict[str, Any]:
     return fields
 
 
+def _screen_sent_destination(body: TargetUpdate, row: Any) -> None:
+    """Refuse a change that leaves a destination that is not public.
+
+    Runs :func:`~meho_backplane.api.v1.targets.screen_destination_change`
+    on the sent fields and the stored row, so a port-only change is checked
+    too. The error keeps the usual "invalid target parameters" shape.
+    """
+    try:
+        screen_destination_change(body.model_dump(exclude_unset=True), row)
+    except TargetDestinationBlockedError as exc:
+        raise ValueError(f"invalid target parameters: {exc}") from exc
+
+
 async def targets_update(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Change the sent fields of one target of the operator's tenant.
 
@@ -290,6 +304,7 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
                     f"no live target with id {target_id} in your tenant; nothing was changed"
                 )
             structlog.contextvars.bind_contextvars(target_id=str(row.id), target_name=row.name)
+            _screen_sent_destination(body, row)
             updated = await apply_target_update(row, body, operator, session)
     except HTTPException as exc:
         raise ValueError(_http_exception_message(exc)) from exc

@@ -199,6 +199,10 @@ from meho_backplane.targets.secret_field_map import (
     check_secret_field_map_sources,
     merge_secret_field_map,
 )
+from meho_backplane.targets.ssrf_guard import (
+    TargetDestinationBlockedError,
+    assert_public_destination,
+)
 from meho_backplane.targets.vault_login_extras import enforce_vault_login_extras_platform_admin
 
 __all__ = [
@@ -1719,6 +1723,34 @@ async def _drop_kept_logins_on_connection_change(
         _drop_again_after_commit(session, t)
 
 
+def screen_destination_change(updates: dict[str, Any], t: TargetORM) -> None:
+    """Run the SSRF guard on the destination a PATCH leaves, when it changes.
+
+    *updates* holds only the sent fields (``exclude_unset``). The new
+    destination is each sent ``host`` / ``fqdn`` / ``port``, else the stored
+    one. A sent host or fqdn is screened with the new port. A sent port
+    (also ``null``, which clears it) screens the stored host and fqdn
+    again, because a ``host:port`` allowlist entry admits one port only.
+    Raises :class:`TargetDestinationBlockedError`.
+    """
+    port_sent = "port" in updates
+    port = updates["port"] if port_sent else t.port
+    for key in ("host", "fqdn"):
+        if key not in updates and not port_sent:
+            continue
+        value = updates[key] if key in updates else getattr(t, key)
+        if value is not None:
+            assert_public_destination(value, port)
+
+
+def _screen_sent_destination(updates: dict[str, Any], t: TargetORM) -> None:
+    """:func:`screen_destination_change` with the route's 422 answer."""
+    try:
+        screen_destination_change(updates, t)
+    except TargetDestinationBlockedError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 def _validate_update_body_fields(
     updates: dict[str, Any],
     t: TargetORM,
@@ -1754,6 +1786,7 @@ def _validate_update_body_fields(
       :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
     effective_product = _apply_product_patch(updates, t.product)
+    _screen_sent_destination(updates, t)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:
         _enforce_secret_ref_tenant_scope(updates["secret_ref"], operator, t.name)

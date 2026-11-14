@@ -306,17 +306,19 @@ async def _connect(
     (:func:`~meho_backplane.connectors._shared.dial_guard.connect_checked`).
     """
 
+    port = getattr(target, "port", None) or DEFAULT_PORT
+
     async def _open(address: str) -> pytds.Connection:
         return await asyncio.to_thread(
             _blocking_connect,
             host=address,
-            port=getattr(target, "port", None) or DEFAULT_PORT,
+            port=port,
             database=database or DEFAULT_DATABASE,
             creds=creds,
             query_timeout=query_timeout,
         )
 
-    return await connect_checked(target.host, _open)
+    return await connect_checked(target.host, _open, port=port)
 
 
 def _blocking_fetch(conn: pytds.Connection, sql: str, params: Any) -> list[dict[str, Any]]:

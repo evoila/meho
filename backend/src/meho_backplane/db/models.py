@@ -27,7 +27,7 @@ Schema decisions for :class:`Tenant`:
   ``default=uuid.uuid4`` for the SQLite dev/test driver and for
   out-of-band inserts.
 * ``slug`` — Text NOT NULL UNIQUE. The operator-facing identifier
-  (``rdc-internal``, ``customer-a``); used in URLs, log lines,
+  (``tenant-a``, ``customer-a``); used in URLs, log lines,
   audit displays. Uniqueness is enforced **exclusively** by the
   named ``tenant_slug_idx`` b-tree index (declared
   ``unique=True``); the column itself omits ``unique=True`` so
@@ -35,7 +35,7 @@ Schema decisions for :class:`Tenant`:
   to the named one. The named index gives later migrations a
   stable identifier to reference.
 * ``name`` — Text NOT NULL. Free-form display label
-  (e.g. "RDC Internal Tenancy"); not constrained or indexed.
+  (e.g. "Tenant A"); not constrained or indexed.
 * ``created_at`` — ``timestamptz``. PG-side ``now()`` server
   default via the migration; the ORM also declares
   ``default=lambda: datetime.now(UTC)`` so SQLite dev/test paths
@@ -118,7 +118,7 @@ Indexes on :class:`AuditLog`:
   shape) hit the index.
 * ``audit_log_tenant_id_idx`` — b-tree on ``tenant_id`` so
   per-tenant audit queries ("show me everything in
-  ``rdc-internal``") hit the index. Added by migration ``0002``;
+  ``tenant-a``") hit the index. Added by migration ``0002``;
   G0.1 sibling tasks T2/T3 wire the column writes.
 * ``audit_log_target_id_idx`` — b-tree on ``target_id`` so
   per-target audit queries hit the index. Added by migration ``0004``.
@@ -431,7 +431,7 @@ class AuditEventClass(StrEnum):
     migration together.
 
     * :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation
-      (success or failure), or a MEHO-internal action such as a topology
+      (success or failure), or an internal action such as a topology
       edit, a retention sweep or a reaper.
     * :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
       a policy deny, a rate-limit refusal, or a park for approval.
@@ -769,7 +769,7 @@ class Tenant(Base):
 
     Every authenticated request post-G0.1 carries a ``tenant_id``
     JWT claim that resolves to a row in this table. The slug
-    (``rdc-internal``, ``customer-a``) is the operator-facing
+    (``tenant-a``, ``customer-a``) is the operator-facing
     handle; the ``id`` is the FK keystone every per-tenant feature
     (knowledge bases, memory scopes, target registries, broadcast
     streams, audit-log scoping) joins on.
@@ -1698,7 +1698,7 @@ class DocCollection(Base):
 
     ``backend`` is the ``{type, ref}`` routing record the T2 (#1551)
     backend-agnostic search router resolves server-side — the backend
-    (``vertex-rag`` / ``meho-knowledge``) never appears in a request or
+    (``vertex-rag`` / a self-hosted store) never appears in a request or
     response. Operator-set; never probe-written.
 
     ``status`` is a bounded enum enforced via a DB-layer CHECK
@@ -5299,7 +5299,7 @@ class AddonPairing(Base):
 
     Foundation of Initiative #2900 (#3025). Each row is one *active* pairing
     between the backplane and a sibling add-on product (first consumers:
-    meho-automation, meho-ssp). Pairing is deliberately **not** connector
+    meho-automation and other add-ons). Pairing is deliberately **not** connector
     registration: an add-on is a peer control plane beside the narrow waist,
     integrated through the governance planes, not a managed vendor system
     below it.
@@ -8209,7 +8209,7 @@ class EventSource(Base):
 
 
 class EventOutbox(Base):
-    """One durable MEHO-internal event ready for subscription dispatch.
+    """One durable internal event ready for subscription dispatch.
 
     Initiative #804 (G11.3 Scheduler P2), Task #824 (T3). The
     transactional outbox: producers insert one of these rows in the

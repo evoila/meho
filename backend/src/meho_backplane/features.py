@@ -5,7 +5,7 @@
 
 v0.6.0 ships four major features that each require additional deploy
 configuration not flagged anywhere operator-facing
-(``claude-rdc-hetzner-dc#697`` signals 16, 17). The pattern is the same
+(consumer feedback signals 16 and 17). The pattern is the same
 across all four: the feature's code ships, env vars get added in
 :mod:`meho_backplane.settings`, but no ``/ready`` check, no
 ``docs/RELEASING.md`` callout, no release-body "what won't work out of
@@ -90,7 +90,7 @@ for its discovery payload.
 References
 ----------
 
-* Consumer feedback (canonical): ``claude-rdc-hetzner-dc#697`` signals
+* Consumer feedback (canonical): signals
   16 + 17 — the original "expose feature-gate state" flag.
 * Convention anchor: :doc:`docs/codebase/error-message-shape.md`
   (G0.14-T11) — the missing-env messages here mirror the convention's

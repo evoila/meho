@@ -1391,7 +1391,7 @@ async def test_dispatch_typed_returns_no_connector_when_resolver_misses(
     label (with the resolver's exception message in
     ``extras["exception_message"]``) so operators see the upstream
     diagnosis, matching ``signals 7`` and ``8`` of
-    ``claude-rdc-hetzner-dc#697``.
+    a consumer dogfood report.
     """
     # Register a typed op for a product, but DON'T register a
     # connector class for it — the resolver must miss.
@@ -1434,8 +1434,8 @@ async def test_dispatch_typed_returns_ambiguous_when_resolver_cant_tiebreak(
 ) -> None:
     """Typed branch surfaces ``ambiguous_connector`` with the resolver's diagnostic message.
 
-    Mirrors the live ``rdc-rke2-infra-k8s`` shape from
-    ``claude-rdc-hetzner-dc#697`` signal 8: the Kubernetes connector
+    Mirrors a live Kubernetes target shape from
+    a consumer dogfood report, signal 8: the Kubernetes connector
     self-registers under ``('k8s', '', '')`` (v1) AND ``('k8s',
     '1.x', 'k8s')`` (v2), the tie-break ladder treats both as
     equally specific (both have ``supported_version_range=None``),

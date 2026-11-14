@@ -361,7 +361,7 @@ def test_check_document_runs_the_routing_checks() -> None:
         "routing": [{"match": {"risk": "safe"}, "approvers": ["Readers"]}],
     }
 
-    mistakes, _ = check_document(document, scope="tenant", install_document=None, ops=[])
+    mistakes = check_document(document, scope="tenant", install_document=None, ops=[])
 
     assert "`routing[0]` asks `Readers`" in mistakes[0]
 
@@ -378,7 +378,7 @@ def _floored_op(level: str = "caution") -> KnownOp:
 
 def _check_with_floored_op(routing: list[dict[str, Any]], **kwargs: Any) -> list[str]:
     document = {"classifications": kwargs.pop("classifications", []), "routing": routing}
-    mistakes, _ = check_document(
+    mistakes = check_document(
         document, scope="install", install_document=None, ops=[_floored_op(**kwargs)]
     )
     return mistakes
@@ -516,7 +516,7 @@ def test_separated_duties_passes_the_import_checks(scope: str) -> None:
     assert parsed.mistakes == []
     assert parsed.model is not None
 
-    mistakes, _ = check_document(
+    mistakes = check_document(
         document_of(parsed.model),
         scope=scope,  # type: ignore[arg-type]
         install_document=None,

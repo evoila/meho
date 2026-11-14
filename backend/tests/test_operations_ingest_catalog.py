@@ -1157,7 +1157,7 @@ def test_packaged_catalog_fetch_upstreams_are_raw_spec_urls_not_doc_portals() ->
 
 
 # ---------------------------------------------------------------------------
-# next_step.verb round-trips to a dispatchable ingest (claude-rdc-hetzner-dc#1136)
+# next_step.verb round-trips to a dispatchable ingest (consumer-reported)
 # ---------------------------------------------------------------------------
 
 
@@ -1165,7 +1165,7 @@ def test_packaged_catalog_fetch_upstreams_are_raw_spec_urls_not_doc_portals() ->
 async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() -> None:
     """The ``vcfa`` registered-row ``next_step.verb`` ingests dispatchably.
 
-    The claude-rdc-hetzner-dc#1136 false-success was: an operator copying
+    The consumer-reported false success was: an operator copying
     the verb ingested under a product the dispatcher never queried, so the
     catalog kept reporting ``registered, 0 ops``. #1814 (Initiative #1810)
     closed the underlying split by realigning ``VcfAutomationConnector`` to

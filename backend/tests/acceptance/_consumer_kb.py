@@ -5,7 +5,7 @@
 
 The consumer's ``kb/`` directory (44+ entries spanning vSphere /
 NSX / Vault / k8s / Argo / Harbor / etc.) lives in their separate
-``evoila-bosnia/claude-rdc-hetzner-dc`` repo rather than ``evoila/meho``
+a consumer repository rather than ``evoila/meho``
 itself, so the public chassis repo stays free of vendor-shaped
 operator runbooks. This helper resolves a local path to the directory
 by checking, in priority order:

@@ -258,7 +258,7 @@ def test_operator_can_promote_user_to_user_target_when_target_id_supplied() -> N
             operator,
             MemoryScope.USER,
             MemoryScope.USER_TARGET,
-            target_id="rdc-vcenter",
+            target_id="example-vcenter",
         )
         is None
     )
@@ -350,7 +350,7 @@ def test_read_only_operator_cannot_promote_user_to_user_target() -> None:
             operator,
             MemoryScope.USER,
             MemoryScope.USER_TARGET,
-            target_id="rdc-vcenter",
+            target_id="example-vcenter",
         )
 
 
@@ -369,7 +369,7 @@ def test_target_promotion_without_tenant_admin_raises_not_implemented() -> None:
             operator,
             MemoryScope.USER_TARGET,
             MemoryScope.TARGET,
-            target_id="rdc-vcenter",
+            target_id="example-vcenter",
         )
 
 
@@ -387,7 +387,7 @@ def test_tenant_admin_target_promotion_v0_2_fallback() -> None:
             operator,
             MemoryScope.USER_TARGET,
             MemoryScope.TARGET,
-            target_id="rdc-vcenter",
+            target_id="example-vcenter",
         )
         is None
     )

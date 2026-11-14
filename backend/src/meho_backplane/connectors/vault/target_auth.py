@@ -10,7 +10,7 @@ credential — a vault ``Target``'s ``secret_ref`` stays ``NULL`` — so the onl
 per-target auth datum the connector reads is the role name (and, optionally,
 the auth-method mount the role lives on).
 
-Contract (frozen; lab-verified in ``claude-rdc-hetzner-dc#2814`` / PR
+Contract (frozen; lab-verified in PR
 ``#2815``):
 
 * ``extras["vault_role"]`` (string) — when present and the target's product is

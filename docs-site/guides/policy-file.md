@@ -100,6 +100,10 @@ refused, and the message names the entry and the operation.
   `caution` and always waits.
 - A file can raise a risk level, but never lower it below the level in
   MEHO's code.
+- When the install's policy makes an operation always wait, it waits in
+  every tenant. A tenant's file can make more operations wait. An entry
+  with `always_wait: false` that would end an install-wide wait is
+  refused, and the message names the install entry.
 
 ## Commands
 
@@ -128,11 +132,13 @@ platform admin may do that.
 5. The import **replaces the whole policy**. An entry that is not in the
    file is removed.
 
-!!! warning "Install-wide always wait"
+!!! note "Install-wide always wait"
 
-    An install file can make operations always wait. A tenant's own entry
-    that is as specific or more specific can set this back to the
-    operation's own value. MEHO shows a warning for such an entry.
+    An install file can make operations always wait. This holds for every
+    tenant: a tenant cannot set it back. A tenant entry stored before this
+    rule that sets it back has no effect on the wait. `meho policy export`
+    writes a `# Has no effect:` comment above such an entry. Remove it
+    before you import the file again.
 
 ## REST
 

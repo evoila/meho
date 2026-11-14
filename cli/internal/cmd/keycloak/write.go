@@ -88,7 +88,7 @@ func printWriteResult(opID string) func(w io.Writer, r *CallResult) {
 // writeResultKeyOrder pins a stable render order for the write
 // confirmations' scalar fields so the output is diff-stable across ops.
 var writeResultKeyOrder = []string{
-	"realm", "name", "client_id", "client_uuid", "id", "username",
+	"realm", "name", "client_id", "client_uuid", "id", "username", "requested_username",
 	"mapper_name", "created", "updated", "conflict", "password_reset",
 	"assigned_roles",
 	// group-lifecycle write confirmations (#3280)

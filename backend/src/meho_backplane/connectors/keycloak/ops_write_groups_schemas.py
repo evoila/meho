@@ -215,7 +215,7 @@ GROUP_WRITE_OPS: tuple[KeycloakOp, ...] = (
                 "group_id": "Group UUID (from keycloak.group.list).",
                 "username": "Username; resolved to UUID when user_id is absent.",
             },
-            "output_shape": "``{user_id, group_id, added, unchanged}``.",
+            "output_shape": "``{user_id, username, group_id, added, unchanged}``.",
         },
     ),
     KeycloakOp(
@@ -270,7 +270,7 @@ GROUP_WRITE_OPS: tuple[KeycloakOp, ...] = (
                 "group_id": "Group UUID (from keycloak.group.list).",
                 "username": "Username; resolved to UUID when user_id is absent.",
             },
-            "output_shape": "``{user_id, group_id, removed, unchanged}``.",
+            "output_shape": "``{user_id, username, group_id, removed, unchanged}``.",
         },
     ),
 )

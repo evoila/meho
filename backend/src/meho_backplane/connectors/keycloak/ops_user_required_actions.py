@@ -446,7 +446,7 @@ async def keycloak_user_required_actions_update(
     resulting = _apply(current, add, remove)
     result: dict[str, Any] = {
         "id": uuid,
-        "username": _opt_str(user.get("username")) or _opt_str(params.get("username")),
+        "username": _opt_str(user.get("username")),
         "realm": realm,
         "changed": resulting != current,
         "added": [name for name in add if name not in current],

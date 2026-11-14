@@ -96,7 +96,7 @@ from meho_backplane.connectors.keycloak._paths import (
     fill_path,
 )
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -224,7 +224,7 @@ async def keycloak_client_get(
     scrubbed.
     """
     realms = resolve_realm_config(target)
-    client_uuid = quote_segment(params["id"])
+    client_uuid = str(params["id"])
     client = await self._get_admin_json(
         target,
         fill_path(_CLIENT_PATH, {"realm": realms.managed_realm, "client-uuid": client_uuid}),
@@ -303,7 +303,7 @@ async def keycloak_role_mapping_get(
     scrubber for defence-in-depth consistency with the sibling ops.
     """
     realms = resolve_realm_config(target)
-    user_uuid = quote_segment(params["id"])
+    user_uuid = str(params["id"])
     mappings = await self._get_admin_json(
         target,
         fill_path(
@@ -363,7 +363,7 @@ async def keycloak_role_users(
     role is capped at that page.
     """
     realms = resolve_realm_config(target)
-    role_name = quote_segment(params["name"])
+    role_name = str(params["name"])
     rows = await self._get_admin_list(
         target,
         fill_path(_ROLE_USERS_PATH, {"realm": realms.managed_realm, "role-name": role_name}),
@@ -409,7 +409,7 @@ async def keycloak_group_list(
     if isinstance(parent_id, str) and parent_id:
         path = fill_path(
             _GROUP_CHILDREN_PATH,
-            {"realm": realms.managed_realm, "group-id": quote_segment(parent_id)},
+            {"realm": realms.managed_realm, "group-id": parent_id},
         )
     else:
         path = fill_path(_GROUPS_PATH, {"realm": realms.managed_realm})
@@ -435,7 +435,7 @@ async def keycloak_group_member_list(
     very large group is capped at that page.
     """
     realms = resolve_realm_config(target)
-    group_uuid = quote_segment(params["id"])
+    group_uuid = str(params["id"])
     query: dict[str, Any] = {}
     max_results = params.get("max")
     if isinstance(max_results, int):

@@ -45,7 +45,7 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     _opt_str,
     get_or_none,
 )
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -107,9 +107,8 @@ async def keycloak_user_lock_status(
 ) -> dict[str, Any]:
     """Return one user's lock status after failed sign-ins, with no IP address."""
     realm = resolve_realm_config(target).managed_realm
-    realm_segment = quote_segment(realm)
     user_id = await _user_id(self, operator, target, realm, params, _STATUS_OP)
-    segments = {"realm": realm_segment, "user-id": quote_segment(user_id)}
+    segments = {"realm": realm, "user-id": user_id}
     # The lock status read answers "not locked" for an unknown id; the user read gives 404.
     by_id = _opt_str(params.get("id")) is not None
     if by_id and await get_or_none(self, target, fill_path(_USER_PATH, segments), operator) is None:
@@ -138,7 +137,7 @@ async def keycloak_realm_lock_settings(
     """Return the realm's lock rules for failed sign-ins."""
     realm = resolve_realm_config(target).managed_realm
     row = await self._get_admin_json(
-        target, fill_path(_ADMIN_REALM_PATH, {"realm": quote_segment(realm)}), operator=operator
+        target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
     )
     if "bruteForceProtected" not in row:
         raise KeycloakUnexpectedResponseError("the realm answer has no 'bruteForceProtected'")

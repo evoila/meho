@@ -74,17 +74,14 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
-from urllib.parse import quote
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
     strip_credential_value,
 )
-from meho_backplane.targets.required_extras import (
-    has_managed_realm,
-    managed_realm_missing_message,
-)
+from meho_backplane.connectors.keycloak._paths import quote_segment
+from meho_backplane.targets.required_extras import keycloak_realm_problem
 
 __all__ = [
     "DEFAULT_ADMIN_REALM",
@@ -111,27 +108,6 @@ DEFAULT_ADMIN_REALM: str = "master"
 #: truth and error messages stay diff-stable.
 _CLIENT_FIELDS: tuple[str, str] = ("client_id", "client_secret")
 _PASSWORD_FIELDS: tuple[str, str] = ("username", "password")
-
-
-def quote_segment(value: Any) -> str:
-    """Percent-encode a caller-supplied id/uuid for a URL path segment.
-
-    Encodes ``/`` (``safe=""``) and ``.`` so that neither slash-based nor
-    dot-segment path traversal (``..``) can alter the request path structure.
-    A traversal-shaped id such as ``../../../../realms/master/clients``
-    becomes ``%2E%2E%2F%2E%2E%2F%2E%2E%2F%2E%2E%2Frealms%2Fmaster%2Fclients``
-    and cannot climb out of the realm sub-tree.  A bare ``..`` id becomes
-    ``%2E%2E`` and is not normalised by httpx.  Mirrors the ArgoCD connector's
-    ``_quote_name`` (``argocd/ops_write.py:130-132``).
-
-    Applied at every site where a caller-supplied id/uuid is interpolated
-    into a Keycloak Admin REST path — both read and write ops.
-
-    Note: In production every id/uuid is additionally validated against the
-    UUID pattern gate before the handler runs, but this function is a safe
-    standalone primitive that does not rely on that upstream gate.
-    """
-    return quote(str(value), safe="").replace(".", "%2E")
 
 
 @runtime_checkable
@@ -181,7 +157,10 @@ class RealmConfig:
 
 
 class KeycloakManagedRealmMissingError(ValueError):
-    """The target names no managed realm, so no operation can run on it."""
+    """The target names no managed realm, or a realm that is not a plain name.
+
+    No operation can run on such a target.
+    """
 
 
 def resolve_realm_config(target: KeycloakTargetLike) -> RealmConfig:
@@ -191,16 +170,17 @@ def resolve_realm_config(target: KeycloakTargetLike) -> RealmConfig:
     admin realm falls back to :data:`DEFAULT_ADMIN_REALM` when the key is
     absent, empty, or the ``extras`` attribute is missing entirely (a
     pre-G0.3 stub target). The managed realm has no default: when the
-    target does not name one, this raises
-    :class:`KeycloakManagedRealmMissingError` before any call to Keycloak.
+    target does not name one, or either realm is not a plain name (see
+    :func:`~meho_backplane.targets.required_extras.realm_name_problem`),
+    this raises :class:`KeycloakManagedRealmMissingError` before any call
+    to Keycloak.
     """
     extras = getattr(target, "extras", None) or {}
-    admin = extras.get("admin_realm") if isinstance(extras, Mapping) else None
-    managed = extras.get("managed_realm") if isinstance(extras, Mapping) else None
-    if not has_managed_realm(extras):
-        raise KeycloakManagedRealmMissingError(
-            managed_realm_missing_message(getattr(target, "name", None))
-        )
+    problem = keycloak_realm_problem(extras, getattr(target, "name", None))
+    if problem is not None:
+        raise KeycloakManagedRealmMissingError(problem)
+    admin = extras.get("admin_realm")
+    managed = extras.get("managed_realm")
     return RealmConfig(
         admin_realm=admin if isinstance(admin, str) and admin else DEFAULT_ADMIN_REALM,
         managed_realm=str(managed),

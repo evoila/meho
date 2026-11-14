@@ -30,7 +30,7 @@ import httpx
 from meho_backplane.connectors.keycloak._paths import _USER_PATH, fill_path
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -73,9 +73,7 @@ async def _set_enabled(
             connector,
             operator,
             target,
-            path=fill_path(
-                _USER_PATH, {"realm": realms.managed_realm, "user-id": quote_segment(uuid)}
-            ),
+            path=fill_path(_USER_PATH, {"realm": realms.managed_realm, "user-id": uuid}),
             requested={"enabled": enabled},
         )
     except httpx.HTTPStatusError as exc:

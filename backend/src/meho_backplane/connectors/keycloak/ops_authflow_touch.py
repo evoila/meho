@@ -200,9 +200,7 @@ def _shape_difference(rows: list[dict[str, Any]], *, requirements: bool = True) 
 async def _read_rows(
     connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
 ) -> list[dict[str, Any]]:
-    path = fill_path(
-        _AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": quote_segment(TOUCH_FLOW_ALIAS)}
-    )
+    path = fill_path(_AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": TOUCH_FLOW_ALIAS})
     rows = await get_admin_list_strict(connector, target, path, operator=operator)
     for row in rows:
         if not isinstance(row, dict):
@@ -224,7 +222,7 @@ async def _config_difference(
         config_id = rows[index].get("authenticationConfig")
         if not isinstance(config_id, str) or not config_id:
             return f"step {index + 1} ({node.name!r}) has no settings"
-        path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(config_id)})
+        path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": config_id})
         body = await connector._get_admin_json(target, path, operator=operator)
         if body.get("config") != node.config[1]:
             return f"step {index + 1} ({node.name!r}) has other settings"
@@ -253,7 +251,7 @@ async def _add_steps(
 ) -> None:
     """Add *nodes* to the flow *parent*, each sub-flow with its own steps."""
     for node in nodes:
-        values = {"realm": realm, "flowAlias": quote_segment(parent)}
+        values = {"realm": realm, "flowAlias": parent}
         if node.children is None:
             path = fill_path(_AUTH_FLOW_ADD_STEP_PATH, values)
             body: dict[str, Any] = {"provider": node.name}
@@ -295,7 +293,7 @@ async def _make_flow(
             "No client was bound to it.",
         )
     executions_path = fill_path(
-        _AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": quote_segment(TOUCH_FLOW_ALIAS)}
+        _AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": TOUCH_FLOW_ALIAS}
     )
     # Keycloak makes every new step DISABLED. Steps are matched by place, not
     # by name: the level condition is in the flow twice.
@@ -313,7 +311,7 @@ async def _make_flow(
             alias, config = node.config
             path = fill_path(
                 _AUTH_EXECUTION_CONFIG_PATH,
-                {"realm": realm, "executionId": quote_segment(str(row["id"]))},
+                {"realm": realm, "executionId": str(row["id"])},
             )
             await connector._write_admin(
                 target,
@@ -426,7 +424,7 @@ async def _ensure_amr_mapper(
     """
     path = fill_path(
         _CLIENT_PROTOCOL_MAPPERS_PATH,
-        {"realm": realm, "client-uuid": quote_segment(client_uuid)},
+        {"realm": realm, "client-uuid": client_uuid},
     )
     mappers = [
         m
@@ -480,7 +478,7 @@ async def _redirect_default(
     config_id = step.get("authenticationConfig") if step is not None else None
     if not isinstance(config_id, str) or not config_id:
         return None, None
-    path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(config_id)})
+    path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": config_id})
     body = await connector._get_admin_json(target, path, operator=operator)
     config = body.get("config")
     default = config.get("defaultProvider") if isinstance(config, dict) else None
@@ -506,9 +504,7 @@ async def _ensure_redirect(
     browser = str(realm_rep.get("browserFlow") or "browser")
     if browser == TOUCH_FLOW_ALIAS:
         return False
-    path = fill_path(
-        _AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": quote_segment(browser)}
-    )
+    path = fill_path(_AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": browser})
     browser_rows = await get_admin_list_strict(connector, target, path, operator=operator)
     wanted, _ = await _redirect_default(
         connector, operator, target, realm, [r for r in browser_rows if isinstance(r, dict)]
@@ -519,14 +515,14 @@ async def _ensure_redirect(
     if wanted is None and body is not None:
         # The realm no longer goes straight to the company login: drop the
         # touch flow's old default too, as the chart's setup step does.
-        path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(str(body["id"]))})
+        path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": str(body["id"])})
         await connector._write_admin(
             target, "DELETE", path, operator=operator, idempotent_conflict=False
         )
     elif body is not None:
         config = body.get("config")
         merged = {**(config if isinstance(config, dict) else {}), "defaultProvider": wanted}
-        path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(str(body["id"]))})
+        path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": str(body["id"])})
         await connector._write_admin(
             target,
             "PUT",
@@ -539,7 +535,7 @@ async def _ensure_redirect(
         step = next(row for row in rows if row.get("providerId") == REDIRECTOR)
         path = fill_path(
             _AUTH_EXECUTION_CONFIG_PATH,
-            {"realm": realm, "executionId": quote_segment(str(step["id"]))},
+            {"realm": realm, "executionId": str(step["id"])},
         )
         await connector._write_admin(
             target,
@@ -748,36 +744,33 @@ async def keycloak_authflow_ensure_approval_touch(
 ) -> dict[str, Any]:
     """Give the console client the login flow with the passkey touch level."""
     realm = resolve_realm_config(target).managed_realm
-    segment = quote_segment(realm)
     client_id = str(params.get("client_id") or _DEFAULT_CLIENT_ID).strip()
     client_uuid = await find_client_uuid(
-        self, operator, target, segment, client_id, op_id=ENSURE_APPROVAL_TOUCH_OP_ID, roles=_ROLES
+        self, operator, target, realm, client_id, op_id=ENSURE_APPROVAL_TOUCH_OP_ID, roles=_ROLES
     )
     if client_uuid is None:
         raise KeycloakTouchFlowError(
             "client_not_found", f"no client {client_id!r} in realm {realm!r}; nothing was changed"
         )
-    await _check_verification(self, operator, target, segment)
-    flow_id, created, rows = await _ensure_flow(self, operator, target, segment)
+    await _check_verification(self, operator, target, realm)
+    flow_id, created, rows = await _ensure_flow(self, operator, target, realm)
     state = "made by this run" if created else "already there"
     flag = str(created).lower()
     changed = [f"the flow {TOUCH_FLOW_ALIAS!r} (id {flow_id!r}, flow_created={flag}) is {state}"]
-    client_path = fill_path(
-        _CLIENT_PATH, {"realm": segment, "client-uuid": quote_segment(client_uuid)}
-    )
+    client_path = fill_path(_CLIENT_PATH, {"realm": realm, "client-uuid": client_uuid})
     refused = f"map {TOUCH_ACR!r} to level {TOUCH_LEVEL} in the realm"
     try:
-        loa_changed = await _ensure_loa_map(self, operator, target, segment)
+        loa_changed = await _ensure_loa_map(self, operator, target, realm)
         if loa_changed:
             changed.append(f"the realm maps {TOUCH_ACR!r} to level {TOUCH_LEVEL}")
         refused = f"add or fix the 'amr' mapper of the client {client_id!r}"
         mapper_added, mapper_fixed = await _ensure_amr_mapper(
-            self, operator, target, segment, client_uuid
+            self, operator, target, realm, client_uuid
         )
         if mapper_added or mapper_fixed:
             changed.append(f"the client {client_id!r} has the 'amr' mapper")
         refused = "copy the company login default to the flow"
-        redirect_copied = await _ensure_redirect(self, operator, target, segment, rows)
+        redirect_copied = await _ensure_redirect(self, operator, target, realm, rows)
         if redirect_copied:
             changed.append("the flow has the company login default")
         refused = f"bind the flow to the client {client_id!r}"
@@ -785,7 +778,7 @@ async def keycloak_authflow_ensure_approval_touch(
             self,
             operator,
             target,
-            segment,
+            realm,
             client_path,
             flow_id,
             replace_custom_login=params.get("replace_custom_login") is True,

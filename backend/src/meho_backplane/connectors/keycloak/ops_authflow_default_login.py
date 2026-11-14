@@ -43,7 +43,6 @@ from meho_backplane.connectors.keycloak._paths import (
     fill_path,
 )
 from meho_backplane.connectors.keycloak.ops_authflow import get_admin_list_strict
-from meho_backplane.connectors.keycloak.session import quote_segment
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -202,7 +201,7 @@ async def read_default_login_difference(
     """
     path = fill_path(
         _AUTH_FLOW_EXECUTIONS_PATH,
-        {"realm": realm, "flowAlias": quote_segment(DEFAULT_LOGIN_FLOW)},
+        {"realm": realm, "flowAlias": DEFAULT_LOGIN_FLOW},
     )
     steps: list[_Step] = []
     for row in await get_admin_list_strict(connector, target, path, operator=operator):
@@ -211,9 +210,7 @@ async def read_default_login_difference(
         config_id = row.get("authenticationConfig")
         config: dict[str, Any] | None = None
         if isinstance(config_id, str) and config_id:
-            config_path = fill_path(
-                _AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(config_id)}
-            )
+            config_path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": config_id})
             body = await connector._get_admin_json(target, config_path, operator=operator)
             raw = body.get("config")
             config = raw if isinstance(raw, dict) else {}

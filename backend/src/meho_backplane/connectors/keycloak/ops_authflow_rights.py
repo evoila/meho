@@ -422,7 +422,7 @@ async def find_client_uuid(
     connector: KeycloakConnector,
     operator: Operator,
     target: KeycloakTargetLike,
-    realm_segment: str,
+    realm: str,
     client_id: str,
     *,
     op_id: str,
@@ -433,9 +433,7 @@ async def find_client_uuid(
     The lookup is the op's first request, so nothing was changed yet.
     """
     try:
-        return await connector._find_client_uuid(
-            target, realm_segment, client_id, operator=operator
-        )
+        return await connector._find_client_uuid(target, realm, client_id, operator=operator)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code != 403:
             raise

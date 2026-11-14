@@ -80,7 +80,9 @@ routed by :func:`build_keycloak_secret_endpoint`:
   :func:`~meho_backplane.targets.resolver.resolve_target`.
 * ``<realm>`` — the Keycloak realm the user lives in. Taken from the ref
   (the operator addresses it explicitly), not from the target's
-  ``extras["managed_realm"]`` default.
+  ``extras["managed_realm"]``. It must be a plain realm name
+  (:func:`~meho_backplane.targets.required_extras.realm_name_problem`)
+  and is not trimmed.
 * ``<username>`` — the human username; resolved to the internal UUID via
   the Admin REST ``?username=&exact=true`` lookup.
 * ``#password`` (required) — the only writable field. Any other field is
@@ -129,10 +131,11 @@ from meho_backplane.connectors.keycloak._paths import (
 )
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
-from meho_backplane.connectors.keycloak.session import KeycloakTargetLike, quote_segment
+from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
 from meho_backplane.connectors.secret.endpoints import SecretMaterial, register_secret_endpoint
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.targets.required_extras import realm_name_problem
 from meho_backplane.targets.resolver import resolve_target
 
 if TYPE_CHECKING:
@@ -193,6 +196,19 @@ class KeycloakClientNotFoundError(Exception):
     """
 
 
+def _ref_realm(ref: str, raw: str) -> str:
+    """Return the ``<realm>`` segment of *ref* as it is; it must be a plain realm name.
+
+    The segment is not trimmed: a realm with spaces around it is refused.
+    """
+    problem = realm_name_problem(raw)
+    if problem is not None:
+        raise KeycloakSecretRefError(
+            f"keycloak secret ref {ref!r}: the realm {raw!r} is not a plain realm name: {problem}"
+        )
+    return raw
+
+
 def _parse_keycloak_ref(ref: str) -> tuple[str, str, str]:
     """Split ``"<target>/<realm>/<username>#<field>"`` into ``(target, realm, username)``.
 
@@ -220,8 +236,8 @@ def _parse_keycloak_ref(ref: str) -> tuple[str, str, str]:
             f"malformed keycloak secret ref {ref!r}: expected a "
             "'<target>/<realm>/<username>' address before '#password'"
         )
-    target_name, realm, username = segments
-    return target_name, realm, username
+    target_name, _realm, username = segments
+    return target_name, _ref_realm(ref, address.split("/")[1]), username
 
 
 def _parse_keycloak_client_ref(ref: str) -> tuple[str, str, str]:
@@ -253,8 +269,8 @@ def _parse_keycloak_client_ref(ref: str) -> tuple[str, str, str]:
             f"malformed keycloak client-secret ref {ref!r}: expected a "
             "'<target>/<realm>/clients/<clientId>' address before '#secret'"
         )
-    target_name, realm, _clients_segment, client_id = segments
-    return target_name, realm, client_id
+    target_name, _realm, _clients_segment, client_id = segments
+    return target_name, _ref_realm(ref, address.split("/")[1]), client_id
 
 
 class KeycloakCredentialSecretEndpoint:
@@ -346,7 +362,7 @@ class KeycloakCredentialSecretEndpoint:
             "PUT",
             fill_path(
                 _USER_RESET_PASSWORD_PATH,
-                {"realm": quote_segment(self._realm), "user-id": quote_segment(uuid)},
+                {"realm": self._realm, "user-id": uuid},
             ),
             operator=operator,
             json=credential,
@@ -424,7 +440,7 @@ class KeycloakClientSecretSourceEndpoint:
             target,
             fill_path(
                 _CLIENT_SECRET_PATH,
-                {"realm": quote_segment(self._realm), "client-uuid": quote_segment(uuid)},
+                {"realm": self._realm, "client-uuid": uuid},
             ),
             operator=operator,
         )

@@ -147,7 +147,7 @@ from meho_backplane.connectors.keycloak.ops_write_realm_delete import (
     realm_name_param,
 )
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._preview import (
     PreviewContext,
     register_preview_builder,
@@ -183,8 +183,8 @@ def _managed_realm(ctx: PreviewContext) -> str | None:
     target) so the preview omits the key rather than guessing.
     """
     explicit = ctx.params.get("realm")
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
+    if isinstance(explicit, str) and explicit:
+        return explicit
     if ctx.target is None:
         return None
     try:
@@ -205,7 +205,7 @@ async def _realm_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     settings etc.) without any embedded secret leaking.
     """
     representation = _representation(ctx)
-    realm_name = str(representation.get("realm") or ctx.params.get("realm") or "").strip()
+    realm_name = str(representation.get("realm") or ctx.params.get("realm") or "")
     return {
         "resource": "realm",
         "realm": realm_name or None,
@@ -385,7 +385,7 @@ async def _fetch_current_group_attributes(ctx: PreviewContext) -> dict[str, Any]
             group_id = resolved
         current = await connector._get_admin_json(
             target,
-            fill_path(_GROUP_PATH, {"realm": realm, "group-id": quote_segment(group_id)}),
+            fill_path(_GROUP_PATH, {"realm": realm, "group-id": group_id}),
             operator=ctx.operator,
         )
     except Exception:

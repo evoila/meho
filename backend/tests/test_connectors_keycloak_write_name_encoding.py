@@ -80,45 +80,54 @@ def _raw_paths(mock: respx.MockRouter) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_realm_update_encodes_a_realm_name_with_slashes(
+async def test_realm_update_refuses_a_realm_name_with_slashes(
     connector: KeycloakConnector,
 ) -> None:
     realm = f"{_REALM}/users/{_USER_UUID}"
-    encoded = f"/admin/realms/{_REALM}%2Fusers%2F{_USER_UUID}"
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
-        mock.post("/realms/master/protocol/openid-connect/token").respond(
-            200, json={"access_token": "kc-token", "expires_in": 300}
-        )
-        mock.route(method="GET").respond(200, json={"realm": realm, "enabled": True})
-        mock.route(method="PUT").respond(204)
-        await keycloak_realm_update(
-            connector, _OPERATOR, _target(), {"realm": realm, "representation": {"enabled": True}}
-        )
-        paths = [p for p in _raw_paths(mock) if p.startswith("/admin/")]
-
-    assert paths == [encoded, encoded, encoded]
-    assert not any(p.startswith(f"/admin/realms/{_REALM}/users") for p in paths)
+        route = mock.route().respond(200, json={})
+        with pytest.raises(ValueError, match="not a plain realm name"):
+            await keycloak_realm_update(
+                connector,
+                _OPERATOR,
+                _target(),
+                {"realm": realm, "representation": {"enabled": True}},
+            )
+    assert not route.called
 
 
 @pytest.mark.asyncio
-async def test_realm_update_encodes_the_new_realm_name_for_the_read_back(
+async def test_realm_update_encodes_a_dot_in_the_realm_name(
     connector: KeycloakConnector,
 ) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": "kc-token", "expires_in": 300}
         )
-        mock.route(method="GET").respond(200, json={"realm": _REALM})
+        mock.route(method="GET").respond(200, json={"realm": "a.b", "enabled": True})
         mock.route(method="PUT").respond(204)
         await keycloak_realm_update(
-            connector,
-            _OPERATOR,
-            _target(),
-            {"realm": _REALM, "representation": {"realm": "../master"}},
+            connector, _OPERATOR, _target(), {"realm": "a.b", "representation": {"enabled": True}}
         )
         paths = [p for p in _raw_paths(mock) if p.startswith("/admin/")]
 
-    assert paths == [f"/admin/realms/{_REALM}"] * 2 + ["/admin/realms/%2E%2E%2Fmaster"]
+    assert paths == ["/admin/realms/a%2Eb"] * 3
+
+
+@pytest.mark.asyncio
+async def test_realm_update_refuses_a_new_realm_name_that_is_not_plain(
+    connector: KeycloakConnector,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        route = mock.route().respond(200, json={})
+        with pytest.raises(ValueError, match=r"representation\.realm"):
+            await keycloak_realm_update(
+                connector,
+                _OPERATOR,
+                _target(),
+                {"realm": _REALM, "representation": {"realm": "../master"}},
+            )
+    assert not route.called
 
 
 @pytest.mark.asyncio

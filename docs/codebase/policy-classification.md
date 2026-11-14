@@ -15,6 +15,15 @@ All of this is behind the switch `POLICY_CLASSIFICATION` (Helm
 MEHO reads none of it: every operation keeps the risk level and the
 approval it has today, and `category`, `labels` and `rule_ref` stay empty.
 `/ready` shows the switch under `features.policy.classification`.
+The switch changes what the agent sees (the category and labels in search
+results and in the call contract), so `GET /version` lists it too.
+
+Label text can reach the agent, so it has a character rule
+(`label_text_ok` in `policy/classification.py`). A key uses only letters,
+digits and `. _ / -`. A value uses only printable characters: no line
+breaks and no control characters. A write that breaks the rule is
+refused, also in the policy file import. A stored label that breaks it
+(for example one written before the rule) is not shown.
 
 ## Where the values come from
 
@@ -97,6 +106,18 @@ Dispatch (`lookup_descriptor`, which joins the group key), preview, search,
 the call contract and the console all read `effective_policy_map`, so they
 show the same values. The returned `EffectivePolicy` carries `category`,
 `labels`, `rule_ref` and `always_wait`.
+
+## Where a person and an agent see it
+
+While the switch is on:
+
+- a `search_operations` hit and the call contract (exact-op mode) carry
+  `category` and `labels` ([mcp.md](mcp.md));
+- an approval request carries `category`, `labels` and
+  `classification_rule` (the `rule_ref`), and the approvals console and
+  `meho approvals show` show them ([approvals.md](approvals.md)).
+
+With the switch off, none of these keys is in an answer.
 
 ## "Always wait" means a person approves each call
 
@@ -252,8 +273,6 @@ stricter for that tenant. The page says so.
 - The policy file import (`policy.apply`, see [policy.md](policy.md))
   replaces the whole document of a tenant or the install, also the entries
   that `policy.classify` wrote.
-- Search hits, the call contract and the approval request do not show the
-  category yet.
 - On the pattern routes (`/api/v1/policy/classification`, the console
   page, `policy.classify`) a connector id, group key or operation id that
   holds `*`, `?` or `[` is read as a pattern. The dry run shows what it

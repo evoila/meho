@@ -117,8 +117,9 @@ func newDoctorCmd() *cobra.Command {
 			"unexpected. It prints the OAuth scopes your CLI session holds and " +
 			"compares the working-surface tools the server expects with the ones " +
 			"the handshake listed. Last, it warns about each Keycloak target that " +
-			"names no managed realm (extras.managed_realm), because MEHO refuses " +
-			"every operation on such a target.\n\n" +
+			"names no managed realm (extras.managed_realm), or a realm that is not " +
+			"a plain name, because MEHO refuses every operation on such a target. " +
+			"A platform admin sees the Keycloak targets of every tenant.\n\n" +
 			"Note: the scopes shown are the CLI login's scopes. A Claude client " +
 			"logs in on its own (through mcp-remote) and can hold other scopes; " +
 			"call meho_status from that client to see them. For a deeper look at " +

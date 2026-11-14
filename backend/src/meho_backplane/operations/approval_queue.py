@@ -175,6 +175,7 @@ from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
 from meho_backplane.operations.uncertain_outcome import envelope_is_uncertain
 from meho_backplane.version import running_release_id
+from meho_backplane.work_ref import work_ref_filter_values
 
 __all__ = [
     "EXPIRED_REASON_MESSAGES",
@@ -3910,7 +3911,7 @@ async def list_pending(
     if status is not None:
         stmt = stmt.where(ApprovalRequest.status == status)
     if work_ref is not None:
-        stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+        stmt = stmt.where(ApprovalRequest.work_ref.in_(work_ref_filter_values(work_ref)))
     if after is not None:
         if order == "oldest":
             stmt = stmt.where(
@@ -3981,7 +3982,7 @@ async def pending_chain_positions(
         .order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
     )
     if work_ref is not None:
-        stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+        stmt = stmt.where(ApprovalRequest.work_ref.in_(work_ref_filter_values(work_ref)))
     groups: dict[str, list[uuid.UUID]] = {}
     for request_id, ref in (await session.execute(stmt)).all():
         groups.setdefault(ref, []).append(request_id)

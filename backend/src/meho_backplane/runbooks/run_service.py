@@ -168,6 +168,7 @@ from meho_backplane.runbooks.substitution import (
     RUN_PARAMS_PATTERN,
     resolve_substitutions,
 )
+from meho_backplane.work_ref import work_ref_filter_values
 
 __all__ = [
     "DeprecatedTemplateError",
@@ -831,7 +832,7 @@ class RunbookRunService:
             if filter_.template_slug is not None:
                 stmt = stmt.where(RunbookRun.template_slug == filter_.template_slug)
             if filter_.work_ref is not None:
-                stmt = stmt.where(RunbookRun.work_ref == filter_.work_ref)
+                stmt = stmt.where(RunbookRun.work_ref.in_(work_ref_filter_values(filter_.work_ref)))
             rows = (await session.execute(stmt)).scalars().all()
 
             # Per-row current step + position need the pinned template body

@@ -67,6 +67,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import authorize_tenant_scope
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
+from meho_backplane.mcp.tools._work_ref_argument import work_ref_argument
 from meho_backplane.scheduler.schemas import (
     ScheduledTriggerCreate,
     ScheduledTriggerRead,
@@ -137,7 +138,7 @@ async def _list_handler(
     )
     kind = arguments.get("kind")
     status = arguments.get("status")
-    work_ref = arguments.get("work_ref")
+    work_ref = work_ref_argument(arguments.get("work_ref"))
     limit_raw = arguments.get("limit", 100)
     offset_raw = arguments.get("offset", 0)
     # The inputSchema does first-pass shape + bounds; the int() cast is
@@ -149,7 +150,7 @@ async def _list_handler(
         operator.tenant_id,
         kind=kind if isinstance(kind, str) else None,
         status=status if isinstance(status, str) else None,
-        work_ref=work_ref if isinstance(work_ref, str) else None,
+        work_ref=work_ref,
         limit=limit,
         offset=offset,
     )

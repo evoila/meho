@@ -47,6 +47,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.api.v1.audit_models import AuditQueryRequest
 from meho_backplane.audit_query import (
     AuditQueryFilters,
     InvalidCursorError,
@@ -675,6 +676,46 @@ async def test_work_ref_filter_exact_match_excludes_others_and_null(
 
     assert [entry.id for entry in result.rows] == [matching_id]
     assert result.rows[0].work_ref == ref
+
+
+@pytest.mark.asyncio
+async def test_work_ref_filter_finds_a_row_stored_before_the_rule(
+    session: AsyncSession,
+) -> None:
+    """A row stored before the ticket id rule keeps its padded text.
+
+    The filter matches the cleaned id and the text as typed, so a search
+    with the exact old text finds the old row and the new one, and a search
+    with the cleaned id finds the new row.
+    """
+    tenant_id = uuid.uuid4()
+    old_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        work_ref="  CHG1  ",
+    )
+    new_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        work_ref="CHG1",
+    )
+    await session.commit()
+
+    padded = await query_audit(
+        AuditQueryRequest(work_ref="  CHG1  ").to_filters(),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    cleaned = await query_audit(
+        AuditQueryRequest(work_ref="CHG1").to_filters(),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert {entry.id for entry in padded.rows} == {old_id, new_id}
+    assert [entry.id for entry in cleaned.rows] == [new_id]
 
 
 @pytest.mark.asyncio

@@ -116,6 +116,7 @@ from meho_backplane.mcp.tools._short_tool_texts import (
     BROADCAST_RECENT_SHORT,
     BROADCAST_WATCH_SHORT,
 )
+from meho_backplane.mcp.tools._work_ref_argument import work_ref_argument
 from meho_backplane.work_ref import WorkRefError, normalize_work_ref
 
 __all__: list[str] = []
@@ -159,10 +160,10 @@ def _extract_filter(arguments: dict[str, Any]) -> AnnouncementFilter:
         ("principal", principal),
         ("target", target),
         ("actor_sub", actor_sub),
-        ("work_ref", work_ref),
     ):
         if value is not None and not isinstance(value, str):
             raise McpInvalidParamsError(f"filter.{name}: must be a string when provided")
+    work_ref = work_ref_argument(work_ref, name="filter.work_ref")
     active_only = filter_obj.get("active_only", False)
     if not isinstance(active_only, bool):
         raise McpInvalidParamsError("filter.active_only: must be a boolean when provided")

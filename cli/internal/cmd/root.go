@@ -11,7 +11,6 @@ import (
 	"context"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -718,7 +717,7 @@ func applyWorkRef(cmd *cobra.Command, _ []string) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(source+" "+api.WorkRefRule), jsonOut)
 	}
-	cmd.SetContext(api.WithWorkRef(cmd.Context(), strings.TrimSpace(ref)))
+	cmd.SetContext(api.WithWorkRef(cmd.Context(), api.CleanWorkRef(ref)))
 	return nil
 }
 

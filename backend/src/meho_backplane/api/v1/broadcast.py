@@ -34,7 +34,6 @@ from meho_backplane.broadcast import (
     TARGET_MAX_CHARS,
     TTL_MAX_MINUTES,
     TTL_MIN_MINUTES,
-    WORK_REF_MAX_CHARS,
     AnnouncementClaimError,
     AnnouncementFilter,
     AnnounceRateLimitError,
@@ -45,7 +44,7 @@ from meho_backplane.broadcast import (
     publish_agent_announcement,
     read_announcement_history,
 )
-from meho_backplane.work_ref import WorkRef
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef, WorkRefFilter
 
 __all__ = ["router"]
 
@@ -78,7 +77,7 @@ class BroadcastAnnounceRequest(BaseModel):
         | None
     ) = None
     ttl_minutes: int | None = Field(default=None, ge=TTL_MIN_MINUTES, le=TTL_MAX_MINUTES)
-    work_ref: WorkRef | None = None
+    work_ref: WorkRef | None = Field(default=None, description=WORK_REF_FIELD_DESCRIPTION)
     #: Deprecated: the server sets the run id. A value that is not the
     #: checked run is refused.
     run_id: UUID | None = None
@@ -127,7 +126,7 @@ async def recent_broadcast_events(
     principal: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
     target: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
     actor_sub: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
-    work_ref: Annotated[str | None, Query(min_length=1, max_length=WORK_REF_MAX_CHARS)] = None,
+    work_ref: Annotated[WorkRefFilter | None, Query(description=WORK_REF_FIELD_DESCRIPTION)] = None,
     active_only: bool = False,
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
 ) -> dict[str, Any]:

@@ -5,32 +5,92 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/evoila/meho/cli/internal/auth"
 )
 
-func TestValidWorkRef(t *testing.T) {
-	for ref, want := range map[string]bool{
-		"gh:evoila/meho#13":    true,
-		"gh:owner/repo.name#1": true,
-		"CHG0012345":           true,
-		"OPS-123":              true,
-		"INC 42 / step\t2":     true,
-		"Änderung-7":           true,
-		"":                     false,
-		"   ":                  false,
-		"OPS-123\n":            false,
-		"OPS-123\nX-Other: 1":  false,
-		"CHG1\r2":              false,
-		"CHG\x001":             false,
-		"CHG\x7f1":             false,
-	} {
-		if got := ValidWorkRef(ref); got != want {
-			t.Errorf("ValidWorkRef(%q) = %v; want %v", ref, got, want)
+type workRefCase struct {
+	Name               string `json:"name"`
+	Raw                string `json:"raw"`
+	Repeat             int    `json:"repeat"`
+	Clean              string `json:"clean"`
+	CleanRepeat        int    `json:"clean_repeat"`
+	Rule               string `json:"rule"`
+	LengthDependsOnNFC bool   `json:"length_depends_on_nfc"`
+	CLIRefuses         bool   `json:"cli_refuses"`
+}
+
+func (c workRefCase) raw() string {
+	if c.Repeat > 0 {
+		return strings.Repeat(c.Raw, c.Repeat)
+	}
+	return c.Raw
+}
+
+func (c workRefCase) clean() string {
+	if c.CleanRepeat > 0 {
+		return strings.Repeat(c.Clean, c.CleanRepeat)
+	}
+	return c.Clean
+}
+
+// loadWorkRefCases reads the case list shared with the backend test.
+func loadWorkRefCases(t *testing.T) (valid, invalid []workRefCase) {
+	t.Helper()
+	data, err := os.ReadFile("../../../testdata/work_ref_cases.json")
+	if err != nil {
+		t.Fatalf("read shared cases: %v", err)
+	}
+	var doc struct {
+		Valid   []workRefCase `json:"valid"`
+		Invalid []workRefCase `json:"invalid"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parse shared cases: %v", err)
+	}
+	if len(doc.Valid) == 0 || len(doc.Invalid) == 0 {
+		t.Fatal("the shared case list is empty")
+	}
+	return doc.Valid, doc.Invalid
+}
+
+// TestValidWorkRef_SharedCases runs the list the backend test runs too.
+// The CLI does not make the text NFC, so a case whose length depends on
+// that step is left to the backend.
+func TestValidWorkRef_SharedCases(t *testing.T) {
+	valid, invalid := loadWorkRefCases(t)
+	for _, c := range valid {
+		if c.LengthDependsOnNFC {
+			continue
+		}
+		if got := ValidWorkRef(c.raw()); got == c.CLIRefuses {
+			t.Errorf("%s: ValidWorkRef(%q) = %v; want %v", c.Name, c.raw(), got, !c.CLIRefuses)
+		}
+		// Only the case that needs the NFC step differs from CleanWorkRef.
+		if c.Name != "decomposed text is made composed" && CleanWorkRef(c.raw()) != c.clean() {
+			t.Errorf("%s: CleanWorkRef(%q) = %q; want %q", c.Name, c.raw(), CleanWorkRef(c.raw()), c.clean())
+		}
+	}
+	for _, c := range invalid {
+		if ValidWorkRef(c.raw()) {
+			t.Errorf("%s: ValidWorkRef(%q) = true; want false", c.Name, c.raw())
+		}
+	}
+}
+
+// TestValidWorkRef_InvalidUTF8 covers what a JSON file cannot hold: bytes
+// that are not UTF-8 text, which the header cannot carry.
+func TestValidWorkRef_InvalidUTF8(t *testing.T) {
+	for _, ref := range []string{"CHG\xff1", "\xc3", "\xed\xa0\x80CHG"} {
+		if ValidWorkRef(ref) {
+			t.Errorf("ValidWorkRef(%q) = true; want false", ref)
 		}
 	}
 }

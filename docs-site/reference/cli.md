@@ -1327,7 +1327,7 @@ meho connector classify [flags]
 - `--group` — operation group key pattern
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
 - `--label` — a key=value label (repeat for more); replaces the labels of this entry
-- `--no-always-wait` — back to the operation's own approval value (never below it)
+- `--no-always-wait` — back to the operation's own approval value (never below it); refused when the install's policy makes a matched operation always wait
 - `--op` — operation id pattern, for example 'k8s.deployment.*'
 
 ### `meho connector delete`

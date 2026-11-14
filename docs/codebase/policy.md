@@ -69,29 +69,36 @@ is one sentence that names the entry:
   (`operations/caller_address.py`).
 - **Floor: the code's level.** A `risk` below the operation's level in the
   code is refused. A file can raise a risk level, not lower it.
-- **An install-wide "always wait".** In a tenant's file, an entry with
-  `always_wait: false` that matches an operation the install's policy makes
-  always wait is refused. The sentence names the install entry, for example
-  `install:classifications[0]`. A tenant can make more operations wait,
-  not fewer.
+- **An install-wide "always wait" or risk level.** In a tenant's file, an
+  entry with `always_wait: false` that matches an operation the install's
+  policy makes always wait is refused. So is an entry with a lower `risk`
+  than the install's level for a matching operation. The sentence names the
+  install entry, for example `install:classifications[0]`, and says which
+  part to remove; the other fields of the entry can stay.
 - Two entries that give one operation a different category (or a different
   value for one label key) at the same level.
 
 At most 50 mistakes are listed, then one line says how many more there
 are.
 
-An install file with `always_wait: true` is binding for every tenant
-(decision of 12 November 2026): when the install's most specific entry
-that sets `always_wait` says `true`, the operation waits in every tenant,
-whatever the tenant's entries say. The rule is in `classify`
+**The stricter of install and tenant counts** (decision of 12 November
+2026). For the risk level and for "always wait", the install and the
+tenant each find their own value; then the higher risk level counts, and
+the operation always waits when either says so. So what the install's
+file sets is a floor for every tenant, and a tenant can only make things
+stricter. A more specific install entry with `always_wait: false` does
+not end a wait that a tenant entry adds. The rule is in `classify`
 (`policy/classification.py`), so dispatch, preview, search, the policy
-evaluator and its compare-only run (`POLICY_ENGINE_SHADOW`) all follow it.
+evaluator and its compare-only run (`POLICY_ENGINE_SHADOW`) all follow
+it. The details and the case of a connector that a tenant registers
+under its own id are in [policy-classification.md](policy-classification.md).
 
 **Stored before the upgrade.** A tenant entry stored before this rule
-that sets an install-wide wait back now has no effect on the wait (its
-other fields still count). `export_policy` writes a
-`# Has no effect: ...` comment above such an entry, and a new import of
-the same entry is refused, so the tenant admin removes it.
+that sets an install-wide wait back, or that sets a lower risk level
+than the install, now has no effect for that part (its other fields still
+count). `export_policy` writes one `# Has no effect: ...` comment for each
+such part above the entry, and a new import of the same entry is refused,
+so the tenant admin removes that part.
 
 ## Plan, import, approval
 

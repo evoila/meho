@@ -4345,7 +4345,7 @@ type CheckSourceKind string
 
 // ClassificationEditBody One edit: the match and the values it sets. Set at least one value.
 type ClassificationEditBody struct {
-	// AlwaysWait true: every call of a matched operation waits for approval. false: back to the operation's own value, never below it.
+	// AlwaysWait true: every call of a matched operation waits for approval. false: back to the operation's own value, never below it. false is refused when the install's policy makes a matched operation always wait.
 	AlwaysWait *bool `json:"always_wait"`
 
 	// Category A category of the taxonomy, for example network or storage.

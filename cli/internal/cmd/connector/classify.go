@@ -83,7 +83,7 @@ func newClassifyCmd() *cobra.Command {
 	addClassificationFlags(cmd, &category, &labels)
 	cmd.Flags().BoolVar(&alwaysWait, "always-wait", false, "every call of a matched operation waits for approval")
 	cmd.Flags().BoolVar(&noAlwaysWait, "no-always-wait", false,
-		"back to the operation's own approval value (never below it)")
+		"back to the operation's own approval value (never below it); refused when the install's policy makes a matched operation always wait")
 	cmd.Flags().BoolVar(&apply, "apply", false, "ask for the change (without it: dry run only)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human summary")

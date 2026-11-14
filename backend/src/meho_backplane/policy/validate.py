@@ -13,7 +13,8 @@ The floors are rules in the code that no policy file can loosen:
 * A file can raise a risk level, never lower it below the level in the
   code.
 * A tenant's file cannot switch off an "always wait" that the install's
-  policy sets: a tenant can make more operations wait, not fewer.
+  policy sets, and cannot set a lower risk level than the install's
+  policy: the stricter of install and tenant counts.
 
 Each problem is one sentence that names the entry
 (``classifications[N]``) and the operation. :func:`check_document` also
@@ -45,8 +46,7 @@ from meho_backplane.policy.classification import (
     Taxonomy,
     check_no_conflict,
     entries_from_document,
-    install_wait_text,
-    install_wait_undone,
+    install_floor_texts,
     taxonomy_from_documents,
 )
 
@@ -178,17 +178,17 @@ def _floor_mistakes(entries: Sequence[ClassificationEntry], ops: Sequence[KnownO
     return mistakes
 
 
-def _install_wait_mistakes(
+def _install_floor_mistakes(
     entries: Sequence[ClassificationEntry],
     install_entries: Sequence[ClassificationEntry],
     ops: Sequence[KnownOp],
 ) -> list[str]:
-    """A tenant entry that sets back an install-wide "always wait": one sentence each."""
+    """A tenant entry that undoes an install-wide wait or risk level: one sentence each part."""
+    coords = [op.coords for op in ops]
     mistakes: list[str] = []
     for index, entry in enumerate(entries):
-        found = install_wait_undone(entry, (op.coords for op in ops), install_entries)
-        if found is not None:
-            mistakes.append(install_wait_text(f"`classifications[{index}]`", *found))
+        name = f"`classifications[{index}]`"
+        mistakes.extend(install_floor_texts(name, entry, coords, install_entries))
     return mistakes
 
 
@@ -210,8 +210,8 @@ def check_document(
     """Return the mistakes of *document*, a valid file's stored form.
 
     *install_document* is the stored install policy (for a tenant's file:
-    its taxonomy is the base, its "always wait" entries cannot be set
-    back, and its entries take part in the conflict check).
+    its taxonomy is the base, its "always wait" entries and risk levels
+    cannot be set back, and its entries take part in the conflict check).
     *other_entries* are more entries that apply next to the file (the
     category and labels set on one operation).
     """
@@ -228,7 +228,7 @@ def check_document(
     entries = entries_from_document(document, scope=scope)
     base = entries_from_document(install_document, scope="install") if scope == "tenant" else []
     mistakes = _floor_mistakes(entries, ops)
-    mistakes.extend(_install_wait_mistakes(entries, base, ops))
+    mistakes.extend(_install_floor_mistakes(entries, base, ops))
     if not mistakes:
         try:
             check_no_conflict(

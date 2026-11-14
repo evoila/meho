@@ -62,12 +62,26 @@ The rules are in `policy/classification.py` (`classify`, no database):
 3. **Each field on its own.** The most specific entry that sets a field
    decides it. Labels add up; a more specific entry replaces the value of
    a key.
-4. **An install-wide "always wait" is binding.** When the install's most
-   specific entry that sets `always_wait` says `true`, the operation always
-   waits in every tenant. A tenant's entry can add a wait, never remove
-   this one. The install's own more specific `always_wait: false` still
-   counts. A tenant file or a single edit that tries to set it back is
-   refused (`install_wait_undone`, `install_wait_text`).
+4. **The stricter of install and tenant counts.** This is the one rule
+   for `risk` and `always_wait` (decision of 12 November 2026). Each scope
+   first finds its own value with rules 1 to 3, using only its own
+   entries. Then the higher risk level counts, and the operation always
+   waits when the install or the tenant says so. So:
+   - an install risk level is a floor for every tenant. A tenant can raise
+     it, not lower it;
+   - an install "always wait" holds in every tenant;
+   - a tenant's own "always wait" holds, also under a more specific
+     install entry with `always_wait: false`;
+   - the install's own more specific entry still decides the install's
+     value, and a tenant's own more specific entry still decides the
+     tenant's value.
+
+   A tenant file that sets `always_wait: false` on an operation the
+   install makes wait, or a lower `risk` than a matching install entry,
+   is refused. The text names the install entry and says what to remove;
+   the other fields of the entry can stay (`install_floor_texts`). The
+   single edit has no `risk` field, so it refuses only the
+   `always_wait: false` part (`install_wait_undone`).
 5. **Ties** (same rank): for `risk` the higher level wins, for
    `always_wait` `true` wins. A different `category`, or a different value
    for one label key, is a conflict.
@@ -75,6 +89,17 @@ The rules are in `policy/classification.py` (`classify`, no database):
 
 `rule_ref` names the most specific entry that matched, for example
 `tenant:classifications[2]` or `install:override`, or `taxonomy.default`.
+
+### Connectors that a tenant registers itself
+
+A tenant can ingest its own connector and choose its id (`<impl_id>-<version>`),
+also for a product that MEHO already ships. An entry matches on the
+connector id, the group key and the operation id only, never on the
+product. So an install entry such as `{connector: "vault-*"}` does not
+match a tenant's own connector `my-vault-1.x` for the same product, and
+the install's risk level or "always wait" does not reach it. An install
+entry with a wildcard connector covers it, for example
+`{connector: "*", op: "<op-id-pattern>"}` or `{connector: "*"}`.
 
 **A conflict** is refused when an entry is written (one sentence that
 names both entries). If a reader still meets one (for example a new
@@ -177,7 +202,8 @@ two steps. Both are in `policy/bulk.py`:
    wait" before and after the edit, and `changes` for each. The list is
    never cut. It also names a conflict the edit would make, or the
    install entry whose "always wait" the edit tries to set back
-   (`conflict`). It writes nothing. Next to the classified values,
+   (`conflict`). A tenant's own "always wait" under an install entry with
+   `always_wait: false` shows as "waits" after the edit. It writes nothing. Next to the classified values,
    `before.in_force` and `after.in_force` show what applies: the risk
    level and whether a call waits, with the code's value, the overrides
    and the floors (`policy_in_force` in `operations/op_policy.py`). So

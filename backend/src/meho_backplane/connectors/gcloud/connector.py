@@ -101,6 +101,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.gcloud.backup_bucket import BackupBucketOps
 from meho_backplane.connectors.gcloud.session import (
     GcloudCredentialsLoader,
     GcloudTargetLike,
@@ -179,9 +180,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "shows who may use or act as one service account; "
         "``gcloud.iam.service_accounts.binding.add`` adds one member to one role there "
         "and ``gcloud.iam.service_accounts.binding.remove`` takes one member out of one "
-        "role (both need a person's approval). The right group when the agent needs to "
-        "verify a permission, pick an impersonation SA, or produce an access-review "
-        "report. Pair with the 'identity' group when onboarding a new target."
+        "role (both need a person's approval); ``gcloud.iam.service_accounts.create`` "
+        "makes a service account with no key (a person must approve). The right group "
+        "when the agent needs to verify a permission, pick an impersonation SA, or produce an "
+        "access-review report. Pair with the 'identity' group when onboarding a new target."
     ),
     "workload_identity": (
         "Use for workload identity pools: the Google setting that lets an outside "
@@ -198,6 +200,16 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "``gcloud.iam.workload_identity_pools.providers.update_keys`` replaces the "
         "uploaded keys; each needs a person's approval. Pair with the 'iam' group to add "
         "or remove the service-account binding that lets the pool act as an account."
+    ),
+    "storage": (
+        "Use to set up and check a Cloud Storage bucket, for example for backups. "
+        "``gcloud.storage.buckets.create`` makes a private bucket; "
+        "``gcloud.storage.buckets.update_settings`` sets versioning, the retention period "
+        "(not the lock) and lifecycle rules; ``gcloud.storage.buckets.read`` shows the "
+        "settings, who has access and whether retention is locked; "
+        "``gcloud.storage.buckets.access.add`` gives one member one role on the bucket. The "
+        "changes need a person's approval. Pair with the 'iam' group to make the service "
+        "account that writes to the bucket."
     ),
     "compute": (
         "Use for Compute Engine resource inventory: VMs, VPC networks, and subnets. "
@@ -250,7 +262,9 @@ def _subnet_row(sn: dict[str, Any], *, region: str) -> dict[str, Any]:
     }
 
 
-class GcloudConnector(WorkloadIdentityOps, WorkloadIdentityWriteOps, HttpConnector):
+class GcloudConnector(
+    WorkloadIdentityOps, WorkloadIdentityWriteOps, BackupBucketOps, HttpConnector
+):
     """GCP REST connector with ADC + service-account impersonation.
 
     Auth: ``google.auth.default()`` for ADC source credentials, wrapped

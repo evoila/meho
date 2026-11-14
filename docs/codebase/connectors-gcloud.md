@@ -206,6 +206,59 @@ or 4,096 bytes) is stored and the call returns a result handle; the agent
 reads the rows with `result_query`. The connector needs no code for this.
 See `jsonflux.md` and `result-spill.md`.
 
+## Setting up a backup bucket: storage and service account ops
+
+Five ops set up a Cloud Storage bucket for backups and the service account
+that writes to it. Before they existed, a person did these steps by hand
+with `gcloud`, which left no MEHO approval and no audit row.
+
+| Op ID | Google call | Risk level |
+|---|---|---|
+| `gcloud.storage.buckets.create` | `POST /storage/v1/b?project=<id>` | caution (a person must approve) |
+| `gcloud.storage.buckets.update_settings` | `GET`, then `PATCH /storage/v1/b/<bucket>?ifMetagenerationMatch=<n>` | caution (a person must approve) |
+| `gcloud.storage.buckets.read` | `GET /b/<bucket>` and `GET /b/<bucket>/iam` | safe |
+| `gcloud.storage.buckets.access.add` | `GET .../iam`, add one member, `PUT .../iam` with the read `etag` | dangerous (a person must approve) |
+| `gcloud.iam.service_accounts.create` | `POST /v1/projects/<id>/serviceAccounts` | caution (a person must approve) |
+
+Source: metadata in `ops_backup_bucket.py` (`BACKUP_BUCKET_OPS`, appended
+to `GCLOUD_OPS`; the bucket ops are in the new `storage` group, the service
+account create is in `iam`); handlers in `backup_bucket.py`, as the
+`BackupBucketOps` mixin that `GcloudConnector` inherits. They reuse the
+value checks, the HTTP helper and the policy-conflict error of
+`workload_identity.py`.
+
+How they behave:
+
+- **Private by design.** A new bucket always has uniform bucket-level access
+  and public access prevention `enforced`. Only the name, location and
+  storage class are chosen. Bucket names with dots are not accepted.
+- **Name already used.** Bucket names are global. On `409` the create fails
+  with a clear message and changes nothing. A bucket in another project
+  cannot be read, so MEHO does not guess who owns it.
+- **Settings update** changes only what is named: `versioning`,
+  `retention_period_seconds` (0 removes it) and `lifecycle_rules` (the full
+  list; it replaces all rules). It reads the bucket, sends only what differs
+  and sets `ifMetagenerationMatch`, so a change made in between makes
+  Google refuse it. The same settings send nothing (`changed: false`). A
+  locked retention period cannot be changed. Locking is not an op here: it
+  cannot be undone.
+- **Read** shows the settings, `retention_locked` and each role with its
+  members. If the bucket read or the policy read fails, the call fails;
+  there is no partial answer.
+- **Access add** reads the policy with version 3, adds the member to the
+  binding without a condition, and writes back with the `etag` it read. A
+  member already there sends nothing (`added: false`). A stale etag (`409`
+  or `412`) raises `GcloudPolicyChangedError` without a retry. `allUsers`,
+  `allAuthenticatedUsers` and `deleted:` members are refused.
+- **Service account create** makes no key. An ID that exists (`409`) shows
+  that account (`already_existed: true`).
+- **No check before approval yet.** These ops have no permission check that
+  runs before a person is asked to approve. The checks of the workload
+  identity ops show the way to add one.
+
+Tests: `backend/tests/test_connectors_gcloud_backup_bucket.py`. A live test
+on a sandbox project follows in a separate Task.
+
 ## Key types
 
 - **`GcloudConnector`** (`connector.py`) — `HttpConnector` subclass.

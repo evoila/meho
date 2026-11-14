@@ -327,7 +327,7 @@ class _GhFakeTarget:
 
     name: str
     host: str = "api.github.com"
-    secret_ref: str | None = "targets/github/evoila-bosnia-gh"
+    secret_ref: str | None = "targets/github/example-gh"
     auth_model: str | None = "shared_service_account"
     port: int | None = None
 

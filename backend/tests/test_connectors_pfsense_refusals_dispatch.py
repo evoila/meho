@@ -282,6 +282,8 @@ class _RecordingPfSense(PfSenseConnector):
         stdin: str | None = None,
     ) -> Any:
         self.commands.append(cmd)
+        if cmd == "cat /etc/version":
+            return _proc("2.7.2-RELEASE (amd64)\n")
         if cmd == "cat /cf/conf/config.xml":
             return _proc(self._config)
         if cmd.endswith("/sock"):

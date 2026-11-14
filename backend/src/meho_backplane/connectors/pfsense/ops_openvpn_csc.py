@@ -118,6 +118,7 @@ __all__ = [
 
 _VPNID_RE: Final = re.compile(r"^[0-9]{1,5}$")
 _CHANGED_MARKER: Final = "MEHO_CSC_CHANGED="
+_NO_USER_MARKER: Final = "MEHO_CSC_NO_USER="
 _MAX_ENTRIES: Final = 100
 _MAX_ROUTES: Final = 50
 
@@ -503,11 +504,38 @@ _PHP_STALE_CHECK: Final = [
 ]
 
 
+# The user check of the fragment, just before it writes: each override needs
+# a local user with its name. A name without one is printed as
+# ``MEHO_CSC_NO_USER=<names>`` and nothing is written.
+_PHP_USER_CHECK: Final = [
+    "$meho_users = array();",
+    "if (isset($config['system']['user']) && is_array($config['system']['user'])) {",
+    "  foreach ($config['system']['user'] as $meho_u) {",
+    "    if (isset($meho_u['name'])) {",
+    "      $meho_users[(string)$meho_u['name']] = true;",
+    "    }",
+    "  }",
+    "}",
+    "$meho_missing = array();",
+    "foreach ($meho_changes as $meho_c) {",
+    "  if (!isset($meho_users[$meho_c['name']])) {",
+    "    $meho_missing[$meho_c['name']] = true;",
+    "  }",
+    "}",
+    "if (count($meho_missing) > 0) {",
+    f"  echo '{_NO_USER_MARKER}' . implode(' ', array_keys($meho_missing)) . \"\\n\";",
+    "  $meho_changes = array();",
+    "}",
+]
+
+
 def build_csc_sync_playback(plan: list[dict[str, Any]], csc_count: int) -> str:
     """Return the raw-PHP fragment that creates or updates the planned overrides.
 
     Only rows with action ``create`` or ``update`` are written. First the
-    fragment checks that the overrides are still as the plan saw them
+    fragment checks that each named user still exists (else it prints
+    ``MEHO_CSC_NO_USER=<names>`` and writes nothing) and that the overrides
+    are still as the plan saw them
     (*csc_count* overrides, see ``_PHP_STALE_CHECK``). When one is not, it
     prints ``MEHO_CSC_CHANGED=<name@vpnid ...>`` and writes nothing. Else it
     adds each new override and edits each planned one. It touches
@@ -526,6 +554,7 @@ def build_csc_sync_playback(plan: list[dict[str, Any]], csc_count: int) -> str:
         ");",
         f"$meho_count = {int(csc_count)};",
         f"$meho_csc = (isset({path}) && is_array({path})) ? {path} : array();",
+        *_PHP_USER_CHECK,
         *_PHP_STALE_CHECK,
         "if (count($meho_stale) > 0) {",
         f"  echo '{_CHANGED_MARKER}' . implode(' ', $meho_stale) . \"\\n\";",
@@ -706,6 +735,14 @@ async def pfsense_openvpn_csc_sync(
         script_body=build_csc_sync_playback(plan, len(csc)),
         operator=operator,
     )
+    gone = re.search(rf"^{_NO_USER_MARKER}(.*)$", played, re.MULTILINE)
+    if gone is not None:
+        raise PfSenseRefusedError(
+            "pfsense.openvpn.csc.sync",
+            "user_not_found",
+            f"the firewall has no local user {gone.group(1).strip()!r} any more; nothing was "
+            "written. Run the op again.",
+        )
     stale = re.search(rf"^{_CHANGED_MARKER}(.*)$", played, re.MULTILINE)
     if stale is not None:
         raise RuntimeError(

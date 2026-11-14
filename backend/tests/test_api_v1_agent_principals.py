@@ -993,7 +993,7 @@ async def test_register_skips_vault_when_token_unset(
 
 
 # ---------------------------------------------------------------------------
-# meho-internal#289 — agent-principal register is human-only on every
+# agent-principal register is human-only on every
 # transport. An agent principal is minted ``tenant_admin``, so it clears the
 # role gate; the human-principal guard must still refuse it so a machine
 # cannot mint another agent principal over REST. (The human positive path

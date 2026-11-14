@@ -54,7 +54,7 @@ from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.targets.resolver import resolve_target
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
-_TARGET_NAME = "rdc-keycloak-write-e2e"
+_TARGET_NAME = "keycloak-write-e2e"
 _KC_HOST = "keycloak-write-e2e.test.invalid"
 _KC_BASE_URL = f"https://{_KC_HOST}"
 _ADMIN_TOKEN = "kc-admin-token-write-e2e"
@@ -67,7 +67,7 @@ _NEW_USER_UUID = "66666666-6666-6666-6666-666666666666"
 #: security assertion is that this string never escapes into the op
 #: result, the audit params view, or the broadcast payload.
 _PASSWORD_SENTINEL = "vault-sourced-password-DO-NOT-LEAK"
-_PASSWORD_SECRET_REF = "rdc-hetzner-dc/keycloak/operator-a-password"
+_PASSWORD_SECRET_REF = "example-site/keycloak/operator-a-password"
 
 _OPERATOR_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000ae")
 _OPERATOR = Operator(
@@ -188,10 +188,10 @@ async def _seed_keycloak_target() -> TargetORM:
             host=_KC_HOST,
             port=443,
             fqdn=None,
-            secret_ref="rdc-hetzner-dc/keycloak/admin",
+            secret_ref="example-site/keycloak/admin",
             auth_model="shared_service_account",
             vpn_required=False,
-            extras={},
+            extras={"managed_realm": "example"},
             fingerprint={"version": "26.0.5"},
             notes="seeded by test_connectors_keycloak_write_e2e",
         )
@@ -309,10 +309,12 @@ async def test_client_update_resolves_clientid_to_uuid(
     """client.update resolves a human clientId to its internal UUID before the PUT."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        list_route = mock.get("/admin/realms/evba/clients").respond(200, json=[_EXISTING_CLIENT])
+        list_route = mock.get("/admin/realms/example/clients").respond(200, json=[_EXISTING_CLIENT])
         # client.update reads the client first and merges onto it (#3941).
-        mock.get(f"/admin/realms/evba/clients/{_CLIENT_UUID}").respond(200, json=_EXISTING_CLIENT)
-        put_route = mock.put(f"/admin/realms/evba/clients/{_CLIENT_UUID}").respond(204)
+        mock.get(f"/admin/realms/example/clients/{_CLIENT_UUID}").respond(
+            200, json=_EXISTING_CLIENT
+        )
+        put_route = mock.put(f"/admin/realms/example/clients/{_CLIENT_UUID}").respond(204)
         result = await _dispatch(
             "keycloak.client.update",
             {"client_id": "meho-web", "representation": {"enabled": False}},
@@ -330,10 +332,10 @@ async def test_protocol_mapper_create_resolves_clientid(
     """protocol_mapper.create resolves clientId → UUID and POSTs the mapper."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        mock.get("/admin/realms/evba/clients").respond(200, json=[_EXISTING_CLIENT])
+        mock.get("/admin/realms/example/clients").respond(200, json=[_EXISTING_CLIENT])
         post_route = mock.post(
-            f"/admin/realms/evba/clients/{_CLIENT_UUID}/protocol-mappers/models"
-        ).respond(201, headers=_location(f"/admin/realms/evba/clients/{_CLIENT_UUID}"))
+            f"/admin/realms/example/clients/{_CLIENT_UUID}/protocol-mappers/models"
+        ).respond(201, headers=_location(f"/admin/realms/example/clients/{_CLIENT_UUID}"))
         result = await _dispatch(
             "keycloak.protocol_mapper.create",
             {
@@ -359,11 +361,11 @@ async def test_role_mapping_assign_resolves_username_and_role(
     """role_mapping.assign resolves username→UUID and role-name→representation."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        mock.get("/admin/realms/evba/users").respond(200, json=[_EXISTING_USER])
-        mock.get(f"/admin/realms/evba/users/{_USER_UUID}").respond(200, json=_EXISTING_USER)
-        mock.get("/admin/realms/evba/roles/tenant_admin").respond(200, json=_REALM_ROLE)
+        mock.get("/admin/realms/example/users").respond(200, json=[_EXISTING_USER])
+        mock.get(f"/admin/realms/example/users/{_USER_UUID}").respond(200, json=_EXISTING_USER)
+        mock.get("/admin/realms/example/roles/tenant_admin").respond(200, json=_REALM_ROLE)
         post_route = mock.post(
-            f"/admin/realms/evba/users/{_USER_UUID}/role-mappings/realm"
+            f"/admin/realms/example/users/{_USER_UUID}/role-mappings/realm"
         ).respond(204)
         result = await _dispatch(
             "keycloak.role_mapping.assign",
@@ -387,8 +389,8 @@ async def test_client_create_409_is_idempotent(keycloak_write_e2e: KeycloakConne
     """A 409 already-exists on client.create is a success; the UUID is resolved."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        mock.post("/admin/realms/evba/clients").respond(409, json={"errorMessage": "exists"})
-        mock.get("/admin/realms/evba/clients").respond(200, json=[_EXISTING_CLIENT])
+        mock.post("/admin/realms/example/clients").respond(409, json={"errorMessage": "exists"})
+        mock.get("/admin/realms/example/clients").respond(200, json=[_EXISTING_CLIENT])
         result = await _dispatch(
             "keycloak.client.create",
             {"representation": {"clientId": "meho-web"}},
@@ -404,8 +406,8 @@ async def test_client_create_201_returns_new_uuid(keycloak_write_e2e: KeycloakCo
     """A fresh client.create parses the new UUID out of the Location header."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        mock.post("/admin/realms/evba/clients").respond(
-            201, headers=_location(f"/admin/realms/evba/clients/{_NEW_CLIENT_UUID}")
+        mock.post("/admin/realms/example/clients").respond(
+            201, headers=_location(f"/admin/realms/example/clients/{_NEW_CLIENT_UUID}")
         )
         result = await _dispatch(
             "keycloak.client.create",
@@ -425,11 +427,11 @@ async def test_realm_create_409_is_idempotent(keycloak_write_e2e: KeycloakConnec
         mock.post("/admin/realms").respond(409, json={"errorMessage": "exists"})
         result = await _dispatch(
             "keycloak.realm.create",
-            {"representation": {"realm": "evba", "enabled": True}},
+            {"representation": {"realm": "example", "enabled": True}},
         )
     assert result["status"] == "ok", result.get("error")
     assert result["result"]["conflict"] is True
-    assert result["result"]["realm"] == "evba"
+    assert result["result"]["realm"] == "example"
 
 
 # ---------------------------------------------------------------------------
@@ -444,8 +446,8 @@ async def test_user_create_sources_password_from_vault_never_leaks(
     """user.create sources the password from Vault; it never leaks into the result."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        post_route = mock.post("/admin/realms/evba/users").respond(
-            201, headers=_location(f"/admin/realms/evba/users/{_NEW_USER_UUID}")
+        post_route = mock.post("/admin/realms/example/users").respond(
+            201, headers=_location(f"/admin/realms/example/users/{_NEW_USER_UUID}")
         )
         result = await _dispatch(
             "keycloak.user.create",
@@ -470,9 +472,11 @@ async def test_user_reset_password_resolves_username_and_no_leak(
     """user.reset_password resolves username→UUID and never leaks the password."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        mock.get("/admin/realms/evba/users").respond(200, json=[_EXISTING_USER])
-        mock.get(f"/admin/realms/evba/users/{_USER_UUID}").respond(200, json=_EXISTING_USER)
-        put_route = mock.put(f"/admin/realms/evba/users/{_USER_UUID}/reset-password").respond(204)
+        mock.get("/admin/realms/example/users").respond(200, json=[_EXISTING_USER])
+        mock.get(f"/admin/realms/example/users/{_USER_UUID}").respond(200, json=_EXISTING_USER)
+        put_route = mock.put(f"/admin/realms/example/users/{_USER_UUID}/reset-password").respond(
+            204
+        )
         result = await _dispatch(
             "keycloak.user.reset_password",
             {"username": "operator-a", "password_secret_ref": _PASSWORD_SECRET_REF},
@@ -515,8 +519,8 @@ async def test_writes_use_admin_token_never_operator_jwt(
     """Every write carries the admin Bearer, never the operator JWT."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        mock.post("/admin/realms").respond(201, headers=_location("/admin/realms/evba"))
-        await _dispatch("keycloak.realm.create", {"representation": {"realm": "evba"}})
+        mock.post("/admin/realms").respond(201, headers=_location("/admin/realms/example"))
+        await _dispatch("keycloak.realm.create", {"representation": {"realm": "example"}})
         for call in mock.calls:
             req = call.request
             if req.url.path.startswith("/admin/"):

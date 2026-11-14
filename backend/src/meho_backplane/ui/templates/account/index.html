@@ -141,6 +141,11 @@
     </div>
   </div>
 
+  {# ---------- Your tools (only with MCP_CLIENT_PER_TOOL_KIND) ---------- #}
+  {% if tools is not none %}
+  {% include "account/_tools.html" %}
+  {% endif %}
+
   {# ---------- Install hint (installable app) ---------- #}
   <div class="card bg-base-100 border-base-300 border shadow-sm" data-field="install-hint">
     <div class="card-body space-y-3">

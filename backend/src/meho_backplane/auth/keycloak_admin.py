@@ -18,6 +18,12 @@ principal lifecycle service needs:
 * :meth:`delete_client` — DELETE the client outright. Used to roll back
   a created client when the DB row that records it cannot be written, so
   register never leaves an orphaned, unrevocable token-issuing identity.
+* :meth:`revoke_user_client_consent` — end one person's consent and
+  offline login for one login client (the "Sign out this tool" button of
+  the account page).
+* :meth:`list_user_sessions` / :meth:`delete_user_session` — read one
+  person's ordinary (online) logins and end one of them. The same button
+  uses them for logins that are not offline.
 
 Design decisions
 ----------------
@@ -52,6 +58,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -65,6 +72,8 @@ __all__ = [
     "KeycloakAdminNotConfiguredError",
     "KeycloakClientConflictError",
     "KeycloakClientNotFoundError",
+    "KeycloakConsentNotFoundError",
+    "KeycloakForbiddenError",
 ]
 
 _ADMIN_HTTP_TIMEOUT_SECONDS: float = 10.0
@@ -115,6 +124,17 @@ class KeycloakClientConflictError(KeycloakAdminError):
 
 class KeycloakClientNotFoundError(KeycloakAdminError):
     """Raised when the target client does not exist (404 from Keycloak)."""
+
+
+class KeycloakConsentNotFoundError(KeycloakAdminError):
+    """Raised when Keycloak has no consent or offline login of the person for the client (404)."""
+
+
+class KeycloakForbiddenError(KeycloakAdminError):
+    """Raised when Keycloak answers 403 to a call on a person's logins.
+
+    The admin client lacks the realm role ``manage-users``.
+    """
 
 
 def _hardcoded_claim_mapper(name: str, claim_name: str, claim_value: str) -> dict[str, Any]:
@@ -719,3 +739,132 @@ class KeycloakAdminClient:
                 status=resp.status_code,
             )
             raise KeycloakAdminError(f"Keycloak delete_client failed: HTTP {resp.status_code}")
+
+    async def revoke_user_client_consent(self, user_id: str, client_id: str) -> None:
+        """End the consent and offline login of user *user_id* for *client_id*.
+
+        Calls ``DELETE /users/{user id}/consents/{client id}``. *client_id*
+        is the OAuth ``clientId`` (for example ``meho-mcp-desktop``), not the
+        internal UUID. Keycloak removes the person's consent and offline
+        login for that one client; the person's logins in other clients keep
+        working. An ordinary (online) login of a client that asks for no
+        consent stays: end it with :meth:`delete_user_session`. The admin
+        client needs the realm role ``manage-users``.
+
+        Raises
+        ------
+        KeycloakConsentNotFoundError
+            Keycloak answered 404: no consent or offline login of this
+            person for this client, or no such client or person.
+        KeycloakForbiddenError
+            Keycloak answered 403: the admin client lacks ``manage-users``.
+        KeycloakAdminError
+            Any other failure (a network error, 5xx).
+        """
+        assert self._http is not None
+        assert self._token
+        log = structlog.get_logger(__name__)
+        url = (
+            f"{self._admin_url}/users/{quote(user_id, safe='')}"
+            f"/consents/{quote(client_id, safe='')}"
+        )
+        try:
+            resp = await self._http.delete(url, headers=self._auth_headers())
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(
+                f"Keycloak revoke_user_client_consent network error: {type(exc).__name__}"
+            ) from exc
+        if resp.status_code == 404:
+            raise KeycloakConsentNotFoundError(
+                f"Keycloak has no consent or offline login of this person for client {client_id!r}"
+            )
+        if resp.status_code == 403:
+            raise KeycloakForbiddenError(
+                "Keycloak revoke_user_client_consent refused: HTTP 403 (needs manage-users)"
+            )
+        if resp.status_code not in (200, 204):
+            log.warning(
+                "keycloak_revoke_user_client_consent_failed",
+                client_id=client_id,
+                status=resp.status_code,
+            )
+            raise KeycloakAdminError(
+                f"Keycloak revoke_user_client_consent failed: HTTP {resp.status_code}"
+            )
+
+    async def list_user_sessions(self, user_id: str) -> list[dict[str, Any]]:
+        """Return the ordinary (online) logins of user *user_id*.
+
+        Calls ``GET /users/{user id}/sessions``. Each item is a Keycloak
+        ``UserSessionRepresentation``: ``id`` is the login, and ``clients``
+        maps the internal id of each login client in it to its
+        ``clientId``. One login can hold several clients when they signed
+        in through the same browser login.
+
+        Raises
+        ------
+        KeycloakForbiddenError
+            Keycloak answered 403: the admin client lacks ``manage-users``.
+        KeycloakAdminError
+            Any other failure (a network error, 404, 5xx) or an answer that
+            is not a list.
+        """
+        assert self._http is not None
+        assert self._token
+        url = f"{self._admin_url}/users/{quote(user_id, safe='')}/sessions"
+        try:
+            resp = await self._http.get(url, headers=self._auth_headers())
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(
+                f"Keycloak list_user_sessions network error: {type(exc).__name__}"
+            ) from exc
+        if resp.status_code == 403:
+            raise KeycloakForbiddenError(
+                "Keycloak list_user_sessions refused: HTTP 403 (needs manage-users)"
+            )
+        if resp.status_code != 200:
+            structlog.get_logger(__name__).warning(
+                "keycloak_list_user_sessions_failed", status=resp.status_code
+            )
+            raise KeycloakAdminError(f"Keycloak list_user_sessions failed: HTTP {resp.status_code}")
+        sessions = resp.json()
+        if not isinstance(sessions, list):
+            raise KeycloakAdminError("Keycloak list_user_sessions returned no list")
+        return [s for s in sessions if isinstance(s, dict)]
+
+    async def delete_user_session(self, session_id: str) -> bool:
+        """End one ordinary (online) login, with every client in it.
+
+        Calls ``DELETE /sessions/{session id}``. Returns ``False`` when
+        Keycloak answers 404 (the login already ended), else ``True``.
+
+        Raises
+        ------
+        KeycloakForbiddenError
+            Keycloak answered 403: the admin client lacks ``manage-users``.
+        KeycloakAdminError
+            Any other failure (a network error, 5xx).
+        """
+        assert self._http is not None
+        assert self._token
+        url = f"{self._admin_url}/sessions/{quote(session_id, safe='')}"
+        try:
+            resp = await self._http.delete(url, headers=self._auth_headers())
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(
+                f"Keycloak delete_user_session network error: {type(exc).__name__}"
+            ) from exc
+        if resp.status_code == 404:
+            return False
+        if resp.status_code == 403:
+            raise KeycloakForbiddenError(
+                "Keycloak delete_user_session refused: HTTP 403 (needs manage-users)"
+            )
+        if resp.status_code not in (200, 204):
+            structlog.get_logger(__name__).warning(
+                "keycloak_delete_user_session_failed", status=resp.status_code
+            )
+            raise KeycloakAdminError(
+                f"Keycloak delete_user_session failed: HTTP {resp.status_code}"
+            )
+        return True

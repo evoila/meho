@@ -99,8 +99,8 @@ provisioned set:
 - Keycloak admin access to the realm where MEHO agents authenticate.
 - A Keycloak **confidential client** (e.g. `meho-admin`) in that realm
   with `serviceAccountsEnabled=true`. Its service account must hold the
-  Keycloak built-in role `manage-clients` in the target realm (see
-  Step 2 below).
+  Keycloak built-in roles `manage-clients` and `manage-users` in the
+  target realm (see Step 2 below).
 - The backplane already runs with `KEYCLOAK_ISSUER_URL` set and
   validated (`meho status` returns green).
 - Keycloak version **22+** (Admin REST API v2 path shape).
@@ -118,7 +118,7 @@ In the Keycloak Admin Console for your realm:
 5. **Credentials** tab → note the **Client secret** → copy it to
    `KEYCLOAK_ADMIN_CLIENT_SECRET`
 
-## Step 2 — Grant `manage-clients` to the service account
+## Step 2 — Grant `manage-clients` and `manage-users` to the service account
 
 The service account that backs `meho-admin` needs permission to
 create and update clients. In Keycloak 22+:
@@ -126,6 +126,10 @@ create and update clients. In Keycloak 22+:
 1. **Clients → `meho-admin` → Service account roles** tab
 2. **Assign role** → filter by **Client** → select the realm's
    `realm-management` client → assign `manage-clients`
+3. In the same way, assign `manage-users`. The "Sign out this tool"
+   button of the account page needs it: it reads a person's logins and
+   ends the logins of one tool. Without it, Keycloak answers 403 and the
+   page says that the right is missing.
 
 > **Security note**: `manage-clients` allows creating any client in the
 > realm. Restrict the `meho-admin` service account to only those

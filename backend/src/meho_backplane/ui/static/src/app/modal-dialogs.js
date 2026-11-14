@@ -50,6 +50,33 @@
 (function () {
   "use strict";
 
+  // Open and close a page dialog from a button without inline script:
+  // ``data-open-dialog="<dialog id>"`` opens that dialog with
+  // ``showModal()``; ``data-close-dialog`` closes the dialog the button is
+  // in. Delegated on the document, so buttons in a swapped-in fragment work
+  // too.
+  document.addEventListener("click", function (event) {
+    var node = event.target;
+    if (!node || typeof node.closest !== "function") {
+      return;
+    }
+    var opener = node.closest("[data-open-dialog]");
+    if (opener) {
+      var target = document.getElementById(opener.dataset.openDialog);
+      if (target && !target.open && typeof target.showModal === "function") {
+        target.showModal();
+      }
+      return;
+    }
+    var closer = node.closest("[data-close-dialog]");
+    if (closer) {
+      var dialog = closer.closest("dialog");
+      if (dialog && dialog.open) {
+        dialog.close();
+      }
+    }
+  });
+
   // Strip a stranded ``modal-open`` from a dialog the moment it closes.
   // Registered in the capture phase because the native ``close`` event
   // does not bubble (MDN: "does not bubble") -- a body/document listener

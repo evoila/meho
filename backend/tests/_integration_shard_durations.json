@@ -40,6 +40,7 @@
   "tests/integration/test_kb_routes_pg.py": 4.66,
   "tests/integration/test_kb_service_pg.py": 4.79,
   "tests/integration/test_keycloak_bootstrap_mcp_login.py": 37.66,
+  "tests/integration/test_keycloak_tool_sign_out.py": 35.0,
   "tests/integration/test_mcp_inspector.py": 4.07,
   "tests/integration/test_memory_eligibility_pg.py": 5.72,
   "tests/integration/test_memory_service_account_roundtrip_e2e.py": 3.11,

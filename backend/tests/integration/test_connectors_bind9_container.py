@@ -37,6 +37,7 @@ scoped and amortised across the two tests in this module.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shlex
 import tempfile
@@ -622,6 +623,42 @@ async def test_record_remove_against_real_bind9_clears_resolution(
         assert get_result["total"] == 0
     finally:
         await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_two_parallel_record_adds_against_real_bind9_both_land(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """Two ``record.add`` writes on one zone at the same time both land."""
+    first = Bind9Connector()
+    second = Bind9Connector()
+    try:
+        await asyncio.gather(
+            first.bind9_record_add(
+                bind9_container_target,
+                {
+                    "fqdn": "par1.example.test",
+                    "ip": "192.0.2.71",
+                    "type": "A",
+                    "zone": "example.test",
+                },
+            ),
+            second.bind9_record_add(
+                bind9_container_target,
+                {
+                    "fqdn": "par2.example.test",
+                    "ip": "192.0.2.72",
+                    "type": "A",
+                    "zone": "example.test",
+                },
+            ),
+        )
+        for fqdn, ip in (("par1.example.test", "192.0.2.71"), ("par2.example.test", "192.0.2.72")):
+            get_result = await first.bind9_record_get(bind9_container_target, {"fqdn": fqdn})
+            assert ip in {row["rdata"] for row in get_result["rows"]}
+    finally:
+        await first.aclose()
+        await second.aclose()
 
 
 @pytest.mark.asyncio

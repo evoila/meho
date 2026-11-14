@@ -20,10 +20,13 @@ How the values of one operation are found:
 * **Each field on its own.** The most specific entry that sets a field
   decides that field. Labels add up: a more specific entry replaces the
   value of a key that a less specific one set.
-* **Install-wide "always wait" is binding.** When the install's most
-  specific entry that sets ``always_wait`` says ``true``, the operation
-  always waits in every tenant. A tenant's entry can add a wait, never
-  remove this one (:func:`install_wait_undone`).
+* **The stricter of install and tenant counts** for ``risk`` and
+  ``always_wait``. Each scope first finds its own value with the rules
+  above, using only its own entries. Then the higher risk level counts,
+  and the operation always waits when either scope says so. So a tenant
+  can only make things stricter than the install
+  (:func:`install_wait_undone`, :func:`install_risk_lowered`), and an
+  install entry never ends a wait or lowers a level that a tenant set.
 * **Ties.** Two entries of the same rank: for ``risk`` the higher level
   wins, for ``always_wait`` ``true`` wins. A different ``category`` (or a
   different value for one label key) is a conflict. A writer refuses it
@@ -59,6 +62,9 @@ __all__ = [
     "classify",
     "entries_from_document",
     "has_wildcard",
+    "install_floor_texts",
+    "install_risk_lowered",
+    "install_risk_text",
     "install_wait_text",
     "install_wait_undone",
     "taxonomy_from_documents",
@@ -71,6 +77,7 @@ RISK_LEVELS: Final[tuple[str, ...]] = ("safe", "caution", "dangerous", "destruct
 
 _LEVEL_RANK: Final[dict[str, int]] = {"connector": 1, "group": 2, "op": 3}
 _SCOPE_RANK: Final[dict[str, int]] = {"install": 0, "tenant": 1}
+_SCOPES: Final[tuple[Scope, ...]] = ("install", "tenant")
 _GLOB_METACHARS: Final[frozenset[str]] = frozenset("*?[")
 
 #: The rule reference of an operation that no entry matches.
@@ -233,15 +240,26 @@ def _labels(
     return labels, None
 
 
-def _install_wait(matched: Sequence[ClassificationEntry]) -> ClassificationEntry | None:
-    """The install entry that makes the operation always wait, or ``None``.
+def _scope_top(
+    matched: Sequence[ClassificationEntry], scope: Scope, attr: str
+) -> list[ClassificationEntry]:
+    """The entries of *scope* that decide *attr*, with that scope's own specificity.
 
-    Only install entries count, with their own specificity: a more
-    specific install entry with ``always_wait: false`` still beats a less
-    specific one with ``true``.
+    So a more specific install entry with ``always_wait: false`` still
+    beats a less specific install entry with ``true``.
     """
-    top = _top([e for e in matched if e.scope == "install"], "always_wait")
-    return next((e for e in top if e.always_wait), None)
+    return _top([e for e in matched if e.scope == scope], attr)
+
+
+def _scope_risk(matched: Sequence[ClassificationEntry], scope: Scope) -> ClassificationEntry | None:
+    """The entry that sets the risk level of *scope*; the higher level on a tie."""
+    top = _scope_top(matched, scope, "risk")
+    return max(top, key=lambda e: RISK_LEVELS.index(e.risk or "safe")) if top else None
+
+
+def _scope_wait(matched: Sequence[ClassificationEntry], scope: Scope) -> ClassificationEntry | None:
+    """The entry of *scope* that makes the operation always wait, or ``None``."""
+    return next((e for e in _scope_top(matched, scope, "always_wait") if e.always_wait), None)
 
 
 def install_wait_undone(
@@ -260,19 +278,75 @@ def install_wait_undone(
     for one in coords:
         if not entry.matches(one):
             continue
-        install = _install_wait([e for e in entries if e.matches(one)])
+        install = _scope_wait([e for e in entries if e.matches(one)], "install")
         if install is not None:
             return one.op_id, install.ref
     return None
 
 
 def install_wait_text(name: str, op_id: str, install_ref: str) -> str:
-    """The one sentence that refuses or marks an entry found by :func:`install_wait_undone`."""
+    """The sentences that refuse or mark an entry found by :func:`install_wait_undone`."""
     return (
         f"{name} sets `always_wait: false` on `{op_id}`, but `{install_ref}` makes it "
         "always wait for the whole install. A tenant can make more operations wait, "
-        "not fewer."
+        "not fewer. Remove `always_wait: false` from the tenant entry; its other "
+        "fields can stay."
     )
+
+
+def install_risk_lowered(
+    entry: ClassificationEntry,
+    coords: Iterable[OpCoordinates],
+    entries: Sequence[ClassificationEntry],
+) -> tuple[str, str, str] | None:
+    """Where a tenant *entry* sets a lower risk level than the install's policy.
+
+    Returns ``(op_id, install_ref, install_level)`` for the first
+    operation in *coords* that *entry* matches and that an install entry
+    in *entries* sets to a higher level than ``entry.risk``. ``None``
+    when there is none.
+    """
+    if entry.scope != "tenant" or entry.risk is None:
+        return None
+    level = RISK_LEVELS.index(entry.risk)
+    for one in coords:
+        if not entry.matches(one):
+            continue
+        install = _scope_risk([e for e in entries if e.matches(one)], "install")
+        if install is not None and RISK_LEVELS.index(install.risk or "safe") > level:
+            return one.op_id, install.ref, install.risk or "safe"
+    return None
+
+
+def install_risk_text(name: str, risk: str, op_id: str, install_ref: str, level: str) -> str:
+    """The sentences that refuse or mark an entry found by :func:`install_risk_lowered`."""
+    return (
+        f"{name} sets `risk: {risk}` on `{op_id}`, but `{install_ref}` sets it to "
+        f"`{level}` for the whole install. A tenant can raise a risk level, not lower "
+        f"it. Remove `risk: {risk}` from the tenant entry, or set `{level}` or higher; "
+        "its other fields can stay."
+    )
+
+
+def install_floor_texts(
+    name: str,
+    entry: ClassificationEntry,
+    coords: Sequence[OpCoordinates],
+    entries: Sequence[ClassificationEntry],
+) -> list[str]:
+    """Each part of a tenant *entry* that the install's policy overrules: one text each.
+
+    The parts are ``always_wait: false`` against an install-wide wait and
+    a ``risk`` below the install's level. An empty list when neither.
+    """
+    texts: list[str] = []
+    undone = install_wait_undone(entry, coords, entries)
+    if undone is not None:
+        texts.append(install_wait_text(name, *undone))
+    lowered = install_risk_lowered(entry, coords, entries)
+    if lowered is not None and entry.risk is not None:
+        texts.append(install_risk_text(name, entry.risk, *lowered))
+    return texts
 
 
 def classify(
@@ -282,10 +356,10 @@ def classify(
 ) -> Classification:
     """Return the classified values of the operation at *coords*."""
     matched = [e for e in entries if e.matches(coords)]
-    risks = [e.risk for e in _top(matched, "risk") if e.risk is not None]
+    picked = [_scope_risk(matched, scope) for scope in _SCOPES]
+    risks = [e.risk for e in picked if e is not None and e.risk is not None]
     risk = max(risks, key=RISK_LEVELS.index) if risks else None
-    always_wait = any(e.always_wait for e in _top(matched, "always_wait"))
-    always_wait = always_wait or _install_wait(matched) is not None
+    always_wait = any(_scope_wait(matched, scope) is not None for scope in _SCOPES)
     category, category_conflict = _category(coords, matched, taxonomy)
     labels, label_conflict = _labels(coords, matched)
     conflict = category_conflict or label_conflict

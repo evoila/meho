@@ -11,8 +11,8 @@
   :mod:`meho_backplane.connectors.policy.apply`). It plans again first:
   when the stored policy changed after the plan, nothing is written.
 * :func:`export_policy` writes the stored policy as a file. A tenant
-  entry that tries to set back an install-wide "always wait" gets a
-  comment that says it has no effect.
+  entry that tries to set back an install-wide "always wait" or risk
+  level gets a comment that says which part has no effect.
 * :func:`list_history` returns the imported files, newest first.
 
 The import replaces the whole policy of its scope (a tenant, or the
@@ -42,8 +42,7 @@ from meho_backplane.policy.classification import (
     Taxonomy,
     classify,
     entries_from_document,
-    install_wait_text,
-    install_wait_undone,
+    install_floor_texts,
     taxonomy_from_documents,
 )
 from meho_backplane.policy.document import (
@@ -453,8 +452,12 @@ def _dump(value: Any) -> str:
 
 async def _no_effect_notes(
     session: AsyncSession, tenant_id: uuid.UUID | None, entries: list[dict[str, Any]]
-) -> dict[int, str]:
-    """The tenant entries that try to set back an install-wide "always wait", by index."""
+) -> dict[int, list[str]]:
+    """The parts of tenant entries that the install's policy overrules, by entry index.
+
+    A part is ``always_wait: false`` against an install-wide wait, or a
+    ``risk`` below the install's level.
+    """
     install_row = await _stored_row(session, "install", None)
     install_entries = _entries_or_note(
         install_row.document if install_row is not None else None,
@@ -462,26 +465,28 @@ async def _no_effect_notes(
         "the install's stored policy",
         [],
     )
-    if not any(e.always_wait for e in install_entries):
+    if not any(e.always_wait or e.risk for e in install_entries):
         return {}
     ops = await load_known_ops(session, scope="tenant", tenant_id=tenant_id)
-    notes: dict[int, str] = {}
+    coords = [op.coords for op in ops]
+    notes: dict[int, list[str]] = {}
     for index, raw in enumerate(entries):
         try:
             entry = entries_from_document({"classifications": [raw]}, scope="tenant")[0]
         except (ValueError, IndexError):
             continue
-        found = install_wait_undone(entry, (op.coords for op in ops), install_entries)
-        if found is not None:
-            notes[index] = install_wait_text(f"`classifications[{index}]`", *found)
+        texts = install_floor_texts(f"`classifications[{index}]`", entry, coords, install_entries)
+        if texts:
+            notes[index] = texts
     return notes
 
 
 async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.UUID | None) -> str:
     """The stored policy of *scope* as a ``policy: v1`` file.
 
-    In a tenant's file, an entry that tries to set back an "always wait"
-    of the install's policy gets a ``# Has no effect:`` comment above it.
+    In a tenant's file, each part of an entry that tries to set back an
+    "always wait" or a risk level of the install's policy gets a
+    ``# Has no effect:`` comment above the entry.
     """
     stored = await _stored_row(session, scope, tenant_id)
     document = normalise_document(stored.document if stored is not None else None)
@@ -495,8 +500,7 @@ async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.
     notes = await _no_effect_notes(session, tenant_id, entries) if scope == "tenant" else {}
     parts = [_dump(head), "classifications:\n"]
     for index, entry in enumerate(entries):
-        if index in notes:
-            parts.append(f"# Has no effect: {notes[index]}\n")
+        parts.extend(f"# Has no effect: {note}\n" for note in notes.get(index, []))
         parts.append(_dump([entry]))
     return "".join(parts)
 

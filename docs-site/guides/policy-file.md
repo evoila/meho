@@ -58,10 +58,17 @@ refused, and the message names the entry and the operation.
   `caution` and always waits.
 - A file can raise a risk level, but never lower it below the level in
   MEHO's code.
-- When the install's policy makes an operation always wait, it waits in
-  every tenant. A tenant's file can make more operations wait. An entry
-  with `always_wait: false` that would end an install-wide wait is
-  refused, and the message names the install entry.
+- **The stricter of install and tenant counts.** What the install's file
+  sets is a floor for every tenant. A tenant's file can raise a risk level
+  and make more operations wait. It cannot set a lower risk level than
+  the install, and cannot end an install-wide wait: such an entry is
+  refused. The message names the install entry and the part to remove;
+  the other fields of the entry can stay. The install cannot end a wait
+  that a tenant's own entry adds either.
+- An install entry matches connectors by their id, not by product. A
+  connector that a tenant registers itself, under its own id, is matched
+  only by an install entry with a wildcard connector, for example
+  `{connector: "*", op: "<op-id-pattern>"}`.
 
 ## Commands
 
@@ -90,12 +97,13 @@ platform admin may do that.
 5. The import **replaces the whole policy**. An entry that is not in the
    file is removed.
 
-!!! note "Install-wide always wait"
+!!! note "Install-wide always wait and risk level"
 
-    An install file can make operations always wait. This holds for every
-    tenant: a tenant cannot set it back. A tenant entry stored before this
-    rule that sets it back has no effect on the wait. `meho policy export`
-    writes a `# Has no effect:` comment above such an entry. Remove it
+    An install file can make operations always wait and raise their risk
+    level. This holds for every tenant: a tenant cannot set it back. A
+    tenant entry stored before this rule that sets it back has no effect
+    for that part. `meho policy export` writes a `# Has no effect:`
+    comment above such an entry, one for each part. Remove that part
     before you import the file again.
 
 ## REST

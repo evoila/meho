@@ -31482,7 +31482,7 @@
             "type": "boolean",
             "nullable": true,
             "title": "Always Wait",
-            "description": "true: every call of a matched operation waits for approval. false: back to the operation's own value, never below it."
+            "description": "true: every call of a matched operation waits for approval. false: back to the operation's own value, never below it. false is refused when the install's policy makes a matched operation always wait."
           }
         },
         "additionalProperties": false,

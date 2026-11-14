@@ -169,14 +169,14 @@ class TestPackViewsTar:
     def test_single_relative_path_packs_under_bind_root(self) -> None:
         """``named.conf.local`` -> ``etc/bind/named.conf.local`` member."""
         tar_bytes = pack_views_tar(
-            {"named.conf.local": 'zone "evba.lab" { type master; };\n'},
+            {"named.conf.local": 'zone "example.test" { type master; };\n'},
         )
         with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as t:
             members = t.getnames()
             assert members == ["etc/bind/named.conf.local"]
             extracted = t.extractfile("etc/bind/named.conf.local")
             assert extracted is not None
-            assert extracted.read() == b'zone "evba.lab" { type master; };\n'
+            assert extracted.read() == b'zone "example.test" { type master; };\n'
 
     def test_absolute_path_under_root_packs_intact(self) -> None:
         """An absolute path under the root is accepted and stripped of leading /."""
@@ -481,12 +481,12 @@ class TestApplyViews:
                 _TARGET,
                 {
                     "files": {"named.conf.local": "x\n"},
-                    "verify_fqdn": "internal.evba.lab",
+                    "verify_fqdn": "internal.example.test",
                 },
             )
         verify_cmd = atomic_mock.await_args.kwargs["verify_command"]
         assert "dig @localhost" in verify_cmd
-        assert "internal.evba.lab" in verify_cmd
+        assert "internal.example.test" in verify_cmd
 
     async def test_verify_fqdn_omitted_falls_back_to_checkconf(self) -> None:
         """No ``verify_fqdn`` -> verify_command is the static parse check."""

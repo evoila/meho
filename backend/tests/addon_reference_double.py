@@ -13,7 +13,7 @@ across four planes, each shipped and unit-tested on its own:
 
 This module is the **proof plane** for the whole contract: a single reference
 add-on *test double* that participates in every plane exactly as a real paired
-add-on (first consumers: meho-automation, meho-ssp) would, so CI proves the
+add-on (first consumers: separate add-on packages) would, so CI proves the
 planes compose end to end without any external process.
 
 It is deliberately a ``tests/`` harness, **not** a shipped connector or add-on:

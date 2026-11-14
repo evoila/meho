@@ -292,6 +292,7 @@ func runUpdate(cmd *cobra.Command, name string, body map[string]any, jsonOut boo
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("decode updated target: %v", err)), jsonOut)
 	}
+	printTargetWarnings(cmd.ErrOrStderr(), raw)
 	if jsonOut {
 		return output.PrintJSON(cmd.OutOrStdout(), &t)
 	}

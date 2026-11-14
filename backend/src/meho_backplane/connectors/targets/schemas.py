@@ -220,6 +220,15 @@ TARGETS_REGISTER_RESPONSE_SCHEMA: dict[str, Any] = {
                 "version."
             ),
         },
+        "warnings": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Only present when a setting is allowed but risky, for example a "
+                "Keycloak target that manages the realm MEHO itself signs in with. "
+                "Tell the person about each line."
+            ),
+        },
     },
     "required": [
         "target_id",

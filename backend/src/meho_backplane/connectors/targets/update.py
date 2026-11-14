@@ -59,6 +59,7 @@ from meho_backplane.connectors.targets.ops import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.resolver import resolve_target_by_id
 from meho_backplane.targets.schemas import TargetUpdate
 
@@ -212,6 +213,15 @@ TARGETS_UPDATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "Names of the fields the call changed.",
         },
+        "warnings": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Only present when a setting is allowed but risky, for example a "
+                "Keycloak target that manages the realm MEHO itself signs in with. "
+                "Tell the person about each line."
+            ),
+        },
     },
     "required": ["target_id", "name", "product", "version", "host", "updated_fields"],
 }
@@ -294,6 +304,7 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
     except HTTPException as exc:
         raise ValueError(_http_exception_message(exc)) from exc
 
+    warnings = keycloak_realm_warnings(updated.product, updated.extras)
     return {
         "target_id": str(updated.id),
         "name": updated.name,
@@ -301,6 +312,7 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
         "version": updated.version,
         "host": updated.host,
         "updated_fields": sorted(body.model_fields_set),
+        **({"warnings": warnings} if warnings else {}),
     }
 
 

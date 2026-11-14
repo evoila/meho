@@ -572,6 +572,20 @@
         </div>
       {% endif %}
 
+      {% set target_notes = effect.get("target_warnings") %}
+      {% if target_notes is sequence and target_notes is not string and target_notes | length %}
+        {#- A setting of the target that is allowed but risky, for example a
+            Keycloak target that manages MEHO's own sign-in realm. -#}
+        <div class="alert alert-warning mt-2" role="alert" aria-label="Target warnings">
+          <div>
+            <h4 class="font-semibold text-sm">Check the target</h4>
+            <ul class="text-xs opacity-90 list-disc pl-4">
+              {% for note in target_notes %}<li>{{ note }}</li>{% endfor %}
+            </ul>
+          </div>
+        </div>
+      {% endif %}
+
       {% if effect.get("preview_unavailable") %}
         {#- #1628: the preview builder ran but faulted, so the blast radius
             could not be resolved. Error-styled -- this is not a small action. -#}

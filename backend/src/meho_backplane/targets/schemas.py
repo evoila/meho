@@ -77,6 +77,7 @@ __all__ = [
     "TargetListResponse",
     "TargetSummary",
     "TargetUpdate",
+    "TargetWriteResult",
     "project_target_to_summary",
     "validate_ca_pin_pem",
 ]
@@ -354,6 +355,22 @@ class Target(BaseModel):
     # observed the target through an audit-history surface, not a
     # live registry probe.
     deleted_at: datetime | None = None
+
+
+class TargetWriteResult(Target):
+    """The answer of a target create or update: the target, plus warnings.
+
+    ``warnings`` holds plain lines about a setting that is allowed but
+    risky, for example a Keycloak target that manages the realm MEHO
+    itself signs in with
+    (:func:`~meho_backplane.targets.keycloak_realm_warnings.keycloak_realm_warnings`).
+    Empty when there is nothing to say.
+    """
+
+    warnings: tuple[str, ...] = Field(
+        default=(),
+        description="Plain lines about a setting that is allowed but risky. Empty when none.",
+    )
 
 
 class TargetCreate(BaseModel):

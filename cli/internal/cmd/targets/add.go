@@ -314,12 +314,29 @@ func runAdd(cmd *cobra.Command, opts addOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("decode created target: %v", err)), opts.JSONOut)
 	}
+	printTargetWarnings(cmd.ErrOrStderr(), raw)
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), &t)
 	}
 	printTargetSummary(cmd.OutOrStdout(), &t)
 	printProbeHint(cmd.OutOrStdout(), &t)
 	return nil
+}
+
+// printTargetWarnings prints each warning of a create or update answer
+// (a setting that is allowed but risky, for example a Keycloak target
+// that manages the realm MEHO itself signs in with). It writes to
+// stderr, so the JSON on stdout stays as it is.
+func printTargetWarnings(w io.Writer, raw []byte) {
+	var answer struct {
+		Warnings []string `json:"warnings"`
+	}
+	if json.Unmarshal(raw, &answer) != nil {
+		return
+	}
+	for _, line := range answer.Warnings {
+		fmt.Fprintf(w, "Warning: %s\n", line)
+	}
 }
 
 // printProbeHint names the next command when the new target has no

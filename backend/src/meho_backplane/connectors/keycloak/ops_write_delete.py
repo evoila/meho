@@ -41,11 +41,21 @@ the request waits for approval, so a refused delete never reaches an
 approver. The handlers run them again when the approved call executes, which
 catches a change made while the request waited (for example a new sub-group).
 
+A user delete does not look the user up again after approval. It deletes
+only the user on the approval card: the user id and the realm the card
+shows. The run is refused when the card shows no user id, when the card
+said the user does not exist, or when the username stored for that id is
+not the one on the card (the user was renamed). A user who was deleted and
+made again with the same name has a new id, so the run finds nothing to
+delete.
+
 Safe to run twice
 =================
 
 If the object is already gone (the id reads 404, or the name matches
 nothing), the handler sends no DELETE and returns ``already_absent: true``.
+An approved user delete whose card said the user does not exist is refused
+instead: the approver saw no user to delete.
 A DELETE that answers 404 (someone removed the object in the meantime) is
 reported the same way.
 
@@ -60,6 +70,7 @@ References
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
@@ -89,7 +100,12 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     str_field,
     subgroup_count,
 )
-from meho_backplane.connectors.keycloak.session import quote_segment
+from meho_backplane.connectors.keycloak.ops_write_user_identity import (
+    card_user_id,
+    check_card_username,
+)
+from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.operations._preview import approved_preview
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -148,14 +164,29 @@ def _blast_radius(
     }
 
 
+def _user_name_fields(found: FoundObject, params: dict[str, Any]) -> dict[str, Any]:
+    """The user's name for the card and the result of a user delete.
+
+    ``username`` is the name stored in Keycloak. When the user does not exist,
+    the name the caller sent is shown only as ``requested_username``.
+    """
+    if found.name is not None:
+        return {"username": found.name}
+    requested = params.get("username")
+    if isinstance(requested, str) and requested.strip():
+        return {"requested_username": requested.strip()}
+    return {}
+
+
 async def user_blast_radius(
     connector: KeycloakConnector,
     operator: Operator,
     target: KeycloakTargetLike,
     found: FoundObject,
+    params: dict[str, Any],
 ) -> dict[str, Any]:
     """Card for a user delete: user name, enabled or not, and its groups."""
-    obj: dict[str, Any] = {"kind": "keycloak_user", "username": found.name}
+    obj: dict[str, Any] = {"kind": "keycloak_user", **_user_name_fields(found, params)}
     if found.rep is not None and found.object_id is not None:
         rows = await connector._get_admin_list(
             target,
@@ -277,15 +308,57 @@ def _absent(result: dict[str, Any]) -> dict[str, Any]:
     return {**result, "deleted": False, "already_absent": True}
 
 
+async def _approved_user(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    card: dict[str, Any],
+) -> FoundObject:
+    """The user on the approval card of a user delete, read again by its id.
+
+    Raises :exc:`ValueError` when the card said the user does not exist, shows
+    no user id or realm, or names another user than the one stored for the id.
+    """
+    block = card.get("blast_radius")
+    shown = block.get("object") if isinstance(block, dict) else None
+    shown = shown if isinstance(shown, dict) else {}
+    if shown.get("present") is False:
+        raise ValueError(
+            f"{USER_DELETE_OP}: the approval card said the user does not exist, so "
+            "there is no approved user to delete. Nothing was deleted. Send a new request."
+        )
+    uuid = card_user_id(USER_DELETE_OP, shown)
+    realm = str_field(shown, "realm")
+    if realm is None:
+        raise ValueError(
+            f"{USER_DELETE_OP}: the approval card shows no realm. Nothing was deleted. "
+            "Send a new request."
+        )
+    realms = dataclasses.replace(resolve_realm_config(target), managed_realm=realm)
+    path = fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(uuid)})
+    rep = await get_or_none(connector, target, path, operator)
+    if rep is not None:
+        check_card_username(USER_DELETE_OP, shown, rep)
+    return FoundObject(realms=realms, object_id=uuid, name=str_field(rep, "username"), rep=rep)
+
+
 async def keycloak_user_delete(
     self: KeycloakConnector,
     operator: Operator,
     target: KeycloakTargetLike,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """Delete one user (``DELETE .../users/{id}``). Op-id: ``keycloak.user.delete``."""
-    found = await find_user(self, operator, target, params)
-    result = {"realm": found.realm, "id": found.object_id, "username": found.name}
+    """Delete one user (``DELETE .../users/{id}``). Op-id: ``keycloak.user.delete``.
+
+    In the approved run it acts on the user on the approval card, not on a
+    new lookup of the username.
+    """
+    card = approved_preview(USER_DELETE_OP)
+    if card is None:
+        found = await find_user(self, operator, target, params)
+    else:
+        found = await _approved_user(self, operator, target, card)
+    result = {"realm": found.realm, "id": found.object_id, **_user_name_fields(found, params)}
     if not found.present or found.object_id is None:
         return _absent(result)
     await check_user_guards(self, operator, target, found)

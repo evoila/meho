@@ -314,3 +314,17 @@ func TestRoleMappingAssignAwaitingApprovalRealPath(t *testing.T) {
 		t.Errorf("awaiting_approval was wrongly rejected as invalid status: %s", errBuf.String())
 	}
 }
+
+// A user delete of a user that does not exist has no stored name: the
+// printed result shows the name that was sent as requested_username.
+func TestWriteResultPrintsRequestedUsername(t *testing.T) {
+	var buf bytes.Buffer
+	printWriteResult("keycloak.user.delete")(&buf, &CallResult{
+		Status: "ok",
+		Result: json.RawMessage(
+			`{"realm":"example","id":"u-1","requested_username":"event-guest","deleted":false,"already_absent":true}`),
+	})
+	if !strings.Contains(buf.String(), "requested_username: event-guest") {
+		t.Fatalf("requested_username not printed:\n%s", buf.String())
+	}
+}

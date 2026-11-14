@@ -120,7 +120,8 @@ class FoundObject:
     ``rep`` is the object's current representation, or ``None`` when it does
     not exist. ``object_id`` is its internal id (``None`` when a name matched
     nothing). ``name`` is the human name to report: the stored one when the
-    object exists, else the name the caller passed.
+    object exists, else the name the caller passed. For a user it is only the
+    stored username (``None`` when the user does not exist).
     """
 
     realms: RealmConfig
@@ -203,6 +204,12 @@ def _single_match(
 # ---------------------------------------------------------------------------
 
 
+def _same_username(asked: str, user: dict[str, Any]) -> bool:
+    """Whether *asked* is the username stored for *user* (case does not count)."""
+    stored = str_field(user, "username")
+    return stored is not None and stored.casefold() == asked.casefold()
+
+
 async def find_user(
     connector: KeycloakConnector,
     operator: Operator,
@@ -217,6 +224,11 @@ async def find_user(
     if user_id is not None:
         path = fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(user_id)})
         rep = await get_or_none(connector, target, path, operator)
+        if rep is not None and username is not None and not _same_username(username, rep):
+            raise ValueError(
+                f"{USER_DELETE_OP}: 'id' and 'username' belong to different users. "
+                "Nothing was changed. Send the request with one user."
+            )
     elif username is not None:
         rows = await connector._get_admin_list(
             target,
@@ -241,10 +253,11 @@ async def find_user(
         )
     else:
         raise ValueError(f"{USER_DELETE_OP} requires either 'id' (UUID) or 'username'")
+    # Only the stored username: a name the caller sent is never shown as the user's.
     return FoundObject(
         realms=realms,
         object_id=str_field(rep, "id") or user_id,
-        name=str_field(rep, "username") or username,
+        name=str_field(rep, "username"),
         rep=rep,
     )
 

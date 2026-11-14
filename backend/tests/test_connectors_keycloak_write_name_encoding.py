@@ -130,6 +130,7 @@ async def test_role_mapping_assign_does_not_decode_a_percent_encoded_role_name(
         mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": "kc-token", "expires_in": 300}
         )
+        mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}").respond(200, json={"id": _USER_UUID})
         lookup = mock.get(path__startswith=f"/admin/realms/{_REALM}/roles/").respond(
             200, json={"id": _ROLE_UUID, "name": role_name}
         )
@@ -155,6 +156,7 @@ async def test_role_mapping_assign_refuses_a_role_of_another_name(
         mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": "kc-token", "expires_in": 300}
         )
+        mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}").respond(200, json={"id": _USER_UUID})
         mock.get(path__startswith=f"/admin/realms/{_REALM}/roles/").respond(
             200, json={"id": _ROLE_UUID, "name": "realm-admin"}
         )
@@ -175,6 +177,7 @@ async def test_role_mapping_assign_returns_the_names_keycloak_returned(
         mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": "kc-token", "expires_in": 300}
         )
+        mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}").respond(200, json={"id": _USER_UUID})
         mock.get(f"/admin/realms/{_REALM}/roles/viewer").respond(
             200, json={"id": _ROLE_UUID, "name": "viewer"}
         )

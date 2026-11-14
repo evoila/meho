@@ -186,7 +186,8 @@ async def test_credential_write_with_builder_shows_the_plan_never_the_params(
     assert envelope["redacted_body"] is None
     assert envelope["plan_shown"] is True
     preview = envelope["proposed_effect"]["preview"]
-    assert preview["username"] == "alice"
+    # No live connector here, so the card shows the name as requested.
+    assert preview["requested_username"] == "alice"
     assert preview["realm"] == "lab"
     assert preview["password_secret_ref"] == "secret/keycloak/alice"
     assert _SECRET not in str(envelope)

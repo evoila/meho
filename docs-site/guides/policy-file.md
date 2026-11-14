@@ -47,6 +47,64 @@ classifications:
 - `labels` follow the same rules as a single label change: at most 32
   labels, a key of 1 to 63 characters, a value of 1 to 255 characters.
 
+## Which login group is which team
+
+A tenant's file can say which login group is which team, in `bindings`.
+A binding gives a group one of the five group kinds (`Readers`,
+`Operators`, `SA-Operators`, `Admins`, `Approvers`) and a set of
+categories.
+
+```yaml
+bindings:
+  - match: {group: /MEHO-Operators/Network}   # the full path of the group
+    kind: SA-Operators
+    categories: [network]
+  - match: {attribute: "<tenant>-storage"}    # the group attribute meho_group
+    kind: Operators
+    categories: [storage]
+```
+
+- MEHO matches the group by its **full path** or by its **group
+  attribute** `meho_group`, never by its short name. A short name can
+  belong to more than one group. The login setup must send full paths or
+  the attribute: see [Keycloak realm setup](../install/keycloak-realm.md).
+- `categories: ["*"]` means every category.
+- A binding never changes a person's base level (read-only, operator or
+  admin). It can only pick between the kinds of that level: `Operators`
+  or `SA-Operators`, `Readers` or `Approvers`.
+- A person whose groups match two kinds in one tenant cannot log in. Fix
+  the bindings or the groups.
+- A person whose groups match no binding keeps the kind they have today.
+- `principal: agent` or `principal: service` binds a machine login. It can
+  only get `Readers`: only a person approves. A runner gets no binding.
+- A token whose `groups` claim is not a list of texts matches no binding.
+- When your file has no bindings, MEHO uses the shipped bindings: the
+  groups of the settings `JWT_ROLE_GROUPS` and `JWT_SELF_APPROVER_GROUP`,
+  by their full path. They count only for a person whose token has no
+  tenant list (`meho_tenants`, the older login setup). With a tenant list,
+  the person's entry for the tenant decides, as without bindings.
+  `meho policy export` shows them.
+- A shipped binding takes its kind from the **end** of the group name:
+  `Corp-Operators` gives `Operators`. If your site renamed the groups,
+  check that each name ends with its kind. Run `meho policy export` and
+  read `bindings`. A group whose name ends with no kind (for example
+  `Corp-Read-Only`) is not there: write its binding yourself.
+- `meho policy diff` and the import compare your file with the **stored**
+  bindings, not the shipped ones. So the first import of an exported file
+  lists the shipped bindings as added. A file without `bindings` removes
+  the stored ones, and the shipped bindings count again.
+- A binding can name any group of the login setup, also a group of
+  another tenant. Who is in that group is then decided by whoever manages
+  it. Bind only groups that your tenant manages. Two admins of the tenant
+  decide the bindings: one imports the file, a second one approves it.
+
+!!! note "Off by default"
+
+    Bindings count only while the setting `POLICY_APPROVER_ROUTING` (Helm
+    `config.policy.approverRouting`) is on. The policy commands, and so
+    the import of bindings, also need the setting `POLICY_CLASSIFICATION`
+    (Helm `config.policy.classification`).
+
 ## Rules that no file can loosen
 
 MEHO checks each file against these rules. A file that breaks one is

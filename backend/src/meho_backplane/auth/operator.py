@@ -393,6 +393,13 @@ class Operator(BaseModel):
     #: The ``meho_tenants`` claim had a part MEHO could not read. Then
     #: ``self_approver`` stays off in every tenant (#3327).
     tenants_claim_malformed: bool = False
+    #: The group kind the bindings of the policy file give this login in the
+    #: current tenant (:mod:`meho_backplane.policy.bindings`). ``None`` when
+    #: the ``POLICY_APPROVER_ROUTING`` switch is off or no binding matched.
+    bound_kind: RoleGroup | None = None
+    #: The categories of the bindings that matched. ``"*"`` means every
+    #: category. Empty when :attr:`bound_kind` is ``None``.
+    bound_categories: frozenset[str] = frozenset()
     #: How the person signed in, from the ``acr`` claim. ``None`` when absent.
     acr: str | None = None
     #: The Keycloak sign-in session id, from the ``sid`` claim. ``None`` when

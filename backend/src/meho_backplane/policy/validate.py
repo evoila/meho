@@ -19,7 +19,10 @@ Each problem is one sentence that names the entry
 (``classifications[N]``) and the operation. :func:`check_document` also
 refuses an unknown category or risk level, a ``taxonomy.default`` in a
 tenant's file, and two entries that give one operation different
-categories at the same level.
+categories at the same level. The ``bindings`` are checked by
+:func:`~meho_backplane.policy.bindings.binding_mistakes`: no binding in the
+install's file, no runner, no agent or service with a kind that may
+approve, and no unknown category.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from sqlalchemy.orm import aliased
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.credential_read import has_credential_read_floor
+from meho_backplane.policy.bindings import binding_mistakes
 from meho_backplane.policy.classification import (
     RISK_LEVELS,
     ClassificationConflictError,
@@ -223,6 +227,7 @@ def check_document(
     raw_entries: list[dict[str, Any]] = list(document.get("classifications") or [])
     mistakes = _taxonomy_mistakes(document, scope=scope, taxonomy=taxonomy)
     mistakes.extend(_entry_value_mistakes(raw_entries, taxonomy))
+    mistakes.extend(binding_mistakes(document, scope=scope, taxonomy=taxonomy))
     if mistakes:
         return _capped(mistakes)
     entries = entries_from_document(document, scope=scope)

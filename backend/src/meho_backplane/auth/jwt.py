@@ -1948,6 +1948,11 @@ async def verify_jwt_for_audience(
     picks the tenant the request works in and may raise 400
     ``tenant_not_chosen`` or 403 ``tenant_not_member`` /
     ``tenant_not_found``. *allow_unchosen* is for the status answers only.
+
+    Bindings (``POLICY_APPROVER_ROUTING``): after the tenant is chosen,
+    :func:`~meho_backplane.policy.bindings.bind_current_tenant` matches the
+    login's groups against the bindings of that tenant. Two group kinds
+    give 401 ``multiple_bound_kinds``. With the switch off it does nothing.
     """
     if not expected_audience or not expected_audience.strip():
         raise _http_401(AUDIENCE_NOT_CONFIGURED_REMEDIATION)
@@ -1959,7 +1964,16 @@ async def verify_jwt_for_audience(
         expected_audience=expected_audience,
     )
     operator = _operator_from_claims(claims, token, settings)
-    return await select_current_tenant(operator, requested_tenant, allow_unchosen=allow_unchosen)
+    operator = await select_current_tenant(
+        operator, requested_tenant, allow_unchosen=allow_unchosen
+    )
+    # Imported here: the policy package imports ``meho_backplane.auth``.
+    from meho_backplane.policy.bindings import BoundKindConflictError, bind_current_tenant
+
+    try:
+        return await bind_current_tenant(operator, claims)
+    except BoundKindConflictError as exc:
+        raise _http_401(str(exc)) from exc
 
 
 def header_value(value: object) -> str | None:

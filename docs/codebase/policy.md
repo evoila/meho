@@ -44,8 +44,12 @@ classifications:
 - `labels` pass the same check as the single edit (`_check_labels` in
   `policy/store.py`): at most 32 labels, a key of 1 to 63 characters and a
   value of 1 to 255 characters. A mistake names the entry.
-- Later changes add `bindings` and `routing`. Until then they are unknown
-  keys.
+- `bindings` (a tenant's file only) says which login group is which team:
+  a group, matched by its full path or its group attribute, gets one of the
+  five group kinds and a set of categories. They count only while the
+  switch `POLICY_APPROVER_ROUTING` is on. See
+  [policy-bindings.md](policy-bindings.md).
+- A later change adds `routing`. Until then it is an unknown key.
 
 ## Checks
 
@@ -98,8 +102,8 @@ the same entry is refused, so the tenant admin removes it.
 `policy/service.py`:
 
 - `build_plan` parses and checks the file and works out the diff. It
-  writes nothing. The diff has the sections `description`, `taxonomy` and
-  `classifications`, each with `added`, `changed` (`before` and `after`)
+  writes nothing. The diff has the sections `description`, `taxonomy`,
+  `classifications` and `bindings`, each with `added`, `changed` (`before` and `after`)
   and `removed`. Each classification entry also has `matches` (how many
   operations it matches) and `changes` (how many of those get other
   values). Entries are told apart by their whole `match` (each part on its
@@ -190,7 +194,7 @@ Code: `backend/src/meho_backplane/api/v1/policy.py`,
 ## Tests
 
 `backend/tests/test_policy_document.py` (parser, floors, plan, apply,
-versions), `backend/tests/test_api_v1_policy.py` (routes, waiting import,
+versions), `backend/tests/test_policy_bindings.py` (bindings), `backend/tests/test_api_v1_policy.py` (routes, waiting import,
 approval by a second admin),
 `backend/tests/migrations/test_migration_0163_add_policy_revision.py`,
 `cli/internal/cmd/policy/file_test.go`.

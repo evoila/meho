@@ -95,7 +95,8 @@ def delegated_operator(operator: Operator) -> Operator:
     at most (:func:`meho_backplane.auth.jwt._cap_agent_role`) and never
     approves, so a ``tenant_admin`` caller is narrowed to ``operator``
     here, and the ``approver``, self-approval and ``platform_admin`` flags
-    are cleared. A lower role is kept as it is.
+    are cleared, and so are the group kind and the categories the bindings
+    of the policy file gave the caller. A lower role is kept as it is.
 
     The policy gate does the same for grants (the stricter of the caller's
     and the agent's verdict wins), so a direct run may do only what both
@@ -110,5 +111,7 @@ def delegated_operator(operator: Operator) -> Operator:
             "approver": False,
             "self_approver": False,
             "platform_admin": False,
+            "bound_kind": None,
+            "bound_categories": frozenset(),
         }
     )

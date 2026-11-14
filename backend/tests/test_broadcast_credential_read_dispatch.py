@@ -55,7 +55,7 @@ _SENTINEL_MOUNT = "sntlmount0zzz"
 #: caught — exactly the environment-name-shaped structure decision #3
 #: forbids recording. No segment is a generic English word, so the
 #: by-exclusion search can't false-positive on the allowed
-#: ``target_name`` (``rdc-vault-prod``).
+#: ``target_name`` (``vault-prod``).
 _SENTINEL_PATH_SEGMENTS = ("sntlenv0zzz", "sntlsvc0zzz", "sntlleaf0zzz")
 _SENTINEL_PATH = "/".join(_SENTINEL_PATH_SEGMENTS)
 #: Secret key names returned by the list op.
@@ -186,7 +186,7 @@ class _VaultDispatchTarget:
         self.fingerprint = _FakeFingerprint(version="1.x")
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
-        self.name = "rdc-vault-prod"
+        self.name = "vault-prod"
 
 
 # ---------------------------------------------------------------------------

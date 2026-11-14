@@ -137,35 +137,37 @@ def _completed_process(stdout: str = "", stderr: str = "", exit_status: int = 0)
 
 # Canonical zonefile fixture -- reused across handler-level tests.
 _SAMPLE_ZONEFILE = """$TTL 3600
-@ IN SOA ns1.evba.lab. admin.evba.lab. (
+@ IN SOA ns1.example.test. admin.example.test. (
     2026051801 3600 600 604800 86400 )
-@   IN NS ns1.evba.lab.
-ns1 IN A 10.5.50.1
-www IN A 10.5.50.2
-mail IN A 10.5.50.3
+@   IN NS ns1.example.test.
+ns1 IN A 198.51.100.1
+www IN A 198.51.100.2
+mail IN A 198.51.100.3
 mail IN AAAA 2001:db8::1
 """
 
 
-_CHECKCONF_OUTPUT = 'zone "evba.lab" {\n\ttype master;\n\tfile "/etc/bind/db.evba.lab";\n};\n'
+_CHECKCONF_OUTPUT = (
+    'zone "example.test" {\n\ttype master;\n\tfile "/etc/bind/db.example.test";\n};\n'
+)
 
 
 # Split-horizon `named-checkconf -p`: the same zone declared once per
-# view (#2897). Parses to two `evba.lab` rows attributed internal /
+# view (#2897). Parses to two `example.test` rows attributed internal /
 # external.
 _MULTIVIEW_CHECKCONF_OUTPUT = (
     'view "internal" {\n'
     "\tmatch-clients { 10.0.0.0/8; localhost; };\n"
-    '\tzone "evba.lab" {\n'
+    '\tzone "example.test" {\n'
     "\t\ttype master;\n"
-    '\t\tfile "/etc/bind/internal/db.evba.lab";\n'
+    '\t\tfile "/etc/bind/internal/db.example.test";\n'
     "\t};\n"
     "};\n"
     'view "external" {\n'
     "\tmatch-clients { any; };\n"
-    '\tzone "evba.lab" {\n'
+    '\tzone "example.test" {\n'
     "\t\ttype master;\n"
-    '\t\tfile "/etc/bind/external/db.evba.lab";\n'
+    '\t\tfile "/etc/bind/external/db.example.test";\n'
     "\t};\n"
     "};\n"
 )
@@ -175,23 +177,28 @@ _MULTIVIEW_CHECKCONF_OUTPUT = (
 # emits.
 _MULTIVIEW_ROWS: list[dict[str, Any]] = [
     {
-        "name": "evba.lab",
-        "file": "/etc/bind/internal/db.evba.lab",
+        "name": "example.test",
+        "file": "/etc/bind/internal/db.example.test",
         "type": "master",
         "view": "internal",
     },
     {
-        "name": "evba.lab",
-        "file": "/etc/bind/external/db.evba.lab",
+        "name": "example.test",
+        "file": "/etc/bind/external/db.example.test",
         "type": "master",
         "view": "external",
     },
 ]
 _SINGLE_EXPLICIT_VIEW_ROWS: list[dict[str, Any]] = [
-    {"name": "evba.lab", "file": "/etc/bind/db.evba.lab", "type": "master", "view": "default"},
+    {
+        "name": "example.test",
+        "file": "/etc/bind/db.example.test",
+        "type": "master",
+        "view": "default",
+    },
 ]
 _NO_VIEW_ROWS: list[dict[str, Any]] = [
-    {"name": "evba.lab", "file": "/etc/bind/db.evba.lab", "type": "master", "view": None},
+    {"name": "example.test", "file": "/etc/bind/db.example.test", "type": "master", "view": None},
 ]
 
 
@@ -204,15 +211,15 @@ class TestResolveZoneForFqdn:
     """Pure-function tests for the longest-suffix matcher."""
 
     def test_longest_suffix_match(self) -> None:
-        assert resolve_zone_for_fqdn(["evba.lab", "lab"], "api.evba.lab") == "evba.lab"
+        assert resolve_zone_for_fqdn(["example.test", "test"], "api.example.test") == "example.test"
 
     def test_trailing_dot_normalised(self) -> None:
-        assert resolve_zone_for_fqdn(["evba.lab."], "api.evba.lab.") == "evba.lab"
+        assert resolve_zone_for_fqdn(["example.test."], "api.example.test.") == "example.test"
 
     def test_label_boundary_respected(self) -> None:
-        """``ba.lab`` does NOT match ``api.evba.lab`` -- labels are atomic."""
+        """``ple.test`` does NOT match ``api.example.test`` -- labels are atomic."""
         with pytest.raises(ZoneResolutionError) as exc_info:
-            resolve_zone_for_fqdn(["ba.lab"], "api.evba.lab")
+            resolve_zone_for_fqdn(["ple.test"], "api.example.test")
         assert exc_info.value.reason == "unresolvable"
 
     def test_root_zone_excluded(self) -> None:
@@ -223,29 +230,29 @@ class TestResolveZoneForFqdn:
 
     def test_unresolvable_raises(self) -> None:
         with pytest.raises(ZoneResolutionError) as exc_info:
-            resolve_zone_for_fqdn(["evba.lab"], "other.example.com")
+            resolve_zone_for_fqdn(["example.test"], "other.example.com")
         assert exc_info.value.reason == "unresolvable"
         assert exc_info.value.fqdn == "other.example.com"
 
     def test_ambiguous_raises_with_candidates(self) -> None:
         with pytest.raises(ZoneResolutionError) as exc_info:
-            resolve_zone_for_fqdn(["evba.lab", "evba.lab."], "api.evba.lab")
+            resolve_zone_for_fqdn(["example.test", "example.test."], "api.example.test")
         assert exc_info.value.reason == "ambiguous"
-        assert sorted(exc_info.value.candidates) == ["evba.lab", "evba.lab"]
+        assert sorted(exc_info.value.candidates) == ["example.test", "example.test"]
 
     def test_mixed_case_fqdn_matches_lowercase_zone(self) -> None:
         """DNS names are case-insensitive (RFC 1035 §2.3.3).
 
         Operator input through the API surface arrives in whatever
-        case the human typed (``API.EVBA.LAB``); the running daemon
-        treats it as equivalent to ``api.evba.lab``. The resolver
+        case the human typed (``API.EXAMPLE.TEST``); the running daemon
+        treats it as equivalent to ``api.example.test``. The resolver
         must do the same -- a case-sensitive comparison would reject
         legitimate input as unresolvable.
         """
-        assert resolve_zone_for_fqdn(["evba.lab"], "API.EVBA.lab") == "evba.lab"
-        assert resolve_zone_for_fqdn(["EVBA.LAB"], "api.evba.lab") == "evba.lab"
+        assert resolve_zone_for_fqdn(["example.test"], "API.EXAMPLE.test") == "example.test"
+        assert resolve_zone_for_fqdn(["EXAMPLE.TEST"], "api.example.test") == "example.test"
         # Mixed case on both sides.
-        assert resolve_zone_for_fqdn(["EvBa.LaB"], "Api.EvBa.lAb") == "evba.lab"
+        assert resolve_zone_for_fqdn(["ExAmPlE.TeSt"], "Api.ExAmPlE.tEsT") == "example.test"
 
 
 # ---------------------------------------------------------------------------
@@ -258,24 +265,24 @@ class TestResolveZoneTarget:
 
     def test_no_view_deployment_resolves_with_null_view(self) -> None:
         zone, path, view = resolve_zone_target(
-            _NO_VIEW_ROWS, fqdn="api.evba.lab", explicit_zone=None, explicit_view=None
+            _NO_VIEW_ROWS, fqdn="api.example.test", explicit_zone=None, explicit_view=None
         )
-        assert (zone, path, view) == ("evba.lab", "/etc/bind/db.evba.lab", None)
+        assert (zone, path, view) == ("example.test", "/etc/bind/db.example.test", None)
 
     def test_single_view_resolves_and_returns_view(self) -> None:
         zone, path, view = resolve_zone_target(
             _SINGLE_EXPLICIT_VIEW_ROWS,
-            fqdn="api.evba.lab",
+            fqdn="api.example.test",
             explicit_zone=None,
             explicit_view=None,
         )
-        assert (zone, path, view) == ("evba.lab", "/etc/bind/db.evba.lab", "default")
+        assert (zone, path, view) == ("example.test", "/etc/bind/db.example.test", "default")
 
     def test_multi_view_without_view_raises_ambiguous_view(self) -> None:
         """The #2897 first failure: same zone in two views, no view given."""
         with pytest.raises(ZoneResolutionError) as exc_info:
             resolve_zone_target(
-                _MULTIVIEW_ROWS, fqdn="api.evba.lab", explicit_zone=None, explicit_view=None
+                _MULTIVIEW_ROWS, fqdn="api.example.test", explicit_zone=None, explicit_view=None
             )
         assert exc_info.value.reason == "ambiguous_view"
         assert exc_info.value.candidates == ["external", "internal"]
@@ -285,18 +292,22 @@ class TestResolveZoneTarget:
     def test_multi_view_with_view_selects_that_views_file(self) -> None:
         zone, path, view = resolve_zone_target(
             _MULTIVIEW_ROWS,
-            fqdn="api.evba.lab",
+            fqdn="api.example.test",
             explicit_zone=None,
             explicit_view="internal",
         )
-        assert (zone, path, view) == ("evba.lab", "/etc/bind/internal/db.evba.lab", "internal")
+        assert (zone, path, view) == (
+            "example.test",
+            "/etc/bind/internal/db.example.test",
+            "internal",
+        )
 
     def test_explicit_zone_multi_view_without_view_raises_ambiguous_view(self) -> None:
         with pytest.raises(ZoneResolutionError) as exc_info:
             resolve_zone_target(
                 _MULTIVIEW_ROWS,
-                fqdn="api.evba.lab",
-                explicit_zone="evba.lab",
+                fqdn="api.example.test",
+                explicit_zone="example.test",
                 explicit_view=None,
             )
         assert exc_info.value.reason == "ambiguous_view"
@@ -305,7 +316,7 @@ class TestResolveZoneTarget:
         with pytest.raises(ZoneResolutionError) as exc_info:
             resolve_zone_target(
                 _MULTIVIEW_ROWS,
-                fqdn="api.evba.lab",
+                fqdn="api.example.test",
                 explicit_zone=None,
                 explicit_view="dmz",
             )
@@ -324,57 +335,64 @@ class TestResolveZoneTarget:
 
     def test_zone_without_file_is_unresolvable(self) -> None:
         """A hint / forward zone (no ``file``) is not a writable target."""
-        rows = [{"name": "evba.lab", "file": None, "type": "forward", "view": None}]
+        rows = [{"name": "example.test", "file": None, "type": "forward", "view": None}]
         with pytest.raises(ZoneResolutionError) as exc_info:
-            resolve_zone_target(rows, fqdn="api.evba.lab", explicit_zone=None, explicit_view=None)
+            resolve_zone_target(
+                rows, fqdn="api.example.test", explicit_zone=None, explicit_view=None
+            )
         assert exc_info.value.reason == "unresolvable"
 
     def test_unserved_explicit_zone_walks_to_configured_parent(self) -> None:
         """#3304: an ``explicit_zone`` this server does not serve walks up.
 
         A record written flat into a configured parent's zonefile
-        (``host.sub.evba.lab`` under ``evba.lab``, where ``sub.evba.lab`` is
+        (``host.sub.example.test`` under ``example.test``, where ``sub.example.test`` is
         not itself a zone) must resolve to the configured ancestor rather than
-        fail closed. Before the fix, honouring the unserved ``sub.evba.lab``
+        fail closed. Before the fix, honouring the unserved ``sub.example.test``
         verbatim raised ``unresolvable`` and the destructive-delete park was
         refused ``blast_radius_required`` for a computable delete.
         """
         zone, path, view = resolve_zone_target(
             _NO_VIEW_ROWS,
-            fqdn="host.sub.evba.lab",
-            explicit_zone="sub.evba.lab",
+            fqdn="host.sub.example.test",
+            explicit_zone="sub.example.test",
             explicit_view=None,
         )
-        assert (zone, path, view) == ("evba.lab", "/etc/bind/db.evba.lab", None)
+        assert (zone, path, view) == ("example.test", "/etc/bind/db.example.test", None)
 
     def test_configured_subzone_wins_over_parent_longest_suffix(self) -> None:
         """#3304: a genuinely-configured subzone resolves to the subzone.
 
-        When ``sub.evba.lab`` really is a served zone, the longest suffix
+        When ``sub.example.test`` really is a served zone, the longest suffix
         wins over the parent -- whether the caller omits ``zone`` (walk) or
         names the subzone explicitly (served -> honoured verbatim).
         """
         rows = [
-            {"name": "evba.lab", "file": "/etc/bind/db.evba.lab", "type": "master", "view": None},
             {
-                "name": "sub.evba.lab",
-                "file": "/etc/bind/db.sub.evba.lab",
+                "name": "example.test",
+                "file": "/etc/bind/db.example.test",
+                "type": "master",
+                "view": None,
+            },
+            {
+                "name": "sub.example.test",
+                "file": "/etc/bind/db.sub.example.test",
                 "type": "master",
                 "view": None,
             },
         ]
-        expected = ("sub.evba.lab", "/etc/bind/db.sub.evba.lab", None)
+        expected = ("sub.example.test", "/etc/bind/db.sub.example.test", None)
         assert (
             resolve_zone_target(
-                rows, fqdn="host.sub.evba.lab", explicit_zone=None, explicit_view=None
+                rows, fqdn="host.sub.example.test", explicit_zone=None, explicit_view=None
             )
             == expected
         )
         assert (
             resolve_zone_target(
                 rows,
-                fqdn="host.sub.evba.lab",
-                explicit_zone="sub.evba.lab",
+                fqdn="host.sub.example.test",
+                explicit_zone="sub.example.test",
                 explicit_view=None,
             )
             == expected
@@ -404,10 +422,10 @@ class TestResolveZoneTarget:
         behaviour for zones this server does not serve *at all*; a configured
         forward / hint zone named explicitly keeps failing ``unresolvable``.
         """
-        rows = [{"name": "evba.lab", "file": None, "type": "forward", "view": None}]
+        rows = [{"name": "example.test", "file": None, "type": "forward", "view": None}]
         with pytest.raises(ZoneResolutionError) as exc_info:
             resolve_zone_target(
-                rows, fqdn="api.evba.lab", explicit_zone="evba.lab", explicit_view=None
+                rows, fqdn="api.example.test", explicit_zone="example.test", explicit_view=None
             )
         assert exc_info.value.reason == "unresolvable"
 
@@ -423,20 +441,20 @@ class TestViewAwareVerifyBuilders:
     def test_soa_serial_round_trips_from_rendered_text(self) -> None:
         # _SAMPLE_ZONEFILE carries SOA serial 2026051801; after an add it
         # bumps to 2026051802.
-        assert _soa_serial_from_text(_SAMPLE_ZONEFILE, "evba.lab") == 2026051801
+        assert _soa_serial_from_text(_SAMPLE_ZONEFILE, "example.test") == 2026051801
         bumped = _add_record_to_zonefile(
             _SAMPLE_ZONEFILE,
-            zone_name="evba.lab",
-            fqdn="api.evba.lab",
-            ip="10.5.50.99",
+            zone_name="example.test",
+            fqdn="api.example.test",
+            ip="198.51.100.99",
             record_type="A",
         )
-        assert _soa_serial_from_text(bumped, "evba.lab") == 2026051802
+        assert _soa_serial_from_text(bumped, "example.test") == 2026051802
 
     def test_zonestatus_verify_names_view_and_asserts_serial(self) -> None:
-        cmd = _zonestatus_serial_verify("evba.lab", "internal", 2026051802)
+        cmd = _zonestatus_serial_verify("example.test", "internal", 2026051802)
         # Names the view explicitly (class token before the view).
-        assert "rndc zonestatus evba.lab IN internal" in cmd
+        assert "rndc zonestatus example.test IN internal" in cmd
         # Anchored serial match avoids a substring false-positive; the
         # optional leading whitespace tolerates any rndc indentation.
         assert "^[[:space:]]*serial: 2026051802[[:space:]]*$" in cmd
@@ -444,21 +462,21 @@ class TestViewAwareVerifyBuilders:
         assert "last rndc zonestatus" in cmd
 
     def test_zonestatus_verify_quotes_metacharacters(self) -> None:
-        cmd = _zonestatus_serial_verify("evba.lab", "in;rm -rf", 1)
+        cmd = _zonestatus_serial_verify("example.test", "in;rm -rf", 1)
         # The view is shlex-quoted so a metachar cannot break out.
         assert "'in;rm -rf'" in cmd
         assert "; rm -rf" not in cmd.replace("'in;rm -rf'", "")
 
     def test_dig_add_verify_is_record_level_with_diagnostics(self) -> None:
-        cmd = _dig_add_verify("api.evba.lab", "10.5.50.99", "A")
-        assert "dig @localhost api.evba.lab A +short" in cmd
-        assert "grep -qxF 10.5.50.99" in cmd
+        cmd = _dig_add_verify("api.example.test", "198.51.100.99", "A")
+        assert "dig @localhost api.example.test A +short" in cmd
+        assert "grep -qxF 198.51.100.99" in cmd
         assert "expected A" in cmd  # failure diagnostic
 
     def test_dig_remove_verify_asserts_both_families_absent(self) -> None:
-        cmd = _dig_remove_verify("api.evba.lab")
-        assert "dig @localhost api.evba.lab A +short" in cmd
-        assert "dig @localhost api.evba.lab AAAA +short" in cmd
+        cmd = _dig_remove_verify("api.example.test")
+        assert "dig @localhost api.example.test A +short" in cmd
+        assert "dig @localhost api.example.test AAAA +short" in cmd
         assert '[ -z "$A" ] && [ -z "$AAAA" ]' in cmd
         assert "still resolves after remove" in cmd  # failure diagnostic
 
@@ -663,20 +681,20 @@ class TestZonefileTransform:
     def test_add_a_record_appears_in_output(self) -> None:
         new = _add_record_to_zonefile(
             _SAMPLE_ZONEFILE,
-            zone_name="evba.lab",
-            fqdn="api.evba.lab",
-            ip="10.5.50.99",
+            zone_name="example.test",
+            fqdn="api.example.test",
+            ip="198.51.100.99",
             record_type="A",
         )
-        assert "api.evba.lab" in new
-        assert "10.5.50.99" in new
+        assert "api.example.test" in new
+        assert "198.51.100.99" in new
 
     def test_add_a_record_bumps_soa_serial(self) -> None:
         new = _add_record_to_zonefile(
             _SAMPLE_ZONEFILE,
-            zone_name="evba.lab",
-            fqdn="api.evba.lab",
-            ip="10.5.50.99",
+            zone_name="example.test",
+            fqdn="api.example.test",
+            ip="198.51.100.99",
             record_type="A",
         )
         # Original serial 2026051801 -> 2026051802 after bump.
@@ -686,8 +704,8 @@ class TestZonefileTransform:
     def test_add_aaaa_record(self) -> None:
         new = _add_record_to_zonefile(
             _SAMPLE_ZONEFILE,
-            zone_name="evba.lab",
-            fqdn="api.evba.lab",
+            zone_name="example.test",
+            fqdn="api.example.test",
             ip="2001:db8::99",
             record_type="AAAA",
         )
@@ -696,22 +714,22 @@ class TestZonefileTransform:
     def test_remove_clears_both_a_and_aaaa(self) -> None:
         new = _remove_record_from_zonefile(
             _SAMPLE_ZONEFILE,
-            zone_name="evba.lab",
-            fqdn="mail.evba.lab",
+            zone_name="example.test",
+            fqdn="mail.example.test",
         )
-        # ``mail`` had both A (10.5.50.3) and AAAA (2001:db8::1); both gone.
-        assert "10.5.50.3" not in new
+        # ``mail`` had both A (198.51.100.3) and AAAA (2001:db8::1); both gone.
+        assert "198.51.100.3" not in new
         assert "2001:db8::1" not in new
         # Other records survive.
-        assert "10.5.50.2" in new  # www
-        assert "10.5.50.1" in new  # ns1
+        assert "198.51.100.2" in new  # www
+        assert "198.51.100.1" in new  # ns1
 
     def test_remove_bumps_soa_even_if_noop(self) -> None:
         """A remove for a non-existent record still bumps SOA -- consistent observability."""
         new = _remove_record_from_zonefile(
             _SAMPLE_ZONEFILE,
-            zone_name="evba.lab",
-            fqdn="absent.evba.lab",
+            zone_name="example.test",
+            fqdn="absent.example.test",
         )
         assert "2026051802" in new
 
@@ -731,7 +749,7 @@ class TestPipelineScript:
         script = _build_pipeline_script(
             snapshot_path="/tmp/snap;evil",  # NOSONAR -- explicitly hostile input
             audit_slice_path="/etc/bind/foo;evil",
-            zone_name="evba.lab",
+            zone_name="example.test",
             bind_root="/etc/bind",
         )
         # shlex.quote wraps strings containing ``;`` in single quotes
@@ -808,7 +826,7 @@ class TestPipelineParse:
             "===STATE_BEFORE_END===\n"
             "===FAILED_STEP===checkconf\n"
             "===FAILED_DETAIL_BEGIN===\n"
-            "zone evba.lab/IN: NS 'broken.example.': not loaded due to errors.\n"
+            "zone example.test/IN: NS 'broken.example.': not loaded due to errors.\n"
             "===FAILED_DETAIL_END===\n"
         )
         sections = _parse_pipeline_output(output)
@@ -869,8 +887,8 @@ class TestPipelineScriptRollbackShape:
         """
         script = _build_pipeline_script(
             snapshot_path="/tmp/snap.tar.gz",
-            audit_slice_path="/etc/bind/db.evba.lab",
-            zone_name="evba.lab",
+            audit_slice_path="/etc/bind/db.example.test",
+            zone_name="example.test",
             bind_root="/etc/bind",
         )
         # The clear-then-extract ordering inside rollback() is what
@@ -896,8 +914,8 @@ class TestPipelineScriptRollbackShape:
         """
         script = _build_pipeline_script(
             snapshot_path="/tmp/snap.tar.gz",
-            audit_slice_path="/etc/bind/db.evba.lab",
-            zone_name="evba.lab",
+            audit_slice_path="/etc/bind/db.example.test",
+            zone_name="example.test",
             bind_root="/etc/bind",
         )
         assert '[ -n "$BIND_ROOT" ] && [ "$BIND_ROOT" != "/" ]' in script
@@ -941,8 +959,8 @@ class TestPipelineScriptRollbackShape:
         """
         script = _build_pipeline_script(
             snapshot_path="/tmp/snap.tar.gz",
-            audit_slice_path="/etc/bind/db.evba.lab",
-            zone_name="evba.lab",
+            audit_slice_path="/etc/bind/db.example.test",
+            zone_name="example.test",
             bind_root="/etc/bind",
         )
 
@@ -1080,8 +1098,8 @@ class TestPipelineScriptRollbackShape:
         """
         script = _build_pipeline_script(
             snapshot_path="/tmp/snap.tar.gz",
-            audit_slice_path="/etc/bind/db.evba.lab",
-            zone_name="evba.lab",
+            audit_slice_path="/etc/bind/db.example.test",
+            zone_name="example.test",
             bind_root="/etc/bind",
         )
 
@@ -1153,8 +1171,8 @@ class TestPipelineScriptRollbackShape:
 
         script = _build_pipeline_script(
             snapshot_path="/tmp/snap.tar.gz",
-            audit_slice_path="/etc/bind/db.evba.lab",
-            zone_name="evba.lab",
+            audit_slice_path="/etc/bind/db.example.test",
+            zone_name="example.test",
             bind_root="/etc/bind",
         )
         # Extract the embedded regex pattern verbatim from the script
@@ -1168,8 +1186,8 @@ class TestPipelineScriptRollbackShape:
 
         single_line = (
             "$TTL 3600\n"
-            "@ IN SOA ns1.evba.lab. admin.evba.lab. 2026051801 3600 600 604800 86400\n"
-            "@ IN NS ns1.evba.lab.\n"
+            "@ IN SOA ns1.example.test. admin.example.test. 2026051801 3600 600 604800 86400\n"
+            "@ IN NS ns1.example.test.\n"
         )
         new_text, n = embedded_pattern.subn(
             lambda m: m.group(1) + "2026051900", single_line, count=1
@@ -1179,9 +1197,9 @@ class TestPipelineScriptRollbackShape:
 
         multiline = (
             "$TTL 3600\n"
-            "@ IN SOA ns1.evba.lab. admin.evba.lab. (\n"
+            "@ IN SOA ns1.example.test. admin.example.test. (\n"
             "    2026051801 3600 600 604800 86400 )\n"
-            "@   IN NS ns1.evba.lab.\n"
+            "@   IN NS ns1.example.test.\n"
         )
         new_text, n = embedded_pattern.subn(lambda m: m.group(1) + "2026051900", multiline, count=1)
         assert n == 1, "embedded regex must match the parenthesised multi-line SOA shape"
@@ -1299,8 +1317,8 @@ class TestAtomicApplyStageFailureBranch:
                 connector,
                 _TARGET,
                 sudo_password="pw",  # NOSONAR
-                audit_slice_path="/etc/bind/db.evba.lab",
-                zone_name="evba.lab",
+                audit_slice_path="/etc/bind/db.example.test",
+                zone_name="example.test",
                 staged_bytes=b"whatever",
                 verify_command="true",
             )
@@ -1330,7 +1348,7 @@ class TestRollbackByteIdenticalForNewFiles:
         bind_root = tmp_path / "bind"
         bind_root.mkdir()
         (bind_root / "named.conf").write_text("# existing\n")
-        (bind_root / "db.evba.lab").write_text("$TTL 3600\n@ IN SOA . . 1 1 1 1 1\n")
+        (bind_root / "db.example.test").write_text("$TTL 3600\n@ IN SOA . . 1 1 1 1 1\n")
 
         # Pre-op checksum of the sandbox tree.
         def _tree_digest() -> str:
@@ -1419,13 +1437,13 @@ rollback
         # drift.
         zone_text = (
             "$TTL 3600\n"
-            "@ IN SOA ns1.evba.lab. admin.evba.lab. (\n"
+            "@ IN SOA ns1.example.test. admin.example.test. (\n"
             "    2026051801 3600 600 604800 86400 )\n"
-            "@   IN NS ns1.evba.lab.\n"
-            "ns1 IN A 10.5.50.1\n"
-            "rollback-canary IN A 10.5.50.123\n"
+            "@   IN NS ns1.example.test.\n"
+            "ns1 IN A 198.51.100.1\n"
+            "rollback-canary IN A 198.51.100.123\n"
         )
-        zone_file = tmp_path / "db.evba.lab"
+        zone_file = tmp_path / "db.example.test"
         zone_file.write_text(zone_text)
 
         # Extract the python3 program body from the rendered script.
@@ -1440,7 +1458,7 @@ rollback
         script = _build_pipeline_script(
             snapshot_path="/tmp/snap.tar.gz",
             audit_slice_path=str(zone_file),
-            zone_name="evba.lab",
+            zone_name="example.test",
             bind_root="/etc/bind",
         )
         bump_invocation = 'python3 - "$AUDIT_SLICE_PATH" "$NEW_SERIAL"'
@@ -1478,8 +1496,8 @@ rollback
         assert "2026051801" not in new_text, (
             "the original serial is still present -- the regex matched in the wrong place"
         )
-        assert "ns1.evba.lab. admin.evba.lab." in new_text, "mname/rname round-trip failed"
-        assert "rollback-canary IN A 10.5.50.123" in new_text, (
+        assert "ns1.example.test. admin.example.test." in new_text, "mname/rname round-trip failed"
+        assert "rollback-canary IN A 198.51.100.123" in new_text, (
             "rdata below the SOA was clobbered by the rewrite"
         )
         # Diff exactly one numeric token replaced.
@@ -1517,15 +1535,15 @@ class TestAtomicApplySuccessPath:
                 connector,
                 _TARGET,
                 sudo_password="pw",  # NOSONAR -- unit test
-                audit_slice_path="/etc/bind/db.evba.lab",
-                zone_name="evba.lab",
+                audit_slice_path="/etc/bind/db.example.test",
+                zone_name="example.test",
                 staged_bytes=b"new_zonefile_content_line\n",
                 verify_command="true",
             )
         assert isinstance(result, AtomicApplyResult)
         assert result.state_before == "old_zonefile_content_line"
         assert result.state_after == "new_zonefile_content_line"
-        assert result.audit_slice_path == "/etc/bind/db.evba.lab"
+        assert result.audit_slice_path == "/etc/bind/db.example.test"
 
     async def test_uses_remote_bash_with_sudo_exclusively(self) -> None:
         """The primitive must never bypass the safe-sudo helper."""
@@ -1548,8 +1566,8 @@ class TestAtomicApplySuccessPath:
                 connector,
                 _TARGET,
                 sudo_password="pw",  # NOSONAR
-                audit_slice_path="/etc/bind/db.evba.lab",
-                zone_name="evba.lab",
+                audit_slice_path="/etc/bind/db.example.test",
+                zone_name="example.test",
                 staged_bytes=b"x",
                 verify_command="true",
             )
@@ -1579,8 +1597,8 @@ class TestAtomicApplySuccessPath:
                 connector,
                 _TARGET,
                 sudo_password="pw",  # NOSONAR
-                audit_slice_path="/etc/bind/db.evba.lab",
-                zone_name="evba.lab",
+                audit_slice_path="/etc/bind/db.example.test",
+                zone_name="example.test",
                 staged_bytes=payload,
                 verify_command="true",
             )
@@ -1627,8 +1645,8 @@ class TestAtomicApplyRollbackBranches:
                 connector,
                 _TARGET,
                 sudo_password="pw",  # NOSONAR
-                audit_slice_path="/etc/bind/db.evba.lab",
-                zone_name="evba.lab",
+                audit_slice_path="/etc/bind/db.example.test",
+                zone_name="example.test",
                 staged_bytes=b"x",
                 verify_command="false",
             )
@@ -1658,8 +1676,8 @@ class TestAtomicApplyRollbackBranches:
                 connector,
                 _TARGET,
                 sudo_password="pw",  # NOSONAR
-                audit_slice_path="/etc/bind/db.evba.lab",
-                zone_name="evba.lab",
+                audit_slice_path="/etc/bind/db.example.test",
+                zone_name="example.test",
                 staged_bytes=b"x",
                 verify_command="true",
             )
@@ -1688,8 +1706,8 @@ class TestAtomicApplyRollbackBranches:
                 connector,
                 _TARGET,
                 sudo_password="pw",  # NOSONAR
-                audit_slice_path="/etc/bind/db.evba.lab",
-                zone_name="evba.lab",
+                audit_slice_path="/etc/bind/db.example.test",
+                zone_name="example.test",
                 staged_bytes=b"x",
                 verify_command="true",
             )
@@ -1732,23 +1750,23 @@ class TestRecordAddHandler:
                 connector,
                 _TARGET,
                 {
-                    "fqdn": "api.evba.lab",
-                    "ip": "10.5.50.99",
+                    "fqdn": "api.example.test",
+                    "ip": "198.51.100.99",
                     "type": "A",
-                    "zone": "evba.lab",
+                    "zone": "example.test",
                 },
             )
-        assert result["fqdn"] == "api.evba.lab"
-        assert result["ip"] == "10.5.50.99"
+        assert result["fqdn"] == "api.example.test"
+        assert result["ip"] == "198.51.100.99"
         assert result["type"] == "A"
-        assert result["zone"] == "evba.lab"
-        assert result["file"] == "/etc/bind/db.evba.lab"
+        assert result["zone"] == "example.test"
+        assert result["file"] == "/etc/bind/db.example.test"
         assert result["op_class"] == "write"
         assert result["result_state_before"] == "old"
         assert result["result_state_after"] == "new"
 
     async def test_zone_omitted_resolves_via_longest_suffix(self) -> None:
-        """``--zone`` omitted -> handler picks ``evba.lab`` from checkconf output."""
+        """``--zone`` omitted -> handler picks ``example.test`` from checkconf output."""
         connector = Bind9Connector()
         run_mock = AsyncMock(
             side_effect=[
@@ -1774,9 +1792,9 @@ class TestRecordAddHandler:
             result = await bind9_record_add(
                 connector,
                 _TARGET,
-                {"fqdn": "api.evba.lab", "ip": "10.5.50.99"},
+                {"fqdn": "api.example.test", "ip": "198.51.100.99"},
             )
-        assert result["zone"] == "evba.lab"
+        assert result["zone"] == "example.test"
 
     async def test_zone_unresolvable_rejects_pre_staging(self) -> None:
         """No zone is a suffix -> ZoneResolutionError, no _remote_bash_with_sudo call."""
@@ -1791,7 +1809,7 @@ class TestRecordAddHandler:
             await bind9_record_add(
                 connector,
                 _TARGET,
-                {"fqdn": "api.outside.example.com", "ip": "10.5.50.99"},
+                {"fqdn": "api.outside.example.com", "ip": "198.51.100.99"},
             )
         assert exc_info.value.reason == "unresolvable"
         # No staging happened -- the sudo path was never touched.
@@ -1811,10 +1829,10 @@ class TestRecordAddHandler:
         """
         connector = Bind9Connector()
         # Construct a checkconf output with two identical-depth zones.
-        # The longest-suffix match against ``api.evba.lab`` will tie.
+        # The longest-suffix match against ``api.example.test`` will tie.
         ambiguous_checkconf = (
-            'zone "evba.lab" {\n\ttype master;\n\tfile "/etc/bind/db.evba.lab";\n};\n'
-            # ``evba.lab.`` (trailing dot) is technically the same zone
+            'zone "example.test" {\n\ttype master;\n\tfile "/etc/bind/db.example.test";\n};\n'
+            # ``example.test.`` (trailing dot) is technically the same zone
             # but the parser normalises -- to genuinely tie we add a
             # second zone that the matcher sees as distinct but
             # equal-length.
@@ -1825,16 +1843,16 @@ class TestRecordAddHandler:
         # depth as both being suffixes of the FQDN; the matcher then
         # returns the ambiguous error.
         ambiguous_checkconf = (
-            'zone "evba.lab" {\n'
+            'zone "example.test" {\n'
             "\ttype master;\n"
-            '\tfile "/etc/bind/db.evba.lab";\n'
+            '\tfile "/etc/bind/db.example.test";\n'
             "};\n"
             'zone "other.lab" {\n'
             "\ttype master;\n"
             '\tfile "/etc/bind/db.other.lab";\n'
             "};\n"
         )
-        # ``api.evba.lab`` only suffixes ``evba.lab`` (not ``other.lab``);
+        # ``api.example.test`` only suffixes ``example.test`` (not ``other.lab``);
         # so this is unresolvable for ``other.lab``. To test ambiguous
         # we use the pure resolver against a constructed input -- the
         # handler path will not legitimately produce a tie because the
@@ -1846,7 +1864,7 @@ class TestRecordAddHandler:
             patch.object(connector, "_run_command", run_mock),
             patch.object(connector, "_remote_bash_with_sudo", sudo_mock),
         ):
-            # api.other.lab matches other.lab; api.evba.lab matches evba.lab.
+            # api.other.lab matches other.lab; api.example.test matches example.test.
             # No ambiguity; this assertion proves a non-ambiguous resolve works.
             result_zone, _, _ = await _resolve_helper(connector, _TARGET, "api.other.lab")
         assert result_zone == "other.lab"
@@ -1865,9 +1883,9 @@ class TestRecordAddHandler:
                 connector,
                 _TARGET,
                 {
-                    "fqdn": "api.evba.lab",
+                    "fqdn": "api.example.test",
                     "ip": "not-an-ip",
-                    "zone": "evba.lab",
+                    "zone": "example.test",
                 },
             )
         assert run_mock.await_count == 0
@@ -1887,10 +1905,10 @@ class TestRecordAddHandler:
                 connector,
                 _TARGET,
                 {
-                    "fqdn": "api.evba.lab",
-                    "ip": "10.5.50.99",
+                    "fqdn": "api.example.test",
+                    "ip": "198.51.100.99",
                     "type": "AAAA",
-                    "zone": "evba.lab",
+                    "zone": "example.test",
                 },
             )
         assert sudo_mock.await_count == 0
@@ -1905,10 +1923,10 @@ class TestRecordAddHandler:
                 connector,
                 _TARGET,
                 {
-                    "fqdn": "api.evba.lab",
-                    "ip": "10.5.50.99",
+                    "fqdn": "api.example.test",
+                    "ip": "198.51.100.99",
                     "type": "CNAME",
-                    "zone": "evba.lab",
+                    "zone": "example.test",
                 },
             )
 
@@ -1924,7 +1942,7 @@ class TestRecordAddHandler:
             await bind9_record_add(
                 connector,
                 bad_target,
-                {"fqdn": "api.evba.lab", "ip": "10.5.50.99", "zone": "evba.lab"},
+                {"fqdn": "api.example.test", "ip": "198.51.100.99", "zone": "example.test"},
             )
 
 
@@ -1960,10 +1978,10 @@ class TestRecordRemoveHandler:
             result = await bind9_record_remove(
                 connector,
                 _TARGET,
-                {"fqdn": "mail.evba.lab", "zone": "evba.lab"},
+                {"fqdn": "mail.example.test", "zone": "example.test"},
             )
-        assert result["fqdn"] == "mail.evba.lab"
-        assert result["zone"] == "evba.lab"
+        assert result["fqdn"] == "mail.example.test"
+        assert result["zone"] == "example.test"
         assert result["op_class"] == "write"
 
     async def test_remove_zone_omitted_resolves_via_longest_suffix(self) -> None:
@@ -1990,9 +2008,9 @@ class TestRecordRemoveHandler:
             result = await bind9_record_remove(
                 connector,
                 _TARGET,
-                {"fqdn": "mail.evba.lab"},
+                {"fqdn": "mail.example.test"},
             )
-        assert result["zone"] == "evba.lab"
+        assert result["zone"] == "example.test"
 
 
 # ---------------------------------------------------------------------------
@@ -2023,7 +2041,7 @@ class TestRecordViewHandling:
             await bind9_record_add(
                 connector,
                 _TARGET,
-                {"fqdn": "host.evba.lab", "ip": "10.5.50.9"},
+                {"fqdn": "host.example.test", "ip": "198.51.100.9"},
             )
         assert exc_info.value.reason == "ambiguous_view"
         assert exc_info.value.candidates == ["external", "internal"]
@@ -2041,7 +2059,7 @@ class TestRecordViewHandling:
             await bind9_record_add(
                 connector,
                 _TARGET,
-                {"fqdn": "host.evba.lab", "ip": "10.5.50.9", "view": "dmz"},
+                {"fqdn": "host.example.test", "ip": "198.51.100.9", "view": "dmz"},
             )
         assert exc_info.value.reason == "view_not_found"
         assert sudo_mock.await_count == 0
@@ -2062,22 +2080,22 @@ class TestRecordViewHandling:
             result = await bind9_record_add(
                 connector,
                 _TARGET,
-                {"fqdn": "host.evba.lab", "ip": "10.5.50.9", "view": "internal"},
+                {"fqdn": "host.example.test", "ip": "198.51.100.9", "view": "internal"},
             )
         # The internal view's zonefile was the staging target.
         assert result["view"] == "internal"
-        assert result["file"] == "/etc/bind/internal/db.evba.lab"
+        assert result["file"] == "/etc/bind/internal/db.example.test"
         # The verify predicate baked into the sudo script is the
         # view-precise zonestatus serial check (not a view-blind dig),
         # asserting the staged serial (2026051801 + 1).
         staged_script = sudo_mock.await_args.args[1]
-        assert "rndc zonestatus host.evba.lab IN internal" not in staged_script
-        assert "rndc zonestatus evba.lab IN internal" in staged_script
+        assert "rndc zonestatus host.example.test IN internal" not in staged_script
+        assert "rndc zonestatus example.test IN internal" in staged_script
         assert "2026051802" in staged_script
         # The record-level dig predicate for this FQDN is NOT used (the
         # bare ``dig @localhost <zone> SOA`` in the rollback comment is a
         # different, literal-``<zone>`` string).
-        assert "dig @localhost host.evba.lab" not in staged_script
+        assert "dig @localhost host.example.test" not in staged_script
 
     async def test_add_no_view_deployment_uses_dig_verify(self) -> None:
         connector = Bind9Connector()
@@ -2095,11 +2113,11 @@ class TestRecordViewHandling:
             result = await bind9_record_add(
                 connector,
                 _TARGET,
-                {"fqdn": "api.evba.lab", "ip": "10.5.50.99"},
+                {"fqdn": "api.example.test", "ip": "198.51.100.99"},
             )
         assert result["view"] is None
         staged_script = sudo_mock.await_args.args[1]
-        assert "dig @localhost api.evba.lab A +short" in staged_script
+        assert "dig @localhost api.example.test A +short" in staged_script
         assert "rndc zonestatus" not in staged_script
 
     async def test_remove_with_view_uses_zonestatus_verify(self) -> None:
@@ -2118,14 +2136,14 @@ class TestRecordViewHandling:
             result = await bind9_record_remove(
                 connector,
                 _TARGET,
-                {"fqdn": "mail.evba.lab", "view": "external"},
+                {"fqdn": "mail.example.test", "view": "external"},
             )
         assert result["view"] == "external"
-        assert result["file"] == "/etc/bind/external/db.evba.lab"
+        assert result["file"] == "/etc/bind/external/db.example.test"
         staged_script = sudo_mock.await_args.args[1]
-        assert "rndc zonestatus evba.lab IN external" in staged_script
+        assert "rndc zonestatus example.test IN external" in staged_script
         # The record-level dig predicate for this FQDN is NOT used.
-        assert "dig @localhost mail.evba.lab" not in staged_script
+        assert "dig @localhost mail.example.test" not in staged_script
 
 
 # ---------------------------------------------------------------------------
@@ -2230,7 +2248,7 @@ class TestRemoteCommandExitStatus:
             await bind9_record_add(
                 connector,
                 _TARGET,
-                {"fqdn": "api.evba.lab", "ip": "10.5.50.99"},
+                {"fqdn": "api.example.test", "ip": "198.51.100.99"},
             )
         assert exc_info.value.exit_status == 1
         assert "named-checkconf -p" in exc_info.value.command
@@ -2250,7 +2268,7 @@ class TestRemoteCommandExitStatus:
                 _completed_process(stdout=_CHECKCONF_OUTPUT, exit_status=0),
                 _completed_process(
                     stdout="",
-                    stderr="cat: /etc/bind/db.evba.lab: Permission denied\n",
+                    stderr="cat: /etc/bind/db.example.test: Permission denied\n",
                     exit_status=1,
                 ),
             ]
@@ -2263,7 +2281,7 @@ class TestRemoteCommandExitStatus:
             await bind9_record_add(
                 connector,
                 _TARGET,
-                {"fqdn": "api.evba.lab", "ip": "10.5.50.99", "zone": "evba.lab"},
+                {"fqdn": "api.example.test", "ip": "198.51.100.99", "zone": "example.test"},
             )
         assert exc_info.value.exit_status == 1
         assert "cat" in exc_info.value.command
@@ -2290,9 +2308,10 @@ class TestRemoteCommandExitStatus:
                 connector,
                 _TARGET,
                 {
-                    "fqdn": "api.evba.lab",
-                    "ip": "10.5.50.99",
-                    "zone": "evba.lab",  # explicit -- goes through resolve_zonefile_path_for_zone
+                    "fqdn": "api.example.test",
+                    "ip": "198.51.100.99",
+                    # explicit -- goes through resolve_zonefile_path_for_zone
+                    "zone": "example.test",
                 },
             )
         assert exc_info.value.exit_status == 2

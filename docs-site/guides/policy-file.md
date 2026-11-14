@@ -47,6 +47,11 @@ meho policy diff --scope install small-team.yaml     # answers "No change."
 Check this file with `--scope install`. Without it, `validate` checks the
 file as a tenant's file and reports `taxonomy.default` as a mistake.
 
+On a fresh install, the diff of an install file with no `taxonomy` block
+shows the six built-in categories as removed, but they still apply. An
+install file with no entries and no `taxonomy` block is not the same as the
+"small team" file, so its import waits for a second admin to approve it.
+
 On a fresh install, `meho policy export --scope install` writes the same
 policy, without the comments. To start your own policy:
 

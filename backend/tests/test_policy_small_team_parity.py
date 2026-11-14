@@ -29,6 +29,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PolicyRevision, TenantPolicy
 from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.operations.typed_register import run_typed_op_registrars
+from meho_backplane.policy import service
 from meho_backplane.policy.classification import DEFAULT_TAXONOMY, taxonomy_from_documents
 from meho_backplane.policy.document import document_of, parse_policy_file
 from meho_backplane.policy.evaluate import Asker, Lookups, evaluate
@@ -152,6 +153,24 @@ def test_the_file_has_the_builtin_taxonomy() -> None:
     assert taxonomy_from_documents(builtin_install_document(), None) == DEFAULT_TAXONOMY
 
 
+def test_the_file_has_no_classification_entries() -> None:
+    assert builtin_install_document()["classifications"] == []
+
+
+def test_a_packaged_file_that_is_not_valid_names_the_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "profiles").mkdir()
+    (tmp_path / "profiles" / "small-team.yaml").write_text("policy: v9\n")
+    monkeypatch.setattr(service, "files", lambda _package: tmp_path)
+    service._small_team_document.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match=r"The shipped small-team\.yaml is not valid"):
+            builtin_install_document()
+    finally:
+        service._small_team_document.cache_clear()
+
+
 @pytest.mark.asyncio
 async def test_the_file_passes_validate(monkeypatch: pytest.MonkeyPatch) -> None:
     _switch(monkeypatch, True)
@@ -204,6 +223,24 @@ async def test_diff_and_import_of_the_file_on_a_fresh_install_change_nothing(
     async with get_sessionmaker()() as session:
         assert (await session.execute(select(TenantPolicy))).scalars().all() == []
         assert (await session.execute(select(PolicyRevision))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_an_install_file_without_taxonomy_waits_and_keeps_the_categories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, True)
+    await _register_all()
+    async with get_sessionmaker()() as session:
+        plan = await build_plan(
+            session, scope="install", tenant_id=None, content=b"policy: v1\nclassifications: []\n"
+        )
+    assert plan.mistakes == []
+    assert plan.no_change is False
+    assert plan.diff is not None
+    assert plan.diff["taxonomy"]["removed"] == list(DEFAULT_TAXONOMY.categories)
+    assert plan.diff["operations_changed"] == 0
+    assert taxonomy_from_documents(plan.document, None) == DEFAULT_TAXONOMY
 
 
 @pytest.mark.asyncio

@@ -490,9 +490,8 @@ async def _no_effect_notes(
     session: AsyncSession, tenant_id: uuid.UUID | None, entries: list[dict[str, Any]]
 ) -> dict[int, str]:
     """The tenant entries that try to set back an install-wide "always wait", by index."""
-    install_row = await _stored_row(session, "install", None)
     install_entries = _entries_or_note(
-        install_row.document if install_row is not None else None,
+        await _stored_document(session, "install", None),
         "install",
         "the install's stored policy",
         [],

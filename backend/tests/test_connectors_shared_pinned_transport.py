@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the address-pinning httpx transports (F13, meho-internal#275).
+"""Tests for the address-pinning httpx transports (F13).
 
 The pinning transport closes the SSRF check/use gap: a destination guard
 that screens a hostname and then hands the *name* to httpx leaves httpx

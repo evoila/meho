@@ -214,7 +214,7 @@ def test_the_order_of_the_bindings_does_not_count() -> None:
 
 def _check(bindings: list[dict[str, Any]], scope: Any = "tenant") -> list[str]:
     document = {"classifications": [], "bindings": bindings}
-    return check_document(document, scope=scope, install_document=None, ops=[])[0]
+    return check_document(document, scope=scope, install_document=None, ops=[])
 
 
 def _binding(kind: str, **extra: Any) -> dict[str, Any]:
@@ -257,7 +257,7 @@ def test_a_category_of_the_tenant_file_is_known() -> None:
         "classifications": [],
         "bindings": [{**_binding("Operators"), "categories": ["team-x"]}],
     }
-    assert check_document(document, scope="tenant", install_document=None, ops=[])[0] == []
+    assert check_document(document, scope="tenant", install_document=None, ops=[]) == []
 
 
 def test_the_install_file_holds_no_bindings() -> None:

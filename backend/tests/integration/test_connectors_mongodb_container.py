@@ -42,6 +42,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.mongodb import MongoDbConnector
 from meho_backplane.settings import get_settings
 
+from .._container_ready import ping_mongodb, wait_until_ready
 from .._vault_fakes import install_fake_client
 from ._image_tags import major_of_image
 
@@ -131,6 +132,13 @@ def mongo_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
             user=mongo.username,
             password=mongo.password,
             major=major_of_image(image),
+        )
+        wait_until_ready(
+            lambda: ping_mongodb(
+                coords.host, coords.port, username=coords.user, password=coords.password
+            ),
+            what=f"mongodb ({image})",
+            timeout=60,
         )
         _seed(coords)
         yield coords

@@ -678,7 +678,7 @@ async def test_write_helper_leaves_agent_session_id_null_without_contextvar() ->
 # ---------------------------------------------------------------------------
 # G0.15-T3 (#1212): MCP audit-write column hoisting
 #
-# Covers the three findings from claude-rdc-hetzner-dc#753:
+# Covers the three findings from a consumer dogfood run:
 #   * Finding 1 — ``op_class`` mis-classification: ``call_operation``'s
 #     outer-wrapper row now carries ``"tool_call"`` (Option A) so the inner
 #     DISPATCH row remains the source of truth for the domain class.
@@ -710,8 +710,8 @@ async def test_principal_name_and_email_merged_from_operator() -> None:
     structlog.contextvars.clear_contextvars()
     op = Operator(
         sub="op-test-2",
-        name="Damir Topic",
-        email="damir.topic@example.com",
+        name="Operator A",
+        email="operator-a@example.com",
         raw_jwt="fixture-jwt-not-real",
         tenant_id=uuid4(),
         tenant_role=TenantRole.OPERATOR,
@@ -730,8 +730,8 @@ async def test_principal_name_and_email_merged_from_operator() -> None:
     rows = await _audit_rows()
     assert len(rows) == 1
     payload = dict(rows[0].payload)
-    assert payload["principal_name"] == "Damir Topic"
-    assert payload["principal_email"] == "damir.topic@example.com"
+    assert payload["principal_name"] == "Operator A"
+    assert payload["principal_email"] == "operator-a@example.com"
     # JSON-encoder safety: the value is a plain ``str`` instance, not an
     # ``EmailStr`` subclass; ``json.dumps(payload)`` round-trips cleanly.
     assert type(payload["principal_email"]) is str
@@ -797,7 +797,7 @@ async def test_explicit_payload_principal_name_wins_over_operator() -> None:
     structlog.contextvars.clear_contextvars()
     op = Operator(
         sub="op-test-4",
-        name="Damir Topic",
+        name="Operator A",
         email=None,
         raw_jwt="fixture-jwt-not-real",
         tenant_id=uuid4(),
@@ -839,7 +839,7 @@ async def test_target_id_and_name_hoisted_from_contextvars() -> None:
     target_id = uuid4()
     structlog.contextvars.bind_contextvars(
         target_id=str(target_id),
-        target_name="rdc-vcenter",
+        target_name="example-vcenter",
     )
     op = build_operator()
 
@@ -857,7 +857,7 @@ async def test_target_id_and_name_hoisted_from_contextvars() -> None:
     assert len(rows) == 1
     row = rows[0]
     assert row.target_id == target_id
-    assert row.payload["target_name"] == "rdc-vcenter"
+    assert row.payload["target_name"] == "example-vcenter"
     structlog.contextvars.clear_contextvars()
 
 
@@ -976,7 +976,7 @@ async def test_initialize_issued_session_id_round_trips_to_audit_row(
     inbound header and the column landed NULL despite ``meho_status``
     advertising ``mcp_session_id_capture: "when_negotiated"``. This test
     regression-locks the full chain so the next consumer-side dogfood
-    cycle doesn't relive `claude-rdc-hetzner-dc#753` finding 2.
+    cycle doesn't repeat finding 2 of that dogfood run.
     """
     from uuid import UUID
 

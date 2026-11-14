@@ -60,8 +60,8 @@ func newNetworkingShowCmd() *cobra.Command {
 			"OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho holodeck networking show --target holorouter-hetzner-dc\n" +
-			"  meho holodeck networking show --target holorouter-hetzner-dc --json | jq .result.bgp",
+		Example: "  meho holodeck networking show --target my-router\n" +
+			"  meho holodeck networking show --target my-router --json | jq .result.bgp",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

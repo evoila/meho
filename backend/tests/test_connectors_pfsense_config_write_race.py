@@ -89,14 +89,14 @@ _RULE_B = _block_rule(_RULE_B_ID)
 _NEW_RULE = (
     f"<rule><tracker>{_NEW_RULE_ID}</tracker><type>pass</type><interface>lan</interface>"
     "<ipprotocol>inet</ipprotocol><source><any></any></source>"
-    "<destination><address>10.5.0.0/24</address></destination>"
+    "<destination><address>198.51.100.0/24</address></destination>"
     f"<descr>meho: filter rule {_NEW_RULE_ID}</descr></rule>"
 )
 _NEW_RULE_PARAMS: dict[str, Any] = {
     "ridentifier": _NEW_RULE_ID,
     "type": "pass",
     "interface": "lan",
-    "destination": "10.5.0.0/24",
+    "destination": "198.51.100.0/24",
 }
 _EMPTY_LAN_SEPARATORS = "<separator><lan></lan></separator>"
 _FILTER = f"<filter>{_RULE_A}{_EMPTY_LAN_SEPARATORS}</filter>"

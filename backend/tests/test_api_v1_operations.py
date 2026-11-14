@@ -1014,7 +1014,7 @@ async def test_post_call_accepts_bare_string_target(
             TargetORM(
                 id=target_id,
                 tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
-                name="rdc-vault",
+                name="vault-a",
                 aliases=[],
                 product="vault",
                 host="vault.example.com",
@@ -1039,7 +1039,7 @@ async def test_post_call_accepts_bare_string_target(
             json={
                 "connector_id": "vault-1.x",
                 "op_id": "vault.does.not.exist",
-                "target": "rdc-vault",
+                "target": "vault-a",
                 "params": {},
             },
             headers={"Authorization": f"Bearer {_operator_token(key)}"},

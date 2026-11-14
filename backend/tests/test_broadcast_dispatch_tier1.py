@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for the broadcast param scrub (meho-internal #151).
+"""Unit tests for the broadcast param scrub.
 
 :func:`~meho_backplane.broadcast.events.scrub_broadcast_params` replaces
 secret-named keys and runs the Tier-1 deterministic redactor over string

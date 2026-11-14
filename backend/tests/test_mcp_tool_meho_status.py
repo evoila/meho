@@ -80,7 +80,7 @@ def test_tools_list_exposes_meho_status_with_well_formed_input_schema(
     assert schema["type"] == "object"
     assert schema["properties"] == {}
     assert schema["additionalProperties"] is False
-    # MEHO-internal fields stripped from the wire shape.
+    # internal fields stripped from the wire shape.
     assert "required_role" not in statuses[0]
     assert "op_class" not in statuses[0]
 

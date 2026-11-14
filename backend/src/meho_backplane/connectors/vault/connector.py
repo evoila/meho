@@ -73,6 +73,7 @@ from uuid import UUID
 import hvac.exceptions
 import requests.exceptions
 import structlog
+from packaging.version import InvalidVersion, Version
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -98,6 +99,22 @@ _log = structlog.get_logger(__name__)
 # deploys.
 _SYSTEM_TENANT_ID: UUID = UUID(int=0)
 _SYSTEM_OPERATOR_SUB: str = "system:vault-connector-shim"
+
+# OpenBao is the open-source fork of Vault and starts at 2.0. Its health
+# answer never has the ``enterprise`` key that every HashiCorp Vault
+# answer has. Together: no ``enterprise`` key and a version of 2.0 or
+# higher means OpenBao. A Vault too old to send the key is below 2.0.
+_OPENBAO_FIRST_MAJOR: int = 2
+
+
+def _is_openbao(payload: dict[str, Any], version: str | None) -> bool:
+    """True when a ``/sys/health`` answer comes from OpenBao, not HashiCorp Vault."""
+    if "enterprise" in payload or not isinstance(version, str):
+        return False
+    try:
+        return Version(version).major >= _OPENBAO_FIRST_MAJOR
+    except InvalidVersion:
+        return False
 
 
 class VaultConnector(Connector):
@@ -128,6 +145,11 @@ class VaultConnector(Connector):
     ) -> FingerprintResult:
         """Canonical fingerprint from ``GET /v1/sys/health``.
 
+        Tells HashiCorp Vault from OpenBao (they share this connector and
+        the same API): an OpenBao server gives vendor and product
+        ``openbao``, a HashiCorp server gives ``hashicorp`` and ``vault``.
+        See :func:`_is_openbao` for the rule.
+
         Reuses :func:`~meho_backplane.auth.vault._build_client` so the
         existing test seam applies and the vault_timeout / namespace
         settings are respected without duplicating the client-
@@ -148,6 +170,7 @@ class VaultConnector(Connector):
         version: str | None = None
         build: str | None = None
         extras: dict[str, Any] = {}
+        vendor, product = "hashicorp", "vault"
 
         if isinstance(payload, dict):
             version = payload.get("version")
@@ -160,10 +183,12 @@ class VaultConnector(Connector):
                 "replication_dr_mode": payload.get("replication_dr_mode"),
                 "replication_performance_mode": payload.get("replication_performance_mode"),
             }
+            if _is_openbao(payload, version):
+                vendor, product = "openbao", "openbao"
 
         return FingerprintResult(
-            vendor="hashicorp",
-            product="vault",
+            vendor=vendor,
+            product=product,
             version=version,
             build=build,
             reachable=True,

@@ -405,7 +405,7 @@ def _connector_ids(list_response: httpx.Response) -> set[str]:
 async def test_e2e_zero_op_ingest_then_delete_clears_catalog(client: TestClient) -> None:
     """Ingest a zero-op spec, DELETE the stub, verify it left every surface.
 
-    The exact claude-rdc-hetzner-dc v0.14.0 cycle-10 sequence: a spec
+    The exact consumer-reported v0.14.0 cycle-10 sequence: a spec
     whose ``paths`` is empty parses cleanly, registers the auto-shim
     (pre-flight + registration run before the upsert loop), and lands
     zero rows — leaving a ``state="registered"`` stub in the catalog

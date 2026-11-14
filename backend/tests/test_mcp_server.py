@@ -238,7 +238,7 @@ def test_initialize_without_protocol_version_returns_invalid_params(
 # ``audit_log.agent_session_id``) was already in place; the regression
 # the v0.7.0 release-body's G0.14-T6 #1147 callout promised was inert
 # because MEHO never issued an id — clients (Claude Code by default,
-# per `claude-rdc-hetzner-dc#753` finding 2) therefore had nothing to
+# per a consumer dogfood finding) therefore had nothing to
 # echo back, so every MCP audit row landed with ``agent_session_id:
 # null`` regardless of the ``capture_mode: "when_negotiated"`` advertisement.
 # ---------------------------------------------------------------------------

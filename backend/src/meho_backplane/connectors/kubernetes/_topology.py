@@ -6,7 +6,7 @@
 G0.14-T12 (#1201) lands the first
 :meth:`~meho_backplane.connectors.base.Connector.discover_topology`
 override against a shipped connector, closing the v0.6.0 release-body
-amendment promise (`claude-rdc-hetzner-dc#697` signal 13).
+amendment promise (consumer feedback signal 13).
 
 The populator scope at v0.7 is deliberately minimal:
 

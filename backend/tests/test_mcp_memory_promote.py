@@ -224,7 +224,7 @@ def test_promote_tool_input_schema_mirrors_http_route_body(
         "tenant",
         "target",
     }
-    # MEHO-internal fields stripped from the wire shape.
+    # internal fields stripped from the wire shape.
     assert "required_role" not in tool
     assert "op_class" not in tool
 

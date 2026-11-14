@@ -11,8 +11,7 @@ This module is the one place that federation happens: a thin async
 corpus URL carrying a **deployment-configured** corpus service credential
 (``settings.corpus_service_token``).
 
-The caller's raw inbound operator JWT is **never** forwarded
-(evoila-bosnia/meho-internal#290). The corpus URL is read from a
+The caller's raw inbound operator JWT is **never** forwarded. The corpus URL is read from a
 tenant-configurable ``backend.ref`` (the ``meho-docs`` add-on's
 per-collection endpoint), so replaying the operator's Vault-capable
 bearer to it let a ``tenant_admin`` capture that credential (a
@@ -544,7 +543,7 @@ class CorpusChunk(BaseModel):
     having to model every one.
 
     The text and source-link fields each accept **two** wire names via a
-    validation alias (#1732): MEHO.Knowledge's ``/search`` returns
+    validation alias (#1732): the knowledge service's ``/search`` returns
     ``text`` / ``source_uri`` while an earlier corpus shape (and MEHO's
     own internal projection) uses ``content`` / ``source_url``. Accepting
     both keeps the one consumed name (``content`` / ``source_url``) stable
@@ -553,10 +552,10 @@ class CorpusChunk(BaseModel):
     constructing the model directly in tests.
 
     ``document_id`` is modelled ``str | None`` (#2004). The contract names
-    the field ``document_id`` — MEHO.Knowledge speaks that exact key, so
+    the field ``document_id`` — the knowledge service speaks that exact key, so
     there is no second wire name to alias (the #1732 fix aliased the three
     fields that *did* drift; ``document_id`` is not one of them). What it
-    can be is **absent**: MEHO.Knowledge returns ``document_id: ""`` when a
+    can be is **absent**: the knowledge service returns ``document_id: ""`` when a
     chunk has no owning-document concept. ``document_id`` is only ever read
     as a *citation-label fallback* (``title -> document_id -> filename ->
     URL`` in :func:`~meho_backplane.docs_search.citation_links._label_for`)
@@ -683,7 +682,7 @@ class CorpusChunk(BaseModel):
     def _blank_document_id_to_none(cls, value: object) -> object:
         """Normalise a blank ``document_id`` to ``None`` (#2004).
 
-        MEHO.Knowledge returns ``document_id: ""`` for a chunk with no
+        the knowledge service returns ``document_id: ""`` for a chunk with no
         owning-document concept. A required ``""`` would validate but lie;
         ``Optional`` alone keeps the empty string. Mapping blank-after-strip
         to ``None`` here makes the absence honest, so the citation-label
@@ -724,7 +723,7 @@ class CorpusSearchResponse(BaseModel):
     MEHO's own cited-chunk surface and binds the central audit row.
 
     The hit list accepts **two** envelope names via a validation alias
-    (#1732): MEHO.Knowledge's ``/search`` returns ``{"results": [...]}``
+    (#1732): the knowledge service's ``/search`` returns ``{"results": [...]}``
     while an earlier corpus shape (and MEHO's own internal projection)
     uses ``{"chunks": [...]}``. The field is **required** — it carries no
     default — so a 2xx body that names *neither* envelope fails parse
@@ -806,7 +805,7 @@ async def search_corpus(
     await _screen_corpus_dial(resolved_url)
     resolved_audience = audience if audience is not None else settings.corpus_audience
 
-    # MEHO.Knowledge's ``/search`` reads ``top_k`` for the hit cap and
+    # the knowledge service's ``/search`` reads ``top_k`` for the hit cap and
     # silently ignores ``limit`` (#1732) — sending ``limit`` let the
     # corpus fall back to its server-side default. Send the key the corpus
     # actually honours so ``limit`` reaches it. No ``with_rerank`` is sent:
@@ -1466,7 +1465,7 @@ class CorpusStatusResponse(BaseModel):
     flight, or the corpus was registered but never ingested), so the
     search path can fail typed instead of returning an empty 200. Frozen.
 
-    Readiness wire shape (#1732). MEHO.Knowledge has **no** ``/status``
+    Readiness wire shape (#1732). The knowledge service has **no** ``/status``
     route; it exposes ``GET /readyz`` returning a ``HealthResponse`` whose
     200 *is* the "ready" signal — it need not carry an ``index_built``
     field. So this adapter:
@@ -1496,7 +1495,7 @@ class CorpusStatusResponse(BaseModel):
 def derive_status_url(search_url: str) -> str:
     """Derive the corpus readiness URL from its *search_url*.
 
-    MEHO.Knowledge exposes its readiness as ``GET /readyz`` at the service
+    the knowledge service exposes its readiness as ``GET /readyz`` at the service
     root (no ``/status`` route, #1732), so the readiness URL is the search
     URL's **host root** plus ``/readyz``
     (``https://corpus/v1/search`` → ``https://corpus/readyz``). Anchoring

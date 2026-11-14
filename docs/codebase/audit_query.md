@@ -27,7 +27,7 @@ class it knows. Nothing is guessed from `method` / `path`.
 | `policy_decision` | Dispatch rows a gate refused (`denied`, rate limit, unqualified target version), a call of an ingested licence read that MEHO keeps off (`denied`, `payload["error"]["error_code"] = license_read_off`, #5791), the `approval.request` park row, and the `denied` row of a step inside a multi-step operation. |
 | `config_change` | Two settings rows (`method = SERVICE`). The `meho_connector_edit_op` row: an operator turned one operation on or off, or changed or removed its risk level, approval rule, description or guidance (#5791). The `meho_connector_tenant_setting` row: a tenant turned one built-in operation or a whole group on or off for itself, or set it back to the install default (#5864). `payload["op_id"]` names the edited operation (a group switch names `payload["group_key"]`), so a search by op id finds the edit. No operation ran, so a filter on `operation_execution` does not return these rows. The other connector review rows (enable, disable, group edits) stay `operation_execution`. Edit rows written before migration `0137` keep `operation_execution`; no row is changed. |
 | `approval_decision` | `approval.decision` rows (approve, reject, expire; an approve row's payload names the `approval_rule` that allowed it), the `approval.withdraw` row (the sender took its request back, #5717), and the standing-grant auto-approval row. |
-| `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm. |
+| `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm, and the `mcp.session_open` row of a new MCP session (with `AUDIT_CLIENT_IDENTITY` on). A filter on `security_event` therefore also returns session starts. |
 | `legacy_request` | Every row written before `0106` (server default; old rows are not reclassified), the REST and MCP request wrapper rows, and the `approval.result` read row. |
 
 A call of an ingested op on a connector class that does not accept
@@ -42,6 +42,9 @@ A refused call's row says why (#5773). `payload["error"]` holds the
 `error_code` the caller got, a `reason_code`, and the `reason` text. The
 `reason_code` names the rule that refused the call
 (`operations/deny_reasons.py`): `agent_grant_denied` (the agent's grants),
+`agent_no_grant` (no grant covers the call), `agent_steps_not_declared`
+(a multi-step operation lists no steps, so the agent's grants cannot be
+checked for each step),
 `role_insufficient` (the role is below what the operation or tool needs),
 `read_scope_denied` (a service login's read scope), `connector_not_allowed`
 (the agent may not use the connector), `agent_reveal_refused` (an agent
@@ -110,6 +113,43 @@ stays `pending` after the request is approved, rejected or expired. Use
 `approval.request` rows. To see what waits now, use the approval queue
 (`meho approvals list`, or the console's approvals page). Decision record:
 [`docs/decisions/composite-audit-when-a-step-waits.md`](../decisions/composite-audit-when-a-step-waits.md).
+
+### A row that cannot be stored is refused before the call
+
+The dispatcher writes the row of a call after the call. If that write
+fails, the target may already hold the change (`audit_commit_failed`). So
+before it sends a call, the dispatcher checks the part of the row it
+already knows. `operations/audit_row_precheck.py` does this
+(`audit_row_problem`). It checks the values only and sends no statement
+to the database:
+
+- the text columns `operator_sub`, `actor_sub`, `path`, `step_id` and
+  `work_ref`: each text can be encoded as UTF-8 and holds no NUL
+  character;
+- `operator_sub`, `actor_sub` and `work_ref` have an index, so each must
+  also stay under `INDEX_TEXT_MAX_BYTES`;
+- every key and text in `payload`, built by the same function the writer
+  uses (the `client` block and the caller's name included). The caller's
+  name is the token's name, or the client id of a machine login, as the
+  writer stores it;
+- every number in `payload`: NaN and Infinity cannot be stored as JSON, so
+  they are refused too.
+
+When the check itself fails (for example on a payload nested too deep to
+walk), the call is refused with `audit_row_invalid` and the field
+`payload`.
+
+On a problem the call is refused with `audit_row_invalid`. `extras.field`
+names the value (never its content). A payload value is named by its path,
+for example `payload.principal_name`. A key that cannot be stored is named by
+its position (`payload.<key 1>`), so the refusal never holds the bad text. Nothing is sent to the target, no
+approval request is made and no row is written. All ways into the
+dispatcher pass through this one check. `audit_commit_failed` stays for a
+database that is not reachable after the call, and for what is known only
+after the call (`raw_payload`, `redaction_manifest`). The registered agent
+name is known before the call, but it is in the database, and the check
+sends no statement there, so it does not check that name. The module lists how each text and JSON column is covered, and
+`tests/test_audit_row_precheck.py` fails when a new column is in no list.
 
 ### Loose rows: the standing check (#4670)
 
@@ -255,7 +295,7 @@ Field-to-source mapping:
 | `principal_name` | `payload['principal_name']` when present. Four writers set it: MCP rows (#1212, `write_mcp_audit_row`), approval request and decision rows (#3300), `DISPATCH` operation run and refusal rows (#4029, `operations/_audit.py:write_audit_row`), and the tool rows of MEHO's own agent runs (`agent/tool_audit.py:write_agent_tool_row`). Each takes the name from `auth/display_name.py:principal_display_name` (#3885): the token's `name` claim, else for an agent token the registered agent name, else for any machine token its client id. The name always belongs to the row's `operator_sub`. On an approved run that is the approver when a person approves through the console, CLI or REST (`resume_dispatch_after_approval`), and the agent when MEHO's own agent waits for the approval and resumes the run itself (`agent/approval_wait.py:_resume_approved_or_already_resumed`). It is `None` when none of these gives a name. HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
 | `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); exact-match filterable since #4030. |
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
-| `work_ref` | `audit_log.work_ref` — external change-ticket reference (work_ref I1-T1 #1655, migration `0039`). An opaque string (e.g. `"gh:evoila/meho#1"`) correlating a governed operation to the out-of-band change record that authorised it. Surfaced + exact-match-filterable since work_ref I1-T3 (#1658). Bind sources: the request/agent/dispatch boundary (work_ref I1-T2 #1657) and runbook runs (work_ref I3-T1 #1661 — a run's `runbook_runs.work_ref` is bound around each `operation_call` step's dispatch + on the abort row, so the step audit rows inherit the run's change ticket). NULL when no bind source is in scope; system-internal writers leave it NULL by design. |
+| `work_ref` | `audit_log.work_ref` — external change-ticket reference (work_ref I1-T1 #1655, migration `0039`). An opaque string (e.g. `"gh:evoila/meho#1"`) correlating a governed operation to the out-of-band change record that authorised it. Surfaced + exact-match-filterable since work_ref I1-T3 (#1658). Bind sources: the request/agent/dispatch boundary (work_ref I1-T2 #1657) and runbook runs (work_ref I3-T1 #1661 — a run's `runbook_runs.work_ref` is bound around each `operation_call` step's dispatch + on the abort row, so the step audit rows inherit the run's change ticket). NULL when no bind source is in scope; system-internal writers leave it NULL by design. The server reads the `Meho-Work-Ref` header as UTF-8, with latin-1 as the fallback for bytes that are not valid UTF-8 (`decode_work_ref_header` in `operations/_audit.py`). So a non-ASCII ticket id such as `Änderung-7` lands on the audit row as the client sent it. |
 | `policy_decision` | `audit_log.policy_decision` — the synchronous policy-gate verdict stamped on the row (#130, migration `0051`). One of the closed `PermissionVerdict` set — `"auto-execute"` / `"needs-approval"` / `"deny"` — or `None` where no gate ran (pre-#130 rows, pre-gate usage errors like unknown-op / invalid-params / connector-resolution failures, and system-internal writers). Populated by both audit writers off the dispatch-scoped `policy_decision_var` contextvar: the parked "request" row carries `"needs-approval"`; the approval "decision" row carries `None` (an operator's approve/reject is not a gate verdict — it is recorded via `result_status`). A consumer reads the verdict directly (`WHERE policy_decision = '<verdict>'`) instead of reconstructing it from `method`+`path`+`payload`. **Verdict catalog:** the persisted set is exactly the three-value `PermissionVerdict` enum. `time_window_violation` / `quota_exceeded` are **not** implemented (no such policy classes exist in code); any external catalog listing them overstates the surface. |
 | `event_class` | `audit_log.event_class` — what kind of accountable event the row records (#3733, migration `0106`). See [Event class](#event-class-3733). |
 | `sandbox_mode` | `audit_log.sandbox_mode` — `true` when the instance ran in sandbox mode when it wrote the row (#4622, see [decisions/sandbox-mode.md](../decisions/sandbox-mode.md)). Rows from before the column existed read `false`. Every audit answer carries it (#5312), so a person can check the mark of a sandbox test with MEHO alone. Not a filter: one database has one mode. The CLI table shows no column for it; `--json` shows it. |
@@ -267,6 +307,50 @@ The three computed fields use the same rules the audit writers apply when
 they store the row, so a row returned by the query API and the stored row
 agree on the `(op_id, op_class, result_status)` trio. Since #3758 no
 automatic Broadcast event is published for a row; the row is the record.
+
+### The `client` block: which login client made the call
+
+Switch: `AUDIT_CLIENT_IDENTITY` (`Settings.audit_client_identity`), off by
+default. With it off, no row gets the block and every row stays as before.
+
+With it on, every audit row gets one payload block `client`:
+
+```json
+{"azp": "meho-cli", "channel": "token", "principal_kind": "user", "sid_hash": "3f1c0a9b2d4e5f60"}
+```
+
+| Key | What it is |
+|---|---|
+| `azp` | The login client the token was made for (the `azp` claim). `null` when the token has none. |
+| `channel` | `web` for a call from a person's web console session, `token` for every call that came with a token (command line, MCP, REST, a service login). |
+| `principal_kind` | `user`, `agent`, `service` or `runner`. |
+| `sid_hash` | The first 16 hex characters of the SHA-256 of the `sid` claim (the sign-in session). It groups the rows of one sign-in. MEHO never stores the raw `sid`. `null` when the token has no `sid`. |
+
+One helper builds the block: `auth/client_identity.py`. The writers:
+
+- MCP rows (`mcp/audit.py:write_mcp_audit_row`), operation rows
+  (`operations/_audit.py:write_audit_row`) and approval rows
+  (`operations/approval_queue.py:_write_audit_row`) take the block from the
+  `Operator` they already have. The block always comes from the checked
+  login: a `client` key that came another way is replaced.
+- The REST request row (`audit.py:_write_audit_row`) is written by the audit
+  middleware, which has no `Operator`. The login check of the request
+  (`middleware.py:verify_jwt_and_bind`, and for the web console
+  `ui/auth/refresh.py:_verify_session_token`) keeps the block in a context
+  variable, and the middleware reads it. The middleware resets it at the
+  start of each request. A request without a checked login has no block.
+- A console page checks its stored token in the session middleware
+  (`ui/auth/revalidation.py:revalidate_read_session`), which runs before
+  the audit middleware's reset. So that check keeps the block per session,
+  next to the time of the last check. The session context
+  (`UISessionContext.client`) carries it, and the page dependency
+  `require_ui_session` binds it again. A page view that does not check the
+  token again (it was checked within the last few minutes) reuses the kept
+  block. With the switch on, the first page view after login checks the
+  token once to build the block.
+
+`meho audit show` prints it as `via: <client> (<channel>)` (`-` when the row
+has no block). The console audit detail shows it as "Via".
 
 ### `AuditQueryResult` — page
 
@@ -324,6 +408,51 @@ query_audit(filters, tenant_id, session)
   └─ next_cursor = encode_cursor(CursorPosition(ts=last.ts, id=last.id))
                    if has_more else None
 ```
+
+## One rule for a ticket id (work ref)
+
+Every door cleans a ticket id with `normalize_work_ref` in
+`meho_backplane/work_ref.py`, so one ticket id is the same text
+wherever it enters MEHO. An audit search (`filter-work-ref`) then finds
+every row of one ticket, and a run approval covers exactly the calls of
+that ticket, whichever door they came through.
+
+The doors: the `Meho-Work-Ref` header (the audit middleware, also for
+`/mcp`), the `call_operation` body and MCP input, the MCP agent run and
+announce inputs, the REST announce body, a runbook start, a scheduler
+trigger, a run approval request, and the console forms.
+
+The rule:
+
+- White space at both ends is removed.
+- An empty value is refused.
+- A control character (also NUL, a line break and a tab), an invisible
+  format character (zero-width and direction marks), a line or paragraph
+  separator and a lone surrogate are refused.
+- The text is at most 256 characters, counted after NFC.
+- The text is stored in Unicode form NFC.
+
+A value that breaks the rule is refused with a message that names the
+rule. The check runs before anything else happens with the request:
+before the policy gate, before an operation is sent and before a row is
+written. Nothing is cut or changed without a word, apart from the strip
+and NFC.
+
+- A call without a ticket sends no `Meho-Work-Ref` header. A header that
+  is sent but empty or blank is refused with HTTP 400, like any other
+  bad value.
+- No door checks the length before the rule does. A ticket id sent in
+  NFD form, or with spaces at the ends, can be longer than 256 code
+  points and still be taken. The body size limit of the server bounds
+  the raw input.
+- A 422 answer for a bad body names the rule. When the refused input
+  cannot be encoded as UTF-8 (a lone surrogate written as `\ud800` in
+  JSON), the answer shows it as backslash escapes
+  (`api/request_validation.py`).
+
+Rows stored before this rule are not changed. A ticket id stored before
+this release may carry white space at the ends, so an exact-match filter
+or a run approval made for the cleaned text does not match such a row.
 
 ## Per-session replay (G8.2-T3 #1011)
 
@@ -453,7 +582,7 @@ tenant-scoping invariant is enforced one layer up.
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal_sub = operator.sub` (exact match on the user id, never the name filter); `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
-| `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read (#3215). Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). Only an `operation_execution` row reads a trace (#3747); any other class answers `trace_present=false` without a trace read. 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace, event_class}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. Operator plane keeps full access independent of the agent gate. | Flight-recorder trace (#3215). |
+| `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read. Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). Only an `operation_execution` row reads a trace; any other class answers `trace_present=false` without a trace read. 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace, event_class}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. A person keeps full access, independent of the agent gate. An agent login (`principal_kind=agent`) gets the agent rules: no trace unless `should_expose_to_agent` is true for the tenant (checked before the load), and never a trace marked `redaction_uncertain`. Both answer `trace_present=false` (`_load_trace_for`). | Flight-recorder trace. |
 | `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count, excluded_null_session_count, loose_row_count}`; `loose_row_count` is the nodes whose parent id names no row, #4670). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
 
 The replay route's **413 cap** is a cheap tenant-scoped

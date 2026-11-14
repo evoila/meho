@@ -80,6 +80,9 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.kv_tree import folder_max_keys, list_kv_tree
 from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
 from meho_backplane.connectors.vault.ops_auth_write import register_vault_auth_write_operations
+from meho_backplane.connectors.vault.ops_userpass_lifecycle import (
+    register_vault_userpass_lifecycle_operations,
+)
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.connectors.vault.tenant_scope import enforce_tenant_scope
 from meho_backplane.operations.typed_register import register_typed_operation
@@ -1198,7 +1201,7 @@ def vault_kv_write_target_path(op_id: str, params: dict[str, Any]) -> str:
     * ``vault.kv.delete`` soft-deletes versions via ``POST
       <mount>/delete/<path>`` (hvac's ``delete_secret_versions``), which
       Vault authorizes with ``update`` on that **delete** path — NOT the
-      data path (#3274, lab-verified in claude-rdc-hetzner-dc#2814).
+      data path (#3274, lab-verified).
     * ``vault.kv.metadata.delete`` sends ``DELETE <mount>/metadata/<path>``
       (hvac's ``delete_metadata_and_all_versions``) and reads the same
       path before and after, so it authorizes on the **metadata** path
@@ -1691,3 +1694,4 @@ async def register_vault_typed_operations(
     # redaction at the classification layer. Its own module, same
     # single-registrar-entry discipline as the read group above.
     await register_vault_auth_write_operations(embedding_service=embedding_service)
+    await register_vault_userpass_lifecycle_operations(embedding_service=embedding_service)

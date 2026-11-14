@@ -76,6 +76,12 @@ from meho_backplane.connectors._shared.system_operator import (
 )
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.kubernetes._dial_check import check_api_client_dials
+from meho_backplane.connectors.kubernetes._node_resources import (
+    NODE_LIST_OP_ID,
+    add_node_resources,
+    node_list_resources_on,
+    with_node_resources,
+)
 from meho_backplane.connectors.kubernetes._wire_span import instrument_api_client
 from meho_backplane.connectors.kubernetes.kubeconfig import (
     CredentialLoader,
@@ -471,6 +477,9 @@ class KubernetesConnector(Connector):
     product = "k8s"
     version = "1.x"
     impl_id = "k8s"
+    # Kubernetes lines that are supported upstream (1.35 to 1.37) plus the
+    # 1.32 line that CI tests today. Older targets get a clear fit warning.
+    supported_version_range = ">=1.32,<1.38"
 
     def __init__(
         self,
@@ -790,6 +799,9 @@ class KubernetesConnector(Connector):
         Op-id: ``k8s.node.list``. Wraps ``CoreV1Api.list_node()`` and
         projects each :class:`V1Node` through
         :func:`~meho_backplane.connectors.kubernetes.ops_core.node_row`.
+        With the switch ``K8S_NODE_LIST_RESOURCES`` on, it then adds each
+        node's size and ``requested`` sum from the pod list
+        (:func:`~meho_backplane.connectors.kubernetes._node_resources.add_node_resources`).
         The Ready-condition mapping ("Ready" / "NotReady" / "Unknown") and
         the role-label derivation are both helpers in :mod:`ops_core` so
         the unit tests pin those mappings against synthetic
@@ -803,6 +815,8 @@ class KubernetesConnector(Connector):
         core_v1 = client.CoreV1Api(api_client)
         resp = await core_v1.list_node()
         rows = [node_row(n) for n in resp.items]
+        if node_list_resources_on():
+            await add_node_resources(rows, resp.items, core_v1.list_pod_for_all_namespaces)
         return {"rows": rows, "total": len(rows)}
 
     async def k8s_service_list(
@@ -1194,7 +1208,8 @@ class KubernetesConnector(Connector):
                 group=group, version=version, plural=plural
             )
         items = list_items(resp, group=group, plural=plural)
-        rows = [custom_resource_row(obj) for obj in items]
+        fields: list[str] | None = params.get("fields")
+        rows = [custom_resource_row(obj, fields) for obj in items]
         return {"rows": rows, "total": len(rows)}
 
     async def k8s_cr_info(
@@ -1241,7 +1256,7 @@ class KubernetesConnector(Connector):
             obj = await custom.get_cluster_custom_object(
                 group=group, version=version, plural=plural, name=name
             )
-        return custom_resource_row(obj)
+        return custom_resource_row(obj, params.get("fields"))
 
     async def k8s_ls(
         self,
@@ -1943,7 +1958,10 @@ class KubernetesConnector(Connector):
                 )
             bindings.append((op, handler))
 
+        resources_on = node_list_resources_on()
         for op, handler in bindings:
+            if resources_on and op.op_id == NODE_LIST_OP_ID:
+                op = with_node_resources(op)
             when_to_use: str | None
             if op.group_key is None:
                 when_to_use = None

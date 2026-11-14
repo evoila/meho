@@ -58,7 +58,10 @@ The test is `backend/tests/test_connectors_vcf_shared_auth.py`.
 - **`ConnectorAuthError`** — a `SessionLoginError` subclass a connector
   raises when the product rejects a login (HTTP 401 or 403). It carries the status code,
   a short `cause`, the target name and a remediation. The dispatcher turns
-  it into `connector_auth_failed`.
+  it into `connector_auth_failed`. A connector that does not use HTTP (a
+  database login, for example) passes `over_http=False`. Then the error
+  text says that the system refused the login and names the `cause`,
+  not "HTTP <status>" (default `True`).
 - **`SessionLoginError`** — typed `RuntimeError` subclass raised by
   `vcf_session_login` on a non-2xx response, a transport error, or a
   structurally invalid 2xx (empty token).

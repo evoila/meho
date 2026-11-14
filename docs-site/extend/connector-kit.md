@@ -138,6 +138,12 @@ operations you register, not `execute`.
 - **Errors.** Raise `kit.ConnectorUpstreamError` when the vendor answers
   with an error, and `kit.ConnectorAuthError` when it refuses the
   credential. A failed read must never look like an empty answer.
+- **Version range.** Set `supported_version_range` (for example
+  `">=1.0,<2.0"`) to the product versions the connector is built for. When no
+  range applies, for example for a cloud API with no product version, leave
+  it out and set `version_range_reason` to one plain sentence. The template
+  has a test, `tests/test_version_range.py`, that fails when a connector has
+  neither.
 - **Caches.** Key a cache you keep across calls, for example a login
   token, with `kit.target_cache_key(target)`.
 
@@ -204,6 +210,21 @@ only `safe` operations, so a sensor cannot use a marked operation.
 **A preview for a change.** Register a preview with
 `kit.register_preview_builder`. It shows the person who approves what the
 change will do. Every `destructive` operation needs one.
+
+**A multi-step operation.** The kit has no names for multi-step
+operations yet. A package that registers one with MEHO's own modules must
+declare the steps of each multi-step operation that changes something:
+call `register_governed_subops` with every step the operation may run,
+or `declare_no_governed_subops` when it makes its change without a step
+that MEHO checks on its own (both in
+`meho_backplane.operations.governed_subops`). MEHO checks an agent's
+grants for each listed step before the call starts. When an operation
+declares neither, MEHO refuses an agent's call of it with
+`agent_steps_not_declared` once `AGENT_GRANT_REQUIRED` is `on`. Check
+this in your package's own CI: after your operations are registered,
+`composites_without_declared_steps(op_ids)` from the same module must
+return an empty list for the ids of your multi-step operations that
+change something.
 
 What MEHO does for you, so you do not:
 

@@ -70,6 +70,12 @@ from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.handlers import handle_tools_list
 from meho_backplane.mcp.human_only import HUMAN_ONLY_MCP_TOOLS, human_only_remediation
 from meho_backplane.mcp.registry import MCP_ADMIN_SCOPE
+from meho_backplane.mcp.short_texts import ShortText, apply_short_text
+from meho_backplane.mcp.tools._short_tool_texts import (
+    ADD_TO_KNOWLEDGE_SHORT,
+    CALL_OPERATION_SHORT,
+    PREVIEW_OPERATION_SHORT,
+)
 from meho_backplane.operations import approval_queue
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
@@ -80,6 +86,20 @@ from tests.mcp_test_fixtures import (
 )
 
 _DOCS_CAPABILITY = "meho-docs"
+
+
+@pytest.fixture(autouse=True, params=[False, True], ids=["full-texts", "short-texts"])
+def short_tool_texts(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> bool:
+    """Run every test here with ``MCP_SHORT_TOOL_TEXTS`` off and on (#4172).
+
+    The short texts change only descriptions, so the surface must be the
+    same in both states.
+    """
+    short = bool(request.param)
+    monkeypatch.setenv("MCP_SHORT_TOOL_TEXTS", "true" if short else "false")
+    get_settings.cache_clear()
+    return short
+
 
 #: The four working-surface docs tools — visible only to a session that
 #: ALSO holds the ``meho-docs`` capability (mirrors #3154's set).
@@ -291,7 +311,9 @@ OPERATOR_SURFACE_SORTED: tuple[str, ...] = (
     "meho_sensor_create",
     "meho_sensor_delete",
     "meho_sensor_list",
+    "meho_sensor_pause",
     "meho_sensor_results",
+    "meho_sensor_resume",
     "meho_targets_register",
     "meho_targets_update",
     "meho_topology_annotate",
@@ -693,7 +715,7 @@ async def test_wire_listing_entries_are_spec_shape_no_surface_leak() -> None:
     """Every listed entry is the MCP wire shape and never leaks ``surface``.
 
     The listing is what a client consumes, so the per-entry contract
-    (spec fields present, MEHO-internal ``surface`` absent) is pinned on
+    (spec fields present, internal ``surface`` absent) is pinned on
     the same path as the membership.
     """
     op = _operator(
@@ -784,6 +806,13 @@ _SWITCHED_TOOLS: dict[str, str] = {
     "preview_operation": "TEAM_KNOWLEDGE_RECALL",
 }
 
+#: The short text of each switched tool, shown with ``MCP_SHORT_TOOL_TEXTS`` on.
+_SWITCHED_SHORT_TEXTS: dict[str, ShortText] = {
+    "add_to_knowledge": ADD_TO_KNOWLEDGE_SHORT,
+    "call_operation": CALL_OPERATION_SHORT,
+    "preview_operation": PREVIEW_OPERATION_SHORT,
+}
+
 
 def _set_switches(monkeypatch: pytest.MonkeyPatch, *, similar: bool, recall: bool) -> None:
     monkeypatch.setenv("KB_SIMILAR_CHECK", "true" if similar else "false")
@@ -815,27 +844,30 @@ async def test_switches_off_listing_has_no_word_of_the_switched_features(
 
 @pytest.mark.parametrize("switch", sorted(set(_SWITCHED_TOOLS.values())))
 async def test_a_switch_on_lists_its_tools_as_registered(
-    monkeypatch: pytest.MonkeyPatch, switch: str
+    monkeypatch: pytest.MonkeyPatch, switch: str, short_tool_texts: bool
 ) -> None:
     """With a switch on, its tools list the same text and schema as registered.
 
     The registered definition is the full text from before the switch
     existed, so "on" changes nothing. The other switch stays off, so each
-    switch is checked on its own.
+    switch is checked on its own. With the short texts on, the expected
+    tool is the registered one with its short text.
     """
     _set_switches(
         monkeypatch, similar=switch == "KB_SIMILAR_CHECK", recall=switch == "TEAM_KNOWLEDGE_RECALL"
     )
     tools = await _listed_tools(_operator())
     for name, tool_switch in _SWITCHED_TOOLS.items():
-        registered = mcp_registry._TOOLS[name][0].to_wire()
+        registered = mcp_registry._TOOLS[name][0]
+        if short_tool_texts:
+            registered = apply_short_text(registered, _SWITCHED_SHORT_TEXTS[name])
         if tool_switch == switch:
-            assert tools[name] == registered
+            assert tools[name] == registered.to_wire()
         else:
-            assert tools[name] != registered
+            assert tools[name] != registered.to_wire()
     if switch == "KB_SIMILAR_CHECK":
         assert "create_anyway" in tools["add_to_knowledge"]["inputSchema"]["properties"]
-        assert "similar entries first" in tools["add_to_knowledge"]["description"]
+        assert "similar entries first" in str(tools["add_to_knowledge"])
     else:
         for name in ("call_operation", "preview_operation"):
             assert "team_knowledge" in tools[name]["outputSchema"]["properties"]

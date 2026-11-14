@@ -43,8 +43,7 @@
     "client_id": {
       "type": "string",
       "title": "OAuth client id (advanced)",
-      "description": "Pre-registered public OAuth client the shim presents to Keycloak. Leave as the default unless your realm registered the client under a different name.",
-      "default": "meho-mcp",
+      "description": "Pre-registered public OAuth client the shim presents to Keycloak. Leave it empty: the extension then uses the client MEHO names for Claude Desktop, or else meho-mcp. Set it only when your realm registered the client under a different name.",
       "required": false
     },
     "scopes": {

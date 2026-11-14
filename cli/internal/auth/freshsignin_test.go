@@ -80,6 +80,7 @@ func browser(t *testing.T, f *fakeIdP, state func(string) string) func(string) e
 		for key, want := range map[string]string{
 			"prompt":                "login",
 			"max_age":               "0",
+			"acr_values":            "meho-approve",
 			"response_type":         "code",
 			"client_id":             "meho-cli",
 			"code_challenge_method": "S256",

@@ -75,8 +75,10 @@ same operation on the connector version that matches the target, and
 runs it there when it exists and is turned on.
 
 So pin the connector whose version matches the target. To see the
-target's version, run `meho targets describe <name>`. A sensor cannot
-be changed: delete it and create it again with the right connector.
+target's version, run `meho targets describe <name>`. To move a sensor
+to the right connector, change it with
+`meho sensor edit <sensor_id> --connector-id <id>` (see
+[Change a sensor or a dashboard](#change-a-sensor-or-a-dashboard)).
 
 ## Step 2 — create the sensor
 
@@ -161,12 +163,27 @@ the target, or set its version, and the list shows the result.
 
 To change a sensor later, use `meho sensor edit` (see
 [Change a sensor or a dashboard](#change-a-sensor-or-a-dashboard)).
-There is deliberately **no pause verb**. Nor is `paused`
-a self-protection you can wait for: the runner parks a sensor **only**
-when its stored cadence (`cron_expr` / `timezone`) no longer parses,
-stamping `status_reason` with `invalid_cadence:<error>`. There is no
-failure counter — a sensor that evaluates `critical` or `unknown`
-forever stays `active` forever. The way to stop one is to delete it:
+To stop a sensor for a while, pause it. A paused sensor is not run, so it
+does not call its target. It keeps its id, its result history and its place
+in every dashboard:
+
+```bash
+meho sensor pause <uuid>
+meho sensor resume <uuid>
+```
+
+Pause and resume are safe to run twice. Use them, for example, while you fix
+the credential of the target.
+
+MEHO also pauses a sensor for you in two cases. The first is a stored
+cadence that no longer parses (`status_reason` is `invalid_cadence:<error>`).
+The second is a target that refuses the login several times in a row
+(`status_reason` is `auth_failed:ConnectorAuthError`). By default this is 3
+times; set `SENSOR_AUTH_FAILURE_PARK_THRESHOLD` to change it. This stops a
+stale credential from being tried on every run. MEHO then mails a warning to
+the mail recipients (`--notify-email`) of every dashboard that holds the
+sensor. Fix the credential, then resume the sensor. A sensor that reads `critical` or `unknown` for other
+reasons stays `active`. To remove a sensor and its history, delete it:
 
 ```bash
 meho sensor delete <uuid>
@@ -204,7 +221,7 @@ The same view lives in the operator console at `/ui/checks` (list)
 and `/ui/checks/{dashboard_id}` (member breakdown). Dashboards have
 CLI, REST, and UI surfaces; sensors additionally have MCP tools
 (`meho_sensor_list` / `meho_sensor_create` / `meho_sensor_delete` /
-`meho_sensor_results`) —
+`meho_sensor_pause` / `meho_sensor_resume` / `meho_sensor_results`) —
 **dashboards have no MCP
 tools today**.
 
@@ -359,6 +376,128 @@ writes an audit row. The REST routes are
 `GET /api/v1/checks/dashboard-files/export?name=<name>` and
 `POST /api/v1/checks/dashboard-files/import`.
 
+## Watch an Azure subscription (budget, policy, Advisor)
+
+Three sensors and one dashboard for one Azure subscription. The file below
+is a dashboard file, so you import it in one step.
+
+What each sensor measures:
+
+| Sensor | Value | Degraded | Critical | Checked |
+|---|---|---|---|---|
+| `<dashboard>-budget-used` | Highest percent used of the budgets, in the current budget period | 80 or more | 100 or more | every day |
+| `<dashboard>-policy-non-compliant` | Non-compliant resources now | above the baseline | more than 10 above the baseline | every 6 hours |
+| `<dashboard>-advisor-high-impact` | Open high-impact Advisor recommendations now | above the baseline | more than 10 above the baseline | every day |
+
+The baseline is the count on the day you make the sensor. Read it once:
+
+```bash
+meho operation call azure-arm-2026.10 azure.policy.compliance.summary \
+  --target <azure-target>
+meho operation call azure-arm-2026.10 azure.advisor.recommendation.list \
+  --target <azure-target> --params '{"impact": "High"}'
+```
+
+Put the `non_compliant_resources` number and the Advisor `count` into the
+file as the `degraded` bounds (`12` and `3` below), and add 10 for the
+`critical` bounds (`22` and `13`). Save the file, then import it:
+
+```json
+{
+  "format": "meho-dashboard/1",
+  "dashboard": {
+    "name": "azure-subscription-health",
+    "description": "One Azure subscription: budget used in the current period, non-compliant resources and high-impact Advisor recommendations against their baseline.",
+    "notify_min_state": "critical"
+  },
+  "sensors": [
+    {
+      "name": "azure-subscription-health-budget-used",
+      "connector_id": "azure-arm-2026.10",
+      "op_id": "azure.cost.budget.list",
+      "target": "azure-subscription",
+      "params": {},
+      "assertion": {
+        "select": {
+          "path": "$.budgets[*].percent_used",
+          "aggregate": "max"
+        },
+        "compare": {
+          "type": "threshold",
+          "op": "gte",
+          "degraded": 80,
+          "critical": 100
+        }
+      },
+      "cadence_kind": "interval",
+      "interval_seconds": 86400,
+      "severity": "critical"
+    },
+    {
+      "name": "azure-subscription-health-policy-non-compliant",
+      "connector_id": "azure-arm-2026.10",
+      "op_id": "azure.policy.compliance.summary",
+      "target": "azure-subscription",
+      "params": {},
+      "assertion": {
+        "select": {
+          "path": "$.non_compliant_resources"
+        },
+        "compare": {
+          "type": "threshold",
+          "op": "gt",
+          "degraded": 12,
+          "critical": 22
+        }
+      },
+      "cadence_kind": "interval",
+      "interval_seconds": 21600,
+      "severity": "critical"
+    },
+    {
+      "name": "azure-subscription-health-advisor-high-impact",
+      "connector_id": "azure-arm-2026.10",
+      "op_id": "azure.advisor.recommendation.list",
+      "target": "azure-subscription",
+      "params": {
+        "impact": "High"
+      },
+      "assertion": {
+        "select": {
+          "path": "$.count"
+        },
+        "compare": {
+          "type": "threshold",
+          "op": "gt",
+          "degraded": 3,
+          "critical": 13
+        }
+      },
+      "cadence_kind": "interval",
+      "interval_seconds": 86400,
+      "severity": "critical"
+    }
+  ]
+}
+```
+
+```bash
+meho dashboard import azure-health.json \
+  --map-target azure-subscription=<azure-target> --dry-run
+meho dashboard import azure-health.json \
+  --map-target azure-subscription=<azure-target>
+```
+
+Import finds a sensor by its name. So each sensor name starts with the
+dashboard name. To watch a second subscription, change the dashboard name
+in a copy of the file (for example `azure-sub-b-health`) and change the start
+of the three sensor names the same way. Otherwise the second import changes
+the sensors of the first subscription.
+
+A budget with no amount has no percent, and a sensor with no value shows
+`unknown`, never `ok`. The Python version of these recipes is
+`meho_backplane.connectors.azure.sensor_templates`.
+
 ## The investigator (optional deep tier)
 
 When a dashboard's rollup crosses from green into a non-green state,
@@ -373,8 +512,9 @@ It is off until you opt in, and it has real prerequisites:
 
 - An **enabled agent definition named `checks-investigator`** in your
   tenant (the name is configurable deploy-side). The
-  [tiered-triage example](https://github.com/evoila/meho/tree/main/examples/r1-tiered-triage)
-  is the mould — read-only toolset, writes need approval.
+  [checks investigator example](https://github.com/evoila/meho/tree/main/examples/checks-investigator)
+  shows it: a read-only toolset, and an agent login registered with
+  `--grants read-everything`, so writes wait for approval.
 - The agent runtime, which is **experimental** maturity — check the
   [feature-maturity index](../reference/maturity.md) before leaning
   on it.
@@ -383,6 +523,10 @@ It is off until you opt in, and it has real prerequisites:
 
 The investigator never executes a change: any write op its agent
 attempts parks in the approval queue like everyone else's.
+
+**Next: start an agent.** A Sensor or a Dashboard can also start an agent when
+it changes state, for example to find the cause. See
+[Start an agent when a Sensor or Dashboard changes](scheduler.md#start-an-agent-when-a-sensor-or-dashboard-changes).
 
 ## Going further
 
@@ -399,10 +543,10 @@ The quickstart above is the core loop. A few surfaces extend it:
   offending rows — the specific objects or series that broke the check —
   so a notification or an investigation names *what* breached, not just
   *that* something did. A healthy tick's evidence is unchanged.
-- **A broadcast feed.** Every dashboard rollup transition is also
-  published to the tenant broadcast feed, so operators and agents can
-  watch check-state changes the way they watch every other action
-  (`meho_broadcast_recent`, `meho_broadcast_watch`, `GET /api/v1/feed`).
+- **Where a change shows.** A dashboard change is shown in the console
+  and the checks API, and it can send a mail (see notifications above).
+  It is not posted to the activity feed. The feed carries notes that
+  agents and people post.
 - **The investigator.** The diagnose-only agent above turns a red
   dashboard into a structured, retrievable finding — read-only by
   design.

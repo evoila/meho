@@ -10,9 +10,10 @@ G0.24-T4 (#1649) acceptance criteria:
   :class:`OperationResult` -- NOT the bare ``connector_error:
   HTTPStatusError`` that buried GitHub's actionable 403 (body message +
   ``X-Accepted-GitHub-Permissions`` / ``x-oauth-scopes`` headers) in
-  ``extras["exception_message"]`` (consumer
-  ``claude-rdc-hetzner-dc#1138``). The operator-facing ``error`` names
-  the likely insufficient-permission cause; ``extras`` carries
+  ``extras["exception_message"]`` (reported by a
+  consumer). The operator-facing ``error`` names
+  the likely causes (a missing permission, or a wrong password or locked
+  account, #6254); ``extras`` carries
   ``http_status=403``, the upstream ``upstream_message``, and the
   permission headers **when present**.
 * A dispatch raising :exc:`httpx.HTTPStatusError` with ``status_code ==
@@ -470,11 +471,13 @@ def test_result_connector_http_403_shape_with_github_headers() -> None:
     assert out.op_id == "POST:/repos/o/r/issues"
     assert out.error is not None
     assert out.error.startswith("connector_http_403:")
-    # The cause is named connector-agnostically as a permission problem.
-    assert "may lack the permission" in out.error
+    # The cause is named connector-agnostically: a missing permission,
+    # or a wrong password / locked account (#6254).
+    assert "refused this call" in out.error
+    assert "lacks a permission" in out.error
     assert "403" in out.error
     # Remediation imperative + doc reference.
-    assert "Grant the missing permission" in out.error
+    assert "First check the target's account" in out.error
     assert "docs/codebase/error-message-shape.md" in out.error
     # The upstream body message tails the operator-facing string.
     assert "Resource not accessible by integration" in out.error
@@ -534,11 +537,45 @@ def test_result_connector_http_403_empty_body_yields_null_message() -> None:
     exc = _make_http_status_error()
     out = result_connector_http_403("POST:/x", exc, duration_ms=1.0)
     assert out.extras["upstream_message"] is None
-    # The operator-facing string still names the permission cause.
+    # The operator-facing string still names the causes.
     assert out.error is not None
-    assert "may lack the permission" in out.error
+    assert "lacks a permission" in out.error
+    assert "password is wrong or the account is locked" in out.error
     # No dangling "Upstream said:" tail when there was no message.
     assert "Upstream said:" not in out.error
+
+
+def test_result_connector_http_403_wrong_password_text_claims_no_login() -> None:
+    """A 403 for a wrong password or locked account gets no false claim (#6254).
+
+    Some vendors answer a failed login with 403. MEHO's own text must not
+    say the login worked, and must not tell the agent to retry: more calls
+    with a wrong password can lock the account.
+    """
+    vendor_text = "The credentials were incorrect or the account specified has been locked."
+    exc = _make_http_status_error(json_body={"error_message": vendor_text})
+    out = result_connector_http_403("GET:/api/v1/node/status", exc, duration_ms=1.0)
+
+    assert out.error is not None
+    assert out.error.startswith("connector_http_403:")
+    own_text = out.error.split("Upstream said:")[0]
+    assert "authenticated" not in own_text
+    assert "and retry" not in own_text
+    assert "Do not retry yet" in own_text
+    assert "password is wrong or the account is locked" in own_text
+    assert "extras.upstream_message" in own_text
+    # The extras keys stay the same, so agents that branch on error_code work.
+    assert set(out.extras) >= {
+        "error_code",
+        "http_status",
+        "upstream_message",
+        "permission_headers",
+    }
+    assert out.extras["error_code"] == "connector_http_403"
+    assert out.extras["http_status"] == 403
+    assert out.extras["permission_headers"] == {}
+    # The vendor's own text still reaches the caller.
+    assert vendor_text in out.extras["upstream_message"]
 
 
 def test_result_connector_http_403_caps_oversized_message() -> None:

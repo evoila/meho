@@ -27,7 +27,28 @@ More rules:
 - MEHO also finds secrets in free text, for example private key blocks
   and labels such as `DB_PASSWORD=`.
 - A person or a service principal can ask for the real value with
-  `reveal_secret: true`. An agent is refused.
+  `reveal_secret: true`. An agent is refused. When the operation reads a
+  secret, such as a Vault secret read, the request waits until a second
+  person approves it. For every request with `reveal_secret` that waits
+  for approval, also one that creates a credential, approving does not
+  run the operation. The person who asked then runs it and gets the
+  value. This works once, and only for 15 minutes after the approval. The
+  person who approved does not see the value, and MEHO does not store it.
+  No browser or proxy keeps the answer with the value: it says
+  `Cache-Control: no-store`. The same is true when a person sees the
+  values at once, on a read that needs no approval.
+- A call with `reveal_secret: true` cannot run in the background. With
+  `async: true` it is refused. It runs at once, or through an approval.
+- How the person who asked gets the value:
+    - **Command line:** `meho secret read --approval <id> --field <name>`.
+    - **Console:** "Show value" in the Vault view.
+    - **REST:** `POST /api/v1/approvals/<id>/reveal`.
+    - **MCP (an AI tool such as Claude Code):** call `call_operation`
+      again with the same `connector_id` and `op_id`, and
+      `approval_request_id: <id>`. Send nothing else. This needs the
+      switch `MCP_REVEAL_FETCH`, which is off by default. With it off, a
+      person who works through MCP uses the command line or the console.
+    - A second try is refused, and it shows no value.
 - An operation that makes a new credential still gives it to the
   caller once.
 - A connector can mark a field that only looks secret, such as a date

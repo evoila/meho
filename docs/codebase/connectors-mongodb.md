@@ -1,4 +1,4 @@
-# Connector: mongodb (MongoDB 5–8, read-only)
+# Connector: mongodb (MongoDB 7–8, read-only)
 
 ## Overview
 
@@ -36,7 +36,7 @@ supported client directly and pulls **no separate `motor` dependency**.
 
 - **`MongoDbConnector`** (`connector.py`) — `Connector` subclass. Class
   attributes: `product="mongodb"`, `version="7"`, `impl_id="mongodb-wire"`,
-  `supported_version_range=">=5,<9"`, `priority=1` (outranks a
+  `supported_version_range=">=7,<9"`, `priority=1` (outranks a
   `GenericRestConnector` auto-shim). Owns the connect/close lifecycle
   (`_client` async context manager), `fingerprint`, `probe`, the nine op
   handlers, `register_operations`, and the `execute` dispatcher shim.
@@ -219,3 +219,14 @@ replication lag, and treats the standalone code-76 (`NoReplicationEnabled`) as
 - Sibling wire-protocol connector: `docs/codebase/connectors-postgres.md`.
 - Task #2237; Initiative #2228 (data-tier + hypervisor connector coverage);
   reuses the DB-connector shape from postgres (#2236).
+
+## Supported versions
+
+The range is `>=7,<9`: the MongoDB releases the vendor still supports.
+CI runs the container tests on MongoDB 7 and 8
+(`backend/tests/integration/test_connectors_mongodb_container.py`). MongoDB 9
+stays outside the range until a CI run on 9 is green. A target detected as
+MongoDB 5 or 6 is not picked; the error names the range.
+`strict_version_range = True` makes the fallback registration `("mongodb",
+"", "")` check the range too. It still serves a target whose version is not
+known yet, and a probe still finds the connector.

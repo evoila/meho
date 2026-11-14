@@ -55,6 +55,19 @@ EXPOSURE_STATES = {
     "catalogued-not-enabled",
     "not-yet-integrated",
 }
+#: The connector ids of each component start with one of these prefixes. A
+#: ``live-verified`` row needs a test in ``docs/compatibility/live-tests.yaml``
+#: for a connector with such an id, at the version of the row.
+COMPONENT_CONNECTOR_PREFIXES = {
+    "sddc_manager": ("sddc-",),
+    "vcenter_esxi": ("vmware-rest-", "vmware-pyvmomi-"),
+    "nsx": ("nsx-",),
+    "vcf_automation": ("vcfa-",),
+    "fleet": ("fleet-",),
+    "vcf_operations": ("vrops-",),
+    "vcf_operations_for_logs": ("vrli-",),
+    "installer": ("installer-",),
+}
 REQUIRED_DELTA_KEYS = {"endpoint", "schema", "auth", "feature_state"}
 REQUIRED_SUBSET_KEYS = {"advertised_range", "auth", "typed_source", "feature_gate"}
 
@@ -138,6 +151,7 @@ def _validate_component(
     component: object,
     profiles: dict[str, Any],
     artifacts: dict[str, Any],
+    live_tests: dict[str, Any] | None = None,
 ) -> None:
     item = _require_mapping(component, f"release {release}.{component_name}")
     _require_text(item.get("version"), f"release {release}.{component_name}.version")
@@ -175,6 +189,28 @@ def _validate_component(
         _require_text(
             item.get("live_observation"), f"release {release}.{component_name}.live_observation"
         )
+        if not _has_live_test(live_tests, component_name, str(item["version"])):
+            raise ManifestError(
+                f"release {release}.{component_name} is live-verified, but "
+                f"docs/compatibility/live-tests.yaml has no live test of a "
+                f"{component_name} connector at version {item['version']}"
+            )
+
+
+def _has_live_test(live_tests: dict[str, Any] | None, component_name: str, version: str) -> bool:
+    prefixes = COMPONENT_CONNECTOR_PREFIXES.get(component_name, ())
+    connectors = (live_tests or {}).get("connectors")
+    if not isinstance(connectors, dict):
+        return False
+    for connector_id, entry in connectors.items():
+        if not str(connector_id).startswith(prefixes) or not isinstance(entry, dict):
+            continue
+        tests = entry.get("tests")
+        if isinstance(tests, list) and any(
+            isinstance(test, dict) and test.get("product_version") == version for test in tests
+        ):
+            return True
+    return False
 
 
 def _validate_releases(
@@ -182,6 +218,7 @@ def _validate_releases(
     profiles: dict[str, Any],
     artifacts: dict[str, Any],
     component_builds: dict[str, Any],
+    live_tests: dict[str, Any] | None = None,
 ) -> tuple[int, int]:
     if not isinstance(releases, list):
         raise ManifestError("release_rows must be a list")
@@ -212,7 +249,12 @@ def _validate_releases(
             )
         for component_name, component in components.items():
             _validate_component(
-                record["vcf_release"], component_name, component, profiles, artifacts
+                record["vcf_release"],
+                component_name,
+                component,
+                profiles,
+                artifacts,
+                live_tests,
             )
             component_rows += 1
 
@@ -294,8 +336,14 @@ def _validate_regression_subsets(subsets: object) -> None:
                 raise ManifestError(f"MEHO regression subset {subset_id}.{field} is invalid")
 
 
-def validate_manifest(manifest: dict[str, Any]) -> dict[str, int]:
-    """Validate schema, release coverage, provenance, and exposure separation."""
+def validate_manifest(
+    manifest: dict[str, Any], live_tests: dict[str, Any] | None = None
+) -> dict[str, int]:
+    """Validate schema, release coverage, provenance, and exposure separation.
+
+    *live_tests* is the loaded ``docs/compatibility/live-tests.yaml``. A
+    ``live-verified`` row needs a matching test in it.
+    """
     if manifest.get("schema_version") != 1:
         raise ManifestError("schema_version must be 1")
     publication = _require_mapping(manifest.get("publication_boundary"), "publication_boundary")
@@ -313,7 +361,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, int]:
         manifest.get("bom_component_builds"), "bom_component_builds"
     )
     release_rows, component_rows = _validate_releases(
-        manifest.get("release_rows"), profiles, artifacts, component_builds
+        manifest.get("release_rows"), profiles, artifacts, component_builds, live_tests
     )
     return {
         "artifacts": len(artifacts),
@@ -327,12 +375,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True, help="Path to the YAML manifest")
     parser.add_argument(
+        "--live-tests",
+        type=Path,
+        help="Path to live-tests.yaml (default: next to the manifest)",
+    )
+    parser.add_argument(
         "--json", action="store_true", help="Emit the validated coverage summary as JSON"
     )
     args = parser.parse_args()
     try:
         loaded = yaml.safe_load(args.manifest.read_text(encoding="utf-8"))
-        summary = validate_manifest(_require_mapping(loaded, "manifest"))
+        live_path = args.live_tests or args.manifest.parent / "live-tests.yaml"
+        live_tests = (
+            yaml.safe_load(live_path.read_text(encoding="utf-8")) if live_path.is_file() else None
+        )
+        summary = validate_manifest(_require_mapping(loaded, "manifest"), live_tests)
     except (OSError, yaml.YAMLError, ManifestError) as exc:
         print(f"manifest validation failed: {exc}", file=sys.stderr)
         return 1

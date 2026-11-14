@@ -50,7 +50,7 @@ func newClientCreateCmd() *cobra.Command {
 			"never returned.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example:       "  meho keycloak client create --target rdc-keycloak -f client-meho-web.json",
+		Example:       "  meho keycloak client create --target keycloak-lab -f client-meho-web.json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -93,7 +93,7 @@ func newClientUpdateCmd() *cobra.Command {
 			"clientId) and the connector resolves the UUID. Requires approval.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example:       "  meho keycloak client update --target rdc-keycloak --client-id meho-web -f client-patch.json",
+		Example:       "  meho keycloak client update --target keycloak-lab --client-id meho-web -f client-patch.json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -157,9 +157,9 @@ func newClientListCmd() *cobra.Command {
 			"config; the internal uuid is the `id` field of a list row.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho keycloak client list --target rdc-keycloak\n" +
-			"  meho keycloak client list --target rdc-keycloak --client-id meho-backplane\n" +
-			"  meho keycloak client list --target rdc-keycloak --json | jq '.result.rows[].id'",
+		Example: "  meho keycloak client list --target keycloak-lab\n" +
+			"  meho keycloak client list --target keycloak-lab --client-id meho-backplane\n" +
+			"  meho keycloak client list --target keycloak-lab --json | jq '.result.rows[].id'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -252,8 +252,8 @@ func newClientGetCmd() *cobra.Command {
 			"the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho keycloak client get --target rdc-keycloak --id 11111111-1111-1111-1111-111111111111\n" +
-			"  meho keycloak client get --target rdc-keycloak --id <uuid> --json | jq '.result.client'",
+		Example: "  meho keycloak client get --target keycloak-lab --id 11111111-1111-1111-1111-111111111111\n" +
+			"  meho keycloak client get --target keycloak-lab --id <uuid> --json | jq '.result.client'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

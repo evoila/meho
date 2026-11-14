@@ -1131,3 +1131,181 @@ def test_overrides_report_page_lists_reduced_approval() -> None:
     assert f'data-op-id="{_OP_ID}"' in report.text
     assert "read-only in practice" in report.text
     assert "turned off" in report.text
+    # The switch is off: no "Category" column; the page says what a whole-install row is.
+    assert "<th>Category</th>" not in report.text
+    assert "data-override-category" not in report.text
+    assert "data-overrides-install-note" in report.text
+
+
+def test_overrides_report_page_shows_the_category_with_the_switch_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _classification_on(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A, safety_level="caution", requires_approval=True)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+    try:
+        client.patch(
+            f"/ui/connectors/registry/{_CONNECTOR_ID}/operations/{_OP_ID}",
+            data={"safety_level": "dangerous"},
+            headers=_edit_headers(csrf),
+        )
+        report = client.get("/ui/connectors/overrides?show=all")
+    finally:
+        mock.stop()
+    assert report.status_code == 200, report.text
+    assert f'data-op-id="{_OP_ID}"' in report.text
+    assert "<th>Category</th>" in report.text
+    assert "data-override-category" in report.text
+
+
+# ---------------------------------------------------------------------------
+# #6038: the classify page and the category in the review drawer
+# ---------------------------------------------------------------------------
+
+
+def _classification_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock
+
+    from meho_backplane.connectors.policy.classify import register_policy_classify_operation
+
+    monkeypatch.setenv("POLICY_CLASSIFICATION", "true")
+    get_settings_cache_clear()
+    embedding = AsyncMock()
+    embedding.encode_one.return_value = [0.25] * 384
+    embedding.encode.return_value = [[0.25] * 384]
+    embedding.dimension = 384
+    asyncio.run(register_policy_classify_operation(embedding_service=embedding))
+
+
+def _approval_request_count() -> int:
+    from meho_backplane.db.models import ApprovalRequest
+
+    async def _do() -> int:
+        async with get_sessionmaker()() as session:
+            return len((await session.execute(select(ApprovalRequest))).scalars().all())
+
+    return asyncio.run(_do())
+
+
+def test_group_body_shows_the_category_and_classify_links(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the switch on, each op row shows its category and links to the classify page."""
+    _classification_on(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A)
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        response = client.get(
+            f"/ui/connectors/registry/{_CONNECTOR_ID}/review/groups/resources",
+            headers={"HX-Request": "true"},
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "data-op-category" in response.text
+    assert ">other<" in response.text
+    assert "data-op-classify-link" in response.text
+    assert 'data-group-classify-link="resources"' in response.text
+
+
+def test_group_body_has_no_category_with_the_switch_off() -> None:
+    """With the switch off, the review drawer is as before."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A)
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        response = client.get(
+            f"/ui/connectors/registry/{_CONNECTOR_ID}/review/groups/resources",
+            headers={"HX-Request": "true"},
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "data-op-category" not in response.text
+    assert "classify" not in response.text
+
+
+def test_classify_page_says_when_the_switch_is_off() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        response = client.get("/ui/policy/classify")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "data-classify-off" in response.text
+    assert "data-classify-form" not in response.text
+
+
+def test_classify_page_needs_tenant_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    _classification_on(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    try:
+        page = client.get("/ui/policy/classify")
+        preview = client.post(
+            "/ui/policy/classify/preview",
+            data={"connector": _CONNECTOR_ID, "category": "network"},
+            headers=_edit_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert page.status_code == 403
+    assert preview.status_code == 403
+    assert "Classifying operations needs the tenant_admin role." in page.text
+    assert "re-probe" not in page.text
+
+
+def test_classify_page_dry_run_then_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dry run lists the matched operation and writes nothing; the request waits."""
+    _classification_on(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    form = {"connector": _CONNECTOR_ID, "group": "resources", "category": "network"}
+    try:
+        page = client.get(f"/ui/policy/classify?connector={_CONNECTOR_ID}&group=resources")
+        preview = client.post("/ui/policy/classify/preview", data=form, headers=_edit_headers(csrf))
+        count_after_preview = _approval_request_count()
+        requested = client.post(
+            "/ui/policy/classify/request", data=form, headers=_edit_headers(csrf)
+        )
+        bad = client.post(
+            "/ui/policy/classify/preview",
+            data={**form, "labels": "no-equals-sign"},
+            headers=_edit_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert page.status_code == 200, page.text
+    assert "data-classify-form" in page.text
+    assert f'value="{_CONNECTOR_ID}"' in page.text
+    assert '<option value="network">' in page.text
+    assert preview.status_code == 200, preview.text
+    assert 'data-matched="1"' in preview.text
+    assert f'data-op-id="{_OP_ID}"' in preview.text
+    assert "data-classify-request" in preview.text
+    assert "data-classify-in-force" in preview.text
+    assert count_after_preview == 0
+    assert requested.status_code == 200, requested.text
+    assert "data-classify-requested" in requested.text
+    assert _approval_request_count() == 1
+    assert "data-classify-error" in bad.text
+    assert "key=value" in bad.text

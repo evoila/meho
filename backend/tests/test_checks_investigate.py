@@ -38,6 +38,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import select
 from structlog.testing import capture_logs
 
 import meho_backplane.checks.investigate as inv
@@ -61,6 +62,7 @@ from meho_backplane.db.models import (
     AgentRunStatus,
     CheckDashboard,
     CheckDashboardSensor,
+    ScheduledTrigger,
     Sensor,
     Tenant,
 )
@@ -519,7 +521,7 @@ async def test_concurrent_transitions_fire_one_agent_run(monkeypatch: pytest.Mon
     correlates them into one cause group -> exactly one ``run_scheduled`` fire
     (#2575). Without the coalescing claim each outcome would drive its own
     investigation and the stub -- which persists no real ``agent_run`` row for the
-    ``_has_in_flight_run`` gate to see -- would record two fires.
+    ``has_in_flight_run`` gate to see -- would record two fires.
     """
     await _seed_definition()
     _patch_creds(monkeypatch)
@@ -679,6 +681,146 @@ async def test_one_cause_one_investigation(monkeypatch: pytest.MonkeyPatch) -> N
     assert (
         stub.calls[0].work_ref == f"checks:{dashboard.dashboard_id.hex[:8]}:prod:{expected_group}"
     )
+
+
+async def _seed_event_trigger(
+    agent_name: str,
+    *,
+    status: str = "active",
+    kind: str = "event",
+    tenant_id: UUID = _TENANT,
+) -> None:
+    """Insert one trigger for the agent with this name (its definition must exist)."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        definition = (
+            await session.execute(
+                select(AgentDefinition).where(
+                    AgentDefinition.tenant_id == tenant_id, AgentDefinition.name == agent_name
+                )
+            )
+        ).scalar_one()
+        session.add(
+            ScheduledTrigger(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                agent_definition_id=definition.id,
+                kind=kind,
+                cron_expr="*/5 * * * *" if kind == "cron" else None,
+                timezone="UTC",
+                fire_at=None,
+                event_filter={"event": "check.dashboard.changed"} if kind == "event" else None,
+                next_fire_at=datetime.now(UTC) + timedelta(hours=1) if kind == "cron" else None,
+                status=status,
+                in_flight_policy="fail_into_audit",
+                inputs=None,
+                identity_sub="__scheduler__",
+                created_by_sub="seed-admin",
+            )
+        )
+        await session.commit()
+
+
+async def _fire_one_group(monkeypatch: pytest.MonkeyPatch) -> tuple[_StubInvoker, list[Any]]:
+    _patch_creds(monkeypatch)
+    stub = _install_stub(
+        outcome=_succeeded_outcome(
+            ChecksFinding(verdict="acknowledged", re_escalate=False, summary="ok")
+        )
+    )
+    with capture_logs() as logs:
+        await run_investigation(
+            tenant_id=_TENANT, dashboard=_dash(name="prod"), members=[_member("solo", target=None)]
+        )
+    return stub, logs
+
+
+@pytest.mark.asyncio
+async def test_trigger_owning_the_agent_stops_the_old_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Switch on and an active event trigger for the investigator: no old-path run."""
+    monkeypatch.setenv("CHECKS_AGENT_EVENTS", "true")
+    get_settings.cache_clear()
+    await _seed_definition()
+    await _seed_event_trigger("checks-investigator")
+
+    stub, logs = await _fire_one_group(monkeypatch)
+
+    assert stub.calls == []
+    assert any(e["event"] == "checks_investigation_skipped_trigger_owns" for e in logs)
+
+
+@pytest.mark.asyncio
+async def test_no_trigger_keeps_the_old_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHECKS_AGENT_EVENTS", "true")
+    get_settings.cache_clear()
+    await _seed_definition()
+
+    stub, _ = await _fire_one_group(monkeypatch)
+
+    assert len(stub.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_trigger_of_another_agent_does_not_stop_the_old_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second agent with its own trigger leaves the investigator alone."""
+    monkeypatch.setenv("CHECKS_AGENT_EVENTS", "true")
+    get_settings.cache_clear()
+    await _seed_definition()
+    await _seed_definition(name="other-agent")
+    await _seed_event_trigger("other-agent")
+
+    stub, _ = await _fire_one_group(monkeypatch)
+
+    assert len(stub.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "status"), [("event", "cancelled"), ("event", "paused"), ("cron", "active")]
+)
+async def test_inactive_or_non_event_trigger_does_not_stop_the_old_path(
+    monkeypatch: pytest.MonkeyPatch, kind: str, status: str
+) -> None:
+    monkeypatch.setenv("CHECKS_AGENT_EVENTS", "true")
+    get_settings.cache_clear()
+    await _seed_definition()
+    await _seed_event_trigger("checks-investigator", kind=kind, status=status)
+
+    stub, _ = await _fire_one_group(monkeypatch)
+
+    assert len(stub.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_trigger_in_another_tenant_does_not_stop_the_old_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    monkeypatch.setenv("CHECKS_AGENT_EVENTS", "true")
+    get_settings.cache_clear()
+    await _seed_definition()
+    async with get_sessionmaker()() as session:
+        session.add(Tenant(id=other, slug="tenant-b", name="Tenant B"))
+        await session.commit()
+    await _seed_definition(tenant_id=other)
+    await _seed_event_trigger("checks-investigator", tenant_id=other)
+
+    stub, _ = await _fire_one_group(monkeypatch)
+
+    assert len(stub.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_switch_off_ignores_the_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the switch off the old path runs as today, even with a trigger."""
+    await _seed_definition()
+    await _seed_event_trigger("checks-investigator")
+
+    stub, _ = await _fire_one_group(monkeypatch)
+
+    assert len(stub.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -1102,7 +1244,7 @@ def test_briefing_prompt_cannot_close_its_own_fence() -> None:
 
 def test_briefing_fences_target_returned_evidence() -> None:
     """Target-returned ``last_value`` / ``last_evidence`` / offender sample sit
-    inside the untrusted-content envelope (S14, meho-internal#302).
+    inside the untrusted-content envelope (S14).
 
     A monitored host or service controls these fields; an adversarial value
     that mimics an instruction must reach the auto-fired diagnose-only

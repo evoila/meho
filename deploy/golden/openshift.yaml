@@ -338,7 +338,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: 979e14c3c9b41bd35ae0af3a7553d5df7fe448852634e2f58663c24c3e4929f5
+        checksum/config: d37ceda1e2467f8bf18812fe64e498f6d29385cb47204bcc5600977552cf370f
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.
@@ -750,11 +750,22 @@ data:
   DISPATCH_MAX_CONCURRENT_OPS: "16"
   MCP_SESSION_START_LIMIT_PER_MINUTE: "60"
   APPROVAL_ONE_TIME_CODE_ACR_VALUES: ""
+  APPROVAL_SIGN_IN_LEVEL: "auto"
   # Switches for what the agent sees, off by default until model tests
   # show they help: team knowledge before an operation and in the start
-  # text, and the similar-entry check on a new knowledge entry.
+  # text, the similar-entry check on a new knowledge entry, and short
+  # texts for the biggest tools on the MCP tool list.
   TEAM_KNOWLEDGE_RECALL: "false"
   KB_SIMILAR_CHECK: "false"
+  MCP_SHORT_TOOL_TEXTS: "false"
+  # Claude Code and Claude Desktop sign in with their own login client.
+  MCP_CLIENT_PER_TOOL_KIND: "false"
+  # Category, labels and "always wait" on connectors, groups and
+  # operations. Off by default.
+  POLICY_CLASSIFICATION: "false"
+  # The policy evaluator runs next to today's checks and logs every
+  # difference. It decides nothing. Off by default.
+  POLICY_ENGINE_SHADOW: "false"
   # The shared knowledge scope and the weekly knowledge upkeep. Rendered
   # always; the defaults match the backplane's own defaults (nothing
   # shared, upkeep on, once a week).

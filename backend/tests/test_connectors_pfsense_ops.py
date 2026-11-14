@@ -1062,12 +1062,14 @@ async def test_pfsense_dhcp_leases_response_schema_matches_handler_rows() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_pfsense_ops_has_twenty_four_entries() -> None:
+def test_pfsense_ops_has_thirty_one_entries() -> None:
     """canary + 7 reads + dhcp.leases (#2849) + 2 writes (#3090) + 2 deletes (#3232)
     + 3 teardown-inverse deletes (#3313) + mgmt_flow.summary
     + user.list / route.static.list (#3954) + filter.rule.add / .delete (#3850)
-    + user.disable / user.enable (#3937) + diag.ping (#3965) = 24."""
-    assert len(PFSENSE_OPS) == 24
+    + user.disable / user.enable (#3937) + diag.ping (#3965)
+    + openvpn.clients / openvpn.log (#4093)
+    + address.next_free / csc.sync / user.create / user.delete / rule.sync (#3993) = 31."""
+    assert len(PFSENSE_OPS) == 31
 
 
 def test_pfsense_ops_about_is_first() -> None:
@@ -1099,11 +1101,17 @@ _DELETE_OP_IDS = {
 _USER_WRITE_OP_IDS = {"pfsense.user.disable", "pfsense.user.enable"}
 
 #: The approval-gated firewall rule add (#3850) -- ``dangerous``.
-_DANGEROUS_OP_IDS = {"pfsense.filter.rule.add"}
+_DANGEROUS_OP_IDS = {
+    "pfsense.filter.rule.add",
+    "pfsense.openvpn.user.create",
+    "pfsense.openvpn.user.delete",
+    "pfsense.openvpn.rule.sync",
+}
 
 # Reads whose parameter holds an address the firewall connects to: caution
 # with approval (the caller-address floor).
-_CALLER_ADDRESS_OP_IDS = {"pfsense.diag.ping"}
+# The VPN override sync (#3993) is ``caution`` with approval too.
+_CALLER_ADDRESS_OP_IDS = {"pfsense.diag.ping", "pfsense.openvpn.csc.sync"}
 
 
 def test_pfsense_read_ops_safe_write_ops_caution_delete_ops_destructive() -> None:
@@ -1166,6 +1174,13 @@ def test_pfsense_ops_covers_expected_op_ids() -> None:
         "pfsense.user.disable",
         "pfsense.user.enable",
         "pfsense.diag.ping",
+        "pfsense.openvpn.clients",
+        "pfsense.openvpn.log",
+        "pfsense.openvpn.address.next_free",
+        "pfsense.openvpn.csc.sync",
+        "pfsense.openvpn.user.create",
+        "pfsense.openvpn.user.delete",
+        "pfsense.openvpn.rule.sync",
     }
     assert op_ids == expected
 
@@ -1205,49 +1220,49 @@ def test_pfsense_ops_requires_approval_only_for_governed_ops() -> None:
 
 
 # ---------------------------------------------------------------------------
-# classify_mgmt_flows + pfsense.mgmt_flow.summary (meho-internal#252)
+# classify_mgmt_flows + pfsense.mgmt_flow.summary
 # ---------------------------------------------------------------------------
 
 # A two-leg pfctl -ss fixture in the REAL captured pfSense 2.7 format: field
 # order is <iface> <proto> <ep1>:<p1> <-|-> <ep2>:<p2>  <state>:<state> (pf
 # state format, redmine #2121; matches the lab's own live classifier
-# `rdc-hetzner-dc/scripts/pfsense-meho-measure-report.sh` -- `$2=="tcp"`,
+# script -- `$2=="tcp"`,
 # `<if> tcp <ep1> <-|-> <ep2>`). Inbound management connections render as
 # `<if> tcp <server:mgmtport> <- <client:highport>`; the classifier resolves
 # the server from the direction arrow (`->` server = dst, `<-` server = src),
 # so line 7 is an outbound `->` whose server is the dst endpoint. opt5
-# CIDR 10.11.16.0/20, opt2 CIDR 10.5.50.0/24. Sanctioned: 10.11.16.40 +
-# 10.5.50.153. Baseline (expected non-sanctioned): 10.11.255.0/24. Management
+# CIDR 10.20.16.0/20, opt2 CIDR 10.30.50.0/24. Sanctioned: 10.20.16.40 +
+# 10.30.50.153. Baseline (expected non-sanctioned): 10.20.255.0/24. Management
 # ports default 443/22/902/5480. All ten lines parse (unparsed_lines == 0).
 _MGMT_FLOW_STATES = (
     # 1) sanctioned client -> opt5 mgmt (443); server on ep1, inbound `<-`
-    "vmx6 tcp 10.11.16.9:443 <- 10.11.16.40:50001  ESTABLISHED:ESTABLISHED\n"
+    "vmx6 tcp 10.20.16.9:443 <- 10.20.16.40:50001  ESTABLISHED:ESTABLISHED\n"
     # 2) baseline (expected) non-sanctioned client -> opt5 mgmt (443): NOT unexpected
-    "vmx6 tcp 10.11.16.9:443 <- 10.11.255.7:50002  ESTABLISHED:ESTABLISHED\n"
+    "vmx6 tcp 10.20.16.9:443 <- 10.20.255.7:50002  ESTABLISHED:ESTABLISHED\n"
     # 3) unexpected non-sanctioned client -> opt5 mgmt (902)
-    "vmx6 tcp 10.11.16.9:902 <- 192.168.99.5:50003  ESTABLISHED:ESTABLISHED\n"
+    "vmx6 tcp 10.20.16.9:902 <- 192.168.99.5:50003  ESTABLISHED:ESTABLISHED\n"
     # 4) same unexpected source, different mgmt port (443) -> port aggregation
-    "vmx6 tcp 10.11.16.9:443 <- 192.168.99.5:50004  ESTABLISHED:ESTABLISHED\n"
+    "vmx6 tcp 10.20.16.9:443 <- 192.168.99.5:50004  ESTABLISHED:ESTABLISHED\n"
     # 5) sanctioned client -> opt2 mgmt (22)
-    "vmx3 tcp 10.5.50.20:22 <- 10.5.50.153:50005  ESTABLISHED:ESTABLISHED\n"
+    "vmx3 tcp 10.30.50.20:22 <- 10.30.50.153:50005  ESTABLISHED:ESTABLISHED\n"
     # 6) unexpected non-sanctioned client -> opt2 mgmt (5480)
-    "vmx3 tcp 10.5.50.20:5480 <- 172.16.0.9:50006  ESTABLISHED:ESTABLISHED\n"
+    "vmx3 tcp 10.30.50.20:5480 <- 172.16.0.9:50006  ESTABLISHED:ESTABLISHED\n"
     # 7) mgmt port on the DST endpoint (outbound `->`): server is the dst, client the src
-    "vmx6 tcp 203.0.113.5:40000 -> 10.11.16.9:443  ESTABLISHED:ESTABLISHED\n"
+    "vmx6 tcp 203.0.113.5:40000 -> 10.20.16.9:443  ESTABLISHED:ESTABLISHED\n"
     # 8) non-management port -> ignored
     "vmx6 tcp 8.8.8.8:53 <- 10.0.0.1:12345  ESTABLISHED:ESTABLISHED\n"
     # 9) mgmt port but server dst outside every mgmt_net -> ignored
     "vmx6 tcp 9.9.9.9:443 <- 1.2.3.4:5000  ESTABLISHED:ESTABLISHED\n"
     # 10) UDP to a mgmt port -> ignored (proto != tcp)
-    "vmx6 udp 10.11.16.9:443 <- 10.0.0.1:5000\n"
+    "vmx6 udp 10.20.16.9:443 <- 10.0.0.1:5000\n"
 )
 
 _MGMT_NETS = [
-    {"cidr": "10.11.16.0/20", "leg": "opt5"},
-    {"cidr": "10.5.50.0/24", "leg": "opt2"},
+    {"cidr": "10.20.16.0/20", "leg": "opt5"},
+    {"cidr": "10.30.50.0/24", "leg": "opt2"},
 ]
-_SANCTIONED = ["10.11.16.40", "10.5.50.153"]
-_BASELINE = ["10.11.255.0/24"]
+_SANCTIONED = ["10.20.16.40", "10.30.50.153"]
+_BASELINE = ["10.20.255.0/24"]
 
 
 def _classify_fixture() -> dict[str, Any]:
@@ -1274,13 +1289,13 @@ def test_classify_mgmt_flows_counts_by_class() -> None:
 
 def test_classify_mgmt_flows_unexpected_excludes_sanctioned_and_baseline() -> None:
     result = _classify_fixture()
-    # unexpected = non-sanctioned AND not in baseline: drops 10.11.255.7 (baseline)
+    # unexpected = non-sanctioned AND not in baseline: drops 10.20.255.7 (baseline)
     # and never includes the sanctioned sources.
     assert result["unexpected_source_count"] == 3
     unexpected_srcs = {r["src"] for r in result["unexpected_sources"]}
     assert unexpected_srcs == {"192.168.99.5", "203.0.113.5", "172.16.0.9"}
-    assert "10.11.255.7" not in unexpected_srcs  # baseline is exempt
-    assert "10.11.16.40" not in unexpected_srcs  # sanctioned never counted
+    assert "10.20.255.7" not in unexpected_srcs  # baseline is exempt
+    assert "10.20.16.40" not in unexpected_srcs  # sanctioned never counted
 
 
 def test_classify_mgmt_flows_aggregates_ports_per_source() -> None:
@@ -1410,7 +1425,7 @@ def test_classify_mgmt_flows_default_ports_applied_when_omitted() -> None:
 def test_classify_mgmt_flows_no_baseline_makes_all_non_sanctioned_unexpected() -> None:
     rows = parse_pfctl_states(_MGMT_FLOW_STATES)
     result = classify_mgmt_flows(rows, sanctioned_src=_SANCTIONED, mgmt_nets=_MGMT_NETS)
-    # Without a baseline, the previously-exempt 10.11.255.7 becomes unexpected too.
+    # Without a baseline, the previously-exempt 10.20.255.7 becomes unexpected too.
     assert result["unexpected_source_count"] == 4
 
 
@@ -1441,7 +1456,7 @@ def test_classify_mgmt_flows_caps_non_sanctioned_sources() -> None:
     # Real interface-first format (server on ep1, inbound `<-`).
     n = _MAX_NON_SANCTIONED_SOURCES + 25
     lines = "".join(
-        f"vmx6 tcp 10.11.16.9:443 <- 172.20.{i // 256}.{i % 256}:5000  ESTABLISHED:ESTABLISHED\n"
+        f"vmx6 tcp 10.20.16.9:443 <- 172.20.{i // 256}.{i % 256}:5000  ESTABLISHED:ESTABLISHED\n"
         for i in range(n)
     )
     result = classify_mgmt_flows(
@@ -1462,9 +1477,9 @@ def test_classify_mgmt_flows_real_format_one_non_sanctioned_source_is_flagged() 
     and this returned 0 -- a permanent false all-clear."""
     lines = (
         # sanctioned client -> opt5 mgmt (443)
-        "vmx6 tcp 10.11.16.9:443 <- 10.11.16.40:50001  ESTABLISHED:ESTABLISHED\n"
+        "vmx6 tcp 10.20.16.9:443 <- 10.20.16.40:50001  ESTABLISHED:ESTABLISHED\n"
         # one non-sanctioned client (not in baseline) -> opt5 mgmt (902)
-        "vmx6 tcp 10.11.16.9:902 <- 198.51.100.23:41022  ESTABLISHED:ESTABLISHED\n"
+        "vmx6 tcp 10.20.16.9:902 <- 198.51.100.23:41022  ESTABLISHED:ESTABLISHED\n"
     )
     result = classify_mgmt_flows(
         parse_pfctl_states(lines),
@@ -1485,11 +1500,11 @@ def test_classify_mgmt_flows_nat_translated_line_counted_unparsed_not_all_clear(
     around it still classify, so the summary is truthful, not zeroed."""
     lines = (
         # sanctioned client -> opt5 mgmt (443): classified
-        "vmx6 tcp 10.11.16.9:443 <- 10.11.16.40:50001  ESTABLISHED:ESTABLISHED\n"
+        "vmx6 tcp 10.20.16.9:443 <- 10.20.16.40:50001  ESTABLISHED:ESTABLISHED\n"
         # unexpected non-sanctioned client -> opt5 mgmt (902): classified
-        "vmx6 tcp 10.11.16.9:902 <- 192.168.99.5:50003  ESTABLISHED:ESTABLISHED\n"
+        "vmx6 tcp 10.20.16.9:902 <- 192.168.99.5:50003  ESTABLISHED:ESTABLISHED\n"
         # NAT-translated server endpoint: parser returns proto=None -> unparsed
-        "vmx6 tcp 10.11.16.9:443 (10.99.0.9:443) <- 198.51.100.7:44321  ESTABLISHED:ESTABLISHED\n"
+        "vmx6 tcp 10.20.16.9:443 (10.99.0.9:443) <- 198.51.100.7:44321  ESTABLISHED:ESTABLISHED\n"
     )
     result = classify_mgmt_flows(
         parse_pfctl_states(lines),
@@ -1505,6 +1520,70 @@ def test_classify_mgmt_flows_nat_translated_line_counted_unparsed_not_all_clear(
     assert unexpected_srcs == {"192.168.99.5"}
     # The NAT line's client is neither classified nor silently ignored.
     assert "198.51.100.7" not in unexpected_srcs
+
+
+_PAIR_STATES = (
+    "vmx6 tcp 10.20.16.9:443 <- 192.0.2.10:50001  ESTABLISHED:ESTABLISHED\n"
+    "vmx6 tcp 10.20.16.9:22 <- 192.0.2.10:50002  ESTABLISHED:ESTABLISHED\n"
+    "vmx6 tcp 10.20.16.10:443 <- 192.0.2.10:50003  ESTABLISHED:ESTABLISHED\n"
+)
+
+
+def _classify_pairs(baseline: list[Any]) -> dict[str, Any]:
+    return classify_mgmt_flows(
+        parse_pfctl_states(_PAIR_STATES),
+        sanctioned_src=_SANCTIONED,
+        mgmt_nets=_MGMT_NETS,
+        baseline_src=baseline,
+    )
+
+
+def test_baseline_pair_entry_hides_only_the_named_destination_and_port() -> None:
+    entry = {"src": "192.0.2.10/32", "dst": "10.20.16.9/32", "ports": [443]}
+    result = _classify_pairs(["203.0.113.0/24", entry])
+    rows = {(r["src"], tuple(r["ports"])) for r in result["unexpected_sources"]}
+    # 443 to .9 is known; 22 to .9 and 443 to .10 stay unexpected (one row, ports 22 and 443).
+    assert result["unexpected_source_count"] == 1
+    assert rows == {("192.0.2.10", (22, 443))}
+    assert result["unexpected_sources"][0]["states"] == 2
+    # The source stays non-sanctioned: all three states are counted.
+    assert result["non_sanctioned_state_count"] == 3
+    assert result["non_sanctioned_source_count"] == 1
+
+
+def test_baseline_pair_entry_without_ports_hides_every_port_on_dst() -> None:
+    result = _classify_pairs([{"src": "192.0.2.10", "dst": "10.20.16.9"}])
+    assert [r["ports"] for r in result["unexpected_sources"]] == [[443]]
+
+
+def test_baseline_pair_entry_hiding_everything_keeps_non_sanctioned_count() -> None:
+    baseline = [{"src": "192.0.2.10", "dst": "10.20.16.0/24"}]
+    result = _classify_pairs(baseline)
+    assert result["unexpected_source_count"] == 0
+    assert result["non_sanctioned_source_count"] == 1
+    assert result["non_sanctioned_state_count"] == 3
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"src": "192.0.2.10", "dst": "not-an-address", "ports": [443]},
+        {"src": "not-an-address", "dst": "10.20.16.9"},
+        {"src": "192.0.2.10", "dst": "10.20.16.9", "ports": ["443"]},
+        {"src": "192.0.2.10", "dst": "10.20.16.9", "ports": []},
+        {"src": "192.0.2.10"},
+    ],
+)
+def test_baseline_pair_entry_that_cannot_be_read_hides_nothing(entry: dict[str, Any]) -> None:
+    result = _classify_pairs([entry])
+    assert result["unexpected_source_count"] == 1
+    assert result["unexpected_sources"][0]["ports"] == [22, 443]
+    assert result["unexpected_sources"][0]["states"] == 3
+
+
+def test_baseline_strings_only_behave_as_before() -> None:
+    result = _classify_pairs(["192.0.2.0/24"])
+    assert result["unexpected_source_count"] == 0
 
 
 @pytest.mark.asyncio

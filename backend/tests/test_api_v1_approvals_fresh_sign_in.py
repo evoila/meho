@@ -59,6 +59,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("PER_ACTION_SIGN_IN_MAX_AGE_SECONDS", raising=False)
     monkeypatch.delenv("KEYCLOAK_CLI_APPROVE_CLIENT_ID", raising=False)
     monkeypatch.delenv("APPROVAL_ONE_TIME_CODE_ACR_VALUES", raising=False)
+    monkeypatch.delenv("APPROVAL_SIGN_IN_LEVEL", raising=False)
     get_settings.cache_clear()
     clear_jwks_cache()
     yield
@@ -385,13 +386,17 @@ async def test_the_window_ends_900_seconds_after_the_sign_in(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("azp", ["meho-cli", "meho-mcp", None])
+@pytest.mark.parametrize("azp", ["meho-cli", "meho-mcp", "meho-mcp-code", "meho-mcp-desktop", None])
 async def test_only_the_approval_client_can_approve(
     azp: str | None,
     _client: tuple[httpx.AsyncClient, Any],
     _fake_resume: list[uuid.UUID],
 ) -> None:
-    """A stored login, an MCP token or a token with no ``azp`` gets the 401 (#5515)."""
+    """A stored login, an MCP token or a token with no ``azp`` gets the 401 (#5515).
+
+    The login clients of Claude Code and Claude Desktop are refused like
+    ``meho-mcp``: an AI tool's login can never approve.
+    """
     ac, key = _client
     request_id = await _park()
     token = mint_token(

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the target SSRF guard (evoila-bosnia/meho-internal#153).
+"""Tests for the target address guard.
 
 Coverage matrix (per Task acceptance criteria):
 
@@ -276,9 +276,9 @@ def test_allowlist_hostname_entry_permits_private_resolution(
     _guard_live: pytest.MonkeyPatch,
 ) -> None:
     _patch_resolver(_guard_live, "10.20.30.40")
-    _guard_live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "vcenter.lab.internal")
-    target = TargetCreate(**_create_kwargs(host="vcenter.lab.internal"))
-    assert target.host == "vcenter.lab.internal"
+    _guard_live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "vcenter.example.test")
+    target = TargetCreate(**_create_kwargs(host="vcenter.example.test"))
+    assert target.host == "vcenter.example.test"
     with pytest.raises(ValidationError):
         TargetCreate(**_create_kwargs(host="other.lab.internal"))
 
@@ -518,9 +518,9 @@ def test_screen_and_resolve_allowlisted_hostname_is_passthrough(
 ) -> None:
     # An allowlisted hostname literal is trusted verbatim — no resolution
     # round-trip, so the pin dials it by name (passthrough).
-    _guard_live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "vcenter.lab.internal")
+    _guard_live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "vcenter.example.test")
     _patch_resolver(_guard_live, "10.0.0.5")  # would be blocked if resolved
-    assert screen_and_resolve("vcenter.lab.internal") is None
+    assert screen_and_resolve("vcenter.example.test") is None
 
 
 @pytest.mark.parametrize("host", _NON_PUBLIC_HOSTS)

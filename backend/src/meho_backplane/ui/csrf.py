@@ -8,7 +8,7 @@ session cookie already carries ``SameSite=Strict`` -- which by spec
 omits the cookie from every cross-site navigation, blocking the entire
 CSRF class on top-level requests. CSRF here is **belt-and-braces**
 against the residual same-site vector: a malicious sub-domain on
-``*.evba.lab`` (or a compromise of an unrelated path on the same host)
+``*.example.test`` (or a compromise of an unrelated path on the same host)
 could still issue an XHR carrying the session cookie. The
 double-submit token defeats that vector because a same-site attacker
 JS cannot read the session cookie (``HttpOnly``) and therefore cannot

@@ -618,7 +618,12 @@ def test_status_without_a_chosen_tenant_lists_tenants_and_roles(
         },
         {"tenant_id": str(_TENANT_B), "name": "lab-b", "tenant_role": "operator", "current": False},
     ]
-    assert body["vault"] == {"reachable": False, "read_ok": False, "detail": "tenant_not_chosen"}
+    assert body["vault"] == {
+        "reachable": False,
+        "read_ok": False,
+        "checked": False,
+        "detail": "tenant_not_chosen",
+    }
     assert body["pairings"] == []
     assert seeded == []
 

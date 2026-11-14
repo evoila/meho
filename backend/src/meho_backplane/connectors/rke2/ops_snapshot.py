@@ -16,7 +16,7 @@ the same embedded-etcd-server precondition guard:
   snapshots that already exist on a server node (``rke2 etcd-snapshot
   list``). It is a genuine read (it enumerates, mutates nothing), so it
   carries the ``read-only`` tag. It verifies a fresh post-rotation
-  snapshot landed -- the ``claude-rdc-hetzner-dc#615`` rotation-runbook
+  snapshot landed -- the rotation-runbook
   step that ``.save`` alone could not confirm.
 
 A snapshot listing carries names / locations / sizes / timestamps only,
@@ -43,19 +43,17 @@ Design notes
   the ``rke2`` binary is invoked by absolute path.
 
 * **Privilege.** The ``rke2`` binary and the config / etcd paths are
-  root-owned. The connector authenticates over SSH as root (the same
-  posture the read tier's ``stat`` of ``0600 root:root`` token files and
-  the sibling node ops -- ``rke2.node.service.restart`` /
-  ``rke2.node.config.update`` -- rely on), so both remote commands run via
-  the plain :meth:`SshConnector._run_command` **without** a ``sudo`` argv.
-  This mirrors the T3 node-write ops (which run ``systemctl restart`` /
-  the config read+write directly, no ``sudo`` prefix) and keeps this op
-  clear of the repo-wide sudo-guard invariant, which forbids any
-  ``connectors/`` file outside the sanctioned safe-sudo primitives from
-  constructing a ``sudo`` argv. The credential-minting ``rke2.token.rotate``
-  flow is the only RKE2 op that needs the sudo-password wire shape
-  (:mod:`~meho_backplane.connectors.rke2._sudo`); a non-secret snapshot
-  does not, and MUST NOT hand-roll one.
+  root-owned, and ``/var/lib/rancher/rke2/server/`` is ``0700 root:root``.
+  The guard first checks the login's user id. A root login runs both
+  remote commands via plain :meth:`SshConnector._run_command`. A normal
+  user (the usual target setup) gets the verdict ``needs-root``; the ops
+  then run the guard and the ``rke2`` command through the sanctioned
+  safe-sudo primitive
+  (:func:`~meho_backplane.connectors.rke2._sudo.run_remote_bash_with_sudo`),
+  using the sudo password from the target's Vault secret. This file never
+  builds a ``sudo`` argv itself, so it stays clear of the repo-wide
+  sudo-guard invariant. A normal user whose secret has no password gets a
+  clear "needs root" error, never "not an embedded-etcd server".
 
 * **No secret in the result.** ``rke2 etcd-snapshot save`` logs
   ``Snapshot <name> saved.``; the handler parses that name and returns
@@ -88,6 +86,8 @@ import re
 import shlex
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.connectors._shared.vault_creds import strip_credential_value
+from meho_backplane.connectors.rke2._sudo import run_remote_bash_with_sudo
 from meho_backplane.connectors.rke2.ops import SSH_TRANSPORT_NOTE, Rke2Op
 
 if TYPE_CHECKING:
@@ -149,21 +149,24 @@ _SNAPSHOT_LIST_ROW_RE: re.Pattern[str] = re.compile(
 )
 
 #: Precondition guard: emit a single sentinel token describing the node's
-#: snapshot eligibility. ``external-datastore`` when a ``datastore-endpoint``
+#: snapshot eligibility. ``needs-root`` when the login is not root (a normal
+#: user cannot look inside the ``0700`` server directory, so the other
+#: verdicts would be wrong), ``external-datastore`` when a ``datastore-endpoint``
 #: is configured (snapshots meaningless), ``no-embedded-etcd`` when the
 #: embedded-etcd data dir is absent (agent node / uninitialised server),
 #: ``ok`` otherwise. Fixed constant -- no operator input is interpolated.
 _GUARD_SCRIPT: str = (
-    f'if grep -Eq "^[[:space:]]*datastore-endpoint" {shlex.quote(_RKE2_CONFIG_PATH)} '
+    'if [ "$(id -u)" != 0 ]; then echo needs-root; '
+    f'elif grep -Eq "^[[:space:]]*datastore-endpoint" {shlex.quote(_RKE2_CONFIG_PATH)} '
     f"2>/dev/null; then echo external-datastore; "
     f"elif [ ! -d {shlex.quote(_RKE2_ETCD_DIR)} ]; then echo no-embedded-etcd; "
     f"else echo ok; fi"
 )
 
-#: The guard command as run over SSH. The connector authenticates as root
-#: (config.yaml is ``0600 root:root``; the etcd dir is root-owned), so it
-#: runs via plain ``_run_command`` -- no ``sudo`` argv, matching the sibling
-#: T3 node-write ops and staying clear of the repo-wide sudo-guard.
+#: The guard command as run over SSH with a root login (config.yaml is
+#: ``0600 root:root``; the etcd dir is root-owned), via plain
+#: ``_run_command``. A non-root login gets ``needs-root`` and the ops re-run
+#: it through the safe-sudo primitive (the script, not this ``sh -c`` form).
 _GUARD_CMD: str = "sh -c " + shlex.quote(_GUARD_SCRIPT)
 
 
@@ -265,32 +268,67 @@ def _validate_name(name: Any) -> str | None:
     return name
 
 
+async def _resolve_sudo_password(
+    connector: Rke2SshConnector, target: Target, operator: Operator | None
+) -> str | None:
+    """Return the sudo password from the target's Vault secret, or ``None``.
+
+    Keys on ``sudo_password`` first, then the SSH ``password`` (the same
+    convention as ``rke2.token.rotate``).
+    """
+    secret = await connector._resolve_secret(target, operator)
+    password = secret.get("sudo_password") or secret.get("password")
+    return strip_credential_value(password) if password else None
+
+
+async def _run_guard(
+    connector: Rke2SshConnector,
+    target: Target,
+    operator: Operator | None,
+    sudo_password: str | None,
+) -> Any:
+    """Run the guard script plain, or under sudo when *sudo_password* is set."""
+    if sudo_password is None:
+        return await connector._run_command(target, _GUARD_CMD, operator=operator)
+    return await run_remote_bash_with_sudo(
+        connector, target, _GUARD_SCRIPT, operator=operator, sudo_password=sudo_password
+    )
+
+
 async def _run_precondition_guard(
     connector: Rke2SshConnector,
     target: Target,
     operator: Operator | None = None,
-) -> None:
+) -> str | None:
     """Run the shared embedded-etcd-server precondition guard.
 
     Both snapshot ops (``.save`` and ``.list``) enforce the identical
-    precondition through this one function -- a genuine reuse of
-    :data:`_GUARD_CMD`, not a per-op reimplementation. Returns ``None`` on
-    the ``ok`` verdict; otherwise raises:
+    precondition through this one function. Returns the sudo password to
+    run the ``rke2`` command with, or ``None`` when the login is root and
+    the command runs plain. Otherwise raises:
 
     * :class:`Rke2SnapshotError` when the guard itself could not run over
       SSH. ``_run_command`` wraps ``conn.run(check=False)``, so a
       transport / SSH / shell failure returns a non-zero exit with
       (typically) empty stdout; the guard prints a sentinel token and
-      exits 0 on every *real* verdict (external-datastore / no-embedded-etcd
-      / ok), so a non-zero exit is unambiguously an infrastructure failure.
-      Interpreting that empty verdict as "not an embedded-etcd server"
-      would mislabel it. Fail closed either way, but with the accurate
-      cause.
-    * :class:`Rke2SnapshotPreconditionError` on ``external-datastore``
-      (snapshots do not apply to an external datastore-endpoint) or any
-      non-``ok`` verdict (agent node / uninitialised server).
+      exits 0 on every *real* verdict, so a non-zero exit is unambiguously
+      an infrastructure failure (also a failed ``sudo``). Interpreting that
+      empty verdict as "not an embedded-etcd server" would mislabel it.
+    * :class:`Rke2SnapshotPreconditionError` on ``needs-root`` with no sudo
+      password, on ``external-datastore`` (snapshots do not apply to an
+      external datastore-endpoint) or any other non-``ok`` verdict (agent
+      node / uninitialised server).
     """
-    guard = await connector._run_command(target, _GUARD_CMD, operator=operator)
+    sudo_password: str | None = None
+    guard = await _run_guard(connector, target, operator, None)
+    if _guard_verdict(guard) == "needs-root":
+        sudo_password = await _resolve_sudo_password(connector, target, operator)
+        if sudo_password is None:
+            raise Rke2SnapshotPreconditionError(
+                "this operation needs root; the target logs in as a normal user "
+                "and its Vault secret has no sudo_password or password"
+            )
+        guard = await _run_guard(connector, target, operator, sudo_password)
     guard_exit = getattr(guard, "exit_status", None)
     if guard_exit not in (0, None):
         guard_err = getattr(guard, "stderr", "") if hasattr(guard, "stderr") else ""
@@ -299,8 +337,7 @@ async def _run_precondition_guard(
             "the snapshot precondition guard failed to run over SSH "
             f"(exit {guard_exit}): {guard_err_txt or 'no stderr'}"
         )
-    guard_raw = guard.stdout if hasattr(guard, "stdout") else ""
-    verdict = guard_raw.strip() if isinstance(guard_raw, str) else ""
+    verdict = _guard_verdict(guard)
     if verdict == "external-datastore":
         raise Rke2SnapshotPreconditionError(
             "this RKE2 node configures an external datastore-endpoint; "
@@ -309,8 +346,31 @@ async def _run_precondition_guard(
     if verdict != "ok":
         raise Rke2SnapshotPreconditionError(
             "this RKE2 node is not an embedded-etcd server "
-            "(no server/db/etcd data directory); cannot take a snapshot"
+            "(no server/db/etcd data directory); cannot use managed-etcd snapshots"
         )
+    return sudo_password
+
+
+def _guard_verdict(guard: Any) -> str:
+    """Return the stripped guard sentinel token, or ``""`` when unreadable."""
+    guard_raw = guard.stdout if hasattr(guard, "stdout") else ""
+    return guard_raw.strip() if isinstance(guard_raw, str) else ""
+
+
+async def _run_snapshot_command(
+    connector: Rke2SshConnector,
+    target: Target,
+    cmd: str,
+    operator: Operator | None,
+    sudo_password: str | None,
+    timeout: float,
+) -> Any:
+    """Run the ``rke2`` command plain, or under sudo when *sudo_password* is set."""
+    if sudo_password is None:
+        return await connector._run_command(target, cmd, operator=operator, timeout=timeout)
+    return await run_remote_bash_with_sudo(
+        connector, target, cmd, operator=operator, sudo_password=sudo_password, timeout=timeout
+    )
 
 
 async def rke2_etcd_snapshot_save(
@@ -323,8 +383,8 @@ async def rke2_etcd_snapshot_save(
 
     Runs the precondition guard, then triggers an on-demand managed-etcd
     snapshot via ``/var/lib/rancher/rke2/bin/rke2 etcd-snapshot save``
-    (plus ``--name <NAME>`` when supplied), run as root over plain SSH --
-    no ``sudo`` argv, matching the sibling node-write ops. Returns
+    (plus ``--name <NAME>`` when supplied), as root: plain for a root login,
+    through the safe-sudo primitive for a normal user. Returns
     ``{snapshot_name, path, exit_status}``; the snapshot name/path are the
     only non-``exit_status`` fields and carry no secret material.
 
@@ -336,17 +396,16 @@ async def rke2_etcd_snapshot_save(
     """
     name = _validate_name(params.get("name"))
 
-    await _run_precondition_guard(connector, target, operator)
+    sudo_password = await _run_precondition_guard(connector, target, operator)
 
     argv = [_RKE2_BIN, "etcd-snapshot", "save"]
     if name is not None:
         argv += ["--name", name]
-    # Plain (root) invocation via ``_run_command`` -- no ``sudo`` argv, as the
-    # connector already authenticates as root and the sudo-guard forbids
-    # hand-rolled ``sudo`` here. ``shlex.quote`` bounds the argv defensively
+    # Plain for a root login, the safe-sudo primitive otherwise (no hand-rolled
+    # ``sudo`` argv here). ``shlex.quote`` bounds the argv defensively
     # even though ``name`` is already charset-validated.
     save_cmd = " ".join(shlex.quote(arg) for arg in argv)
-    proc = await connector._run_command(target, save_cmd, operator=operator, timeout=120.0)
+    proc = await _run_snapshot_command(connector, target, save_cmd, operator, sudo_password, 120.0)
     exit_status = getattr(proc, "exit_status", None)
 
     stdout_raw = proc.stdout if hasattr(proc, "stdout") else ""
@@ -378,8 +437,8 @@ async def rke2_etcd_snapshot_list(
 
     Runs the shared embedded-etcd-server precondition guard, then
     enumerates existing managed-etcd snapshots via
-    ``/var/lib/rancher/rke2/bin/rke2 etcd-snapshot list``, run as root over
-    plain SSH -- no ``sudo`` argv, the same privilege model as ``.save``.
+    ``/var/lib/rancher/rke2/bin/rke2 etcd-snapshot list``, as root: plain for a
+    root login, through the safe-sudo primitive for a normal user (as ``.save``).
     Takes no operator parameters (the local snapshot store only; S3 listing
     is out of scope). Returns
     ``{"snapshots": [{name, location, size_bytes, created_at}, ...]}`` --
@@ -395,13 +454,13 @@ async def rke2_etcd_snapshot_list(
     """
     del params  # no operator params; the local snapshot store is fixed
 
-    await _run_precondition_guard(connector, target, operator)
+    sudo_password = await _run_precondition_guard(connector, target, operator)
 
-    # Plain (root) invocation via ``_run_command`` -- no ``sudo`` argv, same
-    # as ``.save``. ``shlex.quote`` bounds the fixed argv defensively (a
+    # Plain for a root login, the safe-sudo primitive otherwise, as ``.save``.
+    # ``shlex.quote`` bounds the fixed argv defensively (a
     # no-op here, since no operator input is interpolated).
     list_cmd = " ".join(shlex.quote(arg) for arg in [_RKE2_BIN, "etcd-snapshot", "list"])
-    proc = await connector._run_command(target, list_cmd, operator=operator, timeout=60.0)
+    proc = await _run_snapshot_command(connector, target, list_cmd, operator, sudo_password, 60.0)
     exit_status = getattr(proc, "exit_status", None)
 
     stdout_raw = proc.stdout if hasattr(proc, "stdout") else ""

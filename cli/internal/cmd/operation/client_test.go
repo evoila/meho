@@ -563,7 +563,7 @@ func TestPostCallTargetBareString(t *testing.T) {
 	opts := callOptions{
 		ConnectorID: "vault-1.x",
 		OpID:        "vault.kv.read",
-		TargetName:  "rdc-vault",
+		TargetName:  "vault-lab",
 	}
 	if _, err := postCall(context.Background(), f, opts, nil); err != nil {
 		t.Fatalf("postCall: %v", err)
@@ -580,12 +580,12 @@ func TestPostCallTargetBareString(t *testing.T) {
 	}
 	// Round-trip the union via its MarshalJSON to verify the bare-string
 	// shape — the union's internal json.RawMessage is set by
-	// FromCallOperationBodyTarget0 so MarshalJSON should emit `"rdc-vault"`.
+	// FromCallOperationBodyTarget0 so MarshalJSON should emit `"vault-lab"`.
 	raw, err := b.Target.MarshalJSON()
 	if err != nil {
 		t.Fatalf("target.MarshalJSON: %v", err)
 	}
-	want := `"rdc-vault"`
+	want := `"vault-lab"`
 	if string(raw) != want {
 		t.Fatalf("--target should marshal as bare string %q; got %q", want, string(raw))
 	}
@@ -594,8 +594,8 @@ func TestPostCallTargetBareString(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AsCallOperationBodyTarget0: %v", err)
 	}
-	if bare != "rdc-vault" {
-		t.Fatalf("round-tripped bare-string target: got %q; want %q", bare, "rdc-vault")
+	if bare != "vault-lab" {
+		t.Fatalf("round-tripped bare-string target: got %q; want %q", bare, "vault-lab")
 	}
 }
 
@@ -645,7 +645,7 @@ func TestPostCallParamsSetWhenSupplied(t *testing.T) {
 	opts := callOptions{
 		ConnectorID: "vault-1.x",
 		OpID:        "vault.kv.read",
-		TargetName:  "rdc-vault",
+		TargetName:  "vault-lab",
 	}
 	params := map[string]any{"path": "secret/foo"}
 	if _, err := postCall(context.Background(), f, opts, params); err != nil {
@@ -771,27 +771,87 @@ func TestRunCallForwardsValidWorkRef(t *testing.T) {
 	}
 }
 
-// TestRunCallRejectsMalformedWorkRefBeforeRequest ensures bad ticket syntax
-// fails locally rather than issuing a dispatch without trustworthy linkage.
-func TestRunCallRejectsMalformedWorkRefBeforeRequest(t *testing.T) {
-	f := &fakeOperationsClient{}
+// TestRunCallForwardsNonGitHubWorkRef checks that a ticket id from
+// another system (a ServiceNow change, a Jira key) goes into the body
+// unchanged, like the backplane accepts it.
+func TestRunCallForwardsNonGitHubWorkRef(t *testing.T) {
+	for _, ref := range []string{"CHG0012345", "OPS-123", "Änderung-7"} {
+		t.Run(ref, func(t *testing.T) {
+			cr, _ := json.Marshal(CallResult{Status: "ok", OpID: "vault.kv.read", DurationMs: 1})
+			f := &fakeOperationsClient{
+				callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+					{HTTPResponse: makeHTTPResp(200), Body: cr},
+				},
+			}
+			withFakeClient(t, f)
+
+			cmd := newCallCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--work-ref", ref, "--backplane", "https://x"})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if f.lastCallBody == nil || f.lastCallBody.WorkRef == nil || *f.lastCallBody.WorkRef != ref {
+				t.Fatalf("work_ref not forwarded from flag; got %+v", f.lastCallBody)
+			}
+		})
+	}
+}
+
+// TestRunCallTrimsWorkRef checks that --work-ref " CHG1 " is sent as
+// "CHG1", the same id the global flag and MEHO_WORK_REF send.
+func TestRunCallTrimsWorkRef(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{Status: "ok", OpID: "vault.kv.read", DurationMs: 1})
+	f := &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	}
 	withFakeClient(t, f)
 
 	cmd := newCallCmd()
 	cmd.SetOut(&bytes.Buffer{})
-	var errBuf bytes.Buffer
-	cmd.SetErr(&errBuf)
-	cmd.SetArgs([]string{
-		"vault-1.x", "vault.kv.read", "--work-ref", "not-a-ticket", "--backplane", "https://x",
-	})
-	if err := cmd.Execute(); err == nil {
-		t.Fatal("malformed work ref should return a command error")
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--work-ref", " CHG1 ", "--backplane", "https://x"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
 	}
-	if !strings.Contains(errBuf.String(), "--work-ref must match gh:<owner>/<repo>#<n>") {
-		t.Fatalf("expected work-ref validation message; got %q", errBuf.String())
+	if f.lastCallBody == nil || f.lastCallBody.WorkRef == nil || *f.lastCallBody.WorkRef != "CHG1" {
+		t.Fatalf("work_ref not trimmed; got %+v", f.lastCallBody)
 	}
-	if f.lastCallBody != nil {
-		t.Fatalf("malformed work ref must fail before dispatch; got %+v", f.lastCallBody)
+}
+
+// TestRunCallRejectsMalformedWorkRefBeforeRequest checks that an empty
+// or blank value, or a value with a line break, fails locally before
+// any request. An explicit `--work-ref ""` is refused, not taken as
+// "no reference".
+func TestRunCallRejectsMalformedWorkRefBeforeRequest(t *testing.T) {
+	for name, ref := range map[string]string{
+		"empty":        "",
+		"blank":        "   ",
+		"line break":   "OPS-123\nX-Other: 1",
+		"carriage ret": "OPS-123\r",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeOperationsClient{}
+			withFakeClient(t, f)
+
+			cmd := newCallCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			var errBuf bytes.Buffer
+			cmd.SetErr(&errBuf)
+			cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--work-ref", ref, "--backplane", "https://x"})
+			if err := cmd.Execute(); err == nil {
+				t.Fatal("malformed work ref should return a command error")
+			}
+			if !strings.Contains(errBuf.String(), "--work-ref "+api.WorkRefRule) {
+				t.Fatalf("expected work-ref error message; got %q", errBuf.String())
+			}
+			if f.lastCallBody != nil {
+				t.Fatalf("malformed work ref must fail before dispatch; got %+v", f.lastCallBody)
+			}
+		})
 	}
 }
 
@@ -805,7 +865,7 @@ func TestPostCallRefreshOn401(t *testing.T) {
 			{HTTPResponse: makeHTTPResp(200), Body: cr},
 		},
 	}
-	opts := callOptions{ConnectorID: "vault-1.x", OpID: "vault.kv.read", TargetName: "rdc-vault"}
+	opts := callOptions{ConnectorID: "vault-1.x", OpID: "vault.kv.read", TargetName: "vault-lab"}
 	if _, err := postCall(context.Background(), f, opts, nil); err != nil {
 		t.Fatalf("postCall after refresh: %v", err)
 	}
@@ -885,7 +945,7 @@ func TestRunCallAwaitingApprovalRealPath(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errBuf)
-	cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--target", "rdc-argocd", "--backplane", "https://x"})
+	cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--target", "argocd-lab", "--backplane", "https://x"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("awaiting_approval must not be an error (parked, exit 0); got %v", err)
 	}
@@ -1008,7 +1068,7 @@ func TestRunCallAwaitingApprovalJSON(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--target", "rdc-argocd", "--json", "--backplane", "https://x"})
+	cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--target", "argocd-lab", "--json", "--backplane", "https://x"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -1109,7 +1169,7 @@ func TestCallJSONCarriesChecksAlertAdvisoryOnOK(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--target", "rdc-vault", "--json", "--backplane", "https://x"})
+	cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--target", "vault-lab", "--json", "--backplane", "https://x"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("status=ok must exit 0; got %v", err)
 	}
@@ -1161,7 +1221,7 @@ func TestCallHumanRenderOmitsExtrasOnOK(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--target", "rdc-vault", "--backplane", "https://x"})
+	cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--target", "vault-lab", "--backplane", "https://x"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("status=ok must exit 0; got %v", err)
 	}
@@ -1383,7 +1443,7 @@ func TestPostPreviewThreadsTargetAndParams(t *testing.T) {
 	opts := previewOptions{
 		ConnectorID: "vmware-rest-9.0",
 		OpID:        "vmware.composite.vm.destroy",
-		TargetName:  "rdc-vcenter",
+		TargetName:  "vcenter-lab",
 	}
 	params := map[string]any{"vm": "vm-1812"}
 	if _, err := postPreview(context.Background(), f, opts, params); err != nil {
@@ -1396,7 +1456,7 @@ func TestPostPreviewThreadsTargetAndParams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("target not the bare-string shape: %v", err)
 	}
-	if gotTarget != "rdc-vcenter" {
+	if gotTarget != "vcenter-lab" {
 		t.Fatalf("target not threaded; got %q", gotTarget)
 	}
 	if f.lastPreviewBody.Params == nil || (*f.lastPreviewBody.Params)["vm"] != "vm-1812" {
@@ -1438,7 +1498,7 @@ func TestPostPreviewRefreshOn401(t *testing.T) {
 			{HTTPResponse: makeHTTPResp(200), Body: okPreviewBody(t)},
 		},
 	}
-	opts := previewOptions{ConnectorID: "vmware-rest-9.0", OpID: "vmware.composite.vm.destroy", TargetName: "rdc-vcenter"}
+	opts := previewOptions{ConnectorID: "vmware-rest-9.0", OpID: "vmware.composite.vm.destroy", TargetName: "vcenter-lab"}
 	if _, err := postPreview(context.Background(), f, opts, nil); err != nil {
 		t.Fatalf("postPreview after refresh: %v", err)
 	}
@@ -1480,7 +1540,7 @@ func TestRunPreviewOkPrintsHashRealPath(t *testing.T) {
 	cmd.SetErr(&errBuf)
 	cmd.SetArgs([]string{
 		"vmware-rest-9.0", "vmware.composite.vm.destroy",
-		"--target", "rdc-vcenter", "--params", `{"vm":"vm-1812"}`, "--backplane", "https://x",
+		"--target", "vcenter-lab", "--params", `{"vm":"vm-1812"}`, "--backplane", "https://x",
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("ok preview must exit 0; got %v", err)
@@ -1566,7 +1626,7 @@ func TestPostCallThreadsPreviewHash(t *testing.T) {
 	opts := callOptions{
 		ConnectorID: "vmware-rest-9.0",
 		OpID:        "vmware.composite.vm.destroy",
-		TargetName:  "rdc-vcenter",
+		TargetName:  "vcenter-lab",
 		PreviewHash: "abc123def456",
 	}
 	if _, err := postCall(context.Background(), f, opts, map[string]any{"vm": "vm-1812"}); err != nil {
@@ -1586,7 +1646,7 @@ func TestPostCallPreviewHashNilWhenOmitted(t *testing.T) {
 			{HTTPResponse: makeHTTPResp(200), Body: cr},
 		},
 	}
-	opts := callOptions{ConnectorID: "vault-1.x", OpID: "vault.kv.read", TargetName: "rdc-vault"}
+	opts := callOptions{ConnectorID: "vault-1.x", OpID: "vault.kv.read", TargetName: "vault-lab"}
 	if _, err := postCall(context.Background(), f, opts, nil); err != nil {
 		t.Fatalf("postCall: %v", err)
 	}

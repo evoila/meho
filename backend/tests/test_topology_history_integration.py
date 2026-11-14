@@ -200,8 +200,8 @@ def _register_fake() -> None:
 async def _seed_tenant_and_target(slug: str) -> tuple[uuid.UUID, Target]:
     """Insert one tenant + one target for it, returning both.
 
-    Look-up-then-insert on the tenant -- migration ``0018`` seeds the
-    ``rdc-internal`` tenant into the per-worker schema template
+    Look-up-then-insert on the tenant -- migration ``0018`` seeds
+    a tenant into the per-worker schema template
     (:func:`tests.conftest._schema_template_db`); a plain INSERT would
     trip ``UNIQUE constraint failed: tenant.slug``.
     """
@@ -297,7 +297,7 @@ async def test_refresh_annotate_refresh_chronology_pairs_audit_ids() -> None:
     operation that caused it.
     """
     _register_fake()
-    tenant_id, target = await _seed_tenant_and_target(slug="rdc-internal")
+    tenant_id, target = await _seed_tenant_and_target(slug="example-tenant")
     operator = _operator(tenant_id)
 
     # --- Operation 1: refresh seeding 3 nodes + 2 edges --------------
@@ -397,7 +397,7 @@ async def test_every_history_audit_id_joins_to_audit_log_same_tenant_principal()
     caused it.
     """
     _register_fake()
-    tenant_id, target = await _seed_tenant_and_target(slug="rdc-internal")
+    tenant_id, target = await _seed_tenant_and_target(slug="example-tenant")
     operator = _operator(tenant_id, sub="op-linkage-42")
 
     _FakeConnector.hints = _hints_3n2e()

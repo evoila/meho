@@ -841,3 +841,72 @@ func TestPrintTriggerSummaryHasAllKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildCreateBodyCheckSource(t *testing.T) {
+	agentID := parseStubUUID(t, stubAgentDefID)
+	sensorID := parseStubUUID(t, stubOtherTenant)
+	cases := []struct {
+		name     string
+		opts     createOptions
+		wantKind api.CheckSourceKind
+		wantName string
+		wantID   string
+		wantWors bool
+	}{
+		{"sensor by name", createOptions{Kind: "event", OnSensor: "disk"}, api.CheckSourceKindSensor, "disk", "", false},
+		{"sensor by id", createOptions{Kind: "event", OnSensor: sensorID.String()}, api.CheckSourceKindSensor, "", sensorID.String(), false},
+		{"dashboard worse", createOptions{Kind: "event", OnDashboard: "web", OnlyWorse: true}, api.CheckSourceKindDashboard, "web", "", true},
+		{"any sensor", createOptions{Kind: "event", OnAnySensor: true}, api.CheckSourceKindSensor, "", "", false},
+		{"any dashboard", createOptions{Kind: "event", OnAnyDashboard: true}, api.CheckSourceKindDashboard, "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := buildCreateBody(tc.opts, agentID, nil, nil, nil, nil)
+			cs := body.CheckSource
+			if cs == nil {
+				t.Fatalf("check_source not set")
+			}
+			if body.EventFilter != nil {
+				t.Errorf("event_filter must stay nil; got %+v", body.EventFilter)
+			}
+			if cs.Kind != tc.wantKind {
+				t.Errorf("kind = %q, want %q", cs.Kind, tc.wantKind)
+			}
+			if (tc.wantName == "") != (cs.Name == nil) || (cs.Name != nil && *cs.Name != tc.wantName) {
+				t.Errorf("name = %v, want %q", cs.Name, tc.wantName)
+			}
+			if (tc.wantID == "") != (cs.Id == nil) || (cs.Id != nil && cs.Id.String() != tc.wantID) {
+				t.Errorf("id = %v, want %q", cs.Id, tc.wantID)
+			}
+			if got := cs.OnlyWorsening != nil && *cs.OnlyWorsening; got != tc.wantWors {
+				t.Errorf("only_worsening = %v, want %v", got, tc.wantWors)
+			}
+		})
+	}
+}
+
+func TestRunCreateRejectsBadCheckSourceFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		opts createOptions
+		want string
+	}{
+		{"with event filter", createOptions{Kind: "event", OnSensor: "disk", EventFilterArg: `{"a":1}`}, "cannot be used with --event-filter"},
+		{"two sources", createOptions{Kind: "event", OnSensor: "disk", OnAnyDashboard: true}, "use only one of"},
+		{"only worse alone", createOptions{Kind: "event", EventFilterArg: `{"a":1}`, OnlyWorse: true}, "--only-worse needs one of"},
+		{"on cron", createOptions{Kind: "cron", CronExpr: "* * * * *", OnSensor: "disk"}, "need --kind=event"},
+		{"event with nothing", createOptions{Kind: "event"}, "requires --event-filter or one of"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, _, stderr := newRunCmd(t)
+			tc.opts.AgentDefinition = stubAgentDefID
+			if err := runCreate(cmd, tc.opts); err == nil {
+				t.Fatalf("expected validation error")
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Errorf("expected %q; got %q", tc.want, stderr.String())
+			}
+		})
+	}
+}

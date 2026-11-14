@@ -6,9 +6,10 @@ The `bind9` connector is the typed `Connector` subclass that dispatches
 operator-facing ISC bind9 operations over SSH. It is registered under
 the `(product="bind9", version="9.x", impl_id="bind9-ssh")` registry
 triple and is the first tier-1 child of the `SshConnector` adapter
-(G0.2-T4 #243). The `9.x` version range covers ISC bind9 9.18
-(current Extended Support Version) and 9.20 (current Stable Release);
-both expose `named -v` and `named-checkconf -p` with the same flags
+(G0.2-T4 #243). The connector declares the range `>=9.18,<9.21`. It
+covers ISC bind9 9.18 (end of life in June 2026) and 9.20 (current
+Stable Release); CI runs the connector against both (Debian bookworm
+and Debian trixie containers). Both expose `named -v` and `named-checkconf -p` with the same flags
 and the same banner format.
 
 The connector replaces the operator's `scripts/bind9-dns.sh` wrapper
@@ -26,10 +27,10 @@ Source: `backend/src/meho_backplane/connectors/bind9/`.
 
 - **`Bind9Connector`** (`connector.py`) -- `SshConnector` subclass.
   Class attributes: `product="bind9"`, `version="9.x"`,
-  `impl_id="bind9-ssh"`. It sets no `supported_version_range` and keeps
-  the default `priority` of 0. Inherits the per-target asyncssh connection
-  pool, the key-or-password auth selection, and `aclose()` from the
-  adapter; overrides `fingerprint`, `probe`, `execute`, and adds the
+  `impl_id="bind9-ssh"`. It sets `supported_version_range=">=9.18,<9.21"` and keeps
+  the default `priority` of 0. Inherits the asyncssh connection
+  pool (one login per caller and target), the key-or-password auth
+  selection, and `aclose()` from the adapter; overrides `fingerprint`, `probe`, `execute`, and adds the
   `about` op handler.
 - **`_remote_bash_with_sudo()`** -- the load-bearing safety
   primitive. The only sudo-shell-construction path in the connector
@@ -212,7 +213,7 @@ reason.
 | `bind9.record.delete` | `Bind9Connector.bind9_record_delete` | `destructive` | Governed-delete tier (#3231): deletes exactly ONE record scoped by `(zone, name, type, rdata?)` — never zone-wide, never a whole-rrset sweep. Mandatory human approval + preview-hash binding + blast-radius (the exact record + its siblings). Fail-closed structured refusals `not_found` / `ambiguous` (candidates named) / `unmanaged_zone`; verify predicate confirms the single deleted value is gone (view → `rndc zonestatus`) |
 | `bind9.config.show` | `Bind9Connector.bind9_config_show` | `safe` | Read one config file under the bind config root: `named.conf`, `named.conf.*` or `*.conf`. Runs at once, without approval (#5132), so a session can read a file before `bind9.config.apply_file` changes it. Key files (`rndc.key`, `*.key`, `*.private`), zone files (use `bind9.zone.read`) and paths outside the root are refused with `ConfigPathRejectedError` and no content. Declared `credential_read` in `bind9/op_classes.py` (summary-only broadcast, no body in the flight recorder), because a config file can hold TSIG / rndc key secrets; the value of every `secret` and `cookie-secret` line, with or without quotes, also in a commented-out key block, comes back as `[REDACTED:bind_key_secret]`; the rule reads BIND comments and quoted strings the way BIND does, so a `secret` word in a comment can never hide a real key (#4617, #5342 review) |
 | `bind9.config.apply_file` | `Bind9Connector.bind9_config_apply_file` | `dangerous` | Atomic single-fragment write via T3's primitive; validate = `named-checkconf -p`; verify = config still parses after live reload |
-| `bind9.config.apply_views` | `Bind9Connector.bind9_config_apply_views` | `dangerous` | Atomic multi-file tree write (tar mode of T3's primitive); validate = `named-checkconf -p`; verify = caller-supplied `dig` or fallback parse check |
+| `bind9.config.apply_views` | `Bind9Connector.bind9_config_apply_views` | `dangerous` | Atomic multi-file tree write (tar mode of T3's primitive); validate = `named-checkconf -p`; verify = parse check, then for every staged file that a configured zone uses, `rndc zonestatus` per view must show the serial that `named-checkzone` reads from the file (`_served_check.py`; a staged zone file that no zone uses fails), then the optional caller-supplied `dig` of `verify_fqdn`, sent from `verify_source` when given so it reaches one view; staged files carry the apply time, because BIND skips a zone whose file is not newer than its last load |
 | `bind9.config.backup` | `Bind9Connector.bind9_config_backup` | `caution` | `tar -czf` of `/etc/bind/` under `/var/backups/meho-bind9/`; returns backup ID + listing of existing backups |
 | `bind9.config.reload` | `Bind9Connector.bind9_config_reload` | `caution` | `rndc reload` with structured success/failure envelope; captures `rndc status` before/after for audit |
 
@@ -353,6 +354,42 @@ pipeline inside one `_remote_bash_with_sudo` invocation:
 The integration suite asserts byte-identical-tree rollback via
 `find /etc/bind -type f | xargs sha256sum | sha256sum` before / after
 each failure scenario (checkzone-fail + verify-fail both covered).
+
+### Two writes at the same time
+
+Zone writes on one server never overlap, and a write never lands on a
+file it did not read. Two parts do this:
+
+- **A lock on the server.** The script takes an exclusive `flock` on
+  `/run/meho-bind9/apply.lock` before step 1 and holds it until the
+  script ends. Only root can change that folder: the script makes it with
+  mode 0700, and it refuses to go on (error step `lock`, nothing written)
+  when the folder or the lock file is a link, is not a plain folder or
+  file, or another user owns or can write to the folder. The snapshot, the write, the reload, the verify and a
+  rollback of one apply all finish before the next apply starts. So a
+  rollback can never restore the snapshot over a change that another
+  apply made in between. The lock covers every caller of
+  `atomic_apply`: `record.add`, `record.remove`, `record.delete`,
+  `config.apply_file` and `config.apply_views`. If the lock is not free
+  within 45 seconds, nothing is written and the error step is `lock`.
+- **A read that holds the lock.** The record ops read the zonefile
+  with `read_file_locked`, under a shared `flock` on the same lock file.
+  The write step cuts the file to zero length before it writes, and a
+  rollback deletes and restores it. A plain `cat` at that moment would
+  see an empty or half-written file. The locked read waits until the
+  write is done. Reads do not wait for each other.
+- **A check that the file did not change.** The record ops pass
+  `expected_sha256`, the hash of the zonefile text they read. Once the
+  lock is held, the script hashes the file again. If the hash differs,
+  nothing is written and the error step is `conflict`. The config apply
+  ops pass no hash: they replace the whole file on purpose.
+
+When a record op gets `conflict`, `_apply_zone_change` reads the zonefile
+again, works out the change again on the new content, and retries (up to
+6 retries). So two writes at the same time both land, and the serial goes
+up once for each. A `record.delete` that finds its record already gone on
+the new content answers `not_found`, as it does on any other read. After
+the last retry the `conflict` error is raised.
 
 ### Why one bash script vs N round-trips
 
@@ -655,6 +692,11 @@ Tests: `tests/test_connectors_dns_topology.py`.
   invocations, missing-zone errors, NXDOMAIN-as-empty-rows, and the
   path-rejection-leaks-no-content invariant through the dispatcher
   seam.
+- `backend/tests/test_connectors_bind9_write_lock.py` -- the server lock (with
+  unsafe lock folders and links refused), the locked read during a write, and the
+  "file changed since it was read" check, run on the real bash pipeline, and the
+  record ops redoing a change after a conflict. The real-server test for two
+  parallel adds is in `backend/tests/integration/test_connectors_bind9_container.py`.
 - `backend/tests/test_connectors_bind9_atomic.py` -- T3 unit suite.
   Covers (1) the longest-suffix `resolve_zone_for_fqdn` resolver
   including label-boundary, root-zone-excluded, ambiguous, and

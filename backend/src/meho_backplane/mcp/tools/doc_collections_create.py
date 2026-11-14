@@ -8,7 +8,7 @@ The write sibling of the ``list_doc_collections`` catalogue tool
 docs can I search?"; this tool registers a new collection so an operator /
 agent can seed one without a raw ``INSERT INTO doc_collections`` — closing
 the validated, audited create-half gap Ops hit on the first co-located
-corpus round-trip (claude-rdc-hetzner-dc#975).
+corpus round-trip (the lab repo).
 
 Two gates, mirroring the lifecycle write fronts
 ================================================
@@ -82,7 +82,7 @@ _CREATE_DOC_COLLECTIONS_DESCRIPTION: Final[str] = (
     "would fail every later probe / search. A `collection_key` that "
     "already exists in your scope is rejected as a conflict.\n\n"
     "WHEN TO CALL: to register a corpus an operator has stood up "
-    "(e.g. a co-located MEHO.Knowledge project) so agents can search it, "
+    "(e.g. a co-located knowledge-service project) so agents can search it, "
     "instead of seeding the row by a raw database INSERT. Returns the "
     "full created collection `{id, collection_key, vendor, products, "
     "backend, status, ...}`."

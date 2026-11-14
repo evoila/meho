@@ -10,9 +10,14 @@
   Context contract:
     * ``rows`` -- list[dict]: {connector_id, op_id, scope, tenant_id,
                   safety_level, requires_approval, reason, set_by_sub,
-                  set_at}. ``safety_level`` / ``requires_approval`` are the
-                  values that apply in the row's scope.
+                  set_at, category, always_wait, rule_ref}.
+                  ``safety_level`` / ``requires_approval`` are the values that
+                  apply in the row's scope, with the classification and the
+                  floors (#6038). ``rule_ref`` names the classification entry
+                  that decided them; it is empty with the switch off.
     * ``show`` -- "reduced" | "all".
+    * ``classification`` -- bool: the POLICY_CLASSIFICATION switch. The
+                  "Category" column shows only while it is on.
 -#}
 {% extends "base.html" %}
 
@@ -36,6 +41,11 @@
         <a href="/ui/connectors/overrides" class="link link-hover">Show reduced approval only</a>
       {% endif %}
     </p>
+    <p class="text-sm opacity-70" data-overrides-install-note>
+      A row with the scope "whole install" holds for every tenant. It shows
+      the values for the whole install; a tenant's own rules can make the
+      operation stricter for that tenant.
+    </p>
   </header>
 
   {% if rows %}
@@ -47,6 +57,7 @@
             <th>Operation</th>
             <th>Risk level</th>
             <th>Approval</th>
+            {% if classification %}<th>Category</th>{% endif %}
             <th>Scope</th>
             <th>Who</th>
             <th>When</th>
@@ -69,7 +80,18 @@
                 {% else %}
                   not required
                 {% endif %}
+                {% if row.always_wait %}
+                  <span class="badge badge-info badge-sm" data-override-always-wait>always waits</span>
+                {% endif %}
               </td>
+              {% if classification %}
+                <td class="text-xs" data-override-category>
+                  {{ row.category or "" }}
+                  {% if row.rule_ref %}
+                    <span class="block opacity-70 font-mono" data-override-rule-ref>{{ row.rule_ref }}</span>
+                  {% endif %}
+                </td>
+              {% endif %}
               <td>{{ "whole install" if row.scope == "install" else "tenant " ~ row.tenant_id }}</td>
               <td class="text-xs">{{ row.set_by_sub }}</td>
               <td class="text-xs">{{ row.set_at.strftime("%Y-%m-%d %H:%M UTC") }}</td>

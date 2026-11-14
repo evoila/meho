@@ -12,7 +12,7 @@ evidence_levels:
   unqualified: "No registered range or pinned artifact supports this row."
   registered: "A current MEHO class advertises a range; this is not API coverage or live proof."
   spec-fixture-qualified: "Pinned artifact or fixture supports the named catalog contract only."
-  live-verified: "A safe representative call was observed; it does not certify the full catalog."
+  live-verified: "A safe representative call was observed; it does not certify the full catalog. A row needs a matching test in docs/compatibility/live-tests.yaml."
 artifacts:
   vcf-5x-bom:
     source_url: https://knowledge.broadcom.com/external/article/314608

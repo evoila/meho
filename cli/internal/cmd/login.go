@@ -192,7 +192,7 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			stored := auth.ConvertOAuthToken(result.Token, backplaneURL, result.Issuer, cfg.ClientID)
-			service, user := auth.KeyForBackplane(backplaneURL)
+			service, user := auth.KeyForContext(parentCtx, backplaneURL)
 			if err := store.Save(service, user, stored); err != nil {
 				return fmt.Errorf("token obtained but storage failed: %w", err)
 			}
@@ -205,12 +205,16 @@ func newLoginCmd() *cobra.Command {
 			// hard error: the token is already safely stored, and
 			// the operator can supply --backplane explicitly on the
 			// next invocation.
+			printBackplaneChange(humanOut, backplaneURL)
 			if err := auth.SaveConfig(configAfterLogin(backplaneURL)); err != nil {
 				fmt.Fprintf(errOut,
 					"warning: failed to persist backplane URL to config file: %v\n", err)
 			}
 
 			fmt.Fprintf(humanOut, "Logged in to %s; token stored in %s.\n", backplaneURL, store.Describe())
+			if profile := auth.ProfileFrom(parentCtx); profile != auth.DefaultProfile {
+				fmt.Fprintf(humanOut, "Profile: %s. Use it with `meho --profile %s <command>` or MEHO_PROFILE=%s.\n", profile, profile, profile)
+			}
 			printVersionSkew(parentCtx, httpClient, backplaneURL, errOut)
 			printMigrationNudge(humanOut)
 
@@ -531,6 +535,22 @@ func humanWriter(stdout, stderr io.Writer, printToken bool) io.Writer {
 // scope so a unit test can pin the exact stdout shape.
 func printAccessToken(w io.Writer, tok string) {
 	fmt.Fprintln(w, tok)
+}
+
+// printBackplaneChange prints one line when this login replaces the
+// saved backplane URL with another one. All profiles share that URL,
+// so a login for one profile changes it for every profile, and the
+// tenant chosen for the old backplane is dropped.
+func printBackplaneChange(w io.Writer, backplaneURL string) {
+	prev, err := auth.LoadConfig()
+	if err != nil || prev.BackplaneURL == "" || sameBackplane(prev.BackplaneURL, backplaneURL) {
+		return
+	}
+	line := fmt.Sprintf("The saved backplane URL changes from %s to %s, for all profiles.", prev.BackplaneURL, backplaneURL)
+	if prev.Tenant != nil {
+		line += " The chosen tenant is cleared."
+	}
+	fmt.Fprintln(w, line)
 }
 
 // configAfterLogin is the config `meho login` writes: the backplane

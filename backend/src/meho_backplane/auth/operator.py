@@ -226,8 +226,10 @@ class PrincipalKind(StrEnum):
 
     Members:
 
-    * :attr:`USER` — a human operator authenticated via the interactive
-      device-code flow. Default when no claim is present.
+    * :attr:`USER` — a person who signed in. There are three ways: the
+      command line (``meho-cli`` client, device code), an MCP client
+      (``meho-mcp`` client, sign-in in the browser), and the web console
+      (``meho-web`` client). Default when no claim is present.
     * :attr:`SERVICE` — a non-interactive service account client that
       uses client-credentials flow but is not a MEHO-managed agent.
     * :attr:`AGENT` — a Keycloak client registered by
@@ -425,6 +427,10 @@ class Operator(BaseModel):
     #: the URL; see :mod:`meho_backplane.mcp.profiles`. It only hides
     #: tools. It gives no right and takes no right from the person.
     mcp_tool_profile: str | None = None
+    #: The MCP client asked for the short tool texts with ``?texts=short``
+    #: (#6293). Only the MCP route sets it, from the URL; see
+    #: :mod:`meho_backplane.mcp.short_texts`. It changes only tool texts.
+    mcp_short_tool_texts: bool = False
 
     @property
     def may_self_approve(self) -> bool:
@@ -473,7 +479,7 @@ class Operator(BaseModel):
 #: runner. The human-only governance verbs (approval decisions, agent-grant
 #: create / elevate, standing-grant create / revoke for service principals
 #: (#4616), agent-principal register) refuse these kinds on **every**
-#: transport (meho-internal#289): approval is a human decision (v0.1-spec §7).
+#: transport: approval is a human decision (v0.1-spec §7).
 MACHINE_PRINCIPAL_KINDS: frozenset[PrincipalKind] = frozenset(
     {PrincipalKind.AGENT, PrincipalKind.SERVICE, PrincipalKind.RUNNER}
 )

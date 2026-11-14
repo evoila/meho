@@ -70,7 +70,12 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
-from meho_backplane.operations.approval_rerun import rerun_failed_request
+from meho_backplane.operations.approval_rerun import RerunNotAllowedError, rerun_failed_request
+from meho_backplane.operations.approved_reveal import (
+    WAITING_FOR_REQUESTER,
+    RevealFetchRefusedError,
+    fetch_approved_reveal,
+)
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.redaction import redact
 from meho_backplane.redaction.resolver import get_default_policy
@@ -420,10 +425,9 @@ async def test_reveal_by_a_person_returns_values_and_audit_stores_fingerprints(
     stub_embedding_service: AsyncMock,
 ) -> None:
     await _register("vault.kv.read", _planted_secret_handler, stub_embedding_service)
-    operator = _operator(PrincipalKind.USER)
 
-    first = await _read(operator, reveal=True)
-    second = await _read(operator, reveal=True)
+    first = await _park_approve_and_run("vault.kv.read", reveal=True)
+    second = await _park_approve_and_run("vault.kv.read", reveal=True)
 
     # The caller gets the secret fields as the handler gave them, the PEM
     # private key included.
@@ -435,7 +439,11 @@ async def test_reveal_by_a_person_returns_values_and_audit_stores_fingerprints(
         assert result.result["data"]["private_key"] == _PRIVATE_KEY
         assert result.result["version"] == 7
 
-    rows = await _audit_rows("vault.kv.read")
+    rows = [
+        row
+        for row in await _audit_rows("vault.kv.read")
+        if row.payload.get("result_status") == "ok"
+    ]
     assert len(rows) == 2
     for row in rows:
         stored = json.dumps(row.raw_payload)
@@ -453,6 +461,14 @@ async def test_reveal_returns_no_value_when_the_audit_row_cannot_commit(
     stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     await _register("vault.kv.read", _planted_secret_handler, stub_embedding_service)
+    parked = await _read(_operator(PrincipalKind.USER, sub="requester"), reveal=True)
+    assert parked.status == "awaiting_approval", parked.error
+    reviewer = _operator(PrincipalKind.USER, sub="reviewer")
+    async with get_sessionmaker()() as session:
+        approved = await approve_request(
+            session, UUID(parked.extras["approval_request_id"]), operator=reviewer
+        )
+        await session.commit()
 
     def _raise_audit_commit(*_args: Any, **_kwargs: Any) -> Any:
         async def _boom() -> None:
@@ -462,7 +478,9 @@ async def test_reveal_returns_no_value_when_the_audit_row_cannot_commit(
 
     monkeypatch.setattr(audit_module, "write_audit_row", _raise_audit_commit)
 
-    result = await _read(_operator(PrincipalKind.USER), reveal=True)
+    result = await fetch_approved_reveal(
+        _operator(PrincipalKind.USER, sub="requester"), approved.id
+    )
 
     assert result.status == "error"
     assert (result.error or "").startswith("audit_commit_failed:")
@@ -746,7 +764,12 @@ async def _park_approve_and_run(op_id: str, *, reveal: bool) -> Any:
     async with get_sessionmaker()() as session:
         approved = await approve_request(session, request_id, operator=reviewer)
         await session.commit()
-    return await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
+    answer = await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
+    if answer.status != WAITING_FOR_REQUESTER:
+        return answer
+    # A request with a reveal runs only when the person who asked fetches it.
+    assert answer.result is None
+    return await fetch_approved_reveal(requester, request_id)
 
 
 async def test_reveal_choice_survives_the_wait_for_approval(
@@ -819,12 +842,12 @@ async def _register_failing_credential_write(embedding_service: AsyncMock) -> st
 
 
 @pytest.mark.usefixtures("_no_vault_preflight")
-async def test_reveal_choice_survives_a_failed_credential_write_and_its_rerun(
+async def test_a_failed_credential_write_with_a_reveal_does_not_run_again(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """A credential write keeps its params only until the first run. The reveal
-    choice stays on the request, so the re-run returns the values the requester
-    asked for, also when the params sent again carry the flag."""
+    """A credential write that asked for the values runs once, when the person
+    who asked fetches the value. When that run fails, the request does not run
+    again, by "run again" or by a second fetch: the person sends a new request."""
     op_id = await _register_failing_credential_write(stub_embedding_service)
 
     failed = await _park_approve_and_run(op_id, reveal=True)
@@ -838,39 +861,16 @@ async def test_reveal_choice_survives_a_failed_credential_write_and_its_rerun(
     assert request.resume_result["status"] == "error"
 
     requester = _operator(PrincipalKind.USER, sub="requester")
-    outcome = await rerun_failed_request(
-        operator=requester,
-        request_id=request.id,
-        params={"path": "app/db", "reveal_secret": True},
-    )
-
-    assert outcome.attempt == 2
-    assert outcome.result.status == "ok", outcome.result.error
-    assert outcome.result.result["devices"][0]["password"] == _PASSWORD
-    assert outcome.result.result["devices"][0]["api_token"] == _API_TOKEN
-    assert len(_credential_write_runs) == 2
-    rows = await _audit_rows(op_id)
-    assert [row.payload.get("reveal_secret") for row in rows] == [True, True]
-    assert [value for value in _field_values() if value in json.dumps(rows[-1].raw_payload)] == []
-
-
-@pytest.mark.usefixtures("_no_vault_preflight")
-async def test_rerun_without_the_flag_keeps_the_stored_reveal_choice(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    op_id = await _register_failing_credential_write(stub_embedding_service)
-    failed = await _park_approve_and_run(op_id, reveal=True)
-    assert failed.status == "error", failed.error
-    (request,) = await _approval_requests()
-
-    outcome = await rerun_failed_request(
-        operator=_operator(PrincipalKind.USER, sub="requester"),
-        request_id=request.id,
-        params={"path": "app/db"},
-    )
-
-    assert outcome.result.status == "ok", outcome.result.error
-    assert outcome.result.result["devices"][0]["password"] == _PASSWORD
+    with pytest.raises(RerunNotAllowedError):
+        await rerun_failed_request(
+            operator=requester,
+            request_id=request.id,
+            params={"path": "app/db", "reveal_secret": True},
+        )
+    with pytest.raises(RevealFetchRefusedError) as refused:
+        await fetch_approved_reveal(requester, request.id)
+    assert refused.value.code == "already_used"
+    assert len(_credential_write_runs) == 1
 
 
 @pytest.mark.usefixtures("_no_vault_preflight")
@@ -941,7 +941,11 @@ async def test_reveal_by_a_service_principal_waits_for_approval_on_a_read(
     async with get_sessionmaker()() as session:
         approved = await approve_request(session, request.id, operator=reviewer)
         await session.commit()
-    result = await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
+    answer = await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
+    assert answer.status == WAITING_FOR_REQUESTER
+    assert [value for value in _planted_values() if value in answer.model_dump_json()] == []
+
+    result = await fetch_approved_reveal(service, request.id)
 
     assert result.status == "ok", result.error
     assert result.result["data"]["password"] == _PASSWORD
@@ -960,15 +964,34 @@ async def test_service_principal_read_without_the_flag_still_runs_at_once(
     assert await _approval_requests() == []
 
 
-async def test_person_reveal_on_a_read_still_runs_at_once(
+async def test_person_reveal_on_a_secret_read_waits_for_approval(
     stub_embedding_service: AsyncMock,
 ) -> None:
+    """``vault.kv.read`` runs at once without the flag; a reveal waits for a person."""
     await _register("vault.kv.read", _planted_secret_handler, stub_embedding_service)
+    person = _operator(PrincipalKind.USER)
 
-    result = await _read(_operator(PrincipalKind.USER), reveal=True)
+    hidden = await _read(person, reveal=False)
+    parked = await _read(person, reveal=True)
+
+    assert hidden.status == "ok", hidden.error
+    assert parked.status == "awaiting_approval", parked.error
+    assert parked.result is None
+    assert [value for value in _planted_values() if value in parked.model_dump_json()] == []
+    (request,) = await _approval_requests()
+    assert request.reveal_secret is True
+
+
+async def test_person_reveal_on_a_plain_read_still_runs_at_once(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The floor is for a credential read; a plain read's reveal runs at once for a person."""
+    op_id = "vault.device.list_from_package"
+    await _register(op_id, _package_device_list, stub_embedding_service)
+
+    result = await _read(_operator(PrincipalKind.USER), reveal=True, op_id=op_id)
 
     assert result.status == "ok", result.error
-    assert result.result["data"]["password"] == _PASSWORD
     assert await _approval_requests() == []
 
 

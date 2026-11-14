@@ -137,10 +137,16 @@ read-only op** alongside the posture tier, in a new `rke2-service-read` group:
   `Rke2ServiceStatusProbeError` rather than being served as a service-state
   answer — the same infrastructure-failure discipline `rke2.posture.show` uses.
 
-Both snapshot ops run **as root over plain SSH** (`_run_command`, no `sudo`
-argv) — like the sibling T3 node-write ops, the connector already
-authenticates as root, so no sudo construction is needed and the repo-wide
-sudo-guard stays satisfied.
+Both snapshot ops need root. The guard first checks the login's user id. A
+root login runs the guard and the `rke2` command over plain SSH
+(`_run_command`). A normal user (the usual target setup) cannot read
+`/var/lib/rancher/rke2/server/` (`0700 root:root`), so the guard answers
+`needs-root` and both commands run through the safe-sudo primitive
+(`_sudo.run_remote_bash_with_sudo`) with the sudo password from the target's
+Vault secret (`sudo_password`, else `password`). Without a password the op
+fails with "this operation needs root", never "not an embedded-etcd server".
+The repo-wide sudo-guard stays satisfied: `ops_snapshot.py` builds no `sudo`
+argv itself.
 
 Nine ops total: four safe read-only (T1 `about` / `posture.show`, the #2852
 `node.service.status`, and the #2854 redacted `node.config.get` read), three
@@ -156,8 +162,14 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
 ## Key types
 
 - **`Rke2SshConnector`** (`connector.py`) — `SshConnector` subclass. Class
-  attributes: `product="rke2"`, `version="1.x"`, `impl_id="rke2-ssh"`.
-  Inherits the per-target asyncssh connection pool, `_auth_config`,
+  attributes: `product="rke2"`, `version="1.x"`, `impl_id="rke2-ssh"`,
+  `supported_version_range=">=1.32,<1.38"` (the same range as the
+  `kubernetes` connector; RKE2 follows the Kubernetes lines). A target
+  whose known version is outside the range does not run: the operation
+  answers `no_connector` and names the range. The
+  token-rotate version check (`rke2_version_rotate_verdict`) is separate
+  and unchanged.
+  Inherits the asyncssh connection pool (one login per caller and target), `_auth_config`,
   `_run_command`, `_assert_reachable`, and `aclose()` from the adapter.
   Ships `fingerprint`, `probe`, `execute`, `about`, `posture_show`,
   `service_status`, `config_get`, the write and snapshot shims
@@ -243,13 +255,13 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
 
 - **Snapshot handlers + parsers** (`ops_snapshot.py`, #2431 + #2853) — two
   handlers sharing one guard:
-  - `rke2_etcd_snapshot_save` (#2431): guard → save → parse, run as root over
-    plain `_run_command` with **no** `sudo` argv; `parse_saved_snapshot_name`
+  - `rke2_etcd_snapshot_save` (#2431): guard → save → parse, run as root (plain for
+    a root login, the safe-sudo primitive for a normal user); `parse_saved_snapshot_name`
     recovers the name from the RKE2 `Snapshot <name> saved.` log;
     `_validate_name` is the fail-closed charset re-check of the single optional
     `name` (the only operator input), `shlex.quote`'d into the argv.
   - `rke2_etcd_snapshot_list` (#2853): guard → `rke2 etcd-snapshot list` →
-    `parse_snapshot_list`, also root-over-plain-SSH, no operator params.
+    `parse_snapshot_list`, run as root the same way, no operator params.
     Returns `{snapshots: [{name, location, size_bytes, created_at}, …]}`.
   - `_run_precondition_guard` — the **shared** embedded-etcd-server guard both
     handlers run first (a genuine reuse of `_GUARD_CMD`, not a per-op
@@ -257,7 +269,8 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
     is read, so an SSH/transport failure surfaces as a distinct transport error
     (`Rke2SnapshotError`) rather than a mislabeled "not an embedded-etcd server"
     verdict (fail-closed either way); an external-`datastore-endpoint` or
-    non-server node raises `Rke2SnapshotPreconditionError`.
+    non-server node raises `Rke2SnapshotPreconditionError`. It returns the sudo
+    password the command must use (`None` for a root login).
   - Structured errors: `Rke2SnapshotNameError` / `Rke2SnapshotPreconditionError`
     / `Rke2SnapshotError`. The `rke2` binary is invoked by absolute path in
     both handlers.

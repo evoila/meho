@@ -24,10 +24,13 @@ op_id                             Admin REST API
 ``keycloak.role.users``           ``GET /admin/realms/{realm}/roles/{role-name}/users``
 ================================  =================================================
 
+``keycloak.user.get`` and ``keycloak.user.sessions`` (one user's state and
+live sessions) live in :mod:`~meho_backplane.connectors.keycloak.ops_user_state`.
+
 All ops dispatch via the **admin-auth** path the T1 substrate built
 (``auth_headers`` → admin token Bearer), never the operator-OIDC path.
 The realm is resolved from the target's ``managed_realm`` (``extras``
-override, default ``evba``) so an op never has to be told which realm to
+override, default :data:`DEFAULT_MANAGED_REALM`) so an op never has to be told which realm to
 operate on — it operates on the realm the connector manages.
 
 Secret redaction

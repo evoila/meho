@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import socket
 import sqlite3
 import sys
@@ -90,7 +91,8 @@ def test_runner_waits_for_a_database_that_is_down_then_fails_at_its_limit(
     err = capfd.readouterr().err.splitlines()
     assert code == 1
     assert elapsed >= 1.0
-    assert err[0].startswith("migration_db_waiting: ConnectionRefusedError; waited 0 s of 1 s")
+    # The elapsed seconds depend on runner speed; only the message counts.
+    assert re.match(r"migration_db_waiting: ConnectionRefusedError; waited \d+ s of 1 s", err[0])
     assert err[-1].startswith(
         "migration_failed: DatabaseNotReadyError: the database did not accept a connection "
         "within 1 s (MIGRATION_DB_WAIT_SECONDS); last error: ConnectionRefusedError"

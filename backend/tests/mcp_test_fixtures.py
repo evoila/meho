@@ -225,6 +225,7 @@ def isolated_registry() -> Iterator[None]:
         runbook_runs,
         runbooks,
         scheduler,
+        sensor_pause,
         sensors,
         targets_register,
         targets_update,
@@ -359,6 +360,7 @@ def isolated_registry() -> Iterator[None]:
     # double-register.
     importlib.reload(scheduler)
     importlib.reload(sensors)
+    importlib.reload(sensor_pause)
     importlib.reload(memory_tools)
     importlib.reload(memory_promote_tool)
     # #3029: the pairing-gated ``meho_automation_list`` meta-tool joins the

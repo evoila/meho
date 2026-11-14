@@ -125,12 +125,12 @@ func TestDecodeRowsResultNullAndEmpty(t *testing.T) {
 }
 
 func TestDecodeWrappedObject(t *testing.T) {
-	raw := json.RawMessage(`{"realm":{"realm":"evba","enabled":true}}`)
+	raw := json.RawMessage(`{"realm":{"realm":"example","enabled":true}}`)
 	obj, err := decodeWrappedObject(raw, "realm")
 	if err != nil {
 		t.Fatalf("decodeWrappedObject: %v", err)
 	}
-	if obj["realm"] != "evba" || obj["enabled"] != true {
+	if obj["realm"] != "example" || obj["enabled"] != true {
 		t.Fatalf("decoded: %+v", obj)
 	}
 	// Missing key → nil, no error.
@@ -221,14 +221,14 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 			writeJSON(t, w, 200, CallResult{
 				Status: "ok",
 				OpID:   "keycloak.realm.get",
-				Result: json.RawMessage(`{"realm":{"realm":"evba"}}`),
+				Result: json.RawMessage(`{"realm":{"realm":"example"}}`),
 			})
 		},
 	})
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "keycloak.realm.get", "rdc-keycloak", nil)
+	r, err := dispatchOp(context.Background(), srv.URL, "keycloak.realm.get", "keycloak-lab", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 				return
 			}
 			tgt, _ := raw["target"].(map[string]any)
-			if tgt == nil || tgt["name"] != "rdc-keycloak" {
+			if tgt == nil || tgt["name"] != "keycloak-lab" {
 				t.Errorf("target should wrap slug as {name: ...}; got %v", raw["target"])
 			}
 			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: "keycloak.realm.get"})
@@ -259,7 +259,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "keycloak.realm.get", "rdc-keycloak", nil); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "keycloak.realm.get", "keycloak-lab", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -286,7 +286,7 @@ func TestDispatchOpForwardsParams(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "keycloak.client.get", "rdc-keycloak",
+	r, err := dispatchOp(context.Background(), srv.URL, "keycloak.client.get", "keycloak-lab",
 		map[string]any{"id": "client-uuid-1"})
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
@@ -327,7 +327,7 @@ func TestAllOpsUseCanonicalOpIDs(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	for _, opID := range expectedOps {
-		if _, err := dispatchOp(context.Background(), srv.URL, opID, "rdc-keycloak", nil); err != nil {
+		if _, err := dispatchOp(context.Background(), srv.URL, opID, "keycloak-lab", nil); err != nil {
 			t.Fatalf("dispatchOp %s: %v", opID, err)
 		}
 	}

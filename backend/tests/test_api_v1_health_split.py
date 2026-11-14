@@ -4,7 +4,7 @@
 """RBAC-split tests for the two authenticated health routes.
 
 The /health surface is split into two routes with different privilege
-requirements (least-privilege hardening, meho-internal#159):
+requirements (least-privilege hardening):
 
 * ``GET /api/v1/health`` — the federation-proof deep check. Every call
   federates a live per-operator Vault credential and reads a KV v2
@@ -127,7 +127,7 @@ def test_read_only_health_returns_403_before_any_vault_federation(
 ) -> None:
     """A ``read_only`` caller gets 403 and Vault is never approached.
 
-    The acceptance criterion of meho-internal#159: the RBAC gate must
+    The acceptance criterion: the RBAC gate must
     fire *before* ``_probe_vault_federation`` / the ``vault.kv.read``
     dispatch, so no per-operator Vault credential is federated and no
     secret is read on behalf of the lowest-trust role.
@@ -183,7 +183,12 @@ def test_operator_rank_health_reaches_federation_probe(
         "tenant_role": role,
         "tenants": [],
     }
-    assert body["vault"] == {"reachable": True, "read_ok": True, "detail": "version=7"}
+    assert body["vault"] == {
+        "reachable": True,
+        "read_ok": True,
+        "detail": "version=7",
+        "checked": True,
+    }
     head = ScriptDirectory.from_config(alembic_config()).get_current_head()
     assert body["db"] == {
         "migrated": True,

@@ -44,6 +44,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/nsx"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/pfsense"
+	"github.com/evoila/meho/cli/internal/cmd/policy"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
 	"github.com/evoila/meho/cli/internal/cmd/runbook"
 	runnerprincipal "github.com/evoila/meho/cli/internal/cmd/runner-principal"
@@ -134,7 +135,14 @@ func newRootCmdFor(args []string) *cobra.Command {
 		"work-ref",
 		"",
 		"external change-ticket reference sent on every backplane request, so the audit rows carry it "+
-			"(e.g. gh:evoila/meho#13; default: $"+api.WorkRefEnv+")",
+			"(e.g. gh:evoila/meho#13 or CHG0012345; default: $"+api.WorkRefEnv+")",
+	)
+	root.PersistentFlags().String(
+		"profile",
+		"",
+		"named login to use, so one person can hold several identities side by side "+
+			"(default: $"+auth.ProfileEnv+", else \"default\"). `meho login --profile <name>` "+
+			"stores the login under that name",
 	)
 	root.PersistentPreRunE = applyRequestContext
 
@@ -350,6 +358,11 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// so the backplane manifest cannot shadow the built-in `dashboard` parent.
 	root.AddCommand(dashboard.NewRootCmd())
 
+	// The policy file (policy: v1): validate / diff / import / export /
+	// history on /api/v1/policy. tenant_admin or platform_admin; an import
+	// waits until a second admin approves it.
+	root.AddCommand(policy.NewRootCmd())
+
 	// G3.1-T7 (#511) -- vmware-rest-9.0 operator alias verbs for
 	// Initiative #227. The verb tree pre-bakes connector_id=
 	// "vmware-rest-9.0" on top of the existing /api/v1/operations/call
@@ -383,7 +396,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// vRLI core verbs (about, query, aggregated, field list, host list,
 	// content-pack list, alert list) plus operation search/call
 	// meta-tool wrappers. `meho vcf-logs query --time-range 1h
-	// --target rdc-vrli` replaces the consumer's `./scripts/vcf-logs.sh`
+	// --target vrli-lab` replaces the consumer's `./scripts/vcf-logs.sh`
 	// wrapper. Registered before registerDynamicSubcommands so the
 	// backplane manifest cannot shadow the built-in `vcf-logs` parent.
 	root.AddCommand(vcflogs.NewRootCmd())
@@ -428,7 +441,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// (read/list/put/versions/delete), sys (health/seal-status/mounts-
 	// list/auth-list), and auth (userpass/approle list+read) verbs over
 	// the typed ops registered by G3.3-T1/T2/T3 (#545/#546/#547).
-	// `meho vault kv read --target rdc-vault secret <path>` replaces the
+	// `meho vault kv read --target vault-lab secret <path>` replaces the
 	// consumer's `_secret-read.sh` wrapper. Registered before
 	// registerDynamicSubcommands so the backplane manifest cannot shadow
 	// the built-in `vault` parent.
@@ -474,10 +487,8 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// the 11 ops (about, zone list/read, record get/add/remove, config
 	// show/apply-views/apply-file/backup/reload) registered by G3.4-
 	// T1..T4 (#587/#588/#589/#590). `meho bind9 record add
-	// esx-dc6.evba.lab 10.5.50.25 --zone evba.lab --target
-	// vcf-router-bind9` replaces the consumer's
-	// `bind9-dns.sh --add-a-record` wrapper (the 2026-05-04 / 2026-05-05
-	// credential-leak surface — evoila-bosnia/claude-rdc-hetzner-dc#86).
+	// esx-1.example.test 192.0.2.25 --zone example.test --target
+	// vcf-router-bind9` adds an A record to a zone.
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `bind9` parent.
 	root.AddCommand(bind9.NewRootCmd())
@@ -573,8 +584,8 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// the connector ID on every invocation. Ships the 8 read-only ops
 	// (about, config show, pod list/info, service list, k8s exec
 	// (read-only), logs tail, networking show) registered by G3.8-T1/T2
-	// (#853/#854). `meho holodeck pod list --target holorouter` replaces
-	// the consumer's `holodeck.sh --target holorouter 'pwsh -c
+	// (#853/#854). `meho holodeck pod list --target my-router` replaces
+	// the consumer's `holodeck.sh --target my-router 'pwsh -c
 	// "Get-HoloDeckPod | Format-Table"'` invocation 1:1. The sister
 	// `clone-holodeck-instance.sh` wrapper (multi-step nested-lab
 	// bring-up) stays in the wrapper for v0.2 and surfaces as a Runbook
@@ -654,9 +665,10 @@ func newRootCmdFor(args []string) *cobra.Command {
 }
 
 // applyWorkRef reads the global --work-ref flag (or MEHO_WORK_REF when
-// the flag is not set), checks its shape, and puts it on the command
-// context. Every AuthedClient request and every hand-rolled backplane
-// request built from that context then sends the Meho-Work-Ref header.
+// the flag is not set), checks it (not blank, one line), and puts it on
+// the command context. Every AuthedClient request and every hand-rolled
+// backplane request built from that context then sends the
+// Meho-Work-Ref header.
 //
 // A subcommand that defines its own local --work-ref (operation call,
 // scheduler create, runbook start, agent run, broadcast announce) hides
@@ -677,21 +689,24 @@ func applyWorkRef(cmd *cobra.Command, _ []string) error {
 	if sendsNoBackplaneRequest(cmd) {
 		return nil
 	}
+	// A given --work-ref is checked, also an empty one. An empty
+	// MEHO_WORK_REF means "not set". The variable is checked before it
+	// is trimmed, so a trailing line break is refused too.
 	ref, source := "", ""
 	if f := cmd.Root().PersistentFlags().Lookup("work-ref"); f != nil && f.Changed {
 		ref, source = f.Value.String(), "--work-ref"
-	} else if v, ok := os.LookupEnv(api.WorkRefEnv); ok {
-		ref, source = strings.TrimSpace(v), api.WorkRefEnv
+	} else if v := os.Getenv(api.WorkRefEnv); v != "" {
+		ref, source = v, api.WorkRefEnv
 	}
-	if ref == "" {
+	if source == "" {
 		return nil
 	}
 	if !api.ValidWorkRef(ref) {
 		// On a read command that filters by reference, the old
 		// --work-ref spelling still filters for one release when
 		// --filter-work-ref is not given, and a filter value need not
-		// have the tag shape. Skip the tag and let workref.Filter
-		// filter and warn. With --filter-work-ref given, --work-ref
+		// be a value the header can carry. Skip the tag and let
+		// workref.Filter filter and warn. With --filter-work-ref given, --work-ref
 		// only tags, so a bad value is an error like everywhere else.
 		if source == "--work-ref" && workref.OldFlagFilters(cmd) {
 			return nil
@@ -701,9 +716,9 @@ func applyWorkRef(cmd *cobra.Command, _ []string) error {
 			jsonOut = f.Value.String() == "true"
 		}
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(source+" must match gh:<owner>/<repo>#<n>"), jsonOut)
+			output.Unexpected(source+" "+api.WorkRefRule), jsonOut)
 	}
-	cmd.SetContext(api.WithWorkRef(cmd.Context(), ref))
+	cmd.SetContext(api.WithWorkRef(cmd.Context(), strings.TrimSpace(ref)))
 	return nil
 }
 

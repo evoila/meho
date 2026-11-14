@@ -1,5 +1,7 @@
 # Connect clients
 
+New here? Start with the [laptop guide](../install/laptop-tools.md).
+
 You have a running backplane. This section wires operators and agents
 to it — **the CLI first**, then the MCP client matrix, then a
 symptom-first [troubleshooting page](troubleshooting.md) for the auth
@@ -55,7 +57,7 @@ agent session lists a small, tiered set of meta-tools — see
 
 ## The MCP client matrix
 
-All three MCP paths are **internal-only** — the client, or the local
+All of these MCP paths are **internal-only** — the client, or the local
 shim it spawns, runs on a VPN-connected machine and speaks Streamable
 HTTP to the backplane's `/mcp` route directly. Pick the row that
 matches your client:
@@ -64,13 +66,14 @@ matches your client:
 |---|---|---|
 | **Claude Desktop** | One-click `.mcpb` bundle (recommended), or a manual local [`mcp-remote`](https://github.com/geelen/mcp-remote) stdio→HTTP shim running the OAuth 2.1 + PKCE flow and forwarding to `/mcp`. The shim is the only Desktop transport for an internal-only backplane. | [Claude Desktop](claude-desktop.md) |
 | **Claude Code** | One-command MEHO plugin (recommended), or a manual native-HTTP `.mcp.json` with a loopback PKCE flow pinned to the pre-registered `meho-mcp` public client. The pattern both dogfood repos run daily. | [Claude Code](claude-code.md) |
+| **Codex** | Native HTTP in `~/.codex/config.toml`, with a loopback login pinned to the pre-registered `meho-mcp` public client. No shim needed. | [Codex](codex.md) |
 | **Cursor and other clients that can't carry a `client_id`** | A generic `mcp-remote` stdio shim carrying a CLI-minted bearer token. | [Other MCP clients](mcp-remote-shim.md) |
 
 Running Claude for a whole company? The Claude admin should read
 [Organisation setup for the Claude admin](organisation-setup.md): the
 settings that keep MEHO the only path to your systems.
 
-All three assume the realm already has the public `meho-mcp` OAuth
+All of them assume the realm already has the public `meho-mcp` OAuth
 client and the operator's workstation trusts the deployment's CA. The
 one-time realm work is in
 [Keycloak realm setup](../install/keycloak-realm.md); the CA-trust step

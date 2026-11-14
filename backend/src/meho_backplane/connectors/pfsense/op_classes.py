@@ -7,13 +7,26 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 """
 
-from meho_backplane.op_classes import declare_op_classes, declare_root_shell
+from meho_backplane.op_classes import (
+    declare_op_classes,
+    declare_per_call_approval,
+    declare_root_shell,
+)
 
 declare_op_classes(
+    # VPN onboarding (#3993). ``.sync`` is not a write suffix. ``user.create``
+    # makes a password on the firewall and sends it to Vault: the answer holds
+    # none, but the op mints a secret.
+    credential_mint=("pfsense.openvpn.user.create",),
     # User flag writes (#3937): ``.disable`` / ``.enable`` are not write
     # suffixes, and a suffix would also relabel the flat ``meho_`` mirror.
     # The params carry only a user name, so plain ``write``.
-    write=("pfsense.user.disable", "pfsense.user.enable"),
+    write=(
+        "pfsense.openvpn.csc.sync",
+        "pfsense.openvpn.rule.sync",
+        "pfsense.user.disable",
+        "pfsense.user.enable",
+    ),
 )
 
 # The SSH login on pfSense is ``admin``, which is root (uid 0). Every config
@@ -34,5 +47,13 @@ declare_root_shell(
         "pfsense.alias.delete",
         "pfsense.alias.member.remove",
         "pfsense.nat.delete",
+        "pfsense.openvpn.csc.sync",
+        "pfsense.openvpn.rule.sync",
+        "pfsense.openvpn.user.create",
+        "pfsense.openvpn.user.delete",
     )
 )
+
+# Creating or deleting a VPN user gives or takes a login. A person approves
+# each call; a standing grant never covers them.
+declare_per_call_approval(("pfsense.openvpn.user.create", "pfsense.openvpn.user.delete"))

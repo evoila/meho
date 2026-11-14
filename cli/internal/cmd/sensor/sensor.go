@@ -24,6 +24,9 @@
 //     change some fields in place via PATCH /api/v1/sensors/{id}; the id,
 //     the result history and the dashboard memberships stay.
 //     Role: tenant_admin.
+//   - `meho sensor pause|resume <sensor_id> [--tenant <id>] [--json]` —
+//     stop or restart the runner's checks of one sensor via
+//     PATCH /api/v1/sensors/{id} with status. Role: tenant_admin.
 //   - `meho sensor results <sensor_id> [--from T] [--to T] [--state S]
 //     [--limit N] [--cursor C] [--json]` — the per-tick evidence trend
 //     query (#2756) via GET /api/v1/sensors/{id}/results: raw rows in
@@ -144,7 +147,7 @@ func loadJSONObjectFlag(cmd *cobra.Command, raw, flagName string) (map[string]an
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sensor",
-		Short: "Manage deterministic-check sensors (list / create / edit / delete / results / ack)",
+		Short: "Manage deterministic-check sensors (list / create / edit / pause / resume / delete / results / ack)",
 		Long: "Manage tenant-scoped sensors wired by the deterministic " +
 			"check layer (Initiative #2416). A sensor pins an (op + args + " +
 			"assertion + cadence + severity) tuple the check runner " +
@@ -161,6 +164,8 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newCreateCmd())
 	cmd.AddCommand(newDeleteCmd())
 	cmd.AddCommand(newEditCmd())
+	cmd.AddCommand(newPauseCmd())
+	cmd.AddCommand(newResumeCmd())
 	cmd.AddCommand(newResultsCmd())
 	cmd.AddCommand(newAckCmd())
 	return cmd

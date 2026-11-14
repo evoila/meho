@@ -22,7 +22,7 @@ aren't configured yet (the chicken-and-egg the issue body calls out).
 
 So the connector authenticates to the Keycloak **Admin REST API** with a
 **separate admin credential** loaded from Vault (consumer path
-``secret/rdc-hetzner-dc/keycloak/admin``) via
+``secret/<consumer>/keycloak/admin``) via
 :func:`~meho_backplane.connectors.keycloak.session.load_admin_credentials_from_vault`.
 It mints an admin access token through Keycloak's own token endpoint
 (``POST /realms/{admin_realm}/protocol/openid-connect/token``) and caches
@@ -112,7 +112,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
-from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
+from meho_backplane.connectors.keycloak.redaction import redact_trace_fields
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakAdminCredentialsLoader,
@@ -630,11 +630,13 @@ class KeycloakConnector(HttpConnector):
         A client representation carries the confidential client's
         ``secret``, a user representation can carry ``credentials``, and a
         realm's ``smtpServer`` map carries a ``password``. The trace gets
-        the same scrub the operation result gets
-        (:func:`~meho_backplane.connectors.keycloak.redaction.redact_secret_fields`),
-        so the stored trace and the agent copy hold ``***REDACTED***`` where
-        the result does. An empty body is recorded as it is. A body that is
-        not JSON is replaced by a fixed marker. Never raises.
+        the same scrub the operation result gets, plus the personal fields
+        an operation leaves out of its result, such as the ``lastIPFailure``
+        of a user's lock status
+        (:func:`~meho_backplane.connectors.keycloak.redaction.redact_trace_fields`),
+        so the stored trace and the agent copy hold ``***REDACTED***`` there.
+        An empty body is recorded as it is. A body that is not JSON is
+        replaced by a fixed marker. Never raises.
         """
         if not response.content:
             return None
@@ -643,7 +645,7 @@ class KeycloakConnector(HttpConnector):
         except ValueError:
             return _TRACE_BODY_WITHHELD
         try:
-            return redact_secret_fields(body)
+            return redact_trace_fields(body)
         except Exception:  # a trace must never break the call, and never hold a secret
             return _TRACE_BODY_WITHHELD
 
@@ -1144,6 +1146,80 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_logout(self, operator, target, params)
 
+    async def user_required_actions_update(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.required_actions.update``."""
+        from meho_backplane.connectors.keycloak.ops_user_required_actions import (
+            keycloak_user_required_actions_update,
+        )
+
+        return await keycloak_user_required_actions_update(self, operator, target, params)
+
+    async def user_otp_status(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.otp_status``."""
+        from meho_backplane.connectors.keycloak.ops_user_required_actions import (
+            keycloak_user_otp_status,
+        )
+
+        return await keycloak_user_otp_status(self, operator, target, params)
+
+    async def user_get(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.get``."""
+        from meho_backplane.connectors.keycloak.ops_user_state import keycloak_user_get
+
+        return await keycloak_user_get(self, operator, target, params)
+
+    async def user_sessions(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.sessions``."""
+        from meho_backplane.connectors.keycloak.ops_user_state import keycloak_user_sessions
+
+        return await keycloak_user_sessions(self, operator, target, params)
+
+    async def user_lock_status(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.lock_status``."""
+        from meho_backplane.connectors.keycloak.ops_lock_status import keycloak_user_lock_status
+
+        return await keycloak_user_lock_status(self, operator, target, params)
+
+    async def realm_lock_settings(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.realm.lock_settings``."""
+        from meho_backplane.connectors.keycloak.ops_lock_status import (
+            keycloak_realm_lock_settings,
+        )
+
+        return await keycloak_realm_lock_settings(self, operator, target, params)
+
+    async def user_disable(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.disable``."""
+        from meho_backplane.connectors.keycloak.ops_write_user_enabled import (
+            keycloak_user_disable,
+        )
+
+        return await keycloak_user_disable(self, operator, target, params)
+
+    async def user_enable(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.enable``."""
+        from meho_backplane.connectors.keycloak.ops_write_user_enabled import (
+            keycloak_user_enable,
+        )
+
+        return await keycloak_user_enable(self, operator, target, params)
+
     async def user_check_login(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1171,6 +1247,46 @@ class KeycloakConnector(HttpConnector):
         )
 
         return await keycloak_authflow_ensure_passkey_code_skip(self, operator, target, params)
+
+    async def authflow_ensure_approval_touch(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.authflow.ensure_approval_touch``."""
+        from meho_backplane.connectors.keycloak.ops_authflow_touch import (
+            keycloak_authflow_ensure_approval_touch,
+        )
+
+        return await keycloak_authflow_ensure_approval_touch(self, operator, target, params)
+
+    async def auth_flow_step_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.auth_flow.step.list``."""
+        from meho_backplane.connectors.keycloak.ops_flow_reads import (
+            keycloak_auth_flow_step_list,
+        )
+
+        return await keycloak_auth_flow_step_list(self, operator, target, params)
+
+    async def required_action_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.required_action.list``."""
+        from meho_backplane.connectors.keycloak.ops_flow_reads import (
+            keycloak_required_action_list,
+        )
+
+        return await keycloak_required_action_list(self, operator, target, params)
+
+    async def events_config_get(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.events.config.get``."""
+        from meho_backplane.connectors.keycloak.ops_flow_reads import (
+            keycloak_events_config_get,
+        )
+
+        return await keycloak_events_config_get(self, operator, target, params)
 
     async def identity_provider_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
@@ -1212,8 +1328,8 @@ class KeycloakConnector(HttpConnector):
         the destructive ``user.delete`` / ``group.delete`` /
         ``client.delete``. #3851 adds ``user.logout``; #3886 adds ``realm.delete``.
         ``user.check_login`` (one login test) rides the same walk, and so do
-        ``authflow.ensure_approval_flow``, ``authflow.ensure_passkey_code_skip``
-        and ``identity_provider.list``.
+        ``authflow.ensure_approval_flow``, ``authflow.ensure_passkey_code_skip``,
+        ``authflow.ensure_approval_touch`` and ``identity_provider.list``.
         """
         # Lazy imports: the operations package pulls in the embedding
         # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a
@@ -1227,10 +1343,16 @@ class KeycloakConnector(HttpConnector):
         from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import (
             PASSKEY_CODE_SKIP_OPS,
         )
+        from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import TOUCH_OPS
+        from meho_backplane.connectors.keycloak.ops_flow_reads import (
+            FLOW_READ_OPS,
+            WHEN_TO_USE_FLOW_READ_BY_GROUP,
+        )
         from meho_backplane.connectors.keycloak.ops_identity_provider import (
             IDENTITY_PROVIDER_OPS,
             WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP,
         )
+        from meho_backplane.connectors.keycloak.ops_lock_status import LOCK_STATUS_OPS
         from meho_backplane.connectors.keycloak.ops_login_check import (
             LOGIN_CHECK_OPS,
             WHEN_TO_USE_LOGIN_CHECK_BY_GROUP,
@@ -1239,6 +1361,10 @@ class KeycloakConnector(HttpConnector):
             READ_OPS,
             WHEN_TO_USE_BY_GROUP,
         )
+        from meho_backplane.connectors.keycloak.ops_user_required_actions import (
+            USER_REQUIRED_ACTION_OPS,
+        )
+        from meho_backplane.connectors.keycloak.ops_user_state import USER_STATE_OPS
         from meho_backplane.connectors.keycloak.ops_write import (
             WHEN_TO_USE_WRITE_BY_GROUP,
             WRITE_OPS,
@@ -1254,6 +1380,7 @@ class KeycloakConnector(HttpConnector):
             **WHEN_TO_USE_LOGIN_CHECK_BY_GROUP,
             **WHEN_TO_USE_AUTHFLOW_BY_GROUP,
             **WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP,
+            **WHEN_TO_USE_FLOW_READ_BY_GROUP,
         }
 
         bindings: list[tuple[Any, Any]] = []
@@ -1263,7 +1390,12 @@ class KeycloakConnector(HttpConnector):
             *LOGIN_CHECK_OPS,
             *APPROVAL_FLOW_OPS,
             *PASSKEY_CODE_SKIP_OPS,
+            *TOUCH_OPS,
             *IDENTITY_PROVIDER_OPS,
+            *USER_REQUIRED_ACTION_OPS,
+            *USER_STATE_OPS,
+            *LOCK_STATUS_OPS,
+            *FLOW_READ_OPS,
         ):
             handler = getattr(cls, op.handler_attr, None)
             if handler is None:

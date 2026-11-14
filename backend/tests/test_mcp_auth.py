@@ -238,7 +238,7 @@ def test_token_for_arbitrary_audience_is_rejected_at_mcp(
         _mock_discovery_and_jwks(router, jwks)
         foreign_token = _mint_mcp_token(
             keypair,
-            audience="https://some-other-service.evba.lab/api",
+            audience="https://some-other-service.example.test/api",
         )
         response = client.post(
             "/mcp",
@@ -273,6 +273,32 @@ def test_token_with_mcp_audience_is_accepted(
     body = response.json()
     assert body["id"] == 4
     assert body["result"] == {}
+
+
+@pytest.mark.parametrize("azp", ["meho-mcp", "meho-mcp-code", "meho-mcp-desktop"])
+def test_token_of_each_mcp_login_client_is_accepted(
+    client: TestClient,
+    keypair: Any,
+    jwks: dict[str, Any],
+    azp: str,
+) -> None:
+    """A token of the shared client or of a tool's own client works on ``/mcp``.
+
+    Claude Code and Claude Desktop sign in with their own login client
+    (``MCP_CLIENT_PER_TOOL_KIND``). ``/mcp`` checks the audience, not the
+    client, so their tokens work the same as a ``meho-mcp`` token.
+    """
+    with respx.mock as router:
+        _mock_discovery_and_jwks(router, jwks)
+        token = _mint_mcp_token(keypair, extra_claims={"azp": azp})
+        response = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 5, "method": "ping"},
+            headers={"Authorization": f"Bearer {token}", "Meho-Tool": "claude-desktop"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"jsonrpc": "2.0", "id": 5, "result": {}}
 
 
 def test_person_token_call_operation_is_never_a_web_session(

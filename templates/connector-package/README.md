@@ -18,7 +18,7 @@ any MEHO release.
    | Made-up name | Where |
    |---|---|
    | `example-connectors` (the wheel's name) | `pyproject.toml` |
-   | `example_widget` (the folder) | the folder name, `pyproject.toml`, `PACKAGE` in `tests/test_kit_imports.py`, the imports in `tests/test_example_widget.py` |
+   | `example_widget` (the folder) | the folder name, `pyproject.toml`, `PACKAGE` in `tests/test_kit_imports.py` and `tests/test_version_range.py`, the imports in `tests/test_example_widget.py` |
    | `example`, `example-widget`, `1.x` (product, implementation id, version) | `connector.py`. The product must be the first part of the implementation id. The connector id is `<implementation id>-<version>`, here `example-widget-1.x`. |
    | `ExampleWidgetConnector` | `connector.py`, `operations.py`, `__init__.py`, the tests |
    | `example.widget.list`, `example.widget.rename` (operation ids) | `operations.py` |
@@ -37,6 +37,7 @@ meho_backplane/connectors/example_widget/
 tests/
   test_example_widget.py   both operations through MEHO, against a fake widget API
   test_kit_imports.py      the package imports MEHO only through the kit
+  test_version_range.py    each connector has a version range, or says why not
 ```
 
 The two operations:
@@ -93,6 +94,9 @@ uv run pytest tests/example_widget tests/test_operation_contracts.py
   each new release.
 - `tests/test_kit_imports.py` fails when a file of the package imports a
   MEHO module other than the kit or the package's own folder.
+- `tests/test_version_range.py` fails when a connector class of the package
+  has no `supported_version_range` and no `version_range_reason`. Without a
+  range, MEHO picks the connector for every version of the product.
 - `tests/test_operation_contracts.py` is MEHO's check of the operation
   texts and schemas. Run it with the package's folder in the checkout.
 

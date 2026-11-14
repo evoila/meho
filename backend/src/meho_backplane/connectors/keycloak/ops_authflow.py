@@ -3,43 +3,70 @@
 
 """Give a running realm the approval sign-in flow: ``keycloak.authflow.ensure_approval_flow``.
 
-The chart's realm file defines the login flow ``meho approval sign-in`` and
-binds it to the client ``meho-cli-approve``. Keycloak reads that file only
-when the realm does not exist yet, so a realm made earlier has no such flow.
-This op adds it with one governed request.
+The chart's realm file defines the login flow ``meho approval sign-in level``
+and binds it to the client ``meho-cli-approve``. Keycloak reads that file
+only when the realm does not exist yet, so a realm made earlier has no such
+flow. This op adds it with one governed request.
+
+The flow gives the approval level (#6281): level 2 of the realm's sign-in
+levels, named ``meho-approve`` in the ``acr`` claim. No other flow of the
+realm gives this level, so MEHO can tell an approval sign-in from any other
+sign-in.
 
 What the op does, on the target's managed realm:
 
 1. Find the client (default ``meho-cli-approve``). No client: stop before
    anything is written.
-2. Find the flow ``meho approval sign-in``.
+2. Find the flow ``meho approval sign-in level``.
 
-   * It does not exist: make it with the same steps as the realm file. The
-     password form (required), then the sub-flow
-     ``meho approval sign-in - one-time code`` (conditional) with
-     ``conditional-user-configured`` and ``auth-otp-form`` (both required).
-     Then read the steps again and check them.
-   * It exists with the same steps: change nothing.
-   * It exists with other steps: stop and name the first difference. Nothing
-     is written.
+   * It does not exist: make it with the same steps as the realm file. One
+     conditional sub-flow ``meho approval sign-in level - level 2`` with the
+     level step ``conditional-level-of-authentication`` (level 2, maximum
+     age 0, so it is asked for at every sign-in), the password form, and the
+     conditional sub-flow ``meho approval sign-in level - one-time code``
+     (``conditional-user-configured`` and ``auth-otp-form``). Then read the
+     steps again and check them.
+   * It exists with the same steps: change nothing, except that a level step
+     without its settings gets them (a run that stopped half-way).
+   * It exists with other steps, or the level step has other settings: stop
+     and name the first difference. Nothing is written.
 
-3. Bind the flow as the client's browser flow
+3. Name the level: the realm attribute ``acr.loa.map`` gets
+   ``"meho-approve": 2``, next to the names it has. The op stops before
+   it writes when another name already has level 2, or when the client
+   has its own ``acr.loa.map`` (Keycloak would then use the client's map).
+4. Bind the flow as the client's browser flow
    (``authenticationFlowBindingOverrides.browser``), unless it already is.
    The client is read, the one key is put on top, and the full client is
    written back, so no other client setting changes. Then the client is read
    again; the result reports the browser flow id that was read back.
 
-Safe to run twice: a second run finds the flow and the binding and writes
-nothing. Risk level ``caution`` with approval: the op changes how people sign
-in to approve.
+When Keycloak refuses (HTTP 403) the settings of the level step, the level
+name or the binding, the error names the refused step and what the run
+changed before: the flow (alias, id, ``flow_created``), the level setting
+and the level name.
+
+A 403 at the client lookup names the roles that let an account find a
+client (``query-clients``, ``view-clients`` or ``manage-clients``).
+
+Safe to run twice: a second run finds the flow, the level and the binding and
+writes nothing. Risk level ``caution`` with approval: the op changes how
+people sign in to approve.
 """
 
 from __future__ import annotations
 
+import functools
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 from meho_backplane.connectors.keycloak._paths import (
+    _ADMIN_REALM_PATH,
+    _AUTH_CONFIG_PATH,
+    _AUTH_EXECUTION_CONFIG_PATH,
     _AUTH_FLOW_ADD_STEP_PATH,
     _AUTH_FLOW_ADD_SUBFLOW_PATH,
     _AUTH_FLOW_EXECUTIONS_PATH,
@@ -47,12 +74,32 @@ from meho_backplane.connectors.keycloak._paths import (
     _CLIENT_PATH,
     fill_path,
 )
-from meho_backplane.connectors.keycloak.ops_read import KeycloakOp
+from meho_backplane.connectors.keycloak.ops_authflow_rights import (
+    CLIENT_LOOKUP_ROLES,
+    find_client_uuid,
+    missing_rights_error,
+    names_missing_rights,
+    register_rights_check,
+)
+from meho_backplane.connectors.keycloak.ops_authflow_schemas import (
+    APPROVAL_FLOW_OPS,
+    ENSURE_APPROVAL_FLOW_OP_ID,
+    WHEN_TO_USE_AUTHFLOW_BY_GROUP,
+)
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import merge_representation
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.core.keycloak_levels import (
+    APPROVAL_LEVEL,
+    APPROVAL_LEVEL_NAME,
+    LEVEL_MAP,
+    client_level_map,
+    level_conflict,
+    parse_level_map,
+)
+from meho_backplane.operations._preview import PreviewContext
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -62,22 +109,39 @@ if TYPE_CHECKING:
 __all__ = [
     "APPROVAL_FLOW_ALIAS",
     "APPROVAL_FLOW_OPS",
+    "APPROVAL_LEVEL_CONFIG",
+    "APPROVAL_LEVEL_STEP",
     "ENSURE_APPROVAL_FLOW_OP_ID",
     "WHEN_TO_USE_AUTHFLOW_BY_GROUP",
     "KeycloakApprovalFlowError",
+    "approval_flow_difference",
     "get_admin_list_strict",
     "keycloak_authflow_ensure_approval_flow",
 ]
 
-ENSURE_APPROVAL_FLOW_OP_ID = "keycloak.authflow.ensure_approval_flow"
-APPROVAL_FLOW_ALIAS = "meho approval sign-in"
-_CODE_FLOW_ALIAS = "meho approval sign-in - one-time code"
+APPROVAL_FLOW_ALIAS = "meho approval sign-in level"
+_LEVEL_FLOW_ALIAS = "meho approval sign-in level - level 2"
+_CODE_FLOW_ALIAS = "meho approval sign-in level - one-time code"
 _DEFAULT_CLIENT_ID = "meho-cli-approve"
 _FLOW_DESCRIPTION = (
-    "Sign-in of `meho approvals approve`: always asks for the password, and for "
-    "the one-time code when the person has set one up."
+    "Sign-in of `meho approvals approve`. It gives the approval level 2 (acr "
+    "meho-approve) and nothing else gives it: the password form, then the one-time "
+    "code when the person has set one up, every time."
 )
-_CODE_FLOW_DESCRIPTION = "Asks for the one-time code when the person has set one up."
+_SUBFLOW_DESCRIPTIONS = {
+    _LEVEL_FLOW_ALIAS: (
+        "Level 2: the password, then the one-time code. Asked for again at every sign-in."
+    ),
+    _CODE_FLOW_ALIAS: "Asks for the one-time code when the person has set one up.",
+}
+#: The settings of the level step: level 2, asked for at every sign-in.
+_LEVEL_CONFIG_ALIAS = _LEVEL_FLOW_ALIAS
+APPROVAL_LEVEL_CONFIG = {"loa-condition-level": str(APPROVAL_LEVEL), "loa-max-age": "0"}
+APPROVAL_LEVEL_STEP = "conditional-level-of-authentication"
+#: The realm-management roles the run needs: the flow, then the client binding.
+_ROLES = ("manage-realm", "manage-clients")
+#: A Keycloak permission on the one client can replace ``manage-clients``.
+_PER_CLIENT = ("manage-clients",)
 
 
 @dataclass(frozen=True)
@@ -93,10 +157,12 @@ class _Step:
 
 #: The steps in the order Keycloak lists them (a sub-flow's steps follow it).
 _STEPS: tuple[_Step, ...] = (
-    _Step(0, "auth-username-password-form", "REQUIRED", APPROVAL_FLOW_ALIAS),
-    _Step(0, _CODE_FLOW_ALIAS, "CONDITIONAL", APPROVAL_FLOW_ALIAS, subflow=True),
-    _Step(1, "conditional-user-configured", "REQUIRED", _CODE_FLOW_ALIAS),
-    _Step(1, "auth-otp-form", "REQUIRED", _CODE_FLOW_ALIAS),
+    _Step(0, _LEVEL_FLOW_ALIAS, "CONDITIONAL", APPROVAL_FLOW_ALIAS, subflow=True),
+    _Step(1, APPROVAL_LEVEL_STEP, "REQUIRED", _LEVEL_FLOW_ALIAS),
+    _Step(1, "auth-username-password-form", "REQUIRED", _LEVEL_FLOW_ALIAS),
+    _Step(1, _CODE_FLOW_ALIAS, "CONDITIONAL", _LEVEL_FLOW_ALIAS, subflow=True),
+    _Step(2, "conditional-user-configured", "REQUIRED", _CODE_FLOW_ALIAS),
+    _Step(2, "auth-otp-form", "REQUIRED", _CODE_FLOW_ALIAS),
 )
 
 
@@ -104,7 +170,11 @@ class KeycloakApprovalFlowError(RuntimeError):
     """The approval flow op stopped. ``code`` is a short, stable word.
 
     ``client_not_found``: the client does not exist. ``other_steps``: a flow
-    with the name exists with other steps. ``check_failed``: the flow or the
+    with the name exists with other steps, or its level step has other
+    settings. ``levels_not_object``: the realm's ``acr.loa.map`` is not a
+    JSON object. ``level_taken``: another name already has level 2 in the
+    realm's ``acr.loa.map``. ``client_level_map``: the client has its own
+    ``acr.loa.map``. ``check_failed``: the flow or the
     binding did not read back as written. ``flow_not_found``: the new flow
     could not be found after it was made.
     """
@@ -178,6 +248,16 @@ def _difference(steps: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def approval_flow_difference(rows: list[Any]) -> str | None:
+    """The first difference of the listed steps *rows* to the approval flow.
+
+    *rows* is the answer of ``GET .../authentication/flows/<alias>/executions``.
+    ``None`` when the steps are the ones of the realm file. The health check
+    uses it too (``meho_backplane.auth.approval_sign_in_flow``).
+    """
+    return _difference(_listed_steps(rows))
+
+
 async def _read_steps(
     connector: KeycloakConnector,
     operator: Operator,
@@ -230,7 +310,7 @@ async def _make_flow(
             body = {
                 "alias": step.name,
                 "type": "basic-flow",
-                "description": _CODE_FLOW_DESCRIPTION,
+                "description": _SUBFLOW_DESCRIPTIONS[step.name],
             }
         else:
             path = fill_path(_AUTH_FLOW_ADD_STEP_PATH, values)
@@ -268,6 +348,118 @@ async def _make_flow(
     return flow_id
 
 
+async def _ensure_level_setting(
+    connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
+) -> bool:
+    """Give the level step its settings when it has none; whether it was written.
+
+    Settings with other values are not changed: the op stops with
+    ``other_steps``. Runs on a flow whose steps match :data:`_STEPS`.
+    """
+    rows = await _read_steps(connector, operator, target, realm, APPROVAL_FLOW_ALIAS)
+    step = next(
+        row for row in rows if isinstance(row, dict) and _step_name(row) == APPROVAL_LEVEL_STEP
+    )
+    config_id = step.get("authenticationConfig")
+    if config_id:
+        path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(str(config_id))})
+        have = await connector._get_admin_json(target, path, operator=operator)
+        config = have.get("config")
+        values: dict[str, Any] = config if isinstance(config, dict) else {}
+        if any(values.get(key) != value for key, value in APPROVAL_LEVEL_CONFIG.items()):
+            raise KeycloakApprovalFlowError(
+                "other_steps",
+                f"the level step of flow {APPROVAL_FLOW_ALIAS!r} has the settings {values!r}; "
+                f"wanted {APPROVAL_LEVEL_CONFIG!r}. Nothing was changed.",
+            )
+        return False
+    path = fill_path(
+        _AUTH_EXECUTION_CONFIG_PATH,
+        {"realm": realm, "executionId": quote_segment(str(step.get("id")))},
+    )
+    await connector._write_admin(
+        target,
+        "POST",
+        path,
+        operator=operator,
+        json={"alias": _LEVEL_CONFIG_ALIAS, "config": dict(APPROVAL_LEVEL_CONFIG)},
+        idempotent_conflict=False,
+    )
+    return True
+
+
+async def _read_levels(
+    connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, path: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The realm's attributes and its level map; stops when the map cannot take level 2.
+
+    It stops when the map is not a JSON object, or when another name already
+    has level 2.
+    """
+    rep = await connector._get_admin_json(target, path, operator=operator)
+    attributes = dict(rep.get("attributes") or {})
+    levels = parse_level_map(attributes.get(LEVEL_MAP))
+    if levels is None:
+        raise KeycloakApprovalFlowError(
+            "levels_not_object",
+            f"the realm attribute {LEVEL_MAP!r} is not a JSON object; "
+            "nothing was changed. Fix it in the Keycloak admin console first.",
+        )
+    conflict = level_conflict(levels, {APPROVAL_LEVEL_NAME: APPROVAL_LEVEL})
+    if conflict is not None:
+        raise KeycloakApprovalFlowError(
+            "level_taken",
+            f"{conflict}. Nothing was changed. Give that name another level in the "
+            "Keycloak admin console (Realm settings, Sign-in levels), then run again.",
+        )
+    return attributes, levels
+
+
+async def _check_levels(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    realm: str,
+    client_path: str,
+) -> None:
+    """Stop before any write when the realm or the client cannot give the approval level."""
+    client = await connector._get_admin_json(target, client_path, operator=operator)
+    own_map = client_level_map(client)
+    if own_map is not None:
+        raise KeycloakApprovalFlowError(
+            "client_level_map",
+            f"{own_map}, so Keycloak would not use the realm's approval level. Nothing was "
+            f"changed. Remove the client's {LEVEL_MAP} in the Keycloak admin console "
+            "(the client's advanced settings), then run again.",
+        )
+    await _read_levels(connector, operator, target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}))
+
+
+async def _ensure_level_name(
+    connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
+) -> bool:
+    """Name level 2 ``meho-approve`` in the realm's ``acr.loa.map``; whether it was written.
+
+    The other names of the map stay. The full ``attributes`` map is written
+    back, because Keycloak drops realm attributes a write leaves out.
+    """
+    path = fill_path(_ADMIN_REALM_PATH, {"realm": realm})
+    attributes, levels = await _read_levels(connector, operator, target, path)
+    if levels.get(APPROVAL_LEVEL_NAME) == APPROVAL_LEVEL:
+        return False
+    levels[APPROVAL_LEVEL_NAME] = APPROVAL_LEVEL
+    attributes[LEVEL_MAP] = json.dumps(levels, separators=(",", ":"))
+    await connector._write_admin(
+        target,
+        "PUT",
+        path,
+        operator=operator,
+        json={"attributes": attributes},
+        idempotent_conflict=False,
+    )
+    return True
+
+
 async def _bind(
     connector: KeycloakConnector,
     operator: Operator,
@@ -302,6 +494,41 @@ async def _bind(
     }
 
 
+def _refused_text(
+    flow_id: str,
+    *,
+    step: str,
+    created: bool,
+    level_setting_added: bool,
+    level_changed: bool,
+    client_id: str | None = None,
+) -> str:
+    """Say what the run changed before Keycloak refused *step*.
+
+    Without *client_id* the text is short enough for the error message.
+    """
+    state = "made" if created else "already there"
+    text = (
+        f"{ENSURE_APPROVAL_FLOW_OP_ID} stopped half-way: the flow {APPROVAL_FLOW_ALIAS!r} "
+        f"(id {flow_id!r}, flow_created={str(created).lower()}) is {state}; "
+        f"Keycloak refused (HTTP 403) to {step}"
+    )
+    if client_id is None:
+        return f"{text}. See extras.remediation."
+    kept = [
+        name
+        for name, changed in (
+            ("the flow", created),
+            ("the level setting", level_setting_added),
+            ("the level name in the realm's level map", level_changed),
+        )
+        if changed
+    ]
+    after = f"These stay in the realm: {', '.join(kept)}." if kept else "MEHO changed nothing."
+    return f"{text} (client {client_id!r}). {after}"
+
+
+@names_missing_rights(ENSURE_APPROVAL_FLOW_OP_ID, _ROLES)
 async def keycloak_authflow_ensure_approval_flow(
     self: KeycloakConnector,
     operator: Operator,
@@ -312,11 +539,23 @@ async def keycloak_authflow_ensure_approval_flow(
     realm = resolve_realm_config(target).managed_realm
     realm_segment = quote_segment(realm)
     client_id = str(params.get("client_id") or _DEFAULT_CLIENT_ID).strip()
-    client_uuid = await self._find_client_uuid(target, realm_segment, client_id, operator=operator)
+    client_uuid = await find_client_uuid(
+        self,
+        operator,
+        target,
+        realm_segment,
+        client_id,
+        op_id=ENSURE_APPROVAL_FLOW_OP_ID,
+        roles=_ROLES,
+    )
     if client_uuid is None:
         raise KeycloakApprovalFlowError(
             "client_not_found", f"no client {client_id!r} in realm {realm!r}; nothing was changed"
         )
+    client_path = fill_path(
+        _CLIENT_PATH, {"realm": realm_segment, "client-uuid": quote_segment(client_uuid)}
+    )
+    await _check_levels(self, operator, target, realm_segment, client_path)
 
     flow_id = await _find_flow_id(self, operator, target, realm_segment)
     created = flow_id is None
@@ -344,156 +583,65 @@ async def keycloak_authflow_ensure_approval_flow(
                 f"{difference}. The client was not bound to it.",
             )
 
-    client_path = fill_path(
-        _CLIENT_PATH, {"realm": realm_segment, "client-uuid": quote_segment(client_uuid)}
-    )
-    binding = await _bind(self, operator, target, client_path, flow_id)
+    setting_added = level_changed = False
+    step = "write the settings of the level step"
+    try:
+        setting_added = await _ensure_level_setting(self, operator, target, realm_segment)
+        step = "write the realm's level map"
+        level_changed = await _ensure_level_name(self, operator, target, realm_segment)
+        step = "bind it to the client"
+        binding = await _bind(self, operator, target, client_path, flow_id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            raise
+        refused = functools.partial(
+            _refused_text,
+            flow_id,
+            step=step,
+            created=created,
+            level_setting_added=setting_added,
+            level_changed=level_changed,
+        )
+        raise await missing_rights_error(
+            self,
+            operator,
+            target,
+            exc,
+            op_id=ENSURE_APPROVAL_FLOW_OP_ID,
+            roles=_ROLES,
+            message=refused(),
+            done=refused(client_id=client_id),
+        ) from exc
     return {
         "realm": realm,
         "flow_alias": APPROVAL_FLOW_ALIAS,
         "flow_id": flow_id,
         "flow_created": created,
         "flow_steps": steps,
+        "level_setting_added": setting_added,
+        "level_name": APPROVAL_LEVEL_NAME,
+        "level_changed": level_changed,
         "client_id": client_id,
         "client_uuid": client_uuid,
         **binding,
     }
 
 
-_WHEN_TO_USE_AUTHFLOW = (
-    "Use to give a realm that already runs the approval sign-in flow "
-    "(``keycloak.authflow.ensure_approval_flow``). Keycloak reads the chart's "
-    "realm file only when the realm is new, so an older realm has no flow "
-    "'meho approval sign-in'. The op makes the flow (password, then the "
-    "one-time code when the person has one) and binds it as the browser flow "
-    "of the client 'meho-cli-approve'. Safe to run twice. A flow with that "
-    "name but other steps is not changed: the op stops and names the "
-    "difference. It needs approval."
-)
+async def _approval_flow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Card for the op: the realm, the flow and the client it binds."""
+    try:
+        realm: str | None = resolve_realm_config(ctx.target).managed_realm
+    except Exception:
+        realm = None
+    return {
+        "resource": "client_browser_flow",
+        "realm": realm,
+        "flow": APPROVAL_FLOW_ALIAS,
+        "client_id": str(ctx.params.get("client_id") or _DEFAULT_CLIENT_ID).strip(),
+        "client_lookup_needs_one_of": list(CLIENT_LOOKUP_ROLES),
+    }
 
-_WHEN_TO_USE_AUTHFLOW_GROUP = (
-    "Use to change a realm's login flows with approval. "
-    "``keycloak.authflow.ensure_approval_flow`` gives a realm the approval "
-    "sign-in flow of 'meho-cli-approve'. "
-    "``keycloak.authflow.ensure_passkey_code_skip`` gives a realm made before "
-    "Keycloak 26.4 the step that skips the one-time code after a passkey "
-    "login. Both are safe to run twice and stop without a change on a flow "
-    "with another shape."
-)
 
-#: Group text for the login flow ops' group, merged into the connector's map.
-WHEN_TO_USE_AUTHFLOW_BY_GROUP: dict[str, str] = {"authflow_write": _WHEN_TO_USE_AUTHFLOW_GROUP}
-
-_PARAMETER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "client_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 255,
-            "description": "Client to bind the flow to. Default 'meho-cli-approve'.",
-        },
-    },
-    "additionalProperties": False,
-    "examples": [{}, {"client_id": "meho-cli-approve"}],
-}
-
-_RESPONSE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "realm": {"type": "string", "description": "The target's managed realm."},
-        "flow_alias": {"type": "string", "description": "Always 'meho approval sign-in'."},
-        "flow_id": {"type": "string", "description": "Internal id of the flow."},
-        "flow_created": {
-            "type": "boolean",
-            "description": "true: this run made the flow. false: it was already there.",
-        },
-        "flow_steps": {
-            "type": "array",
-            "description": "The flow's steps as read back from Keycloak.",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "level": {"type": ["integer", "null"]},
-                    "step": {"type": "string"},
-                    "requirement": {"type": ["string", "null"]},
-                },
-            },
-        },
-        "client_id": {"type": "string", "description": "The client the flow is bound to."},
-        "client_uuid": {"type": "string", "description": "Internal id of the client."},
-        "browser_flow_id": {
-            "type": "string",
-            "description": "The client's browser flow, read back after the run.",
-        },
-        "previous_browser_flow_id": {
-            "type": ["string", "null"],
-            "description": "The client's browser flow before the run; null when it had none.",
-        },
-        "binding_changed": {
-            "type": "boolean",
-            "description": "true: this run bound the flow. false: it was already bound.",
-        },
-    },
-    "required": [
-        "realm",
-        "flow_alias",
-        "flow_id",
-        "flow_created",
-        "flow_steps",
-        "client_id",
-        "client_uuid",
-        "browser_flow_id",
-        "previous_browser_flow_id",
-        "binding_changed",
-    ],
-}
-
-APPROVAL_FLOW_OPS: tuple[KeycloakOp, ...] = (
-    KeycloakOp(
-        op_id=ENSURE_APPROVAL_FLOW_OP_ID,
-        handler_attr="authflow_ensure_approval_flow",
-        summary="Make the approval sign-in flow on the realm and bind it to meho-cli-approve.",
-        description=(
-            "Makes the login flow 'meho approval sign-in' (password, then the "
-            "one-time code) on the managed realm when it is missing, and sets "
-            "it as the browser flow of 'meho-cli-approve'. Changes nothing when "
-            "both are there. Stops without a change when the flow has other steps."
-        ),
-        parameter_schema=_PARAMETER_SCHEMA,
-        response_schema=_RESPONSE_SCHEMA,
-        group_key="authflow_write",
-        tags=("login-flow", "client", "keycloak"),
-        safety_level="caution",
-        requires_approval=True,
-        llm_instructions={
-            "when_to_use": _WHEN_TO_USE_AUTHFLOW,
-            "when_to_call": (
-                "When a realm made before the approval sign-in flow existed must "
-                "get it, so that `meho approvals approve` asks for the password "
-                "and the one-time code. Also to check it: a second run changes "
-                "nothing."
-            ),
-            "preconditions": (
-                "The client (default 'meho-cli-approve') must exist in the "
-                "target's managed realm. Create it first with "
-                "keycloak.client.create when it is missing."
-            ),
-            "parameter_hints": {
-                "client_id": "Leave it out to use 'meho-cli-approve'.",
-            },
-            "output_shape": (
-                "``{realm, flow_alias, flow_id, flow_created, flow_steps: "
-                "[{level, step, requirement}], client_id, client_uuid, "
-                "browser_flow_id, previous_browser_flow_id, binding_changed}``."
-            ),
-            "next_step": (
-                "flow_created and binding_changed both false: the realm already "
-                "had the flow, nothing changed. An error with 'other_steps' names "
-                "the difference; a person fixes the flow in the Keycloak admin "
-                "console. Then `meho approvals approve` asks for the password "
-                "and the one-time code through this flow."
-            ),
-        },
-    ),
+register_rights_check(
+    ENSURE_APPROVAL_FLOW_OP_ID, _ROLES, _approval_flow_preview, per_object=_PER_CLIENT
 )

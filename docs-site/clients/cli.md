@@ -1,5 +1,7 @@
 # The `meho` CLI
 
+New here? Start with the [laptop guide](../install/laptop-tools.md).
+
 The `meho` CLI is a single static Go binary and the **starting point**
 for connecting to a backplane. It runs on a VPN-connected workstation,
 verifies TLS against your operating system's trust store, and
@@ -181,6 +183,26 @@ not need the URL re-typed. That file holds **only** the backplane URL —
 no secret; the token lives in the keyring, or in a `0600`-mode
 `credentials.json` sibling on headless hosts where no keyring is
 available.
+
+### Several logins at once (profiles)
+
+One person sometimes needs two identities, for example one that starts
+a write and one that approves it. Give each identity a profile name:
+
+```bash
+meho login https://meho.example.com --profile initiator
+meho login https://meho.example.com --profile approver
+meho --profile approver status      # or: export MEHO_PROFILE=approver
+```
+
+Each profile keeps its own login, so switching needs no new login.
+`--profile` beats `MEHO_PROFILE`. Without either, the CLI uses the
+default login. This replaces using one `XDG_CONFIG_HOME` for each
+identity. All profiles share the saved backplane URL, so a login with
+another URL changes it for every profile (the login prints one line
+when it does). The browser sign-in of `meho approvals approve` decides
+who approves; the profile only picks the login for `approvals list`
+and `approvals show`.
 
 ### How long the login lasts
 

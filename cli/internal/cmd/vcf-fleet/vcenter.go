@@ -40,7 +40,7 @@ func newVcenterListCmd() *cobra.Command {
 			"obtained from `vcf-fleet datacenter list`. The hostname field is the\n" +
 			"load-bearing identifier for cross-referencing against vSphere targets.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example:       "  meho vcf-fleet vcenter list dc-vmid-001 --target rdc-fleet",
+		Example:       "  meho vcf-fleet vcenter list dc-vmid-001 --target fleet-lab",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -42,7 +42,7 @@ rewrites any :data:`BLOCK_START` / :data:`BLOCK_END` substring found
 in the interpolated field values *before* the wrapper runs. The
 assembled band therefore carries exactly one delimiter pair -- the
 one the wrapper emits -- and legitimate content (which never contains
-these MEHO-internal sentinels) renders unchanged. This mirrors the
+these internal sentinels) renders unchanged. This mirrors the
 field-constraint discipline the runbook-priming band already enforces
 via its slug/step-id regex.
 
@@ -115,7 +115,7 @@ def _neutralise_delimiters(text: str) -> str:
     :data:`_NEUTRALISED_DELIMITER` before the positional wrapper runs
     guarantees the assembled band carries exactly one delimiter pair --
     the one the wrapper emits. Legitimate content never contains these
-    MEHO-internal sentinels, so it renders unchanged.
+    internal sentinels, so it renders unchanged.
     """
     for delimiter in (BLOCK_START, BLOCK_END):
         text = text.replace(delimiter, _NEUTRALISED_DELIMITER)

@@ -136,6 +136,7 @@ from meho_backplane.operations.budget_enforcement import (
     evaluate_pre_run_budget,
 )
 from meho_backplane.operations.identity_budget import TokenUsage
+from meho_backplane.session_store.hosted_runs import RunEventLog, add_run_session
 from meho_backplane.settings import Settings, get_settings
 
 if TYPE_CHECKING:
@@ -857,6 +858,13 @@ class AgentInvoker:
                 ttl_seconds=get_settings().agent_run_lease_ttl_seconds,
             )
             run_id = row.id
+            add_run_session(
+                session,
+                run_id=run_id,
+                tenant_id=operator.tenant_id,
+                started_by=operator.sub,
+                agent_name=entry.name,
+            )
             await session.commit()
         return run_id, owner
 
@@ -999,6 +1007,26 @@ class AgentInvoker:
                 )
             await session.commit()
 
+    async def _record_loop_failure(
+        self,
+        run_id: uuid.UUID,
+        exc: Exception,
+        events: RunEventLog,
+        handle: AgentRunHandle | None,
+    ) -> None:
+        """Save the ``error`` event of a failed background run, then record the failure."""
+        if not isinstance(exc, AgentRunError):
+            _log.warning("agent_invoke_unexpected_failure", run_id=str(run_id), error=str(exc))
+        await events.save("error", {"error": str(exc)})
+        await _finish_despite_cancel(
+            self._finalize_run(
+                run_id,
+                output=None,
+                error=str(exc),
+                request_usages=_handle_usages(handle),
+            )
+        )
+
     async def _finalize_success(self, run_id: uuid.UUID, result: AgentRunResult) -> None:
         """Record the output of a run that succeeded and charge its calls."""
         usage = TokenUsage(
@@ -1069,11 +1097,17 @@ class AgentInvoker:
         session_token = agent_session_id_var.set(run_id)
         meta_token = agent_run_audit_meta_var.set(meta)
         heartbeat = _LeaseHeartbeat(run_id, lease_owner)
+        events = RunEventLog(run_id, operator.tenant_id)
         handle: AgentRunHandle | None = None
         try:
             try:
                 handle = self._runtime.start(
-                    definition, operator, inputs, run_id=run_id, model=model
+                    definition,
+                    operator,
+                    inputs,
+                    run_id=run_id,
+                    model=model,
+                    on_event=events.save_event,
                 )
                 result = await self._runtime.result(handle)
             except asyncio.CancelledError:
@@ -1084,19 +1118,8 @@ class AgentInvoker:
                 )
                 raise
             except Exception as exc:
-                if not isinstance(exc, AgentRunError):
-                    _log.warning(
-                        "agent_invoke_unexpected_failure", run_id=str(run_id), error=str(exc)
-                    )
                 heartbeat.settle()
-                await _finish_despite_cancel(
-                    self._finalize_run(
-                        run_id,
-                        output=None,
-                        error=str(exc),
-                        request_usages=_handle_usages(handle),
-                    )
-                )
+                await self._record_loop_failure(run_id, exc, events, handle)
                 return
             heartbeat.settle()
             await _finish_despite_cancel(self._finalize_success(run_id, result))
@@ -1428,6 +1451,7 @@ class AgentInvoker:
             operator_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
         )
+        await RunEventLog(run_id, operator.tenant_id).save("error", {"error": error})
         await self._finalize_run(run_id, output=None, error=error)
         return AgentRunOutcome(
             run_id=run_id,
@@ -1466,6 +1490,7 @@ class AgentInvoker:
             operator_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
         )
+        await RunEventLog(run_id, operator.tenant_id).save("error", {"error": error})
         await self._finalize_run(run_id, output=None, error=error)
         return AgentRunOutcome(
             run_id=run_id,
@@ -1804,13 +1829,7 @@ class AgentInvoker:
         runbook = _unexecutable_runbook_instruction(definition, inputs)
         if runbook is not None:
             outcome = await self._refuse_unexecutable_runbook(run_id, name, operator, runbook)
-            yield (
-                run_id,
-                AgentRunEvent(
-                    kind=AgentRunEventKind.ERROR,
-                    data={"error": outcome.error},
-                ),
-            )
+            yield run_id, AgentRunEvent(kind=AgentRunEventKind.ERROR, data={"error": outcome.error})
             return
 
         terminal_output: dict[str, object] | None = None
@@ -1842,6 +1861,7 @@ class AgentInvoker:
         # fresh for the stream's lifetime; cancel it once the stream
         # terminates (final/error event, client disconnect, cancel).
         heartbeat = _LeaseHeartbeat(run_id, lease_owner)
+        events = RunEventLog(run_id, operator.tenant_id)
         # Usage of the requests the run finished, kept current by the runtime,
         # so a run that ends by an error or a closed stream is still charged.
         usage_sink: list[TokenUsage] = []
@@ -1862,6 +1882,7 @@ class AgentInvoker:
                     terminal_error = str(event.data.get("error"))
                 elif event.kind is AgentRunEventKind.TURN:
                     turns += 1
+                await events.save_event(event)
                 yield run_id, event
         finally:
             await heartbeat.close()
@@ -1894,10 +1915,22 @@ async def _resolve_child_definition(
     structured :class:`~pydantic_ai.ModelRetry`. Mirrors
     :meth:`AgentInvoker._load_definition` but returns ``None`` instead of
     raising, per the resolver protocol.
+
+    The owner rule is the same as for a direct run: an agent login resolves
+    only the definitions whose ``identity_ref`` is its own client id. A
+    person resolves any enabled definition of the tenant.
     """
     service = AgentDefinitionService()
     entry = await service.get(operator.tenant_id, agent_name)
     if entry is None or not entry.enabled:
+        return None
+    if operator.principal_kind is PrincipalKind.AGENT and entry.identity_ref != operator.client_id:
+        _log.info(
+            "agent_invoke_child_not_owned",
+            agent=agent_name,
+            client_id=operator.client_id,
+            tenant_id=str(operator.tenant_id),
+        )
         return None
     return AgentInvoker._to_agent_definition(entry)
 

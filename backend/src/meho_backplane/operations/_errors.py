@@ -47,7 +47,13 @@ from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
-from meho_backplane.operations.deny_reasons import READ_SCOPE_DENIED, deny_reason_code
+from meho_backplane.operations.deny_reasons import (
+    AGENT_NO_GRANT,
+    AGENT_STEPS_NOT_DECLARED,
+    READ_SCOPE_DENIED,
+    deny_reason_code,
+    is_agent_no_grant,
+)
 from meho_backplane.operations.uncertain_outcome import (
     UNCERTAIN_ADVICE,
     UNCERTAIN_OUTCOME,
@@ -717,7 +723,11 @@ def result_denied(
     source and any ceilings that were applied so an agent can diagnose
     the refusal without human intervention. ``error_code`` is ``denied``,
     or :data:`READ_SCOPE_DENIED_CODE` when the reason starts with that
-    code (the gate's stable marker for a read-scope refusal).
+    code (the gate's stable marker for a read-scope refusal), or
+    ``agent_no_grant`` when an agent has no grant and the
+    ``AGENT_GRANT_REQUIRED`` switch is on (#6189), or
+    ``agent_steps_not_declared`` when an agent calls a multi-step operation
+    whose steps are not declared and the switch is on (#6298).
 
     ``reason_code`` says which rule refused the call
     (:mod:`~meho_backplane.operations.deny_reasons`). When the caller does
@@ -728,6 +738,10 @@ def result_denied(
     error_code = "denied"
     if reason.startswith(f"{READ_SCOPE_DENIED_CODE}:"):
         error_code = READ_SCOPE_DENIED_CODE
+    elif is_agent_no_grant(reason):
+        error_code = AGENT_NO_GRANT
+    elif reason.startswith(f"{AGENT_STEPS_NOT_DECLARED}:"):
+        error_code = AGENT_STEPS_NOT_DECLARED
     return OperationResult(
         status="denied",
         op_id=op_id,
@@ -879,6 +893,40 @@ def result_audit_commit_failed(
         ),
         duration_ms=duration_ms,
         extras=extras,
+    )
+
+
+def result_audit_row_invalid(
+    op_id: str,
+    field: str,
+    reason: str,
+    duration_ms: float,
+) -> OperationResult:
+    """The audit row of this call could not be stored, so the call was not sent.
+
+    MEHO checks the values of the audit row before it sends a call to the
+    target (:func:`~meho_backplane.operations.audit_row_precheck.audit_row_problem`).
+    When one value can never be stored, the call is refused here: nothing
+    went to the target and no approval request was made. *field* names the
+    value, never its content. Compare ``audit_commit_failed``: there the call
+    ran and the outcome is unknown.
+    """
+    remediation = f"Nothing was sent to the target. Fix the value of {field} and call again."
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"audit_row_invalid: the audit record of this call could not be saved "
+            f"because {field} {reason}. The operation did not run."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "audit_row_invalid",
+            "field": field,
+            "reason": reason,
+            "execution_outcome": "not_started",
+            "remediation": remediation,
+        },
     )
 
 
@@ -2162,13 +2210,16 @@ def result_connector_http_403(
     accepted/required permissions -- into an opaque
     ``connector_error: HTTPStatusError`` with only the httpx status
     line, the actionable detail buried in
-    ``extras["exception_message"]`` (consumer
-    ``claude-rdc-hetzner-dc#1138``).
+    ``extras["exception_message"]`` (consumer feedback).
 
     The cause is kept **connector-agnostic**: any upstream 403 means the
-    credential reached the upstream and was rejected on authorization,
-    not transport -- so the operator-facing ``error`` names the likely
-    insufficient-permission cause regardless of which connector raised.
+    upstream refused the call, not a transport fault. Most often the
+    account lacks a permission, but some vendors (NSX, for one) also
+    answer a wrong password or a locked account with 403. So the
+    operator-facing ``error`` claims no successful login and gives no
+    retry advice: it names both causes, points at ``upstream_message``,
+    and says to check the target's account first, because more calls
+    with a wrong password can lock the account (#6254).
     ``extras`` carries the machine-usable fields an agent can branch on
     without re-parsing a transport error: ``http_status`` (always
     ``403`` -- the dispatcher scopes this builder to that code; 401/429
@@ -2187,15 +2238,17 @@ def result_connector_http_403(
         if (value := response.headers.get(header)) is not None
     }
     summary = (
-        "connector_http_403: the upstream returned HTTP 403 Forbidden. The "
-        "target credential reached the upstream and was authenticated, but "
-        "may lack the permission this operation requires -- a credential "
-        "scope matter on the target, not a meho transport fault. Grant the "
-        "missing permission on the backing credential (for a GitHub App / "
-        "fine-grained PAT, the accepted permission is echoed in "
-        "extras.permission_headers when the upstream sent it) and retry. See "
-        "docs/codebase/error-message-shape.md for the dispatch error "
-        "convention."
+        "connector_http_403: the upstream returned HTTP 403 Forbidden -- it "
+        "refused this call. A 403 can mean that the target's account lacks a "
+        "permission this operation needs, or that its password is wrong or "
+        "the account is locked (some vendors answer a failed login with 403). "
+        "Read extras.upstream_message to see which. Do not retry yet: more "
+        "calls with a wrong password can lock the account, or keep it locked. "
+        "First check the target's account: its password, whether it is "
+        "locked, and its permissions (for a GitHub App / fine-grained PAT, "
+        "the accepted permission is echoed in extras.permission_headers when "
+        "the upstream sent it). See docs/codebase/error-message-shape.md for "
+        "the dispatch error convention."
     )
     if upstream_message is not None:
         summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
@@ -2234,8 +2287,7 @@ def result_connector_http_422(
     ``connector_error: HTTPStatusError`` with only the httpx status line,
     the actionable detail buried in ``extras["exception_message"]``. That
     bare shape is exactly what slowed the diagnosis of the
-    requestBody-mangling bug T5 #1656 (consumer
-    ``claude-rdc-hetzner-dc#1138``).
+    requestBody-mangling bug T5 #1656 (consumer feedback).
 
     The cause is kept **connector-agnostic**: any upstream 422 means the
     upstream parsed the request and rejected its *content*, not transport
@@ -2397,10 +2449,11 @@ _AUTH_FAILED_DOC_TAIL = (
 def _auth_failed_summary(
     *,
     stage: Literal["establish", "dispatch", "after_relogin", "call"],
-    status_code: int,
+    status_label: str,
     host: str,
     remediation: str,
     relogin: Literal["not_available", "attempted_failed", "reestablished"],
+    over_http: bool,
 ) -> str:
     """Compose the stage-aware operator-facing ``connector_auth_failed`` summary (#2400).
 
@@ -2420,19 +2473,31 @@ def _auth_failed_summary(
     * ``call`` -- a connector rejected a normal call on a live session with
       an auth/permission fault that a fresh login cannot fix (#3566), so no
       re-login was tried.
+
+    *status_label* is ``HTTP <status>`` when the connector got a real HTTP
+    status, else ``cause <cause>``. With ``over_http=False`` (a database
+    login, for example) the establish text says that the system refused
+    the login, not that an HTTP login was rejected (#6154).
     """
     if stage == "call":
         return (
             f"connector_auth_failed: the upstream rejected this call with an "
-            f"auth/permission fault (HTTP {status_code}) for {host}. "
+            f"auth/permission fault ({status_label}) for {host}. "
             f"{remediation} {_AUTH_FAILED_DOC_TAIL}"
         )
     if stage == "establish":
-        lead = (
-            f"connector_auth_failed: the login itself was rejected (HTTP "
-            f"{status_code}) for {host} -- the credential was refused at "
-            f"session establish."
-        )
+        if over_http:
+            lead = (
+                f"connector_auth_failed: the login itself was rejected "
+                f"({status_label}) for {host} -- the credential was refused at "
+                f"session establish."
+            )
+        else:
+            lead = (
+                f"connector_auth_failed: the system at {host} refused the login "
+                f"({status_label}) -- the credential was refused at session "
+                f"establish."
+            )
         if relogin == "attempted_failed":
             lead = (
                 f"{lead} This followed a forced re-login after a mid-session "
@@ -2442,14 +2507,14 @@ def _auth_failed_summary(
     if stage == "after_relogin":
         return (
             f"connector_auth_failed: the upstream returned an auth/session "
-            f"failure (HTTP {status_code}) for {host}. The session was already "
+            f"failure ({status_label}) for {host}. The session was already "
             f"re-logged-in and retried once on a session-expiry status, and the "
             f"fresh session was still rejected. {remediation} "
             f"{_AUTH_FAILED_DOC_TAIL}"
         )
     return (
         f"connector_auth_failed: the upstream returned an auth/session failure "
-        f"(HTTP {status_code}) for {host}. The connector reached the host but "
+        f"({status_label}) for {host}. The connector reached the host but "
         f"its per-request credential was rejected; this connector holds no "
         f"re-loginable session (no invalidate_session hook), so no re-login was "
         f"attempted. {remediation} If this persists after restaging, verify the "
@@ -2597,12 +2662,17 @@ def result_connector_auth_failed(
         remediation = _auth_scheme_remediation(target_name)
     else:
         remediation = _auth_restage_remediation(target_name, secret_ref)
+    # #6154: a connector that does not use HTTP (a database login, for
+    # example) still passes a status code; the text then names its own
+    # cause instead of an HTTP status it never got.
+    over_http = exc.over_http if isinstance(exc, ConnectorAuthError) else True
     summary = _auth_failed_summary(
         stage=stage,
-        status_code=status_code,
+        status_label=f"HTTP {status_code}" if over_http else f"cause {cause}",
         host=host,
         remediation=remediation,
         relogin=relogin,
+        over_http=over_http,
     )
     if upstream_message is not None:
         summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
@@ -2892,7 +2962,9 @@ def result_write_capability_denied(
     reason). Its ``granted`` / ``required`` / ``path`` / ``reason`` fields
     ride in ``extras`` next to the ``doc_ref`` for the write policy. The
     ``reason`` may hold a probe exception class or a target lookup problem,
-    so it goes through :func:`_sanitize_free_text`.
+    so it goes through :func:`_sanitize_free_text`. A check that is not a
+    Vault check sets ``remediation`` (the next step) and ``doc_ref``; without
+    them the text points at the Vault write policy.
     """
     path = preflight.get("path")
     granted = list(preflight.get("granted") or [])
@@ -2904,11 +2976,20 @@ def result_write_capability_denied(
         detail += f" (needs {required}, has {granted})"
     if reason:
         detail += f" (check result: {reason})"
+    # A check of another vendor names its own next step and doc.
+    remediation = preflight.get("remediation")
+    doc_ref = preflight.get("doc_ref")
+    if not isinstance(remediation, str) or not remediation:
+        remediation = (
+            f"Add the write grant (see {_VAULT_WRITE_POLICY_DOC} section 6), "
+            "then call the operation again."
+        )
+    if not isinstance(doc_ref, str) or not doc_ref:
+        doc_ref = f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface"
     summary = (
         f"write_capability_denied: the identity this write runs under cannot "
         f"perform it{detail}. MEHO did not create an approval request, because "
-        f"the write would fail after approval. Add the write grant (see "
-        f"{_VAULT_WRITE_POLICY_DOC} section 6), then call the operation again."
+        f"the write would fail after approval. {remediation}"
     )
     return OperationResult(
         status="denied",
@@ -2921,7 +3002,7 @@ def result_write_capability_denied(
             "granted": granted,
             "required": required,
             "reason": reason,
-            "doc_ref": f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface",
+            "doc_ref": doc_ref,
         },
     )
 

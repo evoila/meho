@@ -50,7 +50,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
-from meho_backplane.operations.approval_outcome import resume_outcome
+from meho_backplane.operations.approval_outcome import ResumeOutcome, resume_outcome
 from meho_backplane.operations.approval_outcome_check import (
     list_outcome_unknown,
     outcome_check,
@@ -64,6 +64,7 @@ from meho_backplane.operations.approval_queue import (
     get_request,
     list_pending,
 )
+from meho_backplane.settings import get_settings
 
 #: Canonical op ids — same as the REST routes for transport-independent audit rows.
 _OP_IDS: Final[dict[str, str]] = {
@@ -122,6 +123,21 @@ _APPROVAL_ID_ANYOF: Final[list[dict[str, Any]]] = [
 ]
 
 
+def _outcome_to_dict(outcome: ResumeOutcome) -> dict[str, Any]:
+    """Render the run summary. ``exit_code`` only with ``MCP_APPROVAL_EXIT_CODE`` on."""
+    out: dict[str, Any] = {
+        "resumed_at": outcome.resumed_at,
+        "result_status": outcome.result_status,
+        "error_code": outcome.error_code,
+        "audit_id": str(outcome.audit_id) if outcome.audit_id else None,
+        "guidance": outcome.guidance,
+        "execution_outcome": outcome.execution_outcome,
+    }
+    if get_settings().mcp_approval_exit_code:
+        out["exit_code"] = outcome.exit_code
+    return out
+
+
 def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
     """Render an :class:`ApprovalRequest` as a JSON-serialisable dict.
 
@@ -131,8 +147,9 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
     ``result_state`` and ``resume_outcome`` (#3486, #3543) match the REST
     view: whether an approved request ran, and a short summary of how the
     run ended. The result body stays on the owner-only REST ``/result``.
-    ``reveal_secret`` matches the REST view too: ``True`` when the approved
-    run returns the hidden values of the answer to the requester.
+    ``reveal_secret`` matches the REST view too: ``True`` when the requester
+    asked for the hidden values of the answer. The run happens when the
+    requester gets the values.
     """
     result_state = approval_result_state(row)
     outcome = resume_outcome(row)
@@ -149,23 +166,13 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
         "connector_id": row.connector_id,
         "target_id": str(row.target_id) if row.target_id else None,
         "proposed_effect": row.proposed_effect,
-        # True when the approved run returns the hidden values of the answer
-        # to the requester (the requester sent ``reveal_secret: true``).
+        # True when the requester asked for the hidden values of the answer
+        # (``reveal_secret: true``). The operation runs when the requester
+        # gets the values, not on approve.
         "reveal_secret": bool(row.reveal_secret),
         "status": row.status,
         "result_state": result_state.value if result_state is not None else None,
-        "resume_outcome": (
-            {
-                "resumed_at": outcome.resumed_at,
-                "result_status": outcome.result_status,
-                "error_code": outcome.error_code,
-                "audit_id": str(outcome.audit_id) if outcome.audit_id else None,
-                "guidance": outcome.guidance,
-                "execution_outcome": outcome.execution_outcome,
-            }
-            if outcome is not None
-            else None
-        ),
+        "resume_outcome": _outcome_to_dict(outcome) if outcome is not None else None,
         # #5026: why the outcome is unknown and what to check, and what a
         # person recorded after they checked the target.
         "outcome_unknown": (
@@ -399,8 +406,9 @@ register_mcp_tool(
             "Operator-level. Returns the full detail including "
             "proposed_effect (human-readable description of what the op "
             "would do) so an operator can decide before approving. "
-            "`reveal_secret: true` means the approved run returns the "
-            "hidden values of the answer to the requester. "
+            "`reveal_secret: true` means the requester asked for the "
+            "hidden values of the answer. Approving runs nothing: the "
+            "operation runs once, when the requester gets the values. "
             "Cross-tenant / absent ids return approval_request_not_found. "
             "Pass either `approval_request_id` (canonical name) "
             "or the deprecated `id` alias."

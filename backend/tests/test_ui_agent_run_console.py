@@ -31,7 +31,7 @@ import asyncio
 import re
 import uuid
 import warnings
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from datetime import timedelta
 from typing import Any
 
@@ -42,11 +42,13 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
+from sqlalchemy import select
 
 from meho_backplane.agent.invocation import (
     AgentDisabledError,
     AgentNotFoundError,
     AgentRunNotFoundError,
+    AgentRunOutcome,
     BudgetExceededError,
     reset_agent_invoker_for_testing,
 )
@@ -54,7 +56,7 @@ from meho_backplane.agent.run import AgentRunEvent, AgentRunEventKind
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import AgentDefinition, Tenant
+from meho_backplane.db.models import AgentDefinition, AgentRunStatus, AuditLog, Tenant
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -72,6 +74,7 @@ from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.routes.agents import run_token as run_token_module
 from meho_backplane.ui.routes.agents.run_token import mint_run_token
 from meho_backplane.ui.templating import reset_templating_for_testing
+from tests._hosted_run_helpers import record_hosted_run
 from tests._oidc_jwt_helpers import (
     AUDIENCE as _DEFAULT_AUDIENCE,
 )
@@ -277,11 +280,12 @@ def _csrf_headers(token: str) -> dict[str, str]:
 class _FakeInvoker:
     """Deterministic stand-in for :class:`AgentInvoker`.
 
-    ``ensure_runnable`` raises the configured error (or passes); the
-    streaming generator yields a fixed sequence of run events so the SSE
-    bridge emits known frames without a model / DB round-trip. The
-    ``operator`` arg is captured so a test can assert the bridge passed
-    the lifted (tenant-scoped) operator rather than a request parameter.
+    ``ensure_runnable`` raises the configured error (or passes); ``run``
+    writes a finished run with a fixed sequence of saved events to the
+    test database, without a model, so the SSE bridge streams known frames
+    from the store. The ``operator`` arg is captured so a test can assert
+    the bridge passed the lifted (tenant-scoped) operator rather than a
+    request parameter.
     """
 
     def __init__(
@@ -298,22 +302,31 @@ class _FakeInvoker:
         self._cancel_error = cancel_error
         self.stream_calls: list[tuple[str, str]] = []
         self.stream_operators: list[Operator] = []
+        self.run_ids: list[uuid.UUID] = []
         self.cancel_calls: list[tuple[uuid.UUID, Operator]] = []
 
     async def ensure_runnable(self, operator: Operator, name: str) -> None:
         if self._ensure_error is not None:
             raise self._ensure_error
 
-    async def stream_events(
+    async def run(
         self,
         operator: Operator,
         name: str,
         inputs: str,
-    ) -> AsyncIterator[tuple[uuid.UUID, AgentRunEvent]]:
+        *,
+        async_mode: bool = False,
+    ) -> AgentRunOutcome:
         self.stream_calls.append((name, inputs))
         self.stream_operators.append(operator)
-        for event in self._events:
-            yield self._run_id, event
+        run_id = await record_hosted_run(
+            tenant_id=operator.tenant_id,
+            sub=operator.sub,
+            events=[(event.kind.value, event.data) for event in self._events],
+            agent_name=name,
+        )
+        self.run_ids.append(run_id)
+        return AgentRunOutcome(run_id=run_id, status=AgentRunStatus.RUNNING)
 
     async def cancel(self, operator: Operator, run_id: uuid.UUID) -> object:
         """Record the cancel + raise the configured error, else return a sentinel.
@@ -496,6 +509,29 @@ def test_run_post_returns_transcript_with_stream_token() -> None:
     assert session_id.hex not in body
 
 
+def test_run_post_counts_work_ref_length_after_nfc() -> None:
+    """A ticket id of 130 composed letters sent in NFD form (260 code points) is taken."""
+    import unicodedata
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    reset_agent_invoker_for_testing(_FakeInvoker())
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            "/ui/agents/a1/run",
+            data={"input": "go", "work_ref": unicodedata.normalize("NFD", "\u00c4" * 130)},
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "/ui/agents/a1/run/stream?token=" in response.text
+
+
 def test_run_transcript_stop_dialog_opts_out_of_autopen() -> None:
     """The Stop-confirm dialog must not auto-open when the transcript swaps in.
 
@@ -606,7 +642,6 @@ def test_stream_bridge_streams_frames_incrementally() -> None:
     """The bridge proxies stream_events, emitting one SSE frame per event."""
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_agent(tenant_id=_TENANT_A, name="a1")
-    run_id = uuid.uuid4()
     fake = _FakeInvoker(
         events=[
             AgentRunEvent(kind=AgentRunEventKind.TURN, data={}),
@@ -616,7 +651,6 @@ def test_stream_bridge_streams_frames_incrementally() -> None:
             ),
             AgentRunEvent(kind=AgentRunEventKind.FINAL, data={"output": {"ok": True}}),
         ],
-        run_id=run_id,
     )
     reset_agent_invoker_for_testing(fake)
     keypair, jwks = _make_keypair_and_jwks()
@@ -636,7 +670,10 @@ def test_stream_bridge_streams_frames_incrementally() -> None:
     assert "event: tool_call" in text
     assert "event: final" in text
     assert "topology.query" in text
-    assert str(run_id) in text
+    assert str(fake.run_ids[0]) in text
+    # The stream ends with the run's end state.
+    assert "event: end" in text
+    assert '"state":"ended"' in text
     # The bridge ran the prompt the token carried, for the lifted operator.
     assert fake.stream_calls == [("a1", "go")]
     assert fake.stream_operators[0].tenant_id == _TENANT_A
@@ -1077,3 +1114,141 @@ def test_console_closes_stream_after_final_or_error_frame() -> None:
     assert 'removeAttribute("sse-connect")' in body
     assert 'removeAttribute("data-sse-connect")' in body
     assert body.index('removeAttribute("sse-connect")') < body.index("source.close()")
+
+
+# ---------------------------------------------------------------------------
+# Saved events: follow a run after a reload, run detail
+# ---------------------------------------------------------------------------
+
+_TENANT_B = uuid.UUID("22222222-2222-2222-2222-222222222222")
+
+
+def _record_run(
+    *,
+    tenant_id: uuid.UUID = _TENANT_A,
+    events: list[tuple[str, dict[str, Any]]],
+    end: AgentRunStatus | None = AgentRunStatus.SUCCEEDED,
+) -> uuid.UUID:
+    return asyncio.run(record_hosted_run(tenant_id=tenant_id, sub=_OP_A, events=events, end=end))
+
+
+def _reader_client() -> tuple[TestClient, respx.MockRouter]:
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    return client, mock
+
+
+def test_run_console_with_run_query_follows_the_saved_events() -> None:
+    """``?run=<id>`` (set after a run starts) shows that run again after a reload."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    run_id = uuid.uuid4()
+    client, mock = _reader_client()
+    try:
+        response = client.get(f"/ui/agents/a1/run?run={run_id}")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert f'sse-connect="/ui/agents/runs/{run_id}/events"' in response.text
+    assert "rememberRun: false" in response.text
+    assert 'data-state="idle"' not in response.text
+
+
+def test_run_post_transcript_remembers_the_run_in_the_address() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    reset_agent_invoker_for_testing(_FakeInvoker())
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            "/ui/agents/a1/run", data={"input": "go"}, headers=_csrf_headers(csrf)
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "rememberRun: true" in response.text
+    assert "/ui/agents/a1/run/stream?token=" in response.text
+    assert "turn,tool_call,tool_result,final,error,end" in response.text
+
+
+def test_events_stream_replays_saved_events_then_ends() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    run_id = _record_run(
+        events=[("turn", {}), ("tool_call", {"tool_name": "a"}), ("final", {"output": "ok"})]
+    )
+    client, mock = _reader_client()
+    try:
+        response = client.get(f"/ui/agents/runs/{run_id}/events")
+        again = client.get(f"/ui/agents/runs/{run_id}/events", headers={"Last-Event-ID": "2"})
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["X-Accel-Buffering"] == "no"
+    ids = re.findall(r"^id: (\d+)$", response.text, flags=re.MULTILINE)
+    assert ids == ["1", "2", "3"]
+    assert response.text.rstrip().split("\n\n")[-1].startswith("event: end")
+    # A reconnect with Last-Event-ID goes on after that event: no doubles.
+    assert re.findall(r"^id: (\d+)$", again.text, flags=re.MULTILINE) == ["3"]
+
+
+def test_events_stream_of_another_tenant_is_404() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_tenant(_TENANT_B, "tenant-b")
+    run_id = _record_run(tenant_id=_TENANT_B, events=[("turn", {})])
+    client, mock = _reader_client()
+    try:
+        response = client.get(f"/ui/agents/runs/{run_id}/events")
+    finally:
+        mock.stop()
+    assert response.status_code == 404
+
+
+def test_events_stream_read_only_is_403() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    run_id = _record_run(events=[("turn", {})])
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair, role=TenantRole.READ_ONLY)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get(f"/ui/agents/runs/{run_id}/events")
+    finally:
+        mock.stop()
+    assert response.status_code == 403
+
+
+def test_run_detail_lists_saved_events_and_shows_unfinished() -> None:
+    """A run that stopped without a final event shows "unfinished" and its last event."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    run_id = _record_run(
+        events=[("turn", {}), ("tool_call", {"tool_name": "list_targets"})],
+        end=AgentRunStatus.FAILED,
+    )
+    client, mock = _reader_client()
+    try:
+        response = client.get(f"/ui/agents/runs/{run_id}")
+        poll = client.get(f"/ui/agents/runs/{run_id}", headers={"HX-Request": "true"})
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert 'data-role="run-events"' in response.text
+    assert response.text.count('data-role="run-event"') == 2
+    assert "list_targets" in response.text
+    assert 'data-role="events-unfinished"' in response.text
+    assert "The last saved event is #2." in response.text
+    # The status-panel poll does not read the events again.
+    assert poll.status_code == 200
+    assert 'data-role="run-events"' not in poll.text
+
+    async def _reads() -> int:
+        async with get_sessionmaker()() as session:
+            rows = list(await session.scalars(select(AuditLog)))
+        return sum(1 for row in rows if row.payload.get("op_id") == "sessions.run_events.read")
+
+    assert asyncio.run(_reads()) == 1

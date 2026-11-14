@@ -22,7 +22,21 @@ on the result in `meho_backplane/operations/dispatcher.py`.
 
 ## Safety levels at a glance
 
-This is what happens today when no grant matches. In this table:
+This is what happens when no grant matches. The column "Agent login, no
+grant" depends on the switch `AGENT_GRANT_REQUIRED` (#6189):
+
+- **`off`** (the default): the risk-level default, as before. A `safe`
+  operation runs at once on every target of the tenant.
+- **`on`**: the call is refused on every risk level, also `safe`, with the
+  code `agent_no_grant`. The agent needs a grant first
+  ([agent-permission-grants.md](agent-permission-grants.md#starting-grant-sets-agentsgrant_setspy-6191)).
+- **`observe`**: the same as `off`, and MEHO logs one
+  `agent_no_grant_would_deny` line for each call that `on` would refuse.
+
+The switch changes only the agent login. People, service accounts and
+runners keep the rules in the other columns, in every switch state.
+
+In this table:
 
 - **Agent login** is a token for an agent identity (`principal_kind=agent`).
 - **Person, web interface** is a person working in the web interface
@@ -36,14 +50,15 @@ This is what happens today when no grant matches. In this table:
 
 | Safety level | Agent login, no grant | Person, web interface | Person, token | Service account |
 |---|---|---|---|---|
-| `safe` | runs at once | runs at once | runs at once | runs at once; a person can limit it to named targets with a read scope (#4992, see below) |
-| `caution` | waits for approval | runs at once | waits for approval | a change waits for approval unless a standing grant covers it; a read runs at once (inside the read scope, when one is set) |
-| `dangerous` | waits for approval | waits for approval | waits for approval | waits for approval unless a standing grant covers it |
-| `destructive` | waits for approval | waits for approval | waits for approval | always waits for approval |
+| `safe` | `off`: runs at once. `on`: refused, `agent_no_grant` | runs at once | runs at once | runs at once; a person can limit it to named targets with a read scope (#4992, see below) |
+| `caution` | `off`: waits for approval. `on`: refused, `agent_no_grant` | runs at once | waits for approval | a change waits for approval unless a standing grant covers it; a read runs at once (inside the read scope, when one is set) |
+| `dangerous` | `off`: waits for approval. `on`: refused, `agent_no_grant` | waits for approval | waits for approval | waits for approval unless a standing grant covers it |
+| `destructive` | `off`: waits for approval. `on`: refused, `agent_no_grant` | waits for approval | waits for approval | always waits for approval |
 
 One sentence per level:
 
-- **`safe`:** everyone runs it at once.
+- **`safe`:** everyone runs it at once. With the switch `on`, an agent
+  login runs it only when a grant covers it.
 - **`caution`:** a person in the web interface runs it at once. A token
   call and an agent login wait until a person approves it. A person may
   approve their own token `caution` change with a click in the web
@@ -56,9 +71,10 @@ One sentence per level:
   group rules (for example a MEHO-SA-Operator). Agents never approve.
 
 So an agent's `caution`, `dangerous` and `destructive` requests all wait
-for a person's approval (#3980). Agents never approve, on any path: not
-their own requests and not anyone else's. Who may approve follows the
-approval groups
+for a person's approval (#3980). With the switch `on`, this holds only
+when a grant covers the call; with no grant the call is refused. Agents
+never approve, on any path: not their own requests and not anyone else's.
+Who may approve follows the approval groups
 ([approvals.md](approvals.md#the-approval-groups-and-how-a-person-approves-3325)).
 
 An op marked `requires_approval` also waits for approval, for every kind of
@@ -252,6 +268,94 @@ claim for audit parent-linkage (#3446), is never matched against this table).
    | `destructive` | `needs-approval` (#3980) |
    | unknown | `deny` (fail-closed) |
 
+   The switch `AGENT_GRANT_REQUIRED` (#6189) changes this step for an
+   agent login. Other logins never reach this table.
+
+   | `AGENT_GRANT_REQUIRED` | No matching row |
+   |---|---|
+   | `off` (default) | the table above, as before |
+   | `observe` | the table above, and MEHO logs `agent_no_grant_would_deny` (agent, op id, target, risk level) once for each call that `on` would refuse. A call that checks the grant twice (a destructive call checks its preview hash again; a preview with a check before the wait for approval runs the gate twice) still logs one line (`agent_no_grant_log_scope`). |
+   | `on` | `deny` on every risk level, also `safe`. The reason starts with `agent_no_grant:`, names the agent and the op, and says how an admin adds a grant. `result_denied` returns `error_code="agent_no_grant"`, and the audit row of the refusal has `reason_code="agent_no_grant"`. Steps 4 and 5 are skipped: nothing can loosen a `deny`. |
+
+   A matching row works as before, also with the switch on. Any other
+   value of the switch stops MEHO at start.
+
+   A multi-step operation with the switch `on`: before the call waits for
+   approval or runs a step, the dispatcher checks every listed write step
+   of the operation for the agent (`agent_step_refusal` in
+   `operations/_preview_steps.py`, the same list the preview checks). When
+   one step has no grant, the whole call is refused with `agent_no_grant`,
+   no approval request is stored, and no step runs. When a `deny` grant
+   meets a step, the call is refused in the same place, with the grant's
+   own reason and the code `agent_grant_denied` (#6285). So the call never
+   stops half-way at a step the agent's grants refuse. The preview runs the same
+   check, also when the operation itself would wait for approval, so it
+   says `deny` with the same reason. With `observe` the dispatcher runs
+   the check too: each uncovered write step logs one
+   `agent_no_grant_would_deny` line, and the call runs or waits as before.
+   A step with a `deny` grant is left to the step gate, as before.
+
+   The check reads the step list of the operation
+   (`operations/governed_subops.py`). A CI check
+   (`tests/test_agent_grant_step_check.py`) makes sure that every
+   multi-step operation that changes something declares its steps
+   (`register_governed_subops`), or declares that it has no step that
+   MEHO checks on its own (`declare_no_governed_subops`). It fails and
+   names the operation when one does neither.
+
+   Three more rules close the gaps of that check (#6298):
+
+   - **No step list.** The CI check sees only the operations of this
+     repo. A connector package can bring a multi-step operation that
+     changes something and declares nothing. With the switch `on`, an
+     agent's call of such an operation is refused before it starts, with
+     the code `agent_steps_not_declared` (`error_code` and `reason_code`).
+     The text names the agent and the operation. No approval request is
+     stored and no step runs; the audit row has the code. With `observe`
+     MEHO logs one `agent_steps_not_declared_would_deny` line (agent,
+     tenant, op id) and the call goes on. People and service logins are
+     not touched. The preview gives the same answer.
+   - **The text of a denied step** names the agent (`agent:<name>`), the
+     operation, the step and the grant pattern, and says how an admin
+     changes the grant (`meho agent grant list --principal <agent>` and
+     `meho agent grant revoke <grant-id>`, or the console). It never holds
+     the call's arguments.
+   - **A resumed call is checked again.** A call that waited for approval
+     can run much later, and an admin may have changed a grant in
+     between. With the switch `on`, the dispatcher runs the same step
+     check again before the first step, for the agent that asked, on
+     every path that runs the approved call (#6314,
+     `operations/approved_step_check.py`):
+     - the agent's own run resumes it (the waiter of a hosted agent run,
+       or a re-run by the agent login): the check runs for the caller;
+     - a person runs it from an approvals surface (console, CLI, REST
+       `/approve` and `/decide`): the check runs for the requester of
+       the request, which the resume binds
+       (`secondary_target_policy.bind_approved_requester`). An agent
+       login over MCP has no waiter, so this is its only path. For a
+       hosted agent run, the waiter and the approvals surface race for
+       the call; both give the same answer.
+
+     To rebuild the agent there, the park stores a requester record on
+     the approval card (`permission_preflight.requester`: sub, kind,
+     client id, role, actor) when an agent asks and the switch is not
+     `off`. A card with no record (made while the switch was `off`)
+     cannot be checked. When the operation has steps to check, the run
+     is refused with `policy_denied` and the agent must ask again. A
+     call with no steps to check runs as before. A refusal writes one `denied` audit row, the
+     approval request ends as a failed run with the reason, and the
+     person who runs it sees the reason in the answer. People and
+     service logins that asked are not checked again. With `observe`
+     nothing is refused again: the "would deny" lines were logged when
+     the call was made. At resume the dispatcher only marks them as
+     written (`agent_no_grant_already_logged`), so the step gate of the
+     resumed call does not log them a second time, whoever runs it.
+
+   A composite that checks a step that is not on its declared list
+   (`enforce_subop_policy`) logs one `composite_step_not_declared`
+   warning (composite op id, step op id) and goes on. The step gate still
+   checks the step; the warning shows that the up-front check missed it.
+
 4. **Apply safety-level ceiling.** A row's verdict can only tighten to the
    op's ceiling, never loosen beyond it:
 
@@ -349,6 +453,16 @@ A `needs-approval` dispatch writes its "request" audit row with the
 synthetic status code `202` (`approval_queue.py`). The audit-query read path
 (`audit_query/query.py`) derives `pending` from `status_code == 202` and offers
 a `result_status="pending"` filter, so a waiting call is not counted as `ok`.
+
+### Shadow mode of the policy evaluator
+
+With the `POLICY_ENGINE_SHADOW` switch on (off by default), the policy
+evaluator (`policy/evaluate.py`) works out its own verdict after
+`policy_gate` and logs `policy_shadow_mismatch` when it differs. The
+verdict of `policy_gate` is still the one that counts. For an agent the
+evaluator reads the matching grant through `matched_grant` (the same row
+match as `resolve_verdict`, before any ceiling) and applies the ceilings
+itself. See [policy-evaluator.md](policy-evaluator.md).
 
 ## Dependencies
 

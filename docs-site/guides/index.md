@@ -31,9 +31,11 @@ backplane — reach for whichever the task in front of you needs:
 |---|---|
 | [Topology](topology.md) | The dependency graph: blast-radius (`dependents`), reachability (`path`), and how a resource gets into the graph. |
 | [Broadcast](broadcast.md) | The cross-operator activity feed — read it, announce intent, watch it live, and the read-before-start discipline. |
+| [MEHO on your phone and laptop](phone-and-laptop.md) | Sign in and approve with a passkey: Face ID, Touch ID, a fingerprint or Windows Hello. |
 | [Memory and knowledge](memory-and-knowledge.md) | Two durable stores: scoped, TTL'd memory and the tenant knowledge base, and which belongs where. |
 | [Agent sessions](agent-sessions.md) | Keep uploaded agent sessions in your own object storage: turn the store on with Helm values, rights, retention and quarantine. |
 | [Audit forensics](audit-forensics.md) | Reconstructing "who did X to Y and when" from the append-only ledger, and tracing an agent session end to end. |
+| [The policy file](policy-file.md) | Keep the categories and classifications of operations in one file: validate it, see a diff, and import it after a second admin approves. Off by default. |
 | [The settings file](settings-file.md) | Export a tenant's policies, conventions and targets as one file, import a file after a preview of every change, and read who changed what and when. REST only for now. |
 | [Flight recorder](flight-recorder.md) | The redacted per-dispatch record of the vendor traffic behind an audit row — what it captures, and who can read it back. |
 | [Runbooks](runbooks.md) | Authoring versioned, multi-step procedures and running them one gated step at a time. |

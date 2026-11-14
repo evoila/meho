@@ -16,11 +16,9 @@ import (
 // newRecordCmd returns the `meho bind9 record` parent command and
 // assembles its three verbs (get / add / remove).
 //
-// The `record add` invocation is the 1:1 replacement for the
-// consumer's `scripts/bind9-dns.sh --add-a-record ...` call (the
-// 2026-05-04 / 2026-05-05 credential-leak surface — evoila-bosnia/
-// claude-rdc-hetzner-dc#86); the verb shape matches the wrapper's
-// positional / flag conventions.
+// `record add` creates an A record in a zone. It takes the name and
+// the address as positional arguments, and the zone and the target as
+// flags.
 func newRecordCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "record",
@@ -53,8 +51,8 @@ func newRecordGetCmd() *cobra.Command {
 			"TXT are the operator-relevant complement (other types ride\n" +
 			"through `meho bind9 zone read`).\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho bind9 record get www.evba.lab --target vcf-router-bind9\n" +
-			"  meho bind9 record get mail.evba.lab --type AAAA --target vcf-router-bind9",
+		Example: "  meho bind9 record get www.example.test --target vcf-router-bind9\n" +
+			"  meho bind9 record get mail.example.test --type AAAA --target vcf-router-bind9",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -171,9 +169,9 @@ func newRecordAddCmd() *cobra.Command {
 			"This verb is the 1:1 replacement for the consumer's\n" +
 			"`bind9-dns.sh --add-a-record <fqdn> <ip> --zone <zone>`.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho bind9 record add esx-dc6.evba.lab 10.5.50.25 --zone evba.lab --target vcf-router-bind9\n" +
-			"  meho bind9 record add v6.evba.lab 2001:db8::25 --type AAAA --target vcf-router-bind9\n" +
-			"  meho bind9 record add host.evba.lab 10.5.50.9 --view internal --target vcf-router-bind9",
+		Example: "  meho bind9 record add esx-1.example.test 192.0.2.25 --zone example.test --target vcf-router-bind9\n" +
+			"  meho bind9 record add v6.example.test 2001:db8::25 --type AAAA --target vcf-router-bind9\n" +
+			"  meho bind9 record add host.example.test 192.0.2.9 --view internal --target vcf-router-bind9",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -183,7 +181,7 @@ func newRecordAddCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&targetName, "target", "", "target slug to dispatch against")
 	cmd.Flags().StringVar(&zone, "zone", "",
-		"owning zone (e.g. evba.lab). Omitted → handler resolves via longest-suffix match.")
+		"owning zone (e.g. example.test). Omitted → handler resolves via longest-suffix match.")
 	cmd.Flags().StringVar(&view, "view", "",
 		"split-horizon view owning the zone. Required only when the zone is in multiple views.")
 	cmd.Flags().StringVar(&recordType, "type", "",
@@ -250,8 +248,8 @@ func newRecordRemoveCmd() *cobra.Command {
 			"awaiting_approval). Approving it runs the removal. If the preview\n" +
 			"fails, the command stops and shows why; nothing is sent.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho bind9 record remove esx-dc6.evba.lab --zone evba.lab --target vcf-router-bind9\n" +
-			"  meho bind9 record remove host.evba.lab --view internal --target vcf-router-bind9",
+		Example: "  meho bind9 record remove esx-1.example.test --zone example.test --target vcf-router-bind9\n" +
+			"  meho bind9 record remove host.example.test --view internal --target vcf-router-bind9",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -261,7 +259,7 @@ func newRecordRemoveCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&targetName, "target", "", "target slug to dispatch against")
 	cmd.Flags().StringVar(&zone, "zone", "",
-		"owning zone (e.g. evba.lab). Omitted → handler resolves via longest-suffix match.")
+		"owning zone (e.g. example.test). Omitted → handler resolves via longest-suffix match.")
 	cmd.Flags().StringVar(&view, "view", "",
 		"split-horizon view owning the zone. Required only when the zone is in multiple views.")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit the full OperationResult envelope as JSON")

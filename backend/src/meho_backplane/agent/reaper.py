@@ -125,8 +125,8 @@ from meho_backplane.db.models import (
 from meho_backplane.metrics import note_loop_tick
 from meho_backplane.operations.agent_run import (
     IllegalTransitionError,
+    fail_run,
     release_lease,
-    transition,
 )
 from meho_backplane.settings import get_settings
 
@@ -296,14 +296,14 @@ async def _reap_one_row(
         return policy_value, "cleared"
 
     # fail_into_audit -- the conservative default. Mark the row
-    # ``failed`` with a stable interruption reason; ``transition()``
-    # clears the lease as part of the terminal-state side effect.
+    # ``failed`` with a stable interruption reason; ``fail_run()``
+    # clears the lease as part of the terminal-state side effect, and
+    # its hosted-run session (if any) becomes ``unfinished``.
     # Status guard: the row could have transitioned between the
     # claim query and this write (e.g. an operator cancel landed) --
-    # ``transition()`` raises :class:`IllegalTransitionError` on a
+    # ``fail_run()`` raises :class:`IllegalTransitionError` on a
     # bad edge; the outer per-row ``try`` catches and logs.
-    row.error = AGENT_RUN_REAPER_INTERRUPTION_REASON
-    await transition(session, row, AgentRunStatus.FAILED)
+    await fail_run(session, row, error=AGENT_RUN_REAPER_INTERRUPTION_REASON)
     _stage_audit_row(
         session=session,
         operator_sub=_SYSTEM_OPERATOR_SUB,

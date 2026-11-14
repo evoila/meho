@@ -75,8 +75,8 @@
   Hidden values (``request.reveal_secret``)
     When the requester asked for the hidden values of the answer, the detail
     list says so (``data-approval-reveal-secret``), on every status, and the
-    consequence banner of a pending row says that approving returns them to
-    the requester (``data-approval-gate-reveal-secret``).
+    consequence banner of a pending row says that approving lets the
+    requester see them once (``data-approval-gate-reveal-secret``).
 
   Context:
     request               -- dict: id / op_id / connector_id / principal_sub /
@@ -205,14 +205,14 @@
           </div>
         </div>
       {% elif fresh_sign_in_error %}
-        {# An approval needs a recent sign-in that asked for the password; a
+        {# An approval needs a recent sign-in with the password or a passkey; a
            destructive operation needs a sign-in of its own. The banner names
            the way forward: a new sign-in, then approve again. #}
         <div class="alert alert-warning mt-4 items-start" role="alert" aria-live="assertive" data-testid="approval-fresh-sign-in">
           <div class="text-sm">
             <h4 class="font-semibold">Sign in again to approve</h4>
             <p class="mt-1 opacity-90">
-              An approval needs a recent sign-in that asked for your password.
+              An approval needs a recent sign-in with your password or a passkey.
               A destructive operation needs a sign-in of its own.
               Sign in again, then open this request and approve it.
             </p>
@@ -317,6 +317,10 @@
                 {% if request.outcome.result_status %}
                   <dt class="opacity-70">Result status</dt>
                   <dd class="font-mono">{{ request.outcome.result_status }}</dd>
+                {% endif %}
+                {% if request.outcome.exit_code is not none %}
+                  <dt class="opacity-70">Exit code</dt>
+                  <dd class="font-mono" data-testid="approval-exit-code" data-exit-code="{{ request.outcome.exit_code }}">{{ request.outcome.exit_code }}{% if request.outcome.exit_code != 0 %} (the script failed){% endif %}</dd>
                 {% endif %}
                 {% if request.outcome.error_code %}
                   <dt class="opacity-70">Error code</dt>
@@ -769,8 +773,9 @@
         </p>
         {% if request.reveal_secret %}
           <p class="mt-1 text-xs font-semibold [overflow-wrap:anywhere]" data-approval-gate-reveal-secret>
-            Approving returns the hidden values to the requester: the answer
-            shows the secret values in clear text.
+            Approving lets the requester see the hidden values once: the
+            operation runs when they fetch the values, within a short time.
+            The answer shows the secret values in clear text to them only.
           </p>
         {% endif %}
         {% if out_of_order %}

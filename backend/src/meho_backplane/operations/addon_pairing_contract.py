@@ -4,7 +4,7 @@
 """Add-on pairing contract — version constants + bidirectional negotiation (#3025).
 
 The pairing handshake binds a sibling add-on product (first consumers:
-meho-automation, meho-ssp) to the backplane over a *versioned integration
+meho-automation and other add-ons) to the backplane over a *versioned integration
 contract*. This module is the single source of truth for the backplane's
 contract version and the pure negotiation logic; the service layer
 (:mod:`meho_backplane.operations.addon_pairing`) applies it at pair time

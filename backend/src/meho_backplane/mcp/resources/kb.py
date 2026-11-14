@@ -58,8 +58,7 @@ The handler returns ``{slug, body, metadata, ...}`` so a client UI can
 render the entry alongside its provenance even though the entry's
 *content* is Markdown. ``body`` is agent-authored stored text and is
 served wrapped in the positional untrusted-content envelope from
-:mod:`meho_backplane.untrusted_text` (stored-prompt-injection guard,
-evoila-bosnia/meho-internal#154).
+:mod:`meho_backplane.untrusted_text` (stored-prompt-injection guard).
 
 Subscriptions
 =============
@@ -141,7 +140,7 @@ async def read_kb_entry(operator: Operator, slug: str) -> dict[str, Any]:
         raise McpInvalidParamsError(f"kb entry not found: {slug!r}")
 
     data = entry.model_dump(mode="json")
-    # Stored-prompt-injection guard (evoila-bosnia/meho-internal#154):
+    # Stored-prompt-injection guard:
     # the body is agent-authored Markdown re-served into an LLM
     # context; wrap it in the positional untrusted-content envelope so
     # the reading agent attributes it to its untrusted provenance.

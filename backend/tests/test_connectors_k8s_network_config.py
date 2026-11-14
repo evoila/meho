@@ -358,12 +358,12 @@ def test_service_row_lb_ingress_projects_ip_and_hostname_entries() -> None:
         type_="LoadBalancer",
         status=_lb_status(
             V1LoadBalancerIngress(ip="10.0.0.5"),
-            V1LoadBalancerIngress(hostname="lb.evba.lab"),
+            V1LoadBalancerIngress(hostname="lb.example.test"),
         ),
     )
     assert service_row(svc)["lb_ingress"] == [
         {"ip": "10.0.0.5", "hostname": None},
-        {"ip": None, "hostname": "lb.evba.lab"},
+        {"ip": None, "hostname": "lb.example.test"},
     ]
 
 
@@ -474,13 +474,13 @@ def test_ingress_path_row_with_named_port() -> None:
 
 def test_ingress_rule_row_collects_paths() -> None:
     rule = V1IngressRule(
-        host="argocd.evba.lab",
+        host="argocd.example.test",
         http=V1HTTPIngressRuleValue(
             paths=[_http_path(path="/"), _http_path(path="/api", port_number=443)]
         ),
     )
     row = ingress_rule_row(rule)
-    assert row["host"] == "argocd.evba.lab"
+    assert row["host"] == "argocd.example.test"
     assert len(row["paths"]) == 2
     assert row["paths"][0]["path"] == "/"
     assert row["paths"][1]["path"] == "/api"
@@ -489,22 +489,22 @@ def test_ingress_rule_row_collects_paths() -> None:
 def test_ingress_row_with_tls_dedup() -> None:
     rules = [
         V1IngressRule(
-            host="argocd.evba.lab",
+            host="argocd.example.test",
             http=V1HTTPIngressRuleValue(paths=[_http_path()]),
         ),
         V1IngressRule(
-            host="argocd.evba.lab",  # duplicate host, different path
+            host="argocd.example.test",  # duplicate host, different path
             http=V1HTTPIngressRuleValue(paths=[_http_path(path="/api")]),
         ),
     ]
-    tls = [V1IngressTLS(hosts=["argocd.evba.lab"], secret_name="argocd-tls")]
+    tls = [V1IngressTLS(hosts=["argocd.example.test"], secret_name="argocd-tls")]
     ingress = _make_ingress(name="argocd-ingress", rules=rules, tls=tls)
     row = ingress_row(ingress)
     assert row["name"] == "argocd-ingress"
     assert row["class"] == "nginx"
     # hosts deduplicated, sorted
-    assert row["hosts"] == ["argocd.evba.lab"]
-    assert row["tls_hosts"] == ["argocd.evba.lab"]
+    assert row["hosts"] == ["argocd.example.test"]
+    assert row["tls_hosts"] == ["argocd.example.test"]
     assert len(row["rules"]) == 2
 
 
@@ -566,7 +566,7 @@ def test_configmap_list_row_keys_only_no_data_field() -> None:
     """Critical privacy contract: list row carries ``keys``, never ``data``."""
     cm = _make_configmap(
         name="argocd-cm",
-        data={"repositories": "secret-repo-url", "url": "https://argocd.evba.lab"},
+        data={"repositories": "secret-repo-url", "url": "https://argocd.example.test"},
     )
     row = configmap_list_row(cm)
     assert row["name"] == "argocd-cm"
@@ -614,7 +614,7 @@ def test_configmap_info_includes_full_data_and_binary_data() -> None:
     """``info`` is the counterpart -- the targeted-read shape carries values."""
     cm = _make_configmap(
         name="argocd-cm",
-        data={"url": "https://argocd.evba.lab"},
+        data={"url": "https://argocd.example.test"},
         binary_data={"cert": "base64-encoded-bytes"},
         labels={"app": "argocd"},
         annotations={"managed-by": "helm"},
@@ -622,7 +622,7 @@ def test_configmap_info_includes_full_data_and_binary_data() -> None:
     info = configmap_info(cm)
     assert info["name"] == "argocd-cm"
     assert info["namespace"] == "argocd"
-    assert info["data"] == {"url": "https://argocd.evba.lab"}
+    assert info["data"] == {"url": "https://argocd.example.test"}
     assert info["binary_data"] == {"cert": "base64-encoded-bytes"}
     assert info["metadata"]["labels"] == {"app": "argocd"}
     assert info["metadata"]["annotations"] == {"managed-by": "helm"}
@@ -885,11 +885,11 @@ async def test_k8s_ingress_list_returns_hosts_and_tls() -> None:
         name="argocd-ingress",
         rules=[
             V1IngressRule(
-                host="argocd.evba.lab",
+                host="argocd.example.test",
                 http=V1HTTPIngressRuleValue(paths=[_http_path()]),
             )
         ],
-        tls=[V1IngressTLS(hosts=["argocd.evba.lab"], secret_name="argocd-tls")],
+        tls=[V1IngressTLS(hosts=["argocd.example.test"], secret_name="argocd-tls")],
     )
     connector = _make_connector()
     with (
@@ -916,8 +916,8 @@ async def test_k8s_ingress_list_returns_hosts_and_tls() -> None:
     assert result["total"] == 1
     row = result["rows"][0]
     assert row["name"] == "argocd-ingress"
-    assert row["hosts"] == ["argocd.evba.lab"]
-    assert row["tls_hosts"] == ["argocd.evba.lab"]
+    assert row["hosts"] == ["argocd.example.test"]
+    assert row["tls_hosts"] == ["argocd.example.test"]
 
 
 # ---------------------------------------------------------------------------
@@ -932,7 +932,7 @@ async def test_k8s_configmap_list_keys_only_data_absent() -> None:
         name="argocd-cm",
         data={
             "repositories": "https://github.com/argoproj/argocd-example-apps",
-            "url": "https://argocd.evba.lab",
+            "url": "https://argocd.example.test",
             "policy.default": "role:readonly",
         },
     )
@@ -971,7 +971,7 @@ async def test_k8s_configmap_info_returns_full_data_and_binary_data() -> None:
     """``k8s.configmap.info argocd-cm --namespace argocd`` returns full data + binary_data."""
     cm = _make_configmap(
         name="argocd-cm",
-        data={"repositories": "...", "url": "https://argocd.evba.lab"},
+        data={"repositories": "...", "url": "https://argocd.example.test"},
         binary_data={"cert.pem": "base64-bytes"},
         labels={"app": "argocd"},
         annotations={"managed-by": "helm"},
@@ -994,7 +994,7 @@ async def test_k8s_configmap_info_returns_full_data_and_binary_data() -> None:
             name="argocd-cm", namespace="argocd"
         )
 
-    assert result["data"] == {"repositories": "...", "url": "https://argocd.evba.lab"}
+    assert result["data"] == {"repositories": "...", "url": "https://argocd.example.test"}
     assert result["binary_data"] == {"cert.pem": "base64-bytes"}
     assert result["metadata"]["labels"] == {"app": "argocd"}
 
@@ -1428,7 +1428,7 @@ async def test_k8s_ingress_list_all_namespaces_uses_for_all_namespaces() -> None
         name="ing-1",
         rules=[
             V1IngressRule(
-                host="argocd.evba.lab",
+                host="argocd.example.test",
                 http=V1HTTPIngressRuleValue(paths=[_http_path()]),
             )
         ],

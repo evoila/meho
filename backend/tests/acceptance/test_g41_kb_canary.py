@@ -76,7 +76,7 @@ Why an env-var resolver rather than vendoring the corpus
 =========================================================
 
 The consumer's kb/ is operator-curated content tracked in their own
-repo (``evoila-bosnia/claude-rdc-hetzner-dc``). Vendoring would fork
+repo (a consumer repository). Vendoring would fork
 the corpus and any drift between MEHO's copy and the consumer's
 live copy would silently break the canary's "real-corpus" promise.
 The env-var indirection (``MEHO_CONSUMER_KB_DIR`` or

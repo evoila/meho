@@ -149,11 +149,11 @@ async def test_user_create_preview_realm_from_target() -> None:
     ctx = _ctx(
         "keycloak.user.create",
         {"representation": {"username": "alice"}},
-        managed_realm="evba",
+        managed_realm="example",
     )
     effect = await build_proposed_effect(ctx)
     assert effect is not None
-    assert effect["preview"]["realm"] == "evba"
+    assert effect["preview"]["realm"] == "example"
 
 
 # ---------------------------------------------------------------------------

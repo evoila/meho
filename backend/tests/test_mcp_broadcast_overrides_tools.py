@@ -807,7 +807,7 @@ def test_input_schemas_are_strict_draft_2020_12(
     pattern: schema itself validates as Draft 2020-12, every schema
     sets ``additionalProperties: false`` (so a typo'd kwarg fails at
     the dispatcher's jsonschema gate rather than landing as a silent
-    no-op), and MEHO-internal fields (``required_role`` /
+    no-op), and internal fields (``required_role`` /
     ``op_class``) are stripped from the wire shape per
     :meth:`ToolDefinition.to_wire`.
     """
@@ -830,6 +830,6 @@ def test_input_schemas_are_strict_draft_2020_12(
             f"{name}: missing additionalProperties=false"
         )
         jsonschema.Draft202012Validator.check_schema(schema)
-        # MEHO-internal fields must not leak onto the wire.
+        # internal fields must not appear on the wire.
         assert "required_role" not in tools[name]
         assert "op_class" not in tools[name]

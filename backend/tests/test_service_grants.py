@@ -836,13 +836,13 @@ async def test_create_selector_grant_round_trips() -> None:
             op_id="vmware.composite.vm.create",
             connector_id=_CONNECTOR,
             target_product="vmware",
-            target_name_pattern="esx-dc*",
+            target_name_pattern="esx-host*",
             reason="authorise runtime-created ESXi appliances",
         ),
     )
     assert entry.target_id is None
     assert entry.target_product == "vmware"
-    assert entry.target_name_pattern == "esx-dc*"
+    assert entry.target_name_pattern == "esx-host*"
 
 
 def test_create_rejects_target_id_with_selector() -> None:
@@ -867,7 +867,7 @@ async def test_create_refuses_duplicate_active_selector() -> None:
         op_id="vmware.composite.vm.create",
         connector_id=_CONNECTOR,
         target_product="vmware",
-        target_name_pattern="esx-dc*",
+        target_name_pattern="esx-host*",
         reason="first",
     )
     await svc.create(_TENANT_ID, _CREATOR, payload)
@@ -911,7 +911,7 @@ async def test_selector_grant_matches_target_fingerprint(session: AsyncSession) 
             op_id="vmware.composite.vm.create",
             connector_id=_CONNECTOR,
             target_product="vmware",
-            target_name_pattern="esx-dc*",
+            target_name_pattern="esx-host*",
             reason="runtime-created appliances",
         ),
     )
@@ -925,7 +925,7 @@ async def test_selector_grant_matches_target_fingerprint(session: AsyncSession) 
         connector_id=_CONNECTOR,
         target_id=fresh_target_id,
         target_product="vmware",
-        target_name="esx-dc19",
+        target_name="esx-host19",
     )
     assert matched is not None
     assert matched.id == created.id
@@ -940,7 +940,7 @@ async def test_selector_grant_matches_target_fingerprint(session: AsyncSession) 
             connector_id=_CONNECTOR,
             target_id=fresh_target_id,
             target_product="k8s",
-            target_name="esx-dc19",
+            target_name="esx-host19",
         )
     ) is None
 
@@ -1015,7 +1015,7 @@ async def test_concrete_target_grant_wins_over_selector(session: AsyncSession) -
         connector_id=_CONNECTOR,
         target_id=concrete_id,
         target_product="vmware",
-        target_name="esx-dc19",
+        target_name="esx-host19",
     )
     assert matched is not None
     assert matched.id == concrete.id

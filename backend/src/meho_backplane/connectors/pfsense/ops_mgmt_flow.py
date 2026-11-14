@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""pfSense management-plane flow classification op (meho-internal#252).
+"""pfSense management-plane flow classification op.
 
 Adds one governed read op to :class:`PfSenseConnector`:
 
@@ -16,7 +16,7 @@ Adds one governed read op to :class:`PfSenseConnector`:
 Why a governed op (and why the state table)
 --------------------------------------------
 
-The management-plane lockdown ratchet (Goal meho-internal#234) stage 1
+The management-plane lockdown ratchet stage 1
 put passive floating ``match`` counting rules on the lab pfSense and an
 on-demand report over an SSH script (kb
 ``pfsense-2.7-management-plane-flow-counting.md``). Stage 2 (Initiative
@@ -646,6 +646,6 @@ MGMT_FLOW_SUMMARY_OP = PfSenseOp(
 )
 
 #: The management-plane flow ops appended to :data:`PFSENSE_OPS`
-#: (meho-internal#252). One op today; the tuple keeps the "import a module
+#:. One op today; the tuple keeps the "import a module
 #: tuple and splat it" registration shape.
 MGMT_FLOW_OPS: tuple[PfSenseOp, ...] = (MGMT_FLOW_SUMMARY_OP,)

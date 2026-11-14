@@ -15,6 +15,11 @@
   comment that says it has no effect.
 * :func:`list_history` returns the imported files, newest first.
 
+Until a policy for the whole install is imported, the install's policy is
+the shipped "small team" file (:func:`builtin_install_document`). It says
+what MEHO does without a file, so importing it answers "No change." and the
+export of a fresh install is that file.
+
 The import replaces the whole policy of its scope (a tenant, or the
 install): an entry that is not in the file is removed. The same file twice,
 or a file with the same meaning, is "No change.": nothing waits and no
@@ -23,11 +28,14 @@ revision is written.
 
 from __future__ import annotations
 
+import copy
+import functools
 import json
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from importlib.resources import files
 from typing import Any, Final
 
 import yaml
@@ -61,10 +69,12 @@ __all__ = [
     "KEEP_REVISIONS",
     "NO_CHANGE",
     "POLICY_CHANGED",
+    "SMALL_TEAM_PROFILE",
     "PolicyApplyError",
     "PolicyPlan",
     "apply_policy",
     "build_plan",
+    "builtin_install_document",
     "export_policy",
     "list_history",
 ]
@@ -79,6 +89,9 @@ POLICY_CHANGED: Final[str] = (
 
 #: How many imported files MEHO keeps per tenant (and for the install).
 KEEP_REVISIONS: Final[int] = 20
+
+#: The packaged policy file the install uses until one is imported.
+SMALL_TEAM_PROFILE: Final[str] = "small-team.yaml"
 
 #: The lock key of the install's policy (a tenant id is never all zeros).
 _INSTALL_LOCK_ID: Final[uuid.UUID] = uuid.UUID(int=0)
@@ -104,12 +117,36 @@ class PolicyPlan:
     no_change: bool = False
 
 
+@functools.cache
+def _small_team_document() -> dict[str, Any]:
+    content = (files("meho_backplane.policy") / "profiles" / SMALL_TEAM_PROFILE).read_bytes()
+    parsed = parse_policy_file(content)
+    if parsed.model is None:
+        raise RuntimeError(f"The shipped {SMALL_TEAM_PROFILE} is not valid: {parsed.mistakes[0]}")
+    return document_of(parsed.model)
+
+
+def builtin_install_document() -> dict[str, Any]:
+    """The install's policy while none is imported: the shipped "small team" file."""
+    return copy.deepcopy(_small_team_document())
+
+
 async def _stored_row(
     session: AsyncSession, scope: Scope, tenant_id: uuid.UUID | None
 ) -> TenantPolicy | None:
     column = TenantPolicy.tenant_id
     where = column.is_(None) if scope == "install" else column == tenant_id
     return (await session.execute(select(TenantPolicy).where(where))).scalar_one_or_none()
+
+
+async def _stored_document(
+    session: AsyncSession, scope: Scope, tenant_id: uuid.UUID | None
+) -> dict[str, Any] | None:
+    """The stored policy of *scope*; for the install, the built-in file when none is stored."""
+    stored = await _stored_row(session, scope, tenant_id)
+    if stored is not None:
+        return stored.document
+    return builtin_install_document() if scope == "install" else None
 
 
 def _stored_name(scope: Scope, tenant_id: uuid.UUID | None) -> str:
@@ -296,8 +333,7 @@ async def build_plan(
     content: bytes,
 ) -> PolicyPlan:
     """Check *content* for *scope* and work out what it would change. Writes nothing."""
-    stored = await _stored_row(session, scope, tenant_id)
-    before = stored.document if stored is not None else None
+    before = await _stored_document(session, scope, tenant_id)
     plan = PolicyPlan(
         scope=scope,
         tenant_id=tenant_id,
@@ -312,8 +348,7 @@ async def build_plan(
     install_document: dict[str, Any] | None = document
     other: list[ClassificationEntry] = []
     if scope == "tenant":
-        install_row = await _stored_row(session, "install", None)
-        install_document = install_row.document if install_row is not None else None
+        install_document = await _stored_document(session, "install", None)
         if tenant_id is not None:
             other = await _override_entries_for(session, tenant_id)
     ops = await load_known_ops(session, scope=scope, tenant_id=tenant_id)
@@ -478,13 +513,12 @@ async def _no_effect_notes(
 
 
 async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.UUID | None) -> str:
-    """The stored policy of *scope* as a ``policy: v1`` file.
+    """The stored policy of *scope* as a ``policy: v1`` file (see :func:`_stored_document`).
 
     In a tenant's file, an entry that tries to set back an "always wait"
     of the install's policy gets a ``# Has no effect:`` comment above it.
     """
-    stored = await _stored_row(session, scope, tenant_id)
-    document = normalise_document(stored.document if stored is not None else None)
+    document = normalise_document(await _stored_document(session, scope, tenant_id))
     head: dict[str, Any] = {"policy": POLICY_VERSION}
     for key in ("description", "taxonomy"):
         if key in document:

@@ -48,6 +48,7 @@ from meho_backplane.operations._errors import status_code_for_result
 from meho_backplane.operations.audit_row_safe import (
     AUDIT_FULL_ROW_LOST_TOTAL,
     AUDIT_TEXT_CHANGED_TOTAL,
+    FULL_ROW_LOST,
     TEXT_CHANGED,
     clamp_duration_ms,
     is_database_unreachable,
@@ -860,12 +861,14 @@ def _storable_columns(
     """The three JSON columns made storable, and whether a text or number was replaced.
 
     When one was, ``payload`` gets ``text_changed: true``. Only this function
-    sets that key: a key of the same name from anywhere else is dropped.
+    sets that key, and only :func:`_write_short_row` sets ``full_row_lost``:
+    a key of either name from anywhere else (a handler's extra) is dropped.
     """
     stored_payload, payload_changed = storable_and_changed(payload)
     stored_raw, raw_changed = storable_and_changed(raw_payload)
     stored_manifest, manifest_changed = storable_and_changed(redaction_manifest)
     stored_payload.pop(TEXT_CHANGED, None)
+    stored_payload.pop(FULL_ROW_LOST, None)
     changed = payload_changed or raw_changed or manifest_changed
     if changed:
         stored_payload[TEXT_CHANGED] = True
@@ -888,10 +891,11 @@ async def _write_short_row(
     The short row keeps the fixed columns (who, when, tenant, target,
     operation, status, ticket id, request id) and the *short_payload* from
     :func:`~meho_backplane.operations.audit_row_safe.short_row_payload`: the
-    payload keys that MEHO's own code builds, the approval request id, and a
-    ``full_row_lost`` mark with the error class. It holds none of the text of
-    the target or of a handler. When this insert fails too, the error is
-    raised: the caller then answers ``audit_commit_failed``.
+    payload keys that MEHO's own code builds, a small ``error`` with the error
+    code and the approval request id, and a ``full_row_lost`` mark with the
+    error class. It holds none of the text of the target or of a handler.
+    When this insert fails too, the error is raised: the caller then answers
+    ``audit_commit_failed``.
     """
     error_class = type(cause).__name__
     _log.warning(
@@ -903,6 +907,7 @@ async def _write_short_row(
     )
     AUDIT_FULL_ROW_LOST_TOTAL.labels(error_class=error_class).inc()
     columns, changed = _storable_columns(short_payload, None, None)
+    columns["payload"][FULL_ROW_LOST] = {"error_class": error_class}
     async with get_sessionmaker()() as session:
         session.add(AuditLog(**row_fields, event_class=event_class, payload=columns["payload"]))
         await session.commit()

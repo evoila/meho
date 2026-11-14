@@ -88,14 +88,20 @@ holds:
   `reveal_secret`, `agent_session_id`, `run_id`, `step_id`,
   `caller_gone_at`, the parent audit id, the result handle (`handle_id`,
   `total_rows`), `redaction_policy_id` and the model data of an agent run;
-- `approval_request_id` for a call that waits for approval or was
-  refused. The id comes from the result that MEHO's code built, never
-  from an error text, and only a UUID is kept;
+- a small `error` object that MEHO builds itself: only `error_code` and,
+  for a call that waits for approval or was refused,
+  `approval_request_id`. This is the same place as in the full row. The
+  values come from the result that MEHO's code built, never from an error
+  text. Only a UUID and an error code of the usual form are kept;
+- `approval_request_id` at the top of `payload` only for the run of an
+  approved request, as in the full row (`docs/codebase/approvals.md`);
 - `{"full_row_lost": {"error_class": "<name of the error>"}}`.
 
-A short row has no `raw_payload`, no `redaction_manifest`, no `error` and
-none of the extra keys that a connector handler adds: these can hold text of
-the target. MEHO logs `audit_full_row_lost` with the audit id, the
+A short row has no `raw_payload`, no `redaction_manifest`, no other key of
+the full `error` and none of the extra keys that a connector handler adds:
+these can hold text of the target. A full row never has `full_row_lost` or
+`text_changed` from a handler's extra: MEHO drops both keys and sets them
+only itself. MEHO logs `audit_full_row_lost` with the audit id, the
 operation, the request id and the error class. The same short row is used on
 the error path, so a call that failed at the target also has a row.
 

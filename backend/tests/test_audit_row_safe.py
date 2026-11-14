@@ -44,6 +44,7 @@ from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations import _audit as audit_module
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._audit import write_audit_row
+from meho_backplane.operations._errors import result_awaiting_approval
 from meho_backplane.operations.audit_row_safe import (
     FULL_ROW_LOST,
     INVALID_CHARACTER_MARKER,
@@ -203,7 +204,7 @@ def _assert_short_row(payload: dict[str, Any], error_class: str, result_status: 
     assert payload["connector_impl_id"] == "demo"
     assert payload["principal_name"] == "Safe Test"
     assert isinstance(payload["params_hash"], str)
-    assert "error" not in payload
+    assert set(payload.get("error", {})) <= {"error_code", "approval_request_id"}
 
 
 def _no_text_that_the_table_refuses(value: Any) -> bool:
@@ -426,6 +427,8 @@ async def test_the_error_path_stores_a_short_row_too(demo_op: None) -> None:
     rows = await _rows()
     assert len(rows) == 1
     _assert_short_row(rows[0].payload, "DataError", result_status="error")
+    assert "vendor failed" not in repr(rows[0].payload)
+    assert set(rows[0].payload["error"]) == {"error_code"}
     assert rows[0].status_code != 200
 
 
@@ -534,39 +537,70 @@ async def test_a_short_row_keeps_the_reveal_choice(demo_op: None) -> None:
     assert rows[0].payload["reveal_secret"] is True
 
 
-async def test_a_short_row_keeps_the_approval_request_id(demo_op: None) -> None:
-    """The row of a call that waits for approval keeps the request id from the code value."""
+async def test_the_short_row_of_a_waiting_call_keeps_the_request_id_under_error(
+    demo_op: None,
+) -> None:
+    """Through the dispatcher: the id stays under ``error``, as in the full row."""
     request_id = uuid.uuid4()
+    answer["value"] = result_awaiting_approval(OP_ID, request_id, 0.0)
     listener = _refuse_audit_inserts(_data_error(), times=1)
     try:
-        await _write(
-            result_status="pending",
-            error_extras={
-                "error_code": "approval_required",
-                "approval_request_id": str(request_id),
-                "message": f"waits for approval {uuid.uuid4()}",
-            },
-        )
+        result = await _call()
     finally:
         _stop_refusing(listener)
+    assert result.status == "awaiting_approval", result.error
     rows = await _rows()
     assert len(rows) == 1
     payload = rows[0].payload
-    assert payload[FULL_ROW_LOST] == {"error_class": "DataError"}
+    _assert_short_row(payload, "DataError", result_status="awaiting_approval")
+    assert payload["error"] == {
+        "error_code": "awaiting_approval",
+        "approval_request_id": str(request_id),
+    }
+    assert "approval_request_id" not in payload
+
+
+async def test_the_short_row_of_an_approved_run_keeps_the_request_id_at_the_top(
+    demo_op: None,
+) -> None:
+    """Through the dispatcher: the run of an approved request, as in the full row."""
+    request_id = uuid.uuid4()
+    answer["value"] = {"ok": True}
+    structlog.contextvars.bind_contextvars(audit_approval_request_id=str(request_id))
+    listener = _refuse_audit_inserts(_data_error(), times=1)
+    try:
+        result = await _call()
+    finally:
+        _stop_refusing(listener)
+        structlog.contextvars.unbind_contextvars("audit_approval_request_id")
+    assert result.status == "ok", result.error
+    rows = await _rows()
+    assert len(rows) == 1
+    payload = rows[0].payload
+    _assert_short_row(payload, "DataError")
     assert payload["approval_request_id"] == str(request_id)
-    assert payload["result_status"] == "pending"
     assert "error" not in payload
 
 
 def test_an_approval_request_id_that_is_not_a_uuid_is_left_out() -> None:
     short = short_row_payload(
-        ValueError("x"), {"op_id": OP_ID}, error_extras={"approval_request_id": "free text"}
+        ValueError("x"),
+        {"op_id": OP_ID},
+        error_extras={"approval_request_id": "free text"},
+        payload={"approval_request_id": "free text"},
     )
     assert "approval_request_id" not in short
     assert short == {"op_id": OP_ID, FULL_ROW_LOST: {"error_class": "ValueError"}}
 
 
-def test_a_short_row_leaves_out_the_handler_extras_and_the_error() -> None:
+def test_the_short_error_keeps_only_an_error_code_of_the_usual_form() -> None:
+    short = short_row_payload(
+        ValueError("x"), {"op_id": OP_ID}, error_extras={"error_code": "Target said: no"}
+    )
+    assert "error" not in short
+
+
+def test_a_short_row_leaves_out_the_handler_extras_and_the_error_text() -> None:
     core = {"op_id": OP_ID, "params_hash": "ab", "principal_name": "Safe Test"}
     short = short_row_payload(
         ValueError("x"),
@@ -576,6 +610,22 @@ def test_a_short_row_leaves_out_the_handler_extras_and_the_error() -> None:
     )
     assert "target text" not in repr(short)
     assert short["params_hash"] == "ab"
+    assert short["error"] == {"error_code": "e"}
+
+
+async def test_a_full_row_drops_the_marks_a_handler_extra_sets(demo_op: None) -> None:
+    """Only the writer sets ``text_changed`` and ``full_row_lost``."""
+    answer["value"] = {"ok": True}
+    answer["audit_extras"] = {
+        "audit_text_changed": True,
+        "audit_full_row_lost": {"error_class": "Forged"},
+    }
+    result = await _call()
+    assert result.status == "ok", result.error
+    rows = await _rows()
+    assert len(rows) == 1
+    assert TEXT_CHANGED not in rows[0].payload
+    assert FULL_ROW_LOST not in rows[0].payload
 
 
 async def test_the_audit_search_finds_a_short_row_by_principal_name(demo_op: None) -> None:

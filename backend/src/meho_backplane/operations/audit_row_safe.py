@@ -94,7 +94,7 @@ _UNREACHABLE_SQLSTATES: Final[frozenset[str]] = frozenset(
 #: Keys of the full ``payload`` that a short row keeps. MEHO's own code
 #: builds each of them (from the operation, the login, the call context or
 #: the result handle), so none holds text of the target or of a handler.
-#: Left out: ``error`` and the handler's extras.
+#: Left out: the full ``error`` and the handler's extras.
 _SHORT_ROW_KEYS: Final[tuple[str, ...]] = (
     "op_id",
     "op_class",
@@ -121,8 +121,15 @@ _SHORT_ROW_KEYS: Final[tuple[str, ...]] = (
     "client",
 )
 
-#: Key of the approval request id in a short row and in an error's extras.
+#: Key of the approval request id: in an error's extras, and at the top of
+#: the payload of the run of an approved request.
 _APPROVAL_REQUEST_ID: Final[str] = "approval_request_id"
+
+#: Key of the error code in an error's extras.
+_ERROR_CODE: Final[str] = "error_code"
+
+#: An error code as MEHO's code writes it. Any other value is left out.
+_ERROR_CODE_FORM: Final = re.compile(r"[a-z][a-z0-9_.]{0,63}")
 
 
 def _safe_text(value: str, changed: list[bool]) -> str:
@@ -216,22 +223,33 @@ def clamp_duration_ms(duration_ms: float) -> Decimal:
     return min(Decimal(str(round(duration_ms, 2))), MAX_DURATION_MS)
 
 
-def _approval_request_id(*sources: dict[str, Any] | None) -> str | None:
-    """The first approval request id in *sources* that is a UUID.
+def _uuid_or_none(raw: Any) -> str | None:
+    """*raw* as a UUID text, or ``None`` when it is not a UUID."""
+    if raw is None:
+        return None
+    try:
+        return str(uuid.UUID(str(raw)))
+    except ValueError:
+        return None
 
-    MEHO's code sets this id: on the result of a call that waits for
-    approval or was refused, and on the run of an approved request. Only a
-    UUID is kept, so no free text reaches the short row.
+
+def _short_error(error_extras: dict[str, Any] | None) -> dict[str, str]:
+    """The ``error`` object of a short row: the error code and the approval request id.
+
+    MEHO's code sets both: the code on every error result, the approval
+    request id on the result of a call that waits for approval or was
+    refused. Only a code of the usual form and a UUID are kept, so no free
+    text reaches the short row.
     """
-    for source in sources:
-        raw = (source or {}).get(_APPROVAL_REQUEST_ID)
-        if raw is None:
-            continue
-        try:
-            return str(uuid.UUID(str(raw)))
-        except ValueError:
-            continue
-    return None
+    extras = error_extras or {}
+    error: dict[str, str] = {}
+    code = extras.get(_ERROR_CODE)
+    if isinstance(code, str) and _ERROR_CODE_FORM.fullmatch(code):
+        error[_ERROR_CODE] = code
+    approval_request_id = _uuid_or_none(extras.get(_APPROVAL_REQUEST_ID))
+    if approval_request_id is not None:
+        error[_APPROVAL_REQUEST_ID] = approval_request_id
+    return error
 
 
 def short_row_payload(
@@ -245,14 +263,19 @@ def short_row_payload(
 
     *core* is the payload as MEHO's own code built it, before the handler's
     extras and the error were added. The short row keeps its keys in
-    :data:`_SHORT_ROW_KEYS`, the approval request id (from *error_extras*,
-    else from the full *payload*; a UUID only), and :data:`FULL_ROW_LOST`
-    with the error class.
+    :data:`_SHORT_ROW_KEYS` and :data:`FULL_ROW_LOST` with the error class.
+    The approval request id stays where the full row has it: under
+    ``error`` for a call that waits for approval or was refused (see
+    :func:`_short_error`), at the top for the run of an approved request
+    (from the full *payload*). Only a UUID is kept.
     """
     short: dict[str, Any] = {key: core[key] for key in _SHORT_ROW_KEYS if key in core}
-    approval_request_id = _approval_request_id(error_extras, payload)
+    approval_request_id = _uuid_or_none((payload or {}).get(_APPROVAL_REQUEST_ID))
     if approval_request_id is not None:
         short[_APPROVAL_REQUEST_ID] = approval_request_id
+    error = _short_error(error_extras)
+    if error:
+        short["error"] = error
     short[FULL_ROW_LOST] = {"error_class": type(exc).__name__}
     return short
 

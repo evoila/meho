@@ -187,7 +187,7 @@ router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
 #: :func:`~meho_backplane.auth.rbac.require_approvals_access`.
 _require_approvals_access = Depends(require_approvals_access)
 
-#: Human-only governance gate (meho-internal#289). Rejects a non-human
+#: Human-only governance gate. Rejects a non-human
 #: ``principal_kind`` (agent / service / runner) before the endpoint runs —
 #: the REST half of :mod:`meho_backplane.mcp.human_only`'s policy, so the
 #: approval **decision** verbs (approve / reject / decide) are human-only on

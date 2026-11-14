@@ -462,6 +462,7 @@ from meho_backplane.operations.dispatch_limits import (
     resolve_dispatch_rate_limit,
 )
 from meho_backplane.operations.license_reads import is_license_read
+from meho_backplane.operations.op_policy import approval_classification
 from meho_backplane.operations.reducer import (
     SECRET_REVEAL_CONTEXT_KEY,
     PassThroughReducer,
@@ -695,7 +696,7 @@ async def _resolve_connector_instance(
     :func:`~meho_backplane.connectors.resolve_connector_or_label`
     helper so the dispatcher and the ``/api/v1/targets/{name}/probe``
     route reach the same yes/no/ambiguous answer for the same target
-    (consumer feedback signal 19, ``claude-rdc-hetzner-dc#697``).
+    (consumer feedback signal 19).
     """
     if descriptor.source_kind == "ingested":
         await _restore_saved_ingest_profiles(target)
@@ -2338,7 +2339,7 @@ async def _handle_http_status_error(
 
     G0.24-T4 (#1649): an upstream 403 or 422 carries actionable detail the
     generic ``connector_error`` arm would bury in ``extras.exception_message``
-    (consumer ``claude-rdc-hetzner-dc#1138``), because the shared
+    (consumer feedback), because the shared
     ``HttpConnector`` adapter does no error mapping. 403 -> insufficient
     permission (authenticated but lacking the op's scope); 422 -> invalid
     payload (the upstream parsed the request and rejected its content).
@@ -3162,6 +3163,10 @@ async def _build_proposed_effect(
         # ``op_class`` / ``preview`` / fail-soft-marker envelope built by
         # :func:`build_proposed_effect` itself unchanged.
         base["safety_level"] = descriptor.safety_level
+        # #6041: the category, labels and classification rule, so an
+        # approver sees at once what kind of change waits. Nothing while
+        # the POLICY_CLASSIFICATION switch is off.
+        base.update(approval_classification(descriptor))
         # #3980: a person's ``caution`` call that waits only because it came
         # with a token says so on the request. The same person may then
         # approve it with a click in the web interface.

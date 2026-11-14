@@ -45,7 +45,7 @@ SHA-256. The query strings a call actually ran (the local expansion
 variants) are logged only when ``DOCS_DEBUG_LOG_QUERY_TEXT=true``, by
 :func:`log_query_text`, as one ``docs_query_text`` record at debug severity.
 The upstream answer path logs no query text yet: the backend does not return
-its rewritten query until evoila-bosnia/MEHO.Knowledge#513, and then that
+its rewritten query, and then that
 query goes through the same helper with ``source="upstream_rewrite"``. The
 backplane's log floor is INFO
 (:func:`~meho_backplane.logging.configure_logging`), so that record is
@@ -111,7 +111,7 @@ AnswerSource = Literal["local", "upstream"]
 #: ``expansion`` is the local expansion variants (the operator's question
 #: first); ``upstream_rewrite`` is reserved for the rewritten query an
 #: upstream answer endpoint will report (not wired yet: it needs the backend
-#: to return it, evoila-bosnia/MEHO.Knowledge#513).
+#: to return it).
 QueryTextSource = Literal["expansion", "upstream_rewrite"]
 
 #: Docs searches that requested a ``product`` or ``version`` and returned no

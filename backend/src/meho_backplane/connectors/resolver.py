@@ -806,7 +806,7 @@ def resolve_connector_or_label(
     The pre-G0.14 ``/probe`` route used the v1 :func:`get_connector`
     lookup and the dispatcher used the v2 :func:`resolve_connector` —
     same target, two different yes/no answers (consumer feedback signal
-    19, `claude-rdc-hetzner-dc#697`). This helper is the shared code
+    19). This helper is the shared code
     path that closes that asymmetry: both callers now ask
     :func:`resolve_connector` the same way, and the labels above are the
     only output shape they can branch on.

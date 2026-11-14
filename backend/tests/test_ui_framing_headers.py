@@ -3,7 +3,7 @@
 
 """Regression tests for the operator-console clickjacking-defence headers.
 
-Issue evoila-bosnia/meho-internal#101 row L12: the ``/ui/*`` operator
+Review row L12: the ``/ui/*`` operator
 console shipped no anti-framing protection -- no ``X-Frame-Options`` and
 no CSP ``frame-ancestors`` -- so any site could load it in an
 ``<iframe>`` and mount a clickjacking attack.

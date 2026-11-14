@@ -47,7 +47,7 @@ lives in :func:`meho_backplane.auth.rbac.ensure_human_principal` /
 machine ``principal_kind`` (agent / service / runner) on the approval
 decision routes and on grant create / elevate + agent-principal register —
 closing the seam that an agent principal, minted ``tenant_admin`` with the
-REST audience, would otherwise reach over REST (meho-internal#289). Both
+REST audience, would otherwise reach over REST. Both
 halves consult the same
 :func:`meho_backplane.auth.operator.is_human_principal` split, so removing
 a verb from the agent surface here and refusing the machine kind there are

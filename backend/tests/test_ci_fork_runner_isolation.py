@@ -10,7 +10,7 @@ checked-out content, and for a fork `pull_request` event the fork's own
 copy of the workflow body) on internal infrastructure — the class of
 self-hosted-runner risk GitHub documents in its secure-use reference.
 
-The finding (meho-internal#268) was that the fix for this had only been
+The finding  was that the fix for this had only been
 applied to the principal CI file: `migration-compat.yml`,
 `dependency-license-check.yml`, `readme-version-check.yml`,
 `secret-scan.yml` and `security-scan.yml` scheduled the internal pool on

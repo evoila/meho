@@ -291,7 +291,7 @@ def authorize_tenant_scope(operator: Operator, requested: UUID | None) -> UUID:
 #: governance verb over REST. Names the human path (operator console /
 #: ``meho`` CLI) the way the MCP transport's
 #: :data:`~meho_backplane.mcp.human_only.HUMAN_ONLY_MCP_TOOLS` messages do,
-#: so REST and MCP speak one policy (meho-internal#289). Carried on the 403
+#: so REST and MCP speak one policy. Carried on the 403
 #: ``detail`` behind the machine-readable ``human_principal_required:``
 #: prefix, mirroring the ``self_approval_forbidden: <hint>`` shape the
 #: approvals routes already return.

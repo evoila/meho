@@ -96,7 +96,7 @@ client UI can render the entry alongside its provenance even though
 the entry's *content* is Markdown. ``body`` is agent-authored stored
 text and is served wrapped in the positional untrusted-content
 envelope from :mod:`meho_backplane.untrusted_text`
-(stored-prompt-injection guard, evoila-bosnia/meho-internal#154).
+(stored-prompt-injection guard).
 """
 
 from __future__ import annotations

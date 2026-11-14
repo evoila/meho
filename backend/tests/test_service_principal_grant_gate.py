@@ -623,7 +623,7 @@ async def test_null_target_grant_parks_target_scoped_dispatch_with_hint() -> Non
     verdict, reason = await policy_gate(
         operator=_operator(principal_kind=PrincipalKind.SERVICE),
         descriptor=_caution_descriptor(),
-        target=SimpleNamespace(id=uuid.uuid4(), product="vmware", name="esx-dc19"),
+        target=SimpleNamespace(id=uuid.uuid4(), product="vmware", name="esx-host19"),
         connector_id=_CONNECTOR,
     )
     assert verdict is PermissionVerdict.NEEDS_APPROVAL
@@ -635,7 +635,7 @@ async def test_null_target_grant_parks_target_scoped_dispatch_with_hint() -> Non
 @pytest.mark.asyncio
 async def test_selector_grant_auto_executes_for_runtime_created_target() -> None:
     """A selector grant clears the gate for a target that did not exist at create time."""
-    grant_id = await _seed_selector_grant(target_product="vmware", target_name_pattern="esx-dc*")
+    grant_id = await _seed_selector_grant(target_product="vmware", target_name_pattern="esx-host*")
 
     result = await enforce_subop_policy(
         operator=_operator(principal_kind=PrincipalKind.SERVICE),
@@ -643,7 +643,7 @@ async def test_selector_grant_auto_executes_for_runtime_created_target() -> None
         op_id=_OP,
         safety_level="caution",
         requires_approval=False,
-        target=SimpleNamespace(id=uuid.uuid4(), product="vmware", name="esx-dc19"),
+        target=SimpleNamespace(id=uuid.uuid4(), product="vmware", name="esx-host19"),
         params=_PARAMS,
     )
     assert result is None  # auto-executed
@@ -653,14 +653,14 @@ async def test_selector_grant_auto_executes_for_runtime_created_target() -> None
     assert rows[0].payload.get("matched_by") == "selector"
     assert rows[0].payload["target_selector"] == {
         "target_product": "vmware",
-        "target_name_pattern": "esx-dc*",
+        "target_name_pattern": "esx-host*",
     }
 
 
 @pytest.mark.asyncio
 async def test_selector_grant_parks_on_fingerprint_mismatch() -> None:
     """A selector grant does not clear the gate for a non-matching target fingerprint."""
-    await _seed_selector_grant(target_product="vmware", target_name_pattern="esx-dc*")
+    await _seed_selector_grant(target_product="vmware", target_name_pattern="esx-host*")
 
     result = await enforce_subop_policy(
         operator=_operator(principal_kind=PrincipalKind.SERVICE),

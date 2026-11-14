@@ -1581,8 +1581,8 @@ def build_openapi_schema() -> dict[str, object]:
     the ``product`` property on the ``TargetCreate`` request schema
     renders as a JSON Schema enum populated from the live connector
     registry. Without this hook the schema would surface ``product`` as
-    a free-form string — the dogfood signal 5 UX miss in
-    ``claude-rdc-hetzner-dc#697`` (operator typed ``'kubernetes'``,
+    a free-form string — the dogfood signal 5 UX miss
+    in consumer feedback (operator typed ``'kubernetes'``,
     resolver matched on ``'k8s'``, no early signal). Paired with the
     runtime 422 in :func:`~meho_backplane.api.v1.targets.create_target`
     (Options A + C from the task body, sharing one source-of-truth

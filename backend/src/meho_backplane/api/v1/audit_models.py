@@ -60,6 +60,7 @@ __all__ = [
     "AuditQueryResult",
     "AuditReplayResult",
     "AuditTraceResult",
+    "AuditTraceSearchResult",
     "ReplayNode",
     "TraceSpanView",
     "TraceView",
@@ -88,6 +89,12 @@ class _AuditFilterFields(BaseModel):
     parent_audit_id: uuid.UUID | None = None
     agent_session_id: uuid.UUID | None = None
     work_ref: str | None = Field(default=None, max_length=256)
+    # ``true``: only the short rows, stored when the database refused the
+    # full row. ``false``: the other rows. Not set: no filter (#6452).
+    full_row_lost: bool | None = None
+    # ``true``: only the rows where the writer replaced a character or a
+    # number so the table could store it. ``false``: the other rows (#6452).
+    text_changed: bool | None = None
 
     def to_filters(self) -> AuditQueryFilters:
         """Return the substrate filters, with ``since`` / ``until`` parsed.
@@ -209,6 +216,17 @@ class AuditReplayResult(BaseModel):
     row_count: int
     excluded_null_session_count: int
     loose_row_count: int
+
+
+class AuditTraceSearchResult(BaseModel):
+    """200 body for ``GET /api/v1/audit/traces`` (#6452).
+
+    The stored traces that match the request id, caller and time window,
+    newest first. A trace is listed even when its audit row was never
+    stored.
+    """
+
+    items: list[TraceView]
 
 
 class AuditTraceResult(BaseModel):

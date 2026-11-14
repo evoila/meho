@@ -9821,6 +9821,10 @@ class DispatchTrace(Base):
         default=False,
         server_default=sa.false(),
     )
+    # Request id and caller of the call (migration 0167). They let a trace be
+    # found without its audit row. NULL on a trace stored before the change.
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    operator_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         # One trace header per dispatch: unique on the soft-FK to audit_log.
@@ -9834,6 +9838,14 @@ class DispatchTrace(Base):
         Index(
             "dispatch_trace_expires_at_idx",
             "expires_at",
+            postgresql_using="btree",
+        ),
+        Index("dispatch_trace_request_id_idx", "request_id", postgresql_using="btree"),
+        Index(
+            "dispatch_trace_operator_created_idx",
+            "tenant_id",
+            "operator_sub",
+            "created_at",
             postgresql_using="btree",
         ),
     )

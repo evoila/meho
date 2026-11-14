@@ -54,6 +54,91 @@ own grant refused the call, and `role_insufficient` means the role did.
 The text names operations, grant patterns, roles and logins only, never a
 secret or the call's arguments.
 
+### Text the table cannot store, and the short row (#6452)
+
+The answer of a target can hold text that the `audit_log` table refuses.
+The audit writer (`write_audit_row`) changes that text before it stores the
+row, in `payload`, `raw_payload` and `redaction_manifest` (keys and values,
+at any depth). The caller still gets the answer unchanged.
+
+| Text in the answer | What is stored |
+|---|---|
+| A NUL character | `<NUL>` |
+| A character that is not valid as text (a lone surrogate) | `<invalid character>` |
+| A number JSON cannot hold (NaN, Infinity) | The text `nan`, `inf` or `-inf` |
+| A `Decimal`, date, time stamp, UUID, bytes or set | Its text form (a set becomes a list) |
+| A key that is not text | Its text form, as JSON writes it (`1`, `true`, `null`) |
+
+When the writer replaced a character or a number (the first two rows, or a
+key that got a `#2` suffix because two keys became equal), it sets
+`"text_changed": true` at the top level of `payload`. Only the writer sets
+this key. A target can send the text `<NUL>`, but it cannot set the key. A
+value of the last two rows is not counted as a change.
+
+When the insert of the full row fails for any other reason, the writer tries
+once more with a **short row**. The call still returns its answer, also a
+call that returns hidden values: the short row is its audit row. A short row
+holds:
+
+- the fixed columns: who, when, tenant, target, operation, status code,
+  ticket id, request id, session, run and step;
+- in `payload`, every value that MEHO builds itself: `op_id`, `op_class`,
+  `result_status`, `params_hash`, `source_kind`, the connector product,
+  version and implementation, `principal_name`, `client`,
+  `reveal_secret`, `agent_session_id`, `run_id`, `step_id`,
+  `caller_gone_at`, the parent audit id, the result handle (`handle_id`,
+  `total_rows`), `redaction_policy_id` and the model data of an agent run;
+- `approval_request_id` for a call that waits for approval or was
+  refused. The id comes from the result that MEHO's code built, never
+  from an error text, and only a UUID is kept;
+- `{"full_row_lost": {"error_class": "<name of the error>"}}`.
+
+A short row has no `raw_payload`, no `redaction_manifest`, no `error` and
+none of the extra keys that a connector handler adds: these can hold text of
+the target. MEHO logs `audit_full_row_lost` with the audit id, the
+operation, the request id and the error class. The same short row is used on
+the error path, so a call that failed at the target also has a row.
+
+No short row is written when the database cannot be reached (a connection
+fault, a connection timeout, too many connections, a shutdown). Then the
+write fails at once, and the call answers `audit_commit_failed`. The same
+happens when the short row fails too. A statement that was cancelled or ran
+into a statement timeout is not such a case: then the short row is tried.
+
+The write of a call that ran is not lost when the task is cancelled during
+the write: the write runs to its end, and the cancel is raised after it.
+`duration_ms` is cut to the largest value its column holds (99999999.99).
+
+**How to find these rows:**
+
+- `meho audit query --full-row-lost` (REST: `"full_row_lost": true` in the
+  body of `POST /api/v1/audit/query`) lists the short rows.
+  `meho audit query --text-changed` (`"text_changed": true`) lists the rows
+  where text was changed. Both work with the other filters, for example
+  `--principal`.
+- Two counters: `meho_audit_full_row_lost_total` (by `error_class`) and
+  `meho_audit_text_changed_total`.
+
+A failed audit write is logged as `dispatch_audit_failed`. The line holds the
+request id, the target (name and id), the operation and the caller
+(`operator_sub`).
+
+The code is in `operations/audit_row_safe.py` and `operations/_audit.py`.
+
+### Find a trace without its audit row (#6452)
+
+`GET /api/v1/audit/traces` searches the stored flight-recorder traces
+without reading `audit_log`, so it works when the audit row of a call was
+never stored. Query parameters: `request_id` (UUID), `caller` (the exact
+`operator_sub`), `since` (default `24h`), `until`, `limit` (1 to 100, default
+20). Newest first. 200 body: `{"items": [TraceView, ...]}`, each with its
+spans. Migration `0167` added `request_id` and `operator_sub` to
+`dispatch_trace`; an older trace has neither and is found by time only.
+Access rules are those of the single trace read: a person reads every trace
+of the tenant, an agent reads none unless the tenant lets agents read
+traces, and never a trace marked `redaction_uncertain`. There is no CLI
+command for it yet.
+
 ### Results a handler returns: error, wait, deny (#4274, #4275)
 
 A typed or multi-step handler can return a result instead of raising one.
@@ -582,6 +667,7 @@ tenant-scoping invariant is enforced one layer up.
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal_sub = operator.sub` (exact match on the user id, never the name filter); `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
+| `GET /api/v1/audit/traces` | Finds stored traces by `request_id`, `caller` and the window `since` / `until`, without the audit row (#6452). See "Find a trace without its audit row". 200 body is `{items: [TraceView]}`. | Flight-recorder trace search. |
 | `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read. Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). Only an `operation_execution` row reads a trace; any other class answers `trace_present=false` without a trace read. 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace, event_class}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. A person keeps full access, independent of the agent gate. An agent login (`principal_kind=agent`) gets the agent rules: no trace unless `should_expose_to_agent` is true for the tenant (checked before the load), and never a trace marked `redaction_uncertain`. Both answer `trace_present=false` (`_load_trace_for`). | Flight-recorder trace. |
 | `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count, excluded_null_session_count, loose_row_count}`; `loose_row_count` is the nodes whose parent id names no row, #4670). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
 

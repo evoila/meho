@@ -37,6 +37,8 @@ import (
 //	  [--parent-audit-id ID]       # rows whose parent is this audit-id
 //	  [--session-id ID]            # narrow to one agent session (UUID)
 //	  [--filter-work-ref REF]      # exact change-ticket ref: gh:evoila/meho#1
+//	  [--full-row-lost]            # only short rows: the full row was refused
+//	  [--text-changed]             # only rows where text was replaced to be stored
 //	  [--json]                     # raw AuditQueryResult JSON
 //	  [--backplane <url>]          # override the configured backplane
 //
@@ -62,6 +64,8 @@ func newQueryCmd() *cobra.Command {
 		parentAuditID     string
 		sessionID         string
 		workRef           string
+		fullRowLost       bool
+		textChanged       bool
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -94,6 +98,8 @@ func newQueryCmd() *cobra.Command {
 				ParentAuditID:     parentAuditID,
 				SessionID:         sessionID,
 				WorkRef:           workref.Filter(cmd, workRef),
+				FullRowLost:       fullRowLost,
+				TextChanged:       textChanged,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -129,6 +135,12 @@ func newQueryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
 		"narrow to one external change-ticket reference (exact match; "+
 			"e.g. gh:evoila/meho#1) — \"show every write authorised by ticket X\"")
+	cmd.Flags().BoolVar(&fullRowLost, "full-row-lost", false,
+		"only the short rows: the database refused the full row, so MEHO stored "+
+			"the row without the target's answer and the error text")
+	cmd.Flags().BoolVar(&textChanged, "text-changed", false,
+		"only the rows where MEHO replaced a character or a number "+
+			"(for example a NUL character) so the database could store the row")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw AuditQueryResult JSON instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -150,6 +162,8 @@ type queryOptions struct {
 	ParentAuditID     string
 	SessionID         string
 	WorkRef           string
+	FullRowLost       bool
+	TextChanged       bool
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -278,6 +292,14 @@ func buildAuditQueryRequest(opts queryOptions) (api.AuditQueryRequest, error) {
 	if opts.WorkRef != "" {
 		v := opts.WorkRef
 		body.WorkRef = &v
+	}
+	if opts.FullRowLost {
+		v := true
+		body.FullRowLost = &v
+	}
+	if opts.TextChanged {
+		v := true
+		body.TextChanged = &v
 	}
 	if opts.Limit > 0 {
 		l := opts.Limit

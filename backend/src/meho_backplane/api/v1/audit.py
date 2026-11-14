@@ -127,6 +127,7 @@ from meho_backplane.api.v1.audit_models import (
     AuditQueryRequest,
     AuditReplayResult,
     AuditTraceResult,
+    AuditTraceSearchResult,
 )
 from meho_backplane.audit_query import (
     AuditEntry,
@@ -145,7 +146,12 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
-from meho_backplane.flight_recorder import TraceView, load_trace, should_expose_to_agent
+from meho_backplane.flight_recorder import (
+    TraceView,
+    find_traces,
+    load_trace,
+    should_expose_to_agent,
+)
 
 __all__ = ["router"]
 
@@ -406,6 +412,54 @@ async def _load_trace_for(operator: Operator, audit_id: uuid.UUID) -> TraceView 
     if is_agent and view is not None and view.redaction_uncertain:
         return None
     return view
+
+
+@router.get("/traces", response_model=AuditTraceSearchResult)
+async def search_traces(
+    request_id: uuid.UUID | None = Query(default=None),
+    caller: str | None = Query(default=None, max_length=512),
+    since: str = Query(default=_DEFAULT_SINCE, max_length=32),
+    until: str | None = Query(default=None, max_length=32),
+    limit: int = Query(default=20, ge=1, le=100),
+    operator: Operator = _require_operator,
+) -> AuditTraceSearchResult:
+    """Find stored flight-recorder traces without their audit row (#6452).
+
+    Filters: ``request_id`` (the id of the request that made the call),
+    ``caller`` (the exact login subject of the caller) and the window
+    ``since`` / ``until`` (duration shorthand or ISO-8601; ``since`` defaults
+    to 24 hours). The newest traces come first. Use it when the audit row of
+    a call was never stored, so ``GET /{audit_id}/trace`` cannot be used.
+
+    The trace tables hold the request id and the caller since migration
+    ``0167``; an older trace is found by the time window only. The access
+    rules are those of the single trace read: a person reads every trace of
+    the tenant; an agent login reads none unless the tenant lets agents read
+    traces, and never a trace marked ``redaction_uncertain``.
+    """
+    _bind_audit_overrides(_AUDIT_TRACE_OP_ID)
+    now = datetime.now(UTC)
+    try:
+        since_dt = parse_duration(since, now=now)
+        until_dt = parse_duration(until, now=now) if until is not None else None
+    except DurationParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    is_agent = operator.principal_kind is PrincipalKind.AGENT
+    if is_agent and not await should_expose_to_agent(tenant_id=operator.tenant_id):
+        return AuditTraceSearchResult(items=[])
+    async with get_sessionmaker()() as session:
+        items = await find_traces(
+            session,
+            tenant_id=operator.tenant_id,
+            request_id=request_id,
+            operator_sub=caller,
+            since=since_dt,
+            until=until_dt,
+            include_redaction_uncertain=not is_agent,
+            limit=limit,
+        )
+    structlog.contextvars.bind_contextvars(audit_row_count=len(items))
+    return AuditTraceSearchResult(items=items)
 
 
 @router.get("/{audit_id}/trace", response_model=AuditTraceResult)

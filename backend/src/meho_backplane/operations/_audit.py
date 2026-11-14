@@ -23,7 +23,10 @@ specific fields land in ``payload``.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import uuid
+from collections.abc import Coroutine
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -42,6 +45,15 @@ from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
 from meho_backplane.operations._errors import status_code_for_result
+from meho_backplane.operations.audit_row_safe import (
+    AUDIT_FULL_ROW_LOST_TOTAL,
+    AUDIT_TEXT_CHANGED_TOTAL,
+    TEXT_CHANGED,
+    clamp_duration_ms,
+    is_database_unreachable,
+    short_row_payload,
+    storable_and_changed,
+)
 from meho_backplane.operations.caller_gone import caller_gone_at
 from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.work_ref import normalize_work_ref
@@ -480,6 +492,30 @@ def _build_audit_payload(
     builders, so persisting it to the durable ledger adds no leak surface;
     it is threaded to the audit row only.
     """
+    payload = _build_core_payload(
+        descriptor,
+        params_hash,
+        result_status,
+        redaction_policy_id=redaction_policy_id,
+        handle_metadata=handle_metadata,
+    )
+    return _add_handler_extras_and_error(payload, descriptor, error_extras)
+
+
+def _build_core_payload(
+    descriptor: EndpointDescriptor,
+    params_hash: str,
+    result_status: str,
+    *,
+    redaction_policy_id: str | None = None,
+    handle_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The part of the payload that MEHO's own code builds (#6452).
+
+    Everything of :func:`_build_audit_payload` except the handler's
+    ``audit_*`` extras and the ``error`` envelope. A short row keeps keys of
+    this part only (:func:`~meho_backplane.operations.audit_row_safe.short_row_payload`).
+    """
     payload: dict[str, Any] = {
         "op_id": descriptor.op_id,
         "params_hash": params_hash,
@@ -503,6 +539,16 @@ def _build_audit_payload(
     # correlation, credential_read reveal choice) for the broadcast-event
     # surface; the canonical values live in dedicated ``audit_log`` columns.
     _apply_contextvar_lineage_mirrors(payload)
+    payload.update(op_id=descriptor.op_id, op_class=descriptor_op_class(descriptor))
+    return payload
+
+
+def _add_handler_extras_and_error(
+    payload: dict[str, Any],
+    descriptor: EndpointDescriptor,
+    error_extras: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Add the handler's ``audit_*`` extras and the error envelope to *payload*."""
     # Handler-bound extras last so a handler can intentionally override
     # a default (e.g. a future per-op result_status override); the
     # default keys are documented + load-bearing for audit consumers,
@@ -587,7 +633,7 @@ def _resolve_target_id(target: Any) -> uuid.UUID | None:
 
 
 async def _apply_principal_name(
-    session: AsyncSession, payload: dict[str, Any], operator: Operator
+    session: AsyncSession, operator: Operator, *payloads: dict[str, Any]
 ) -> None:
     """Store the caller's display name in ``payload["principal_name"]`` (#4029).
 
@@ -603,7 +649,8 @@ async def _apply_principal_name(
     """
     name = await principal_display_name(session, operator)
     if name:
-        payload["principal_name"] = name
+        for payload in payloads:
+            payload["principal_name"] = name
 
 
 class AuditCommitError(RuntimeError):
@@ -663,16 +710,26 @@ async def write_audit_row(
     happened: ``operation_execution`` when the operation ran (``ok``,
     ``error``, or stopped part-way because a step waits for approval or was
     denied, #4275), ``policy_decision`` when a gate refused it before it ran.
+
+    Before the row is stored, every text and number in ``payload``,
+    ``raw_payload`` and ``redaction_manifest`` is made storable
+    (:func:`~meho_backplane.operations.audit_row_safe.make_storable`, #6452).
+    When a character or a number was replaced, ``payload`` gets
+    ``text_changed: true``. When the insert of the full row still fails, for
+    a reason other than "the database cannot be reached", one short row is
+    stored instead (see :func:`_write_short_row`). Only when that insert
+    fails too does this function raise. A cancel of the task during the
+    write is raised after the write ends (:func:`_run_to_end`), and
+    ``duration_ms`` is cut to the largest value the column holds.
     """
-    sessionmaker = get_sessionmaker()
-    payload = _build_audit_payload(
+    core = _build_core_payload(
         descriptor,
         params_hash,
         result_status,
-        error_extras=error_extras,
         redaction_policy_id=redaction_policy_id,
         handle_metadata=handle_metadata,
     )
+    payload = _add_handler_extras_and_error(dict(core), descriptor, error_extras)
     target_id = _resolve_target_id(target)
     parent_audit_id = parent_audit_id_var.get()
     # The session this row belongs to (#4672): the agent run's id inside
@@ -706,34 +763,151 @@ async def write_audit_row(
     # is added by migration ``0051``. ``None`` when no gate ran for this row.
     if hasattr(AuditLog, "policy_decision"):
         runbook_kwargs["policy_decision"] = policy_decision_var.get()
-    async with sessionmaker() as session:
-        await _apply_principal_name(session, payload, operator)
-        apply_client_block(payload, operator)
-        row = AuditLog(
-            id=audit_id,
-            occurred_at=datetime.now(UTC),
-            operator_sub=operator.sub,
-            actor_sub=resolve_actor_sub(),
-            tenant_id=operator.tenant_id,
-            target_id=target_id,
-            parent_audit_id=parent_audit_id,
-            agent_session_id=agent_session_id,
+    row_fields: dict[str, Any] = {
+        "id": audit_id,
+        "occurred_at": datetime.now(UTC),
+        "operator_sub": operator.sub,
+        "actor_sub": resolve_actor_sub(),
+        "tenant_id": operator.tenant_id,
+        "target_id": target_id,
+        "parent_audit_id": parent_audit_id,
+        "agent_session_id": agent_session_id,
+        "method": "DISPATCH",
+        "path": descriptor.op_id,
+        "status_code": status_code_for_result(result_status),
+        # #3695: the request's correlation id. A standing-grant
+        # auto-approval row written for this call carries the same
+        # value, so the approval links forward to this row.
+        "request_id": current_request_id(),
+        "duration_ms": clamp_duration_ms(duration_ms),
+        **runbook_kwargs,
+    }
+    await _run_to_end(
+        _store_row(
+            row_fields=row_fields,
             event_class=event_class,
-            method="DISPATCH",
-            path=descriptor.op_id,
-            status_code=status_code_for_result(result_status),
-            # #3695: the request's correlation id. A standing-grant
-            # auto-approval row written for this call carries the same
-            # value, so the approval links forward to this row.
-            request_id=current_request_id(),
-            duration_ms=Decimal(str(round(duration_ms, 2))),
+            operator=operator,
+            core=core,
             payload=payload,
             raw_payload=raw_payload,
             redaction_manifest=redaction_manifest,
-            **runbook_kwargs,
-        )
-        session.add(row)
+            error_extras=error_extras,
+        ),
+        audit_id=audit_id,
+    )
+
+
+async def _run_to_end(write: Coroutine[Any, Any, None], *, audit_id: uuid.UUID) -> None:
+    """Run the audit *write* to its end, also when this task is cancelled (#6452).
+
+    The call already ran, so its row must not be lost half-way. On a cancel
+    the write goes on in its own task; when it is done, the cancel is raised.
+    """
+    task = asyncio.ensure_future(write)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if task.cancelled():
+            raise
+        while not task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({task})
+        failure = None if task.cancelled() else task.exception()
+        if failure is not None:
+            _log.warning(
+                "audit_write_failed_after_cancel",
+                audit_id=str(audit_id),
+                error_class=type(failure).__name__,
+            )
+        raise
+
+
+async def _store_row(
+    *,
+    row_fields: dict[str, Any],
+    event_class: AuditEventClass,
+    operator: Operator,
+    core: dict[str, Any],
+    payload: dict[str, Any],
+    raw_payload: Any | None,
+    redaction_manifest: list[dict[str, Any]] | None,
+    error_extras: dict[str, Any] | None,
+) -> None:
+    """Store the full row; store the short row when the database refuses it (#6452)."""
+    try:
+        async with get_sessionmaker()() as session:
+            await _apply_principal_name(session, operator, core, payload)
+            apply_client_block(core, operator)
+            apply_client_block(payload, operator)
+            columns, changed = _storable_columns(payload, raw_payload, redaction_manifest)
+            session.add(AuditLog(**row_fields, event_class=event_class, **columns))
+            await session.commit()
+    except Exception as exc:
+        if is_database_unreachable(exc):
+            raise
+        short = short_row_payload(exc, core, error_extras=error_extras, payload=payload)
+        await _write_short_row(row_fields, event_class, short, exc)
+        return
+    if changed:
+        AUDIT_TEXT_CHANGED_TOTAL.inc()
+
+
+def _storable_columns(
+    payload: dict[str, Any],
+    raw_payload: Any | None,
+    redaction_manifest: list[dict[str, Any]] | None,
+) -> tuple[dict[str, Any], bool]:
+    """The three JSON columns made storable, and whether a text or number was replaced.
+
+    When one was, ``payload`` gets ``text_changed: true``. Only this function
+    sets that key: a key of the same name from anywhere else is dropped.
+    """
+    stored_payload, payload_changed = storable_and_changed(payload)
+    stored_raw, raw_changed = storable_and_changed(raw_payload)
+    stored_manifest, manifest_changed = storable_and_changed(redaction_manifest)
+    stored_payload.pop(TEXT_CHANGED, None)
+    changed = payload_changed or raw_changed or manifest_changed
+    if changed:
+        stored_payload[TEXT_CHANGED] = True
+    columns = {
+        "payload": stored_payload,
+        "raw_payload": stored_raw,
+        "redaction_manifest": stored_manifest,
+    }
+    return columns, changed
+
+
+async def _write_short_row(
+    row_fields: dict[str, Any],
+    event_class: AuditEventClass,
+    short_payload: dict[str, Any],
+    cause: BaseException,
+) -> None:
+    """Store the short row when the full row of a call could not be stored (#6452).
+
+    The short row keeps the fixed columns (who, when, tenant, target,
+    operation, status, ticket id, request id) and the *short_payload* from
+    :func:`~meho_backplane.operations.audit_row_safe.short_row_payload`: the
+    payload keys that MEHO's own code builds, the approval request id, and a
+    ``full_row_lost`` mark with the error class. It holds none of the text of
+    the target or of a handler. When this insert fails too, the error is
+    raised: the caller then answers ``audit_commit_failed``.
+    """
+    error_class = type(cause).__name__
+    _log.warning(
+        "audit_full_row_lost",
+        audit_id=str(row_fields["id"]),
+        op_id=row_fields["path"],
+        request_id=row_fields["request_id"],
+        error_class=error_class,
+    )
+    AUDIT_FULL_ROW_LOST_TOTAL.labels(error_class=error_class).inc()
+    columns, changed = _storable_columns(short_payload, None, None)
+    async with get_sessionmaker()() as session:
+        session.add(AuditLog(**row_fields, event_class=event_class, payload=columns["payload"]))
         await session.commit()
+    if changed:
+        AUDIT_TEXT_CHANGED_TOTAL.inc()
 
 
 async def audit_safe(
@@ -807,6 +981,9 @@ async def audit_safe(
             op_id=descriptor.op_id,
             result_status=result_status,
             operator_sub=operator.sub,
+            request_id=current_request_id(),
+            target=getattr(target, "name", None),
+            target_id=str(_resolve_target_id(target) or ""),
         )
         if require_audit:
             # Completed-handler success path: the DISPATCH row is a hard

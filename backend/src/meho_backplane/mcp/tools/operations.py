@@ -77,6 +77,10 @@ from meho_backplane.mcp.tools._operation_recall import (
     with_recall,
 )
 from meho_backplane.mcp.tools._preview_typed_writes_text import preview_tool_for_settings
+from meho_backplane.mcp.tools._search_classification import (
+    CLASSIFICATION_PROPERTIES,
+    classification_schema_for_settings,
+)
 from meho_backplane.mcp.tools._short_tool_texts import (
     CALL_OPERATION_SHORT,
     SEARCH_OPERATIONS_SHORT,
@@ -435,7 +439,9 @@ _SAFETY_LEVEL_SCHEMA: dict[str, Any] = {
 }
 
 #: Ranked mode: slim hits. The three score fields appear only when a
-#: tenant_admin caller sets ``include_scores`` (#3668).
+#: tenant_admin caller sets ``include_scores`` (#3668). ``category`` and
+#: ``labels`` appear only while the ``POLICY_CLASSIFICATION`` switch is on
+#: (``_search_classification``).
 _SEARCH_RANKED_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -456,6 +462,7 @@ _SEARCH_RANKED_OUTPUT_SCHEMA: dict[str, Any] = {
                     "group_key": {"type": ["string", "null"]},
                     "safety_level": _SAFETY_LEVEL_SCHEMA,
                     "requires_approval": {"type": "boolean"},
+                    **CLASSIFICATION_PROPERTIES,
                     "fused_score": {"type": "number"},
                     "bm25_score": {"type": ["number", "null"]},
                     "cosine_score": {"type": ["number", "null"]},
@@ -523,6 +530,7 @@ _SEARCH_EXACT_OP_OUTPUT_SCHEMA: dict[str, Any] = {
                 "group_key": {"type": ["string", "null"]},
                 "safety_level": _SAFETY_LEVEL_SCHEMA,
                 "requires_approval": {"type": "boolean"},
+                **CLASSIFICATION_PROPERTIES,
                 "parameter_schema": {"type": "object"},
                 "examples": {
                     "type": "array",
@@ -581,7 +589,9 @@ register_mcp_tool(
         name="search_operations",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
-        for_settings=with_short_text(SEARCH_OPERATIONS_SHORT),
+        for_settings=with_short_text(
+            SEARCH_OPERATIONS_SHORT, then=classification_schema_for_settings
+        ),
         description=(
             "Hybrid BM25 + cosine retrieval over a connector's enabled "
             "operations. Use this AFTER `list_operation_groups` has "

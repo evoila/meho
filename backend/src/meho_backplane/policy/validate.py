@@ -12,6 +12,8 @@ The floors are rules in the code that no policy file can loosen:
   (:mod:`meho_backplane.operations.caller_address`).
 * A file can raise a risk level, never lower it below the level in the
   code.
+* A tenant's file cannot switch off an "always wait" that the install's
+  policy sets: a tenant can make more operations wait, not fewer.
 
 Each problem is one sentence that names the entry
 (``classifications[N]``) and the operation. :func:`check_document` also
@@ -43,6 +45,8 @@ from meho_backplane.policy.classification import (
     Taxonomy,
     check_no_conflict,
     entries_from_document,
+    install_wait_text,
+    install_wait_undone,
     taxonomy_from_documents,
 )
 
@@ -174,14 +178,18 @@ def _floor_mistakes(entries: Sequence[ClassificationEntry], ops: Sequence[KnownO
     return mistakes
 
 
-def _install_wait_warnings(entries: Sequence[ClassificationEntry]) -> list[str]:
-    return [
-        f"`classifications[{index}]` makes operations always wait for the whole install. "
-        "A tenant's own entry that is as specific or more specific can set it back to "
-        "the operation's own value."
-        for index, entry in enumerate(entries)
-        if entry.always_wait is True
-    ]
+def _install_wait_mistakes(
+    entries: Sequence[ClassificationEntry],
+    install_entries: Sequence[ClassificationEntry],
+    ops: Sequence[KnownOp],
+) -> list[str]:
+    """A tenant entry that sets back an install-wide "always wait": one sentence each."""
+    mistakes: list[str] = []
+    for index, entry in enumerate(entries):
+        found = install_wait_undone(entry, (op.coords for op in ops), install_entries)
+        if found is not None:
+            mistakes.append(install_wait_text(f"`classifications[{index}]`", *found))
+    return mistakes
 
 
 def _capped(mistakes: list[str]) -> list[str]:
@@ -198,13 +206,14 @@ def check_document(
     install_document: dict[str, Any] | None,
     ops: Sequence[KnownOp],
     other_entries: Sequence[ClassificationEntry] = (),
-) -> tuple[list[str], list[str]]:
-    """Return the mistakes and the warnings of *document*, a valid file's stored form.
+) -> list[str]:
+    """Return the mistakes of *document*, a valid file's stored form.
 
     *install_document* is the stored install policy (for a tenant's file:
-    its taxonomy is the base, and its entries take part in the conflict
-    check). *other_entries* are more entries that apply next to the file
-    (the category and labels set on one operation).
+    its taxonomy is the base, its "always wait" entries cannot be set
+    back, and its entries take part in the conflict check).
+    *other_entries* are more entries that apply next to the file (the
+    category and labels set on one operation).
     """
     taxonomy = (
         taxonomy_from_documents(document, None)
@@ -215,16 +224,16 @@ def check_document(
     mistakes = _taxonomy_mistakes(document, scope=scope, taxonomy=taxonomy)
     mistakes.extend(_entry_value_mistakes(raw_entries, taxonomy))
     if mistakes:
-        return _capped(mistakes), []
+        return _capped(mistakes)
     entries = entries_from_document(document, scope=scope)
+    base = entries_from_document(install_document, scope="install") if scope == "tenant" else []
     mistakes = _floor_mistakes(entries, ops)
+    mistakes.extend(_install_wait_mistakes(entries, base, ops))
     if not mistakes:
-        base = entries_from_document(install_document, scope="install") if scope == "tenant" else []
         try:
             check_no_conflict(
                 (op.coords for op in ops), [*base, *entries, *other_entries], taxonomy
             )
         except ClassificationConflictError as exc:
             mistakes.append(str(exc))
-    warnings = _install_wait_warnings(entries) if scope == "install" else []
-    return _capped(mistakes), warnings
+    return _capped(mistakes)

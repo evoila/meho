@@ -19,7 +19,12 @@ The rule:
 
 A value that breaks the rule is refused with a message that names the rule.
 It is never cut or changed without a word, apart from the strip and NFC.
-Rows stored before this rule may carry white space at the ends.
+Rows stored before this rule may carry white space at the ends. A search
+for the ticket id of such a row needs the exact old text.
+
+A search filter on a ticket id (the audit search, the approvals, runs,
+scheduler and runbook run lists and the broadcast history) follows the same
+rule, so a search finds an id however it is typed.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from typing import Annotated, Any, Final
 from pydantic import BeforeValidator
 
 __all__ = [
+    "WORK_REF_FIELD_DESCRIPTION",
     "WORK_REF_MAX_CHARS",
     "WorkRef",
     "WorkRefError",
@@ -39,6 +45,13 @@ __all__ = [
 
 WORK_REF_MAX_CHARS: Final[int] = 256
 
+#: The rule in one line, for the description of a ``work_ref`` field.
+WORK_REF_FIELD_DESCRIPTION: Final[str] = (
+    "Ticket id. White space at both ends is removed; it must not be blank, "
+    f"must not hold control or invisible characters, and is at most {WORK_REF_MAX_CHARS} "
+    "characters."
+)
+
 # Cc: control (NUL, tab, line break). Cf: format (zero-width, direction
 # marks). Zl / Zp: line and paragraph separators. Cs: lone surrogates, which
 # cannot be encoded as UTF-8.
@@ -46,22 +59,34 @@ _REFUSED_CATEGORIES: Final[frozenset[str]] = frozenset({"Cc", "Cf", "Zl", "Zp", 
 
 
 class WorkRefError(ValueError):
-    """A ticket id breaks the rule. The message names the rule."""
+    """A ticket id breaks the rule. The message names the rule.
+
+    ``rule`` is a short code for the rule that failed (``empty``,
+    ``invisible_character`` or ``too_long``). It never holds the value, so
+    a log line can carry it.
+    """
+
+    def __init__(self, message: str, *, rule: str) -> None:
+        super().__init__(message)
+        self.rule = rule
 
 
 def normalize_work_ref(value: str) -> str:
     """Return the cleaned ticket id, or raise :class:`WorkRefError`."""
     cleaned = unicodedata.normalize("NFC", value.strip())
     if not cleaned:
-        raise WorkRefError("work_ref must not be empty")
+        raise WorkRefError("work_ref must not be empty", rule="empty")
     for char in cleaned:
         if unicodedata.category(char) in _REFUSED_CATEGORIES:
             raise WorkRefError(
                 "work_ref must not contain control or invisible characters "
-                f"(found U+{ord(char):04X})"
+                f"(found U+{ord(char):04X})",
+                rule="invisible_character",
             )
     if len(cleaned) > WORK_REF_MAX_CHARS:
-        raise WorkRefError(f"work_ref must be at most {WORK_REF_MAX_CHARS} characters")
+        raise WorkRefError(
+            f"work_ref must be at most {WORK_REF_MAX_CHARS} characters", rule="too_long"
+        )
     return cleaned
 
 

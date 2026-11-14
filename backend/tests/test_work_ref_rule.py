@@ -5,13 +5,17 @@
 
 from __future__ import annotations
 
+import json
 import unicodedata
+import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import jsonschema
 import pytest
+import structlog.testing
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
@@ -27,6 +31,7 @@ from meho_backplane.mcp.tools import operations as mcp_operations
 from meho_backplane.mcp.tools import scheduler as _mcp_scheduler  # noqa: F401  (registers the tool)
 from meho_backplane.mcp.tools.agent_runs import _run_handler
 from meho_backplane.mcp.tools.broadcast import _parse_announce_claims
+from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations._audit import decode_work_ref_header, work_ref_var
 from meho_backplane.operations.meta_tools import CallOperationBody
 from meho_backplane.operations.run_approval_schemas import RunApprovalCreate
@@ -43,32 +48,22 @@ _NFC = unicodedata.normalize("NFC", "Änderung-7")
 _LONG_NFD = unicodedata.normalize("NFD", "Ä" * 130)
 
 _ZWSP = chr(0x200B)
-_RLO = chr(0x202E)
-_LSEP = chr(0x2028)
 
-_GOOD = [
-    ("CHG0012345", "CHG0012345"),
-    ("  CHG1  ", "CHG1"),
-    ("\tCHG1\n", "CHG1"),
-    ("gh:evoila/meho#13", "gh:evoila/meho#13"),
-    ("a" * 256, "a" * 256),
-    (_NFD, _NFC),
-    ("change 12", "change 12"),
-]
+#: The cases shared with the Go test of the command line tool
+#: (cli/internal/api/workref_test.go), so the two rules cannot drift.
+_CASES_FILE = Path(__file__).resolve().parents[2] / "testdata" / "work_ref_cases.json"
+_CASES = json.loads(_CASES_FILE.read_text(encoding="utf-8"))
 
+
+def _text(case: dict[str, Any], key: str) -> str:
+    count = case.get("repeat", 1) if key == "raw" else case.get("clean_repeat", 1)
+    return str(case[key]) * int(count)
+
+
+_GOOD = [pytest.param(_text(c, "raw"), _text(c, "clean"), id=c["name"]) for c in _CASES["valid"]]
 _BAD = [
-    ("", "empty"),
-    ("   ", "empty"),
-    ("\t\n", "empty"),
-    ("CHG\x001", "control"),
-    ("CHG1\x00", "control"),
-    ("CHG\n1", "control"),
-    ("CHG\t1", "control"),
-    ("CHG" + _ZWSP + "1", "control"),
-    ("CHG" + _RLO + "1", "control"),
-    ("CHG" + _LSEP + "1", "control"),
-    ("\ud800CHG", "control"),
-    ("a" * 257, "at most 256"),
+    pytest.param(_text(c, "raw"), c["rule"], id=c["name"])
+    for c in _CASES["invalid"] + _CASES["invalid_python_only"]
 ]
 
 
@@ -77,10 +72,27 @@ def test_normalize_accepts_and_cleans(raw: str, expected: str) -> None:
     assert normalize_work_ref(raw) == expected
 
 
-@pytest.mark.parametrize(("raw", "word"), _BAD)
-def test_normalize_refuses_and_names_the_rule(raw: str, word: str) -> None:
-    with pytest.raises(WorkRefError, match=word):
+@pytest.mark.parametrize(("raw", "rule"), _BAD)
+def test_normalize_refuses_and_names_the_rule(raw: str, rule: str) -> None:
+    with pytest.raises(WorkRefError) as caught:
         normalize_work_ref(raw)
+    assert caught.value.rule == rule
+
+
+@pytest.mark.parametrize(
+    ("raw", "words"),
+    [
+        ("", "must not be empty"),
+        ("CHG\x001", "control or invisible characters (found U+0000)"),
+        (_ZWSP.join(["a", "b"]), "(found U+200B)"),
+        ("a" * 257, "at most 256 characters"),
+    ],
+)
+def test_the_message_names_the_rule_and_never_the_value(raw: str, words: str) -> None:
+    with pytest.raises(WorkRefError) as caught:
+        normalize_work_ref(raw)
+    assert words in str(caught.value)
+    assert raw not in str(caught.value) or raw == ""
 
 
 def test_length_is_counted_after_nfc() -> None:
@@ -267,6 +279,35 @@ def test_header_door_refuses_a_blank_value(blank: str) -> None:
     assert reached == []
 
 
+@pytest.mark.parametrize(
+    ("sent", "rule"),
+    [
+        (b"   ", "empty"),
+        (b"CHG\tHIDDEN-9", "invisible_character"),
+        (b"HIDDEN-" + b"a" * 257, "too_long"),
+    ],
+)
+def test_refused_header_leaves_a_log_line_without_the_value(sent: bytes, rule: str) -> None:
+    """The log line has the request id, the route and the rule, never the value."""
+
+    async def inner(scope: Scope, receive: Receive, send: Send) -> None:
+        raise AssertionError("the request must not run")
+
+    client = TestClient(RequestContextMiddleware(AuditMiddleware(inner)))
+    request_id = uuid.uuid4().hex
+    with structlog.testing.capture_logs() as logs:
+        response = client.get(
+            "/api/v1/thing", headers={"Meho-Work-Ref": sent.decode(), "X-Request-Id": request_id}
+        )
+    assert response.status_code == 400
+    (line,) = [entry for entry in logs if entry["event"] == "work_ref_header_refused"]
+    assert line["rule"] == rule
+    assert line["route"] == "/api/v1/thing"
+    assert line["method"] == "GET"
+    assert uuid.UUID(line["request_id"]).hex == request_id
+    assert "HIDDEN" not in str(logs)
+
+
 def test_header_door_without_header_binds_nothing() -> None:
     reached: list[str | None] = []
     client = _app_with_middleware(reached)
@@ -333,15 +374,35 @@ def test_body_with_a_lone_surrogate_gets_a_safe_422() -> None:
     assert error["loc"] == ["body", "work_ref"]
     assert "must not contain control or invisible characters" in error["msg"]
     assert "U+D800" in error["msg"]
-    assert error["input"] == "\\ud800CHG"
+    assert "input" not in error
 
 
-def test_body_422_is_unchanged_for_encodable_input() -> None:
+def test_body_422_does_not_show_the_refused_ticket_id() -> None:
+    """The 422 names the rule and the code point, like the header and MCP answers."""
+    sent = "CHG-hidden" + _ZWSP + "-7"
+    response = _body_app().post("/call", json={"connector_id": "c", "op_id": "o", "work_ref": sent})
+    assert response.status_code == 422
+    (error,) = response.json()["detail"]
+    assert error["loc"] == ["body", "work_ref"]
+    assert "U+200B" in error["msg"]
+    assert "input" not in error
+    assert "CHG-hidden" not in response.text
+
+
+def test_body_422_for_a_blank_ticket_id_names_the_rule() -> None:
     response = _body_app().post("/call", json={"connector_id": "c", "op_id": "o", "work_ref": " "})
     assert response.status_code == 422
     (error,) = response.json()["detail"]
-    assert error["input"] == " "
+    assert "input" not in error
     assert "must not be empty" in error["msg"]
+
+
+def test_body_422_keeps_the_input_of_other_fields() -> None:
+    response = _body_app().post("/call", json={"connector_id": 7, "op_id": "o"})
+    assert response.status_code == 422
+    (error,) = response.json()["detail"]
+    assert error["loc"] == ["body", "connector_id"]
+    assert error["input"] == 7
 
 
 def test_app_uses_the_safe_422_handler() -> None:

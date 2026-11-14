@@ -86,6 +86,7 @@ from meho_backplane.operations.agent_run import (
     IllegalTransitionError,
     UnauthorizedCancellationError,
 )
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
 
 __all__ = ["router"]
 
@@ -308,12 +309,15 @@ def _bound_work_ref(raw: str | None) -> Iterator[None]:
     the header around its *post-response* audit write (so the binding is not
     live during the route handler). This binds the same header value for the
     duration of the invoker call so the run row inherits it, mirroring the
-    set/reset discipline the approval-queue boundary uses. A missing /
-    blank header binds nothing — the run's ``work_ref`` lands ``NULL``.
+    set/reset discipline the approval-queue boundary uses. A missing header
+    (``None``) binds nothing — the run's ``work_ref`` lands ``NULL``. A header
+    that is sent but blank never gets here: the audit middleware and
+    :func:`_header_work_ref` refuse it with the shared rule. A blank console
+    form value is turned into ``None`` before the call.
 
-    ``raw`` is normal text. The REST routes pass the header through
-    :func:`_header_work_ref` first; the console run passes its form value
-    as it is.
+    ``raw`` is normal text that already follows the shared rule. The REST
+    routes pass the header through :func:`_header_work_ref` first; the
+    console run passes its form value cleaned by ``form_work_ref``.
     """
     cleaned = raw.strip() if raw is not None else None
     if not cleaned:
@@ -404,14 +408,16 @@ async def run_agent(
 
 @router.get("/runs", response_model=list[AgentRunSummaryResponse])
 async def list_runs(
-    work_ref: str | None = Query(
-        default=None,
-        description=(
-            "Filter by external change-ticket reference (exact match), e.g. "
-            "'gh:evoila/meho#11' — the runs that worked under change ticket X "
-            "(work_ref I3-T2 #1662). Omit for no work_ref filter."
+    work_ref: Annotated[
+        WorkRef | None,
+        Query(
+            description=(
+                "Filter by external change-ticket reference (exact match), e.g. "
+                "'gh:evoila/meho#11' — the runs that worked under change ticket X "
+                "(work_ref I3-T2 #1662). Omit for no work_ref filter. " + WORK_REF_FIELD_DESCRIPTION
+            ),
         ),
-    ),
+    ] = None,
     status: AgentRunStatus | None = Query(
         default=None,
         description=(

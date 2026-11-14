@@ -114,7 +114,7 @@ For the full parent/child **session-graph tree** (lineage between composite oper
 | `--audit-id` | UUID | Exact-id lookup. Combined with the tenant boundary, produces 0 or 1 row. |
 | `--parent-audit-id` | UUID | Exact match on `parent_audit_id`. Returns the direct children of one row, for example the decision row and the run row of an approval request. |
 | `--session-id` | UUID | Exact match on `agent_session_id`. Returns the rows of one agent session as a flat page. |
-| `--filter-work-ref` | string | Exact match on the external change-ticket reference (`work_ref`) of the row. |
+| `--filter-work-ref` | string | Exact match on the external change-ticket reference (`work_ref`) of the row. The value is stripped and made NFC, like a stored ticket id. A blank value, a control or invisible character, or more than 256 characters is refused. A row stored before this rule keeps its old text (it may have white space at the ends), so a search for it needs that exact text. |
 | `--limit` | int 1..1000 | Default 100, max 1000. |
 | `--cursor` | string (opaque) | Forward-only base64 cursor from a prior page's `next_cursor`. Tampered cursors return 400. |
 

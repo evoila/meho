@@ -139,7 +139,7 @@ from meho_backplane.targets.resolver import (
     TargetNotFoundError,
     resolve_target,
 )
-from meho_backplane.work_ref import WorkRef
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
 
 __all__ = [
     "SEARCH_CLASSIFY_MIN_HITS",
@@ -545,7 +545,7 @@ class CallOperationBody(BaseModel):
     op_id: str = Field(min_length=1)
     target: _TargetArg = None
     params: dict[str, Any] = Field(default_factory=dict)
-    work_ref: WorkRef | None = None
+    work_ref: WorkRef | None = Field(default=None, description=WORK_REF_FIELD_DESCRIPTION)
     preview_hash: str | None = Field(
         default=None,
         min_length=1,

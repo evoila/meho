@@ -52,6 +52,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.models import AgentRunStatus
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
+from meho_backplane.mcp.tools._work_ref_argument import work_ref_argument
 from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.work_ref import WorkRefError, normalize_work_ref
 
@@ -351,9 +352,7 @@ async def _list_runs_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    work_ref = arguments.get("work_ref")
-    if work_ref is not None and not isinstance(work_ref, str):
-        raise McpInvalidParamsError("work_ref must be a string when supplied")
+    work_ref = work_ref_argument(arguments.get("work_ref"))
     agent_name = arguments.get("agent_name")
     if agent_name is not None and not isinstance(agent_name, str):
         raise McpInvalidParamsError("agent_name must be a string when supplied")

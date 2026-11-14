@@ -1,0 +1,197 @@
+{
+ "_comment": "Shared cases for the ticket id rule. Read by backend/tests/test_work_ref_rule.py and cli/internal/api/workref_test.go. A case with repeat holds raw repeated that many times. The Go test skips length_depends_on_nfc (the CLI does not make the text composed) and invalid_python_only (Go text cannot hold a lone surrogate). A valid case with cli_refuses is cleaned by the backend, but the CLI refuses it on purpose: a control character at the end of a flag or variable value is most likely a mistake.",
+ "valid": [
+  {
+   "name": "plain ticket",
+   "raw": "CHG0012345",
+   "clean": "CHG0012345"
+  },
+  {
+   "name": "github issue",
+   "raw": "gh:evoila/meho#13",
+   "clean": "gh:evoila/meho#13"
+  },
+  {
+   "name": "jira key",
+   "raw": "OPS-123",
+   "clean": "OPS-123"
+  },
+  {
+   "name": "spaces at both ends",
+   "raw": "  CHG1  ",
+   "clean": "CHG1"
+  },
+  {
+   "name": "tab and line break at both ends",
+   "raw": "\tCHG1\n",
+   "clean": "CHG1",
+   "cli_refuses": true
+  },
+  {
+   "name": "no-break space at both ends",
+   "raw": "\u00a0CHG1\u00a0",
+   "clean": "CHG1"
+  },
+  {
+   "name": "unit separator at both ends",
+   "raw": "\u001fCHG1\u001f",
+   "clean": "CHG1",
+   "cli_refuses": true
+  },
+  {
+   "name": "space inside",
+   "raw": "change 12",
+   "clean": "change 12"
+  },
+  {
+   "name": "no-break space inside",
+   "raw": "change\u00a012",
+   "clean": "change\u00a012"
+  },
+  {
+   "name": "non-ASCII text",
+   "raw": "\u00c4nderung-7",
+   "clean": "\u00c4nderung-7"
+  },
+  {
+   "name": "exactly 256 characters",
+   "raw": "a",
+   "repeat": 256,
+   "clean": "a",
+   "clean_repeat": 256
+  },
+  {
+   "name": "decomposed text is made composed",
+   "raw": "A\u0308nderung-7",
+   "clean": "\u00c4nderung-7"
+  },
+  {
+   "name": "long only before the composed form",
+   "raw": "A\u0308",
+   "repeat": 130,
+   "clean": "\u00c4",
+   "clean_repeat": 130,
+   "length_depends_on_nfc": true
+  }
+ ],
+ "invalid": [
+  {
+   "name": "empty",
+   "raw": "",
+   "rule": "empty"
+  },
+  {
+   "name": "spaces only",
+   "raw": "   ",
+   "rule": "empty"
+  },
+  {
+   "name": "tab and line break only",
+   "raw": "\t\n",
+   "rule": "empty"
+  },
+  {
+   "name": "NUL in the middle",
+   "raw": "CHG\u00001",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "NUL at the end",
+   "raw": "CHG1\u0000",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "line break inside",
+   "raw": "CHG\n1",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "carriage return inside",
+   "raw": "CHG\r1",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "tab inside",
+   "raw": "CHG\t1",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "delete character",
+   "raw": "CHG\u007f1",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "next-line control inside",
+   "raw": "CHG\u00851",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "zero-width space",
+   "raw": "CHG\u200b1",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "zero-width joiner",
+   "raw": "CHG\u200d1",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "word joiner",
+   "raw": "CHG\u20601",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "byte order mark",
+   "raw": "CHG\ufeff1",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "soft hyphen",
+   "raw": "CHG\u00ad1",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "left-to-right mark",
+   "raw": "CHG\u200e1",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "right-to-left override",
+   "raw": "CHG\u202e1",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "isolate mark",
+   "raw": "CHG\u20661",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "tag character",
+   "raw": "CHG\udb40\udc011",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "line separator",
+   "raw": "CHG\u20281",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "paragraph separator",
+   "raw": "CHG\u20291",
+   "rule": "invisible_character"
+  },
+  {
+   "name": "257 characters",
+   "raw": "a",
+   "repeat": 257,
+   "rule": "too_long"
+  }
+ ],
+ "invalid_python_only": [
+  {
+   "name": "lone surrogate",
+   "raw": "\ud800CHG",
+   "rule": "invisible_character"
+  }
+ ]
+}

@@ -831,6 +831,58 @@ def test_create_submit_one_off_utc_fire_at_persists_instant() -> None:
     assert stored == datetime(2026, 7, 1, 9, 0, tzinfo=UTC)
 
 
+def _load_trigger_work_refs(tenant_id: uuid.UUID) -> list[str | None]:
+    from sqlalchemy import select
+
+    async def _do() -> list[str | None]:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            stmt = select(ScheduledTrigger.work_ref).where(ScheduledTrigger.tenant_id == tenant_id)
+            return list((await session.execute(stmt)).scalars().all())
+
+    return asyncio.run(_do())
+
+
+def _post_create_with_work_ref(work_ref: str) -> Any:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        return client.post(
+            "/ui/scheduler/create",
+            data={
+                "kind": "cron",
+                "agent_definition_id": str(_AGENT_ID),
+                "cron_expr": "0 9 * * *",
+                "timezone": "UTC",
+                "inputs": '{"prompt": "scheduled run"}',
+                "in_flight_policy": "fail_into_audit",
+                "work_ref": work_ref,
+            },
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+
+
+def test_create_submit_cleans_the_ticket_id_of_the_form() -> None:
+    """The create form strips the ticket id like every other door."""
+    response = _post_create_with_work_ref("  CHG1  ")
+    assert response.status_code == 204, response.text
+    assert _load_trigger_work_refs(_TENANT_A) == ["CHG1"]
+
+
+def test_create_submit_refuses_a_bad_ticket_id_before_a_trigger_is_stored() -> None:
+    """An invisible character in the ticket id re-renders the modal; nothing is stored."""
+    response = _post_create_with_work_ref("CHG\u200b1")
+    assert response.status_code == 200, response.text
+    assert "alert-error" in response.text
+    assert "control or invisible characters" in response.text
+    assert _trigger_count(_TENANT_A) == 0
+
+
 def test_create_submit_invalid_cron_rerenders_modal_with_error() -> None:
     """An invalid cron expression re-renders the modal with a typed banner."""
     _seed_tenant(_TENANT_A, "tenant-a")

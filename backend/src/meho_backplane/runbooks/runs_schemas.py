@@ -59,7 +59,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from meho_backplane.work_ref import WorkRef
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
 
 __all__ = [
     "AbortRunRequest",
@@ -262,7 +262,7 @@ class StartRunRequest(BaseModel):
     template_slug: str
     target: str
     params: dict[str, object] = Field(default_factory=dict)
-    work_ref: WorkRef | None = None
+    work_ref: WorkRef | None = Field(default=None, description=WORK_REF_FIELD_DESCRIPTION)
 
 
 class CurrentStepResponse(BaseModel):
@@ -431,7 +431,7 @@ class ListRunsFilter(BaseModel):
     assignee: str | None = None
     status: Literal["in_progress", "completed", "abandoned"] | None = None
     template_slug: str | None = None
-    work_ref: str | None = None
+    work_ref: WorkRef | None = Field(default=None, description=WORK_REF_FIELD_DESCRIPTION)
 
 
 class RunSummary(BaseModel):

@@ -860,7 +860,17 @@ class AuditMiddleware:
         except WorkRefError as exc:
             # A ticket id that breaks the rule is refused before anything
             # else happens with the request: no policy check, no call, no
-            # row. The message names the rule.
+            # row. The message names the rule. The log line names the rule
+            # code, the request id and the route, never the value, so an
+            # operator can find the client that sends a bad header.
+            method, path, request_id = _resolve_request_metadata(scope)
+            structlog.get_logger().warning(
+                "work_ref_header_refused",
+                request_id=str(request_id) if request_id is not None else None,
+                method=method,
+                route=path,
+                rule=exc.rule,
+            )
             await JSONResponse(
                 {"detail": f"Meho-Work-Ref header: {exc}"},
                 status_code=400,

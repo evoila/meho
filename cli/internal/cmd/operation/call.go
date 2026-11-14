@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -164,7 +163,7 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	}
 	// Trim like the global --work-ref and MEHO_WORK_REF, so all three
 	// ways store the same ticket id.
-	opts.WorkRef = strings.TrimSpace(opts.WorkRef)
+	opts.WorkRef = api.CleanWorkRef(opts.WorkRef)
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)

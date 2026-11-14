@@ -169,6 +169,7 @@ from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
 from meho_backplane.settings import get_settings
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
 
 __all__ = ["router"]
 
@@ -895,14 +896,16 @@ async def list_approvals(
             "Defaults to 'pending'."
         ),
     ),
-    work_ref: str | None = Query(
-        default=None,
-        description=(
-            "Filter by external change-ticket reference (exact match), e.g. "
-            "'gh:evoila/meho#1' — the requests authorised by change ticket X "
-            "(work_ref I2-T1 #1659). Omit for no work_ref filter."
+    work_ref: Annotated[
+        WorkRef | None,
+        Query(
+            description=(
+                "Filter by external change-ticket reference (exact match), e.g. "
+                "'gh:evoila/meho#1' — the requests authorised by change ticket X "
+                "(work_ref I2-T1 #1659). Omit for no work_ref filter. " + WORK_REF_FIELD_DESCRIPTION
+            ),
         ),
-    ),
+    ] = None,
     limit: int | None = Query(
         default=None,
         ge=1,

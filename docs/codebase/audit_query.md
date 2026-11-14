@@ -445,14 +445,55 @@ and NFC.
   NFD form, or with spaces at the ends, can be longer than 256 code
   points and still be taken. The body size limit of the server bounds
   the raw input.
-- A 422 answer for a bad body names the rule. When the refused input
-  cannot be encoded as UTF-8 (a lone surrogate written as `\ud800` in
-  JSON), the answer shows it as backslash escapes
-  (`api/request_validation.py`).
+- A 422 answer for a bad body, query or path value names the rule and
+  the code point. It does not show the refused ticket id: the `input`
+  field is left out of the error (`api/request_validation.py`). A header
+  that is refused leaves one log line, `work_ref_header_refused`, with
+  the request id, the method, the route and the rule that failed
+  (`empty`, `invisible_character` or `too_long`). It never holds the
+  value. So an operator can find a client that sends a blank or bad
+  header after an upgrade.
 
 Rows stored before this rule are not changed. A ticket id stored before
 this release may carry white space at the ends, so an exact-match filter
 or a run approval made for the cleaned text does not match such a row.
+A search for such an id needs the exact old text, with its white space.
+
+### Search filters
+
+A filter on a ticket id follows the same rule as a stored one. The input
+is stripped, made NFC and checked, and a bad value is refused with the
+same message (HTTP 422, or invalid params on MCP). So a search finds a
+ticket id however it is typed. The filters are:
+
+- the audit search (`POST /api/v1/audit/query`, `POST
+  /api/v1/audit/class-counts`, `GET /api/v1/audit/by-work-ref/{ref}`;
+  CLI `meho audit query --filter-work-ref`);
+- the approvals list (`GET /api/v1/approvals`, MCP `meho_approvals_list`);
+- the agent runs list (`GET /api/v1/agents/runs`, MCP
+  `meho_agents_list_runs`);
+- the scheduler list (`GET /api/v1/scheduler/triggers`, MCP
+  `meho_scheduler_list`);
+- the runbook runs list (`GET /api/v1/runbooks/runs`, MCP
+  `meho_runbook_list_runs`);
+- the broadcast history (`GET /api/v1/broadcast/recent`, MCP
+  `meho_broadcast_recent` and `meho_broadcast_watch`, key
+  `filter.work_ref`).
+
+An empty or blank filter is refused, not read as "no filter". Leave the
+filter out for no filter. The console approvals filter box treats a blank
+box as no filter.
+
+### How a new door is found
+
+`tests/test_work_ref_doors.py` walks every REST request model field,
+every REST query, path and header parameter, and every MCP tool argument
+named `work_ref`. It fails when one does not use the shared type
+`WorkRef` or the shared function (`normalize_work_ref`,
+`work_ref_argument` for MCP), unless it is on a short list with a
+reason (the `Meho-Work-Ref` header of the agent run routes). The
+command line tool has the same rule in `cli/internal/api/workref.go`.
+Both tests read one case list, `testdata/work_ref_cases.json`.
 
 ## Per-session replay (G8.2-T3 #1011)
 

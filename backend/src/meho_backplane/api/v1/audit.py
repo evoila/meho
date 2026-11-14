@@ -116,11 +116,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Final
+from typing import Annotated, Final
 
 import sqlalchemy as sa
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1.audit_models import (
@@ -146,6 +146,7 @@ from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.flight_recorder import TraceView, load_trace, should_expose_to_agent
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
 
 __all__ = ["router"]
 
@@ -295,7 +296,7 @@ async def who_touched(
 
 @router.get("/by-work-ref/{ref:path}", response_model=AuditQueryResult)
 async def by_work_ref(
-    ref: str,
+    ref: Annotated[WorkRef, Path(description=WORK_REF_FIELD_DESCRIPTION)],
     since: str | None = Query(default=None, max_length=32),
     limit: int = Query(default=100, ge=1, le=1000),
     operator: Operator = _require_operator,

@@ -259,6 +259,32 @@ meho targets update lab-prom --clear secret-ref --extra scheme=http
 you want to keep. `--clear extra` removes every extra, and `--clear alias`
 removes every alias. In YAML, write `secret_ref: null`.
 
+### Keycloak targets need a managed realm
+
+A Keycloak target must name the realm MEHO manages, in
+`extras.managed_realm`. MEHO has no built-in realm. Without it, MEHO
+refuses to create or update the target, and refuses every operation on
+it.
+
+```bash
+meho targets add lab-sso --product keycloak --host sso.example.com \
+  --extra managed_realm=example
+```
+
+In YAML, put it under `extras:` (`managed_realm: example`). The optional
+`extras.admin_realm` is the realm the target logs in to; it is `master`
+when you leave it out.
+
+- A realm is one plain name: no `/`, `\`, `?`, `#` or `%`, no spaces at
+  the start or the end, not only dots, and at most 255 characters. MEHO
+  does not trim a value; it refuses it.
+- MEHO allows a managed realm that is the admin realm, or the realm MEHO
+  itself signs in with, but it warns you: at create, at update, and on
+  the approval card of each write on that target.
+- `meho doctor` lists the Keycloak targets MEHO refuses. A platform
+  admin sees the targets of every tenant. You can fix one with
+  `meho targets update`, or in the console edit form ("Managed realm").
+
 ## Change a secret
 
 MEHO keeps a login for each target for a while, so it does not have to

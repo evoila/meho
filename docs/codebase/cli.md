@@ -210,7 +210,7 @@ cli/
     │   ├── doctor.go          # `meho doctor` (#3666) — command, report model, redaction, exit codes.
     │   ├── doctor_offline.go  # offline layer: binary, config, credential store, plugin shim/lock/cache, plugin settings, CA bundle.
     │   ├── doctor_online.go   # authenticated layer: DNS, token + refresh, MCP handshake, working-surface compare.
-    │   ├── doctor_keycloak_realm.go # authenticated layer: warns about Keycloak targets that name no managed realm.
+    │   ├── doctor_keycloak_realm.go # authenticated layer: warns about Keycloak targets MEHO refuses (GET /api/v1/targets/checks/keycloak-realm; all tenants for a platform admin).
     │   ├── doctor_server.go   # server layer (#4740): runs `meho-host check --json` as root on a form-2 server.
     │   ├── doctor_test.go     # offline, credential-store, redaction, and httptest MCP-stub tests.
     │   ├── doctor_server_test.go # server layer with a fake meho-host: root, not root, laptop, bad answers, time limit.

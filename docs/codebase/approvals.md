@@ -3200,6 +3200,13 @@ only, so the parent operation's own audit row keeps the parent's result. Before 
 warning and the op parked anyway; rows parked then still carry
 `write_capability_warning`, which the console modal shows as a banner.
 
+`target_warnings` is a list of plain lines about a setting of the target
+that is allowed but risky, for example a Keycloak target that manages the
+realm MEHO itself signs in with
+(`targets/keycloak_realm_warnings.py`). The dispatcher stamps it onto the
+card when there is at least one line, and the console modal shows it as a
+"Check the target" box.
+
 The KV-v2 write ops (`vault.kv.put` / `vault.kv.patch` /
 `vault.kv.delete`) register a preflight that probes
 `POST sys/capabilities-self` on the target `<mount>/data/<path>` and

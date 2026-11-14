@@ -3250,6 +3250,10 @@ refused, and the message names the entry and the operation.</p>
   <code>caution</code> and always waits.</li>
 <li>A file can raise a risk level, but never lower it below the level in
   MEHO's code.</li>
+<li>When the install's policy makes an operation always wait, it waits in
+  every tenant. A tenant's file can make more operations wait. An entry
+  with <code>always_wait: false</code> that would end an install-wide wait is
+  refused, and the message names the install entry.</li>
 </ul>
 <h2 id="commands">Commands<a class="headerlink" href="#commands" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>policy<span class="w"> </span>validate<span class="w"> </span>policy.yaml<span class="w">     </span><span class="c1"># list every mistake</span>
@@ -3274,11 +3278,13 @@ platform admin may do that.</p>
 <li>The import <strong>replaces the whole policy</strong>. An entry that is not in the
    file is removed.</li>
 </ol>
-<div class="admonition warning">
+<div class="admonition note">
 <p class="admonition-title">Install-wide always wait</p>
-<p>An install file can make operations always wait. A tenant's own entry
-that is as specific or more specific can set this back to the
-operation's own value. MEHO shows a warning for such an entry.</p>
+<p>An install file can make operations always wait. This holds for every
+tenant: a tenant cannot set it back. A tenant entry stored before this
+rule that sets it back has no effect on the wait. <code>meho policy export</code>
+writes a <code># Has no effect:</code> comment above such an entry. Remove it
+before you import the file again.</p>
 </div>
 <h2 id="rest">REST<a class="headerlink" href="#rest" title="Permanent link">&para;</a></h2>
 <table>

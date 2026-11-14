@@ -145,7 +145,7 @@ def test_tools_list_exposes_watch_for_operator(
     body = resp.json()
     names = {t["name"] for t in body["result"]["tools"]}
     assert "meho_broadcast_watch" in names
-    # MEHO-internal RBAC fields stripped from the wire shape.
+    # internal RBAC fields stripped from the wire shape.
     watch_def = next(t for t in body["result"]["tools"] if t["name"] == "meho_broadcast_watch")
     assert "required_role" not in watch_def
     assert "op_class" not in watch_def

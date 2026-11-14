@@ -195,7 +195,7 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
 #: destructive deletes (``pfsense.nat.delete``, ``pfsense.alias.delete``);
 #: #3313 adds the teardown-inverse deletes (``pfsense.route.static.delete``,
 #: ``pfsense.gateway.delete``, ``pfsense.alias.member.remove``)
-#: #252 (meho-internal) adds the management-plane flow classifier
+#: #252 adds the management-plane flow classifier
 #: (``pfsense.mgmt_flow.summary``) via the ``ops_mgmt_flow`` module;
 #: #3954 adds the allow-listed config reads (``pfsense.user.list``,
 #: ``pfsense.route.static.list``) via the ``ops_config_reads`` module;

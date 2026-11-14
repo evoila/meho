@@ -275,7 +275,7 @@ def _resolve_login_role(operator: Operator, settings: Settings, override: str | 
        ``operator.tenant_id`` — so an operator of a sandbox tenant logs into
        a role whose ``bound_claims`` + policy it satisfies instead of the
        shared identity, and one fixed role stops spanning tenants on a shared
-       instance (meho-internal#356). Empty map ⇒ this tier is inert;
+       instance. Empty map ⇒ this tier is inert;
     4. the deployment-global ``vault_oidc_role`` — today's default.
 
     The per-tenant tier sits *below* the check-runner tier deliberately: the

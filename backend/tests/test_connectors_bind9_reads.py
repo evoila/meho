@@ -123,11 +123,11 @@ def _completed_process(stdout: str = "", exit_status: int = 0) -> Any:
 
 
 def test_parse_zones_master_zone_extracts_name_file_type() -> None:
-    output = 'zone "evba.lab" {\n\ttype master;\n\tfile "/etc/bind/db.evba.lab";\n};\n'
+    output = 'zone "example.test" {\n\ttype master;\n\tfile "/etc/bind/db.example.test";\n};\n'
     assert parse_named_checkconf_zones(output) == [
         {
-            "name": "evba.lab",
-            "file": "/etc/bind/db.evba.lab",
+            "name": "example.test",
+            "file": "/etc/bind/db.example.test",
             "type": "master",
             "view": None,
         }
@@ -136,17 +136,17 @@ def test_parse_zones_master_zone_extracts_name_file_type() -> None:
 
 def test_parse_zones_supports_multiple_zones_and_class_clause() -> None:
     output = (
-        'zone "evba.lab" IN {\n'
+        'zone "example.test" IN {\n'
         "\ttype master;\n"
-        '\tfile "/etc/bind/db.evba.lab";\n'
+        '\tfile "/etc/bind/db.example.test";\n'
         "};\n"
-        'zone "10.5.50.in-addr.arpa" {\n'
+        'zone "100.51.198.in-addr.arpa" {\n'
         "\ttype master;\n"
-        '\tfile "/etc/bind/db.10.5.50";\n'
+        '\tfile "/etc/bind/db.198.51.100";\n'
         "};\n"
     )
     rows = parse_named_checkconf_zones(output)
-    assert {row["name"] for row in rows} == {"evba.lab", "10.5.50.in-addr.arpa"}
+    assert {row["name"] for row in rows} == {"example.test", "100.51.198.in-addr.arpa"}
     assert all(row["type"] == "master" for row in rows)
 
 
@@ -156,9 +156,9 @@ def test_parse_zones_walks_through_options_and_view_blocks() -> None:
         "options {\n"
         '\tdirectory "/var/cache/bind";\n'
         "};\n"
-        'zone "evba.lab" {\n'
+        'zone "example.test" {\n'
         "\ttype master;\n"
-        '\tfile "/etc/bind/db.evba.lab";\n'
+        '\tfile "/etc/bind/db.example.test";\n'
         "};\n"
         'view "external" {\n'
         '\tzone "ext.example.com" {\n'
@@ -170,7 +170,7 @@ def test_parse_zones_walks_through_options_and_view_blocks() -> None:
     )
     rows = parse_named_checkconf_zones(output)
     names = {row["name"] for row in rows}
-    assert "evba.lab" in names
+    assert "example.test" in names
     assert "ext.example.com" in names
     ext_row = next(r for r in rows if r["name"] == "ext.example.com")
     assert ext_row["type"] == "slave"
@@ -178,7 +178,7 @@ def test_parse_zones_walks_through_options_and_view_blocks() -> None:
     # The bare top-level zone carries no view; the view-wrapped zone is
     # attributed to its enclosing ``view`` block. The nested
     # ``masters { ... };`` inside the view must not close it early.
-    assert next(r for r in rows if r["name"] == "evba.lab")["view"] is None
+    assert next(r for r in rows if r["name"] == "example.test")["view"] is None
     assert ext_row["view"] == "external"
 
 
@@ -251,17 +251,17 @@ def test_parse_zones_no_views_attributes_null_view() -> None:
         "options {\n"
         '\tdirectory "/var/cache/bind";\n'
         "};\n"
-        'zone "evba.lab" {\n'
+        'zone "example.test" {\n'
         "\ttype master;\n"
-        '\tfile "/etc/bind/db.evba.lab";\n'
+        '\tfile "/etc/bind/db.example.test";\n'
         "};\n"
-        'zone "10.5.50.in-addr.arpa" {\n'
+        'zone "100.51.198.in-addr.arpa" {\n'
         "\ttype master;\n"
-        '\tfile "/etc/bind/db.10.5.50";\n'
+        '\tfile "/etc/bind/db.198.51.100";\n'
         "};\n"
     )
     rows = parse_named_checkconf_zones(output)
-    assert {row["name"] for row in rows} == {"evba.lab", "10.5.50.in-addr.arpa"}
+    assert {row["name"] for row in rows} == {"example.test", "100.51.198.in-addr.arpa"}
     assert all(row["view"] is None for row in rows)
 
 
@@ -271,21 +271,21 @@ def test_parse_zones_no_views_attributes_null_view() -> None:
 
 
 _SAMPLE_ZONEFILE = """$TTL 3600
-@ IN SOA ns1.evba.lab. admin.evba.lab. (
+@ IN SOA ns1.example.test. admin.example.test. (
     2026051801 3600 600 604800 86400 )
-@   IN NS ns1.evba.lab.
-ns1 IN A 10.5.50.1
-www IN A 10.5.50.2
-mail IN A 10.5.50.3
+@   IN NS ns1.example.test.
+ns1 IN A 198.51.100.1
+www IN A 198.51.100.2
+mail IN A 198.51.100.3
 mail IN AAAA 2001:db8::1
-alias IN CNAME ns1.evba.lab.
-@   IN MX 10 mail.evba.lab.
+alias IN CNAME ns1.example.test.
+@   IN MX 10 mail.example.test.
 @   IN TXT "v=spf1 a -all"
 """
 
 
 def test_parse_zonefile_emits_one_row_per_rrset_member() -> None:
-    rows = parse_zonefile(_SAMPLE_ZONEFILE, origin="evba.lab.")
+    rows = parse_zonefile(_SAMPLE_ZONEFILE, origin="example.test.")
     types = sorted(row["type"] for row in rows)
     # SOA + NS + MX + TXT at apex; 3 A + 1 AAAA + 1 CNAME for hosts
     assert types.count("A") == 3
@@ -298,29 +298,29 @@ def test_parse_zonefile_emits_one_row_per_rrset_member() -> None:
 
 
 def test_parse_zonefile_normalises_names_to_fqdn_with_trailing_dot() -> None:
-    rows = parse_zonefile(_SAMPLE_ZONEFILE, origin="evba.lab.")
-    www_row = next(r for r in rows if r["type"] == "A" and r["rdata"] == "10.5.50.2")
-    assert www_row["name"] == "www.evba.lab."
+    rows = parse_zonefile(_SAMPLE_ZONEFILE, origin="example.test.")
+    www_row = next(r for r in rows if r["type"] == "A" and r["rdata"] == "198.51.100.2")
+    assert www_row["name"] == "www.example.test."
     assert www_row["ttl"] == 3600
     assert www_row["class"] == "IN"
 
 
 def test_parse_zonefile_preserves_txt_quoting() -> None:
-    rows = parse_zonefile(_SAMPLE_ZONEFILE, origin="evba.lab.")
+    rows = parse_zonefile(_SAMPLE_ZONEFILE, origin="example.test.")
     txt_row = next(r for r in rows if r["type"] == "TXT")
     assert txt_row["rdata"] == '"v=spf1 a -all"'
 
 
 def test_parse_zonefile_emits_mx_priority_and_target_in_rdata() -> None:
-    rows = parse_zonefile(_SAMPLE_ZONEFILE, origin="evba.lab.")
+    rows = parse_zonefile(_SAMPLE_ZONEFILE, origin="example.test.")
     mx_row = next(r for r in rows if r["type"] == "MX")
-    assert mx_row["rdata"] == "10 mail.evba.lab."
+    assert mx_row["rdata"] == "10 mail.example.test."
 
 
 def test_parse_zonefile_raises_on_invalid_syntax() -> None:
     """A malformed zonefile surfaces a :class:`dns.exception.DNSException`."""
     with pytest.raises(dns.exception.DNSException):
-        parse_zonefile("this is not a zonefile\nblargh blargh\n", origin="evba.lab.")
+        parse_zonefile("this is not a zonefile\nblargh blargh\n", origin="example.test.")
 
 
 # ---------------------------------------------------------------------------
@@ -330,14 +330,14 @@ def test_parse_zonefile_raises_on_invalid_syntax() -> None:
 
 def test_parse_dig_answer_handles_noall_answer_bare_lines() -> None:
     """``dig +noall +answer +nocomments`` shape -- bare per-record lines."""
-    output = "www.evba.lab.\t\t3600\tIN\tA\t10.5.50.2\n"
+    output = "www.example.test.\t\t3600\tIN\tA\t198.51.100.2\n"
     assert parse_dig_answer(output) == [
         {
-            "name": "www.evba.lab.",
+            "name": "www.example.test.",
             "ttl": 3600,
             "class": "IN",
             "type": "A",
-            "rdata": "10.5.50.2",
+            "rdata": "198.51.100.2",
         }
     ]
 
@@ -345,9 +345,9 @@ def test_parse_dig_answer_handles_noall_answer_bare_lines() -> None:
 def test_parse_dig_answer_handles_default_section_marker_shape() -> None:
     """Default-flags ``dig`` output with ``;; ANSWER SECTION:`` marker still parses."""
     output = (
-        "; <<>> DiG 9.18.24 <<>> @localhost evba.lab TXT\n"
+        "; <<>> DiG 9.18.24 <<>> @localhost example.test TXT\n"
         ";; ANSWER SECTION:\n"
-        'evba.lab.\t\t3600\tIN\tTXT\t"v=spf1 a -all"\n'
+        'example.test.\t\t3600\tIN\tTXT\t"v=spf1 a -all"\n'
         "\n"
         ";; Query time: 0 msec\n"
     )
@@ -360,16 +360,16 @@ def test_parse_dig_answer_handles_default_section_marker_shape() -> None:
 def test_parse_dig_answer_returns_empty_on_nxdomain_or_nodata() -> None:
     """No answer rows -> empty list; the handler treats empty as legitimate."""
     # NXDOMAIN -- dig prints only the comment header
-    output = "; <<>> DiG 9.18.24 <<>> @localhost missing.evba.lab A\n;; Query time: 0 msec\n"
+    output = "; <<>> DiG 9.18.24 <<>> @localhost missing.example.test A\n;; Query time: 0 msec\n"
     assert parse_dig_answer(output) == []
 
 
 @pytest.mark.parametrize(
     "line, expected_type, expected_rdata",
     [
-        ("mail.evba.lab.\t3600\tIN\tAAAA\t2001:db8::1", "AAAA", "2001:db8::1"),
-        ("alias.evba.lab.\t3600\tIN\tCNAME\tns1.evba.lab.", "CNAME", "ns1.evba.lab."),
-        ("evba.lab.\t3600\tIN\tMX\t10 mail.evba.lab.", "MX", "10 mail.evba.lab."),
+        ("mail.example.test.\t3600\tIN\tAAAA\t2001:db8::1", "AAAA", "2001:db8::1"),
+        ("alias.example.test.\t3600\tIN\tCNAME\tns1.example.test.", "CNAME", "ns1.example.test."),
+        ("example.test.\t3600\tIN\tMX\t10 mail.example.test.", "MX", "10 mail.example.test."),
     ],
 )
 def test_parse_dig_answer_handles_each_supported_record_type(
@@ -384,21 +384,22 @@ def test_parse_dig_answer_handles_each_supported_record_type(
 def test_parse_dig_answer_yields_multiple_rows_for_multi_member_rrset() -> None:
     """An MX rrset with two priorities -> two rows."""
     output = (
-        "evba.lab.\t3600\tIN\tMX\t10 mail.evba.lab.\nevba.lab.\t3600\tIN\tMX\t20 mail2.evba.lab.\n"
+        "example.test.\t3600\tIN\tMX\t10 mail.example.test.\n"
+        "example.test.\t3600\tIN\tMX\t20 mail2.example.test.\n"
     )
     rows = parse_dig_answer(output)
     assert len(rows) == 2
     assert {row["rdata"] for row in rows} == {
-        "10 mail.evba.lab.",
-        "20 mail2.evba.lab.",
+        "10 mail.example.test.",
+        "20 mail2.example.test.",
     }
 
 
 def test_parse_dig_answer_skips_blank_and_comment_lines() -> None:
-    output = "\n; comment\n;; ANSWER SECTION:\nwww.evba.lab.\t3600\tIN\tA\t10.5.50.2\n\n"
+    output = "\n; comment\n;; ANSWER SECTION:\nwww.example.test.\t3600\tIN\tA\t198.51.100.2\n\n"
     rows = parse_dig_answer(output)
     assert len(rows) == 1
-    assert rows[0]["name"] == "www.evba.lab."
+    assert rows[0]["name"] == "www.example.test."
 
 
 # ---------------------------------------------------------------------------
@@ -523,13 +524,13 @@ def test_config_file_name_runs_on_the_normalised_path(requested: str) -> None:
 
 
 _CHECKCONF_OUTPUT = (
-    'zone "evba.lab" {\n'
+    'zone "example.test" {\n'
     "\ttype master;\n"
-    '\tfile "/etc/bind/db.evba.lab";\n'
+    '\tfile "/etc/bind/db.example.test";\n'
     "};\n"
-    'zone "10.5.50.in-addr.arpa" {\n'
+    'zone "100.51.198.in-addr.arpa" {\n'
     "\ttype master;\n"
-    '\tfile "/etc/bind/db.10.5.50";\n'
+    '\tfile "/etc/bind/db.198.51.100";\n'
     "};\n"
 )
 
@@ -542,8 +543,8 @@ async def test_zone_list_runs_named_checkconf_and_returns_rows() -> None:
     assert run_mock.await_args.args[1] == "named-checkconf -p"
     assert result["total"] == 2
     assert {row["name"] for row in result["rows"]} == {
-        "evba.lab",
-        "10.5.50.in-addr.arpa",
+        "example.test",
+        "100.51.198.in-addr.arpa",
     }
 
 
@@ -552,20 +553,20 @@ async def test_zone_read_resolves_zonefile_path_via_checkconf_and_cats_file() ->
     run_mock = AsyncMock(
         side_effect=[
             _completed_process(stdout=_CHECKCONF_OUTPUT),  # named-checkconf -p
-            _completed_process(stdout=_SAMPLE_ZONEFILE),  # cat /etc/bind/db.evba.lab
+            _completed_process(stdout=_SAMPLE_ZONEFILE),  # cat /etc/bind/db.example.test
         ]
     )
     with patch.object(connector, "_run_command", run_mock):
-        result = await bind9_zone_read(connector, _TARGET, {"zone": "evba.lab"})
+        result = await bind9_zone_read(connector, _TARGET, {"zone": "example.test"})
     # First call: checkconf parse. Second call: cat with quoted path.
     first_cmd = run_mock.await_args_list[0].args[1]
     second_cmd = run_mock.await_args_list[1].args[1]
     assert first_cmd == "named-checkconf -p"
-    assert second_cmd == "cat '/etc/bind/db.evba.lab'"
-    assert result["zone"] == "evba.lab"
-    assert result["file"] == "/etc/bind/db.evba.lab"
+    assert second_cmd == "cat '/etc/bind/db.example.test'"
+    assert result["zone"] == "example.test"
+    assert result["file"] == "/etc/bind/db.example.test"
     assert result["total"] >= 7  # 1 SOA + 1 NS + 3 A + 1 AAAA + 1 CNAME + 1 MX + 1 TXT
-    assert any(row["type"] == "A" and row["rdata"] == "10.5.50.2" for row in result["rows"])
+    assert any(row["type"] == "A" and row["rdata"] == "198.51.100.2" for row in result["rows"])
 
 
 async def test_zone_read_accepts_trailing_dot_on_zone_argument() -> None:
@@ -577,9 +578,9 @@ async def test_zone_read_accepts_trailing_dot_on_zone_argument() -> None:
         ]
     )
     with patch.object(connector, "_run_command", run_mock):
-        result = await bind9_zone_read(connector, _TARGET, {"zone": "evba.lab."})
-    assert result["zone"] == "evba.lab."
-    assert result["file"] == "/etc/bind/db.evba.lab"
+        result = await bind9_zone_read(connector, _TARGET, {"zone": "example.test."})
+    assert result["zone"] == "example.test."
+    assert result["file"] == "/etc/bind/db.example.test"
 
 
 async def test_zone_read_raises_zonefile_read_error_for_missing_zone() -> None:
@@ -600,23 +601,23 @@ async def test_zone_read_raises_zonefile_read_error_for_missing_zone() -> None:
 async def test_record_get_runs_dig_with_quoted_fqdn_and_default_type_a() -> None:
     connector = Bind9Connector()
     run_mock = AsyncMock(
-        return_value=_completed_process(stdout="www.evba.lab.\t3600\tIN\tA\t10.5.50.2\n")
+        return_value=_completed_process(stdout="www.example.test.\t3600\tIN\tA\t198.51.100.2\n")
     )
     with patch.object(connector, "_run_command", run_mock):
-        result = await bind9_record_get(connector, _TARGET, {"fqdn": "www.evba.lab"})
+        result = await bind9_record_get(connector, _TARGET, {"fqdn": "www.example.test"})
     cmd = run_mock.await_args.args[1]
     assert "dig @localhost" in cmd
     # ``shlex.quote`` only wraps in quotes when the input contains shell
-    # metacharacters; a plain ``www.evba.lab`` round-trips unwrapped (and
+    # metacharacters; a plain ``www.example.test`` round-trips unwrapped (and
     # that is the safe shape -- nothing to escape). The contract under
     # test is "the fqdn shows up in the command exactly once and is
     # bracketed only by whitespace or the quote shlex.quote chose".
-    assert " www.evba.lab " in cmd
+    assert " www.example.test " in cmd
     assert " A " in cmd
     assert "+noall +answer +nocomments" in cmd
     assert result["type"] == "A"
     assert result["total"] == 1
-    assert result["rows"][0]["rdata"] == "10.5.50.2"
+    assert result["rows"][0]["rdata"] == "198.51.100.2"
 
 
 async def test_record_get_quotes_fqdn_with_shell_metacharacters() -> None:
@@ -624,22 +625,22 @@ async def test_record_get_quotes_fqdn_with_shell_metacharacters() -> None:
     connector = Bind9Connector()
     run_mock = AsyncMock(return_value=_completed_process(stdout=""))
     with patch.object(connector, "_run_command", run_mock):
-        await bind9_record_get(connector, _TARGET, {"fqdn": "weird;injection.evba.lab"})
+        await bind9_record_get(connector, _TARGET, {"fqdn": "weird;injection.example.test"})
     cmd = run_mock.await_args.args[1]
-    # Either shlex shape: ``'weird;injection.evba.lab'`` is what shlex.quote
+    # Either shlex shape: ``'weird;injection.example.test'`` is what shlex.quote
     # emits for a string containing ``;``. The defence is "the command is
     # safe to feed to sh -c"; the regex below asserts the dangerous bytes
     # are quoted.
-    assert "'weird;injection.evba.lab'" in cmd
+    assert "'weird;injection.example.test'" in cmd
 
 
 async def test_record_get_respects_explicit_type_argument() -> None:
     connector = Bind9Connector()
     run_mock = AsyncMock(
-        return_value=_completed_process(stdout='evba.lab.\t3600\tIN\tTXT\t"v=spf1 a -all"\n')
+        return_value=_completed_process(stdout='example.test.\t3600\tIN\tTXT\t"v=spf1 a -all"\n')
     )
     with patch.object(connector, "_run_command", run_mock):
-        result = await bind9_record_get(connector, _TARGET, {"fqdn": "evba.lab", "type": "TXT"})
+        result = await bind9_record_get(connector, _TARGET, {"fqdn": "example.test", "type": "TXT"})
     assert result["type"] == "TXT"
     assert result["rows"][0]["type"] == "TXT"
 
@@ -649,7 +650,7 @@ async def test_record_get_returns_empty_rows_for_nxdomain() -> None:
     # Empty stdout (or stdout with only comments) -> NXDOMAIN-shaped result.
     run_mock = AsyncMock(return_value=_completed_process(stdout=""))
     with patch.object(connector, "_run_command", run_mock):
-        result = await bind9_record_get(connector, _TARGET, {"fqdn": "missing.evba.lab"})
+        result = await bind9_record_get(connector, _TARGET, {"fqdn": "missing.example.test"})
     assert result["rows"] == []
     assert result["total"] == 0
 
@@ -660,7 +661,7 @@ async def test_record_get_rejects_unsupported_record_type_with_value_error() -> 
     # defence-in-depth check runs when an internal caller bypasses the
     # dispatcher.
     with pytest.raises(ValueError, match="unsupported record type"):
-        await bind9_record_get(connector, _TARGET, {"fqdn": "evba.lab", "type": "DNAME"})
+        await bind9_record_get(connector, _TARGET, {"fqdn": "example.test", "type": "DNAME"})
 
 
 # ---------------------------------------------------------------------------

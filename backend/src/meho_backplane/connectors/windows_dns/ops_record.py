@@ -297,7 +297,7 @@ _ZONE_PROP: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
     "pattern": "\\S",
-    "description": "The DNS zone name, e.g. ``evba.lab``.",
+    "description": "The DNS zone name, e.g. ``example.test``.",
 }
 _NAME_PROP: dict[str, Any] = {
     "type": "string",
@@ -305,7 +305,7 @@ _NAME_PROP: dict[str, Any] = {
     "pattern": "\\S",
     "description": (
         "The owner (host) name relative to the zone, e.g. ``www`` for "
-        "``www.evba.lab``, or ``@`` for the zone apex."
+        "``www.example.test``, or ``@`` for the zone apex."
     ),
 }
 
@@ -389,7 +389,7 @@ WINDOWS_DNS_RECORD_ADD_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "pattern": "\\S",
-            "description": "Required for ``type=A``. The IPv4 address, e.g. ``10.5.50.9``.",
+            "description": "Required for ``type=A``. The IPv4 address, e.g. ``192.0.2.9``.",
         },
         "target": {
             "type": "string",
@@ -398,7 +398,7 @@ WINDOWS_DNS_RECORD_ADD_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Required for ``type=CNAME``. The HostNameAlias -- the "
                 "canonical FQDN the alias points at, e.g. "
-                "``www.evba.lab``."
+                "``www.example.test``."
             ),
         },
         "ttl": {

@@ -49,7 +49,7 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
-_TARGET_NAME = "rdc-keycloak-encoding-test"
+_TARGET_NAME = "keycloak-encoding-test"
 _KC_HOST = "keycloak-encoding.test.invalid"
 _KC_BASE_URL = f"https://{_KC_HOST}"
 _ADMIN_TOKEN = "kc-admin-token-encoding"
@@ -270,7 +270,7 @@ async def _seed_encoding_target() -> TargetORM:
             host=_KC_HOST,
             port=443,
             fqdn=None,
-            secret_ref="rdc-hetzner-dc/keycloak/admin",
+            secret_ref="example-site/keycloak/admin",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={"managed_realm": "example"},

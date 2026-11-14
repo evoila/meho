@@ -110,7 +110,7 @@ class _StubTarget:
     name: str
     host: str
     port: int | None = 443
-    secret_ref: str | None = "rdc-hetzner-dc/keycloak/admin"
+    secret_ref: str | None = "example-site/keycloak/admin"
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
     extras: dict[str, Any] = field(default_factory=lambda: {"managed_realm": "example"})
     tls_server_name: str | None = None  # #2398: per-target TLS SNI / cert-verify name
@@ -726,7 +726,7 @@ async def test_user_write_password_reader_strips_trailing_newline(
     value = await _read_password_from_vault(
         _make_operator(),
         _TARGET,
-        {"password_secret_ref": "rdc/keycloak/user-pw"},
+        {"password_secret_ref": "site/keycloak/user-pw"},
     )
 
     assert value == "hunter2"
@@ -750,7 +750,7 @@ async def test_user_write_password_reader_rejects_whitespace_only_secret(
         await _read_password_from_vault(
             _make_operator(),
             _TARGET,
-            {"password_secret_ref": "rdc/keycloak/user-pw"},
+            {"password_secret_ref": "site/keycloak/user-pw"},
         )
 
 
@@ -774,7 +774,7 @@ async def test_user_write_password_reader_honours_custom_key_and_mount(
         _make_operator(),
         _TARGET,
         {
-            "password_secret_ref": "rdc/keycloak/user-pw",
+            "password_secret_ref": "site/keycloak/user-pw",
             "password_secret_key": "db_pw",
             "password_secret_mount": "kv2",
         },
@@ -784,7 +784,7 @@ async def test_user_write_password_reader_honours_custom_key_and_mount(
     # The Vault backend received the op's mount + path verbatim (mount is a
     # Vault-only knob) — proving schemeless routing is unchanged.
     assert fake.secrets.kv.v2.read_calls[-1] == {
-        "path": "rdc/keycloak/user-pw",
+        "path": "site/keycloak/user-pw",
         "mount_point": "kv2",
     }
 

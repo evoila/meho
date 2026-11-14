@@ -736,7 +736,7 @@ _SECTION_BY_ITEM_TAG = {"rule": "filter", "gateway_item": "gateways"}
 
 _RID_A, _RID_B = "100000011", "100000012"
 _INSERTS = {
-    f"meho_filter_rule_add_{_RID_A}": _pass_rule(_RID_A, "10.5.0.0/24"),
+    f"meho_filter_rule_add_{_RID_A}": _pass_rule(_RID_A, "203.0.113.0/24"),
     f"meho_filter_rule_add_{_RID_B}": _pass_rule(_RID_B, "10.6.0.0/24"),
 }
 
@@ -756,7 +756,7 @@ async def test_concurrent_adds_on_one_appliance_run_one_at_a_time() -> None:
     target = SimpleNamespace(name="pf-a", host="pf.example.invalid")
     with patch.object(connector, "_run_command", side_effect=fake.run):
         first, second = await asyncio.gather(
-            connector.filter_rule_add(target, _add_params(_RID_A, "10.5.0.0/24")),
+            connector.filter_rule_add(target, _add_params(_RID_A, "203.0.113.0/24")),
             connector.filter_rule_add(target, _add_params(_RID_B, "10.6.0.0/24")),
         )
     assert (first["status"], second["status"]) == ("added", "added")
@@ -775,7 +775,7 @@ async def test_concurrent_adds_without_the_lock_lose_a_change() -> None:
     target = SimpleNamespace(name="pf-a", host="pf.example.invalid")
     with patch.object(connector, "_run_command", side_effect=fake.run):
         results = await asyncio.gather(
-            unlocked(connector, target, _add_params(_RID_A, "10.5.0.0/24")),
+            unlocked(connector, target, _add_params(_RID_A, "203.0.113.0/24")),
             unlocked(connector, target, _add_params(_RID_B, "10.6.0.0/24")),
             return_exceptions=True,
         )
@@ -800,7 +800,7 @@ async def test_add_then_delete_of_the_same_rule_serialize() -> None:
     target = SimpleNamespace(name="pf-a", host="pf.example.invalid")
     with patch.object(connector, "_run_command", side_effect=run):
         added, deleted = await asyncio.gather(
-            connector.filter_rule_add(target, _add_params(rid, "10.5.0.0/24")),
+            connector.filter_rule_add(target, _add_params(rid, "203.0.113.0/24")),
             connector.filter_rule_delete(target, {"ridentifier": rid}),
         )
     assert added["status"] == "added"
@@ -835,7 +835,7 @@ async def test_filter_rule_add_and_gateway_add_on_one_appliance_serialize() -> N
     target = SimpleNamespace(name="pf-a", host="pf.example.invalid")
     with patch.object(connector, "_run_command", side_effect=fake.run):
         rule, gateway = await asyncio.gather(
-            connector.filter_rule_add(target, _add_params(_RID_A, "10.5.0.0/24")),
+            connector.filter_rule_add(target, _add_params(_RID_A, "203.0.113.0/24")),
             connector.gateway_add(target, dict(_GATEWAY_PARAMS)),
         )
     assert rule["status"] == "added"
@@ -856,7 +856,7 @@ async def test_filter_rule_add_and_gateway_add_without_the_lock_lose_a_change() 
     target = SimpleNamespace(name="pf-a", host="pf.example.invalid")
     with patch.object(connector, "_run_command", side_effect=fake.run):
         results = await asyncio.gather(
-            unlocked_rule_add(connector, target, _add_params(_RID_A, "10.5.0.0/24")),
+            unlocked_rule_add(connector, target, _add_params(_RID_A, "203.0.113.0/24")),
             unlocked_gateway_add(connector, target, dict(_GATEWAY_PARAMS)),
             return_exceptions=True,
         )

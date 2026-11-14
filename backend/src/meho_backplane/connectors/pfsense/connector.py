@@ -317,9 +317,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "address that is free on every such server. Then create the user with "
         "``pfsense.openvpn.user.create`` (the password goes to Vault and is never "
         "shown; needs approval) and give the user a fixed address and routes with "
-        "``pfsense.openvpn.csc.sync`` (run it with ``compare_only`` first). "
+        "``pfsense.openvpn.csc.sync`` (run it with ``compare_only`` first; "
+        "a ``compare_only`` call also waits for approval). "
         "``pfsense.openvpn.rule.sync`` adds the tagged pass rules each user needs "
-        "(needs approval; also has ``compare_only``). "
+        "(needs approval; also has ``compare_only``, which waits for approval too). "
         "``pfsense.openvpn.user.delete`` removes a VPN user and its overrides "
         "(needs approval; refused while the user is connected unless ``force``)."
     ),

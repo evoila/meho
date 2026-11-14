@@ -302,7 +302,7 @@ def test_anthropic_builder_strips_provider_prefix(
     With the shipped default ``agent_default_model`` spec form
     (``anthropic:claude-sonnet-5-5``), the resolved AnthropicModel must
     carry the bare id — the ``anthropic:`` prefix would otherwise 404 at
-    the Messages API (RDC #789 N11).
+    the Messages API (from a consumer report).
     """
     from pydantic_ai.models.anthropic import AnthropicModel
 

@@ -312,7 +312,7 @@ def test_page_op_class_options_cover_the_closed_vocabulary() -> None:
 
 def test_target_dropdown_is_tenant_scoped() -> None:
     """The target dropdown lists only the session tenant's target names."""
-    _seed_target(tenant_id=_TENANT_A, name="rdc-vcenter")
+    _seed_target(tenant_id=_TENANT_A, name="example-vcenter")
     _seed_target(tenant_id=_TENANT_A, name="lab-k8s")
     # A target in tenant B must NOT appear on tenant A's dropdown.
     _seed_target(tenant_id=_TENANT_B, name="other-tenant-target")
@@ -321,7 +321,7 @@ def test_target_dropdown_is_tenant_scoped() -> None:
         client = _authenticated_client(session_id)
         response = client.get("/ui/broadcast")
     body = response.text
-    assert 'value="rdc-vcenter"' in body
+    assert 'value="example-vcenter"' in body
     assert 'value="lab-k8s"' in body
     assert "other-tenant-target" not in body
 
@@ -410,13 +410,13 @@ def test_fragment_combined_filters_all_embedded_in_sse_url() -> None:
         client = _authenticated_client(session_id)
         response = client.get(
             "/ui/broadcast/feed",
-            params={"op_class": "read", "principal": "op-7", "target": "rdc-vcenter"},
+            params={"op_class": "read", "principal": "op-7", "target": "example-vcenter"},
         )
     body = response.text
     # The three server filters are all present in the embedded URL.
     assert "op_class=read" in body
     assert "principal=op-7" in body
-    assert "target=rdc-vcenter" in body
+    assert "target=example-vcenter" in body
     assert 'sse-connect="/ui/broadcast/stream?' in body
 
 

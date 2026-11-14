@@ -82,7 +82,7 @@ _CREATE_DOC_COLLECTIONS_DESCRIPTION: Final[str] = (
     "would fail every later probe / search. A `collection_key` that "
     "already exists in your scope is rejected as a conflict.\n\n"
     "WHEN TO CALL: to register a corpus an operator has stood up "
-    "(e.g. a co-located MEHO.Knowledge project) so agents can search it, "
+    "(e.g. a co-located knowledge-service project) so agents can search it, "
     "instead of seeding the row by a raw database INSERT. Returns the "
     "full created collection `{id, collection_key, vendor, products, "
     "backend, status, ...}`."

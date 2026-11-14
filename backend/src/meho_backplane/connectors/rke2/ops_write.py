@@ -20,7 +20,7 @@ audit row (``dispatcher.py`` ``raw_payload=redaction.raw``); connector-boundary
 redaction never scrubs ``raw_payload``. So the only reliable control is that
 this handler **never returns the token** -- old or new, not the value, not in
 any field. Neither value ever reaches the world-readable ``/proc/<pid>/cmdline``
-of the ``rke2`` child either (S12, meho-internal#300): the OLD token is read
+of the ``rke2`` child either (S12): the OLD token is read
 on-disk server-side inside the sudo script (a shell ``$(cat ...)``, so its
 value never enters Python) and handed to ``rke2`` through the ``RKE2_TOKEN``
 environment variable -- the upstream ``EnvVar`` backing for ``--token`` -- so
@@ -411,7 +411,7 @@ def _build_rotate_script() -> str:
     """Build the sudo script that rotates the server token off the rke2 argv.
 
     Neither token value reaches the world-readable ``/proc/<pid>/cmdline`` of
-    the ``rke2`` process (S12, meho-internal#300):
+    the ``rke2`` process (S12):
 
     * The OLD token is read on-disk as root (``$(cat ...)`` -- it never enters
       Python) and handed to the child via the ``RKE2_TOKEN`` environment

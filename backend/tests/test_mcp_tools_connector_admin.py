@@ -451,7 +451,7 @@ def test_admin_tool_input_schemas_are_strict_2020_12(
         )
         # Schema itself validates as Draft 2020-12.
         jsonschema.Draft202012Validator.check_schema(schema)
-        # MEHO-internal fields are stripped from the wire shape.
+        # internal fields are stripped from the wire shape.
         assert "required_role" not in tools[name]
         assert "op_class" not in tools[name]
 

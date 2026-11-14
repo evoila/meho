@@ -20,6 +20,10 @@ How the values of one operation are found:
 * **Each field on its own.** The most specific entry that sets a field
   decides that field. Labels add up: a more specific entry replaces the
   value of a key that a less specific one set.
+* **Install-wide "always wait" is binding.** When the install's most
+  specific entry that sets ``always_wait`` says ``true``, the operation
+  always waits in every tenant. A tenant's entry can add a wait, never
+  remove this one (:func:`install_wait_undone`).
 * **Ties.** Two entries of the same rank: for ``risk`` the higher level
   wins, for ``always_wait`` ``true`` wins. A different ``category`` (or a
   different value for one label key) is a conflict. A writer refuses it
@@ -56,6 +60,8 @@ __all__ = [
     "classify",
     "entries_from_document",
     "has_wildcard",
+    "install_wait_text",
+    "install_wait_undone",
     "label_text_ok",
     "taxonomy_from_documents",
 ]
@@ -239,6 +245,48 @@ def _labels(
     return labels, None
 
 
+def _install_wait(matched: Sequence[ClassificationEntry]) -> ClassificationEntry | None:
+    """The install entry that makes the operation always wait, or ``None``.
+
+    Only install entries count, with their own specificity: a more
+    specific install entry with ``always_wait: false`` still beats a less
+    specific one with ``true``.
+    """
+    top = _top([e for e in matched if e.scope == "install"], "always_wait")
+    return next((e for e in top if e.always_wait), None)
+
+
+def install_wait_undone(
+    entry: ClassificationEntry,
+    coords: Iterable[OpCoordinates],
+    entries: Sequence[ClassificationEntry],
+) -> tuple[str, str] | None:
+    """Where a tenant *entry* tries to switch off an install-wide "always wait".
+
+    Returns ``(op_id, install_ref)`` for the first operation in *coords*
+    that *entry* sets to ``always_wait: false`` while an install entry in
+    *entries* makes it always wait. ``None`` when there is none.
+    """
+    if entry.scope != "tenant" or entry.always_wait is not False:
+        return None
+    for one in coords:
+        if not entry.matches(one):
+            continue
+        install = _install_wait([e for e in entries if e.matches(one)])
+        if install is not None:
+            return one.op_id, install.ref
+    return None
+
+
+def install_wait_text(name: str, op_id: str, install_ref: str) -> str:
+    """The one sentence that refuses or marks an entry found by :func:`install_wait_undone`."""
+    return (
+        f"{name} sets `always_wait: false` on `{op_id}`, but `{install_ref}` makes it "
+        "always wait for the whole install. A tenant can make more operations wait, "
+        "not fewer."
+    )
+
+
 def classify(
     coords: OpCoordinates,
     entries: Iterable[ClassificationEntry],
@@ -249,6 +297,7 @@ def classify(
     risks = [e.risk for e in _top(matched, "risk") if e.risk is not None]
     risk = max(risks, key=RISK_LEVELS.index) if risks else None
     always_wait = any(e.always_wait for e in _top(matched, "always_wait"))
+    always_wait = always_wait or _install_wait(matched) is not None
     category, category_conflict = _category(coords, matched, taxonomy)
     labels, label_conflict = _labels(coords, matched)
     conflict = category_conflict or label_conflict

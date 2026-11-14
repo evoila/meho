@@ -333,7 +333,7 @@ async def resolve_group_id(
     row for the connector, the built-in groups otherwise (#3870). Returns
     ``None`` when the visible bucket has no match.
 
-    Visibility predicate (claude-rdc-hetzner-dc#1136): a group resolves
+    Visibility predicate: a group resolves
     when it is fully enabled (``review_status='enabled'``) **or** still
     ``staged``/``disabled`` at the group level yet holding ≥1 per-op-
     enabled descriptor. This mirrors the ``list_operation_groups``

@@ -361,7 +361,7 @@ class OperationGroupSummary(BaseModel):
     so groups-first discovery isn't blind to per-op enablement — an agent
     that called ``list_operation_groups`` FIRST (as the tool description
     instructs) still sees the group whose ops ``search_operations`` and
-    dispatch already treat as live (claude-rdc-hetzner-dc#1136).
+    dispatch already treat as live.
 
     * ``operation_count`` / ``enabled_op_count`` — both count the group's
       ``is_enabled=True`` descriptors. They are equal by construction;
@@ -838,7 +838,7 @@ def _build_operation_groups_query(
     the prior page's last ``group_key`` via strict ``>`` — keyset
     pagination with no offset and no overlap.
 
-    Visibility predicate (claude-rdc-hetzner-dc#1136): a group surfaces
+    Visibility predicate: a group surfaces
     when it is fully enabled (``review_status='enabled'``) **or** still
     ``staged``/``disabled`` at the group level yet holding ≥1 per-op-
     enabled descriptor. The per-op branch is a correlated ``EXISTS`` over
@@ -953,7 +953,7 @@ async def list_operation_groups(
     ``edit_op is_enabled=true``); the latter carries ``partial=True`` with
     a non-zero ``enabled_op_count`` so groups-first discovery isn't blind
     to per-op enablement that ``search_operations`` + dispatch already
-    honour (claude-rdc-hetzner-dc#1136). A group that is not enabled and
+    honour. A group that is not enabled and
     holds zero enabled ops stays hidden. Tenant scoping:
     :func:`~meho_backplane.operations._lookup.visible_scope_clause` — the
     tenant's own rows when it has a row for the connector, the built-in

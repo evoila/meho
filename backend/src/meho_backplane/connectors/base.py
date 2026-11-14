@@ -139,6 +139,15 @@ class Connector(ABC):
     #: Setting it means "any product version is fine, on purpose".
     version_range_reason: str | None = None
 
+    #: Whether the fallback registration ``(product, "", "")`` of this class
+    #: also checks :attr:`supported_version_range`. ``False`` (the default):
+    #: the fallback serves a target of any version. ``True``: the fallback
+    #: still serves a target whose version is unknown, but the resolver
+    #: does not pick the class for a target whose known version is outside
+    #: the range, and its error names the range. A probe skips this check,
+    #: so a target can be probed again after its system is upgraded.
+    strict_version_range: bool = False
+
     #: One plain sentence on what the connector does, shown in the
     #: "What it does" column of the generated connector list on the docs
     #: site. ``None`` (the default) leaves the column empty for this row.

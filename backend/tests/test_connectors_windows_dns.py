@@ -128,7 +128,7 @@ async def test_transport_uses_windows_powershell_and_suppresses_progress() -> No
     assert connector.POWERSHELL_EXECUTABLE == "powershell"
     run_mock = AsyncMock(return_value=_completed_process(stdout='{"rows":[],"total":0}'))
     with patch.object(connector, "_run_command", run_mock):
-        await windows_dns_record_get(connector, _TARGET, {"zone": "evba.lab"})
+        await windows_dns_record_get(connector, _TARGET, {"zone": "example.test"})
     cmd: str = run_mock.await_args.args[1]
     assert cmd.startswith("powershell -NoProfile -NonInteractive -EncodedCommand ")
     assert not cmd.startswith("pwsh ")
@@ -151,7 +151,7 @@ def test_encode_pwsh_command_round_trips_utf16le_base64() -> None:
 
 
 def test_ps_single_quote_doubles_embedded_quotes() -> None:
-    assert ps_single_quote("evba.lab") == "'evba.lab'"
+    assert ps_single_quote("example.test") == "'example.test'"
     assert ps_single_quote("o'brien") == "'o''brien'"
 
 
@@ -174,7 +174,7 @@ async def test_zone_list_builds_envelope_script_and_parses_rows() -> None:
     sample = {
         "rows": [
             {
-                "ZoneName": "evba.lab",
+                "ZoneName": "example.test",
                 "ZoneType": "Primary",
                 "IsDsIntegrated": True,
                 "IsReverseLookupZone": False,
@@ -190,7 +190,7 @@ async def test_zone_list_builds_envelope_script_and_parses_rows() -> None:
     assert "$zones = @(Get-DnsServerZone)" in script
     assert "ConvertTo-Json -Depth 4 -InputObject @{ rows = $zones; total = $zones.Count }" in script
     assert result["total"] == 1
-    assert result["rows"][0]["ZoneName"] == "evba.lab"
+    assert result["rows"][0]["ZoneName"] == "example.test"
 
 
 @pytest.mark.parametrize("rows_json", ["[]", "null"])
@@ -224,7 +224,7 @@ async def test_record_get_builds_expected_pwsh_command_and_parses_rows() -> None
             {
                 "HostName": "www",
                 "RecordType": "A",
-                "RecordData": {"IPv4Address": "10.5.50.2"},
+                "RecordData": {"IPv4Address": "198.51.100.2"},
             }
         ],
         "total": 1,
@@ -232,27 +232,27 @@ async def test_record_get_builds_expected_pwsh_command_and_parses_rows() -> None
     run_mock = AsyncMock(return_value=_completed_process(stdout=json.dumps(sample)))
     with patch.object(connector, "_run_command", run_mock):
         result = await windows_dns_record_get(
-            connector, _TARGET, {"zone": "evba.lab", "name": "www", "type": "A"}
+            connector, _TARGET, {"zone": "example.test", "name": "www", "type": "A"}
         )
     script = _script_from_call(run_mock)
     assert "Get-DnsServerResourceRecord" in script
-    assert "-ZoneName 'evba.lab'" in script
+    assert "-ZoneName 'example.test'" in script
     assert "-Name 'www'" in script
     assert "-RRType 'A'" in script
     assert "ConvertTo-Json" in script
-    assert result["zone"] == "evba.lab"
+    assert result["zone"] == "example.test"
     assert result["type"] == "A"
     assert result["total"] == 1
-    assert result["rows"][0]["RecordData"]["IPv4Address"] == "10.5.50.2"
+    assert result["rows"][0]["RecordData"]["IPv4Address"] == "198.51.100.2"
 
 
 async def test_record_get_omits_optional_filters_when_absent() -> None:
     connector = WindowsDnsConnector()
     run_mock = AsyncMock(return_value=_completed_process(stdout='{"rows":[],"total":0}'))
     with patch.object(connector, "_run_command", run_mock):
-        await windows_dns_record_get(connector, _TARGET, {"zone": "evba.lab"})
+        await windows_dns_record_get(connector, _TARGET, {"zone": "example.test"})
     script = _script_from_call(run_mock)
-    assert "-ZoneName 'evba.lab'" in script
+    assert "-ZoneName 'example.test'" in script
     assert "-Name" not in script
     assert "-RRType" not in script
 
@@ -264,7 +264,7 @@ async def test_record_get_returns_empty_rows_for_no_match() -> None:
     run_mock = AsyncMock(return_value=_completed_process(stdout='{"rows":null,"total":0}'))
     with patch.object(connector, "_run_command", run_mock):
         result = await windows_dns_record_get(
-            connector, _TARGET, {"zone": "evba.lab", "name": "missing"}
+            connector, _TARGET, {"zone": "example.test", "name": "missing"}
         )
     assert result["rows"] == []
     assert result["total"] == 0
@@ -287,7 +287,7 @@ async def test_record_get_rejects_unsupported_type() -> None:
         patch.object(connector, "_run_command", run_mock),
         pytest.raises(ValueError, match="unsupported record type"),
     ):
-        await windows_dns_record_get(connector, _TARGET, {"zone": "evba.lab", "type": "BOGUS"})
+        await windows_dns_record_get(connector, _TARGET, {"zone": "example.test", "type": "BOGUS"})
 
 
 # ---------------------------------------------------------------------------
@@ -300,19 +300,19 @@ async def test_record_add_a_builds_cmdlet_and_returns_write_envelope() -> None:
     run_mock = AsyncMock(return_value=_completed_process(stdout='{"ok":true}'))
     with patch.object(connector, "_run_command", run_mock):
         result = await windows_dns_record_add(
-            connector, _TARGET, {"zone": "evba.lab", "name": "api", "ip": "10.5.50.9"}
+            connector, _TARGET, {"zone": "example.test", "name": "api", "ip": "198.51.100.9"}
         )
     script = _script_from_call(run_mock)
     assert "$ErrorActionPreference = 'Stop'" in script
     assert "Add-DnsServerResourceRecordA" in script
-    assert "-ZoneName 'evba.lab'" in script
+    assert "-ZoneName 'example.test'" in script
     assert "-Name 'api'" in script
-    assert "-IPv4Address '10.5.50.9'" in script
+    assert "-IPv4Address '198.51.100.9'" in script
     assert result == {
-        "zone": "evba.lab",
+        "zone": "example.test",
         "name": "api",
         "type": "A",
-        "value": "10.5.50.9",
+        "value": "198.51.100.9",
         "ttl": None,
         "op_class": "write",
     }
@@ -325,7 +325,7 @@ async def test_record_add_a_with_ttl_renders_timespan() -> None:
         result = await windows_dns_record_add(
             connector,
             _TARGET,
-            {"zone": "evba.lab", "name": "api", "ip": "10.5.50.9", "ttl": 3600},
+            {"zone": "example.test", "name": "api", "ip": "198.51.100.9", "ttl": 3600},
         )
     script = _script_from_call(run_mock)
     assert "-TimeToLive (New-TimeSpan -Seconds 3600)" in script
@@ -339,13 +339,18 @@ async def test_record_add_cname_uses_cname_cmdlet() -> None:
         result = await windows_dns_record_add(
             connector,
             _TARGET,
-            {"zone": "evba.lab", "name": "alias", "type": "CNAME", "target": "www.evba.lab"},
+            {
+                "zone": "example.test",
+                "name": "alias",
+                "type": "CNAME",
+                "target": "www.example.test",
+            },
         )
     script = _script_from_call(run_mock)
     assert "Add-DnsServerResourceRecordCName" in script
-    assert "-HostNameAlias 'www.evba.lab'" in script
+    assert "-HostNameAlias 'www.example.test'" in script
     assert result["type"] == "CNAME"
-    assert result["value"] == "www.evba.lab"
+    assert result["value"] == "www.example.test"
 
 
 async def test_record_add_a_rejects_non_ipv4() -> None:
@@ -353,7 +358,7 @@ async def test_record_add_a_rejects_non_ipv4() -> None:
     run_mock = AsyncMock(return_value=_completed_process(stdout='{"ok":true}'))
     with patch.object(connector, "_run_command", run_mock), pytest.raises(ValueError):
         await windows_dns_record_add(
-            connector, _TARGET, {"zone": "evba.lab", "name": "api", "ip": "not-an-ip"}
+            connector, _TARGET, {"zone": "example.test", "name": "api", "ip": "not-an-ip"}
         )
     # A rejected value never reaches the wire.
     run_mock.assert_not_awaited()
@@ -367,7 +372,7 @@ async def test_record_add_cname_requires_target() -> None:
         pytest.raises(ValueError, match="target"),
     ):
         await windows_dns_record_add(
-            connector, _TARGET, {"zone": "evba.lab", "name": "alias", "type": "CNAME"}
+            connector, _TARGET, {"zone": "example.test", "name": "alias", "type": "CNAME"}
         )
 
 
@@ -381,15 +386,15 @@ async def test_record_remove_builds_force_command() -> None:
     run_mock = AsyncMock(return_value=_completed_process(stdout='{"ok":true}'))
     with patch.object(connector, "_run_command", run_mock):
         result = await windows_dns_record_remove(
-            connector, _TARGET, {"zone": "evba.lab", "name": "api", "type": "A"}
+            connector, _TARGET, {"zone": "example.test", "name": "api", "type": "A"}
         )
     script = _script_from_call(run_mock)
     assert "Remove-DnsServerResourceRecord" in script
-    assert "-ZoneName 'evba.lab'" in script
+    assert "-ZoneName 'example.test'" in script
     assert "-Name 'api'" in script
     assert "-RRType 'A'" in script
     assert "-Force" in script
-    assert result == {"zone": "evba.lab", "name": "api", "type": "A", "op_class": "write"}
+    assert result == {"zone": "example.test", "name": "api", "type": "A", "op_class": "write"}
 
 
 # ---------------------------------------------------------------------------

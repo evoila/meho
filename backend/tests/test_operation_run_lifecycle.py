@@ -68,7 +68,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-async def _seed_tenant(session: AsyncSession, *, slug: str = "rdc-internal") -> uuid.UUID:
+async def _seed_tenant(session: AsyncSession, *, slug: str = "example-tenant") -> uuid.UUID:
     """Return the tenant row's id, inserting it on the first call (FK parent)."""
     existing: uuid.UUID | None = await session.scalar(
         select(Tenant.id).where(Tenant.slug == slug),
@@ -160,7 +160,7 @@ async def test_list_runs_tenant_isolated_status_filtered_newest_first() -> None:
     """``list_runs`` is tenant-scoped, status-filterable, newest-first, bounded."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        tenant_a = await _seed_tenant(session, slug="rdc-internal")
+        tenant_a = await _seed_tenant(session, slug="example-tenant")
         tenant_b = await _seed_tenant(session, slug="other-tenant")
         older = await _fresh_pending(session, tenant_id=tenant_a)
         older.created_at = datetime.now(UTC) - timedelta(hours=1)

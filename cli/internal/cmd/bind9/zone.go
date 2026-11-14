@@ -125,10 +125,10 @@ func newZoneReadCmd() *cobra.Command {
 			"`dns.zone.from_text`. Returns one row per rrset member —\n" +
 			"an A rrset with three addresses yields three rows.\n\n" +
 			"The trailing dot on <zone> is optional; the handler\n" +
-			"normalises both `evba.lab` and `evba.lab.`.\n\n" +
+			"normalises both `example.test` and `example.test.`.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho bind9 zone read evba.lab --target vcf-router-bind9\n" +
-			"  meho bind9 zone read evba.lab. --target vcf-router-bind9 --json",
+		Example: "  meho bind9 zone read example.test --target vcf-router-bind9\n" +
+			"  meho bind9 zone read example.test. --target vcf-router-bind9 --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

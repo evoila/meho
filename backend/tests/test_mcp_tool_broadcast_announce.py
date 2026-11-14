@@ -194,7 +194,7 @@ def test_tools_list_exposes_announce_for_operator(
     announce_def = next(
         t for t in body["result"]["tools"] if t["name"] == "meho_broadcast_announce"
     )
-    # MEHO-internal RBAC fields stripped from the wire shape.
+    # internal RBAC fields stripped from the wire shape.
     assert "required_role" not in announce_def
     assert "op_class" not in announce_def
 

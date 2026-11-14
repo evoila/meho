@@ -247,7 +247,7 @@ class Settings(BaseModel):
         between Keycloak and backplane hosts; default 30s absorbs that
         without giving meaningful runway to a stolen-token replay.
     vault_addr:
-        Base URL of the Vault server, e.g. ``https://vault.evba.lab``.
+        Base URL of the Vault server, e.g. ``https://vault.example.test``.
         Required **only** for the Vault credential backend
         (``CREDENTIAL_BACKEND=vault``) and the Vault OIDC forward-auth
         chain, both of which hang off this endpoint. A GCP-native
@@ -268,8 +268,7 @@ class Settings(BaseModel):
         ``vault_oidc_role``. Empty (the default) means every operator
         keeps ``vault_oidc_role`` -- today's single-role behaviour. Set
         via ``VAULT_OIDC_ROLE_BY_TENANT``. Lets one fixed role stop
-        spanning tenants on a shared multi-tenant instance
-        (meho-internal#356); the fail-closed boundary is each role's
+        spanning tenants on a shared multi-tenant instance; the fail-closed boundary is each role's
         Vault policy + ``bound_claims``, provisioned consumer-side.
     vault_oidc_mount_path:
         Mount path of Vault's JWT/OIDC auth method, **without** the
@@ -503,7 +502,7 @@ class Settings(BaseModel):
     keycloak_admin_url:
         Base URL of the Keycloak Admin REST API for the realm managing
         MEHO principals, e.g.
-        ``https://keycloak.evba.lab/admin/realms/meho``. Used by the
+        ``https://keycloak.example.test/admin/realms/meho``. Used by the
         agent-principal lifecycle service (G11.2-T1) to register /
         list / revoke agent Keycloak clients. Default ``""`` (unset)
         leaves the admin surface inoperative (register/revoke return
@@ -529,7 +528,7 @@ class Settings(BaseModel):
         builds its own :class:`~fastapi.FastAPI` with the flag set.
     backplane_url:
         Canonical externally-visible URL of this backplane, e.g.
-        ``https://meho.evba.lab``. Used to construct the MCP server's
+        ``https://meho.example.test``. Used to construct the MCP server's
         canonical URI (G0.5-T2) and the absolute URL the RFC 9728
         ``WWW-Authenticate: resource_metadata=...`` header points at.
         Default ``""`` is fail-closed for MCP: a request to ``/mcp``
@@ -1654,7 +1653,7 @@ class Settings(BaseModel):
     # (:func:`~meho_backplane.auth.vault._resolve_login_role`) BELOW the
     # per-target ``extras["vault_role"]`` override (#3274) and the
     # check-runner role (#2757), ABOVE the global default -- so one fixed
-    # role stops spanning tenants on a shared instance (meho-internal#356).
+    # role stops spanning tenants on a shared instance.
     # Enforcement stays Vault-side: the boundary is the policy + ``bound_claims``
     # on each selected role; this setting only decides which role a login uses.
     vault_oidc_role_by_tenant: str = Field(default="")
@@ -2507,7 +2506,7 @@ class Settings(BaseModel):
     #: owned by the deployment — NOT the caller's inbound operator JWT.
     #: Replaying the operator's raw bearer to a tenant-configurable corpus
     #: URL leaked a Vault-capable credential to an attacker-controlled sink
-    #: (evoila-bosnia/meho-internal#290), so the operator JWT is never
+    #:, so the operator JWT is never
     #: forwarded. Empty ("") sends no ``Authorization`` header — a corpus
     #: that requires auth then fails closed (401 → ``CorpusUnavailable`` →
     #: 503) rather than receiving the operator bearer. ``repr=False`` keeps

@@ -11,6 +11,8 @@ user. This module is the one place that checks it, for these ops:
 ``keycloak.user.delete``, ``keycloak.user.required_actions.update``,
 ``keycloak.role_mapping.assign``, ``keycloak.group.member.add`` and
 ``keycloak.group.member.remove`` (these two name the user as ``user_id``).
+``keycloak.user.delete`` keeps its own approval card and lookup, and uses
+:func:`card_user_id` and :func:`check_card_username` for its approved run.
 
 Three pieces, used at three moments:
 
@@ -50,6 +52,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "UserOfWrite",
+    "card_user_id",
+    "check_card_username",
     "other_user_reason",
     "read_user_for_write",
     "refuse_other_user_check",
@@ -99,24 +103,43 @@ def user_matches_username(params: dict[str, Any], user: dict[str, Any]) -> bool:
     return stored is not None and stored.casefold() == asked.casefold()
 
 
-def _approved_user_id(op_id: str, id_key: str) -> str | None:
-    """The user id on the approval card, during the approved run of this op.
+def card_user_id(op_id: str, card: dict[str, Any], id_key: str = "id") -> str:
+    """The user id on an approval card; refuse a card that shows none.
 
-    ``None`` when the call is not the approved run of a request. An approved
-    run whose card shows no user id is refused: MEHO cannot tell which user
-    the approver saw, and looking the username up again could find another
-    account.
+    Without the id, MEHO cannot tell which user the approver saw, and looking
+    the username up again could find another account.
     """
-    preview = approved_preview(op_id)
-    if preview is None:
-        return None
-    uuid = _opt_str(preview.get(id_key))
+    uuid = _opt_str(card.get(id_key))
     if uuid is None:
         raise ValueError(
             f"{op_id}: the approval card shows no user id, so MEHO cannot tell which "
             "user was approved. Nothing was changed. Send a new request."
         )
     return uuid
+
+
+def check_card_username(op_id: str, card: dict[str, Any], user: dict[str, Any]) -> None:
+    """Refuse the run when *user*'s stored username is not the one on the card.
+
+    For example, the user was renamed after the approval.
+    """
+    if _opt_str(card.get("username")) is None or not user_matches_username(card, user):
+        raise ValueError(
+            f"{op_id}: the user's name in Keycloak is not the name on the approval "
+            "card. Nothing was changed. Send a new request."
+        )
+
+
+def _approved_user_id(op_id: str, id_key: str) -> str | None:
+    """The user id on the approval card, during the approved run of this op.
+
+    ``None`` when the call is not the approved run of a request. An approved
+    run whose card shows no user id is refused (:func:`card_user_id`).
+    """
+    preview = approved_preview(op_id)
+    if preview is None:
+        return None
+    return card_user_id(op_id, preview, id_key)
 
 
 async def read_user_for_write(

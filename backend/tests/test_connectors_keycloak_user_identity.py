@@ -40,6 +40,7 @@ from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+from meho_backplane.operations._preview import approved_preview_var
 from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
@@ -248,35 +249,6 @@ async def test_member_ops_refuse_a_user_id_and_a_username_of_different_users(
     assert await _stored_requests() == []
 
 
-@pytest.mark.parametrize("op_id", sorted(_USER_OP_PARAMS))
-async def test_id_and_username_of_different_users_is_refused_when_it_runs(
-    kc: KeycloakConnector, op_id: str
-) -> None:
-    params = {"id": _USER_UUID, "username": "someone-else", **_USER_OP_PARAMS[op_id]}
-    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
-        _mount_token(mock)
-        _mount_user(mock, _user(True))
-        writes = mock.route(method__in=["PUT", "POST", "DELETE"]).respond(204)
-        result = await _run(op_id, params)
-    # Some ops withhold the error text, so the check is on the error class.
-    assert result["status"] != "ok"
-    assert "ValueError" in str(result)
-    assert not writes.called
-
-
-async def test_user_delete_refuses_an_id_and_a_username_of_different_users(
-    kc: KeycloakConnector,
-) -> None:
-    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
-        _mount_token(mock)
-        _mount_user(mock, _user(True))
-        deletes = mock.delete(_USER_PATH).respond(204)
-        result = await _run("keycloak.user.delete", {"id": _USER_UUID, "username": "someone-else"})
-    assert result["status"] != "ok"
-    assert "belong to different users" in str(result)
-    assert not deletes.called
-
-
 async def test_user_delete_refuses_different_users_before_approval(
     kc: KeycloakConnector,
 ) -> None:
@@ -298,35 +270,151 @@ async def test_user_delete_refuses_different_users_before_approval(
     assert await _stored_requests() == []
 
 
-async def test_user_delete_of_an_absent_user_shows_the_sent_name_only_as_requested(
+async def _park_user_delete(params: dict[str, Any]) -> uuid.UUID:
+    """Preview a user delete, then send it with the hash: it waits for approval."""
+    args = _call_args("keycloak.user.delete", params)
+    preview = await preview_operation(_operator(), args)
+    assert preview["status"] == "ok", preview
+    call = await call_operation(_operator(), {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "awaiting_approval", call
+    return uuid.UUID(call["extras"]["approval_request_id"])
+
+
+async def _delete_card(request_id: uuid.UUID) -> dict[str, Any]:
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+        assert row is not None
+        card: dict[str, Any] = row.proposed_effect["preview"]["blast_radius"]["object"]
+    return card
+
+
+async def test_user_delete_of_an_absent_user_is_refused_when_the_name_exists_at_run_time(
     kc: KeycloakConnector,
 ) -> None:
-    params = {"id": _USER_UUID, "username": "event-guest"}
-    args = _call_args("keycloak.user.delete", params)
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        mock.get(_USER_PATH).respond(404)
+        lookup = mock.get(_USERS_PATH).respond(200, json=[])
+        mock.get(_USER_PATH).respond(200, json=_user(True))
+        mock.get(f"{_USER_PATH}/groups").respond(200, json=[])
         deletes = mock.delete(url__regex=r".*").respond(204)
-        preview = await preview_operation(_operator(), args)
-        call = await call_operation(_operator(), {**args, "preview_hash": preview["preview_hash"]})
-        assert call["status"] == "awaiting_approval", call
-        request_id = uuid.UUID(call["extras"]["approval_request_id"])
-        async with get_sessionmaker()() as session:
-            row = await session.get(ApprovalRequest, request_id)
-            assert row is not None
-            card = row.proposed_effect["preview"]["blast_radius"]["object"]
-        result = await _run("keycloak.user.delete", params)
+        request_id = await _park_user_delete({"username": "event-guest"})
+        card = await _delete_card(request_id)
+        # A user with that name is made while the request waits.
+        lookup.respond(200, json=[_user(True)])
+        resumed = await _approve_and_resume(request_id)
     assert "username" not in card
     assert card["requested_username"] == "event-guest"
     assert card["present"] is False
-    assert result["status"] == "ok", result
-    assert result["result"] == {
+    assert resumed.status != "ok"
+    assert not deletes.called
+
+
+async def test_user_delete_handler_refuses_a_card_that_said_absent(
+    kc: KeycloakConnector,
+) -> None:
+    card = {"blast_radius": {"object": {"realm": _REALM, "id": None, "present": False}}}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_USERS_PATH).respond(200, json=[_user(True)])
+        _mount_user(mock, _user(True))
+        deletes = mock.delete(url__regex=r".*").respond(204)
+        token = approved_preview_var.set(("keycloak.user.delete", card))
+        try:
+            result = await _run("keycloak.user.delete", {"username": "event-guest"})
+        finally:
+            approved_preview_var.reset(token)
+    assert result["status"] != "ok"
+    assert "the approval card said the user does not exist" in str(result)
+    assert not deletes.called
+
+
+async def test_user_delete_does_not_delete_a_new_user_with_the_same_name(
+    kc: KeycloakConnector,
+) -> None:
+    new_uuid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        lookup = mock.get(_USERS_PATH).respond(200, json=[_user(True)])
+        old_read = _mount_user(mock, _user(True))
+        mock.get(f"{_USER_PATH}/groups").respond(200, json=[])
+        mock.get(f"{_USERS_PATH}/{new_uuid}").respond(200, json={**_user(True), "id": new_uuid})
+        deletes = mock.delete(url__regex=r".*").respond(204)
+        request_id = await _park_user_delete({"username": "event-guest"})
+        # The user is deleted and made again with the same name: a new id.
+        old_read.respond(404)
+        lookup.respond(200, json=[{**_user(True), "id": new_uuid}])
+        resumed = await _approve_and_resume(request_id)
+    # MEHO either refuses the run or finds nothing to delete at the old id.
+    assert resumed.status != "ok" or resumed.result["already_absent"] is True, resumed
+    assert not deletes.called
+
+
+async def test_user_delete_deletes_the_user_on_the_card(kc: KeycloakConnector) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        lookup = mock.get(_USERS_PATH).respond(200, json=[_user(True)])
+        user_read = _mount_user(mock, _user(True))
+        mock.get(f"{_USER_PATH}/groups").respond(200, json=[])
+        delete = mock.delete(_USER_PATH).mock(
+            side_effect=lambda _request: (user_read.respond(404), httpx.Response(204))[1]
+        )
+        request_id = await _park_user_delete({"username": "event-guest"})
+        card = await _delete_card(request_id)
+        lookup.reset()
+        resumed = await _approve_and_resume(request_id)
+    assert card["id"] == _USER_UUID
+    assert card["username"] == "event-guest"
+    assert resumed.status == "ok", resumed
+    assert resumed.result == {
         "realm": _REALM,
         "id": _USER_UUID,
-        "requested_username": "event-guest",
-        "deleted": False,
-        "already_absent": True,
+        "username": "event-guest",
+        "deleted": True,
+        "already_absent": False,
     }
+    assert delete.call_count == 1
+
+
+async def test_user_delete_handler_uses_the_id_on_the_card(kc: KeycloakConnector) -> None:
+    other_uuid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    shown = {"realm": _REALM, "id": _USER_UUID, "username": "event-guest", "present": True}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        # A new lookup of the name would find another user.
+        lookup = mock.get(_USERS_PATH).respond(200, json=[{**_user(True), "id": other_uuid}])
+        user_read = _mount_user(mock, _user(True))
+        other_delete = mock.delete(f"{_USERS_PATH}/{other_uuid}").respond(204)
+        delete = mock.delete(_USER_PATH).mock(
+            side_effect=lambda _request: (user_read.respond(404), httpx.Response(204))[1]
+        )
+        token = approved_preview_var.set(
+            ("keycloak.user.delete", {"blast_radius": {"object": shown}})
+        )
+        try:
+            result = await _run("keycloak.user.delete", {"username": "event-guest"})
+        finally:
+            approved_preview_var.reset(token)
+    assert result["status"] == "ok", result
+    assert result["result"]["id"] == _USER_UUID
+    assert result["result"]["deleted"] is True
+    assert delete.call_count == 1
+    assert not other_delete.called
+    assert not lookup.called
+
+
+async def test_user_delete_of_a_renamed_user_is_refused_when_it_runs(
+    kc: KeycloakConnector,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        user_read = _mount_user(mock, _user(True))
+        mock.get(f"{_USER_PATH}/groups").respond(200, json=[])
+        deletes = mock.delete(url__regex=r".*").respond(204)
+        request_id = await _park_user_delete({"id": _USER_UUID})
+        user_read.respond(200, json={**_user(True), "username": "renamed-guest"})
+        resumed = await _approve_and_resume(request_id)
+    assert resumed.status != "ok"
+    assert "is not the name on the approval card" in str(resumed.model_dump(mode="json"))
     assert not deletes.called
 
 
@@ -352,23 +440,38 @@ async def test_a_username_in_another_case_is_the_same_user(kc: KeycloakConnector
 # ---------------------------------------------------------------------------
 
 
+_RENAME_CASES = [
+    *(
+        (op_id, {"id": _USER_UUID, "username": "event-guest", **extra})
+        for op_id, extra in sorted(_USER_OP_PARAMS.items())
+    ),
+    *(
+        (op_id, {"group_id": _GROUP_UUID, "user_id": _USER_UUID, "username": "event-guest"})
+        for op_id in _MEMBER_OPS
+    ),
+]
+
+
+@pytest.mark.parametrize(("op_id", "params"), _RENAME_CASES, ids=[c[0] for c in _RENAME_CASES])
 async def test_a_user_renamed_after_the_request_is_refused_when_it_runs(
-    kc: KeycloakConnector,
+    kc: KeycloakConnector, op_id: str, params: dict[str, Any]
 ) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         user_read = _mount_user(mock, _user(True))
-        put = mock.put(_USER_PATH).respond(204)
-        call = await call_operation(
-            _operator(), _call_args(_DISABLE, {"id": _USER_UUID, "username": "event-guest"})
+        mock.get(f"/admin/realms/{_REALM}/groups/{_GROUP_UUID}").respond(
+            200, json={"id": _GROUP_UUID, "name": "event-guests", "path": "/event-guests"}
         )
+        writes = mock.route(method__in=["PUT", "POST", "DELETE"]).respond(204)
+        call = await call_operation(_operator(), _call_args(op_id, params))
         assert call["status"] == "awaiting_approval", call
         request_id = uuid.UUID(call["extras"]["approval_request_id"])
         user_read.respond(200, json={**_user(True), "username": "renamed-guest"})
         resumed = await _approve_and_resume(request_id)
     assert resumed.status != "ok"
-    assert "belong to different users" in str(resumed.model_dump(mode="json"))
-    assert not put.called
+    # Some ops withhold the error text, so the check is on the error class.
+    assert "ValueError" in str(resumed.model_dump(mode="json"))
+    assert not writes.called
 
 
 async def test_a_username_request_is_refused_when_the_user_is_renamed(

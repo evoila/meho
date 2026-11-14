@@ -481,14 +481,16 @@ backplane Python base image already follows).
 `base.html` is the layout every page extends. Its structure (shortened):
 
 ```html
-<html data-theme="meho-dark">
+<html data-theme="evoila">
   <head>
     <script src="/ui/static/src/app/approvals-bell.js" defer>
     <script src="/ui/static/src/app/modal-dialogs.js" defer>
     {% block component_scripts %}{% endblock %}   <!-- Alpine.data() registrations; MUST precede alpine.min.js -->
     <!-- _head_assets.html include (shared with wall.html): -->
-    <script src="/ui/static/src/app/theme.js">    <!-- sync: pre-paint theme -->
     <link href="/ui/static/dist/tailwind.css">
+    <link href="/ui/static/brand/evoila-daisyui.css">  <!-- after the bundle: unlayered beats @layer base -->
+    <link href="/ui/static/brand/evoila-tokens.css">
+    <link href="/ui/static/brand/evoila-fonts.css">
     <script src="/ui/static/src/vendor/htmx.min.js" defer>
     <script src="/ui/static/src/app/csrf-token.js" defer>
     <script src="/ui/static/src/app/session-expiry.js" defer>
@@ -1182,13 +1184,18 @@ The renderer singleton lives in `meho_backplane.ui.routes.kb.render`.
 A module-level `threading.Lock` guards the shared `MarkdownIt` instance
 (not thread-safe for concurrent `render()` calls). The pygments CSS is
 generated once at module load and injected as an inline `<style>` block
-in the entry-detail template. It is emitted **theme-scoped** (#2452): a
-default/dark token set under `.kb-code` (pygments `github-dark`) plus a
-`[data-theme="meho-light"] .kb-code` override (pygments `default`), with
-pygments' own opaque container background stripped so the block sits on
-the live `var(--color-base-200)` surface the template pins — code blocks
-stay legible in both `meho-dark` and `meho-light` instead of forcing a
-light background via the dead DaisyUI 4 `--b2` variable.
+in the entry-detail template. It is **one token set** under `.kb-code`
+(pygments `default`, whose dark token colours read on the evoila theme's
+light surface), with pygments' own opaque container background stripped
+so the block sits on the live `var(--color-base-200)` surface the
+template pins — rather than forcing a light background via the dead
+DaisyUI 4 `--b2` variable (#2452).
+
+It used to carry two sets, a dark one under `.kb-code` and a light
+override under a `data-theme` scope, because the console had two themes.
+With one theme the dark set could never be selected, so every KB page
+shipped a stylesheet it could not use; it was dropped with the second
+theme.
 
 ## KB editor modal + mobile reflow (G10.2-T3 #872)
 
@@ -2079,10 +2086,18 @@ one.
   there is no `script-src` policy yet. The `<head>` avoids inline
   script so a future nonce-based CSP can land without template
   rewrites.
-- **Two themes and a toggle.** The console ships `meho-dark` (the
-  default) and `meho-light`; `static/src/app/theme.js` and the theme
-  button switch between them. DaisyUI's `dim` theme is only the
-  plugin's fallback default in `styles.css`.
+- **One theme, from the brand package.** The console renders the evoila
+  light theme, which ships in `meho-ui` and is linked in
+  `_head_assets.html` as three plain stylesheets (`evoila-daisyui.css`,
+  `evoila-tokens.css`, `evoila-fonts.css`) served from the
+  `/ui/static/brand` mount. They load *after* the compiled bundle on
+  purpose: they are unlayered author rules, which beat DaisyUI's
+  `@layer base` output, so the theme takes effect without the vendored
+  plugin knowing about it — and needs no Tailwind processing, being
+  variables rather than utilities. DaisyUI's built-in `light` is the
+  plugin-level floor, so a variable the brand theme does not set fails
+  light. `meho-dark`, `meho-light` and `theme.js` are gone, and
+  `tests/test_ui_brand_theme.py` fails if any of them returns.
 
 ## Topology query overlays + 30s polling-refresh (Task #882)
 
@@ -3684,11 +3699,10 @@ are mutually-exclusive style variants emitted in the same cascade layer:
 no `badge-<color>` modifier `--badge-color` is unset, so `color` falls back to
 inheritance. On a plain card that inherits `base-content` (readable), but inside
 a coloured alert it inherits the alert's `*-content` token — near-black on
-badge-ghost's `base-200` surface in `meho-dark`, near-white on `base-200` in
-`meho-light` — so the badges vanished in both themes. `styles.css` carries an
+badge-ghost's `base-200` surface — so the badges vanished. `styles.css` carries an
 unlayered `.alert .badge-ghost.badge-outline` rule (in the "Chrome + component
 voice" block) that beats the layered DaisyUI declarations regardless of emission
-order, pinning `base-content` on `base-200` so the labels read in both themes;
+order, pinning `base-content` on `base-200` so the labels read;
 it is scoped to `.alert` so the ~15 on-card usages keep their inherited colour.
 
 ## Vault console — confirm-gated writes (G10.18-T2 #1957)

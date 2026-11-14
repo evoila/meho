@@ -108,7 +108,7 @@
     ``StrictUndefined``. -#}
 {% set session_operator_sub = session_operator_sub | default(none) %}
 <!doctype html>
-<html lang="en" data-theme="meho-dark" class="h-full">
+<html lang="en" data-theme="evoila" class="h-full">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -132,7 +132,7 @@
        class on the native ``close`` event (close button, ESC, and the
        backdrop ``<form method="dialog">`` all route through it), so every
        operator modal fully dismisses (#1803). Plain first-party JS (no
-       Alpine, no inline script — same CSP posture as theme.js); it
+       Alpine, no inline script — same CSP posture as the other app scripts); it
        registers its own ``close`` (capture-phase: the event does not
        bubble) + ``htmx:afterSwap`` listeners, so its order relative to
        ``alpine.min.js`` is not load-bearing. -#}
@@ -210,18 +210,7 @@
             ><span class="sr-only">meho</span><span class="meho-type" aria-hidden="true"><span>m</span><span>e</span><span>h</span><span>o</span></span><span class="meho-caret" aria-hidden="true"></span></a>
           </div>
           <div class="flex flex-none items-center">
-            <button
-              type="button"
-              class="btn btn-ghost btn-square btn-sm text-base-content/70"
-              aria-label="Toggle color theme"
-              x-data="{ theme: document.documentElement.getAttribute('data-theme') }"
-              x-on:click="theme = window.mehoToggleTheme()"
-              x-on:meho-theme-changed.window="theme = $event.detail.theme"
-            >
-              <span x-show="theme === 'meho-dark'">{{ icon("sun", class="size-4") }}</span>
-              <span x-show="theme !== 'meho-dark'" x-cloak>{{ icon("moon", class="size-4") }}</span>
-            </button>
-            {# Notifications bell — after the theme toggle (#1778). #}
+            {# Notifications bell. #}
             {{ approvals_bell("mobile") }}
           </div>
         </header>
@@ -381,18 +370,7 @@
                   </ul>
                 </div>
                 <div class="flex items-center gap-1">
-                  <button
-                    type="button"
-                    class="btn btn-ghost btn-square btn-sm text-base-content/60"
-                    aria-label="Toggle color theme"
-                    x-data="{ theme: document.documentElement.getAttribute('data-theme') }"
-                    x-on:click="theme = window.mehoToggleTheme()"
-                    x-on:meho-theme-changed.window="theme = $event.detail.theme"
-                  >
-                    <span x-show="theme === 'meho-dark'">{{ icon("sun", class="size-4") }}</span>
-                    <span x-show="theme !== 'meho-dark'" x-cloak>{{ icon("moon", class="size-4") }}</span>
-                  </button>
-                  {# Notifications bell — after the theme toggle (#1778). #}
+                  {# Notifications bell. #}
                   {{ approvals_bell("sidebar") }}
                 </div>
               </div>

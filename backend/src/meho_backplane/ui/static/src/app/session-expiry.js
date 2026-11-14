@@ -60,7 +60,7 @@
 // wiring. Loaded once from ``_head_assets.html`` after ``htmx.min.js`` so the
 // listener is registered before the first htmx request can resolve. Plain
 // first-party JS (no Alpine, no inline script) to preserve the chassis
-// "zero inline script" CSP posture, mirroring ``theme.js`` / ``modal-dialogs.js``.
+// "zero inline script" CSP posture, mirroring ``modal-dialogs.js``.
 //
 // Idempotent banners: each recovery banner is created once and reused -- a
 // burst of failing background polls (the approvals badge, an SSE reconnect)

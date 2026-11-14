@@ -44,14 +44,18 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from meho_backplane.ui.paths import (
+    static_asset_path,
     static_dist_dir,
-    static_root_dir,
+    static_mounts,
     templates_dir,
 )
 from meho_backplane.ui.static_files import RevalidateStaticFiles
 
-# Prefix every console asset URL carries; the on-disk path is this
-# stripped off the front and resolved under ``static_root_dir()``.
+# Prefix every console asset URL carries. Which directory a URL
+# resolves under is no longer one answer -- the brand stylesheets and
+# webfonts come out of the ``meho-ui`` package via mounts of their own
+# -- so the mapping lives in ``ui.paths`` beside the mount table rather
+# than being spelled out again here.
 _STATIC_URL_PREFIX = "/ui/static/"
 
 # Selectors the console templates author that a healthy Tailwind scan
@@ -75,8 +79,10 @@ def _referenced_static_urls() -> list[str]:
 
 
 def _disk_path(url: str) -> Path:
-    """Map a ``/ui/static/<rest>`` URL to its on-disk path."""
-    return static_root_dir() / url[len(_STATIC_URL_PREFIX) :]
+    """Map a ``/ui/static/<rest>`` URL to the file the app serves for it."""
+    disk = static_asset_path(url)
+    assert disk is not None, f"{url} does not start with {_STATIC_URL_PREFIX}"
+    return disk
 
 
 _REFERENCED_URLS = _referenced_static_urls()
@@ -85,11 +91,12 @@ _REFERENCED_URLS = _referenced_static_urls()
 @pytest.fixture(scope="module")
 def static_client() -> TestClient:
     app = FastAPI()
-    app.mount(
-        "/ui/static",
-        RevalidateStaticFiles(directory=str(static_root_dir()), check_dir=False),
-        name="ui_static",
-    )
+    for prefix, directory in static_mounts():
+        app.mount(
+            prefix,
+            RevalidateStaticFiles(directory=str(directory), check_dir=False),
+            name=prefix.strip("/").replace("/", "_"),
+        )
     return TestClient(app)
 
 
@@ -117,6 +124,12 @@ def test_referenced_asset_is_present_and_served_revalidatable(
     when present (see :func:`test_compiled_css_carries_console_classes`).
     """
     disk = _disk_path(url)
+    if disk.is_dir():
+        # A mount point, not an asset -- the head-assets comment names
+        # ``/ui/static/brand`` in prose while explaining the mount, and
+        # the URL scan cannot tell prose from a reference. A directory
+        # is never servable, so there is nothing here to assert.
+        pytest.skip(f"{url} names a mount point, not an asset")
     if not disk.exists():
         if "/dist/" in url:
             pytest.skip(f"{url} is a build artifact not present in this checkout")
@@ -184,3 +197,58 @@ def test_compiled_css_carries_console_classes(static_client: TestClient) -> None
     )
     missing = [sel for sel in _REQUIRED_CSS_SELECTORS if sel not in body]
     assert not missing, f"tailwind.css is missing console selectors: {missing}"
+
+
+def test_app_mount_table_matches_the_shared_one() -> None:
+    """The running app mounts exactly what :func:`static_mounts` says.
+
+    The brand stylesheets and webfonts are served out of the ``meho-ui``
+    package by prefixes of their own, and a Starlette mount miss does
+    **not** fall through to a later, more specific mount -- so the two
+    brand prefixes registered after the broad ``/ui/static`` one would
+    404 every brand URL while every test that resolves paths through
+    the shared table kept passing.
+
+    Reading the order off the real app rather than off the table is the
+    point: the table alone cannot catch a mount added straight to
+    ``main.py``, which is how the guard tests and the app drifted apart
+    the first time.
+    """
+    from starlette.routing import Mount
+
+    from meho_backplane.main import app
+
+    mounted = [r.path for r in app.router.routes if isinstance(r, Mount)]
+    static_mounted = [p for p in mounted if p.startswith("/ui/static")]
+    expected = [prefix for prefix, _ in static_mounts()]
+
+    assert static_mounted == expected, (
+        "the app's static mount table has drifted from ui.paths.static_mounts(): "
+        f"app has {static_mounted}, table has {expected}"
+    )
+
+
+@pytest.mark.parametrize(
+    "url", ["/ui/static/brand/evoila-daisyui.css", "/ui/static/fonts/rubik-latin-var.woff2"]
+)
+def test_brand_asset_is_served_from_the_shared_package(url: str, static_client: TestClient) -> None:
+    """A brand asset serves over HTTP, not merely resolves on disk.
+
+    The disk check above passes for a file the app cannot reach -- a
+    mount registered in the wrong order resolves fine and 404s. This
+    asserts the served path, the revalidation header the rest of the
+    console's assets carry, and that the bytes come from the shared
+    package rather than a copy in this tree.
+    """
+    resp = static_client.get(url)
+    assert resp.status_code == 200, f"{url} -> {resp.status_code}"
+    assert resp.content, f"{url} served an empty body"
+    assert "no-cache" in resp.headers.get("cache-control", ""), (
+        f"{url} served without a revalidation directive"
+    )
+
+    disk = _disk_path(url)
+    assert "meho_ui" in disk.parts, (
+        f"{url} resolved to {disk}, which is not inside the shared brand "
+        "package -- the console is serving a copy that can drift"
+    )

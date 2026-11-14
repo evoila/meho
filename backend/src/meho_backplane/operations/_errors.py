@@ -896,6 +896,40 @@ def result_audit_commit_failed(
     )
 
 
+def result_audit_row_invalid(
+    op_id: str,
+    field: str,
+    reason: str,
+    duration_ms: float,
+) -> OperationResult:
+    """The audit row of this call could not be stored, so the call was not sent.
+
+    MEHO checks the values of the audit row before it sends a call to the
+    target (:func:`~meho_backplane.operations.audit_row_precheck.audit_row_problem`).
+    When one value can never be stored, the call is refused here: nothing
+    went to the target and no approval request was made. *field* names the
+    value, never its content. Compare ``audit_commit_failed``: there the call
+    ran and the outcome is unknown.
+    """
+    remediation = f"Nothing was sent to the target. Fix the value of {field} and call again."
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"audit_row_invalid: the audit record of this call could not be saved "
+            f"because {field} {reason}. The operation did not run."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "audit_row_invalid",
+            "field": field,
+            "reason": reason,
+            "execution_outcome": "not_started",
+            "remediation": remediation,
+        },
+    )
+
+
 def result_composite_resume_multi_gate_unsupported(
     *,
     composite_op_id: str,
@@ -2176,8 +2210,7 @@ def result_connector_http_403(
     accepted/required permissions -- into an opaque
     ``connector_error: HTTPStatusError`` with only the httpx status
     line, the actionable detail buried in
-    ``extras["exception_message"]`` (consumer
-    ``claude-rdc-hetzner-dc#1138``).
+    ``extras["exception_message"]`` (consumer feedback).
 
     The cause is kept **connector-agnostic**: any upstream 403 means the
     upstream refused the call, not a transport fault. Most often the
@@ -2254,8 +2287,7 @@ def result_connector_http_422(
     ``connector_error: HTTPStatusError`` with only the httpx status line,
     the actionable detail buried in ``extras["exception_message"]``. That
     bare shape is exactly what slowed the diagnosis of the
-    requestBody-mangling bug T5 #1656 (consumer
-    ``claude-rdc-hetzner-dc#1138``).
+    requestBody-mangling bug T5 #1656 (consumer feedback).
 
     The cause is kept **connector-agnostic**: any upstream 422 means the
     upstream parsed the request and rejected its *content*, not transport
@@ -2930,7 +2962,9 @@ def result_write_capability_denied(
     reason). Its ``granted`` / ``required`` / ``path`` / ``reason`` fields
     ride in ``extras`` next to the ``doc_ref`` for the write policy. The
     ``reason`` may hold a probe exception class or a target lookup problem,
-    so it goes through :func:`_sanitize_free_text`.
+    so it goes through :func:`_sanitize_free_text`. A check that is not a
+    Vault check sets ``remediation`` (the next step) and ``doc_ref``; without
+    them the text points at the Vault write policy.
     """
     path = preflight.get("path")
     granted = list(preflight.get("granted") or [])
@@ -2942,11 +2976,20 @@ def result_write_capability_denied(
         detail += f" (needs {required}, has {granted})"
     if reason:
         detail += f" (check result: {reason})"
+    # A check of another vendor names its own next step and doc.
+    remediation = preflight.get("remediation")
+    doc_ref = preflight.get("doc_ref")
+    if not isinstance(remediation, str) or not remediation:
+        remediation = (
+            f"Add the write grant (see {_VAULT_WRITE_POLICY_DOC} section 6), "
+            "then call the operation again."
+        )
+    if not isinstance(doc_ref, str) or not doc_ref:
+        doc_ref = f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface"
     summary = (
         f"write_capability_denied: the identity this write runs under cannot "
         f"perform it{detail}. MEHO did not create an approval request, because "
-        f"the write would fail after approval. Add the write grant (see "
-        f"{_VAULT_WRITE_POLICY_DOC} section 6), then call the operation again."
+        f"the write would fail after approval. {remediation}"
     )
     return OperationResult(
         status="denied",
@@ -2959,7 +3002,7 @@ def result_write_capability_denied(
             "granted": granted,
             "required": required,
             "reason": reason,
-            "doc_ref": f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface",
+            "doc_ref": doc_ref,
         },
     )
 

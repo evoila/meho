@@ -18,6 +18,17 @@ rights:
 * a person needs the ``tenant_admin`` role to ask
   (:func:`~meho_backplane.operations.role_floors.register_role_floor`).
 
+* only a person asks (no agent, service login or hosted agent run):
+  :func:`policy_classify_requester_refusal`. The policy gate checks this
+  on every path, the approval card records who asked
+  (:func:`~meho_backplane.connectors.policy.apply.record_policy_apply_requester`),
+  and the run checks it again. A run by the person who asked (for example
+  a re-run of a failed approved request) changes nothing.
+
+The approval card shows how many operations the entry matches now, the
+first of them, and that a pattern also matches operations added later
+(:func:`build_policy_classify_preview`).
+
 The change runs only after that approval. It is checked again when it
 runs (:func:`~meho_backplane.policy.store.set_classification`): an unknown
 category, or two entries of the same level that would give one operation
@@ -35,11 +46,24 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.operator import PrincipalKind, is_human_principal
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.operations.secondary_target_policy import (
+    approved_requester_sub,
+    approved_requester_subject,
+)
 from meho_backplane.operations.typed_register import (
     register_typed_operation,
     remove_built_in_connector_rows,
 )
+from meho_backplane.policy.bulk import (
+    ClassificationPreview,
+    edit_from_params,
+    params_of,
+    preview_classification_edit,
+)
+from meho_backplane.policy.classification import has_wildcard
 from meho_backplane.policy.store import (
     SWITCH_OFF_REFUSAL,
     ClassificationEdit,
@@ -50,16 +74,23 @@ from meho_backplane.settings import parse_bool_env
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
+    from meho_backplane.operations._preview import PreviewContext
     from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
+    "CARD_FIRST_MATCHES",
+    "CLASSIFY_NEEDS_PERSON",
+    "CLASSIFY_NEEDS_SECOND_ADMIN",
     "GROUP_KEY",
     "GROUP_WHEN_TO_USE",
     "PARAMETER_SCHEMA",
     "POLICY_CLASSIFY_OP_ID",
     "POLICY_REGISTRY_CONNECTOR_ID",
     "SWITCH_OFF_REFUSAL",
+    "build_policy_classify_preview",
+    "classify_card",
     "policy_classify",
+    "policy_classify_requester_refusal",
     "register_policy_classify_operation",
 ]
 
@@ -68,6 +99,25 @@ POLICY_REGISTRY_CONNECTOR_ID: Final[str] = "policy-registry-1.x"
 
 #: The op id of a classification change.
 POLICY_CLASSIFY_OP_ID: Final[str] = "policy.classify"
+
+#: Why a classification change was refused: an agent, a service login or a hosted agent run asked.
+CLASSIFY_NEEDS_PERSON: Final[str] = (
+    "Only a person can ask for a classification change. Use the console, "
+    "`meho connector classify` or the REST API with your own login."
+)
+
+#: Why a classification change did not run: the login that asked for it ran it.
+CLASSIFY_NEEDS_SECOND_ADMIN: Final[str] = (
+    "A classification change runs only from a second admin's approval. Ask for the change again."
+)
+
+#: How many matched operations the approval card names; it counts the rest.
+CARD_FIRST_MATCHES: Final[int] = 20
+
+_LATER_OPERATIONS: Final[str] = (
+    "The entry also matches operations that are added later, for example by a new "
+    "connector version, without a new approval."
+)
 
 _PATTERN_HINT = "`*` is any text, `?` is one character, no wildcard is an exact match."
 
@@ -199,9 +249,18 @@ async def policy_classify(
 
     Op-id: ``policy.classify``. Targetless. Runs after the approval; the
     tenant comes from *operator*, never from *params*.
+
+    Only the admin who approved runs it: a run by the login that asked
+    writes nothing. The card's record of who asked is checked again: it
+    must be a person.
     """
     if not classification_enabled():
         raise ValueError(SWITCH_OFF_REFUSAL)
+    requester = approved_requester_sub()
+    if requester is None or requester == operator.sub:
+        raise ValueError(CLASSIFY_NEEDS_SECOND_ADMIN)
+    if _requester_refusal_at_run() is not None:
+        raise ValueError(CLASSIFY_NEEDS_PERSON)
     edit = ClassificationEdit(
         match=params["match"],
         category=params.get("category"),
@@ -214,6 +273,73 @@ async def policy_classify(
             session, tenant_id=operator.tenant_id, set_by_sub=operator.sub, edit=edit
         )
     return {"scope": "tenant", **result}
+
+
+def policy_classify_requester_refusal(operator: Operator, params: dict[str, Any]) -> str | None:
+    """Why *operator* may not ask for a classification change, or ``None`` when it may.
+
+    The policy gate runs it on every path, before the call waits and before
+    the approval card is built (``register_requester_check``).
+    """
+    del params  # every classification change has the same rule
+    if not is_human_principal(operator) or resolve_actor_sub() is not None:
+        return CLASSIFY_NEEDS_PERSON
+    return None
+
+
+def _requester_refusal_at_run() -> str | None:
+    """Check the card's record of who asked again; no record is a refusal."""
+    requester = approved_requester_subject()
+    if (
+        requester is None
+        or requester.get("principal_kind") != PrincipalKind.USER.value
+        or requester.get("act") is not None
+    ):
+        return CLASSIFY_NEEDS_PERSON
+    return None
+
+
+def _matches_only_today(match: dict[str, str]) -> bool:
+    """True when *match* names one operation of one connector, with no wildcard."""
+    return (
+        "connector" in match
+        and "op" in match
+        and not any(has_wildcard(value) for value in match.values())
+    )
+
+
+def classify_card(preview: ClassificationPreview, params: dict[str, Any]) -> dict[str, Any]:
+    """The approval card of a classification change: the edit and what it matches now.
+
+    Names at most :data:`CARD_FIRST_MATCHES` operations and counts the
+    rest. Says when the entry also matches operations added later.
+    """
+    names = [f"{row.connector_id}: {row.op_id}" for row in preview.operations]
+    card: dict[str, Any] = {
+        **params_of(edit_from_params(params)),
+        "matches_now": len(names),
+        "changes_now": sum(1 for row in preview.operations if row.changes),
+        "first_matches": names[:CARD_FIRST_MATCHES],
+    }
+    if len(names) > CARD_FIRST_MATCHES:
+        card["and_more"] = f"and {len(names) - CARD_FIRST_MATCHES} more"
+    if not _matches_only_today(preview.match):
+        card["later_operations"] = _LATER_OPERATIONS
+    return card
+
+
+async def build_policy_classify_preview(ctx: PreviewContext) -> dict[str, Any]:
+    """The approval card: the edit, the operations it matches now, and later ones.
+
+    Stored on the request when it is made. Builds nothing for a caller who
+    may not ask for the change.
+    """
+    refusal = policy_classify_requester_refusal(ctx.operator, ctx.params)
+    if refusal is not None:
+        raise ValueError(refusal)
+    edit = edit_from_params(ctx.params)
+    preview = await preview_classification_edit(ctx.operator, edit)
+    return classify_card(preview, ctx.params)
 
 
 async def register_policy_classify_operation(

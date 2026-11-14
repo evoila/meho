@@ -20,6 +20,10 @@ How the values of one operation are found:
 * **Each field on its own.** The most specific entry that sets a field
   decides that field. Labels add up: a more specific entry replaces the
   value of a key that a less specific one set.
+* **Install-wide "always wait" is binding.** When the install's most
+  specific entry that sets ``always_wait`` says ``true``, the operation
+  always waits in every tenant. A tenant's entry can add a wait, never
+  remove this one (:func:`install_wait_undone`).
 * **Ties.** Two entries of the same rank: for ``risk`` the higher level
   wins, for ``always_wait`` ``true`` wins. A different ``category`` (or a
   different value for one label key) is a conflict. A writer refuses it
@@ -54,6 +58,9 @@ __all__ = [
     "check_no_conflict",
     "classify",
     "entries_from_document",
+    "has_wildcard",
+    "install_wait_text",
+    "install_wait_undone",
     "taxonomy_from_documents",
 ]
 
@@ -96,6 +103,11 @@ class OpCoordinates:
 
 class ClassificationConflictError(ValueError):
     """Two entries of the same rank give one operation different values."""
+
+
+def has_wildcard(pattern: str) -> bool:
+    """True when *pattern* holds ``*``, ``?`` or ``[``: it can match more than its own text."""
+    return any(char in _GLOB_METACHARS for char in pattern)
 
 
 def _literal_prefix(pattern: str | None) -> int:
@@ -221,6 +233,48 @@ def _labels(
     return labels, None
 
 
+def _install_wait(matched: Sequence[ClassificationEntry]) -> ClassificationEntry | None:
+    """The install entry that makes the operation always wait, or ``None``.
+
+    Only install entries count, with their own specificity: a more
+    specific install entry with ``always_wait: false`` still beats a less
+    specific one with ``true``.
+    """
+    top = _top([e for e in matched if e.scope == "install"], "always_wait")
+    return next((e for e in top if e.always_wait), None)
+
+
+def install_wait_undone(
+    entry: ClassificationEntry,
+    coords: Iterable[OpCoordinates],
+    entries: Sequence[ClassificationEntry],
+) -> tuple[str, str] | None:
+    """Where a tenant *entry* tries to switch off an install-wide "always wait".
+
+    Returns ``(op_id, install_ref)`` for the first operation in *coords*
+    that *entry* sets to ``always_wait: false`` while an install entry in
+    *entries* makes it always wait. ``None`` when there is none.
+    """
+    if entry.scope != "tenant" or entry.always_wait is not False:
+        return None
+    for one in coords:
+        if not entry.matches(one):
+            continue
+        install = _install_wait([e for e in entries if e.matches(one)])
+        if install is not None:
+            return one.op_id, install.ref
+    return None
+
+
+def install_wait_text(name: str, op_id: str, install_ref: str) -> str:
+    """The one sentence that refuses or marks an entry found by :func:`install_wait_undone`."""
+    return (
+        f"{name} sets `always_wait: false` on `{op_id}`, but `{install_ref}` makes it "
+        "always wait for the whole install. A tenant can make more operations wait, "
+        "not fewer."
+    )
+
+
 def classify(
     coords: OpCoordinates,
     entries: Iterable[ClassificationEntry],
@@ -231,6 +285,7 @@ def classify(
     risks = [e.risk for e in _top(matched, "risk") if e.risk is not None]
     risk = max(risks, key=RISK_LEVELS.index) if risks else None
     always_wait = any(e.always_wait for e in _top(matched, "always_wait"))
+    always_wait = always_wait or _install_wait(matched) is not None
     category, category_conflict = _category(coords, matched, taxonomy)
     labels, label_conflict = _labels(coords, matched)
     conflict = category_conflict or label_conflict
@@ -302,11 +357,13 @@ def entries_from_document(
     raw_entries = document.get("classifications") or []
     if not isinstance(raw_entries, list):
         raise ValueError(f"{scope}: `classifications` must be a list.")
-    return [
-        _entry_from_raw(raw, ref=f"{scope}:classifications[{index}]", scope=scope)
-        for index, raw in enumerate(raw_entries)
-        if isinstance(raw, Mapping)
-    ]
+    entries = []
+    for index, raw in enumerate(raw_entries):
+        ref = f"{scope}:classifications[{index}]"
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"{ref}: an entry must be a map.")
+        entries.append(_entry_from_raw(raw, ref=ref, scope=scope))
+    return entries
 
 
 def taxonomy_from_documents(
@@ -314,14 +371,16 @@ def taxonomy_from_documents(
 ) -> Taxonomy:
     """Return the taxonomy for a tenant: the install's list plus the tenant's own categories.
 
-    Without an install policy, :data:`DEFAULT_TAXONOMY` is the install's
-    list. The default category is always the install's.
+    The install's ``categories`` and ``default`` each replace the one of
+    :data:`DEFAULT_TAXONOMY` when set. The default category is always the
+    install's.
     """
     base = DEFAULT_TAXONOMY
     install_tax = (install or {}).get("taxonomy")
-    if isinstance(install_tax, Mapping) and install_tax.get("categories"):
+    if isinstance(install_tax, Mapping):
+        categories = install_tax.get("categories")
         base = Taxonomy(
-            categories=tuple(str(c) for c in install_tax["categories"]),
+            categories=tuple(str(c) for c in categories) if categories else base.categories,
             default=str(install_tax.get("default") or base.default),
         )
     tenant_tax = (tenant or {}).get("taxonomy")

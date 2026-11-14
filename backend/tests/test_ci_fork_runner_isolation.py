@@ -10,7 +10,7 @@ checked-out content, and for a fork `pull_request` event the fork's own
 copy of the workflow body) on internal infrastructure — the class of
 self-hosted-runner risk GitHub documents in its secure-use reference.
 
-The finding (meho-internal#268) was that the fix for this had only been
+The finding  was that the fix for this had only been
 applied to the principal CI file: `migration-compat.yml`,
 `dependency-license-check.yml`, `readme-version-check.yml`,
 `secret-scan.yml` and `security-scan.yml` scheduled the internal pool on
@@ -36,6 +36,7 @@ cannot read; this test guards the in-repo arm.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -262,6 +263,42 @@ _HOSTED_ON_MERGE_GROUP_ALLOWED: dict[tuple[str, str], str] = {
         "docs-site.yml",
         "deploy",
     ): "runs only for tag pushes and main pushes; a merge-queue branch is neither",
+    (
+        "docs-site.yml",
+        "build",
+    ): "about 30 seconds; two pull requests can break the strict build together, so it stays",
+    (
+        "plugin-version-check.yml",
+        "plugin-version",
+    ): "about a minute; two pull requests can raise the same plugin version, so it stays",
+    (
+        "ci.yml",
+        "changes",
+    ): "about 13 seconds of git diff; the other jobs need its answer",
+    (
+        "ci.yml",
+        "python-unit-lane",
+    ): "only adds up the results of other jobs (about 6 seconds)",
+    (
+        "ci.yml",
+        "python-integration",
+    ): "only adds up the results of other jobs (about 6 seconds)",
+    (
+        "ci.yml",
+        "helm-lint-template",
+    ): "about 20 seconds with public tools only; a short job that stays in the queue",
+    (
+        "chart.yml",
+        "changes",
+    ): "about 4 seconds of git diff; the chart jobs need its answer",
+    (
+        "chart.yml",
+        "helm-test-gate",
+    ): "only adds up the results of the chart jobs (about 5 seconds)",
+    (
+        "migration-heads.yml",
+        "check",
+    ): "about 40 seconds; it can break only when two pull requests meet, so it stays in the queue",
     ("chart.yml", "helm-test"): (
         "kind installs need more CPU than the own heavy-queue pool has today; "
         "back to an own pool when the second runner pool exists (#6026)"
@@ -406,3 +443,238 @@ def test_pull_request_workflows_cancel_old_runs_but_not_merge_group() -> None:
         elif cancel is True and "merge_group" in names:
             bad.append(f"{path.name}: cancels merge_group runs")
     assert not bad, "; ".join(bad)
+
+
+# --- fork pull requests get an honest CI signal (#4835) ---------------------
+
+_CI_FORK_GUARD = "head.repo.full_name == github.repository"
+_FORK_OPEN_JOBS = [
+    "changes",
+    "python-lint",
+    "python-unit-lane",
+    "go-lint-test",
+    "cli-api-snapshot-freshness",
+    "helm-lint-template",
+]
+
+
+def _ci_jobs() -> dict[str, Any]:
+    return cast("dict[str, Any]", _load_workflow(_WORKFLOWS_DIR / "ci.yml")["jobs"])
+
+
+@pytest.mark.parametrize("name", _FORK_OPEN_JOBS)
+def test_hosted_ci_jobs_run_on_a_fork_pull_request(name: str) -> None:
+    # These jobs use a hosted runner on a pull request and read no secret, so
+    # a fork pull request may run them.
+    assert _CI_FORK_GUARD not in str(_ci_jobs()[name].get("if", ""))
+
+
+def test_ci_jobs_on_the_own_pool_skip_a_fork_pull_request() -> None:
+    # Every other pull_request job that can use an own pool keeps the guard.
+    bad = []
+    for name, job in _ci_jobs().items():
+        if name in _FORK_OPEN_JOBS:
+            continue
+        runs_on = _runs_on_str(job)
+        on_own_pool = _INTERNAL_POOL_MARKER in runs_on and not _MERGE_QUEUE_ROUTE.fullmatch(runs_on)
+        if on_own_pool and _CI_FORK_GUARD not in str(job.get("if", "")):
+            bad.append(name)
+    assert not bad, bad
+
+
+def test_unit_lane_says_when_a_fork_pull_request_ran_no_unit_tests() -> None:
+    step = _ci_jobs()["python-unit-lane"]["steps"][0]
+    assert "head.repo.full_name != github.repository" in step["env"]["IS_FORK_PR"]
+    script = step["run"]
+    assert "the unit tests did not run" in script
+    assert "merge queue" in script
+    assert "Pull requests from forks" in script
+    # ci.yml has no trigger for a plain branch push, so the maintainer
+    # step must open a pull request to start CI.
+    assert "draft pull request" in script
+    assert "full SHA" in script
+
+
+def test_contributing_fork_steps_start_a_ci_run() -> None:
+    text = (_REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    section = text.split("### Pull requests from forks", 1)[1].split("\n## ", 1)[0]
+    assert "gh pr create --draft" in section
+    # The maintainer pushes the exact commit they read, not the fork branch.
+    assert "git push origin <full-sha>:refs/heads/ci/pr-<number>" in section
+    triggers = _triggers(_load_workflow(_WORKFLOWS_DIR / "ci.yml"))
+    # A pushed ci/pr-<number> branch alone starts no run; the draft pull
+    # request does.
+    assert triggers["push"]["branches"] == ["main"]
+    assert "workflow_dispatch" not in triggers
+
+
+# --- values from pull request code reach a script only through env: ----------
+#
+# On a fork pull request the change detector runs code from the pull request.
+# A job output or a pull request field must never sit inside the text of a
+# `run:` script. It goes through `env:` and the script reads a shell variable.
+# The rule holds in every workflow file that starts on `pull_request`.
+
+_UNSAFE_IN_RUN = re.compile(
+    r"\$\{\{[^}]*(\bneeds\.|\bsteps\.[\w-]+\.outputs\.|\bgithub\.head_ref\b"
+    r"|\bgithub\.event\.pull_request\.|toJSON\(\s*needs\b)",
+    re.IGNORECASE,
+)
+
+# Values the workflow itself fixes, or that a fork cannot change. Each entry:
+# (file, job) -> why the value may stay in a `run:` text. Keep it short.
+_RUN_VALUE_ALLOWED: dict[tuple[str, str], str] = {}
+
+
+# The only terms that prove a fork pull request cannot start a job. Any other
+# term, such as a negation, counts as reachable.
+_FORK_CANNOT_START_TERMS = frozenset(
+    {"github.event.pull_request.head.repo.full_name == github.repository", _PUSH_ONLY}
+)
+
+
+def _split_top_level(expr: str, operator: str) -> list[str]:
+    parts, depth, start, i = [], 0, 0, 0
+    while i < len(expr):
+        char = expr[i]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif depth == 0 and expr.startswith(operator, i):
+            parts.append(expr[start:i])
+            start = i + len(operator)
+            i += len(operator) - 1
+        i += 1
+    parts.append(expr[start:])
+    return [part.strip() for part in parts]
+
+
+def _fork_cannot_start(condition: str) -> bool:
+    """True when the whole `if:` condition is false for a fork pull request.
+
+    An `||` holds only when every arm holds. An `&&` holds when one term holds.
+    A term holds when it is exactly the same-repository check, exactly a
+    push-only check, or a bracket group that holds. Any other form is reachable.
+    """
+    expr = condition.strip()
+    if expr.startswith("${{") and expr.endswith("}}"):
+        expr = expr[3:-2].strip()
+    if not expr:
+        return False
+    arms = _split_top_level(expr, "||")
+    if len(arms) > 1:
+        return all(_fork_cannot_start(arm) for arm in arms)
+    terms = _split_top_level(expr, "&&")
+    if len(terms) > 1:
+        return any(_fork_cannot_start(term) for term in terms)
+    term = terms[0]
+    if term.startswith("(") and term.endswith(")"):
+        return _fork_cannot_start(term[1:-1])
+    return " ".join(term.split()) in _FORK_CANNOT_START_TERMS
+
+
+def _unsafe_run_steps(jobs: dict[str, Any]) -> list[str]:
+    found = []
+    for job_name, job in jobs.items():
+        if _fork_cannot_start(str(job.get("if", ""))):
+            continue
+        for index, step in enumerate(job.get("steps") or []):
+            if _UNSAFE_IN_RUN.search(str(step.get("run", ""))):
+                found.append(f"{job_name} step {index} ({step.get('name', '')})")
+    return found
+
+
+def _pull_request_workflows(paths: list[Path]) -> list[Path]:
+    return [path for path in paths if "pull_request" in _triggers(_load_workflow(path))]
+
+
+def test_run_scripts_of_fork_jobs_hold_no_job_output() -> None:
+    bad = []
+    for path in _pull_request_workflows(_workflow_files()):
+        jobs = _load_workflow(path)["jobs"]
+        for found in _unsafe_run_steps(jobs):
+            job_name = found.split(" step ", 1)[0]
+            if (path.name, job_name) not in _RUN_VALUE_ALLOWED:
+                bad.append(f"{path.name}: {found}")
+    assert not bad, (
+        "These steps put a job result, a step output or a pull request field into "
+        "the text of a run: script. Pass it through env: instead: " + "; ".join(bad)
+    )
+
+
+def test_pull_request_workflows_include_both_file_extensions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a.yml").write_text("on: pull_request\njobs: {}\n")
+    (tmp_path / "b.yaml").write_text("on: [pull_request]\njobs: {}\n")
+    (tmp_path / "c.yaml").write_text("on: push\njobs: {}\n")
+    monkeypatch.setattr(sys.modules[__name__], "_WORKFLOWS_DIR", tmp_path)
+    found = _pull_request_workflows(_workflow_files())
+    assert [path.name for path in found] == ["a.yml", "b.yaml"]
+
+
+def test_run_value_allow_list_has_a_reason_for_each_entry() -> None:
+    assert all(reason.strip() for reason in _RUN_VALUE_ALLOWED.values())
+
+
+@pytest.mark.parametrize(
+    ("condition", "fork_cannot_start"),
+    [
+        ("github.event.pull_request.head.repo.full_name == github.repository", True),
+        ("github.event_name == 'push'", True),
+        ("always() && github.event.pull_request.head.repo.full_name == github.repository", True),
+        (
+            "github.event_name != 'pull_request' || "
+            "(github.event.pull_request.head.repo.full_name == github.repository && "
+            "needs.changes.outputs.chart == 'true')",
+            False,
+        ),
+        (
+            "(github.event.pull_request.head.repo.full_name == github.repository) || "
+            "(github.event.pull_request.head.repo.full_name == github.repository && x)",
+            True,
+        ),
+        ("a || github.event.pull_request.head.repo.full_name == github.repository", False),
+        ("${{ !(github.event.pull_request.head.repo.full_name == github.repository) }}", False),
+        ("!(github.event_name == 'push')", False),
+        ("github.event.pull_request.head.repo.full_name == github.repository == false", False),
+        ("github.event.pull_request.head.repo.full_name != github.repository", False),
+        ("always()", False),
+        ("", False),
+    ],
+)
+def test_fork_cannot_start_reads_the_whole_condition(
+    condition: str, fork_cannot_start: bool
+) -> None:
+    assert _fork_cannot_start(condition) is fork_cannot_start
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "${{ needs.changes.outputs.docs_only }}",
+        "${{ needs.changes.result }}",
+        "${{ github.event.pull_request.head.ref }}",
+        "${{ steps.package.outputs.tarball }}",
+        "${{ github.head_ref }}",
+        "${{ toJSON(needs) }}",
+    ],
+)
+def test_unsafe_run_check_flags_an_expression_in_a_script(expression: str) -> None:
+    jobs = {"lane": {"steps": [{"name": "s", "run": f"value='{expression}'"}]}}
+    assert _unsafe_run_steps(jobs) == ["lane step 0 (s)"]
+
+
+def test_unsafe_run_check_accepts_env() -> None:
+    jobs = {
+        "lane": {
+            "steps": [
+                {
+                    "env": {"DOCS_ONLY": "${{ needs.changes.outputs.docs_only }}"},
+                    "run": 'echo "${DOCS_ONLY}"',
+                }
+            ]
+        }
+    }
+    assert _unsafe_run_steps(jobs) == []

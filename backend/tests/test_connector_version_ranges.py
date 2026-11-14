@@ -26,12 +26,8 @@ from meho_backplane.connectors.registry import _eager_import_connectors
 
 # Class name -> the Task that decides its range. Remove the entry in that Task.
 _WAITING_FOR_RANGE: dict[str, str] = {
-    "KubernetesConnector": "#6260",
-    "Rke2SshConnector": "#6260",
     "PrometheusConnector": "#6262",
     "VaultConnector": "#6263",
-    "PfSenseConnector": "#6264",
-    "Bind9Connector": "#6264",
     "HypervConnector": "the Windows connectors (no Task yet)",
     "MsadConnector": "the Windows connectors (no Task yet)",
     "WindowsDnsConnector": "the Windows connectors (no Task yet)",

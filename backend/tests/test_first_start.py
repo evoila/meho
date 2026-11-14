@@ -708,7 +708,7 @@ def _use_fake_connector(monkeypatch: pytest.MonkeyPatch) -> None:
 
     _Fingerprint.seen.clear()
     monkeypatch.setattr(
-        resolver, "resolve_connector_or_label", lambda target: (_Fingerprint, None, None)
+        resolver, "resolve_connector_or_label", lambda target, **_kw: (_Fingerprint, None, None)
     )
 
 

@@ -6,7 +6,7 @@
 #
 # Invoked by `.github/workflows/pr-smoke.yml` after `helm upgrade --install`
 # completes against the ephemeral `meho-ci-<pr-number>` namespace on
-# rke2-infra. Asserts the backplane's public operator surfaces respond
+# the CI cluster. Asserts the backplane's public operator surfaces respond
 # correctly without authentication, then exits non-zero on any failure so
 # the workflow's teardown step (which runs `if: always()`) cleans up and
 # the PR's smoke status flips to red.
@@ -14,8 +14,8 @@
 # This is the v0.1 PR-smoke contract — deliberately scoped to the
 # unauthenticated surface (`/healthz`, `/version`, `/api/v1/health` 401
 # negative test). The authenticated federation-chain smoke lives in
-# claude-rdc-hetzner-dc/manifests/meho/smoke.sh (operator-facing,
-# real-credentials, against the persistent install) and is exercised in
+# the consumer's own operator-facing smoke script (real credentials,
+# against the persistent install) and is exercised in
 # Goal #11 G2.8 against the production-style instance, not per PR.
 #
 # Arguments:

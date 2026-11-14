@@ -27,7 +27,7 @@ Schema decisions for :class:`Tenant`:
   ``default=uuid.uuid4`` for the SQLite dev/test driver and for
   out-of-band inserts.
 * ``slug`` — Text NOT NULL UNIQUE. The operator-facing identifier
-  (``rdc-internal``, ``customer-a``); used in URLs, log lines,
+  (``tenant-a``, ``customer-a``); used in URLs, log lines,
   audit displays. Uniqueness is enforced **exclusively** by the
   named ``tenant_slug_idx`` b-tree index (declared
   ``unique=True``); the column itself omits ``unique=True`` so
@@ -35,7 +35,7 @@ Schema decisions for :class:`Tenant`:
   to the named one. The named index gives later migrations a
   stable identifier to reference.
 * ``name`` — Text NOT NULL. Free-form display label
-  (e.g. "RDC Internal Tenancy"); not constrained or indexed.
+  (e.g. "Tenant A"); not constrained or indexed.
 * ``created_at`` — ``timestamptz``. PG-side ``now()`` server
   default via the migration; the ORM also declares
   ``default=lambda: datetime.now(UTC)`` so SQLite dev/test paths
@@ -118,7 +118,7 @@ Indexes on :class:`AuditLog`:
   shape) hit the index.
 * ``audit_log_tenant_id_idx`` — b-tree on ``tenant_id`` so
   per-tenant audit queries ("show me everything in
-  ``rdc-internal``") hit the index. Added by migration ``0002``;
+  ``tenant-a``") hit the index. Added by migration ``0002``;
   G0.1 sibling tasks T2/T3 wire the column writes.
 * ``audit_log_target_id_idx`` — b-tree on ``target_id`` so
   per-target audit queries hit the index. Added by migration ``0004``.
@@ -431,7 +431,7 @@ class AuditEventClass(StrEnum):
     migration together.
 
     * :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation
-      (success or failure), or a MEHO-internal action such as a topology
+      (success or failure), or an internal action such as a topology
       edit, a retention sweep or a reaper.
     * :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
       a policy deny, a rate-limit refusal, or a park for approval.
@@ -769,7 +769,7 @@ class Tenant(Base):
 
     Every authenticated request post-G0.1 carries a ``tenant_id``
     JWT claim that resolves to a row in this table. The slug
-    (``rdc-internal``, ``customer-a``) is the operator-facing
+    (``tenant-a``, ``customer-a``) is the operator-facing
     handle; the ``id`` is the FK keystone every per-tenant feature
     (knowledge bases, memory scopes, target registries, broadcast
     streams, audit-log scoping) joins on.
@@ -935,7 +935,7 @@ class Tenant(Base):
         server_default=sa.false(),
     )
     # Where the tenant keeps its lessons (#5976): the key of one docs
-    # collection, the team wiki loaded into a knowledge index.
+    # collection, the tenant's wiki loaded into a knowledge index.
     # ``search_knowledge`` and ``meho kb search`` also search it, and
     # ``add_to_knowledge`` says the lesson goes there as a candidate page
     # (:mod:`meho_backplane.kb.wiki_search`). ``NULL`` (default): lessons
@@ -1698,7 +1698,7 @@ class DocCollection(Base):
 
     ``backend`` is the ``{type, ref}`` routing record the T2 (#1551)
     backend-agnostic search router resolves server-side — the backend
-    (``vertex-rag`` / ``meho-knowledge``) never appears in a request or
+    (``vertex-rag`` / a self-hosted store) never appears in a request or
     response. Operator-set; never probe-written.
 
     ``status`` is a bounded enum enforced via a DB-layer CHECK
@@ -2050,6 +2050,14 @@ class EndpointDescriptor(Base):
     )
     custom_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     custom_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # #5321: the fields an admin edited on a typed or composite op
+    # (``custom_description``, ``llm_instructions``). Typed registration
+    # at every start leaves these fields as they are. NULL means none.
+    admin_edited_fields: Mapped[list[str] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
     # #5037: the connector package that wrote this row at start. NULL means
     # the op is built into MEHO (or ingested). When the package is not
     # installed, discovery hides the row and dispatch refuses it with
@@ -2241,6 +2249,35 @@ class TenantPolicy(Base):
             sqlite_where=sa.text("tenant_id IS NOT NULL"),
         ),
     )
+
+
+class PolicyRevision(Base):
+    """One imported policy file (``meho policy import``), after a second admin approved it.
+
+    ``tenant_id`` is the tenant, or ``NULL`` for the install's policy.
+    ``file_text`` is the file as sent, ``document`` the stored policy after
+    the import, and ``diff`` what the import changed. The service only adds
+    rows; when a scope has more than 20, the oldest go
+    (:mod:`meho_backplane.policy.service`).
+    """
+
+    __tablename__ = "policy_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    imported_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    approved_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    file_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    file_text: Mapped[str] = mapped_column(Text, nullable=False)
+    document: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+    diff: Mapped[dict[str, object]] = mapped_column(_PORTABLE_JSON, nullable=False)
+
+    __table_args__ = (Index("policy_revision_tenant_ts_idx", "tenant_id", "ts"),)
 
 
 class TenantOperationSetting(Base):
@@ -5257,7 +5294,7 @@ class AddonPairing(Base):
 
     Foundation of Initiative #2900 (#3025). Each row is one *active* pairing
     between the backplane and a sibling add-on product (first consumers:
-    meho-automation, meho-ssp). Pairing is deliberately **not** connector
+    meho-automation and other add-ons). Pairing is deliberately **not** connector
     registration: an add-on is a peer control plane beside the narrow waist,
     integrated through the governance planes, not a managed vendor system
     below it.
@@ -8148,7 +8185,7 @@ class EventSource(Base):
 
 
 class EventOutbox(Base):
-    """One durable MEHO-internal event ready for subscription dispatch.
+    """One durable internal event ready for subscription dispatch.
 
     Initiative #804 (G11.3 Scheduler P2), Task #824 (T3). The
     transactional outbox: producers insert one of these rows in the
@@ -9230,6 +9267,15 @@ class Sensor(Base):
         default=None,
     )
     pending_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    # How many evaluations in a row the target refused the login. The runner
+    # pauses the Sensor when it reaches the limit
+    # (``checks/auth_park.py``). Any other result sets it back to 0.
+    auth_failure_count: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0,

@@ -584,7 +584,7 @@ def _default_backplane_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _default_target_ssrf_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
     """Exempt the suite's fixture address space from the target SSRF guard.
 
-    evoila-bosnia/meho-internal#153 rejects targets whose ``host``/
+    The host check rejects targets whose ``host``/
     ``fqdn`` is — or resolves to — a private / loopback / link-local
     address at create/update *and* connect time, overridable only via
     ``MEHO_TARGET_SSRF_ALLOWLIST``. The suite predates that guard and
@@ -834,6 +834,7 @@ def _isolate_global_registries() -> Iterator[None]:
     ``operations.typed_register._TYPED_OP_REGISTRARS``,
     ``operations._preview._PREVIEW_BUILDERS`` / ``_PERMISSION_PREFLIGHTS``,
     ``operations._park_check._PARK_CHECKS``,
+    ``operations.ingest.safety_floors._FLOORS``,
     and the dispatcher's per-process caches
     ``operations._handler_resolve._HANDLER_CACHE`` /
     ``_CONNECTOR_INSTANCE_CACHE``. None had a process-wide per-test
@@ -879,6 +880,7 @@ def _isolate_global_registries() -> Iterator[None]:
     from meho_backplane.operations import _preview as preview_reg
     from meho_backplane.operations import dispatcher, set_default_reducer
     from meho_backplane.operations import typed_register as typed_reg
+    from meho_backplane.operations.ingest import safety_floors as safety_floors_reg
 
     tools = dict(mcp_reg._TOOLS)
     resources = dict(mcp_reg._RESOURCES)
@@ -903,6 +905,10 @@ def _isolate_global_registries() -> Iterator[None]:
     preview_builders = dict(preview_reg._PREVIEW_BUILDERS)
     permission_preflights = dict(preview_reg._PERMISSION_PREFLIGHTS)
     park_checks = dict(park_check_reg._PARK_CHECKS)
+    # Connector safety floors register as an import side effect. A test that
+    # clears the connector registry and re-imports one connector leaves only
+    # that connector's floors behind; restore them like the other registries.
+    ingest_safety_floors = dict(safety_floors_reg._FLOORS)
     default_reducer = dispatcher._DEFAULT_REDUCER
     try:
         yield
@@ -928,6 +934,8 @@ def _isolate_global_registries() -> Iterator[None]:
         preview_reg._PERMISSION_PREFLIGHTS.update(permission_preflights)
         park_check_reg._PARK_CHECKS.clear()
         park_check_reg._PARK_CHECKS.update(park_checks)
+        safety_floors_reg._FLOORS.clear()
+        safety_floors_reg._FLOORS.update(ingest_safety_floors)
         set_default_reducer(default_reducer)
 
 
@@ -1043,8 +1051,8 @@ def mint_token(
     private_key: Any,
     *,
     sub: str = "op-42",
-    name: str | None = "Damir",
-    email: str | None = "damir@example.com",
+    name: str | None = "Alice",
+    email: str | None = "alice@example.com",
     issuer: str = DEFAULT_ISSUER,
     audience: str = DEFAULT_AUDIENCE,
     expires_in: int = 3600,
@@ -1201,6 +1209,33 @@ def pytest_fixture_setup(fixturedef, request):
     _PERF_FIXTURE_TIMINGS.append(
         (round(time.perf_counter() - start, 3), fixturedef.argname, str(fixturedef.scope)),
     )
+
+
+def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> None:
+    """Write this process id and its running test to a progress file, in CI only.
+
+    ``MEHO_CI_PROGRESS_DIR`` is set by the CI test jobs. The memory sampler
+    (``scripts/ci/memory_sampler.sh``) reads these files: it looks up the
+    memory of each process id, so its log line names the pytest worker with
+    the most memory and the test each worker runs. This hook runs only in the
+    process that runs the test, so an xdist controller writes no file. A
+    killed runner loses its files, but the lines the sampler already printed
+    stay in the job log. A write error never fails a test. Returns None, so
+    pytest still runs the test.
+    """
+    directory = os.environ.get("MEHO_CI_PROGRESS_DIR")
+    if not directory:
+        return
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    try:
+        target = os.path.join(directory, f"{worker}.txt")
+        with open(f"{target}.tmp", "w") as fh:
+            fh.write(f"{os.getpid()} {item.nodeid}\n")
+        os.replace(f"{target}.tmp", target)
+    except OSError:
+        # The file only helps the memory sampler; a full or missing folder
+        # must never fail or stop a test.
+        return
 
 
 def _save_worker_coverage_data() -> None:

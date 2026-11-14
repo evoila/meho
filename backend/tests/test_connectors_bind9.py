@@ -153,7 +153,7 @@ def test_registry_v2_class_attrs() -> None:
     assert Bind9Connector.product == "bind9"
     assert Bind9Connector.version == "9.x"
     assert Bind9Connector.impl_id == "bind9-ssh"
-    assert Bind9Connector.supported_version_range is None
+    assert Bind9Connector.supported_version_range == ">=9.18,<9.21"
     assert Bind9Connector.priority == 0
 
 
@@ -170,7 +170,7 @@ def test_package_import_registers_versioned_plus_wildcard() -> None:
     (#509) for the same reason.
 
     Prior to G0.15-T6 (#1215) only the versioned entry was registered;
-    the v0.7.0 dogfood (RDC #753, signal 6) caught the chicken-and-egg
+    the v0.7.0 dogfood (a consumer report, signal 6) caught the chicken-and-egg
     that left every typed connector unresolvable on a fresh target with
     ``version=None``. The fix fans out the K8s sibling-wildcard pattern
     to every typed connector: each ``__init__.py`` now calls

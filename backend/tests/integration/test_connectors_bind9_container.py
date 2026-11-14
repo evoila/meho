@@ -175,24 +175,24 @@ _DOCKERFILE: str = textwrap.dedent(
     # supported record type (A / AAAA / CNAME / MX / TXT) so the
     # ``bind9.record.get`` test can exercise the type-default + the
     # type-explicit paths.
-    RUN echo 'zone "evba.lab" { type master; file "/etc/bind/db.evba.lab"; };' \\
+    RUN echo 'zone "example.test" { type master; file "/etc/bind/db.example.test"; };' \\
             >> /etc/bind/named.conf.local
 
     RUN printf '%s\\n' \\
             '$TTL 3600' \\
-            '@ IN SOA ns1.evba.lab. admin.evba.lab. (' \\
+            '@ IN SOA ns1.example.test. admin.example.test. (' \\
             '    2026051801 3600 600 604800 86400 )' \\
-            '@   IN NS ns1.evba.lab.' \\
-            'ns1 IN A 10.5.50.1' \\
-            'www IN A 10.5.50.2' \\
-            'mail IN A 10.5.50.3' \\
+            '@   IN NS ns1.example.test.' \\
+            'ns1 IN A 192.0.2.1' \\
+            'www IN A 192.0.2.2' \\
+            'mail IN A 192.0.2.3' \\
             'mail IN AAAA 2001:db8::1' \\
-            'alias IN CNAME ns1.evba.lab.' \\
-            '@   IN MX 10 mail.evba.lab.' \\
+            'alias IN CNAME ns1.example.test.' \\
+            '@   IN MX 10 mail.example.test.' \\
             '@   IN TXT "v=spf1 a -all"' \\
-            > /etc/bind/db.evba.lab \\
-     && chown root:bind /etc/bind/db.evba.lab \\
-     && chmod 644 /etc/bind/db.evba.lab
+            > /etc/bind/db.example.test \\
+     && chown root:bind /etc/bind/db.example.test \\
+     && chmod 644 /etc/bind/db.example.test
 
     # Wrapper that starts named in the background and then runs sshd
     # in the foreground so PID 1 stays alive.
@@ -341,7 +341,7 @@ async def test_probe_against_real_bind9_returns_ok(
 async def test_zone_list_against_real_bind9_returns_seeded_zone(
     bind9_container_target: _Bind9Target,
 ) -> None:
-    """``bind9.zone.list`` discovers the seeded ``evba.lab`` zone."""
+    """``bind9.zone.list`` discovers the seeded ``example.test`` zone."""
     connector = Bind9Connector()
     try:
         result = await connector.bind9_zone_list(bind9_container_target, {})
@@ -350,12 +350,12 @@ async def test_zone_list_against_real_bind9_returns_seeded_zone(
 
     rows = result["rows"]
     zone_names = {row["name"] for row in rows}
-    assert "evba.lab" in zone_names, (
-        f"expected ``evba.lab`` in zone.list result; got {zone_names!r}"
+    assert "example.test" in zone_names, (
+        f"expected ``example.test`` in zone.list result; got {zone_names!r}"
     )
-    evba_row = next(r for r in rows if r["name"] == "evba.lab")
-    assert evba_row["type"] == "master"
-    assert evba_row["file"] == "/etc/bind/db.evba.lab"
+    example_row = next(r for r in rows if r["name"] == "example.test")
+    assert example_row["type"] == "master"
+    assert example_row["file"] == "/etc/bind/db.example.test"
     assert result["total"] == len(rows)
 
 
@@ -363,15 +363,15 @@ async def test_zone_list_against_real_bind9_returns_seeded_zone(
 async def test_zone_read_against_real_bind9_parses_seeded_records(
     bind9_container_target: _Bind9Target,
 ) -> None:
-    """``bind9.zone.read evba.lab`` parses every seeded record type."""
+    """``bind9.zone.read example.test`` parses every seeded record type."""
     connector = Bind9Connector()
     try:
-        result = await connector.bind9_zone_read(bind9_container_target, {"zone": "evba.lab"})
+        result = await connector.bind9_zone_read(bind9_container_target, {"zone": "example.test"})
     finally:
         await connector.aclose()
 
-    assert result["zone"] == "evba.lab"
-    assert result["file"] == "/etc/bind/db.evba.lab"
+    assert result["zone"] == "example.test"
+    assert result["file"] == "/etc/bind/db.example.test"
     rows = result["rows"]
     # Each seeded record type must appear at least once.
     types = {row["type"] for row in rows}
@@ -381,40 +381,42 @@ async def test_zone_read_against_real_bind9_parses_seeded_records(
     # The www A record specifically -- the integration test's main
     # anchor for "parsing reaches the right rdata".
     www_row = next(
-        (r for r in rows if r["name"] == "www.evba.lab." and r["type"] == "A"),
+        (r for r in rows if r["name"] == "www.example.test." and r["type"] == "A"),
         None,
     )
-    assert www_row is not None, f"missing www.evba.lab. A row in {rows!r}"
-    assert www_row["rdata"] == "10.5.50.2"
+    assert www_row is not None, f"missing www.example.test. A row in {rows!r}"
+    assert www_row["rdata"] == "192.0.2.2"
 
 
 @pytest.mark.asyncio
 async def test_record_get_against_real_bind9_resolves_via_dig(
     bind9_container_target: _Bind9Target,
 ) -> None:
-    """``bind9.record.get www.evba.lab`` resolves through the running daemon."""
+    """``bind9.record.get www.example.test`` resolves through the running daemon."""
     connector = Bind9Connector()
     try:
-        result = await connector.bind9_record_get(bind9_container_target, {"fqdn": "www.evba.lab"})
+        result = await connector.bind9_record_get(
+            bind9_container_target, {"fqdn": "www.example.test"}
+        )
     finally:
         await connector.aclose()
 
     assert result["type"] == "A"
     assert result["total"] >= 1
     rdatas = {row["rdata"] for row in result["rows"]}
-    assert "10.5.50.2" in rdatas, f"expected 10.5.50.2 in {rdatas!r}"
+    assert "192.0.2.2" in rdatas, f"expected 192.0.2.2 in {rdatas!r}"
 
 
 @pytest.mark.asyncio
 async def test_record_get_with_explicit_type_against_real_bind9(
     bind9_container_target: _Bind9Target,
 ) -> None:
-    """``bind9.record.get mail.evba.lab --type AAAA`` returns the IPv6 row."""
+    """``bind9.record.get mail.example.test --type AAAA`` returns the IPv6 row."""
     connector = Bind9Connector()
     try:
         result = await connector.bind9_record_get(
             bind9_container_target,
-            {"fqdn": "mail.evba.lab", "type": "AAAA"},
+            {"fqdn": "mail.example.test", "type": "AAAA"},
         )
     finally:
         await connector.aclose()
@@ -438,10 +440,10 @@ async def test_config_show_against_real_bind9_reads_named_conf_local(
         await connector.aclose()
 
     assert result["file"] == "/etc/bind/named.conf.local"
-    # The seed added ``zone "evba.lab" { ... };`` to named.conf.local;
+    # The seed added ``zone "example.test" { ... };`` to named.conf.local;
     # the content read must contain that signature line.
-    assert 'zone "evba.lab"' in result["content"]
-    assert "/etc/bind/db.evba.lab" in result["content"]
+    assert 'zone "example.test"' in result["content"]
+    assert "/etc/bind/db.example.test" in result["content"]
 
 
 @pytest.mark.asyncio
@@ -555,35 +557,35 @@ async def _checksum_bind_tree(connector: Bind9Connector, target: _Bind9Target) -
 async def test_record_add_against_real_bind9_resolves_post_apply(
     bind9_container_target: _Bind9Target,
 ) -> None:
-    """``bind9.record.add api.evba.lab 10.5.50.99`` -> dig resolves the new IP."""
+    """``bind9.record.add api.example.test 192.0.2.99`` -> dig resolves the new IP."""
     connector = Bind9Connector()
     try:
         result = await connector.bind9_record_add(
             bind9_container_target,
             {
-                "fqdn": "api.evba.lab",
-                "ip": "10.5.50.99",
+                "fqdn": "api.example.test",
+                "ip": "192.0.2.99",
                 "type": "A",
-                "zone": "evba.lab",
+                "zone": "example.test",
             },
         )
         assert result["op_class"] == "write"
-        assert result["zone"] == "evba.lab"
+        assert result["zone"] == "example.test"
         assert "result_state_before" in result
         assert "result_state_after" in result
         # The before / after must differ -- the staged change is the
-        # diff between them. ``api.evba.lab`` was absent before and
+        # diff between them. ``api.example.test`` was absent before and
         # present after.
-        assert "10.5.50.99" not in result["result_state_before"]
-        assert "10.5.50.99" in result["result_state_after"]
+        assert "192.0.2.99" not in result["result_state_before"]
+        assert "192.0.2.99" in result["result_state_after"]
 
         # Verify the change actually propagated to the running named.
         get_result = await connector.bind9_record_get(
             bind9_container_target,
-            {"fqdn": "api.evba.lab"},
+            {"fqdn": "api.example.test"},
         )
         rdatas = {row["rdata"] for row in get_result["rows"]}
-        assert "10.5.50.99" in rdatas
+        assert "192.0.2.99" in rdatas
     finally:
         await connector.aclose()
 
@@ -600,23 +602,23 @@ async def test_record_remove_against_real_bind9_clears_resolution(
         await connector.bind9_record_add(
             bind9_container_target,
             {
-                "fqdn": "scratch.evba.lab",
-                "ip": "10.5.50.50",
+                "fqdn": "scratch.example.test",
+                "ip": "192.0.2.50",
                 "type": "A",
-                "zone": "evba.lab",
+                "zone": "example.test",
             },
         )
 
         result = await connector.bind9_record_remove(
             bind9_container_target,
-            {"fqdn": "scratch.evba.lab", "zone": "evba.lab"},
+            {"fqdn": "scratch.example.test", "zone": "example.test"},
         )
         assert result["op_class"] == "write"
 
         # Confirm dig no longer resolves the record.
         get_result = await connector.bind9_record_get(
             bind9_container_target,
-            {"fqdn": "scratch.evba.lab"},
+            {"fqdn": "scratch.example.test"},
         )
         assert get_result["total"] == 0
     finally:
@@ -634,14 +636,24 @@ async def test_two_parallel_record_adds_against_real_bind9_both_land(
         await asyncio.gather(
             first.bind9_record_add(
                 bind9_container_target,
-                {"fqdn": "par1.evba.lab", "ip": "10.5.50.71", "type": "A", "zone": "evba.lab"},
+                {
+                    "fqdn": "par1.example.test",
+                    "ip": "192.0.2.71",
+                    "type": "A",
+                    "zone": "example.test",
+                },
             ),
             second.bind9_record_add(
                 bind9_container_target,
-                {"fqdn": "par2.evba.lab", "ip": "10.5.50.72", "type": "A", "zone": "evba.lab"},
+                {
+                    "fqdn": "par2.example.test",
+                    "ip": "192.0.2.72",
+                    "type": "A",
+                    "zone": "example.test",
+                },
             ),
         )
-        for fqdn, ip in (("par1.evba.lab", "10.5.50.71"), ("par2.evba.lab", "10.5.50.72")):
+        for fqdn, ip in (("par1.example.test", "192.0.2.71"), ("par2.example.test", "192.0.2.72")):
             get_result = await first.bind9_record_get(bind9_container_target, {"fqdn": fqdn})
             assert ip in {row["rdata"] for row in get_result["rows"]}
     finally:
@@ -653,14 +665,14 @@ async def test_two_parallel_record_adds_against_real_bind9_both_land(
 async def test_record_add_auto_resolves_zone_when_zone_omitted(
     bind9_container_target: _Bind9Target,
 ) -> None:
-    """``--zone`` omitted -> handler picks ``evba.lab`` via longest-suffix match."""
+    """``--zone`` omitted -> handler picks ``example.test`` via longest-suffix match."""
     connector = Bind9Connector()
     try:
         result = await connector.bind9_record_add(
             bind9_container_target,
-            {"fqdn": "auto-resolve.evba.lab", "ip": "10.5.50.77", "type": "A"},
+            {"fqdn": "auto-resolve.example.test", "ip": "192.0.2.77", "type": "A"},
         )
-        assert result["zone"] == "evba.lab"
+        assert result["zone"] == "example.test"
     finally:
         await connector.aclose()
 
@@ -679,7 +691,7 @@ async def test_record_add_rejects_unresolvable_fqdn_pre_staging(
         with pytest.raises(ZoneResolutionError):
             await connector.bind9_record_add(
                 bind9_container_target,
-                {"fqdn": "api.outside.example.com", "ip": "10.5.50.99", "type": "A"},
+                {"fqdn": "api.outside.example.com", "ip": "192.0.2.99", "type": "A"},
             )
         after = await _checksum_bind_tree(connector, bind9_container_target)
         # Acceptance criterion: ambiguous/unresolvable returns invalid_params
@@ -716,18 +728,18 @@ async def test_atomic_apply_rollback_on_dig_verify_failure_leaves_tree_unchanged
                 connector,
                 bind9_container_target,
                 sudo_password=_CONTAINER_PASSWORD,
-                audit_slice_path="/etc/bind/db.evba.lab",
-                zone_name="evba.lab",
+                audit_slice_path="/etc/bind/db.example.test",
+                zone_name="example.test",
                 # Stage a syntactically valid zonefile so checkzone passes
                 # and reload succeeds. The verify predicate (below) is the
                 # forced failure surface.
                 staged_bytes=(
                     b"$TTL 3600\n"
-                    b"@ IN SOA ns1.evba.lab. admin.evba.lab. "
+                    b"@ IN SOA ns1.example.test. admin.example.test. "
                     b"(2026051899 3600 600 604800 86400)\n"
-                    b"@ IN NS ns1.evba.lab.\n"
-                    b"ns1 IN A 10.5.50.1\n"
-                    b"rollback-canary IN A 10.5.50.123\n"
+                    b"@ IN NS ns1.example.test.\n"
+                    b"ns1 IN A 192.0.2.1\n"
+                    b"rollback-canary IN A 192.0.2.123\n"
                 ),
                 # ``false`` always exits non-zero -- the verify step
                 # detects "named loaded the change but it doesn't
@@ -745,7 +757,7 @@ async def test_atomic_apply_rollback_on_dig_verify_failure_leaves_tree_unchanged
         # Defence-in-depth: the canary IP must not resolve either.
         get_result = await connector.bind9_record_get(
             bind9_container_target,
-            {"fqdn": "rollback-canary.evba.lab"},
+            {"fqdn": "rollback-canary.example.test"},
         )
         assert get_result["total"] == 0, "rollback-canary record survived a verify-failure rollback"
     finally:
@@ -780,8 +792,8 @@ async def test_atomic_apply_rollback_on_checkzone_failure_leaves_tree_unchanged(
                 connector,
                 bind9_container_target,
                 sudo_password=_CONTAINER_PASSWORD,
-                audit_slice_path="/etc/bind/db.evba.lab",
-                zone_name="evba.lab",
+                audit_slice_path="/etc/bind/db.example.test",
+                zone_name="example.test",
                 # Garbage zonefile -- named-checkzone refuses to load
                 # a file with no SOA and undefined directives.
                 staged_bytes=b"this is not a valid zonefile\nblargh blargh\n",

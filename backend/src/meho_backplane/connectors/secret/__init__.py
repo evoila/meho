@@ -45,12 +45,19 @@ handler is a module-level function the dispatcher routes to with
 # The keycloak sink (#1578) lives under ``connectors/keycloak`` but
 # registers here so the broker's second kind lands on the same seam.
 from meho_backplane.connectors.keycloak import secret_endpoint as _keycloak_endpoint  # noqa: F401
+from meho_backplane.connectors.linux import secret_endpoint as _linux_endpoint  # noqa: F401
 from meho_backplane.connectors.secret import handoff_preview as _handoff_preview  # noqa: F401
 from meho_backplane.connectors.secret import move_preview as _move_preview  # noqa: F401
 from meho_backplane.connectors.secret import vault_endpoint as _vault_endpoint  # noqa: F401
 from meho_backplane.connectors.secret.handoff_ops import register_secret_handoff_operations
 from meho_backplane.connectors.secret.ops import register_secret_broker_operations
+from meho_backplane.op_classes import declare_per_call_approval
 from meho_backplane.operations.typed_register import register_typed_op_registrar
+
+# A move can write a secret anywhere a sink reaches, also as root on a host.
+# So a person approves each move: no standing grant and no run approval
+# covers it.
+declare_per_call_approval(("secret.move",))
 
 # Queue the secret.move typed-op upsert onto the lifespan-driven
 # registrar list (run after the connector eager-import pass).

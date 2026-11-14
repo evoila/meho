@@ -55,7 +55,7 @@ is best answered by querying the running daemon, not by hand-resolving
 through the zonefile. ``dig @localhost`` exercises the same code path
 the rest of the world hits when it asks bind9 to resolve <fqdn>, so:
 
-* Zone delegation works correctly (a query for ``api.evba.lab`` that
+* Zone delegation works correctly (a query for ``api.example.test`` that
   delegates to a child zone returns the delegated answer).
 * Views are honoured (a ``$ORIGIN`` inside a view that wraps the same
   zone resolves through the view's RPZ / response-policy rules).
@@ -218,8 +218,8 @@ def parse_dig_answer(output: str) -> list[dict[str, Any]]:
 
     .. code-block:: python
 
-       {"name": "www.evba.lab.", "ttl": 3600, "class": "IN",
-        "type": "A", "rdata": "10.5.50.2"}
+       {"name": "www.example.test.", "ttl": 3600, "class": "IN",
+        "type": "A", "rdata": "192.0.2.2"}
 
     Pure function -- captured ``dig`` output goes in, structured rows
     come out, no IO. The unit suite pins it against captured fixtures
@@ -236,7 +236,7 @@ def parse_dig_answer(output: str) -> list[dict[str, Any]]:
     (``"v=spf1 a -all"``); the ``rdata`` field surfaces them verbatim
     because that matches what the zonefile reader returns for the same
     record. MX records ship as ``<priority> <exchange>`` (e.g.
-    ``"10 mail.evba.lab."``); CNAME ships as the target FQDN.
+    ``"10 mail.example.test."``); CNAME ships as the target FQDN.
     """
     rows: list[dict[str, Any]] = []
     for line in output.splitlines():
@@ -352,7 +352,7 @@ BIND9_RECORD_GET_PARAMETER_SCHEMA: dict[str, Any] = {
             "pattern": "\\S",
             "description": (
                 "Fully-qualified domain name to resolve, e.g. "
-                "``www.evba.lab`` or ``mail.evba.lab.``. Trailing dot "
+                "``www.example.test`` or ``mail.example.test.``. Trailing dot "
                 "optional. Resolved by ``dig @localhost`` so views, "
                 "delegations, and cache hits all behave as the rest of "
                 "the world sees them."
@@ -491,8 +491,8 @@ def resolve_zone_for_fqdn(zones: list[str], fqdn: str) -> str:
     matching contract:
 
     * The FQDN's label-sequence must end with the zone's label
-      sequence. ``api.evba.lab`` matches ``evba.lab`` but not
-      ``ba.lab`` (label boundaries are respected; substring matches
+      sequence. ``api.example.test`` matches ``example.test`` but not
+      ``ample.test`` (label boundaries are respected; substring matches
       across labels are rejected).
     * On a tie at the longest suffix, raises :class:`ZoneResolutionError`
       with ``reason="ambiguous"``.
@@ -504,8 +504,8 @@ def resolve_zone_for_fqdn(zones: list[str], fqdn: str) -> str:
     treating ``.`` as a match for every FQDN would break the
     longest-suffix invariant (every FQDN trivially ends with ``.``).
 
-    DNS names are case-insensitive (RFC 1035 §2.3.3): ``API.EVBA.lab``
-    must match the zone ``evba.lab`` the same way the running daemon
+    DNS names are case-insensitive (RFC 1035 §2.3.3): ``API.EXAMPLE.test``
+    must match the zone ``example.test`` the same way the running daemon
     treats them as equivalent. We lower-case both sides before the
     label comparison so a mixed-case operator input is not rejected
     as unresolvable. The returned zone name preserves the canonical
@@ -667,7 +667,7 @@ def _bump_soa_serial(zone: dns.zone.Zone) -> None:
 def _zonefile_text(zone: dns.zone.Zone) -> str:
     """Render *zone* back to zonefile text with absolute names.
 
-    ``relativize=False`` keeps FQDNs as absolute (``www.evba.lab.``
+    ``relativize=False`` keeps FQDNs as absolute (``www.example.test.``
     rather than ``www``) so the round-tripped file remains
     unambiguous regardless of which ``$ORIGIN`` line happens to be
     in scope. dnspython prepends a ``$ORIGIN`` line via
@@ -723,7 +723,7 @@ def _remove_record_from_zonefile(
 
     ``record.remove`` removes the *name*'s A and AAAA rrsets. The
     consumer wrapper's verb shape matches: a record-remove for
-    ``host.evba.lab`` strips A + AAAA (the v4+v6 pair); leaves
+    ``host.example.test`` strips A + AAAA (the v4+v6 pair); leaves
     CNAME / MX / TXT untouched (out of scope for v0.2 -- T2's
     record.get exposes them read-only, but the consumer wrapper
     never wrote CNAME / MX / TXT either).
@@ -1757,7 +1757,7 @@ BIND9_RECORD_ADD_PARAMETER_SCHEMA: dict[str, Any] = {
             "pattern": "\\S",
             "description": (
                 "Fully-qualified domain name to add, e.g. "
-                "``api.evba.lab``. Trailing dot optional. The handler "
+                "``api.example.test``. Trailing dot optional. The handler "
                 "resolves the owning zone from ``named-checkconf -p`` "
                 "by longest-suffix match unless ``zone`` is set "
                 "explicitly."
@@ -1895,7 +1895,7 @@ BIND9_RECORD_REMOVE_PARAMETER_SCHEMA: dict[str, Any] = {
             "pattern": "\\S",
             "description": (
                 "Fully-qualified domain name to remove, e.g. "
-                "``api.evba.lab``. Removes the A and AAAA rdatasets "
+                "``api.example.test``. Removes the A and AAAA rdatasets "
                 "at that name (CNAME / MX / TXT are out of scope)."
             ),
         },

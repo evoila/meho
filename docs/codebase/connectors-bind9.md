@@ -6,9 +6,10 @@ The `bind9` connector is the typed `Connector` subclass that dispatches
 operator-facing ISC bind9 operations over SSH. It is registered under
 the `(product="bind9", version="9.x", impl_id="bind9-ssh")` registry
 triple and is the first tier-1 child of the `SshConnector` adapter
-(G0.2-T4 #243). The `9.x` version range covers ISC bind9 9.18
-(current Extended Support Version) and 9.20 (current Stable Release);
-both expose `named -v` and `named-checkconf -p` with the same flags
+(G0.2-T4 #243). The connector declares the range `>=9.18,<9.21`. It
+covers ISC bind9 9.18 (end of life in June 2026) and 9.20 (current
+Stable Release); CI runs the connector against both (Debian bookworm
+and Debian trixie containers). Both expose `named -v` and `named-checkconf -p` with the same flags
 and the same banner format.
 
 The connector replaces the operator's `scripts/bind9-dns.sh` wrapper
@@ -26,7 +27,7 @@ Source: `backend/src/meho_backplane/connectors/bind9/`.
 
 - **`Bind9Connector`** (`connector.py`) -- `SshConnector` subclass.
   Class attributes: `product="bind9"`, `version="9.x"`,
-  `impl_id="bind9-ssh"`. It sets no `supported_version_range` and keeps
+  `impl_id="bind9-ssh"`. It sets `supported_version_range=">=9.18,<9.21"` and keeps
   the default `priority` of 0. Inherits the asyncssh connection
   pool (one login per caller and target), the key-or-password auth
   selection, and `aclose()` from the adapter; overrides `fingerprint`, `probe`, `execute`, and adds the

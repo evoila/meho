@@ -3,7 +3,7 @@
 
 """Regression tests for ``extra="forbid"`` on every public v1 request schema.
 
-G0.9-T2 (#729) of Initiative #737. Surfaced by the 2026-05-20 RDC
+G0.9-T2 (#729) of Initiative #737. Surfaced by the 2026-05-20 consumer
 in-lab dogfood as "Signal #2": a v0.2.1 client posting the
 pre-rename ``q`` / ``top_k`` keys to ``/api/v1/retrieve`` saw the
 fields silently dropped (Pydantic v2 default ``extra="ignore"``) and
@@ -103,7 +103,7 @@ _REQUEST_MODELS: list[tuple[type[BaseModel], dict[str, Any]]] = [
     (IngestKbRequest, {"directory": "/tmp/kb"}),
     (
         TargetCreate,
-        {"name": "rdc-vcenter", "product": "vsphere", "host": "vc.example.lab"},
+        {"name": "example-vcenter", "product": "vsphere", "host": "vc.example.lab"},
     ),
     (TargetUpdate, {"host": "vc-2.example.lab"}),
     (
@@ -263,7 +263,7 @@ def test_retrieve_route_rejects_signal_2_payload_with_422_extra_forbidden(
 ) -> None:
     """``POST /api/v1/retrieve`` rejects the exact dogfood Signal #2 payload.
 
-    The 2026-05-20 RDC report's reproducer was a v0.2.1 client still
+    The 2026-05-20 consumer report's reproducer was a v0.2.1 client still
     sending ``q`` (the pre-rename field) and ``top_k`` (renamed to
     ``limit``) — that payload used to be silently dropped, producing
     a 422 missing-``query`` error and an apparent "request worked

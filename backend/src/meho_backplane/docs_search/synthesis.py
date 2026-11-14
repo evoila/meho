@@ -313,8 +313,8 @@ def _render_chunks_for_prompt(chunks: list[DocsChunk]) -> str:
     attribute precisely:
     ``[i] chunk_id=… title="…" source=…``. The title is quoted and kept to
     one line (:func:`_prompt_title`). The content is served verbatim **inside the
-    ``<<UNTRUSTED_AGENT_TEXT`` envelope** (evoila-bosnia/meho-internal#304,
-    extending the #154 read-boundary guard to the federated docs corpus):
+    ``<<UNTRUSTED_AGENT_TEXT`` envelope** (extending the #154 read-boundary guard to the
+    federated docs corpus):
     corpus text is untrusted input to the synthesis model, so it is framed
     as data, never as directives — a chunk cannot smuggle instructions into
     the prompt, and a forged terminator stays inside the block (positional

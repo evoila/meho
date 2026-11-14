@@ -152,7 +152,7 @@ async def test_delete_node_removes_curated_row(
 ) -> None:
     """tools/call deletes a manual seed and returns {node_id, kind, name}."""
     client, _op = client_with_operator
-    node_id = await _seed_node(kind="vault-role", name="rdc-vault", source="curated")
+    node_id = await _seed_node(kind="vault-role", name="example-vault", source="curated")
 
     response = _delete_node_call(client, 10, {"node_id": str(node_id)})
 
@@ -161,7 +161,7 @@ async def test_delete_node_removes_curated_row(
     payload = json.loads(body["result"]["content"][0]["text"])
     assert payload["node_id"] == str(node_id)
     assert payload["kind"] == "vault-role"
-    assert payload["name"] == "rdc-vault"
+    assert payload["name"] == "example-vault"
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:

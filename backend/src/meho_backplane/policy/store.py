@@ -49,6 +49,8 @@ from meho_backplane.policy.classification import (
     check_no_conflict,
     classify,
     entries_from_document,
+    install_wait_text,
+    install_wait_undone,
     taxonomy_from_documents,
 )
 from meho_backplane.settings import get_settings
@@ -57,6 +59,7 @@ __all__ = [
     "SWITCH_OFF_REFUSAL",
     "ClassificationEdit",
     "EditPlan",
+    "InvalidStoredPolicyError",
     "classification_enabled",
     "classify_rows",
     "classify_step",
@@ -69,6 +72,10 @@ __all__ = [
 _MAX_LABELS = 32
 _MAX_LABEL_KEY = 63
 _MAX_LABEL_VALUE = 255
+
+
+class InvalidStoredPolicyError(ValueError):
+    """A stored policy document is not valid, so no operation can be classified."""
 
 
 #: What every surface says while the switch is off.
@@ -136,10 +143,23 @@ async def load_classification(
     install_doc = install.document if install is not None else None
     tenant_doc = tenant.document if tenant is not None else None
     entries = [
-        *entries_from_document(install_doc, scope="install"),
-        *entries_from_document(tenant_doc, scope="tenant"),
+        *_stored_entries(install_doc, "install", "The install's stored policy"),
+        *_stored_entries(tenant_doc, "tenant", f"The stored policy of tenant {tenant_id}"),
     ]
     return taxonomy_from_documents(install_doc, tenant_doc), entries
+
+
+def _stored_entries(
+    document: Mapping[str, Any] | None, scope: Scope, name: str
+) -> list[ClassificationEntry]:
+    """The entries of a stored document; a bad one names the document and the entry."""
+    try:
+        return entries_from_document(document, scope=scope)
+    except ValueError as exc:
+        raise InvalidStoredPolicyError(
+            f"{name} is not valid, so MEHO cannot classify operations: {exc} "
+            "Import a fixed policy file."
+        ) from exc
 
 
 async def _group_keys(
@@ -374,7 +394,9 @@ class EditPlan:
 
     ``before`` and ``after`` hold every entry that applies to the tenant
     without and with the edit; ``matched`` the operations the changed
-    entry matches, sorted and without repeats.
+    entry matches, sorted and without repeats. ``install_wait_refusal``
+    is the reason the edit is refused when it sets ``always_wait: false``
+    on an operation that the install's policy makes always wait.
     """
 
     taxonomy: Taxonomy
@@ -384,6 +406,7 @@ class EditPlan:
     after: list[ClassificationEntry]
     matched: list[OpCoordinates]
     tenant_row: TenantPolicy | None
+    install_wait_refusal: str | None = None
 
     @property
     def rule_ref(self) -> str:
@@ -402,9 +425,10 @@ async def plan_edit(
 ) -> EditPlan:
     """Work out what *edit* changes for *tenant_id*; write nothing.
 
-    Refuses (``ValueError``) an edit that is not valid. A conflict is not
-    checked here: :func:`set_classification` refuses it, and a dry run
-    shows it.
+    Refuses (``ValueError``) an edit that is not valid. A conflict and an
+    edit that sets back an install-wide "always wait" are not refused
+    here: :func:`set_classification` refuses them, and a dry run shows
+    them.
     """
     install, tenant = await _documents(session, tenant_id)
     install_doc = install.document if install is not None else None
@@ -420,6 +444,11 @@ async def plan_edit(
         {c for c in await _visible_coords(session, tenant_id) if changed.matches(c)},
         key=lambda c: (c.connector_id, c.group_key or "", c.op_id),
     )
+    undone = (
+        install_wait_undone(changed, matched, install_entries)
+        if edit.always_wait is False
+        else None
+    )
     return EditPlan(
         taxonomy=taxonomy,
         document=new_doc,
@@ -432,6 +461,7 @@ async def plan_edit(
         after=[*install_entries, *new_tenant_entries, *overrides],
         matched=matched,
         tenant_row=tenant,
+        install_wait_refusal=install_wait_text("This edit", *undone) if undone else None,
     )
 
 
@@ -447,11 +477,14 @@ async def set_classification(
     Refuses (``ValueError``, nothing written) an edit that is not valid,
     or that would give an operation two different categories or label
     values at the same level
-    (:class:`~meho_backplane.policy.classification.ClassificationConflictError`).
+    (:class:`~meho_backplane.policy.classification.ClassificationConflictError`),
+    or that sets back an "always wait" of the install's policy.
     The caller owns the transaction.
     """
     await _lock_tenant_policy(session, tenant_id)
     plan = await plan_edit(session, tenant_id=tenant_id, edit=edit)
+    if plan.install_wait_refusal is not None:
+        raise ValueError(plan.install_wait_refusal)
     check_no_conflict(plan.matched, plan.after, plan.taxonomy)
     tenant = plan.tenant_row
     if tenant is None:

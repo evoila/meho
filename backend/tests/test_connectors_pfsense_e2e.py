@@ -315,9 +315,16 @@ _DELETE_OP_IDS: frozenset[str] = frozenset(
 
 #: The approval-gated firewall rule add (#3850): ``dangerous`` +
 #: ``requires_approval``, covered by ``test_connectors_pfsense_filter_rule_ops.py``.
-_DANGEROUS_OP_IDS: frozenset[str] = frozenset({"pfsense.filter.rule.add"})
+_DANGEROUS_OP_IDS: frozenset[str] = frozenset(
+    {
+        "pfsense.filter.rule.add",
+        "pfsense.openvpn.user.create",
+        "pfsense.openvpn.user.delete",
+        "pfsense.openvpn.rule.sync",
+    }
+)
 
-#: The parameterized read op (meho-internal#252). ``safe`` like the rest of
+#: The parameterized read op. ``safe`` like the rest of
 #: the read surface, but it takes real params (``sanctioned_src`` /
 #: ``mgmt_nets`` are required), so it is held separate from the empty-params
 #: dispatch/audit sweep (covered by ``test_connectors_pfsense_ops.py``).
@@ -325,6 +332,7 @@ _PARAM_READ_OP_IDS: frozenset[str] = frozenset(
     {
         "pfsense.mgmt_flow.summary",
         "pfsense.diag.ping",
+        "pfsense.openvpn.csc.sync",
         "pfsense.openvpn.clients",
         "pfsense.openvpn.log",
     }
@@ -442,7 +450,7 @@ async def pfsense_e2e(
 
 
 def test_pfsense_ops_registration_count() -> None:
-    """All 23 pfSense ops registered (11 read/identity + 2 write + 6 delete +
+    """All 29 pfSense ops registered (11 read/identity + 2 write + 6 delete +
     1 approval-gated rule add + 1 parameterized mgmt-flow read + 2 user writes,
     #3937)."""
     op_ids = {op.op_id for op in PFSENSE_OPS}
@@ -455,7 +463,7 @@ def test_pfsense_ops_registration_count() -> None:
         | _USER_WRITE_OP_IDS
     ) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(PFSENSE_OPS) == 26, f"Expected 26 ops, got {len(PFSENSE_OPS)}"
+    assert len(PFSENSE_OPS) == 31, f"Expected 31 ops, got {len(PFSENSE_OPS)}"
 
 
 def test_pfsense_ops_safety_levels_and_approval() -> None:
@@ -475,8 +483,9 @@ def test_pfsense_ops_safety_levels_and_approval() -> None:
             assert op.safety_level == "dangerous", f"{op.op_id} should be dangerous"
             assert op.requires_approval, f"{op.op_id} user write must require approval"
             continue
-        if op.op_id == "pfsense.diag.ping":
-            # The ping goes to an address the caller gives.
+        if op.op_id in {"pfsense.diag.ping", "pfsense.openvpn.csc.sync"}:
+            # The ping goes to an address the caller gives. The VPN override
+            # sync (#3993) is a change that needs approval at ``caution``.
             assert (op.safety_level, op.requires_approval) == ("caution", True)
             continue
         expected = "caution" if op.op_id in _WRITE_OP_IDS else "safe"

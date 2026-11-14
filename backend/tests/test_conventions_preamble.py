@@ -462,7 +462,7 @@ async def test_injection_body_terminator_neutralised_exactly_one() -> None:
 async def test_legitimate_body_renders_unchanged() -> None:
     """A body with no delimiter substring is emitted byte-for-byte.
 
-    Neutralisation only rewrites the MEHO-internal sentinels, so
+    Neutralisation only rewrites the internal MEHO sentinels, so
     ordinary tenant content -- including angle brackets and the word
     ``CONVENTIONS`` -- passes through untouched.
     """

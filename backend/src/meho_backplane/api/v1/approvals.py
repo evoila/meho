@@ -95,6 +95,7 @@ from meho_backplane.auth.approval_sign_in import (
     check_fresh_approval_sign_in,
     fresh_sign_in_required,
 )
+from meho_backplane.auth.approval_sign_in_flow import sign_in_level_in_force
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.rbac import (
     require_approvals_access,
@@ -186,7 +187,7 @@ router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
 #: :func:`~meho_backplane.auth.rbac.require_approvals_access`.
 _require_approvals_access = Depends(require_approvals_access)
 
-#: Human-only governance gate (meho-internal#289). Rejects a non-human
+#: Human-only governance gate. Rejects a non-human
 #: ``principal_kind`` (agent / service / runner) before the endpoint runs —
 #: the REST half of :mod:`meho_backplane.mcp.human_only`'s policy, so the
 #: approval **decision** verbs (approve / reject / decide) are human-only on
@@ -294,6 +295,11 @@ class ApprovalResumeOutcomeView(BaseModel):
     #: do not run it again, check the target first. ``None`` for any other
     #: run. Additive.
     execution_outcome: str | None = None
+    #: Exit code of a finished command or script (for example
+    #: ``linux.script.run``). ``result_status`` can be ``ok`` (MEHO ran it)
+    #: while this is not 0 (the script failed). ``None`` when the result has
+    #: no exit code. Additive.
+    exit_code: int | None = None
 
 
 class OutcomeUnknownView(BaseModel):
@@ -608,6 +614,7 @@ def _resume_outcome_view(row: ApprovalRequest) -> ApprovalResumeOutcomeView | No
         audit_id=outcome.audit_id,
         guidance=outcome.guidance,
         execution_outcome=outcome.execution_outcome,
+        exit_code=outcome.exit_code,
     )
 
 
@@ -1781,9 +1788,16 @@ async def decide_approval_request(
         )
 
     # Approve needs a fresh approval sign-in (#3979, #5515); reject does not.
-    approval_auth = (
-        check_fresh_approval_sign_in(operator, get_settings()) if decision == "approved" else None
-    )
+    approval_auth = None
+    if decision == "approved":
+        settings = get_settings()
+        level = await sign_in_level_in_force(settings)
+        approval_auth = check_fresh_approval_sign_in(
+            operator,
+            settings,
+            level_in_force=level.in_force,
+            level_check_failed=level.check_failed,
+        )
     request = await _capture_operator_decision(
         request_id=request_id,
         decision=decision,

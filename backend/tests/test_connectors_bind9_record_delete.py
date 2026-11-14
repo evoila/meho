@@ -192,9 +192,10 @@ class _RecordingBind9Connector(Bind9Connector):
     Overrides only the three IO seams the delete handler + its preview
     builder touch: ``_resolve_secret`` (sudo password), ``_run_command``
     (``named-checkconf -p`` + ``cat``), ``_remote_bash_with_sudo`` (the
-    atomic-apply pipeline). A subclass (not a duck type) so the resolver's
-    bound-method rebind + the ``_CONNECTOR_INSTANCE_CACHE`` seeding behave
-    exactly as in production (the ``_SeededBind9Connector`` pattern).
+    locked zonefile read and the atomic-apply pipeline). A subclass (not a
+    duck type) so the resolver's bound-method rebind + the
+    ``_CONNECTOR_INSTANCE_CACHE`` seeding behave exactly as in production
+    (the ``_SeededBind9Connector`` pattern).
     """
 
     def __init__(
@@ -210,6 +211,7 @@ class _RecordingBind9Connector(Bind9Connector):
         self._sudo_output = sudo_output
         self.run_calls: list[str] = []
         self.sudo_calls: list[str] = []
+        self.read_calls: list[str] = []
 
     async def _resolve_secret(
         self, target: Any, operator: Operator | None = None
@@ -235,6 +237,11 @@ class _RecordingBind9Connector(Bind9Connector):
         sudo_password: str,
         timeout: float = 60.0,
     ) -> Any:
+        # The write ops read the zonefile under the server lock (a shared
+        # ``flock``) before the apply; answer that read with the zonefile.
+        if "flock -s" in script:
+            self.read_calls.append(script)
+            return _proc(self._zonefile)
         self.sudo_calls.append(script)
         return _proc(self._sudo_output)
 

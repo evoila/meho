@@ -169,7 +169,11 @@ from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
 from meho_backplane.settings import get_settings
-from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRefFilter
+from meho_backplane.work_ref import (
+    WORK_REF_FIELD_DESCRIPTION,
+    WorkRefFilter,
+    work_ref_filter_values,
+)
 
 __all__ = ["router"]
 
@@ -988,7 +992,7 @@ async def list_approvals(
         if status_filter is not None:
             stmt = stmt.where(ApprovalRequest.status == status_filter.value)
         if work_ref is not None:
-            stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+            stmt = stmt.where(ApprovalRequest.work_ref.in_(work_ref_filter_values(work_ref)))
         if order == "oldest":
             stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
         else:

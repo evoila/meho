@@ -56,6 +56,7 @@ from meho_backplane.operations.uncertain_outcome import (
     envelope_is_uncertain,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.work_ref import work_ref_filter_values
 
 __all__ = [
     "STARTED_NO_RESULT_ADVICE",
@@ -268,7 +269,7 @@ async def list_outcome_unknown(
         .where(_outcome_unknown_clause(cutoff))
     )
     if work_ref is not None:
-        stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+        stmt = stmt.where(ApprovalRequest.work_ref.in_(work_ref_filter_values(work_ref)))
     if order == "oldest":
         stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
     else:

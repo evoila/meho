@@ -186,6 +186,7 @@ from meho_backplane.operations.approval_rights import (
     approve_right,
     self_approval_confirmation,
 )
+from meho_backplane.policy.routing import routing_enabled
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.refresh import (
@@ -231,6 +232,9 @@ _HISTORY_PAGE_SIZE: Final[int] = 25
 #: reads every pending request of the view, one batch at a time.
 _WAITING_SCAN_BATCH: Final[int] = 500
 
+#: The bell counts the requests for a person up to here; it shows "99+" from 100.
+_BADGE_COUNT_CAP: Final[int] = 100
+
 #: Maximum work_ref length accepted by the history filter. ``work_ref`` is
 #: an opaque external change-ticket string (e.g. ``"gh:evoila/meho#1"``);
 #: bounding the wire shape rejects an oversized paste at the form boundary
@@ -253,7 +257,13 @@ _HISTORY_TABS: Final[dict[str, str | None]] = {
     # Approved requests whose outcome MEHO does not know (#5026). Not a
     # status: the list has its own rule (``list_outcome_unknown``).
     "outcome_unknown": "approved",
+    # The pending requests the signed-in person may approve. Only while
+    # approver routing is on (``POLICY_APPROVER_ROUTING``).
+    "for_you": "pending",
 }
+
+#: The tab of the pending requests the signed-in person may approve.
+_FOR_YOU_TAB: Final[str] = "for_you"
 
 #: The tab of approved runs whose outcome MEHO does not know (#5026).
 _OUTCOME_UNKNOWN_TAB: Final[str] = "outcome_unknown"
@@ -464,8 +474,12 @@ async def _list_pending_waiting_first(
     work_ref: str | None,
     offset: int,
     order: ApprovalListOrder,
+    only_waiting: bool = False,
 ) -> tuple[list[ApprovalRequest], bool, set[uuid.UUID]]:
     """Page the Pending tab with the requests *operator* may approve first.
+
+    With *only_waiting* (the "For you" tab), only the requests *operator*
+    may approve.
 
     The split runs over every pending request of the view before the page
     is cut, so a request waiting for this person is on page one even when
@@ -475,7 +489,9 @@ async def _list_pending_waiting_first(
     batch before (not at a counted offset), so a request decided during the
     scan does not make the scan skip a row. Returns ``(rows, has_more, waiting ids)``.
     """
-    pager = WaitingFirstPager(operator, offset=offset, size=_HISTORY_PAGE_SIZE)
+    pager = WaitingFirstPager(
+        operator, offset=offset, size=_HISTORY_PAGE_SIZE, only_waiting=only_waiting
+    )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
         last: ApprovalRequest | None = None
@@ -494,6 +510,32 @@ async def _list_pending_waiting_first(
                 break
             last = batch[-1]
     return pager.page()
+
+
+async def _count_waiting_for(session: UISessionContext, operator: Operator) -> int:
+    """Count the pending requests *operator* may approve, up to :data:`_BADGE_COUNT_CAP`.
+
+    Reads the whole pending queue in batches, like
+    :func:`_list_pending_waiting_first`, so a request waiting for this
+    person counts also when many newer requests wait for other groups. The
+    scan stops at the cap: the badge shows "99+" from there on.
+    """
+    count = 0
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        last: ApprovalRequest | None = None
+        while True:
+            batch = await list_pending(
+                db_session,
+                tenant_id=session.tenant_id,
+                status="pending",
+                limit=_WAITING_SCAN_BATCH,
+                after=last,
+            )
+            count += sum(1 for row in batch if approve_right(operator, row).may_approve)
+            if count >= _BADGE_COUNT_CAP or len(batch) < _WAITING_SCAN_BATCH:
+                return min(count, _BADGE_COUNT_CAP)
+            last = batch[-1]
 
 
 async def _get_request_or_404(session: UISessionContext, request_id: uuid.UUID) -> ApprovalRequest:
@@ -665,8 +707,13 @@ async def _render_badge(request: Request, session: UISessionContext) -> HTMLResp
     a recent backlog, not the full pending set). Tenant-scoped via the
     session.
     """
-    pending = await _list_pending_for_session(session)
-    context: dict[str, object] = {"pending_count": len(pending)}
+    operator = await _operator_or_none(session) if routing_enabled() else None
+    if operator is not None:
+        # Approver routing: count only what this person may approve.
+        count, for_you = await _count_waiting_for(session, operator), True
+    else:
+        count, for_you = len(await _list_pending_for_session(session)), False
+    context: dict[str, object] = {"pending_count": count, "for_you": for_you}
     return get_templates().TemplateResponse(request, "approvals/_badge.html", context)
 
 
@@ -686,7 +733,7 @@ def _resolve_history_tab(tab: str) -> str:
     (a typo'd bookmark, a hand-edited URL) fails loud rather than silently
     coercing to a default that would render a misleading filtered view.
     """
-    if tab not in _HISTORY_TABS:
+    if tab not in _HISTORY_TABS or (tab == _FOR_YOU_TAB and not routing_enabled()):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown approvals tab '{tab}'.",
@@ -732,16 +779,30 @@ async def _build_history_context(
         positions = await pending_chain_positions(
             db_session, tenant_id=session.tenant_id, work_ref=work_ref_filter
         )
+    pending_tab = tab in ("pending", _FOR_YOU_TAB)
     resolved_order: ApprovalListOrder
-    if order_choice == "oldest" or (order_choice == "" and tab == "pending" and positions):
+    if order_choice == "oldest" or (order_choice == "" and pending_tab and positions):
         resolved_order = "oldest"
     else:
         resolved_order = "newest"
-    operator = await _operator_or_none(session) if tab == "pending" else None
+    operator = await _operator_or_none(session) if pending_tab else None
     waiting: set[uuid.UUID] = set()
     if operator is not None:
         rows, has_more, waiting = await _list_pending_waiting_first(
-            session, operator, work_ref=work_ref_filter, offset=offset, order=resolved_order
+            session,
+            operator,
+            work_ref=work_ref_filter,
+            offset=offset,
+            order=resolved_order,
+            only_waiting=tab == _FOR_YOU_TAB,
+        )
+    elif tab == _FOR_YOU_TAB:
+        # Without the person, MEHO cannot say which requests are theirs. An
+        # empty list would read as "nothing waits for you".
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MEHO could not check your sign-in, so it cannot list the requests "
+            "for you. Open the Pending tab, or sign in again.",
         )
     else:
         rows, has_more = await _list_history_for_session(
@@ -781,7 +842,7 @@ async def _build_history_context(
         "status_pill_class": STATUS_PILL_CLASS,
         "result_state_pill": RESULT_STATE_PILL,
         "active_tab": tab,
-        "tabs": list(_HISTORY_TABS.keys()),
+        "tabs": [t for t in _HISTORY_TABS if t != _FOR_YOU_TAB or routing_enabled()],
         "work_ref": work_ref.strip(),
         "offset": offset,
         "page_size": _HISTORY_PAGE_SIZE,

@@ -64,7 +64,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import RunApproval, Tenant
+from meho_backplane.db.models import EndpointDescriptor, RunApproval, Tenant
 from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
 from meho_backplane.operations.grant_approval import RIGHTS_CHANGE_REFUSAL, is_rights_change_op
 from meho_backplane.operations.role_floors import role_floor_denial
@@ -79,6 +79,7 @@ from meho_backplane.operations.service_grants import (
     caller_address_grant_reason,
     delete_grant_reason,
 )
+from meho_backplane.policy.routing import approver_set_for, routing_enabled, routing_refusal
 
 __all__ = [
     "DEFAULT_RUN_APPROVAL_HOURS",
@@ -233,7 +234,10 @@ async def _entry_refusal(tenant_id: uuid.UUID, entry: RunApprovalEntry) -> str |
 
 
 async def _check_approver_group(
-    operator: Operator, entries: Sequence[dict[str, object]], requester_sub: str
+    session: AsyncSession,
+    operator: Operator,
+    entries: Sequence[dict[str, object]],
+    requester_sub: str,
 ) -> None:
     """Apply the approver-group rule of a single request to the whole list.
 
@@ -249,6 +253,9 @@ async def _check_approver_group(
     decides here, on the risk level each entry's operation has now in this
     tenant. An entry whose operation MEHO cannot find has no known risk
     level, so the list cannot be approved.
+
+    With the ``POLICY_APPROVER_ROUTING`` switch on, each entry is routed
+    like a single request (:func:`_check_routed_entry`).
     """
     from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
     from meho_backplane.operations.approval_queue import (
@@ -286,6 +293,38 @@ async def _check_approver_group(
                 f"{descriptor.safety_level} operation. Only {_HIGH_RISK_APPROVERS_TEXT} may "
                 "approve a list with a dangerous or destructive operation"
             )
+        await _check_routed_entry(session, operator, index, entry, descriptor)
+
+
+async def _check_routed_entry(
+    session: AsyncSession,
+    operator: Operator,
+    index: int,
+    entry: RunApprovalEntry,
+    descriptor: EndpointDescriptor,
+) -> None:
+    """Refuse the list when approver routing sends *entry* to other login groups.
+
+    The same routing as a single request
+    (:func:`~meho_backplane.policy.routing.approver_set_for`), worked out
+    now from the entry's risk level and category in this tenant. A change
+    of rights is not routed. Does nothing while the switch is off.
+    """
+    if not routing_enabled() or is_rights_change_op(entry.op_id):
+        return
+    found = await approver_set_for(
+        session,
+        tenant_id=operator.tenant_id,
+        connector_id=entry.connector_id,
+        op_id=entry.op_id,
+        level=descriptor.safety_level,
+        category=descriptor.policy_category,
+    )
+    refusal = routing_refusal(operator, list(found.kinds), found.rule)
+    if refusal is not None:
+        raise RunApprovalGroupError(
+            f"approval_group_required: entries[{index}] ({entry.op_id!r}): {refusal}"
+        )
 
 
 async def _load(
@@ -466,7 +505,7 @@ class RunApprovalService:
                 denial = role_floor_denial(str(entry["op_id"]), operator.tenant_role)
                 if denial is not None:
                     raise RunApprovalRoleFloorError(f"role_floor_required: {denial}")
-            await _check_approver_group(operator, row.entries, row.principal_sub)
+            await _check_approver_group(session, operator, row.entries, row.principal_sub)
             row.approved_at = now
             row.approved_by_sub = operator.sub
             await session.commit()

@@ -317,9 +317,9 @@ async def test_a_file_with_mistakes_is_422_and_nothing_waits(
     key = make_rsa_keypair("kid-pol-422")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
-        resp = _post(client, "import", _token(key), "policy: v1\nrouting: []\n")
+        resp = _post(client, "import", _token(key), "policy: v1\nbindings: []\n")
     assert resp.status_code == 422
-    assert resp.json()["mistakes"] == ["`routing` is not a known key."]
+    assert resp.json()["mistakes"] == ["`bindings` is not a known key."]
     assert await _requests() == []
 
 

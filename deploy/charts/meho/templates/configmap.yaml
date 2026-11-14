@@ -242,6 +242,9 @@ data:
   # The policy evaluator runs next to today's checks and logs every
   # difference. It decides nothing. Off by default.
   POLICY_ENGINE_SHADOW: {{ .Values.config.policy.engineShadow | quote }}
+  # A waiting request stores who may approve it, from the policy file's
+  # routing section. Off by default.
+  POLICY_APPROVER_ROUTING: {{ .Values.config.policy.approverRouting | quote }}
   # The shared knowledge scope and the weekly knowledge upkeep. Rendered
   # always; the defaults match the backplane's own defaults (nothing
   # shared, upkeep on, once a week).

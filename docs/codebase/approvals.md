@@ -1271,6 +1271,104 @@ and counts the metric `policy_shadow_mismatch_total`. Today's answer still
 decides. Run approvals are not compared. See
 [policy-evaluator.md](policy-evaluator.md).
 
+### Approver routing (`POLICY_APPROVER_ROUTING`)
+
+Off by default (Helm `config.policy.approverRouting`). With it on, a
+customer can send approvals to the right team: for example only
+MEHO-SA-Operators and MEHO-Admins approve network changes. The rules are
+the `routing` section of the policy file ([policy.md](policy.md)). The
+code is `policy/routing.py`.
+
+**When a request starts to wait** (`create_pending_request`, used by the
+dispatcher and by a step of a multi-step operation), `stamp_approver_set`
+works out who may approve it and stores it on the request:
+
+- `approver_roles` (JSON): the login group kinds that may approve, for
+  example `["SA-Operators", "Admins"]`. Group kinds only, never people.
+  MEHO stores no members, so the requester is never in it. Whether the
+  requester may approve their own change is today's rule (below).
+- `approver_rule` (text): the routing entry that set them
+  (`tenant:routing[0]`, `install:routing[2]`), or `default`.
+- Migration `0167` adds both columns, nullable.
+
+How the kinds are found:
+
+1. The tenant's routing entries, then the install's. The first entry whose
+   `match` fits wins. A `match` can name a `category`, a `connector`
+   pattern and a `risk` level; all that it names must fit.
+2. The entry's kinds are cut to the kinds that may approve the change
+   today (`today_kinds`, the same rule as `approver_groups` in
+   `policy/evaluate.py`): a `dangerous` or `destructive` change only
+   SA-Operators and Admins; a lower one also Operators and Approvers; an
+   operation that needs the `tenant_admin` role only Admins. So routing
+   only narrows. It never lets a group approve more than today.
+3. No entry fits: today's kinds, rule `default`. MEHO without a policy file
+   therefore asks the same people as today.
+4. A change of rights is not routed (both columns stay NULL). Only another
+   admin approves it, as today.
+
+The risk level comes from `proposed_effect` (`safety_level`). The
+category is the one the classification gave the looked-up operation
+(`EndpointDescriptor.policy_category`, set by `apply_effective_policy` and
+`apply_step_classification` while `POLICY_CLASSIFICATION` is on). The
+dispatcher and the step gate pass it to `create_pending_request`. A request
+without a category fits only entries without `category`.
+
+**At the click** (`_load_pending_for_approval`) today's checks run first,
+in their order: a person only, the read-only check, still pending, the
+deadline, the rights-change and group rules (also the rules on own
+changes), the role floor. Then `_check_routed_approver`: the person's
+group kind (`kind_of`: Admins, SA-Operators, Operators, Approvers or
+Readers) must be in the stored kinds. If not, `ApprovalRoutingError` (a
+subclass of `ApprovalGroupForbiddenError`, so every approve route answers
+403) with one sentence that names who may approve, for example: "Only
+MEHO-SA-Operators or MEHO-Admins may approve this change (routing rule
+`install:routing[0]`). You are in MEHO-Operators." The fresh sign-in, the
+params check and the destructive preview binding still run after it.
+Routing also narrows an own click: a MEHO-SA-Operator whose own network
+change is routed to Admins only cannot approve it.
+
+`approve_right` gives the same answer with the reason `not_routed`. So the
+console sign, the REST fields `may_approve` / `may_approve_reason`, the
+"waiting for you" order and the push recipients
+(`approve_right_any_status`) all follow the routing. The shadow mode of
+"may approve" compares the evaluator with today's answer before routing.
+
+**Old requests and the switch.** A request without stored kinds (made while
+the switch was off, or before migration `0167`) keeps today's rule. With
+the switch off, MEHO stores nothing and checks no stored kinds, so turning
+the switch off brings back today's rule for every waiting request too. A
+stored value that is not a list of kinds lets nobody approve (fail
+closed).
+
+**Console.** With the switch on:
+
+- the request window and the bell list show "Who can approve: Members of
+  MEHO-SA-Operators or MEHO-Admins." when the request has stored kinds
+  (`who_can_approve`);
+- the approvals page has a **For you** tab: the pending requests the
+  signed-in person may approve (the `approve_right` answer). When MEHO
+  cannot check the person, the tab answers 503 instead of an empty list;
+- the bell counts only the requests the person may approve.
+
+With the switch off, none of this shows, and `tab=for_you` is an unknown
+tab (422).
+
+**Run approvals** use the same routing for each entry of the list, at the
+moment a person approves it ([run-approvals.md](run-approvals.md)).
+
+Tests: `tests/test_policy_routing.py`, `tests/test_run_approvals_routing.py`,
+`tests/test_ui_approvals_routing.py`,
+`tests/migrations/test_migration_0167_add_approval_request_approver_roles.py`.
+
+**Not yet:** a team is a group kind. Bindings that give a login group
+categories, and notifications only to the people who may approve, come
+later. The "separated duties" file
+(`deploy/policy-profiles/separated-duties.yaml`, also packaged in
+`backend/src/meho_backplane/policy/profiles/`) shows the routing:
+identity and secret changes only Admins, network and storage changes only
+SA-Operators and Admins.
+
 ## Delegated decisions: the reason-line convention (#3692)
 
 Sometimes an approver decides because **another person told them to, in

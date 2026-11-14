@@ -105,12 +105,12 @@ func TestValidateSendsTheFileAsYAML(t *testing.T) {
 func TestValidateListsMistakesAndFails(t *testing.T) {
 	var got seen
 	srv := server(t, 200,
-		`{"ok":false,"scope":"tenant","mistakes":["`+"`routing`"+` is not a known key."],"warnings":[]}`, &got)
+		`{"ok":false,"scope":"tenant","mistakes":["`+"`bindings`"+` is not a known key."],"warnings":[]}`, &got)
 	stdout, _, err := run(t, "validate", writeFile(t), "--backplane", srv.URL)
 	if err == nil {
 		t.Fatal("expected an error for a file with mistakes")
 	}
-	if !strings.Contains(stdout, "mistake: `routing` is not a known key.") {
+	if !strings.Contains(stdout, "mistake: `bindings` is not a known key.") {
 		t.Errorf("stdout: %s", stdout)
 	}
 }
@@ -122,6 +122,8 @@ func TestDiffIsAPreviewAndPrintsCounts(t *testing.T) {
 		`"description":{"added":[],"changed":[],"removed":[]},`+
 		`"taxonomy":{"added":["team-net"],"changed":[],"removed":[]},`+
 		`"classifications":{"added":[{"entry":{"match":{"op":"k8s.*"}},"matches":3,"changes":2}],`+
+		`"changed":[],"removed":[]},`+
+		`"routing":{"added":[{"entry":{"match":{"category":"network"},"approvers":["Admins"]}}],`+
 		`"changed":[],"removed":[]},"operations_changed":2}}`, &got)
 	stdout, stderr, err := run(t, "diff", writeFile(t), "--scope", "install", "--backplane", srv.URL)
 	if err != nil {
@@ -134,6 +136,7 @@ func TestDiffIsAPreviewAndPrintsCounts(t *testing.T) {
 	for _, want := range []string{
 		"+ taxonomy: team-net",
 		"+ classifications: changes=2 entry={\"match\":{\"op\":\"k8s.*\"}} matches=3",
+		"+ routing: entry={\"approvers\":[\"Admins\"],\"match\":{\"category\":\"network\"}}",
 		"Operations whose values change: 2",
 	} {
 		if !strings.Contains(stdout, want) {

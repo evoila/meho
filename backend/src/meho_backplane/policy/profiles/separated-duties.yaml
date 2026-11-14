@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# The "separated duties" policy file: network, storage, compute and
+# identity changes each go to their own approvers.
+#
+# How to use it:
+#   meho policy validate separated-duties.yaml
+#   meho policy diff separated-duties.yaml
+#   meho policy import separated-duties.yaml
+#
+# The import waits until a second admin approves it. Routing works only
+# while the switches POLICY_CLASSIFICATION (categories) and
+# POLICY_APPROVER_ROUTING (routing) are on.
+#
+# In this version a team is one of the five login group kinds (Readers,
+# Operators, SA-Operators, Admins, Approvers). Routing only narrows: a
+# group never approves more than it may approve today.
+#
+# A copy of this file ships inside MEHO
+# (backend/src/meho_backplane/policy/profiles/). Keep the two the same.
+policy: v1
+description: >-
+  Separated duties. Identity and secret changes only Admins approve.
+  Network and storage changes only SA-Operators and Admins approve.
+  Compute changes follow today's rule.
+taxonomy:
+  categories: [network, storage, compute, identity, secrets, other]
+classifications:
+  # Network
+  - {match: {connector: "pfsense-ssh-*"}, category: network}
+  - {match: {connector: "bind9-ssh-*"}, category: network}
+  - {match: {connector: "windns-ssh-*"}, category: network}
+  - {match: {connector: "net-probe-*"}, category: network}
+  # Storage: databases, the image registry
+  - {match: {connector: "postgres-wire-*"}, category: storage}
+  - {match: {connector: "mongodb-wire-*"}, category: storage}
+  - {match: {connector: "mssql-tds-*"}, category: storage}
+  - {match: {connector: "harbor-rest-*"}, category: storage}
+  # Compute: clusters, hosts, clouds
+  - {match: {connector: "k8s-*"}, category: compute}
+  - {match: {connector: "rke2-ssh-*"}, category: compute}
+  - {match: {connector: "proxmox-api-*"}, category: compute}
+  - {match: {connector: "hyperv-ssh-*"}, category: compute}
+  - {match: {connector: "linux-ssh-*"}, category: compute}
+  - {match: {connector: "winsrv-ssh-*"}, category: compute}
+  - {match: {connector: "wsfc-ssh-*"}, category: compute}
+  - {match: {connector: "azure-arm-*"}, category: compute}
+  - {match: {connector: "gcloud-rest-*"}, category: compute}
+  - {match: {connector: "hetzner-rest-*"}, category: compute}
+  # Identity: login and directory systems
+  - {match: {connector: "keycloak-admin-*"}, category: identity}
+  - {match: {connector: "freeipa-jsonrpc-*"}, category: identity}
+  - {match: {connector: "entra-graph-*"}, category: identity}
+  - {match: {connector: "msad-ssh-*"}, category: identity}
+  # Secrets
+  - {match: {connector: "vault-*"}, category: secrets}
+routing:
+  - match: {category: identity}
+    approvers: [Admins]
+  - match: {category: secrets}
+    approvers: [Admins]
+  - match: {category: network}
+    approvers: [SA-Operators, Admins]
+  - match: {category: storage}
+    approvers: [SA-Operators, Admins]

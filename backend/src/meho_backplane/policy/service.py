@@ -231,6 +231,31 @@ def _description_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str
     return {"added": [], "changed": [{"before": old, "after": new}], "removed": []}
 
 
+def _routing_diff(before: list[Any], after: list[Any]) -> dict[str, list[dict[str, Any]]]:
+    """Routing entries by ``match``: added, changed (other approvers or place), removed."""
+
+    def key(entry: Any) -> str:
+        match = entry.get("match") if isinstance(entry, dict) else None
+        return json.dumps(match, sort_keys=True)
+
+    old = {key(e): (i, e) for i, e in enumerate(before)}
+    new = {key(e): (i, e) for i, e in enumerate(after)}
+    out: dict[str, list[dict[str, Any]]] = {"added": [], "changed": [], "removed": []}
+    for match, (index, entry) in new.items():
+        if match not in old:
+            out["added"].append({"entry": entry, "index": index})
+        elif old[match] != (index, entry):
+            out["changed"].append(
+                {"before": old[match][1], "after": entry, "index": index, "was": old[match][0]}
+            )
+    out["removed"].extend(
+        {"entry": entry, "index": index}
+        for match, (index, entry) in old.items()
+        if match not in new
+    )
+    return out
+
+
 def _sides(
     before: dict[str, Any] | None,
     after: dict[str, Any],
@@ -284,6 +309,7 @@ def _build_diff(
             ops=ops,
             changed=changed,
         ),
+        "routing": _routing_diff(list(old.get("routing") or []), list(after.get("routing") or [])),
         "operations_changed": len(changed),
     }
 
@@ -349,7 +375,7 @@ async def build_plan(
 def _summary(diff: dict[str, Any]) -> dict[str, int]:
     return {
         f"{section}_{kind}": len(diff[section][kind])
-        for section in ("description", "taxonomy", "classifications")
+        for section in ("description", "taxonomy", "classifications", "routing")
         for kind in ("added", "changed", "removed")
     }
 
@@ -490,14 +516,17 @@ async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.
         if key in document:
             head[key] = document[key]
     entries = list(document.get("classifications") or [])
+    routing = {"routing": list(document["routing"])} if document.get("routing") else {}
     if not entries:
-        return _dump({**head, "classifications": []})
+        return _dump({**head, "classifications": [], **routing})
     notes = await _no_effect_notes(session, tenant_id, entries) if scope == "tenant" else {}
     parts = [_dump(head), "classifications:\n"]
     for index, entry in enumerate(entries):
         if index in notes:
             parts.append(f"# Has no effect: {notes[index]}\n")
         parts.append(_dump([entry]))
+    if routing:
+        parts.append(_dump(routing))
     return "".join(parts)
 
 

@@ -1,8 +1,10 @@
 # The policy file (`policy: v1`)
 
-The policy file holds the categories (the taxonomy) and the
+The policy file holds the categories (the taxonomy), the
 classifications of connectors, operation groups and operations
-([policy-classification.md](policy-classification.md)). It is a file of
+([policy-classification.md](policy-classification.md)), and the routing
+of approvals: who may approve which waiting change
+([approvals.md](approvals.md), "Approver routing"). It is a file of
 its own, with its own command (`meho policy`) and its own REST routes. It
 is **not** a section of the settings file
 ([settings.md](settings.md)): the settings import adds and updates but
@@ -28,6 +30,11 @@ classifications:
     always_wait: true
   - match: {op: "<op-id-pattern>"}
     risk: dangerous
+routing:
+  - match: {category: "<category-a>"}
+    approvers: [SA-Operators, Admins]
+  - match: {connector: "<connector-id-pattern>", risk: destructive}
+    approvers: [Admins]
 ```
 
 - `policy` is required and is always `v1`.
@@ -44,8 +51,15 @@ classifications:
 - `labels` pass the same check as the single edit (`_check_labels` in
   `policy/store.py`): at most 32 labels, a key of 1 to 63 characters and a
   value of 1 to 255 characters. A mistake names the entry.
-- Later changes add `bindings` and `routing`. Until then they are unknown
-  keys.
+- Each `routing` entry has a `match` (at least one of `category`,
+  `connector`, `risk`; `connector` is a pattern, the other two are exact)
+  and `approvers`: one to five of the login group kinds `Readers`,
+  `Operators`, `SA-Operators`, `Admins`, `Approvers`. The order counts: the
+  first entry that fits a waiting change wins, and a tenant's entries come
+  before the install's. Two entries with the same `match` are a mistake.
+  Routing only narrows who may approve; see
+  [approvals.md](approvals.md), "Approver routing".
+- A later change adds `bindings`. Until then it is an unknown key.
 
 ## Checks
 
@@ -76,6 +90,27 @@ is one sentence that names the entry:
   not fewer.
 - Two entries that give one operation a different category (or a different
   value for one label key) at the same level.
+- **Routing** (`policy/routing.py`, `routing_mistakes`): an unknown
+  category or risk level in `match`; a group kind that may approve none of
+  the changes the entry routes ("`routing[N]` asks `ROLE`, but `ROLE` has
+  no `approve` rule for these changes."); and a risk level that no group
+  kind of the entry may approve ("A LEVEL change in category CAT can wait,
+  but no role may approve it. It would wait until it expires."). An entry
+  without `risk` is checked on all four risk levels. Readers never
+  approve; Operators and Approvers approve only `safe` and `caution`
+  changes of other people.
+- **Routing and the role floor** (`policy/validate.py`,
+  `_routing_floor_mistakes`): only Admins approve an operation that needs
+  the `tenant_admin` role (for example `targets.register`). For each known
+  operation with that floor, the check works like the run: for each risk
+  level the operation can wait at (its level and every level above), the
+  first entry that fits wins (by its category, its connector, and a
+  `risk` that is that level, or no `risk`). Only that entry is checked.
+  When it does not ask Admins, that is a mistake ("`routing[N]` fits
+  `OP` of connector `C`, but only MEHO-Admins may approve it and the entry
+  does not ask them. It would wait until it expires."). So an earlier
+  entry with `risk: caution` that asks Admins covers the `caution` level,
+  and a later entry is not checked at that level.
 
 At most 50 mistakes are listed, then one line says how many more there
 are.
@@ -98,9 +133,11 @@ the same entry is refused, so the tenant admin removes it.
 `policy/service.py`:
 
 - `build_plan` parses and checks the file and works out the diff. It
-  writes nothing. The diff has the sections `description`, `taxonomy` and
-  `classifications`, each with `added`, `changed` (`before` and `after`)
-  and `removed`. Each classification entry also has `matches` (how many
+  writes nothing. The diff has the sections `description`, `taxonomy`,
+  `classifications` and `routing`, each with `added`, `changed` (`before`
+  and `after`) and `removed`. A routing entry is found by its `match`; it
+  is `changed` when its approvers or its place in the list changed
+  (`index`, and `was` for the old place). Each classification entry also has `matches` (how many
   operations it matches) and `changes` (how many of those get other
   values). Entries are told apart by their whole `match` (each part on its
   own), so two different matches never share one line. `operations_changed` counts all operations whose values change.
@@ -168,7 +205,10 @@ the switch is on. The error names the document and the entry, for example
 classify operations: tenant:classifications[3]: ...". An import of a good
 file replaces it; the preview says so in a warning. This holds also when
 an entry or its `match` is not a map, or `classifications` is not a list:
-the diff then lists such an entry as removed.
+the diff then lists such an entry as removed. With approver routing
+on, a bad `routing` entry makes every request of that tenant fail to start
+waiting: the call is refused ("approval queue unavailable") instead of
+waiting with an unknown approver set.
 
 ## Endpoints and CLI
 
@@ -193,4 +233,7 @@ Code: `backend/src/meho_backplane/api/v1/policy.py`,
 versions), `backend/tests/test_api_v1_policy.py` (routes, waiting import,
 approval by a second admin),
 `backend/tests/migrations/test_migration_0163_add_policy_revision.py`,
+`backend/tests/test_policy_routing.py` (the `routing` section, its checks,
+diff and export, the "separated duties" file, the stored approver kinds
+and the click),
 `cli/internal/cmd/policy/file_test.go`.

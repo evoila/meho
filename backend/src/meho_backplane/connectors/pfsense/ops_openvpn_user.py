@@ -23,7 +23,9 @@ The create steps
 ----------------
 
 1. The Vault target is checked against the caller's tenant path, before
-   the firewall is touched.
+   the firewall is touched. Then ``/etc/version`` is read: a pfSense
+   release other than 2.7.2, the one release whose sources the fragment is
+   checked against, is refused (``version_not_checked``).
 2. ``config.xml`` is read. A user with that name already there is left
    alone (``exists``; safe to run twice and no password is made).
 3. The Vault path is checked, still before any change: it must not be the
@@ -206,6 +208,9 @@ _VAULT_FIELD_RE: Final = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _DEFAULT_MOUNT: Final = "secret"
 _DEFAULT_FIELD: Final = "password"
 _CREATE_OP_ID: Final = "pfsense.openvpn.user.create"
+# The releases whose sources the create fragment was checked against (see
+# "Versions read" in docs/codebase/connectors-pfsense.md).
+_CREATE_RELEASES: Final = ("2.7.2",)
 _DELETE_OP_ID: Final = "pfsense.openvpn.user.delete"
 
 
@@ -558,7 +563,9 @@ async def _target_secret_paths() -> set[str]:
 def _mount_is_kv2(answer: Any) -> bool:
     """``True`` when the answer of ``sys/internal/ui/mounts/<mount>`` says KV version 2."""
     body = answer.get("data") if isinstance(answer, dict) else None
-    options = body.get("options") if isinstance(body, dict) else None
+    if not isinstance(body, dict) or body.get("type") != "kv":
+        return False
+    options = body.get("options")
     return isinstance(options, dict) and str(options.get("version")) == "2"
 
 
@@ -715,6 +722,25 @@ def _may_exist(name: str) -> str:
     )
 
 
+async def _refuse_unchecked_release(
+    self: PfSenseConnector, target: Any, operator: Operator
+) -> None:
+    """Refuse a firewall whose pfSense release is not in ``_CREATE_RELEASES``."""
+    from meho_backplane.connectors.pfsense.connector import parse_pfsense_version
+
+    proc = await self._run_command(target, "cat /etc/version", operator=operator)
+    stdout = getattr(proc, "stdout", None)
+    text = stdout if isinstance(stdout, str) and proc.exit_status == 0 else ""
+    version = parse_pfsense_version(text)["version"]
+    if (version or "").split("-")[0] not in _CREATE_RELEASES:
+        raise PfSenseRefusedError(
+            _CREATE_OP_ID,
+            "version_not_checked",
+            f"the firewall reports pfSense {version or '(no version)'}; this op is checked "
+            f"only against pfSense {', '.join(_CREATE_RELEASES)}. Nothing changed.",
+        )
+
+
 async def _play_create(
     self: PfSenseConnector, target: Any, name: str, descr: str, operator: Operator
 ) -> str:
@@ -749,6 +775,7 @@ async def pfsense_openvpn_user_create(
     if operator is None:
         raise ValueError("pfsense.openvpn.user.create needs an operator to write to Vault")
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=False)
+    await _refuse_unchecked_release(self, target, operator)
 
     result: dict[str, Any] = {
         "op_class": "write",
@@ -1423,7 +1450,8 @@ OPENVPN_USER_OPS: tuple[PfSenseOp, ...] = (
                     "field, stored}, guidance}``. The password is never returned; read it "
                     "from Vault. A refusal (``ambiguous``, ``vault_path_is_target_secret``, "
                     "``vault_field_exists``, ``vault_version_unknown``, ``system_name``, "
-                    "``system_names_unreadable``, ``dot_name``) fails the call and changes "
+                    "``system_names_unreadable``, ``dot_name``, ``version_not_checked``: "
+                    "only pfSense 2.7.2 is supported) fails the call and changes "
                     "nothing."
                 ),
                 "next_step": (

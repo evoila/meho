@@ -15,20 +15,31 @@ an address when it is
 * an interface network (for example ``lan``) whose static address and
   subnet contain it, or an interface address (``lanip``) that is it.
 
-A URL alias has contents that ``config.xml`` does not hold. A rule with
-such a source counts as a rule that may let the address in: unknown is
-not "no rule". A user with no address has no rule that lets it in, also
-not through a URL alias. The Python check (:func:`rules_reaching`) and the PHP
-check of the fragment (:func:`source_check_php`) follow the same rules.
+When MEHO cannot tell what a source holds, the rule counts as a rule that
+may let the address in: unknown is not "no rule". That is so for
 
-Checked against the pfSense 2.8 sources: aliases are ``<aliases><alias>``
-with ``name``, ``type`` and a space separated ``address``; a rule source
-is ``any``, ``network`` or ``address`` with an optional ``not``.
+* an interface network or address of an interface with no static IPv4
+  address in ``config.xml`` (no ``ipaddr`` or ``subnet``, ``dhcp``, an
+  OpenVPN server assigned as its own interface) and for a keyword this
+  code does not know; ``(self)`` (the firewall itself) does not count;
+* a URL alias, whose contents ``config.xml`` does not hold;
+* a host name in an alias (MEHO does not resolve it), and any other alias
+  entry that is neither an address, a network nor a host or network alias.
+
+A user with no address has no rule that lets it in, also not through such
+a source. The Python check (:func:`rules_reaching`) and the PHP check of
+the fragment (:func:`source_check_php`) follow the same rules.
+
+Checked against the pfSense 2.7.2 sources and the development branch
+(2.9.0-DEVELOPMENT): aliases are ``<aliases><alias>`` with ``name``,
+``type`` and a space separated ``address``; a rule source is ``any``,
+``network`` or ``address`` with an optional ``not``.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import re
 from typing import Any
 
 from defusedxml.ElementTree import ParseError, fromstring
@@ -37,8 +48,9 @@ from meho_backplane.connectors.pfsense.ops_write import _php_squote
 
 __all__ = ["rules_reaching", "source_check_php"]
 
-_URL_ALIAS_TYPES = ("url", "urltable")
 _LIST_ALIAS_TYPES = ("host", "network")
+_SELF = "(self)"
+_PREFIX = re.compile(r"[0-9]{1,3}")
 
 
 def _text(element: Any, tag: str) -> str:
@@ -46,23 +58,29 @@ def _text(element: Any, tag: str) -> str:
     return (child.text or "").strip() if child is not None and child.text else ""
 
 
-def _aliases(root: Any) -> tuple[dict[str, list[str]], set[str]]:
-    """Return ``(entries by alias name, names of aliases with unknown contents)``."""
+def _aliases(root: Any) -> dict[str, list[str]]:
+    """Return the entries of each host or network alias, by alias name."""
     entries: dict[str, list[str]] = {}
-    unknown: set[str] = set()
     section = root.find("aliases")
     for alias in section.findall("alias") if section is not None else []:
-        name = _text(alias, "name")
-        kind = _text(alias, "type")
-        if kind in _URL_ALIAS_TYPES:
-            unknown.add(name)
-        elif kind in _LIST_ALIAS_TYPES:
-            entries[name] = _text(alias, "address").split()
-    return entries, unknown
+        if _text(alias, "type") in _LIST_ALIAS_TYPES:
+            entries[_text(alias, "name")] = _text(alias, "address").split()
+    return entries
 
 
-def _interface_net(root: Any, keyword: str) -> str | None:
-    """Return the static network of an interface keyword (``lan``, ``lanip``), else ``None``."""
+def _network(entry: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
+    """Return *entry* as an address or a ``/<bits>`` network (IPv4 or IPv6), else ``None``."""
+    address, slash, bits = entry.strip().partition("/")
+    if "%" in address or (slash and not _PREFIX.fullmatch(bits)):
+        return None
+    try:
+        return ipaddress.ip_network(entry.strip(), strict=False)
+    except ValueError:
+        return None
+
+
+def _interface_net(root: Any, keyword: str) -> ipaddress.IPv4Network | None:
+    """Return the static IPv4 network of ``lan`` / ``lanip`` and the like, else ``None``."""
     only_address = keyword.endswith("ip")
     name = keyword[:-2] if only_address else keyword
     section = root.find("interfaces")
@@ -70,40 +88,42 @@ def _interface_net(root: Any, keyword: str) -> str | None:
     if iface is None:
         return None
     address, subnet = _text(iface, "ipaddr"), _text(iface, "subnet")
-    if not address or not subnet:
+    if not re.fullmatch(r"[0-9]{1,2}", subnet) or int(subnet) > 32:
         return None
-    return f"{address}/32" if only_address else f"{address}/{subnet}"
-
-
-def _holds(entry: str, addresses: list[ipaddress.IPv4Address]) -> bool:
     try:
-        net = ipaddress.ip_network(entry.strip(), strict=False)
+        ipaddress.IPv4Address(address)
     except ValueError:
-        return False
-    return any(address in net for address in addresses)
+        return None
+    return ipaddress.IPv4Network(f"{address}/{32 if only_address else subnet}", strict=False)
 
 
 def _source_reaches(
     rule: dict[str, Any],
     root: Any,
     addresses: list[ipaddress.IPv4Address],
-    aliases: tuple[dict[str, list[str]], set[str]],
+    aliases: dict[str, list[str]],
 ) -> bool:
     if rule["source_not"] or rule["source_kind"] == "any":
         return False
     value = str(rule["source"])
     if rule["source_kind"] == "network":
-        net = _interface_net(root, value.removeprefix("network:"))
-        return net is not None and _holds(net, addresses)
-    entries, unknown = aliases
+        keyword = value.removeprefix("network:")
+        if keyword == _SELF:
+            return False
+        own = _interface_net(root, keyword)
+        return own is None or any(address in own for address in addresses)
     todo, seen = [value], set[str]()
     while todo:
         entry = todo.pop()
-        if _holds(entry, addresses) or entry in unknown:
-            return True
-        if entry in entries and entry not in seen:
+        net = _network(entry)
+        if net is not None:
+            if any(address in net for address in addresses):
+                return True
+        elif entry not in aliases:
+            return True  # a URL alias, a host name or an unknown name: cannot tell
+        elif entry not in seen:
             seen.add(entry)
-            todo.extend(entries[entry])
+            todo.extend(aliases[entry])
     return False
 
 
@@ -132,6 +152,25 @@ def _php_list(values: tuple[str, ...]) -> str:
     return ", ".join(_php_squote(v) for v in values)
 
 
+def _net_check_php() -> list[str]:
+    """Return PHP lines that define ``$meho_is_net($entry)``: an address or ``/<bits>`` network."""
+    return [
+        "$meho_is_net = function ($meho_entry) {",
+        "  $meho_parts = explode('/', trim((string)$meho_entry));",
+        "  if (count($meho_parts) > 2",
+        "      || filter_var($meho_parts[0], FILTER_VALIDATE_IP) === false) {",
+        "    return false;",
+        "  }",
+        "  if (count($meho_parts) === 1) {",
+        "    return true;",
+        "  }",
+        "  $meho_max = strpos($meho_parts[0], ':') === false ? 32 : 128;",
+        "  return preg_match('/^[0-9]{1,3}$/', $meho_parts[1]) === 1",
+        "      && (int)$meho_parts[1] <= $meho_max;",
+        "};",
+    ]
+
+
 def source_check_php() -> list[str]:
     """Return PHP lines that define ``$meho_reach($rule_source)`` for ``$meho_sources``.
 
@@ -140,6 +179,7 @@ def source_check_php() -> list[str]:
     rules in the module text.
     """
     return [
+        *_net_check_php(),
         "$meho_ips = array();",
         "foreach ($meho_sources as $meho_s) {",
         "  $meho_l = ip2long(explode('/', $meho_s)[0]);",
@@ -154,7 +194,7 @@ def source_check_php() -> list[str]:
         "    return false;",
         "  }",
         "  $meho_bits = count($meho_parts) === 2 ? $meho_parts[1] : '32';",
-        "  if (!preg_match('/^[0-9]{1,2}$/', $meho_bits) || (int)$meho_bits > 32) {",
+        "  if (!preg_match('/^[0-9]{1,3}$/', $meho_bits) || (int)$meho_bits > 32) {",
         "    return false;",
         "  }",
         "  $meho_mask = (int)$meho_bits === 0 ? 0 : ((-1 << (32 - (int)$meho_bits)) & 0xFFFFFFFF);",
@@ -166,47 +206,52 @@ def source_check_php() -> list[str]:
         "  return false;",
         "};",
         "$meho_alias = array();",
-        "$meho_alias_unknown = array();",
         "foreach ((array)($config['aliases']['alias'] ?? array()) as $meho_al) {",
-        "  $meho_an = (string)($meho_al['name'] ?? '');",
         "  $meho_at = (string)($meho_al['type'] ?? '');",
-        f"  if (in_array($meho_at, array({_php_list(_URL_ALIAS_TYPES)}), true)) {{",
-        "    $meho_alias_unknown[$meho_an] = true;",
-        f"  }} elseif (in_array($meho_at, array({_php_list(_LIST_ALIAS_TYPES)}), true)) {{",
+        f"  if (in_array($meho_at, array({_php_list(_LIST_ALIAS_TYPES)}), true)) {{",
         "    $meho_list = trim((string)($meho_al['address'] ?? ''));",
+        "    $meho_an = trim((string)($meho_al['name'] ?? ''));",
         "    $meho_alias[$meho_an] = preg_split('/\\s+/', $meho_list, -1, PREG_SPLIT_NO_EMPTY);",
         "  }",
         "}",
-        "$meho_reach = function ($meho_s) use ($meho_ips, $meho_holds, $meho_alias,",
-        "    $meho_alias_unknown, $config) {",
+        "$meho_reach = function ($meho_s) use ($meho_ips, $meho_holds, $meho_is_net, $meho_alias,",
+        "    $config) {",
         "  if (count($meho_ips) === 0 || !is_array($meho_s) || isset($meho_s['any'])",
         "      || isset($meho_s['not'])) {",
         "    return false;",
         "  }",
         "  if (isset($meho_s['network'])) {",
-        "    $meho_k = (string)$meho_s['network'];",
+        "    $meho_k = trim((string)$meho_s['network']);",
+        f"    if ($meho_k === {_php_squote(_SELF)}) {{",
+        "      return false;",
+        "    }",
         "    $meho_only = substr($meho_k, -2) === 'ip';",
         "    if ($meho_only) {",
         "      $meho_k = substr($meho_k, 0, -2);",
         "    }",
-        "    $meho_if = $config['interfaces'][$meho_k] ?? null;",
-        "    if (!is_array($meho_if) || empty($meho_if['ipaddr']) || empty($meho_if['subnet'])) {",
-        "      return false;",
+        "    $meho_if = $meho_k === '' ? null : ($config['interfaces'][$meho_k] ?? null);",
+        "    $meho_a = is_array($meho_if) ? trim((string)($meho_if['ipaddr'] ?? '')) : '';",
+        "    $meho_b = is_array($meho_if) ? trim((string)($meho_if['subnet'] ?? '')) : '';",
+        "    if (filter_var($meho_a, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false",
+        "        || preg_match('/^[0-9]{1,2}$/', $meho_b) !== 1 || (int)$meho_b > 32) {",
+        "      return true;",
         "    }",
-        "    $meho_bits = $meho_only ? '32' : $meho_if['subnet'];",
-        "    return $meho_holds($meho_if['ipaddr'] . '/' . $meho_bits);",
+        "    return $meho_holds($meho_a . '/' . ($meho_only ? '32' : $meho_b));",
         "  }",
         "  if (!isset($meho_s['address'])) {",
         "    return false;",
         "  }",
-        "  $meho_todo = array((string)$meho_s['address']);",
+        "  $meho_todo = array(trim((string)$meho_s['address']));",
         "  $meho_seen = array();",
         "  while (count($meho_todo) > 0) {",
         "    $meho_e = array_pop($meho_todo);",
-        "    if ($meho_holds($meho_e) || isset($meho_alias_unknown[$meho_e])) {",
+        "    if ($meho_is_net($meho_e)) {",
+        "      if ($meho_holds($meho_e)) {",
+        "        return true;",
+        "      }",
+        "    } elseif (!isset($meho_alias[$meho_e])) {",
         "      return true;",
-        "    }",
-        "    if (isset($meho_alias[$meho_e]) && !isset($meho_seen[$meho_e])) {",
+        "    } elseif (!isset($meho_seen[$meho_e])) {",
         "      $meho_seen[$meho_e] = true;",
         "      foreach ($meho_alias[$meho_e] as $meho_x) {",
         "        $meho_todo[] = $meho_x;",

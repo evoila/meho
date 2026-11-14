@@ -1144,7 +1144,9 @@ let a user's tunnel address in). Checked against the pfSense 2.7.2 sources
   name.
 - **User create.** The handler checks the Vault path against the tenant path
   first. This check is skipped when the tenant prefix setting
-  (`VAULT_KV_TENANT_SCOPE_PREFIX`) is empty. An existing user is left alone (`exists`, a normal answer: safe to
+  (`VAULT_KV_TENANT_SCOPE_PREFIX`) is empty. Then it reads `/etc/version`
+  and refuses any pfSense release other than 2.7.2 (`version_not_checked`;
+  see "Versions read" below). An existing user is left alone (`exists`, a normal answer: safe to
   run twice). Two users with the name fail the call (`ambiguous`, raised as
   `PfSenseRefusedError`). Before any change on the firewall, the Vault path
   is checked: it must not be the credential path (`secret_ref`) of any
@@ -1156,7 +1158,8 @@ let a user's tunnel address in). Checked against the pfSense 2.7.2 sources
   credential held in another store, are not caught. When the field already holds a value, the call fails
   (`vault_field_exists`). The handler first asks Vault for the mount
   (`sys/internal/ui/mounts/<mount>`, which a token may read for any path it
-  has access to). The mount must say KV version 2. A mount that is version 1,
+  has access to). The mount must be of type `kv` and say version 2. A mount
+  of another type, a mount that is version 1,
   or whose version cannot be told, fails the call (`vault_version_unknown`)
   before the firewall is changed: on a version 1 mount a read of a new path
   looks like "nothing stored yet", so the read alone proves nothing. The
@@ -1209,12 +1212,26 @@ let a user's tunnel address in). Checked against the pfSense 2.7.2 sources
   network type, also nested) with such an entry, or an interface network
   (`lan`, `opt2`; or `lanip`) with a static address and subnet that hold it.
   Not covered: a negated source (it does not grant by that address), a
-  destination, IPv6, a host name in an alias (it is not resolved) and an
-  interface that gets its address by DHCP. A URL alias has contents that
-  `config.xml` does not hold, so a rule with one counts as a rule that may
-  let the address in. A rule that holds the address only through a network
-  that is wider than the user's tunnel (for example the whole tunnel network)
-  also blocks the delete: remove or narrow it first.
+  destination and IPv6.
+  When MEHO cannot tell what a source holds, the rule counts as a rule that
+  may let the address in, and the delete is refused:
+  - an interface network or address (`wan`, `opt2`, `opt2ip`) of an
+    interface with no static IPv4 address in `config.xml`: no `ipaddr` or
+    `subnet`, `dhcp`, or an OpenVPN server assigned as its own interface
+    (for example `opt2` on `ovpns1`);
+  - a network keyword this code does not know (for example `pppoe`);
+  - a URL alias, whose contents `config.xml` does not hold;
+  - a host name in an alias: MEHO does not resolve it, so it cannot tell
+    what address it stands for.
+  `(self)` (the firewall itself) does not count. The Python check and the
+  fragment give the same answer.
+  A rule whose source is the whole tunnel network (as an address, an alias,
+  or the network of the OpenVPN server's own interface) holds every user's
+  address. It blocks the delete of every VPN user. Then change the rule
+  first: give it a source that does not hold the user's address (for example
+  an alias with only the addresses of the users who stay), or remove it with
+  `pfsense.filter.rule.delete`. Delete the user, then add the rule again if
+  it is still needed.
   Remove the rules with `pfsense.filter.rule.delete` first; the error lists
   their `ridentifier`. The fragment checks again on the config as it is at
   that moment, and changes nothing when a check fails: it counts these rules
@@ -1272,8 +1289,9 @@ two were read:
   a different argument here**: an item wrapper (`['item' => &$user, 'idx' =>
   ...]`) instead of the user array. The create fragment passes the user array,
   as in 2.7.2. So `pfsense.openvpn.user.create` is checked only against
-  2.7.2 and may fail on a release that has the new form. It is not checked on
-  a 2.8 or 2.9 firewall.
+  2.7.2. Before it changes anything, it reads `/etc/version` and refuses any
+  other release (`version_not_checked`), also 2.8.x and 2.9.x, and a
+  firewall whose version it cannot read.
 
 ## References
 

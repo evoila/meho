@@ -162,8 +162,10 @@ class _Fake(pfsense.PfSenseConnector):
         sockets: dict[str, tuple[str, int]] | None = None,
         playback_fails: bool = False,
         undo_out: str = "MEHO_VPN_REMOVED\n",
+        version: str = "2.7.2-RELEASE (amd64)\nbuilt on Fri Jan 12 18:00:00 UTC 2024\n",
     ) -> None:
         super().__init__()
+        self._version = version
         self._configs = list(configs)
         self._rendered = rendered
         self._rendered_exit = rendered_exit
@@ -188,6 +190,8 @@ class _Fake(pfsense.PfSenseConnector):
         stdin: str | None = None,
     ) -> Any:
         self.commands.append(cmd)
+        if cmd == "cat /etc/version":
+            return _proc(self._version)
         if cmd == "cat /cf/conf/config.xml":
             if len(self._configs) > 1:
                 return _proc(self._configs.pop(0))
@@ -921,8 +925,10 @@ class _FakeVault:
         read_fails: bool = False,
         concurrent: bool = False,
         mount_version: Any = "2",
+        mount_type: Any = "kv",
     ) -> None:
         self.mount_version = mount_version  # what the mount info says (None: no options)
+        self.mount_type = mount_type
         self.data = data  # None: nothing is stored at the path yet
         self.version = 0 if data is None else 3
         self.fail = fail
@@ -965,7 +971,7 @@ class _FakeVault:
             def mount_info(url: str) -> dict[str, Any]:
                 assert url.startswith("/v1/sys/internal/ui/mounts/")
                 options = None if fake.mount_version is None else {"version": fake.mount_version}
-                return {"data": {"type": "kv", "options": options}}
+                return {"data": {"type": fake.mount_type, "options": options}}
 
             client.adapter.get = mount_info
             client.secrets.kv.v2.read_secret_version = read
@@ -1027,6 +1033,20 @@ async def test_create_stores_the_password_in_vault_and_never_returns_it(vault: _
     assert _PASSWORD not in json.dumps(out)
     assert all(_PASSWORD not in c for c in fake.commands)
     assert all(_PASSWORD not in c for c in fake.staged)
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["2.8.1-RELEASE (amd64)\n", "2.9.0-DEVELOPMENT (amd64)\n", "2.7.0-RELEASE (amd64)\n", ""],
+)
+async def test_create_refuses_a_pfsense_release_whose_sources_were_not_checked(
+    vault: _FakeVault, version: str
+) -> None:
+    fake = _created_fake(version=version)
+    with pytest.raises(PfSenseRefusedError, match=r"refused \(version_not_checked\).*2\.7\.2"):
+        await _create(fake)
+    assert fake.commands == ["cat /etc/version"]
+    assert not fake.wrote and vault.writes == []
 
 
 async def test_create_keeps_the_other_fields_and_writes_with_the_version_it_read(
@@ -2297,6 +2317,18 @@ async def test_create_refuses_a_new_path_on_a_mount_that_is_not_kv_version_2(
         assert not fake.wrote and fake_vault.writes == []
 
 
+async def test_create_refuses_a_mount_that_is_not_a_kv_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for kind in ("generic", "cubbyhole", None):
+        fake_vault = _FakeVault(mount_type=kind)  # the options still say version 2
+        monkeypatch.setattr(user_module, "vault_client_for_operator", fake_vault)
+        fake = _created_fake()
+        with pytest.raises(PfSenseRefusedError, match=r"refused \(vault_version_unknown\)"):
+            await _create(fake)
+        assert not fake.wrote and fake_vault.writes == []
+
+
 async def test_create_refuses_a_mount_whose_version_cannot_be_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2373,6 +2405,10 @@ _OPT_NET = (
     "<interfaces><opt2><if>ovpns1</if><ipaddr>198.51.100.1</ipaddr><subnet>24</subnet></opt2>"
     "</interfaces>"
 )
+# An OpenVPN server assigned as its own interface: config.xml holds no address for it.
+_OPT_VPN = "<interfaces><opt2><if>ovpns1</if></opt2></interfaces>"
+_WAN_DHCP = "<interfaces><wan><if>vtnet0</if><ipaddr>dhcp</ipaddr></wan></interfaces>"
+_NAME_ALIAS = _aliases("names", "host", "192.0.2.9 host.example.test")
 
 
 @pytest.mark.parametrize("force", [False, True])
@@ -2389,6 +2425,14 @@ _OPT_NET = (
         ("<network>opt2</network>", "lan", _OPT_NET),
         ("<network>opt2ip</network>", "lan", _OPT_NET.replace("198.51.100.1", "198.51.100.5")),
         ("<address>urls</address>", "lan", _aliases("urls", "urltable", "")),
+        # MEHO cannot tell what these hold, so they count.
+        ("<network>opt2</network>", "lan", _OPT_VPN),
+        ("<network>opt2ip</network>", "lan", _OPT_VPN),
+        ("<network>wan</network>", "lan", _WAN_DHCP),
+        ("<network>opt9</network>", "lan", _OPT_NET),
+        ("<network>pppoe</network>", "lan", ""),
+        ("<address>names</address>", "lan", _NAME_ALIAS),
+        ("<address>outer</address>", "lan", _aliases("outer", "network", "192.0.2.0/24 names")),
     ],
 )
 async def test_delete_is_refused_while_any_rule_source_holds_the_users_address(
@@ -2405,20 +2449,16 @@ async def test_delete_is_refused_while_any_rule_source_holds_the_users_address(
     ("source", "extra"),
     [
         ("<address>198.51.100.6</address>", ""),
-        ("<address>203.0.114.0/24</address>", ""),
+        ("<address>203.0.113.0/24</address>", ""),
         (
             "<address>vpn_guests</address>",
-            _aliases("vpn_guests", "host", "192.0.2.9"),
-        ),
-        (
-            "<address>names</address>",
-            _aliases("names", "host", "host.example.test"),
+            _aliases("vpn_guests", "host", "192.0.2.9 2001:db8::/64"),
         ),
         ("<address>loop</address>", _aliases("loop", "network", "loop")),
         ("<any></any>", ""),
         ("<not></not><address>198.51.100.5</address>", ""),
-        ("<network>opt2</network>", _OPT_NET.replace("198.51.100.1", "203.0.114.1")),
-        ("<network>opt9</network>", _OPT_NET),
+        ("<not></not><network>opt2</network>", _OPT_VPN),
+        ("<network>opt2</network>", _OPT_NET.replace("198.51.100.1", "203.0.113.1")),
         ("<network>(self)</network>", ""),
     ],
 )
@@ -2484,6 +2524,12 @@ _PHP_ALIASES = {
     }
 }
 _PHP_OPT = {"interfaces": {"opt2": {"ipaddr": "198.51.100.1", "subnet": "24"}}}
+_PHP_OPT_VPN = {"interfaces": {"opt2": {"if": "ovpns1"}}}
+_PHP_NAMES = {
+    "aliases": {
+        "alias": [{"name": "names", "type": "host", "address": "192.0.2.9 host.example.test"}]
+    }
+}
 
 
 @_needs_php
@@ -2497,6 +2543,13 @@ _PHP_OPT = {"interfaces": {"opt2": {"ipaddr": "198.51.100.1", "subnet": "24"}}}
         ({"address": "urls"}, "lan", _PHP_ALIASES),
         ({"address": "198.51.100.5"}, "VPNGroup", {}),
         ({"network": "opt2"}, "lan", _PHP_OPT),
+        # MEHO cannot tell what these hold, so they count.
+        ({"network": "opt2"}, "lan", _PHP_OPT_VPN),
+        ({"network": "opt2ip"}, "lan", _PHP_OPT_VPN),
+        ({"network": "wan"}, "lan", {"interfaces": {"wan": {"ipaddr": "dhcp"}}}),
+        ({"network": "opt9"}, "lan", _PHP_OPT),
+        ({"network": "pppoe"}, "lan", {}),
+        ({"address": "names"}, "lan", _PHP_NAMES),
     ],
 )
 def test_delete_fragment_run_in_php_writes_nothing_while_a_source_holds_the_address(
@@ -2514,12 +2567,17 @@ def test_delete_fragment_run_in_php_writes_nothing_while_a_source_holds_the_addr
     ("source", "extra"),
     [
         ({"address": "198.51.100.6"}, {}),
-        ({"address": "203.0.114.0/24"}, {}),
+        ({"address": "203.0.113.0/24"}, {}),
         ({"address": "loop"}, _PHP_ALIASES),
         ({"address": "198.51.100.5", "not": ""}, {}),
+        ({"network": "opt2", "not": ""}, _PHP_OPT_VPN),
         ({"any": ""}, {}),
-        ({"network": "opt2"}, {"interfaces": {"opt2": {"ipaddr": "203.0.114.1", "subnet": "24"}}}),
-        ({"network": "opt9"}, _PHP_OPT),
+        ({"network": "opt2"}, {"interfaces": {"opt2": {"ipaddr": "203.0.113.1", "subnet": "24"}}}),
+        ({"network": "(self)"}, {}),
+        (
+            {"address": "v6"},
+            {"aliases": {"alias": [{"name": "v6", "type": "host", "address": "2001:db8::/64"}]}},
+        ),
     ],
 )
 def test_delete_fragment_run_in_php_goes_on_when_no_source_holds_the_address(

@@ -115,7 +115,7 @@ async def keycloak_target() -> AsyncIterator[Any]:
                 secret_ref="tenants/team-a/kc-admin",
                 auth_model="shared_service_account",
                 vpn_required=False,
-                extras={},
+                extras={"managed_realm": "example"},
                 fingerprint={"version": "26.0.5"},
                 notes="seeded by test_approval_failed_run_record",
             )

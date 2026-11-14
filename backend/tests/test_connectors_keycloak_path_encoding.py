@@ -431,48 +431,23 @@ def test_uuid_pattern_rejects_non_uuid_strings() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_quote_segment_imported_and_called_in_both_handler_modules() -> None:
-    """Verify quote_segment is imported and called in both handler modules.
+def test_handlers_pass_raw_values_and_fill_path_encodes_them() -> None:
+    """Every value is encoded once, by ``fill_path``; the handlers pass raw values.
 
-    This is the programmatic equivalent of acceptance criterion 2's grep:
-    ``grep -rn 'quote' backend/src/meho_backplane/connectors/keycloak/``
-
-    Uses exact call-site counts (not >=) so that any future addition or removal
-    of a call site triggers an explicit review.  Current counts:
-
-    * ops_read: 5 sites — ``keycloak_client_get`` + ``keycloak_role_mapping_get``
-      + ``keycloak_role_users`` (role name → path segment, #2843) +
-      ``keycloak_group_list`` (parent_id) + ``keycloak_group_member_list``
-      (group UUID) — the last two added by #3280.
-    * ops_write: 7 sites — ``keycloak_client_update``, ``keycloak_protocol_mapper_create``,
-      ``keycloak_user_password_reset``, ``keycloak_role_mapping_add``,
-      ``keycloak_realm_update`` (the realm name and the new realm name), and
-      ``keycloak_user_logout`` (user UUID, #3851).
-    * ops_write_groups: 6 sites (#3280) — ``keycloak_group_create`` (parent_id),
-      ``keycloak_group_update_attributes`` (group UUID), and
-      ``keycloak_group_member_add`` / ``_remove`` (user UUID + group UUID each).
+    A handler that encoded a value itself would encode it twice (``%2F``
+    becomes ``%252F``), so the three handler modules call no
+    ``quote_segment`` at all.
     """
     import inspect
 
     import meho_backplane.connectors.keycloak.ops_read as ops_read_mod
     import meho_backplane.connectors.keycloak.ops_write as ops_write_mod
     import meho_backplane.connectors.keycloak.ops_write_groups as ops_write_groups_mod
+    from meho_backplane.connectors.keycloak._paths import _USER_PATH, fill_path
 
-    expected_counts = {
-        ops_read_mod: 5,
-        ops_write_mod: 7,
-        ops_write_groups_mod: 6,
-    }
-    for mod, expected in expected_counts.items():
-        source = inspect.getsource(mod)
-        # quote_segment must be imported.
-        assert "quote_segment" in source, (
-            f"quote_segment not found in {mod.__name__} — path-segment encoding is missing"
-        )
-        # Exact call-site count — regression guard against silently adding/removing sites.
-        call_count = source.count("quote_segment(")
-        assert call_count == expected, (
-            f"quote_segment() called {call_count} time(s) in {mod.__name__}, "
-            f"expected exactly {expected}. Update this assertion if a new call site "
-            "is intentionally added or removed."
-        )
+    for mod in (ops_read_mod, ops_write_mod, ops_write_groups_mod):
+        assert "quote_segment(" not in inspect.getsource(mod), mod.__name__
+    assert (
+        fill_path(_USER_PATH, {"realm": "a.b", "user-id": "../x"})
+        == "/admin/realms/a%2Eb/users/%2E%2E%2Fx"
+    )

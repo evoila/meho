@@ -40,7 +40,8 @@ than reconciling them:
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -61,6 +62,7 @@ __all__ = [
     "_USER_CREDENTIALS_PATH",
     "_USER_SESSIONS_PATH",
     "fill_path",
+    "quote_segment",
 ]
 
 # -- templates reconciled against the pinned Admin REST spec ----------------
@@ -130,16 +132,33 @@ _SERVERINFO_PATH = "/admin/serverinfo"
 _PLACEHOLDER_RE = re.compile(r"\{([^{}]+)\}")
 
 
-def fill_path(template: str, values: Mapping[str, str]) -> str:
+def quote_segment(value: Any) -> str:
+    """Percent-encode one value for one URL path segment.
+
+    Encodes ``/`` (``safe=""``) and ``.`` so that neither slash-based nor
+    dot-segment path traversal (``..``) can alter the request path structure.
+    A traversal-shaped id such as ``../../../../realms/master/clients``
+    becomes ``%2E%2E%2F%2E%2E%2F%2E%2E%2F%2E%2E%2Frealms%2Fmaster%2Fclients``
+    and cannot climb out of the realm sub-tree.  A bare ``..`` id becomes
+    ``%2E%2E`` and is not normalised by httpx.  Mirrors the ArgoCD connector's
+    ``_quote_name`` (``argocd/ops_write.py:130-132``).
+
+    :func:`fill_path` applies it to every value, so a handler never calls
+    it for a path it builds from a template.
+    """
+    return quote(str(value), safe="").replace(".", "%2E")
+
+
+def fill_path(template: str, values: Mapping[str, Any]) -> str:
     """Substitute *values* into *template*'s ``{placeholder}`` segments.
 
     Fail-loud contract, both directions: every placeholder in *template*
     must have a value and every provided key must name a placeholder — a
     typo'd key or a missing segment raises :exc:`ValueError` at the call
-    site instead of dispatching a malformed URL. Values are inserted
-    verbatim; callers pre-encode caller-controlled segments with
-    :func:`~meho_backplane.connectors.keycloak.session.quote_segment`
-    exactly as the pre-#2988 f-strings did.
+    site instead of dispatching a malformed URL. Every value is encoded
+    with :func:`quote_segment`, so a ``/``, a ``?`` or a ``..`` in a realm
+    name or an id stays inside its one path segment. Callers pass raw
+    values, never encoded ones.
     """
     placeholders = set(_PLACEHOLDER_RE.findall(template))
     provided = set(values)
@@ -148,4 +167,4 @@ def fill_path(template: str, values: Mapping[str, str]) -> str:
             f"fill_path template {template!r} declares placeholders "
             f"{sorted(placeholders)} but got values for {sorted(provided)}"
         )
-    return _PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], template)
+    return _PLACEHOLDER_RE.sub(lambda match: quote_segment(values[match.group(1)]), template)

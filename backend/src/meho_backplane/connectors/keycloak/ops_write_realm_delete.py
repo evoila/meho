@@ -50,7 +50,6 @@ References
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
-from urllib.parse import unquote, urlsplit
 
 from meho_backplane.connectors.keycloak._paths import (
     _ADMIN_REALM_PATH,
@@ -69,12 +68,14 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
     get_or_none,
 )
+from meho_backplane.connectors.keycloak.realm_params import realm_param
 from meho_backplane.connectors.keycloak.session import (
     DEFAULT_ADMIN_REALM,
-    quote_segment,
     resolve_realm_config,
 )
-from meho_backplane.settings import get_settings
+from meho_backplane.targets.keycloak_realm_warnings import (
+    backplane_login_realms as _backplane_login_realms,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -93,45 +94,11 @@ REALM_DELETE_OP: Final = "keycloak.realm.delete"
 
 
 def realm_name_param(params: dict[str, Any]) -> str:
-    """Return the required ``realm`` param, trimmed. Blank is an error."""
-    value = params.get("realm")
-    realm = value.strip() if isinstance(value, str) else ""
-    if not realm:
+    """Return the required ``realm`` param. Blank is an error, and it must be a plain name."""
+    realm = realm_param(params, "realm", REALM_DELETE_OP)
+    if realm is None:
         raise ValueError(f"{REALM_DELETE_OP} requires 'realm' (the name of the realm to delete)")
     return realm
-
-
-def _realm_from_url(url: str) -> str | None:
-    """Return the realm name in a Keycloak issuer or admin URL.
-
-    The realm is the path segment after the last ``realms`` segment, so
-    ``https://kc/realms/meho`` and ``https://kc/admin/realms/meho`` both give
-    ``meho``. A URL with no realm gives ``None``.
-    """
-    segments = [unquote(s) for s in urlsplit(url).path.split("/") if s]
-    realm = None
-    for index in range(len(segments) - 1):
-        if segments[index] == "realms":
-            realm = segments[index + 1]
-    return realm
-
-
-def _backplane_login_realms() -> set[str]:
-    """Return the realms this backplane's own login uses.
-
-    They are refused on every Keycloak target, not only on the Keycloak
-    behind those URLs: MEHO cannot tell for sure that a target is a
-    different Keycloak.
-    """
-    settings = get_settings()
-    realms: set[str] = set()
-    for url in (str(settings.keycloak_issuer_url), settings.keycloak_admin_url):
-        if not url:
-            continue
-        realm = _realm_from_url(url)
-        if realm is not None:
-            realms.add(realm)
-    return realms
 
 
 def check_realm_guards(target: KeycloakTargetLike, realm: str) -> None:
@@ -154,7 +121,7 @@ def check_realm_guards(target: KeycloakTargetLike, realm: str) -> None:
 
 
 def _realm_path(realm: str) -> str:
-    return fill_path(_ADMIN_REALM_PATH, {"realm": quote_segment(realm)})
+    return fill_path(_ADMIN_REALM_PATH, {"realm": realm})
 
 
 async def _count(
@@ -171,7 +138,7 @@ async def _count(
     ``clients: 0`` for a realm whose clients could not be read. An HTTP
     error is raised, not turned into ``None``.
     """
-    values = {"realm": quote_segment(realm)}
+    values = {"realm": realm}
     users: Any = await connector._get_admin_json(
         target, fill_path(_USERS_COUNT_PATH, values), operator=operator
     )

@@ -57,7 +57,8 @@ func failNet(r *doctorReport, name string, err error, host string) {
 
 // runAuthenticatedChecks resolves the backplane, checks the token, and
 // runs the MCP handshake. It stops at the first failed step, because
-// every later step depends on it.
+// every later step depends on it. Last, it checks the Keycloak targets
+// for a managed realm.
 func runAuthenticatedChecks(ctx context.Context, r *doctorReport, backplaneURL string, deps doctorDeps) {
 	if deps.layerTimeout > 0 {
 		var cancel context.CancelFunc
@@ -93,6 +94,7 @@ func runAuthenticatedChecks(ctx context.Context, r *doctorReport, backplaneURL s
 		return
 	}
 	runMCPHandshake(ctx, r, backplaneURL+"/mcp", client, host)
+	addKeycloakRealmCheck(ctx, r, client)
 }
 
 func checkDNS(ctx context.Context, r *doctorReport, host string, deps doctorDeps) bool {

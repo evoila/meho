@@ -239,6 +239,7 @@ async def targets_register(
         "secret_ref": created.secret_ref,
         "secret_ref_derived": created.secret_ref_derived,
         "next_step": _probe_next_step(created.name),
+        **({"warnings": list(created.warnings)} if created.warnings else {}),
     }
 
 

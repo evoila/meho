@@ -141,7 +141,7 @@ async def _seed_keycloak_target() -> None:
             secret_ref="example/keycloak/admin",
             auth_model="shared_service_account",
             vpn_required=False,
-            extras={},
+            extras={"managed_realm": _REALM},
             fingerprint={"version": "26.0.5"},
             notes="seeded by test_secret_broker_keycloak_sink",
         )

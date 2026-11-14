@@ -36,12 +36,14 @@ from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.keycloak._paths import _GROUP_MEMBERS_PATH, fill_path
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import find_group
-from meho_backplane.connectors.keycloak.ops_write_realm_delete import _backplane_login_realms
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.core.keycloak import ADMIN_GROUPS
 from meho_backplane.operations._preview import PreviewBuilder, PreviewContext
 from meho_backplane.operations.grant_approval import register_grant_op
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.keycloak_realm_warnings import (
+    backplane_login_realms as _backplane_login_realms,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
@@ -155,7 +157,7 @@ async def _members(ctx: PreviewContext, group_id: str) -> list[str] | None:
     members: list[str] = []
     try:
         realm = resolve_realm_config(ctx.target).managed_realm
-        path = fill_path(_GROUP_MEMBERS_PATH, {"realm": realm, "group-id": quote_segment(group_id)})
+        path = fill_path(_GROUP_MEMBERS_PATH, {"realm": realm, "group-id": group_id})
         while len(members) <= MEMBER_CAP:
             rows = await connector._get_admin_list(
                 ctx.target,

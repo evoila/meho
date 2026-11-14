@@ -37,7 +37,6 @@ from meho_backplane.connectors.keycloak._paths import (
 from meho_backplane.connectors.keycloak.session import (
     KeycloakPasswordCredentials,
     RealmConfig,
-    quote_segment,
     resolve_realm_config,
 )
 
@@ -215,7 +214,7 @@ async def find_user(
     user_id = _opt_str(params.get("id"))
     username = _opt_str(params.get("username"))
     if user_id is not None:
-        path = fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(user_id)})
+        path = fill_path(_USER_PATH, {"realm": realm, "user-id": user_id})
         rep = await get_or_none(connector, target, path, operator)
     elif username is not None:
         rows = await connector._get_admin_list(
@@ -261,7 +260,7 @@ async def find_client(
     uuid = _opt_str(params.get("id"))
     client_id = _opt_str(params.get("client_id"))
     if uuid is not None:
-        path = fill_path(_CLIENT_PATH, {"realm": realm, "client-uuid": quote_segment(uuid)})
+        path = fill_path(_CLIENT_PATH, {"realm": realm, "client-uuid": uuid})
         rep = await get_or_none(connector, target, path, operator)
     elif client_id is not None:
         rows = await connector._get_admin_list(
@@ -336,7 +335,7 @@ async def find_group(
         group_id = str_field(match, "id")
     rep = None
     if group_id is not None:
-        path = fill_path(_GROUP_PATH, {"realm": realm, "group-id": quote_segment(group_id)})
+        path = fill_path(_GROUP_PATH, {"realm": realm, "group-id": group_id})
         rep = await get_or_none(connector, target, path, operator)
     return FoundObject(
         realms=realms,

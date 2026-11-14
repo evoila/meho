@@ -137,9 +137,11 @@ fresh target with no asserted version still resolves.
   (`connectors/keycloak/session.py`) — the two admin-credential shapes
   (tagged union `KeycloakAdminCredentials`).
 - `KeycloakTargetLike` — structural Protocol the concrete `Target` model
-  satisfies; adds `extras` (carrying the realm overrides) to the common
+  satisfies; adds `extras` (carrying the realm names) to the common
   REST-target shape.
 - `RealmConfig` — the resolved `(admin_realm, managed_realm)` pair.
+- `KeycloakManagedRealmMissingError` — raised by `resolve_realm_config`
+  when the target names no managed realm. It is a `ValueError`.
 - `KeycloakAdminTokenError` — raised when the token-endpoint round-trip
   fails or returns no usable `access_token`. On a non-2xx it echoes
   Keycloak's `{error, error_description}` (RFC 6749 §5.2 — both non-secret)
@@ -491,10 +493,12 @@ their own idempotency above):
   `?username=&exact=true`; `role_mapping.assign` also resolves each realm
   role name to its `RoleRepresentation`. A create returns the new UUID
   from the `Location` header.
-- **Names in paths.** Every caller value that goes into a path is
-  encoded with `quote_segment` as one path segment: ids, the realm name
-  and the new realm name of `realm.update`, and each role name of
-  `role_mapping.assign`. A `/`, a dot or a `%` stays part of the name.
+- **Names in paths.** Every value that goes into a path is encoded as
+  one path segment by `fill_path` itself (`_paths.quote_segment`): ids,
+  realm names and role names alike. Handlers pass raw values, so a value
+  is never encoded twice, and a new call site cannot forget it. A `/`, a
+  dot or a `%` in an id stays part of the id. A realm name must be a plain
+  name anyway (see "Target configuration").
   `role_mapping.assign` refuses a role whose returned name is not the
   name asked for, and its result lists the names Keycloak returned.
 - **Idempotency.** A create that hits HTTP 409 (already-exists) is a
@@ -1240,7 +1244,7 @@ registry contract.
 **Spec-reconcile lane (#2988).** Every request path the connector dispatches
 lives as a `_*_PATH` template constant in
 `backend/src/meho_backplane/connectors/keycloak/_paths.py` (hoisted out of
-inline f-strings by #2988); handlers fill a template via `fill_path`, whose
+inline f-strings by #2988); handlers fill a template via `fill_path` (which encodes every value), whose
 placeholder names are byte-for-byte the pinned spec's own parameter names
 (`{realm}`, `{client-uuid}`, `{user-id}`, `{role-name}`, `{group-id}` — and
 the camelCase `{groupId}` on the user-group membership sub-resource, a
@@ -1273,11 +1277,78 @@ two realm knobs live on `target.extras` (no schema migration):
 
 - `admin_realm` — realm the admin client authenticates against (default
   `master`).
-- `managed_realm` — realm the connector manages + fingerprints (default:
-  `DEFAULT_MANAGED_REALM` in `connectors/keycloak/session.py`).
+- `managed_realm` — realm the connector manages + fingerprints. **Required.**
+  MEHO has no built-in realm name: a target must name its realm.
 
-Resolved through `resolve_realm_config`, which tolerates a missing
-`extras` attribute and falls back to the defaults.
+Resolved through `resolve_realm_config`. The admin realm falls back to
+`master` when it is absent or empty, also when the `extras` attribute is
+missing. The managed realm never falls back: with no `managed_realm` the
+function raises `KeycloakManagedRealmMissingError`.
+
+**A realm is one plain name.** `targets/required_extras.py`
+(`realm_name_problem`) refuses a managed realm, or a set admin realm, that
+holds `/`, `\`, `?`, `#` or `%`, a control character, white space at the
+start or the end, is made only of dots, or is longer than 255 characters
+(Keycloak's own column size). MEHO trims no realm anywhere: a value with
+spaces around it is refused, at REST, CLI and in the console. The same
+check runs at create, at update and before every Keycloak call. A realm
+that comes as an operation parameter passes it too
+(`connectors/keycloak/realm_params.py`): `realm` and
+`representation.realm` of `keycloak.realm.create` / `keycloak.realm.update`,
+`realm` of `keycloak.realm.delete` and of `keycloak.user.check_login`.
+A params check refuses a bad value before the policy gate, so before a
+call waits for approval. The `<realm>` segment of a secret broker ref
+(`<target>/<realm>/<username>#password`, `<target>/<realm>/clients/<id>#secret`)
+must be plain too.
+
+A Keycloak target with no managed realm, or a realm that is not a plain
+name, is refused like this:
+
+- **Operations.** Every operation on it fails before any call to Keycloak.
+  `auth_headers` checks the realms first, before the credential read and
+  also when an admin token is still cached, so no credential is read from
+  the secret store and no request is sent. The error text says how to set
+  the realm.
+- **Probe and fingerprint.** `meho targets probe` answers
+  `reachable: false` with the same text.
+- **Doctor.** `meho doctor` lists every Keycloak target MEHO refuses, as a
+  warning with the fix (`cli/internal/cmd/doctor_keycloak_realm.go`). It
+  reads `GET /api/v1/targets/checks/keycloak-realm`
+  (`api/v1/targets_keycloak_realm.py`): the caller's tenant, or every
+  tenant for a platform admin who is a person. Against an older backplane
+  without that route it reads the caller's targets one by one. A realm of
+  only spaces counts as no realm, here and everywhere else.
+- **Create and update.** `POST /api/v1/targets` and `PATCH` (also
+  `meho targets add`, `meho targets update`, `meho targets import` and the
+  `targets.register` and `targets.update` operations) answer HTTP 422 with
+  the same text. An update is checked on the target as it will be after the
+  write: sending `extras` without `managed_realm`, or changing the product to
+  `keycloak` on a target without one, is refused. The check lives in
+  `targets/required_extras.py`. The console create and edit forms have a
+  "Managed realm" field (`ui/routes/connectors/forms_realm.py`); for a
+  Keycloak target it is required. The edit form keeps every other extras
+  key, so an older target without a realm can be fixed in the console.
+
+**Allowed, but with a warning.** A managed realm that is the target's
+admin realm (`master` by default), or the realm MEHO itself signs in with
+(the realm in `keycloak_issuer_url` / `keycloak_admin_url`), is allowed.
+`targets/keycloak_realm_warnings.py` gives one line for each case:
+
+- `POST` / `PATCH /api/v1/targets` answer with a `warnings` list
+  (`TargetWriteResult`); `meho targets add` / `update` print each line on
+  stderr.
+- `targets.register` and `targets.update` add `warnings` to their answer,
+  only when there is one.
+- The dispatcher stamps the lines as `target_warnings` on the approval
+  card of every write on such a target; the console shows them as a
+  "Check the target" box.
+
+To set the realm on an existing target (`--extra` replaces the whole
+`extras` map, so repeat the keys you keep):
+
+```console
+$ meho targets update <name> --extra admin_realm=master --extra managed_realm=<realm>
+```
 
 ## Dependencies
 

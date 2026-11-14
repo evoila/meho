@@ -99,6 +99,7 @@ async def _create_submit_handler(
     vpn_required: bool = Form(default=False),
     aliases: str | None = Form(default=None, max_length=_ALIASES_MAX),
     notes: str | None = Form(default=None, max_length=_NOTES_MAX),
+    managed_realm: str | None = Form(default=None, max_length=_NAME_MAX),
     session_ctx: UISessionContext = _require_session_dep,
     operator: Operator = _require_admin_dep,
     db_session: AsyncSession = _get_session_dep,
@@ -124,6 +125,7 @@ async def _create_submit_handler(
         vpn_required=vpn_required,
         aliases_raw=aliases,
         notes=notes,
+        managed_realm=managed_realm,
     )
 
 
@@ -199,6 +201,7 @@ async def _edit_submit_handler(
     vpn_required: bool = Form(default=False),
     aliases: str | None = Form(default=None, max_length=_ALIASES_MAX),
     notes: str | None = Form(default=None, max_length=_NOTES_MAX),
+    managed_realm: str | None = Form(default=None, max_length=_NAME_MAX),
     session_ctx: UISessionContext = _require_session_dep,
     operator: Operator = _require_admin_dep,
     db_session: AsyncSession = _get_session_dep,
@@ -218,6 +221,7 @@ async def _edit_submit_handler(
         vpn_required=vpn_required,
         aliases_raw=aliases,
         notes=notes,
+        managed_realm=managed_realm,
     )
 
 

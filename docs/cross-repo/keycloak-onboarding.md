@@ -393,10 +393,12 @@ A keycloak target row carries:
 
 The two realm knobs live on `target.extras` (a free-form JSONB column) so
 they are target-configurable without a schema migration. `admin_realm`
-falls back to `master` when absent. Always set `managed_realm`: its
-fallback is a fixed realm name from early development, not `meho`
-(`DEFAULT_MANAGED_REALM` in
-[`session.py`](../../backend/src/meho_backplane/connectors/keycloak/session.py)).
+falls back to `master` when absent. `managed_realm` is required and has no
+default: MEHO refuses to create or update a Keycloak target without it
+(HTTP 422), and refuses every operation on an older target that lacks it.
+To fix such a target, run
+`meho targets update <name> --extra admin_realm=master --extra managed_realm=<realm>`
+(`--extra` replaces the whole `extras` map, so repeat the keys you keep).
 
 `auth_headers` rejects any `auth_model` other than
 `shared_service_account` (or `None` for pre-G0.3 targets) with a clear

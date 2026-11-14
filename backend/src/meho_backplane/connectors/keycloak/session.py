@@ -61,12 +61,12 @@ target-configurable without a schema migration:
 * ``admin_realm`` — the realm the admin client authenticates against
   (the admin-cli / service-account client typically lives in
   ``master``). Defaults to :data:`DEFAULT_ADMIN_REALM`.
-* ``managed_realm`` — the realm the connector manages and fingerprints
-  (the realm of your deployment). Defaults to :data:`DEFAULT_MANAGED_REALM`.
+* ``managed_realm`` — the realm the connector manages and fingerprints.
+  It has no default: a target must name it. A target that does not is
+  refused with :class:`KeycloakManagedRealmMissingError`.
 
-Both are read through :func:`resolve_realm_config` which tolerates a
-missing ``extras`` attribute (pre-G0.3 stub targets) and falls back to
-the defaults.
+Both are read through :func:`resolve_realm_config`. A missing ``extras``
+attribute (pre-G0.3 stub targets) counts as no extras.
 """
 
 from __future__ import annotations
@@ -74,21 +74,22 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
-from urllib.parse import quote
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
     strip_credential_value,
 )
+from meho_backplane.connectors.keycloak._paths import quote_segment
+from meho_backplane.targets.required_extras import keycloak_realm_problem
 
 __all__ = [
     "DEFAULT_ADMIN_REALM",
-    "DEFAULT_MANAGED_REALM",
     "KeycloakAdminCredentials",
     "KeycloakAdminCredentialsLoader",
     "KeycloakAmbiguousVaultPayloadError",
     "KeycloakClientCredentials",
+    "KeycloakManagedRealmMissingError",
     "KeycloakPasswordCredentials",
     "KeycloakTargetLike",
     "RealmConfig",
@@ -102,36 +103,11 @@ __all__ = [
 #: ``master``; a target can override via ``extras["admin_realm"]``.
 DEFAULT_ADMIN_REALM: str = "master"
 
-#: The realm the connector manages + fingerprints. A target can
-#: override it via ``extras["managed_realm"]``.
-DEFAULT_MANAGED_REALM: str = "evba"
-
 #: The four field names the credential-shape discriminator inspects. Kept
 #: as module constants so the loader and its tests share one source of
 #: truth and error messages stay diff-stable.
 _CLIENT_FIELDS: tuple[str, str] = ("client_id", "client_secret")
 _PASSWORD_FIELDS: tuple[str, str] = ("username", "password")
-
-
-def quote_segment(value: Any) -> str:
-    """Percent-encode a caller-supplied id/uuid for a URL path segment.
-
-    Encodes ``/`` (``safe=""``) and ``.`` so that neither slash-based nor
-    dot-segment path traversal (``..``) can alter the request path structure.
-    A traversal-shaped id such as ``../../../../realms/master/clients``
-    becomes ``%2E%2E%2F%2E%2E%2F%2E%2E%2F%2E%2E%2Frealms%2Fmaster%2Fclients``
-    and cannot climb out of the realm sub-tree.  A bare ``..`` id becomes
-    ``%2E%2E`` and is not normalised by httpx.  Mirrors the ArgoCD connector's
-    ``_quote_name`` (``argocd/ops_write.py:130-132``).
-
-    Applied at every site where a caller-supplied id/uuid is interpolated
-    into a Keycloak Admin REST path — both read and write ops.
-
-    Note: In production every id/uuid is additionally validated against the
-    UUID pattern gate before the handler runs, but this function is a safe
-    standalone primitive that does not rely on that upstream gate.
-    """
-    return quote(str(value), safe="").replace(".", "%2E")
 
 
 @runtime_checkable
@@ -155,7 +131,7 @@ class KeycloakTargetLike(Protocol):
       :func:`~meho_backplane.connectors._shared.vcf_auth.is_acceptable_auth_model`;
       only ``"shared_service_account"`` / ``None`` accepted.
     * ``extras`` — free-form mapping carrying the optional
-      ``admin_realm`` / ``managed_realm`` overrides.
+      ``admin_realm`` (optional) and ``managed_realm`` (required).
     * ``id`` / ``tenant_id`` — the tenant-unique ``(tenant_id, id)``
       cache key (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
       the admin-token cache uses, so two same-named targets in different
@@ -180,21 +156,34 @@ class RealmConfig:
     managed_realm: str
 
 
+class KeycloakManagedRealmMissingError(ValueError):
+    """The target names no managed realm, or a realm that is not a plain name.
+
+    No operation can run on such a target.
+    """
+
+
 def resolve_realm_config(target: KeycloakTargetLike) -> RealmConfig:
     """Resolve a target's admin-realm + managed-realm from ``extras``.
 
-    Reads ``target.extras["admin_realm"]`` / ``["managed_realm"]`` and
-    falls back to :data:`DEFAULT_ADMIN_REALM` / :data:`DEFAULT_MANAGED_REALM`
-    when the key is absent, empty, or the ``extras`` attribute is missing
-    entirely (a pre-G0.3 stub target). Non-string / empty values fall
-    back to the default rather than producing a malformed realm path.
+    Reads ``target.extras["admin_realm"]`` / ``["managed_realm"]``. The
+    admin realm falls back to :data:`DEFAULT_ADMIN_REALM` when the key is
+    absent, empty, or the ``extras`` attribute is missing entirely (a
+    pre-G0.3 stub target). The managed realm has no default: when the
+    target does not name one, or either realm is not a plain name (see
+    :func:`~meho_backplane.targets.required_extras.realm_name_problem`),
+    this raises :class:`KeycloakManagedRealmMissingError` before any call
+    to Keycloak.
     """
     extras = getattr(target, "extras", None) or {}
-    admin = extras.get("admin_realm") if isinstance(extras, Mapping) else None
-    managed = extras.get("managed_realm") if isinstance(extras, Mapping) else None
+    problem = keycloak_realm_problem(extras, getattr(target, "name", None))
+    if problem is not None:
+        raise KeycloakManagedRealmMissingError(problem)
+    admin = extras.get("admin_realm")
+    managed = extras.get("managed_realm")
     return RealmConfig(
         admin_realm=admin if isinstance(admin, str) and admin else DEFAULT_ADMIN_REALM,
-        managed_realm=managed if isinstance(managed, str) and managed else DEFAULT_MANAGED_REALM,
+        managed_realm=str(managed),
     )
 
 

@@ -1064,6 +1064,50 @@
         }
       }
     },
+    "/api/v1/targets/checks/keycloak-realm": {
+      "get": {
+        "tags": [
+          "targets"
+        ],
+        "summary": "Keycloak Realm Check",
+        "description": "List the live Keycloak targets with no managed realm, or a realm that is not a plain name.\n\nA platform admin who is a person gets the targets of every tenant;\nevery other caller gets the targets of their own tenant.",
+        "operationId": "keycloak_realm_check_api_v1_targets_checks_keycloak_realm_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeycloakRealmCheck"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/targets": {
       "get": {
         "tags": [
@@ -1174,7 +1218,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Target"
+                  "$ref": "#/components/schemas/TargetWriteResult"
                 }
               }
             }
@@ -1351,7 +1395,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Target"
+                  "$ref": "#/components/schemas/TargetWriteResult"
                 }
               }
             }
@@ -29938,6 +29982,12 @@
             "nullable": true,
             "title": "Notes"
           },
+          "managed_realm": {
+            "type": "string",
+            "maxLength": 200,
+            "nullable": true,
+            "title": "Managed Realm"
+          },
           "session_ctx": {
             "$ref": "#/components/schemas/UISessionContext",
             "nullable": true
@@ -29993,6 +30043,12 @@
             "maxLength": 8192,
             "nullable": true,
             "title": "Notes"
+          },
+          "managed_realm": {
+            "type": "string",
+            "maxLength": 200,
+            "nullable": true,
+            "title": "Managed Realm"
           },
           "session_ctx": {
             "$ref": "#/components/schemas/UISessionContext",
@@ -37044,6 +37100,53 @@
         "title": "KbWikiSearch",
         "description": "What the wiki part of one knowledge search did.\n\n``searched`` is false when the wiki was not searched; then ``reason``\nand ``message`` say why and ``hits`` is empty. ``hits`` are the wiki's\nhits, best first, each with ``collection`` set and its ``source_url``\n(the source link the index sent). ``duplicate_count`` counts the wiki\nhits left out because the store's hits already hold their imported copy."
       },
+      "KeycloakRealmCheck": {
+        "properties": {
+          "all_tenants": {
+            "type": "boolean",
+            "title": "All Tenants"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/KeycloakRealmProblem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "all_tenants",
+          "items"
+        ],
+        "title": "KeycloakRealmCheck",
+        "description": "The Keycloak targets MEHO refuses; ``all_tenants`` says how far the list goes."
+      },
+      "KeycloakRealmProblem": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "problem": {
+            "type": "string",
+            "title": "Problem"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "name",
+          "problem"
+        ],
+        "title": "KeycloakRealmProblem",
+        "description": "One Keycloak target MEHO refuses, and why."
+      },
       "KindFilterValue": {
         "type": "string",
         "enum": [
@@ -44003,6 +44106,168 @@
         "type": "object",
         "title": "TargetUpdate",
         "description": "PATCH /api/v1/targets/{name} body.\n\nAll fields are optional. The route handler applies only the fields\nthat are not ``None``; callers must send an explicit ``null`` JSON\nvalue to clear a nullable column (``fqdn``, ``secret_ref``,\n``notes``). ``name`` is absent \u2014 rename = delete + create.\n\n``product`` is patchable as of G0.14-T4 (#1145). The original\nG0.3 contract treated ``product`` as immutable after creation\non the theory that the operator should delete + re-create on a\ntypo, but the v0.6.0 dogfood pass (signal 6) showed the\ncombination of \"no DELETE route\" + \"no PATCH on product\" left a\nmisregistered target permanently broken \u2014 name and alias slots\noccupied, ``secret_ref`` pointing at a stranded Vault path. T4\ncloses the gap by adding DELETE *and* allowing PATCH on\n``product``. The route handler validates the new value against\nthe set of registered connector products and rejects unknown\nvalues with a structured 422 mirroring the ``/probe`` 501\nshape \u2014 so a typo at PATCH time produces the same actionable\ndiagnostic as the typo would at probe time, instead of\nsilently breaking the working target.\n\n``fingerprint`` is **not** accepted via PATCH \u2014 it is server-managed\nand rewritten by every successful probe. Sending ``fingerprint``\nraises 422 via ``extra='forbid'`` for the same reason\n:class:`TargetCreate` rejects it. ``preferred_impl_id`` is patchable.\n\n``version`` is patchable as of G0.15-T6 (#1215) \u2014 same fix-class as\nG0.14-T4 #1145's PATCH-on-``product``. An operator who probes the\ntarget manually (or has out-of-band knowledge of the product\nversion) can set it to flip the resolver from the wildcard fallback\nto the versioned connector. Clearing it (``{\"version\": null}``) is\nlegal and returns the target to the wildcard-fallback shape \u2014 the\ncolumn is nullable so this is not a constraint violation."
+      },
+      "TargetWriteResult": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "aliases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Aliases"
+          },
+          "product": {
+            "type": "string",
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Version"
+          },
+          "host": {
+            "type": "string",
+            "title": "Host"
+          },
+          "port": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Port"
+          },
+          "fqdn": {
+            "type": "string",
+            "nullable": true,
+            "title": "Fqdn"
+          },
+          "secret_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "secret_ref_derived": {
+            "type": "boolean",
+            "title": "Secret Ref Derived",
+            "description": "True when secret_ref is the path MEHO builds from the target name (tenants/<tenant_id>/<name>), as it does for a target added without a secret_ref.",
+            "default": false
+          },
+          "auth_model": {
+            "$ref": "#/components/schemas/AuthModel"
+          },
+          "vpn_required": {
+            "type": "boolean",
+            "title": "Vpn Required"
+          },
+          "verify_tls": {
+            "type": "boolean",
+            "title": "Verify Tls",
+            "default": true
+          },
+          "tls_ca_pin": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tls Ca Pin"
+          },
+          "tls_server_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tls Server Name"
+          },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secret Field Map"
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extras"
+          },
+          "notes": {
+            "type": "string",
+            "nullable": true,
+            "title": "Notes"
+          },
+          "fingerprint": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Fingerprint",
+            "description": "Product and version from the last successful probe. null means the target is not probed yet (a new target is never probed): run POST /api/v1/targets/{name}/probe, or `meho targets probe <name>` in the CLI."
+          },
+          "preferred_impl_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Preferred Impl Id"
+          },
+          "flight_recorder_capture": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Flight Recorder Capture"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "deleted_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Deleted At"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings",
+            "description": "Plain lines about a setting that is allowed but risky. Empty when none.",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "aliases",
+          "product",
+          "host",
+          "port",
+          "fqdn",
+          "secret_ref",
+          "auth_model",
+          "vpn_required",
+          "extras",
+          "notes",
+          "fingerprint",
+          "preferred_impl_id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "TargetWriteResult",
+        "description": "The answer of a target create or update: the target, plus warnings.\n\n``warnings`` holds plain lines about a setting that is allowed but\nrisky, for example a Keycloak target that manages the realm MEHO\nitself signs in with\n(:func:`~meho_backplane.targets.keycloak_realm_warnings.keycloak_realm_warnings`).\nEmpty when there is nothing to say."
       },
       "TargetsDiscoverResult": {
         "properties": {

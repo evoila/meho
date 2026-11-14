@@ -72,6 +72,11 @@ no exception per system.
 - A fresh sign-in for every approval, also in the web interface, comes
   from v0.42.0.
 - An approved request that runs only as approved comes from v0.40.0.
+- From v0.47.0, approving a request that asks for a secret value
+  (`reveal_secret: true`) does not run it. The person who asked fetches
+  the value once, within 15 minutes. A client that read the value from
+  the stored result must change. See the
+  [upgrade note](../install/upgrades.md#version-specific-notes).
 
 ## Operator guide
 

@@ -5,14 +5,23 @@ subscription. The connector logs in to Microsoft Entra ID with a login (a
 service principal) from Vault, keeps the access token in its own cache, and
 calls Azure Resource Manager (Azure's management API) with it.
 
-The connector has 79 operations in 13 groups. The group `account` holds
+The connector has 86 operations in 14 groups. The group `account` holds
 `azure.about`, `azure.location.list` and `azure.operation.status`. The other
 groups are the families (inventory, compute, network, storage, cost and
 more), each with its own section at the end of this page. Every family builds
 on the login, the cache, the retry budget, the paging helper and the polling
-helper described here. Two operations change something in Azure and wait for
-a person's approval (`caution`): `azure.tag.update` and
-`azure.patching.assessment.start`. All the others are `safe` reads.
+helper described here. Eleven operations change something in Azure and wait
+for a person's approval:
+
+- `caution`: `azure.tag.update`, `azure.patching.assessment.start`,
+  `azure.migrate.import.start`, `azure.migrate.group.create`,
+  `azure.migrate.group.update` and `azure.migrate.assessment.create`.
+- `dangerous`: `azure.network.dns.recordset.upsert`,
+  `azure.storage.blob.link.create`, `azure.role.assignment.create` and
+  `azure.role.assignment.delete`.
+- `destructive`: `azure.network.dns.recordset.delete`.
+
+All the others are `safe` reads.
 
 Package: `backend/src/meho_backplane/connectors/azure/`. Shared login code:
 `backend/src/meho_backplane/connectors/_shared/microsoft_login.py`.
@@ -25,7 +34,7 @@ Package: `backend/src/meho_backplane/connectors/azure/`. Shared login code:
 | Connector ID | `azure-arm-2026.10` (implementation `azure-arm`, version `2026.10`) |
 | Registration | the versioned row plus the wildcard row `("azure", "", "")` |
 | Kind | typed operations only; nothing is ingested from a spec |
-| Operations | 79 in 13 groups: `account`, `aks`, `arc`, `automation`, `avs`, `compute`, `cost`, `dns`, `inventory`, `migrate`, `network`, `security`, `storage` |
+| Operations | 86 in 14 groups: `account`, `aks`, `arc`, `automation`, `avs`, `compute`, `cost`, `dns`, `inventory`, `migrate`, `monitor`, `network`, `security`, `storage` |
 | Spec path check | `backend/tests/test_connectors_azure_spec_reconcile.py` against the shelf folder `azure-arm-2026.10` |
 | Onboarding | [`docs/cross-repo/azure-onboarding.md`](../cross-repo/azure-onboarding.md) |
 
@@ -1910,8 +1919,12 @@ meho targets import subscriptions.yaml
 ## migrate
 
 The `migrate` group reads what Azure Migrate knows about the servers a team
-plans to move to Azure. Every operation is a read (`safe`, no approval) and
-changes nothing in Azure.
+plans to move to Azure, and can add servers and plan their move. It has 11
+operations. Seven are reads (`safe`, no approval). Four change something in
+Azure and wait for a person's approval (`caution`):
+`azure.migrate.import.start`, `azure.migrate.group.create`,
+`azure.migrate.group.update` and `azure.migrate.assessment.create`. They are
+described in "Writes: CSV import, groups and assessments" below.
 
 Azure Migrate keeps its data with two providers, each with its own pinned
 API version:
@@ -2047,20 +2060,106 @@ the Azure Migrate project. Azure Migrate has no read-only role of its own.
 subscription; when they are not, the call fails with
 `AzureProviderNotRegisteredError`, and MEHO never registers them.
 
+### Writes: CSV import, groups and assessments (Task #5094)
+
+Five operations of the group start or follow work. Four start work on the
+customer's side. They are `caution` and wait for a person's approval. The
+fifth, `azure.migrate.job.list`, is a `safe` read. The login needs the
+"Azure Migrate Decide and Plan Expert" role on the project's resource
+group. Whether that role also covers the import site is not proven yet; the
+lab proof must say what was missing, if anything.
+
+| Operation | Parameters | What it sends |
+|---|---|---|
+| `azure.migrate.import.start` | `resource_group`, `project`, `csv`, optional `site`, `repeat_key` | reads the project; makes the import site if missing (`PUT .../importSites/{site}`); `PUT .../importcollectors/{site}-collector`; `POST .../importSites/{site}/importUri`; `PATCH` of the site tags; uploads the file; `GET .../importJobs/{job}` until the job ends |
+| `azure.migrate.job.list` | `resource_group`, `project`, optional `site` | `GET .../importSites/{site}/importJobs` |
+| `azure.migrate.group.create` | `resource_group`, `project`, `group`, optional `machines`, `group_type` | `PUT .../groups/{group}`, then `POST .../groups/{group}/updateMachines` (Add) |
+| `azure.migrate.group.update` | `resource_group`, `project`, `group`, optional `add`, `remove` | `POST .../updateMachines`, Add first, then Remove |
+| `azure.migrate.assessment.create` | the group names, `assessment`, `region`, `sizing`, optional `currency` (EUR), `pricing`, `hybrid_benefit`, `comfort_factor` | reads the assessment; `PUT .../assessments/{assessment}` when it does not exist; reads it until Azure has computed it |
+
+Files: `migrate_write_ops.py` (operation table, guidance, `MigrateWriteOps`),
+`migrate_write_schemas.py`, `migrate_writes.py` (groups, assessments, the
+shared `arm_write` and `poll_until`), `migrate_import.py` (the import flow),
+`migrate_csv.py` (file checks), `migrate_jobs.py` (site names, job rows, the
+job list), `migrate_upload.py` (the upload). `migrate.py` adds the table and
+the mixin to its own.
+
+#### How a retry never makes duplicate work
+
+- Group and assessment names are the caller's. The same call sends the same
+  `PUT`. `updateMachines` changes nothing for a machine already in (or out
+  of) the group.
+- An assessment that exists with the same settings is not sent again: MEHO
+  follows it. One that exists with other settings is refused, never changed.
+  Every setting MEHO sends is compared with Azure's own field, also the fixed
+  ones (offer, pricing tier, percentile, time range).
+- The import keeps its record in Azure, in the tags of the import site: one
+  tag `meho-csv-<first 16 characters of the file's SHA-256>` with the job
+  name. MEHO writes it after it got the upload link and before it uploads.
+  A retry finds the tag, reads that job and uploads nothing. If the tag
+  cannot be written, nothing is uploaded. An existing site is never written
+  again (a `PUT` would replace its tags).
+- One PostgreSQL lock per import site (`advisory_lock`, shared by every
+  worker) covers the steps from reading the tags to the end of the upload.
+  Two imports to the same site then never erase each other's tag, and the
+  same file is never uploaded twice at once. When the lock stays busy for
+  two minutes, MEHO sends nothing and answers with a conflict.
+- A tag whose job still waits for its file (`WaitingForBlobUpload`) is
+  followed, not sent again: the first upload may still be under way, or its
+  answer was lost (`outcome: earlier_upload_waiting`). Only a clear refusal
+  from Azure Storage means the file did not arrive; then MEHO removes the
+  tag, so the same call again uploads the file.
+- `repeat_key` imports the same file again on purpose. The tag name gets
+  `-<first 8 characters of the key's SHA-256>`, so each key has its own
+  record, and a retry with the same key after a lost answer uploads nothing.
+  A job that stays in `WaitingForBlobUpload` also needs a new key.
+- A lost answer or a 5xx on the upload is not an error: the call follows the
+  job (`outcome: upload_unconfirmed`). The upload is never sent twice by the
+  same call.
+- A read that fails after a write was sent does not hide the write: the result
+  carries `poll_error`, and `azure.migrate.job.list`,
+  `azure.migrate.assessment.list` or `azure.operation.status` show the
+  outcome. A group call that fails in its second step says that the first
+  step ran.
+
+#### The upload link
+
+`importUri` returns a signed link (a secret) and the job id. MEHO checks that
+the link is plain https to a blob host of the target's cloud, then uploads
+through `send` with a caller object that gives no `Authorization` header:
+MEHO's Azure token never goes to the link. The link is in no result, error,
+log or audit text. The trace mask (`trace_mask.py`) hides `uri`,
+`blobSasUri`, `errorSasUri` and `sasUri` in every Azure answer, and the shared
+`url_secret` rule hides the `sig` value of any link. The audit row holds a
+hash of the parameters, never the file; the result names the file by its
+SHA-256, size and row count.
+
+#### Limits and open points
+
+- At most 20,000 rows and 8 MiB per file. Header columns must include server
+  name, cores, memory and OS name. Azure checks every row; its reasons for
+  bad rows come back in `bad_rows` (at most 100, secrets filtered).
+- `machines`, `add` and `remove` take the machine `name` from
+  `azure.migrate.machine.list` (the API description says "machine names").
+  At most 1000 per call.
+- Not proven yet, to check in the lab: that CSV import works through the API
+  without the portal; what the import site needs in its `PUT` body (MEHO
+  sends the project's region only); whether importing the same file again
+  updates or duplicates machines (MEHO already refuses a repeat of the same
+  file unless a new `repeat_key` is set); whether the group type `Import` is
+  needed for imported servers; the exact upload host.
+
 ### Not in this group yet
 
 - `azure.migrate.report.link` (a short-lived download link for an assessment
   report, `dangerous`, after approval) is not built yet. The link is a
   secret: it must reach only the caller, never the audit row, a trace or the
   stored result.
-- The writes (CSV import, groups, assessments) come later. They can reuse the
-  name checks and rows in `migrate_rows.py` and `read_assessment` in
-  `migrate_reads.py`.
 
 ### Proven live
 
-Nothing yet. The lab login does not exist yet, so every read is proven with
-mocked HTTP only, with answers shaped like the examples in Azure's pinned
+Nothing yet. The lab login does not exist yet, so every read and write is
+proven with mocked HTTP only, with answers shaped like the examples in Azure's pinned
 API description files. Open points for the lab proof:
 
 - that the ID of an imported machine points at its import site, as the API

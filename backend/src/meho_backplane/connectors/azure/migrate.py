@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Azure Migrate reads: the ``migrate`` group of the Azure connector.
+"""Azure Migrate: the ``migrate`` group of the Azure connector.
 
 An agent reads what Azure Migrate knows about the servers a team plans to
 move to Azure: assessment projects, discovery sites, machines, groups,
 assessments and the per-machine results of an assessment (readiness,
-recommended size, monthly cost). Every operation here is a ``safe`` read and
-changes nothing in Azure.
+recommended size, monthly cost). Every operation defined in this module is a
+``safe`` read and changes nothing in Azure. The writes (CSV import, groups,
+assessments) and the import job list are in
+:mod:`meho_backplane.connectors.azure.migrate_write_ops`; :data:`OPS` and
+:class:`MigrateOps` include them.
 
 This module holds the group text (:data:`WHEN_TO_USE`), the guidance for the
 AI, the operation table (:data:`OPS`) and :class:`MigrateOps`: a small class
@@ -36,6 +39,11 @@ from meho_backplane.connectors.azure.migrate_schemas import (
     SITE_LIST_RESPONSE,
     params_schema,
 )
+from meho_backplane.connectors.azure.migrate_write_ops import (
+    WRITE_OPS,
+    WRITE_WHEN_TO_USE,
+    MigrateWriteOps,
+)
 from meho_backplane.connectors.azure.session import AzureTargetLike
 
 if TYPE_CHECKING:
@@ -58,8 +66,8 @@ WHEN_TO_USE: dict[str, str] = {
         "monthly cost per server). azure.migrate.site.list shows how the servers got "
         "in: appliance sites (VMware, Hyper-V, physical servers) or import sites (CSV "
         "files). Every machine row says its source, appliance or import; keep the two "
-        "apart. Read-only; the login needs the Reader role on the project's resource "
-        "group."
+        "apart. The reads need the Reader role on the project's resource group. "
+        + WRITE_WHEN_TO_USE
     ),
 }
 
@@ -254,7 +262,8 @@ def _read(
     )
 
 
-#: Every Azure Migrate operation. All of them are reads.
+#: Every Azure Migrate operation: the reads here, then the writes and the import job
+#: list of :mod:`meho_backplane.connectors.azure.migrate_write_ops`.
 OPS: tuple[AzureTypedOp, ...] = (
     _read(
         "azure.migrate.project.list",
@@ -334,6 +343,7 @@ OPS: tuple[AzureTypedOp, ...] = (
         "cost",
         "readiness",
     ),
+    *WRITE_OPS,
 )
 
 
@@ -347,8 +357,8 @@ def _connector(ops: MigrateOps) -> AzureConnector:
     return cast("AzureConnector", ops)
 
 
-class MigrateOps:
-    """The Azure Migrate reads as methods of ``AzureConnector``.
+class MigrateOps(MigrateWriteOps):
+    """The Azure Migrate operations as methods of ``AzureConnector``.
 
     ``AzureConnector`` lists this class among its base classes, so it takes
     over these methods (a mixin).

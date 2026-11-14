@@ -502,7 +502,10 @@ def test_every_operation_has_its_own_method_and_a_group_text() -> None:
         handler = getattr(AzureConnector, op.handler_attr, None)
         assert inspect.iscoroutinefunction(handler), op.op_id
         assert AZURE_TYPED_WHEN_TO_USE_BY_GROUP.get(op.group_key, "").strip(), op.op_id
-        modules_by_group.setdefault(op.group_key, set()).add(handler.__module__)
+        # A family may keep its writes in a ``<family>_write_ops`` module. That is
+        # still one family, with one group text.
+        family_module = handler.__module__.removesuffix("_write_ops")
+        modules_by_group.setdefault(op.group_key, set()).add(family_module)
     assert set(AZURE_TYPED_WHEN_TO_USE_BY_GROUP) == {op.group_key for op in AZURE_TYPED_OPS}
     # The group texts of all families are merged into one dict, so two families
     # with the same group key would silently keep only one text.

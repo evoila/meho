@@ -82,12 +82,17 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: meho-runners-ci
     timeout-minutes: 15
-    # The image is pulled through the image proxy cache of the CI cluster
-    # when the repository variable CI_IMAGE_PROXY (`<host>/<project>`) is
-    # set. The project is public with anonymous access, so no
-    # `credentials:` block is needed. The proxy keeps Docker Hub's
+    # This job runs the Semgrep scan inside the image below. In this
+    # repository the image comes from the image proxy cache of the CI
+    # cluster, named in the repository variable CI_IMAGE_PROXY
+    # (`<host>/<project>`). The project is public with anonymous access,
+    # so no `credentials:` block is needed. The proxy keeps Docker Hub's
     # namespace, so the `semgrep/semgrep` path appears verbatim under the
-    # prefix. Without the variable the job pulls from Docker Hub directly.
+    # prefix. When the variable is empty here, the image name is a text
+    # that is not a valid image name and names the variable, so
+    # "Initialize containers" fails at once and pulls nothing. Only a run
+    # in another repository (a fork that runs the workflows itself) pulls
+    # from Docker Hub directly.
     #
     # `container.credentials:` cannot coexist with the proxy prefix: GitHub
     # reads it as "log in to the registry that hosts this image", which is
@@ -100,7 +105,7 @@ jobs:
     #
     # Bump cadence: monthly review or on advisory.
     container:
-      image: ${{ vars.CI_IMAGE_PROXY && format('{0}/semgrep/semgrep:1.160.0', vars.CI_IMAGE_PROXY) || 'semgrep/semgrep:1.160.0' }}
+      image: ${{ vars.CI_IMAGE_PROXY && format('{0}/semgrep/semgrep:1.160.0', vars.CI_IMAGE_PROXY) || github.repository == 'evoila/meho' && 'Repository-variable-CI_IMAGE_PROXY-is-not-set' || 'semgrep/semgrep:1.160.0' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 

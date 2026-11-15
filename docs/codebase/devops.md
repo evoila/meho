@@ -2621,8 +2621,9 @@ on a secret:
   mechanics + red-lane protocol:
   [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 - The `secrets` context is unavailable in step-level `if:`, so the gate is
-  the job-env boolean `SPEC_SHELF_TOKEN_PRESENT` — presence only, never the
-  token value.
+  the job-env boolean `SPEC_SHELF_READY` — `true` when the token secret
+  and the `SPEC_SHELF_REPOSITORY` variable are both set; never the token
+  value.
 
 Licensing record, signoff gate, and the full provisioning/rotation runbook:
 [`docs/decisions/vendor-spec-ci-provisioning.md`](../decisions/vendor-spec-ci-provisioning.md).
@@ -3171,8 +3172,9 @@ Steps, in order:
    `azure/setup-helm@v5.0.1` (same SHA as `chart.yml`).
 5. **Configure kubectl (OIDC mode)** — `actions/github-script@v9.0.0`
    mints an OIDC ID token via `core.getIDToken(audience)` against the
-   consumer-chosen audience (a default in the workflow, override
-   via `vars.RKE2_OIDC_AUDIENCE`). Skipped when Option A's inputs
+   consumer-chosen audience from the repository variable
+   `RKE2_OIDC_AUDIENCE`. There is no default: when the variable is empty,
+   the step fails with a message that names it. Skipped when Option A's inputs
    aren't set, so Option B's kubeconfig path takes over below.
 6. **Build kubeconfig** — assembles `$HOME/.kube/config` from either
    the OIDC token + CA cert (Option A) or the base64-decoded

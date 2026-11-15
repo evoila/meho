@@ -7,9 +7,12 @@ name: meho-runners smoke
 #      transparently).
 #
 # The proxy address comes from the repository variable CI_IMAGE_PROXY, in
-# the form `<host>/<project>`. Without it the job is skipped. The optional
-# variable CI_PROXY_CA_NAME holds the common name of the private CA that
-# signs the proxy certificate. Without it the CA check is skipped.
+# the form `<host>/<project>`. The variable CI_PROXY_CA_NAME holds the
+# common name of the private CA that signs the proxy certificate. In this
+# repository the first step fails when one of them is empty, so the check
+# never skips quietly. In another repository (a fork that runs the
+# workflows itself) the job skips without CI_IMAGE_PROXY, and the CA check
+# skips without CI_PROXY_CA_NAME.
 #
 # Runs on every push to main and on workflow_dispatch, on the
 # meho-runners-ci pool.
@@ -19,35 +22,52 @@ on:
   workflow_dispatch:
 
 # The smoke job uses zero GITHUB_TOKEN capability: no checkout, no `gh`,
-# no API call that authenticates as the workflow (the Harbor probe is
+# no API call that authenticates as the workflow (the proxy probe is
 # anonymous against a public project). An empty map is the honest
 # minimum — it drops the repo-default write-all token this job would
 # otherwise carry on the self-hosted meho-runners-ci pool (CodeQL
 # actions/missing-workflow-permissions, alert #36).
 permissions: {}
 
-env:
-  # Pinned image used for the smoke pull. Bump deliberately as part of an
-  # alpine upgrade ticket; the smoke is verifying the cache pipeline, not
-  # the image content.
-  # Repository variable CI_IMAGE_PROXY: `<host>/<project>` of the image proxy.
-  CI_IMAGE_PROXY: ${{ vars.CI_IMAGE_PROXY }}
-  # Repository variable CI_PROXY_CA_NAME: common name of the private CA.
-  CI_PROXY_CA_NAME: ${{ vars.CI_PROXY_CA_NAME }}
-
 jobs:
   smoke:
-    # Skip cleanly when the repository variable is not set.
-    if: vars.CI_IMAGE_PROXY != ''
+    # In another repository, skip when the proxy variable is not set.
+    if: github.repository == 'evoila/meho' || vars.CI_IMAGE_PROXY != ''
     runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
       - name: Derive the proxy values
+        # Only this step gets the values of the repository variables:
+        # GitHub prints each step's `env:` in the public log. The step hides
+        # them in the rest of the log (`::add-mask::`) and passes them on
+        # through $GITHUB_ENV. The smoke pulls the pinned alpine image; bump
+        # it deliberately with an alpine upgrade, since the smoke checks the
+        # cache pipeline, not the image content.
+        env:
+          CI_IMAGE_PROXY: ${{ vars.CI_IMAGE_PROXY }}
+          CI_PROXY_CA_NAME: ${{ vars.CI_PROXY_CA_NAME }}
+          REQUIRE_VARIABLES: ${{ github.repository == 'evoila/meho' }}
         run: |
           set -euo pipefail
+          for name in CI_IMAGE_PROXY CI_PROXY_CA_NAME; do
+            if [ -z "${!name}" ] && [ "$REQUIRE_VARIABLES" = "true" ]; then
+              echo "::error title=Repository variable missing::The repository variable ${name} is empty. This check needs it. Set it under Settings > Secrets and variables > Actions > Variables."
+              exit 1
+            fi
+          done
           PROXY_HOST="${CI_IMAGE_PROXY%%/*}"
           PROXY_PROJECT="${CI_IMAGE_PROXY#*/}"
+          if [ "$CI_IMAGE_PROXY" = "$PROXY_HOST" ] || [ -z "$PROXY_HOST" ] || [ -z "$PROXY_PROJECT" ]; then
+            echo "::error title=Repository variable::CI_IMAGE_PROXY must have the form <host>/<project>."
+            exit 1
+          fi
+          echo "::add-mask::${CI_IMAGE_PROXY}"
+          echo "::add-mask::${PROXY_HOST}"
+          if [ -n "$CI_PROXY_CA_NAME" ]; then
+            echo "::add-mask::${CI_PROXY_CA_NAME}"
+          fi
           {
+            echo "CI_PROXY_CA_NAME=${CI_PROXY_CA_NAME}"
             echo "PROXY_HOST=${PROXY_HOST}"
             echo "SMOKE_IMAGE_PROJECT_PREFIXED=${CI_IMAGE_PROXY}/library/alpine:3.20"
             echo "PROXY_REPO_PATH=${PROXY_PROJECT}/library/alpine"
@@ -79,7 +99,8 @@ jobs:
           docker info --format '{{.ServerVersion}}'
 
       - name: Assert private CA trust is wired (proves the OS-trust mount works)
-        # Skipped when CI_PROXY_CA_NAME is not set.
+        # Skipped when CI_PROXY_CA_NAME is not set (only in another
+        # repository: here the first step fails instead).
         # The CA certificate is mounted into both the Docker daemon sidecar
         # and the runner container. Each one runs update-ca-certificates
         # before it starts, so the daemon can verify the proxy certificate
@@ -93,8 +114,8 @@ jobs:
         if: env.CI_PROXY_CA_NAME != ''
         run: |
           set -euo pipefail
-          # Just grep the bundle for the CA's common name.
-          if ! grep -q "$CI_PROXY_CA_NAME" \
+          # Look for the CA's common name in the bundle, as fixed text.
+          if ! grep -qF -- "$CI_PROXY_CA_NAME" \
                  /etc/ssl/certs/ca-certificates.crt 2>/dev/null \
                && ! docker run --rm \
                      -e PROXY_HOST="$PROXY_HOST" \

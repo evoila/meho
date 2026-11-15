@@ -688,36 +688,20 @@ jobs:
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      # Route testcontainers pulls through the image proxy cache of the CI
-      # cluster. The repository variable CI_IMAGE_PROXY (`<host>/<project>`)
-      # holds its prefix; the project is public with anonymous access.
-      # Without the variable the images come from Docker Hub (`docker.io`) directly. The
-      # test code reads these env vars with a docker.io short-name default — see backend/tests/test_db_engine.py
-      # `MEHO_TEST_PGVECTOR_IMAGE`, backend/tests/test_broadcast_client.py
-      # `MEHO_TEST_VALKEY_IMAGE` — so the env-only swap requires no
-      # source-code changes.
-      # `docker/login-action` below stays load-bearing until the proxy
-      # has shown a week of green cache hits.
-      MEHO_TEST_PGVECTOR_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
-      MEHO_TEST_VALKEY_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/valkey/valkey:8
-      # Vault dev-mode container for the G3.3-T7 kv/sys/auth e2e suite
-      # (backend/tests/integration/test_connectors_vault_dev_e2e.py).
-      # Same env-knob shape as the rows above: the test reads this with
-      # a docker.io short-name default (`hashicorp/vault:1.18`), so the
-      # proxy swap is config-only — no source change. Pinned to
-      # the 1.18 LTS minor (not `:latest`) so an upstream Vault release
-      # never breaks an unrelated PR.
-      MEHO_TEST_VAULT_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/hashicorp/vault:1.18
+      # The test images (MEHO_TEST_*_IMAGE) are set by the step "Read the
+      # CI repository variables" below, not here: GitHub prints the job's
+      # `env:` in the log of every step, and the image proxy name must not
+      # show in the public log.
       # #2949 — vendor vCenter spec-shelf wiring (see the checkout step
       # below + docs/decisions/vendor-spec-ci-provisioning.md).
-      # SPEC_SHELF_TOKEN_PRESENT surfaces *presence* of the
-      # SPEC_SHELF_TOKEN secret as a job-level boolean so the shelf
-      # checkout step can gate on it — the `secrets` context is NOT
-      # available in a step-level `if:` (same constraint the
-      # DOCKERHUB_USERNAME row above works around). Unlike that row,
-      # only the presence flag is surfaced, never the token value, so
-      # the secret is not exported into every step's environment.
-      SPEC_SHELF_TOKEN_PRESENT: ${{ secrets.SPEC_SHELF_TOKEN != '' && vars.SPEC_SHELF_REPOSITORY != '' }}
+      # SPEC_SHELF_READY is `true` when both the SPEC_SHELF_TOKEN secret
+      # and the SPEC_SHELF_REPOSITORY variable are set. The shelf steps
+      # gate on it, because the `secrets` context is NOT available in a
+      # step-level `if:` (same constraint the DOCKERHUB_USERNAME row above
+      # works around). Unlike that row, only this flag is surfaced, never
+      # the token value, so the secret is not exported into every step's
+      # environment.
+      SPEC_SHELF_READY: ${{ secrets.SPEC_SHELF_TOKEN != '' && vars.SPEC_SHELF_REPOSITORY != '' }}
       # Points the spec-shelf resolver (tests/_spec_shelf.py) at the
       # spec-shelf checkout. Set UNCONDITIONALLY: when the shelf checkout
       # was skipped (secret absent — fork PRs, Dependabot runs,
@@ -734,6 +718,33 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Read the CI repository variables
+        # The repository variables CI_IMAGE_PROXY (`<host>/<project>` of the
+        # image proxy cache of the CI cluster) and SPEC_SHELF_REPOSITORY
+        # (`<owner>/<name>` of the vendor spec shelf) hold internal names.
+        # Only this step gets their values. scripts/ci/repo_variables.sh
+        # hides them in the rest of the log and sets the test images below.
+        # In this repository an empty variable fails the job, so no test
+        # skips quietly. In another repository (a fork that runs the
+        # workflows itself) the images come from Docker Hub instead.
+        # The tests read each image with a Docker Hub default (for example
+        # backend/tests/test_db_engine.py and test_broadcast_client.py), so
+        # the swap needs no code change. The Vault image (the e2e suite in
+        # tests/integration/test_connectors_vault_dev_e2e.py) is pinned to
+        # the 1.18 LTS line, so an upstream release never breaks an
+        # unrelated pull request. The Docker Hub login below stays until the
+        # proxy has shown a week of green cache hits.
+        env:
+          CI_IMAGE_PROXY: ${{ vars.CI_IMAGE_PROXY }}
+          SPEC_SHELF_REPOSITORY: ${{ vars.SPEC_SHELF_REPOSITORY }}
+          REQUIRE_VARIABLES: ${{ github.repository == 'evoila/meho' }}
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_variables.sh" CI_IMAGE_PROXY SPEC_SHELF_REPOSITORY <<'IMAGES'
+          MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+          MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          MEHO_TEST_VAULT_IMAGE: PROXY/hashicorp/vault:1.18
+          IMAGES
 
       - name: Start memory sampling
         # Feeds the "Print peak memory" step at the end of this job. A small
@@ -759,7 +770,7 @@ jobs:
         # them. scripts/ci/spec_shelf.sh prints the shelf folders for the
         # sparse checkout below; the verify step after it checks each file.
         id: spec-shelf-list
-        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        if: env.SPEC_SHELF_READY == 'true'
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
@@ -799,7 +810,7 @@ jobs:
         # (the listed folders only), and the
         # SPEC_SHELF_TOKEN PAT is read-only, so the parallel fetches are
         # safe.
-        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        if: env.SPEC_SHELF_READY == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ vars.SPEC_SHELF_REPOSITORY }}
@@ -827,7 +838,7 @@ jobs:
         # exact regression #2949 closes). Without the secret this step
         # skips and lane-skip stays the documented degraded mode.
         # Prints file *presence* only — never spec content.
-        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        if: env.SPEC_SHELF_READY == 'true'
         working-directory: ${{ github.workspace }}
         run: bash scripts/ci/spec_shelf.sh verify ci/spec-shelf spec-shelf
 
@@ -1865,15 +1876,27 @@ jobs:
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      MEHO_TEST_PGVECTOR_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
-      MEHO_TEST_VALKEY_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/valkey/valkey:8
-      MEHO_TEST_VAULT_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/hashicorp/vault:1.18
+      # The test images (MEHO_TEST_*_IMAGE) are set by the step "Read the
+      # CI repository variables" (see python-unit-shard for why).
     defaults:
       run:
         working-directory: backend
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Read the CI repository variables
+        # Same as the step of the same name in python-unit-shard: it checks
+        # and hides the repository variables and sets the test images.
+        env:
+          CI_IMAGE_PROXY: ${{ vars.CI_IMAGE_PROXY }}
+          REQUIRE_VARIABLES: ${{ github.repository == 'evoila/meho' }}
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_variables.sh" CI_IMAGE_PROXY <<'IMAGES'
+          MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+          MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          MEHO_TEST_VAULT_IMAGE: PROXY/hashicorp/vault:1.18
+          IMAGES
 
       - name: Start memory sampling
         # Feeds the "Print peak memory" step at the end of this job. A small
@@ -2439,43 +2462,21 @@ jobs:
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      MEHO_TEST_PGVECTOR_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
-      MEHO_TEST_VALKEY_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/valkey/valkey:8
-      MEHO_TEST_VAULT_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/hashicorp/vault:1.18
-      # G3.2-T6 (#326) — k3s container fixture for the K8s typed-connector
-      # E2E acceptance harness (tests/integration/test_connectors_k8s_e2e.py
-      # and the existing tests/integration/test_connectors_k8s_k3d.py).
-      # Pinned to the same minor the k3d/k3s fixture's in-code default
-      # uses (rancher/k3s:v1.32.5-k3s1) so the image proxy serves the
-      # exact tag the testcontainers fixture asks for, without a docker.io
-      # round-trip.
-      MEHO_TEST_K3S_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/rancher/k3s:v1.32.5-k3s1
+      # The test images (MEHO_TEST_*_IMAGE) are set by the step "Read the
+      # CI repository variables" (see python-unit-shard for why).
       # The k3d test module runs once for each k3s tag in this list: the
       # oldest line the Kubernetes connector serves (1.32) and two lines
       # that upstream still maintains (1.35 and 1.37). The test takes the
-      # image name from MEHO_TEST_K3S_IMAGE above and swaps in each tag. An
-      # image that cannot be pulled skips its run with the reason shown
-      # (-rs below). The other k3s tests keep using the single image above.
+      # image name from MEHO_TEST_K3S_IMAGE and swaps in each tag. An image
+      # that cannot be pulled skips its run with the reason shown (-rs
+      # below). The other k3s tests keep using the single image.
       MEHO_TEST_K3S_TAGS: v1.32.5-k3s1,v1.35.10-k3s1,v1.37.2-k3s1
-      # G11.2-T7 (#1098) — Keycloak 26.x container fixture for the
-      # live-IdP integration test
-      # (backend/tests/integration/test_auth_keycloak_client_credentials.py).
-      # Unlike the rows above this one has **no docker.io short-name
-      # default** in the fixture: the Keycloak image is ~600 MB and an
-      # unauthenticated docker.io pull would reliably exhaust the
-      # cluster's shared NAT egress bucket, so the fixture skips when
-      # MEHO_TEST_KEYCLOAK_IMAGE is unset rather than falling back. The
-      # proxied tag is the only path that runs the suite to
-      # pass; everywhere else (local dev sandboxes, agent sandboxes,
-      # any future fork PR job that doesn't see this env) the test
-      # skips cleanly with a clear remediation message.
-      MEHO_TEST_KEYCLOAK_IMAGE: ${{ vars.CI_IMAGE_PROXY && format('{0}/keycloak/keycloak:26.0', vars.CI_IMAGE_PROXY) || '' }}
       # #2949 — vendor spec-shelf wiring for the tests/integration
       # real-spec lanes. See the comment on the python-unit-shard job's
       # occurrence of these two rows for the full rationale
       # (presence-flag gating; the unconditional docs-root that degrades
       # to lane-skip when the shelf checkout was skipped).
-      SPEC_SHELF_TOKEN_PRESENT: ${{ secrets.SPEC_SHELF_TOKEN != '' && vars.SPEC_SHELF_REPOSITORY != '' }}
+      SPEC_SHELF_READY: ${{ secrets.SPEC_SHELF_TOKEN != '' && vars.SPEC_SHELF_REPOSITORY != '' }}
       MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
     defaults:
       run:
@@ -2483,6 +2484,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Read the CI repository variables
+        # Same as the step of the same name in python-unit-shard: it checks
+        # and hides the repository variables and sets the test images.
+        # The Keycloak image has no Docker Hub fallback: the image is about
+        # 600 MB, and anonymous pulls would use up the shared pull limit. So
+        # without the proxy (only in another repository) it is empty, and
+        # the live Keycloak test skips (tests/integration/
+        # test_auth_keycloak_client_credentials.py). The k3s image uses the
+        # tag of the fixture's own default, so the proxy serves the exact
+        # tag the tests ask for.
+        env:
+          CI_IMAGE_PROXY: ${{ vars.CI_IMAGE_PROXY }}
+          SPEC_SHELF_REPOSITORY: ${{ vars.SPEC_SHELF_REPOSITORY }}
+          REQUIRE_VARIABLES: ${{ github.repository == 'evoila/meho' }}
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_variables.sh" CI_IMAGE_PROXY SPEC_SHELF_REPOSITORY <<'IMAGES'
+          MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+          MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          MEHO_TEST_VAULT_IMAGE: PROXY/hashicorp/vault:1.18
+          MEHO_TEST_K3S_IMAGE: PROXY/rancher/k3s:v1.32.5-k3s1
+          MEHO_TEST_KEYCLOAK_IMAGE: PROXY_ONLY/keycloak/keycloak:26.0
+          IMAGES
 
       - name: Start memory sampling
         # The same sampler as the unit shards (scripts/ci/memory_sampler.sh):
@@ -2504,7 +2528,7 @@ jobs:
         # them. scripts/ci/spec_shelf.sh prints the shelf folders for the
         # sparse checkout below; the verify step after it checks each file.
         id: spec-shelf-list
-        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        if: env.SPEC_SHELF_READY == 'true'
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
@@ -2521,7 +2545,7 @@ jobs:
         # licensing pointer (docs/decisions/vendor-spec-ci-
         # provisioning.md), the secret scope, and the fork/Dependabot
         # degrade-to-skip analysis.
-        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        if: env.SPEC_SHELF_READY == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ vars.SPEC_SHELF_REPOSITORY }}
@@ -2534,7 +2558,7 @@ jobs:
       - name: Verify spec-shelf provisioned the pinned specs
         # Fail-loud layout guard — same rationale as the
         # python-unit-shard job's occurrence.
-        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        if: env.SPEC_SHELF_READY == 'true'
         working-directory: ${{ github.workspace }}
         run: bash scripts/ci/spec_shelf.sh verify ci/spec-shelf spec-shelf
 
@@ -2822,16 +2846,28 @@ jobs:
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       # The 3 forward-compat rollback tests spin up pgvector via
-      # testcontainers; route the pull through the image proxy cache like
-      # the sibling jobs (never `:latest`).
-      MEHO_TEST_PGVECTOR_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
-      MEHO_TEST_VALKEY_IMAGE: ${{ vars.CI_IMAGE_PROXY || 'docker.io' }}/valkey/valkey:8
+      # testcontainers, through the image proxy cache like the sibling
+      # jobs (never `:latest`).
+      # The test images (MEHO_TEST_*_IMAGE) are set by the step "Read the
+      # CI repository variables" (see python-unit-shard for why).
     defaults:
       run:
         working-directory: backend
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Read the CI repository variables
+        # Same as the step of the same name in python-unit-shard: it checks
+        # and hides the repository variables and sets the test images.
+        env:
+          CI_IMAGE_PROXY: ${{ vars.CI_IMAGE_PROXY }}
+          REQUIRE_VARIABLES: ${{ github.repository == 'evoila/meho' }}
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_variables.sh" CI_IMAGE_PROXY <<'IMAGES'
+          MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+          MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          IMAGES
 
       - name: Docker Hub login (for testcontainers pulls)
         # Authenticated pulls avoid the shared-NAT Docker Hub anonymous

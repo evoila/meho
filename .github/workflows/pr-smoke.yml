@@ -140,9 +140,6 @@ jobs:
       RKE2_CA_CERT: ${{ secrets.RKE2_CA_CERT }}
       RDC_KUBECONFIG: ${{ secrets.RDC_KUBECONFIG }}
       RKE2_API_SERVER: ${{ vars.RKE2_API_SERVER }}
-      # Repository variable RKE2_OIDC_AUDIENCE: the audience the cluster API server trusts.
-      # No default: the OIDC step fails with a clear message when it is not set.
-      OIDC_AUDIENCE: ${{ vars.RKE2_OIDC_AUDIENCE }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       # PR head SHA, not branch ref: fork-PR-target hardening pattern
       # forbids checkout `ref:` from accepting a moving label the PR
@@ -251,6 +248,13 @@ jobs:
         # Option B fallback.
         if: env.RKE2_CA_CERT != '' && env.RKE2_API_SERVER != ''
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          # Repository variable RKE2_OIDC_AUDIENCE: the audience the cluster
+          # API server trusts. No default: this step fails with a clear
+          # message when it is not set. Only this step gets the value
+          # (GitHub prints each step's `env:` in the log), and the script
+          # hides it in the rest of the log.
+          OIDC_AUDIENCE: ${{ vars.RKE2_OIDC_AUDIENCE }}
         with:
           script: |
             // Mint an OIDC ID token bound to the consumer-chosen audience.
@@ -264,6 +268,7 @@ jobs:
               core.setFailed('Repository variable RKE2_OIDC_AUDIENCE is not set. Set it to the audience the cluster API server trusts.');
               return;
             }
+            core.setSecret(audience);
             const token = await core.getIDToken(audience);
             // Treat the token as a secret so it's redacted from logs even
             // if a downstream step accidentally echoes it.

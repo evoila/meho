@@ -4715,8 +4715,13 @@ approval.</p>
 </code></pre></div>
 <ul>
 <li>The flow is missing: MEHO makes it with its settings, maps
-  <code>meho-touch</code> to level 3, adds the <code>amr</code> mapper to <code>meho-web</code>, and
-  binds the flow. The binding is the last change.</li>
+  <code>meho-touch</code> to level 3, adds the <code>amr</code> mapper to <code>meho-web</code>, gives the
+  flow the company login default when the realm's browser flow has one,
+  and binds the flow. The binding is the last change.</li>
+<li>Keycloak refuses a request with HTTP 403: MEHO names the missing role
+  and the account. When it was making the flow, the flow may be half-made.
+  Delete it in Keycloak before you run again, or the next run stops with
+  "another shape".</li>
 <li>Everything is there: MEHO changes nothing, and every change flag in
   the result is <code>false</code>. So the call is safe to run twice.</li>
 <li>The flow is there with other steps or other settings: MEHO stops,

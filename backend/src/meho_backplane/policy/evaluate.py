@@ -23,8 +23,9 @@ The schema is fixed. There is no rule language. The order is fixed too:
    service login's wait (never a floor, except a sandbox delete grant).
 
 Some steps stay in the dispatcher and are not here: the children of an
-approved run, the wait of a secret reveal, the announce gate, the role
-floor check when an approved call resumes, and the satellite ladder.
+approved run, the wait of a secret reveal, the announce gate (it never
+asks a person for a claim, and asks every other caller), the role floor
+check when an approved call resumes, and the satellite ladder.
 
 The function is pure: no database, no settings, no log line. The caller
 does the lookups (:mod:`meho_backplane.policy.shadow`). While the

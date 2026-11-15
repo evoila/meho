@@ -5,7 +5,8 @@
 
 ``announce_claim_gap`` decides whether the caller holds an active announce
 claim that covers a write-class op, and if not, why. The reflex advisory
-and the opt-in announce gate both use it.
+and the opt-in announce gate both use it. Since #3762 only trusted claims
+count, and each claim is judged by its newest step.
 
 Before #4091 the lookup read the newest 100 entries of the Valkey stream.
 On a busy tenant the caller's claim fell out of those 100 entries while
@@ -29,6 +30,7 @@ import pytest
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import announce_claim_lookup
 from meho_backplane.broadcast import client as broadcast_client
+from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
 from meho_backplane.broadcast.announce_claim_lookup import (
     announce_claim_gap,
     caller_has_active_announce_claim,
@@ -37,6 +39,8 @@ from meho_backplane.broadcast.announce_gate import (
     announce_gate_blocks,
     reset_announce_gate_cache_for_testing,
 )
+from meho_backplane.broadcast.archive_sequence import next_announcement_seq
+from meho_backplane.broadcast.publisher import _announcement_row
 from meho_backplane.broadcast.reflex import (
     _ANNOUNCE_NUDGES,
     REFLEX_ADVISORY_EXTRAS_KEY,
@@ -86,7 +90,9 @@ def _no_stream_read() -> Iterator[None]:
         yield
 
 
-def _operator(sub: str = _ME, *, tenant_id: UUID = _TENANT) -> Operator:
+def _operator(
+    sub: str = _ME, *, tenant_id: UUID = _TENANT, kind: PrincipalKind = PrincipalKind.USER
+) -> Operator:
     return Operator(
         sub=sub,
         name=sub,
@@ -94,7 +100,7 @@ def _operator(sub: str = _ME, *, tenant_id: UUID = _TENANT) -> Operator:
         raw_jwt="fixture-jwt-not-real",
         tenant_id=tenant_id,
         tenant_role=TenantRole.OPERATOR,
-        principal_kind=PrincipalKind.USER,
+        principal_kind=kind,
     )
 
 
@@ -176,6 +182,53 @@ async def test_no_claim_at_all() -> None:
     assert not await caller_has_active_announce_claim(
         _operator(), op_class=_OP_CLASS, target_name=_VC
     )
+
+
+async def test_completed_claim_is_no_claim() -> None:
+    """A claim whose newest step is the completion is finished (#3762)."""
+    claim_id = uuid.uuid4()
+    await _claim(minutes_ago=5, phase="start", claim_id=claim_id, target=_VC)
+    await _claim(minutes_ago=1, phase="completion", claim_id=claim_id, target=_VC)
+    assert await _gap() == "no_claim"
+
+
+async def test_update_after_start_keeps_the_claim() -> None:
+    claim_id = uuid.uuid4()
+    await _claim(minutes_ago=5, phase="start", claim_id=claim_id, target=_VC)
+    await _claim(minutes_ago=1, phase="update", claim_id=claim_id, target=_VC)
+    assert await _gap() is None
+
+
+async def test_newest_step_decides_the_target() -> None:
+    """An update that names another target moves the claim there."""
+    claim_id = uuid.uuid4()
+    await _claim(minutes_ago=5, phase="start", claim_id=claim_id, target=_VC)
+    await _claim(minutes_ago=1, phase="update", claim_id=claim_id, target="vc-other")
+    assert await _gap() == "other_target"
+
+
+async def test_step_without_ttl_counts_as_expired() -> None:
+    await _claim(target=_VC, ttl_minutes=None)
+    assert await _gap() == "expired"
+
+
+async def test_legacy_announcement_without_trusted_claim_is_no_claim() -> None:
+    """A row from before trusted admission is history, never a claim (#3762)."""
+    legacy = AgentAnnouncementEvent(
+        tenant_id=_TENANT,
+        principal_sub=_ME,
+        activity="legacy note",
+        target=_VC,
+        planned_op_class="write",
+        ttl_minutes=60,
+        phase="start",
+        ts=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    async with get_sessionmaker()() as session:
+        seq = await next_announcement_seq(session, _TENANT)
+        session.add(_announcement_row(legacy, None, seq))
+        await session.commit()
+    assert await _gap() == "no_claim"
 
 
 async def test_claims_of_other_principals_and_tenants_do_not_count() -> None:
@@ -309,17 +362,19 @@ async def _enable_gate() -> None:
 
 
 async def test_announce_gate_passes_with_an_archived_claim() -> None:
+    """The gate asks only an agent for a claim (#3762); the archive holds it."""
     await _enable_gate()
+    agent = _operator(kind=PrincipalKind.AGENT)
     assert (
         await announce_gate_blocks(
-            _operator(), op_class=_OP_CLASS, safety_level="caution", target_name=_VC
+            agent, op_class=_OP_CLASS, safety_level="caution", target_name=_VC
         )
         is not None
     )
     await _claim(target=_VC)
     assert (
         await announce_gate_blocks(
-            _operator(), op_class=_OP_CLASS, safety_level="caution", target_name=_VC
+            agent, op_class=_OP_CLASS, safety_level="caution", target_name=_VC
         )
         is None
     )

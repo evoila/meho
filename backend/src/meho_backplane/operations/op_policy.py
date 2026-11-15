@@ -422,7 +422,8 @@ async def apply_effective_policy(
     column) gets :attr:`EffectivePolicy.always_wait`, so the grant checks
     see it. ``row.policy_category``, ``policy_labels`` and
     ``policy_rule_ref`` (not columns either) get the classification, so
-    the call contract and the approval request can show it.
+    approver routing can match the category and the call contract and the
+    approval request can show it.
     """
     policies = await effective_policy_map(
         session, tenant_id=tenant_id, rows=[row], group_keys=group_keys

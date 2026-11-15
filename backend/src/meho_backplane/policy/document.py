@@ -13,7 +13,9 @@ It holds:
   (``default``);
 * ``classifications``: the entries that give connectors, operation groups
   and operations a category, labels, a higher risk level or the "always
-  wait" mark (:mod:`meho_backplane.policy.classification`).
+  wait" mark (:mod:`meho_backplane.policy.classification`);
+* ``routing``: who is asked to approve a change that waits, by category,
+  connector or risk level (:mod:`meho_backplane.policy.routing`).
 
 The parser uses the strict YAML loader of the settings file
 (:mod:`meho_backplane.instance_settings.schema`): a repeated key, a YAML
@@ -43,6 +45,7 @@ from pydantic import (
     model_validator,
 )
 
+from meho_backplane.auth.operator import RoleGroup
 from meho_backplane.instance_settings.schema import (
     _load_yaml,
     format_validation_errors,
@@ -51,6 +54,7 @@ from meho_backplane.instance_settings.schema import (
 from meho_backplane.policy.store import _check_labels
 
 __all__ = [
+    "GROUP_KINDS",
     "MAX_POLICY_BYTES",
     "POLICY_VERSION",
     "ParsedPolicy",
@@ -69,6 +73,9 @@ POLICY_VERSION: Final[str] = "v1"
 MAX_POLICY_BYTES: Final[int] = 1024 * 1024
 
 _CATEGORY_RE: Final[str] = r"^[a-z][a-z0-9_-]{0,62}$"
+
+#: The five login group kinds a routing entry may ask, in this order.
+GROUP_KINDS: Final[tuple[str, ...]] = tuple(kind.value for kind in RoleGroup)
 _PATTERN = Annotated[str, Field(min_length=1, max_length=200)]
 
 
@@ -140,6 +147,42 @@ class PolicyTaxonomy(_Strict):
         return value
 
 
+class PolicyRouteMatch(_Strict):
+    """``routing[].match``: which waiting changes the entry routes.
+
+    ``category`` and ``risk`` are checked later
+    (:func:`meho_backplane.policy.validate.check_document`).
+    """
+
+    category: Annotated[str, Field(min_length=1, max_length=63)] | None = None
+    connector: _PATTERN | None = None
+    risk: Annotated[str, Field(min_length=1, max_length=63)] | None = None
+
+    @model_validator(mode="after")
+    def _one_field_at_least(self) -> PolicyRouteMatch:
+        if self.category is None and self.connector is None and self.risk is None:
+            raise ValueError("needs at least one of category, connector or risk")
+        return self
+
+
+class PolicyRoute(_Strict):
+    """``routing[]``: one entry. The group kinds that are asked to approve."""
+
+    match: PolicyRouteMatch
+    approvers: list[str] = Field(min_length=1, max_length=len(GROUP_KINDS))
+
+    @field_validator("approvers")
+    @classmethod
+    def _known_kinds(cls, value: list[str]) -> list[str]:
+        if any(kind not in GROUP_KINDS for kind in value):
+            raise ValueError(
+                "names a group kind that does not exist; use " + ", ".join(GROUP_KINDS)
+            )
+        if len(set(value)) != len(value):
+            raise ValueError("names a group kind twice")
+        return value
+
+
 class PolicyFile(_Strict):
     """The whole file. ``policy`` is checked separately for a clear sentence."""
 
@@ -147,6 +190,7 @@ class PolicyFile(_Strict):
     description: Annotated[str, Field(max_length=2000)] | None = None
     taxonomy: PolicyTaxonomy | None = None
     classifications: list[PolicyClassification] = Field(default_factory=list, max_length=2000)
+    routing: list[PolicyRoute] = Field(default_factory=list, max_length=200)
 
 
 @dataclass
@@ -166,6 +210,16 @@ def _repeated_match_mistakes(model: PolicyFile) -> list[str]:
             mistakes.append(
                 f"`classifications[{index}].match` repeats `classifications[{seen[key]}]`; "
                 "list each match once."
+            )
+        else:
+            seen[key] = index
+    seen = {}
+    for index, route in enumerate(model.routing):
+        key = json.dumps(route.match.model_dump(exclude_none=True), sort_keys=True)
+        if key in seen:
+            mistakes.append(
+                f"`routing[{index}].match` repeats `routing[{seen[key]}]`; the first one "
+                "always wins, so list each match once."
             )
         else:
             seen[key] = index
@@ -238,6 +292,11 @@ def document_of(model: PolicyFile) -> dict[str, Any]:
         if taxonomy:
             document["taxonomy"] = taxonomy
     document["classifications"] = [_entry_dict(e) for e in model.classifications]
+    if model.routing:
+        document["routing"] = [
+            {"match": r.match.model_dump(exclude_none=True), "approvers": list(r.approvers)}
+            for r in model.routing
+        ]
     return document
 
 
@@ -260,7 +319,8 @@ def canonical_sha256(document: dict[str, Any] | None) -> str:
 
     Key order, comments and empty keys do not count, and neither does the
     order of the classification entries or of the categories: the most
-    specific entry wins, not the first one.
+    specific entry wins, not the first one. The order of the ``routing``
+    entries counts: the first entry that matches wins.
     """
     meaning = normalise_document(document)
     if "classifications" in meaning:

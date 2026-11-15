@@ -205,8 +205,7 @@ def test_unparseable_random_bytes_returns_malformed_jws() -> None:
 def test_consumer_signal_bearer_returns_malformed_jws() -> None:
     """The exact consumer-signal probe surfaces ``malformed_jws``.
 
-    Reproduces the bearer recorded in
-    ``rdc-hetzner-dc/meho-signals/auth-invalid-token-opaque-error.yaml``
+    Reproduces the bearer from a consumer report
     (``Bearer not-a-real-jwt``) verbatim. Acceptance criterion 1 of
     G0.13-T1 #1131: the consumer's exact bad-bearer scenario carries a
     classifier code that names the failure class.

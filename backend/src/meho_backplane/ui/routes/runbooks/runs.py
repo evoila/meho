@@ -129,6 +129,7 @@ from meho_backplane.ui.auth.middleware import (
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.runbooks.editor import set_csrf_cookie
+from meho_backplane.ui.routes.work_ref_form import form_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["register_runs_routes"]
@@ -163,10 +164,6 @@ _PUBLISHED_PICKER_LIMIT: Final[int] = 200
 #: value reaches the service.
 _MAX_SLUG_LENGTH: Final[int] = 256
 _MAX_TARGET_LENGTH: Final[int] = 512
-
-#: Cap on the ``work_ref`` form field (an opaque external change-ticket
-#: reference -- a GitHub issue ref, a Jira key, a CR id).
-_MAX_WORK_REF_LENGTH: Final[int] = 512
 
 #: Cap on the raw ``params`` JSON textarea before parsing. A substitution
 #: context is small; this guards the JSON parser against an unbounded paste.
@@ -379,7 +376,7 @@ async def _build_start_request(
     if not target:
         return await _render_start_error(request, session, "Target is required.")
     params = _parse_params_or_422(form.params_raw)
-    work_ref = form.work_ref.strip() or None
+    work_ref = form_work_ref(form.work_ref)
     return StartRunRequest(template_slug=slug, target=target, params=params, work_ref=work_ref)
 
 
@@ -471,7 +468,7 @@ def register_runs_routes(router: APIRouter) -> None:
         template_slug: str = Form(default="", max_length=_MAX_SLUG_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
         params: str = Form(default="", max_length=_MAX_PARAMS_JSON_LENGTH),
-        work_ref: str = Form(default="", max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Form(default=""),
     ) -> HTMLResponse:
         form = _StartForm(
             template_slug=template_slug,

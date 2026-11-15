@@ -21,7 +21,7 @@ MEHO's convention is that a per-connector transport helper stays
 package-local until **three or more** connectors consume it: two copies
 is a defensible per-connector-transport convention, more is not. This
 helper crossed that line. Holodeck (#853, ``pwsh``/PS7 on the Photon-OS
-HoloRouter appliance) established the transport; windows_dns (#2760,
+router appliance) established the transport; windows_dns (#2760,
 Windows PowerShell 5.1 on an AD-DNS host) copied it — and its ``_pwsh``
 header flagged the shared hoist as future work (#2759); the
 Microsoft-estate initiative (#3259) adds four more (winsrv / msad / wsfc
@@ -40,7 +40,7 @@ Holodeck's hard-coded transport did:
 
 * ``POWERSHELL_EXECUTABLE`` — ``pwsh`` (PS7, the default) vs
   ``powershell`` (Windows PowerShell 5.1). A Windows Server host ships
-  ``powershell`` but not ``pwsh`` by default; the Photon-OS HoloRouter
+  ``powershell`` but not ``pwsh`` by default; the Photon-OS router
   ships ``pwsh``. Every real connector sets this explicitly; the default
   is only the fallback for an unset connector.
 * ``POWERSHELL_SCRIPT_PREFIX`` — a string prepended to every script

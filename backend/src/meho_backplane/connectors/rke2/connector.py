@@ -168,6 +168,9 @@ class Rke2SshConnector(SshConnector):
     product = "rke2"
     version = "1.x"
     impl_id = "rke2-ssh"
+    # RKE2 follows the Kubernetes minor lines. The token-rotate version check
+    # in ops_write.py is separate and stays as it is.
+    supported_version_range = ">=1.32,<1.38"
 
     async def fingerprint(
         self,

@@ -79,9 +79,72 @@ class _K3sTarget:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def k3s_kubeconfig_and_target() -> Any:
+# The Kubernetes lines the connector claims to serve (its
+# ``supported_version_range``) that CI boots: the oldest supported line and
+# two of the lines upstream still maintains.
+_DEFAULT_K3S_IMAGES: tuple[str, ...] = (
+    "rancher/k3s:v1.32.5-k3s1",
+    "rancher/k3s:v1.35.10-k3s1",
+    "rancher/k3s:v1.37.2-k3s1",
+)
+
+
+def _k3s_images() -> list[str]:
+    """Return the k3s images the module runs against, one run each.
+
+    ``MEHO_TEST_K3S_TAGS`` (comma separated k3s tags) picks one run per
+    tag. The image name comes from ``MEHO_TEST_K3S_IMAGE`` (for example a
+    registry mirror), or is ``rancher/k3s``. Without tags,
+    ``MEHO_TEST_K3S_IMAGE`` picks a single image, as before. Otherwise the
+    defaults above run.
+    """
+    single = os.environ.get("MEHO_TEST_K3S_IMAGE")
+    tags = [item.strip() for item in os.environ.get("MEHO_TEST_K3S_TAGS", "").split(",")]
+    tags = [tag for tag in tags if tag]
+    if tags:
+        name, _, tag = (single or "rancher/k3s").rpartition(":")
+        if not name or "/" in tag:  # no tag, maybe a registry port
+            name = single or "rancher/k3s"
+        return [f"{name}:{tag}" for tag in tags]
+    return [single] if single else list(_DEFAULT_K3S_IMAGES)
+
+
+# The full module runs on the first image. The other images run this smoke
+# set only: the read paths that depend most on the server's answer shapes.
+# This keeps the CI shard inside its time limit.
+_SMOKE_TESTS = frozenset(
+    {
+        "test_fingerprint_against_k3s_returns_product_k3s",
+        "test_probe_against_running_k3s_returns_ok",
+        "test_namespace_list_against_k3s_returns_default_set",
+        "test_node_list_against_k3s_returns_at_least_one_node",
+        "test_pod_list_against_k3s_returns_kube_system_pods",
+        "test_deployment_list_against_k3s_kube_system",
+        "test_event_list_against_k3s_returns_namespaced_events",
+        "test_discover_topology_against_k3s_returns_cluster_namespaces_and_nodes",
+        "test_exec_against_k3s_captures_stdout_and_exit_zero",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _smoke_only_on_extra_images(request: pytest.FixtureRequest) -> None:
+    callspec = getattr(request.node, "callspec", None)
+    image = callspec.params.get("k3s_kubeconfig_and_target") if callspec else None
+    if (
+        image is not None
+        and image != _k3s_images()[0]
+        and request.node.originalname not in _SMOKE_TESTS
+    ):
+        pytest.skip("full run is on the first k3s image only; this image runs the smoke set")
+
+
+@pytest.fixture(scope="module", params=_k3s_images(), ids=lambda image: image.rsplit(":", 1)[-1])
+def k3s_kubeconfig_and_target(request: pytest.FixtureRequest) -> Any:
     """Boot a k3s container; yield (kubeconfig_dict, target stub).
+
+    Runs once for each image from :func:`_k3s_images`. An image that cannot
+    be pulled skips its run with the reason shown.
 
     Container shut down on fixture teardown. The kubeconfig the
     container exposes points to the container's host-mapped TLS port,
@@ -98,16 +161,12 @@ def k3s_kubeconfig_and_target() -> Any:
     except ImportError as exc:  # pragma: no cover — testcontainers ships k3s in 4.x
         pytest.skip(f"testcontainers.k3s unavailable: {exc}")
 
-    # Default tag pinned to a known-good k3s minor aligned with
-    # ``kubernetes_asyncio>=32,<33`` (both target the K8s 1.32 API).
-    # ``rancher/k3s:latest`` would let an upstream release with a
-    # regression in ``/readyz`` / ``/version`` / auth break CI on PRs
-    # that did not touch the connector — same rationale the rest of
-    # the integration suite already follows for ``pgvector/pgvector``
-    # (``MEHO_TEST_PGVECTOR_IMAGE`` defaults to a pinned minor, not
-    # ``:latest``). ``MEHO_TEST_K3S_IMAGE`` override stays for a
-    # registry-mirror swap or a deliberate version bump.
-    image = os.environ.get("MEHO_TEST_K3S_IMAGE", "rancher/k3s:v1.32.5-k3s1")
+    # Tags are pinned, never ``latest``: an upstream release with a
+    # regression in ``/readyz`` / ``/version`` / auth must not break CI on
+    # PRs that did not touch the connector. 1.32 matches
+    # ``kubernetes_asyncio>=32,<33``; the newer lines check the connector
+    # against the servers its range also claims.
+    image = request.param
     try:
         container = K3SContainer(image=image)
         container.start()

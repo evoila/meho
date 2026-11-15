@@ -21,6 +21,12 @@
 #      `exclusiveMaximum: true`. oapi-codegen v2 models these fields
 #      as bool and rejects the numeric form outright.
 #
+# One more rewrite is for oapi-codegen itself: the response fields in
+# `_NULLABLE_OBJECT_REFS` (`$ref` + `nullable`) are wrapped in `allOf`.
+# oapi-codegen drops `nullable` next to a bare `$ref`, so the Go field
+# would be a plain struct and print `null` as an empty object. With the
+# wrapper it is a pointer, and `null` stays `null`.
+#
 # All transforms are lossless for the current spec; if a richer 3.1
 # construct ever lands in the backplane (`type: ["string","null"]`
 # array form, prefixItems on tuples, etc.) extend this script
@@ -100,12 +106,43 @@ def _downgrade_exclusive_bounds(node: Any) -> Any:
     return node
 
 
+# (schema, property) pairs whose ``null`` the Go client must keep. The list
+# is explicit: on a request field the API compatibility check counts the
+# ``allOf`` wrapper as a breaking change.
+_NULLABLE_OBJECT_REFS = {("ClassificationValues", "in_force")}
+
+
+def _wrap_nullable_object_refs(spec: dict) -> dict:
+    """Wrap each field of ``_NULLABLE_OBJECT_REFS`` in ``allOf``.
+
+    oapi-codegen reads ``nullable`` from the schema a ``$ref`` points to,
+    not from the property, so ``{"$ref": ..., "nullable": true}`` turns
+    into a plain Go struct. ``{"allOf": [{"$ref": ...}], "nullable": true}``
+    turns into a pointer without ``omitempty``, so ``null`` survives a
+    round trip.
+    """
+    schemas = spec.get("components", {}).get("schemas", {})
+    for schema_name, prop_name in _NULLABLE_OBJECT_REFS:
+        properties = schemas.get(schema_name, {}).get("properties", {})
+        prop = properties.get(prop_name)
+        if prop is None or "$ref" not in prop or not prop.get("nullable"):
+            raise SystemExit(
+                f"error: {schema_name}.{prop_name} is no longer a nullable $ref; "
+                "update _NULLABLE_OBJECT_REFS in snapshot-openapi.py"
+            )
+        wrapped = {"allOf": [{"$ref": prop["$ref"]}]}
+        wrapped.update({k: v for k, v in prop.items() if k != "$ref"})
+        properties[prop_name] = wrapped
+    return spec
+
+
 def downgrade(spec: dict) -> dict:
     """Apply all 3.1 → 3.0 transforms on a copy of the spec."""
     spec = json.loads(json.dumps(spec))  # deep copy
     spec["openapi"] = "3.0.3"
     spec = _downgrade_anyof_null(spec)
     spec = _downgrade_exclusive_bounds(spec)
+    spec = _wrap_nullable_object_refs(spec)
     return spec
 
 

@@ -110,12 +110,12 @@ func TestDecodeFlatResultNullAndEmpty(t *testing.T) {
 }
 
 func TestDecodeRowsResultHappy(t *testing.T) {
-	raw := json.RawMessage(`{"rows":[{"name":"evba.lab","type":"master","file":"/etc/bind/db.evba.lab"}],"total":1}`)
+	raw := json.RawMessage(`{"rows":[{"name":"example.test","type":"master","file":"/etc/bind/db.example.test"}],"total":1}`)
 	rows, err := decodeRowsResult(raw)
 	if err != nil {
 		t.Fatalf("decodeRowsResult: %v", err)
 	}
-	if len(rows) != 1 || rows[0]["name"] != "evba.lab" {
+	if len(rows) != 1 || rows[0]["name"] != "example.test" {
 		t.Fatalf("decoded: %+v", rows)
 	}
 }
@@ -148,7 +148,7 @@ func TestAssembleViewsBundleHappy(t *testing.T) {
 	if err := os.MkdirAll(zonesDir, 0o755); err != nil {
 		t.Fatalf("mkdir zones: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(zonesDir, "db.evba.lab"), []byte("zone content"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(zonesDir, "db.example.test"), []byte("zone content"), 0o644); err != nil {
 		t.Fatalf("write zone: %v", err)
 	}
 	bundle, err := assembleViewsBundle(viewsConf, zonesDir)
@@ -158,7 +158,7 @@ func TestAssembleViewsBundleHappy(t *testing.T) {
 	if bundle["named.conf.local"] != "// views fragment\n" {
 		t.Errorf("views fragment not mapped to named.conf.local: %+v", bundle)
 	}
-	if bundle["db.evba.lab"] != "zone content" {
+	if bundle["db.example.test"] != "zone content" {
 		t.Errorf("zone file not mapped: %+v", bundle)
 	}
 }
@@ -304,7 +304,7 @@ func TestPrintZoneListTable(t *testing.T) {
 	r := &CallResult{
 		Status:     "ok",
 		OpID:       "bind9.zone.list",
-		Result:     json.RawMessage(`{"rows":[{"name":"site-a.vcf.lab","type":"master","file":"/etc/bind/db.site-a","view":"default"},{"name":"site-a.vcf.lab","type":"master","file":"/etc/bind/views/alice/db.site-a","view":"operator-alice"},{"name":"evba.lab","type":"master","file":"/etc/bind/db.evba.lab","view":null}],"total":3}`),
+		Result:     json.RawMessage(`{"rows":[{"name":"site-a.vcf.lab","type":"master","file":"/etc/bind/db.site-a","view":"default"},{"name":"site-a.vcf.lab","type":"master","file":"/etc/bind/views/alice/db.site-a","view":"operator-alice"},{"name":"example.test","type":"master","file":"/etc/bind/db.example.test","view":null}],"total":3}`),
 		DurationMs: 12.0,
 	}
 	var buf bytes.Buffer
@@ -313,7 +313,7 @@ func TestPrintZoneListTable(t *testing.T) {
 	// The `view` header renders; the two split-horizon rows are
 	// distinguishable by their view names; the null-view zone still
 	// renders (its blank view column is not asserted directly).
-	for _, want := range []string{"view", "site-a.vcf.lab", "master", "default", "operator-alice", "evba.lab", "/etc/bind/views/alice/db.site-a"} {
+	for _, want := range []string{"view", "site-a.vcf.lab", "master", "default", "operator-alice", "example.test", "/etc/bind/views/alice/db.site-a"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printZoneList missing %q in output:\n%s", want, out)
 		}
@@ -335,12 +335,12 @@ func TestPrintRecordGetTable(t *testing.T) {
 	r := &CallResult{
 		Status: "ok",
 		OpID:   "bind9.record.get",
-		Result: json.RawMessage(`{"fqdn":"www.evba.lab.","type":"A","rows":[{"name":"www.evba.lab.","ttl":3600,"class":"IN","type":"A","rdata":"10.5.50.2"}],"total":1}`),
+		Result: json.RawMessage(`{"fqdn":"www.example.test.","type":"A","rows":[{"name":"www.example.test.","ttl":3600,"class":"IN","type":"A","rdata":"192.0.2.2"}],"total":1}`),
 	}
 	var buf bytes.Buffer
 	printRecordGet(&buf, r)
 	out := buf.String()
-	for _, want := range []string{"www.evba.lab.", "10.5.50.2", "A"} {
+	for _, want := range []string{"www.example.test.", "192.0.2.2", "A"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printRecordGet missing %q in output:\n%s", want, out)
 		}
@@ -353,12 +353,12 @@ func TestPrintWriteResultHumanFormat(t *testing.T) {
 	r := &CallResult{
 		Status: "ok",
 		OpID:   "bind9.record.add",
-		Result: json.RawMessage(`{"op_class":"write","fqdn":"api.evba.lab","zone":"evba.lab","file":"/etc/bind/db.evba.lab","type":"A","ip":"10.5.50.99","state_before":"snapshot before","state_after":"snapshot after"}`),
+		Result: json.RawMessage(`{"op_class":"write","fqdn":"api.example.test","zone":"example.test","file":"/etc/bind/db.example.test","type":"A","ip":"192.0.2.99","state_before":"snapshot before","state_after":"snapshot after"}`),
 	}
 	var buf bytes.Buffer
 	printWriteResult(&buf, r)
 	out := buf.String()
-	for _, want := range []string{"op_class: write", "api.evba.lab", "evba.lab", "10.5.50.99", "state_before", "state_after"} {
+	for _, want := range []string{"op_class: write", "api.example.test", "example.test", "192.0.2.99", "state_before", "state_after"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printWriteResult missing %q in:\n%s", want, out)
 		}
@@ -541,13 +541,13 @@ func TestDispatchOpRecordAddSendsExpectedParams(t *testing.T) {
 			if body.OpID != "bind9.record.add" {
 				t.Errorf("op_id: got %q want bind9.record.add", body.OpID)
 			}
-			if body.Params["fqdn"] != "api.evba.lab" {
+			if body.Params["fqdn"] != "api.example.test" {
 				t.Errorf("fqdn: got %v", body.Params["fqdn"])
 			}
-			if body.Params["ip"] != "10.5.50.99" {
+			if body.Params["ip"] != "192.0.2.99" {
 				t.Errorf("ip: got %v", body.Params["ip"])
 			}
-			if body.Params["zone"] != "evba.lab" {
+			if body.Params["zone"] != "example.test" {
 				t.Errorf("zone: got %v", body.Params["zone"])
 			}
 			if body.Params["type"] != "A" {
@@ -560,9 +560,9 @@ func TestDispatchOpRecordAddSendsExpectedParams(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{
-		"fqdn": "api.evba.lab",
-		"ip":   "10.5.50.99",
-		"zone": "evba.lab",
+		"fqdn": "api.example.test",
+		"ip":   "192.0.2.99",
+		"zone": "example.test",
 		"type": "A",
 	}
 	if _, err := conn.Call(context.Background(), srv.URL, "bind9.record.add", "vcf-router-bind9", params); err != nil {

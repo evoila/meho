@@ -115,16 +115,19 @@ __all__ = [
 
 #: pfSense accepts ``[a-zA-Z0-9.-_]`` and at most 32 characters for a local
 #: user name. A leading dash is refused here as well: it could be read as a
-#: command-line option by the tools pfSense calls with the name.
-USER_NAME_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]{0,31}$")
+#: command-line option by the tools pfSense calls with the name. So is a
+#: leading dot: pfSense makes the home directory ``/home/<name>`` for a new
+#: user and a delete removes it, so ``.``, ``..`` or ``.x`` must never be used.
+#: Every pfSense user operation (also the VPN ones) uses this one rule.
+USER_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,31}$")
 
 
 def _validate_user_name(value: Any) -> str:
     """Return *value* if it is an allowed pfSense user name, else raise ``ValueError``."""
     if not isinstance(value, str) or not USER_NAME_RE.fullmatch(value):
         raise ValueError(
-            "name must match ^[A-Za-z0-9._][A-Za-z0-9._-]{0,31}$ (letters, digits, "
-            f"dot, dash, underscore; no leading dash); got {value!r}"
+            f"name must match {USER_NAME_RE.pattern} (letters, digits, dot, dash, "
+            f"underscore; no leading dot or dash); got {value!r}"
         )
     return value
 
@@ -200,9 +203,10 @@ def build_user_flag_playback(name: str, *, disable: bool) -> str:
 
     The fragment finds the user by exact name and changes only
     ``['disabled']`` of that one entry, and only when exactly one user
-    matched and it is not uid 0. Then it calls ``local_user_set()`` and
-    ``write_config()``, like the pfSense web page. ``$userindex`` is rebuilt
-    first because ``local_user_set()`` reads the flag back through it.
+    matched, it is not uid 0 and the name does not start with a dot. Then it
+    calls ``local_user_set()`` and ``write_config()``, like the pfSense web
+    page. ``$userindex`` is rebuilt first because ``local_user_set()`` reads
+    the flag back through it.
 
     *name* must already have passed :func:`_validate_user_name`; it is
     validated again here so the fragment can never carry anything else.
@@ -228,7 +232,9 @@ def build_user_flag_playback(name: str, *, disable: bool) -> str:
         "    }",
         "  }",
         "}",
-        "if ($meho_matched === 1 && (string)$config['system']['user'][$meho_idx]['uid'] !== '0') {",
+        "$meho_dot = (strlen($meho_name) === 0 || $meho_name[0] === '.') ? 1 : 0;",
+        "if ($meho_dot === 0 && $meho_matched === 1",
+        "    && (string)$config['system']['user'][$meho_idx]['uid'] !== '0') {",
         change,
         "  $userindex = index_users();",
         "  local_user_set($config['system']['user'][$meho_idx]);",
@@ -382,7 +388,8 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
             "pattern": USER_NAME_RE.pattern,
             "description": (
                 "Exact name of the ONE local user, as ``pfsense.user.list`` shows it. "
-                "Letters, digits, dot, dash, underscore; at most 32 characters."
+                "Letters, digits, dot, dash, underscore; at most 32 characters; "
+                "no leading dot or dash."
             ),
         },
     },

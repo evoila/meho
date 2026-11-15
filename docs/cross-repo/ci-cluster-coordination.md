@@ -3,30 +3,30 @@ SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 evoila Group
 -->
 
-# rke2-infra coordination — per-PR ephemeral smoke + `repository_dispatch`
+# CI cluster coordination — per-PR ephemeral smoke + `repository_dispatch`
 
 > Cross-repo handshake between `evoila/meho` (this repo, producer) and
-> `evoila-bosnia/claude-rdc-hetzner-dc`
-> (private; consumer of MEHO and operator of the rke2-infra dogfooding
+> the consumer repository
+> (private; consumer of MEHO and operator of the ci-cluster dogfooding
 > cluster).
 >
 > This page is the upstream-side **tracker**. The actual provisioning
 > work — kubeconfig minting, RBAC application, workflow authoring, secret
 > storage — happens on the consumer side. What lives here is the spec
 > the consumer reads to know exactly what `evoila/meho` will send into
-> rke2-infra and exactly what RBAC surface it needs in return.
+> ci-cluster and exactly what RBAC surface it needs in return.
 
 ## Why this handshake exists
 
 Goal #11
 locks the v0.1 release on a single dogfooding consumer (RDC) operating
-MEHO against the consumer's existing rke2-infra Kubernetes cluster.
+MEHO against the consumer's existing CI Kubernetes cluster.
 Two CI/CD properties from `evoila/meho` cross that repo boundary into
 the consumer:
 
 1. **Per-PR ephemeral-cluster smoke** (G2.7-T2, #50).
    Every PR on `evoila/meho` deploys the chart into a fresh
-   `meho-ci-<pr-number>` namespace on rke2-infra, runs the smoke
+   `meho-ci-<pr-number>` namespace on ci-cluster, runs the smoke
    script, and tears the namespace down. If the smoke fails the PR
    can't merge. This is the per-PR ephemeral-cluster discipline MEHO.X
    never had — every G2.0–G2.6 PR closes the real-target feedback loop
@@ -38,7 +38,7 @@ the consumer:
    `RDC_DISPATCH_TOKEN` PAT was not renewed. The consumer rolls forward by
    tracking new GHCR tags / GitHub Releases instead.
 
-Both edges cross the rke2-infra cluster boundary, and both need the
+Both edges cross the CI cluster boundary, and both need the
 consumer side to provision auth + RBAC for the `evoila/meho` GitHub
 Actions identity before Task #50 / #51 can land green. This tracker
 documents exactly what to provision and how either side verifies the
@@ -46,7 +46,7 @@ contract.
 
 ## Consumer-side prerequisites
 
-These items land **in `evoila-bosnia/claude-rdc-hetzner-dc`**, not in
+These items land **in the consumer repository**, not in
 this repo. The acceptance bullets close when the consumer-side PR(s)
 land.
 
@@ -56,7 +56,7 @@ Two options. **Pick exactly one. Option A is preferred.**
 
 #### Option A (preferred) — GitHub Actions OIDC trust
 
-Configure rke2-infra's kube-apiserver to trust GitHub Actions' OIDC
+Configure ci-cluster's kube-apiserver to trust GitHub Actions' OIDC
 identity provider directly. No long-lived kubeconfig secret stored
 on `evoila/meho`.
 
@@ -65,9 +65,9 @@ on `evoila/meho`.
 | Issuer URL | `https://token.actions.githubusercontent.com` |
 | JWKS endpoint | `https://token.actions.githubusercontent.com/.well-known/jwks` |
 | Signing algorithm | `RS256` |
-| Token audience | Operator-chosen; recommend `rke2-infra.evba.lab` (per-cluster, distinct) |
+| Token audience | Operator-chosen; recommend `ci-cluster.example.test` (per-cluster, distinct) |
 
-Sub-claim shape (the Kubernetes user identity rke2-infra will see):
+Sub-claim shape (the Kubernetes user identity ci-cluster will see):
 
 ```text
 repo:evoila/meho:ref:refs/heads/main
@@ -108,27 +108,27 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const token = await core.getIDToken('rke2-infra.evba.lab');
+            const token = await core.getIDToken('ci-cluster.example.test');
             core.setSecret(token);
             core.setOutput('token', token);
       # Equivalent curl form when not using actions/github-script:
       #   TOKEN=$(curl -sSf \
       #     -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-      #     "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=rke2-infra.evba.lab" \
+      #     "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=ci-cluster.example.test" \
       #     | jq -r .value)
       - name: Configure kubectl to use the OIDC ID token
         run: |
           kubectl config set-credentials gha \
             --token="${{ steps.oidc.outputs.token }}"
-          kubectl config set-cluster rke2-infra \
-            --server=https://rke2-infra.evba.lab:6443 \
-            --certificate-authority=/etc/ca/rke2-infra.crt
+          kubectl config set-cluster ci-cluster \
+            --server=https://ci-cluster.example.test:6443 \
+            --certificate-authority=/etc/ca/ci-cluster.crt
           kubectl config set-context gha \
-            --cluster=rke2-infra --user=gha --namespace=meho-ci-${{ github.event.pull_request.number }}
+            --cluster=ci-cluster --user=gha --namespace=meho-ci-${{ github.event.pull_request.number }}
           kubectl config use-context gha
 ```
 
-The audience string (`rke2-infra.evba.lab` above) must match the
+The audience string (`ci-cluster.example.test` above) must match the
 `audiences` entry in the kube-apiserver's OIDC configuration (see the
 next subsection). For Kubernetes-side mapping, the recommended sub
 template is `repo:evoila/meho:environment:rke2-ci` — gating workflow
@@ -140,7 +140,7 @@ audit trail the bare `pull_request` claim doesn't give.
 
 ```text
 --oidc-issuer-url=https://token.actions.githubusercontent.com
---oidc-client-id=rke2-infra.evba.lab
+--oidc-client-id=ci-cluster.example.test
 --oidc-username-claim=sub
 --oidc-username-prefix=actions:
 ```
@@ -152,7 +152,7 @@ audit log.
 **Kubernetes 1.29+ Structured Authentication Configuration:**
 
 Prefer `AuthenticationConfiguration` over the legacy flags when
-rke2-infra runs 1.29 or newer. The config supports multiple
+ci-cluster runs 1.29 or newer. The config supports multiple
 issuers, so the consumer can keep its existing OIDC IdP (Keycloak,
 Google, etc.) alongside GitHub Actions. Worked example shape:
 
@@ -163,7 +163,7 @@ jwt:
   - issuer:
       url: https://token.actions.githubusercontent.com
       audiences:
-        - rke2-infra.evba.lab
+        - ci-cluster.example.test
     claimMappings:
       username:
         claim: sub
@@ -179,7 +179,7 @@ public repo could mint a token against this audience.
 
 #### Option B (fallback) — long-lived kubeconfig stored as a GHA secret
 
-Mint a kubeconfig from a dedicated rke2-infra ServiceAccount, base64
+Mint a kubeconfig from a dedicated ci-cluster ServiceAccount, base64
 the kubeconfig, and store it as the `RDC_KUBECONFIG` secret on
 `evoila/meho` (or — better — as a repository-environment secret on the
 `rke2-ci` GitHub Environment so it requires environment-scoped approval).
@@ -190,7 +190,7 @@ Tradeoffs vs Option A:
   required (consumer-side cron or manual quarterly rotation); shared
   secret blast radius if leaked.
 - **Better:** zero kube-apiserver configuration changes; works on
-  rke2-infra versions that pre-date Structured Authentication Config.
+  ci-cluster versions that pre-date Structured Authentication Config.
 
 Only pick Option B when Option A is blocked on cluster-version or
 operator-time budget. Document the rotation owner + cadence on the
@@ -198,7 +198,7 @@ consumer-side coordination ticket.
 
 ### 2. Namespace-scoped RBAC for `meho-ci-*`
 
-Whichever auth path is picked, the identity that lands in rke2-infra
+Whichever auth path is picked, the identity that lands in ci-cluster
 needs **exactly** these permissions and **no more**:
 
 - **Cluster-scoped, `meho-ci-*` only:** create + delete namespaces
@@ -233,14 +233,14 @@ startup logs when the readiness probe stays red. `replicasets` shows
 up because Helm watches the `Deployment` rollout via the
 `apps/v1/Deployment` status which references the replicasets.
 
-**Verifiability of the scoping**: from the identity rke2-infra issues
+**Verifiability of the scoping**: from the identity ci-cluster issues
 to GitHub Actions, `kubectl auth can-i delete namespace default`
 returns `no` and `kubectl auth can-i delete namespace meho-ci-pr-1`
 returns `yes`. The Verification section below scripts both checks.
 
 ### 3. `repository_dispatch` consumer workflow — RETIRED 2026-07-17
 
-> **Retired.** The producer-side `Notify claude-rdc-hetzner-dc
+> **Retired.** The producer-side `Notify the consumer repository
 > (repository_dispatch)` step was removed from
 > [`.github/workflows/image.yml`](../../.github/workflows/image.yml) in the
 > post-v0.23.0 cleanup: the `RDC_DISPATCH_TOKEN` PAT was not being renewed and
@@ -252,7 +252,7 @@ returns `yes`. The Verification section below scripts both checks.
 
 `evoila/meho`'s `main` push image workflow (G2.7-T3, #51) **formerly** sent a
 `repository_dispatch` event to
-`evoila-bosnia/claude-rdc-hetzner-dc` with the shape below.
+the consumer repository with the shape below.
 
 | Field | Value |
 | --- | --- |
@@ -284,7 +284,7 @@ consumer's call. This handshake only specifies the event shape.
 ### 4. Consumer-side `manifests/meho/` files
 
 The consumer ships its environment-specific install plumbing at
-`claude-rdc-hetzner-dc/manifests/meho/`:
+`<consumer-repo>/manifests/meho/`:
 
 - `values-rdc.yaml` — the actual values overlay for the dogfooding
   instance (copied from
@@ -340,7 +340,7 @@ kubectl auth can-i --namespace meho delete deployments.apps        # no
 # 4. The repository_dispatch listener fires on a manually-sent event.
 gh api -X POST \
   -H "Accept: application/vnd.github+json" \
-  repos/evoila-bosnia/claude-rdc-hetzner-dc/dispatches \
+  repos/<consumer-org>/<consumer-repo>/dispatches \
   -f event_type=meho-image-pushed \
   -f client_payload[image]=ghcr.io/evoila/meho \
   -f client_payload[digest]=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
@@ -348,43 +348,37 @@ gh api -X POST \
   -f client_payload[commit]=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef \
   -f client_payload[ref]=refs/heads/main
 
-gh run list --repo evoila-bosnia/claude-rdc-hetzner-dc \
+gh run list --repo <consumer-org>/<consumer-repo> \
   --event repository_dispatch --limit 1
 #   ⇒ a run is queued / in_progress for the new event_type
 ```
 
-The companion script
-[`scripts/cross-repo/verify-rke2-access.sh`](../../scripts/cross-repo/verify-rke2-access.sh)
-automates the kubectl portion (`KUBECONFIG=… ./verify-rke2-access.sh`),
-prints a pass/fail line per check, and exits non-zero on any
-unexpected outcome. Run it from either side of the handshake before
+Run the commands above from either side of the handshake before
 declaring the contract closed.
 
 ## Status
 
 This is the live tracker for consumer-side acceptance. Bullets here
-mirror the acceptance criteria on
-evoila-bosnia/meho-internal#53.
+mirror the agreed acceptance criteria.
 
 | Item | Status | Owner | Notes |
 | --- | --- | --- | --- |
-| Coordination ticket filed on `evoila-bosnia/claude-rdc-hetzner-dc` | pending | RDC maintainers | Linked to this doc + Initiative #48 |
+| Coordination ticket filed on the consumer repository | pending | RDC maintainers | Linked to this doc + Initiative #48 |
 | kube-apiserver OIDC trust configured (Option A) **OR** `RDC_KUBECONFIG` secret stored (Option B) | pending | RDC maintainers | Prefer Option A; document choice on the coordination ticket |
 | Namespace-scoped RBAC enforcing `meho-ci-*` | pending | RDC maintainers | Includes the admission-policy half of the scoping (see Section 2) |
 | ~~Consumer workflow listening for `meho-image-pushed` repository_dispatch~~ | retired | — | Producer step removed 2026-07-17 (RDC_DISPATCH_TOKEN not renewed); track GHCR tags / Releases instead |
 | `manifests/meho/{values-rdc.yaml,install.sh,smoke.sh,README.md}` landed | pending | RDC maintainers | Also tracked in Goal #11 cross-repo deps |
-| `claude-rdc-hetzner-dc/CLAUDE.md` documents the MEHO event contract | pending | RDC maintainers | Mirror of this doc's Section 3 |
+| `CLAUDE.md` of the consumer repository documents the MEHO event contract | pending | RDC maintainers | Mirror of this doc's Section 3 |
 
 Move an item to `done` (with the linking PR/commit) only after the
-consumer-side change has merged. When all six are done, close
-meho-internal#53.
+consumer-side change has merged. When all six are done, close the tracking work.
 
 ## Out of scope
 
 - Authoring `install.sh` / `smoke.sh` / `values-rdc.yaml` in this
   repo — Goal #11 explicitly rejects this in favour of the
   consumer-owned model.
-- Production cluster provisioning — rke2-infra already exists.
+- Production cluster provisioning — ci-cluster already exists.
 - Multi-environment trust (staging vs prod) — v0.1 has only the
   dogfooding lab.
 - Generalising this handshake to a multi-operator adoption pattern —

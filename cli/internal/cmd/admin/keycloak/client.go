@@ -32,8 +32,8 @@ import (
 // fixture-bloat.
 type adminClient struct {
 	httpClient *http.Client
-	baseURL    string // e.g. "https://keycloak.evba.lab"
-	realm      string // target realm (where clients land), e.g. "evba"
+	baseURL    string // e.g. "https://keycloak.example.test"
+	realm      string // target realm (where clients land), e.g. "example"
 	token      string // master-realm admin access token
 	dryRun     bool   // writes are answered by dryRunTransport
 }
@@ -150,8 +150,9 @@ func (c *adminClient) do(
 	body any,
 ) (int, []byte, error) {
 	endpoint := fmt.Sprintf("%s/admin/realms/%s", c.baseURL, c.realm)
-	if p := strings.TrimLeft(pathRelative, "/"); p != "" {
-		endpoint += "/" + p
+	if rel := strings.TrimLeft(pathRelative, "/"); rel != "" {
+		// An empty path is the realm itself, without a trailing slash.
+		endpoint += "/" + rel
 	}
 
 	var reader io.Reader

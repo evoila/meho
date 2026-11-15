@@ -113,7 +113,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-async def _seed_tenant(session: AsyncSession, *, slug: str = "rdc-internal") -> uuid.UUID:
+async def _seed_tenant(session: AsyncSession, *, slug: str = "example-tenant") -> uuid.UUID:
     """Return the tenant row's id, inserting it on the first call.
 
     Every :class:`GraphNodeHistory` / :class:`GraphEdgeHistory` carries
@@ -121,9 +121,9 @@ async def _seed_tenant(session: AsyncSession, *, slug: str = "rdc-internal") -> 
     tenant. Mirrors :func:`tests.test_topology_schema._seed_tenant`.
 
     The look-up-then-insert shape is load-bearing: migration ``0018``
-    seeds the ``rdc-internal`` tenant into the per-worker schema
+    seeds a tenant into the per-worker schema
     template (:func:`tests.conftest._schema_template_db`), so a plain
-    ``session.add(Tenant(slug='rdc-internal', ...))`` would trip
+    ``session.add(Tenant(slug='example-tenant', ...))`` would trip
     ``UNIQUE constraint failed: tenant.slug``.
     """
     existing: uuid.UUID | None = await session.scalar(

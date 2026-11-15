@@ -1201,7 +1201,7 @@ def vault_kv_write_target_path(op_id: str, params: dict[str, Any]) -> str:
     * ``vault.kv.delete`` soft-deletes versions via ``POST
       <mount>/delete/<path>`` (hvac's ``delete_secret_versions``), which
       Vault authorizes with ``update`` on that **delete** path — NOT the
-      data path (#3274, lab-verified in claude-rdc-hetzner-dc#2814).
+      data path (#3274, lab-verified).
     * ``vault.kv.metadata.delete`` sends ``DELETE <mount>/metadata/<path>``
       (hvac's ``delete_metadata_and_all_versions``) and reads the same
       path before and after, so it authorizes on the **metadata** path

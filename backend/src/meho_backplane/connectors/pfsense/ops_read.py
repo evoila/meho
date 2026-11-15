@@ -173,11 +173,10 @@ def parse_pfctl_rules(output: str) -> list[dict[str, Any]]:
 #   <interface> <proto> <ep1> -> <ep2>  <state>:<state> ...
 #   <interface> <proto> <ep1> <- <ep2>  <state>:<state> ...
 #   <interface> <proto> <ep1> <-> <ep2> ...
-# e.g. ``em0 tcp 10.11.16.9:443 <- 192.168.99.5:59269  ESTABLISHED:ESTABLISHED``
+# e.g. ``em0 tcp 192.0.2.9:443 <- 198.51.100.5:59269  ESTABLISHED:ESTABLISHED``
 # on pfSense 2.7; older builds print ``all`` as the interface. Field order
-# confirmed against the pf state format (pfSense redmine #2121) and the lab's
-# own live classifier (rdc-hetzner-dc ``pfsense-meho-measure-report.sh``:
-# ``$2=="tcp"``; ``<if> tcp <ep1>:<p1> <-|-> <ep2>:<p2>``). Group 1 is the
+# confirmed against the pf state format (pfSense redmine issue 2121) and against
+# live output (``<if> tcp <ep1>:<p1> <-|-> <ep2>:<p2>``). Group 1 is the
 # interface, group 2 the protocol -- previously transposed, which mislabelled
 # every row (fixed for #252; also corrects ``pfsense.firewall.state``).
 #
@@ -696,7 +695,7 @@ def parse_dhcp_leases(
 # gateway. Example (columns space-padded; abbreviated here):
 #
 #   Name      Monitor        Source          Delay     StdDev    Loss    Status  Substatus
-#   WAN_DHCP  172.21.16.1    172.21.16.226   0.651ms   0.112ms   0.0%    online  none
+#   WAN_DHCP  198.51.100.1   198.51.100.226  0.651ms   0.112ms   0.0%    online  none
 #   LTE_GW    1.1.1.1        10.0.5.1        0ms       0ms       100%    down    highloss
 #
 # No field value contains internal whitespace (names are alnum/underscore,

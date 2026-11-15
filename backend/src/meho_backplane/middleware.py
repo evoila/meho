@@ -462,7 +462,7 @@ def _reject_runner_outside_gateway(operator: Operator, request: Request) -> None
 def _reject_kb_limited_login_elsewhere(operator: Operator, request: Request) -> None:
     """Refuse a login limited to one knowledge route on every other route.
 
-    Two such logins exist, each a program in a CI job of the team wiki:
+    Two such logins exist, each a program in a CI job of the tenant's wiki:
 
     * ``kb_import_only`` (#5728) may only import pages: ``POST`` on
       :data:`KB_IMPORT_PATH`.

@@ -101,9 +101,25 @@ Examples in current use:
   rke2 (search_operations on connector <connector-id>).` When both kinds are the same product but
   another connector of that product was picked, the message names both
   connectors and the target's `preferred_impl_id` — #5948)
+- `no_connector` for a version outside the range (`call_operation` and
+  `preview_operation`: the target's known version is outside the
+  `supported_version_range` of the connector picked for it. This happens
+  when the connector also has a fallback entry that accepts every
+  version. Refused right after `target_connector_mismatch`, before the
+  policy check and any wait for approval. A refused call writes one audit
+  row; a refused preview writes none. `extras` names `product`, `version`,
+  `supported_version_range` and `connector_id`. Message: `no_connector:
+  Target '<name>' runs version v1.31.9. Connector k8s-1.x serves only
+  versions >=1.32,<1.38. Upgrade the target, or probe it again if its
+  version changed.` A target with no known version is not refused, and the
+  probe does not run this check — `operations/_target_version_range.py`)
 - `receipt_too_large` (`call_operation`: the receipt of a completed run
   could not fit `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`, so the call is
   refused before dispatch and nothing runs — #3641)
+- `audit_row_invalid` (dispatcher: the audit row of the call can never be
+  stored, so MEHO refused the call before it sent anything. `extras.field`
+  names the value, never its content. `extras.execution_outcome="not_started"`;
+  no approval request is made. Safe to call again with a fixed value)
 - `audit_commit_failed` (dispatcher: the handler finished, but its audit
   row did not commit. `extras.execution_outcome="uncertain"`,
   `extras.retry=false`, no `audit_id`. The caller must not run the call
@@ -304,6 +320,24 @@ text from the error result, in one shared place.
   attribute on the error it raises; `result_connector_error` copies it
   to `extras.remediation`, and it stays. `vcfa.provider.api_token.create`
   uses this to say whether the minted token was revoked.
+- **Own message.** A connector can show the whole `exception_message`
+  when the message is a fixed sentence it wrote itself, with no vendor
+  text, no value from the call and no secret. It adds
+  `ConnectorOwnMessage` (in `connectors/base.py`; a connector package
+  imports it from the connector kit) as a base class of the
+  error type. `result_connector_error` then sets
+  `extras.message_source = "meho"` and the rule keeps that one field.
+  Every other vendor field stays hidden. The shown message is still
+  cleaned of secrets, like every error text. Only `result_connector_error`
+  sets the mark, from the type of the raised error. It does not set it
+  when the error is also an `httpx.HTTPStatusError` or a
+  `ConnectorUpstreamError`, because their text holds the URL or the
+  vendor's words. When a handler returns an error result itself, the
+  dispatcher drops `message_source` before the rule runs. A test lists
+  every marked error type in the core (`_MARKED_TYPES` in
+  `tests/test_operations_own_message_of_secret_op.py`), so each new one
+  is seen in review. `LinuxWriteOwnMessageError` (no sudo credential in
+  the target's secret) is the first use.
 - **Retries are unchanged.** The rule works on the built result, not on
   the raised error. So the new login and one retry after HTTP 401, and
   the 403 and 429 results, work as before.

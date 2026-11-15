@@ -207,7 +207,7 @@ How users get the new version is in the
 - [ ] **The appliance's CIS exception list is approved (every release
   that ships the appliance OVA).** `deploy/appliance/cis/exceptions.md`
   lists each CIS rule that still fails on the appliance, with one
-  sentence on why. Damir Topic approves the whole list once per release,
+  sentence on why. The release owner approves the whole list once per release,
   with the release's security sheet, as a comment on the release-cutting
   PR. What changed since the last release:
 

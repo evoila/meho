@@ -83,13 +83,13 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-async def _seed_tenant(slug: str = "rdc-internal") -> uuid.UUID:
+async def _seed_tenant(slug: str = "example-tenant") -> uuid.UUID:
     """Return the tenant row's id, inserting it on the first call.
 
     The look-up-then-insert shape is load-bearing: migration ``0018``
-    seeds the ``rdc-internal`` tenant into the per-worker schema
+    seeds a tenant into the per-worker schema
     template (:func:`tests.conftest._schema_template_db`), so a plain
-    ``session.add(Tenant(slug='rdc-internal', ...))`` would trip
+    ``session.add(Tenant(slug='example-tenant', ...))`` would trip
     ``UNIQUE constraint failed: tenant.slug``.
     """
     sessionmaker = get_sessionmaker()
@@ -132,14 +132,14 @@ async def test_create_node_inserts_fresh_row() -> None:
             session,
             _operator(tenant_id),
             kind="vault-role",
-            name="rdc-vault",
+            name="example-vault",
             note="seeded from INVENTORY.md L42",
             evidence_url="https://example.test/inv#L42",
         )
 
     assert result.was_created is True
     assert result.node.kind == "vault-role"
-    assert result.node.name == "rdc-vault"
+    assert result.node.name == "example-vault"
     assert result.node.source == "curated"
     assert result.node.discovered_by == "op-1"
     assert result.node.target_id is None
@@ -169,7 +169,7 @@ async def test_create_node_is_idempotent_on_repeat() -> None:
             session,
             _operator(tenant_id),
             kind="vault-role",
-            name="rdc-vault",
+            name="example-vault",
             note="first",
         )
     async with sessionmaker() as session:
@@ -177,7 +177,7 @@ async def test_create_node_is_idempotent_on_repeat() -> None:
             session,
             _operator(tenant_id),
             kind="vault-role",
-            name="rdc-vault",
+            name="example-vault",
             note="second",
         )
 
@@ -416,14 +416,14 @@ async def test_create_node_does_not_collide_across_tenants() -> None:
             session,
             _operator(tenant_b, sub="op-b"),
             kind="vault-role",
-            name="rdc-vault",
+            name="example-vault",
         )
     async with sessionmaker() as session:
         result_a = await create_or_get_node(
             session,
             _operator(tenant_a, sub="op-a"),
             kind="vault-role",
-            name="rdc-vault",
+            name="example-vault",
         )
 
     assert result_a.was_created is True
@@ -464,7 +464,7 @@ async def test_create_node_then_annotate_round_trip() -> None:
             session,
             _operator(tenant_id),
             kind="vault-role",
-            name="rdc-vault",
+            name="example-vault",
         )
     async with sessionmaker() as session:
         edge = await annotate_edge(
@@ -472,7 +472,7 @@ async def test_create_node_then_annotate_round_trip() -> None:
             _operator(tenant_id),
             NodeRef("k8s-sa-prod", "principal"),
             "authenticates-via",
-            NodeRef("rdc-vault", "vault-role"),
+            NodeRef("example-vault", "vault-role"),
             note="bootstrap test",
         )
 
@@ -520,7 +520,7 @@ async def test_create_node_emits_created_history_row_visible_to_history_verb() -
             session,
             _operator(tenant_id),
             kind="vault-role",
-            name="rdc-vault",
+            name="example-vault",
             note="seeded from INVENTORY.md L42",
             evidence_url="https://example.test/inv#L42",
         )
@@ -548,7 +548,7 @@ async def test_create_node_emits_created_history_row_visible_to_history_verb() -
     assert history.snapshot["before"] is None
     after = history.snapshot["after"]
     assert after["kind"] == "vault-role"
-    assert after["name"] == "rdc-vault"
+    assert after["name"] == "example-vault"
     assert after["discovered_by"] == "op-1"
     assert after["properties"]["note"] == "seeded from INVENTORY.md L42"
     assert after["properties"]["evidence_url"] == "https://example.test/inv#L42"
@@ -566,7 +566,7 @@ async def test_create_node_emits_created_history_row_visible_to_history_verb() -
     assert history.audit_id == audit.id
 
     # query_history surfaces the row through the operator-visible verb.
-    result_history = await query_history(_operator(tenant_id), "rdc-vault", kind="vault-role")
+    result_history = await query_history(_operator(tenant_id), "example-vault", kind="vault-role")
     assert len(result_history.rows) == 1
     assert result_history.rows[0].change_kind == GraphHistoryChangeKind.CREATED.value
     assert result_history.rows[0].audit_id == audit.id
@@ -624,7 +624,7 @@ async def test_create_node_idempotent_reseed_does_not_double_write_history() -> 
             session,
             _operator(tenant_id),
             kind="vault-role",
-            name="rdc-vault",
+            name="example-vault",
             note="same",
             evidence_url="https://example.test/same",
         )
@@ -633,7 +633,7 @@ async def test_create_node_idempotent_reseed_does_not_double_write_history() -> 
             session,
             _operator(tenant_id),
             kind="vault-role",
-            name="rdc-vault",
+            name="example-vault",
             note="same",
             evidence_url="https://example.test/same",
         )
@@ -678,7 +678,7 @@ async def test_create_node_meaningful_reseed_emits_updated_history_row() -> None
             session,
             _operator(tenant_id),
             kind="vault-role",
-            name="rdc-vault",
+            name="example-vault",
             note="first",
         )
     async with sessionmaker() as session:
@@ -686,7 +686,7 @@ async def test_create_node_meaningful_reseed_emits_updated_history_row() -> None
             session,
             _operator(tenant_id),
             kind="vault-role",
-            name="rdc-vault",
+            name="example-vault",
             note="second",
         )
 
@@ -738,14 +738,14 @@ async def test_create_node_history_does_not_leak_across_tenants() -> None:
             session,
             _operator(tenant_b, sub="op-b"),
             kind="vault-role",
-            name="rdc-vault",
+            name="example-vault",
         )
     async with sessionmaker() as session:
         await create_or_get_node(
             session,
             _operator(tenant_a, sub="op-a"),
             kind="vault-role",
-            name="rdc-vault",
+            name="example-vault",
         )
 
     timeline_a = await query_timeline(_operator(tenant_a, sub="op-a"))

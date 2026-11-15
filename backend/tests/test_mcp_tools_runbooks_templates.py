@@ -8,7 +8,7 @@ tools that wrap :class:`~meho_backplane.runbooks.service.RunbookTemplateService`
 on the MCP transport (``discard_template`` added by #135):
 
 * All seven tools register against the G0.5 registry with strict 2020-12
-  ``inputSchema`` and the MEHO-internal RBAC fields stripped from the
+  ``inputSchema`` and the internal RBAC fields stripped from the
   wire shape.
 * RBAC: five tools are ``TENANT_ADMIN``-only; ``meho_runbook_list_templates``
   is ``OPERATOR``-readable.
@@ -143,7 +143,7 @@ def test_all_seven_tools_registered_with_strict_schema(
         schema = tools_by_name[name]["inputSchema"]
         assert schema["type"] == "object"
         assert schema["additionalProperties"] is False
-        # MEHO-internal RBAC fields never reach the wire.
+        # internal RBAC fields never reach the wire.
         assert "required_role" not in tools_by_name[name]
         assert "op_class" not in tools_by_name[name]
 

@@ -355,23 +355,23 @@ def _fan_in(
     shards: str,
     outside: str,
     detect: str = "success",
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     script = _step_script(
         "python-unit-lane", name="Assert lint + typecheck + every pytest shard passed"
     )
-    for expression, value in {
-        "${{ needs.changes.result }}": detect,
-        "${{ needs.changes.outputs.docs_only }}": docs_only,
-        "${{ needs.changes.outputs.backend_python }}": backend_python,
-        "${{ needs.changes.outputs.single_connector }}": "",
-        "${{ needs.python-lint.result }}": lint,
-        "${{ needs.python-unit-shard.result }}": shards,
-        "${{ needs.python-outside-backend.result }}": outside,
-    }.items():
-        assert expression in script, expression
-        script = script.replace(expression, value)
+    # The job results reach the script as env values, as on the runner.
     assert "${{" not in script
-    return _bash(script, tmp_path, {"PATH": "/usr/bin:/bin"})
+    values = {
+        "CHANGES_RESULT": detect,
+        "CHANGES_DOCS_ONLY": docs_only,
+        "CHANGES_BACKEND_PYTHON": backend_python,
+        "CHANGES_SINGLE_CONNECTOR": "",
+        "LINT_RESULT": lint,
+        "SHARDS_RESULT": shards,
+        "OUTSIDE_RESULT": outside,
+    }
+    return _bash(script, tmp_path, {"PATH": "/usr/bin:/bin", **values, **(env or {})})
 
 
 @pytest.mark.parametrize(
@@ -427,6 +427,92 @@ def test_fan_in_fails_when_the_detector_did_not_pass(tmp_path: Path) -> None:
     assert result.returncode != 0
 
 
+def _fork_fan_in(tmp_path: Path, **results: str) -> tuple[subprocess.CompletedProcess[str], str]:
+    summary = tmp_path / "summary.md"
+    summary.write_text("")
+    env = {
+        "IS_FORK_PR": "true",
+        "GITHUB_STEP_SUMMARY": str(summary),
+        "PR_NUMBER": "123",
+        "HEAD_SHA": "0123456789abcdef0123456789abcdef01234567",
+    }
+    result = _fan_in(tmp_path, env=env, **results)
+    return result, summary.read_text()
+
+
+@pytest.mark.parametrize(
+    ("docs_only", "backend_python", "lint", "passes"),
+    [
+        # A diff with backend code: lint must pass.
+        ("false", "true", "success", True),
+        ("false", "true", "failure", False),
+        ("false", "true", "cancelled", False),
+        ("false", "true", "skipped", False),
+        # A docs-only or no-backend diff: lint may skip.
+        ("true", "false", "skipped", True),
+        ("false", "false", "skipped", True),
+        ("false", "false", "failure", False),
+    ],
+)
+def test_fork_fan_in_result(
+    tmp_path: Path, docs_only: str, backend_python: str, lint: str, passes: bool
+) -> None:
+    # The shards use our own pool, and the outside-backend job skips by its
+    # own condition: both are skipped on a fork PR.
+    result, summary = _fork_fan_in(
+        tmp_path,
+        docs_only=docs_only,
+        backend_python=backend_python,
+        lint=lint,
+        shards="skipped",
+        outside="skipped",
+    )
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
+    if passes and docs_only == "true":
+        # The reason is "docs only", not "fork".
+        assert "docs only" in summary
+        assert "the unit tests did not run" not in summary
+        assert "git push" not in summary
+    elif passes:
+        assert "the unit tests did not run" in summary
+        assert f"Lint and type check (ruff + mypy): {lint}." in summary
+        assert "`.github/`, `scripts/ci/` and `backend/tests/_unit_*.py`" in summary
+        assert (
+            "git push origin 0123456789abcdef0123456789abcdef01234567:refs/heads/ci/pr-123"
+            in summary
+        )
+    else:
+        assert summary == ""
+
+
+@pytest.mark.parametrize("shards", ["failure", "cancelled"])
+def test_fork_fan_in_fails_on_a_red_shard(tmp_path: Path, shards: str) -> None:
+    result, summary = _fork_fan_in(
+        tmp_path,
+        docs_only="false",
+        backend_python="true",
+        lint="success",
+        shards=shards,
+        outside="skipped",
+    )
+    assert result.returncode != 0
+    assert summary == ""
+
+
+def test_fork_fan_in_fails_when_the_detector_did_not_pass(tmp_path: Path) -> None:
+    result, summary = _fork_fan_in(
+        tmp_path,
+        detect="failure",
+        docs_only="",
+        backend_python="",
+        lint="success",
+        shards="skipped",
+        outside="skipped",
+    )
+    assert result.returncode != 0
+    assert summary == ""
+
+
 # --- The `python-integration` fan-in -----------------------------------------
 
 
@@ -434,16 +520,14 @@ def _integration_fan_in(
     tmp_path: Path, *, docs_only: str, backend_python: str, shards: str
 ) -> subprocess.CompletedProcess[str]:
     script = _step_script("python-integration", name="Assert every integration shard passed")
-    for expression, value in {
-        "${{ needs.changes.result }}": "success",
-        "${{ needs.changes.outputs.docs_only }}": docs_only,
-        "${{ needs.changes.outputs.backend_python }}": backend_python,
-        "${{ needs.python-integration-shard.result }}": shards,
-    }.items():
-        assert expression in script, expression
-        script = script.replace(expression, value)
     assert "${{" not in script
-    return _bash(script, tmp_path, {"PATH": "/usr/bin:/bin"})
+    values = {
+        "CHANGES_RESULT": "success",
+        "CHANGES_DOCS_ONLY": docs_only,
+        "CHANGES_BACKEND_PYTHON": backend_python,
+        "SHARDS_RESULT": shards,
+    }
+    return _bash(script, tmp_path, {"PATH": "/usr/bin:/bin", **values})
 
 
 @pytest.mark.parametrize(

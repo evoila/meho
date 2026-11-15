@@ -311,7 +311,7 @@ verifier itself is well-formed:
 | Bash syntax | `bash -n scripts/acceptance/smoke.sh` | The verifier parses without errors |
 | `--help` exits 0 | `bash scripts/acceptance/smoke.sh --help` | The self-contained help text renders without breaking on the heredoc |
 | Unknown-flag exit 2 | `bash scripts/acceptance/smoke.sh --bogus` returns exit code 2 | The CLI-usage-error path works (matches `install-verify.sh` / `rollback-verify.sh`) |
-| Missing-token failure mode | `bash scripts/acceptance/smoke.sh --enforce-budget` (with no token, no DB, no cluster) exits 1 with `[FAIL] login: ...` | Fail-loud on the precondition; budget hard-fail on missing `SMOKE_START_TS` |
+| Missing-token failure mode | `bash scripts/acceptance/smoke.sh --backplane https://meho.example.test --enforce-budget` (with no token, no DB, no cluster) exits 1 with `[FAIL] login: ...` | Fail-loud on the precondition; budget hard-fail on missing `SMOKE_START_TS` |
 
 No CI job runs these checks today (there is no
 `scripts/ci/check-scripts.sh`); run them by hand when you change the

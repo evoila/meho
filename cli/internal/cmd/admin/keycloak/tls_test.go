@@ -96,7 +96,7 @@ func TestBootstrapClientsCmd_CABundleAndInsecureAreMutuallyExclusive(t *testing.
 	cmd.SetErr(&errOut)
 	cmd.SetArgs([]string{
 		"--keycloak-base-url", "https://kc.example.com",
-		"--realm", "evba",
+		"--realm", "example",
 		"--admin-username", "admin",
 		"--skip-user-provisioning",
 		"--keycloak-ca-bundle", writeSelfSignedCA(t),
@@ -127,7 +127,7 @@ func TestBootstrapClientsCmd_InsecureFlagWarnsLoudly(t *testing.T) {
 	cmd.SetErr(&errOut)
 	cmd.SetArgs([]string{
 		"--keycloak-base-url", srv.URL,
-		"--realm", "evba",
+		"--realm", "example",
 		"--admin-username", "admin",
 		"--mcp-resource-uri", "https://meho.example.com/mcp",
 		"--skip-user-provisioning",
@@ -154,7 +154,7 @@ func TestBootstrapClientsCmd_CABundleReadErrorSurfaces(t *testing.T) {
 	cmd.SetErr(&errOut)
 	cmd.SetArgs([]string{
 		"--keycloak-base-url", "https://kc.example.com",
-		"--realm", "evba",
+		"--realm", "example",
 		"--admin-username", "admin",
 		"--mcp-resource-uri", "https://meho.example.com/mcp",
 		"--skip-user-provisioning",

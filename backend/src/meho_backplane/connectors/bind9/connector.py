@@ -266,6 +266,7 @@ class Bind9Connector(SshConnector):
     product = "bind9"
     version = "9.x"
     impl_id = "bind9-ssh"
+    supported_version_range = ">=9.18,<9.21"
 
     # ~18 lines of executable body wrapped in ~65 lines of docstring
     # encoding the safe-sudo invariant; iter-1 `p1` praised the

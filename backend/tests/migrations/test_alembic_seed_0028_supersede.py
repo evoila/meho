@@ -65,6 +65,7 @@ from sqlalchemy import text
 from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
+from tests._hashed_tokens import find_hashed_token
 
 #: The legacy seed marker ``0018`` wrote on every row.
 _LEGACY_SEED_ACTOR_SUB: Final[str] = "migration:seed-rdc-conventions"
@@ -87,20 +88,22 @@ _EXPECTED_SLUGS: Final[frozenset[str]] = frozenset(
 )
 
 #: Tokens that MUST NOT appear in the seeded default-tenant body
-#: text after ``upgrade head`` (signal-12 verification per #1137 AC).
-#: These tokens identify content sourced from the consumer's
-#: ``CLAUDE.md`` (``evoila/meho`` repo references, customer-specific
-#: lab program identifiers, AI-tool legacy refs). The bare ``rdc-``
-#: prefix subsumes ``rdc-internal`` and ``rdc-hetzner``; ``meho-internal``
-#: and ``claude-rdc-`` are added per the #1137 acceptance criterion to
-#: cover the full set of internal-repo and consumer-identity tokens.
+#: text after ``upgrade head``. These tokens identify content sourced
+#: from a consumer's ``CLAUDE.md`` (``evoila/meho`` repo references,
+#: customer-specific lab program identifiers, AI-tool legacy refs).
 _FORBIDDEN_TOKENS: Final[tuple[str, ...]] = (
     "evoila/meho",
-    "evoila-bosnia",
-    "meho-internal",
-    "claude-rdc-",
-    "rdc-",
     "Holodeck",
+)
+
+#: Three private repository names and the consumer-identity prefix, as
+#: ``(length, sha256 of the lowercase name)``, so this public file does
+#: not name them. See :func:`tests._hashed_tokens.find_hashed_token`.
+_FORBIDDEN_HASHED_TOKENS: Final[tuple[tuple[int, str], ...]] = (
+    (4, "f43a3b35ec5bd2ff114dd9e6d15ca4cdb8a4be4f76836af170b69572932a08dc"),
+    (13, "885ce5f27302f8e3cd4bd676054d0a9ee000282de4948755c338fa861dfa3559"),
+    (13, "06676ff72a3ffffb4e398600c0ff4f1c1e4a6d7a25ad98027fd4f78abb49799c"),
+    (11, "5f13f91242342656476ae9bcdfa2335287a39404e7622fe348ab4e2a8b13a97e"),
 )
 
 
@@ -379,7 +382,7 @@ def test_seeded_default_bodies_carry_no_consumer_specific_tokens(
     Acceptance criterion: "After migration lands, initialize against a
     fresh-DB MCP server returns instructions text that carries the
     generic illustrative conventions only -- zero references to
-    evoila/meho, evoila-bosnia/meho-internal, rdc-internal,
+    evoila/meho, rdc-internal,
     Holodeck-claude, or any other consumer-specific tokens."
 
     The wire-level MCP round-trip is exercised in
@@ -407,6 +410,11 @@ def test_seeded_default_bodies_carry_no_consumer_specific_tokens(
             "the seed must contain no references to a specific consumer's "
             "operational discipline or repo identifiers"
         )
+    hashed_hit = find_hashed_token(blob, _FORBIDDEN_HASHED_TOKENS)
+    assert hashed_hit is None, (
+        f"forbidden token {hashed_hit!r} found in seeded default conventions -- "
+        "the seed must contain no private names"
+    )
 
 
 def test_operator_curated_rdc_internal_content_survives_supersede(

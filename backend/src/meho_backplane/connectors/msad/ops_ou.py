@@ -140,7 +140,7 @@ _DN_PROP: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
     "pattern": "\\S",
-    "description": "A distinguished name (e.g. ``OU=Servers,DC=c1sql,DC=lab``).",
+    "description": "A distinguished name (e.g. ``OU=Servers,DC=example,DC=test``).",
 }
 
 

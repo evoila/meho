@@ -26,10 +26,8 @@ from meho_backplane.docs_search import (
 
 # Concrete object paths from the issue body (#1919), so the test pins the
 # exact shapes a consumer reported.
-_KB_GS = "gs://meho-knowledge-vmware-corpus/kb/broadcom-kb/articles/41/414551.html"
-_COMMUNITY_GS = (
-    "gs://meho-knowledge-vmware-corpus/community/williamlam/blog/2023/05/quiesce-snapshots.md"
-)
+_KB_GS = "gs://example-vmware-corpus/kb/broadcom-kb/articles/41/414551.html"
+_COMMUNITY_GS = "gs://example-vmware-corpus/community/williamlam/blog/2023/05/quiesce-snapshots.md"
 
 
 # ---------------------------------------------------------------------------

@@ -178,7 +178,7 @@ def classify_spec_origin(spec_path_or_uri: str, content: str | None) -> str:
       (``file:///`` / ``docs:`` / a vendor ``https`` URL reused as the
       label): an operator-uploaded spec.
 
-    The ``spec:`` label is a MEHO-internal convention the catalog route
+    The ``spec:`` label is an internal convention the catalog route
     assigns, not operator input on the inline on-ramp, so it is a sound
     discriminator for record-and-surface provenance.
     """
@@ -701,8 +701,7 @@ def _screen_fetch_host(hostname: str) -> list[str]:
     resolver, which dials one of the returned addresses). Resolving once
     and connecting to that same answer is what closes the check/use gap:
     without pinning, httpx re-resolves the name at connect time and a
-    resolver that has since moved the name into private space is followed
-    (evoila-bosnia/meho-internal#275).
+    resolver that has since moved the name into private space is followed.
 
     Fails **closed**, unlike the target guard: an unresolvable name is
     rejected here (the ingest path has no split-horizon fail-open case),
@@ -843,7 +842,7 @@ def _fetch_spec_bytes(spec_path_or_uri: str) -> bytes:
 
     current_url = spec_path_or_uri
     # Pin the fetch to a guard-validated address at the socket boundary
-    # (evoila-bosnia/meho-internal#275): the guard above (and per redirect
+    #: the guard above (and per redirect
     # hop below) screens the name, but httpx would otherwise re-resolve it
     # at connect time. The pinning transport re-screens inside
     # ``connect_tcp`` and dials only an address from that same resolution,

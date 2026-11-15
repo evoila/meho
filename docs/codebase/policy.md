@@ -43,7 +43,10 @@ classifications:
   same `match` are a mistake.
 - `labels` pass the same check as the single edit (`_check_labels` in
   `policy/store.py`): at most 32 labels, a key of 1 to 63 characters and a
-  value of 1 to 255 characters. A mistake names the entry.
+  value of 1 to 255 characters, and the character rule of
+  [policy-classification.md](policy-classification.md) (a key uses only
+  letters, digits and `. _ / -`; a value has no line breaks and no control
+  characters). A mistake names the entry.
 - Later changes add `bindings` and `routing`. Until then they are unknown
   keys.
 
@@ -69,16 +72,29 @@ is one sentence that names the entry:
   (`operations/caller_address.py`).
 - **Floor: the code's level.** A `risk` below the operation's level in the
   code is refused. A file can raise a risk level, not lower it.
+- **An install-wide "always wait".** In a tenant's file, an entry with
+  `always_wait: false` that matches an operation the install's policy makes
+  always wait is refused. The sentence names the install entry, for example
+  `install:classifications[0]`. A tenant can make more operations wait,
+  not fewer.
 - Two entries that give one operation a different category (or a different
   value for one label key) at the same level.
 
 At most 50 mistakes are listed, then one line says how many more there
 are.
 
-An install file with `always_wait: true` gets a **warning**: a tenant's own
-entry that is as specific or more specific can set it back to the
-operation's own value. An install admin cannot force "always wait" for
-every tenant yet; that needs a decision first.
+An install file with `always_wait: true` is binding for every tenant
+(decision of 12 November 2026): when the install's most specific entry
+that sets `always_wait` says `true`, the operation waits in every tenant,
+whatever the tenant's entries say. The rule is in `classify`
+(`policy/classification.py`), so dispatch, preview, search, the policy
+evaluator and its compare-only run (`POLICY_ENGINE_SHADOW`) all follow it.
+
+**Stored before the upgrade.** A tenant entry stored before this rule
+that sets an install-wide wait back now has no effect on the wait (its
+other fields still count). `export_policy` writes a
+`# Has no effect: ...` comment above such an entry, and a new import of
+the same entry is refused, so the tenant admin removes it.
 
 ## Plan, import, approval
 
@@ -89,7 +105,8 @@ every tenant yet; that needs a decision first.
   `classifications`, each with `added`, `changed` (`before` and `after`)
   and `removed`. Each classification entry also has `matches` (how many
   operations it matches) and `changes` (how many of those get other
-  values). `operations_changed` counts all operations whose values change.
+  values). Entries are told apart by their whole `match` (each part on its
+  own), so two different matches never share one line. `operations_changed` counts all operations whose values change.
   `based_on` is the SHA-256 of the meaning of the stored policy (key order,
   comments and empty keys do not count). It covers only the stored policy
   of the import's own scope. A tenant import does not notice a change to
@@ -152,7 +169,9 @@ level that does not exist), every policy read of that tenant fails while
 the switch is on. The error names the document and the entry, for example
 "The stored policy of tenant `<tenant-id>` is not valid, so MEHO cannot
 classify operations: tenant:classifications[3]: ...". An import of a good
-file replaces it; the preview says so in a warning.
+file replaces it; the preview says so in a warning. This holds also when
+an entry or its `match` is not a map, or `classifications` is not a list:
+the diff then lists such an entry as removed.
 
 ## Endpoints and CLI
 

@@ -11,7 +11,7 @@ nodes. There is **no MCP entry point** to create a node directly, so a
 fresh tenant (zero nodes; no probe has run yet) cannot reach a working
 topology state via MCP: ``meho_topology_annotate`` requires both
 endpoints to already exist as ``graph_node`` rows and surfaces
-``NodeNotFoundError`` ("no graph_node matched name 'rdc-vault' in this
+``NodeNotFoundError`` ("no graph_node matched name 'example-vault' in this
 tenant") with no in-tool remediation.
 
 :func:`create_or_get_node` is the manual-seed primitive that closes

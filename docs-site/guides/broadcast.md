@@ -85,8 +85,9 @@ forward with the cursor:
 next page of the same view; it is `null` at the end. `watch_checkpoint`
 is where `meho_broadcast_watch` starts so nothing after this read is missed.
 The `filter` object narrows by exact match on `principal`, `target`,
-and `work_ref` (a change-ticket reference), plus `active_only` to drop
-expired TTL claims.
+and `work_ref` (a change-ticket reference), plus `active_only` to keep
+only active claims: trusted, not completed, and with a TTL that has not
+run out.
 
 ## Announce intent
 

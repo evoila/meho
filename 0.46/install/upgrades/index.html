@@ -3659,6 +3659,11 @@ groups and clients.</p>
 </tr>
 <tr>
 <td><strong>v0.47.0</strong></td>
+<td>In a tenant that has the announce gate on (<code>announce_gate_enabled</code>), a person is never asked for an announce claim. Agents, hosted agent runs, service logins and runner logins are asked as before: their <code>caution</code>-or-higher writes that would run at once need an active claim first, and a service login or a runner login, which cannot make a claim, is refused. The Broadcast page shows agent announcements only. The operation drawer <code>/ui/broadcast/event/{audit_id}</code> and the page filters <code>op_class</code>, <code>op_id</code> and <code>kind</code> are gone; operations are in the audit log. <code>active_only</code> keeps only trusted claims that are not completed and whose TTL has not run out. The target advisory lists only active agent claims, with <code>owner_sub</code> and <code>expires_at</code> (no <code>actor_sub</code>, no <code>op_id</code>).</td>
+<td><strong>Nothing to do.</strong></td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
 <td><strong>Action needed (API clients).</strong> Approving a request that asks for a secret value (<code>reveal_secret: true</code>) and waits for approval runs nothing. The approve answer says <code>dispatch_status: "waiting_for_requester"</code> and holds no value. MEHO stores no value. In <code>GET /api/v1/approvals/&lt;id&gt;/result</code>, <code>result</code> is <code>null</code> until the person who asked fetches the value. After the fetch, the stored result has <code>result: null</code>, <code>handle: null</code> and <code>extras.secret_value_withheld: true</code>. A client that reads the stored result gets no value.</td>
 <td>After the approval, the person who asked fetches the value with <code>POST /api/v1/approvals/&lt;id&gt;/reveal</code> or <code>meho secret read --approval &lt;id&gt; --field &lt;name&gt;</code> (or "Show value" in the console). This works once, and only within 15 minutes of the approval. A second or late fetch is refused with <code>409</code>; then send the request again. Change every client that reads the stored result. See <a href="../../can-do/hidden-secrets/">Secret values stay hidden</a>.</td>
 </tr>

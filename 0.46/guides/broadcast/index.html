@@ -3356,8 +3356,9 @@ forward with the cursor:</p>
 next page of the same view; it is <code>null</code> at the end. <code>watch_checkpoint</code>
 is where <code>meho_broadcast_watch</code> starts so nothing after this read is missed.
 The <code>filter</code> object narrows by exact match on <code>principal</code>, <code>target</code>,
-and <code>work_ref</code> (a change-ticket reference), plus <code>active_only</code> to drop
-expired TTL claims.</p>
+and <code>work_ref</code> (a change-ticket reference), plus <code>active_only</code> to keep
+only active claims: trusted, not completed, and with a TTL that has not
+run out.</p>
 <h2 id="announce-intent">Announce intent<a class="headerlink" href="#announce-intent" title="Permanent link">&para;</a></h2>
 <p><code>meho_broadcast_announce</code> is for <strong>intent and check-ins, not per-op
 noise</strong>: the audit log already records each operation. <code>activity</code> is the

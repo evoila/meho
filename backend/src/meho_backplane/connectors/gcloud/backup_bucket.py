@@ -8,6 +8,10 @@ The operation metadata is in
 the value checks, the policy-conflict error and the HTTP helpers of
 :mod:`meho_backplane.connectors.gcloud.workload_identity`.
 
+* **Every call on a bucket that exists** first checks that the bucket is
+  in the project of the target. Bucket names are global, so the account
+  MEHO uses may reach buckets of other projects. A bucket of another
+  project is refused before MEHO shows or changes anything.
 * **Bucket create** sends one ``POST``. The bucket always has uniform
   access and public access blocked (``enforced``). A bucket name is global,
   so a name that is already used changes nothing and the call fails with a
@@ -58,6 +62,7 @@ __all__ = [
 ]
 
 _STORAGE_API: Final[str] = "https://storage.googleapis.com/storage/v1"
+_CRM_API: Final[str] = "https://cloudresourcemanager.googleapis.com/v1"
 
 #: 3 to 63 characters of a-z, 0-9, '-' and '_'. Names with dots are not accepted.
 BUCKET_NAME_PATTERN: Final[str] = r"^[a-z0-9][a-z0-9_-]{1,61}[a-z0-9]$"
@@ -189,6 +194,30 @@ def _binding_rows(policy: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+async def _project_bucket(
+    connector: GcloudConnector, target: GcloudTargetLike, bucket: str, *, operator: Operator
+) -> dict[str, Any]:
+    """Read a bucket, and refuse it when it is not in the project of *target*.
+
+    Google gives the project of a bucket only as a project number, so MEHO
+    reads the number of the target's project too. When either number is
+    missing, MEHO refuses: it cannot tell whose bucket it is.
+    """
+    found = await connector._get_json_abs(target, _bucket_url(bucket), operator=operator)
+    project_id = gcp_project(target)
+    project = await connector._get_json_abs(
+        target, f"{_CRM_API}/projects/{project_id}", operator=operator
+    )
+    owner = found.get("projectNumber")
+    expected = project.get("projectNumber")
+    if not owner or not expected or str(owner) != str(expected):
+        raise ValueError(
+            f"The bucket {bucket!r} is not in the project {project_id!r} of this target. MEHO "
+            f"reads and changes only buckets of the target's project. {_NOT_CHANGED}"
+        )
+    return found
+
+
 async def _get_policy(
     connector: GcloudConnector, target: GcloudTargetLike, bucket: str, *, operator: Operator
 ) -> dict[str, Any]:
@@ -304,7 +333,7 @@ async def bucket_update_settings(
     """``gcloud.storage.buckets.update_settings``: versioning, retention period, lifecycle."""
     name = _bucket(params)
     wanted = _wanted_settings(params)
-    current = await connector._get_json_abs(target, _bucket_url(name), operator=operator)
+    current = await _project_bucket(connector, target, name, operator=operator)
     before = _bucket_settings(current)
     body = _patch_body(wanted, before)
     if not body:
@@ -336,7 +365,7 @@ async def bucket_read(
 ) -> dict[str, Any]:
     """``gcloud.storage.buckets.read``: settings, who has access, retention lock."""
     name = _bucket(params)
-    bucket = await connector._get_json_abs(target, _bucket_url(name), operator=operator)
+    bucket = await _project_bucket(connector, target, name, operator=operator)
     policy = await _get_policy(connector, target, name, operator=operator)
     return {
         **_bucket_settings(bucket),
@@ -361,6 +390,7 @@ async def bucket_access_add(
             f"is deleted. {_NOT_CHANGED}"
         )
 
+    await _project_bucket(connector, target, name, operator=operator)
     policy = await _get_policy(connector, target, name, operator=operator)
     bindings = list(policy.get("bindings") or [])
     plain = [b for b in bindings if b.get("role") == role and not b.get("condition")]

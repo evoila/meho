@@ -13,6 +13,9 @@ Covers the five operations in
   period, refuses bad lifecycle rules and an empty change;
 * bucket read: settings, access and lock; a failed policy read fails the
   call instead of showing partial data;
+* read, settings update and access add: a bucket of another project, or
+  one whose project is not known, is refused before any data is shown or
+  any change is sent;
 * access add: adds only the named member, sends the etag it read, keeps a
   member that is already there, refuses a stale etag, public members and
   a policy without an etag;
@@ -56,6 +59,8 @@ _OTHER = "group:ops@example.com"
 _SA_ID = "backup-writer"
 _SA_PARENT = f"{_IAM}/projects/{_PROJECT}/serviceAccounts"
 _SA_EMAIL = f"{_SA_ID}@{_PROJECT}.iam.gserviceaccount.com"
+_PROJECT_URL = f"https://cloudresourcemanager.googleapis.com/v1/projects/{_PROJECT}"
+_NUMBER = "123456789012"
 
 
 def _op(op_id: str) -> Any:
@@ -68,6 +73,7 @@ def _bucket(**extra: Any) -> dict[str, Any]:
         "location": "EUROPE-WEST3",
         "storageClass": "STANDARD",
         "metageneration": "3",
+        "projectNumber": _NUMBER,
         "iamConfiguration": {
             "uniformBucketLevelAccess": {"enabled": True},
             "publicAccessPrevention": "enforced",
@@ -89,6 +95,12 @@ def _policy(etag: str = "CAE=") -> dict[str, Any]:
             },
         ],
     }
+
+
+def _in_project(mock: respx.MockRouter, bucket: dict[str, Any] | None = None) -> None:
+    """Answer the bucket read, and the project read that checks who owns the bucket."""
+    mock.get(_BUCKET_URL).respond(200, json=_bucket() if bucket is None else bucket)
+    mock.get(_PROJECT_URL).respond(200, json={"projectId": _PROJECT, "projectNumber": _NUMBER})
 
 
 def _forbidden() -> Any:
@@ -193,7 +205,7 @@ async def test_update_sends_only_the_changed_settings_with_the_metageneration(
 ) -> None:
     rules = [{"action": {"type": "Delete"}, "condition": {"age": 90}}]
     with respx.mock() as mock:
-        mock.get(_BUCKET_URL).respond(200, json=_bucket(versioning={"enabled": True}))
+        _in_project(mock, _bucket(versioning={"enabled": True}))
         patch_route = mock.patch(_BUCKET_URL).respond(
             200,
             json=_bucket(
@@ -234,7 +246,7 @@ async def test_update_with_the_same_settings_sends_nothing(connector: GcloudConn
         lifecycle={"rule": rules},
     )
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(_BUCKET_URL).respond(200, json=current)
+        _in_project(mock, current)
         patch_route = mock.patch(_BUCKET_URL)
         result = await connector.gcloud_bucket_update_settings(
             _OPERATOR,
@@ -252,7 +264,7 @@ async def test_update_with_the_same_settings_sends_nothing(connector: GcloudConn
 
 async def test_update_zero_removes_the_retention_period(connector: GcloudConnector) -> None:
     with respx.mock() as mock:
-        mock.get(_BUCKET_URL).respond(200, json=_bucket(retentionPolicy={"retentionPeriod": "60"}))
+        _in_project(mock, _bucket(retentionPolicy={"retentionPeriod": "60"}))
         patch_route = mock.patch(_BUCKET_URL).respond(200, json=_bucket())
         result = await connector.gcloud_bucket_update_settings(
             _OPERATOR, _TARGET, params={"bucket": _BUCKET, "retention_period_seconds": 0}
@@ -266,7 +278,7 @@ async def test_update_refuses_to_change_a_locked_retention_period(
 ) -> None:
     locked = _bucket(retentionPolicy={"retentionPeriod": "60", "isLocked": True})
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(_BUCKET_URL).respond(200, json=locked)
+        _in_project(mock, locked)
         patch_route = mock.patch(_BUCKET_URL)
         with pytest.raises(ValueError, match="locked"):
             await connector.gcloud_bucket_update_settings(
@@ -280,7 +292,7 @@ async def test_update_keeps_a_locked_period_when_it_is_the_same(
 ) -> None:
     locked = _bucket(retentionPolicy={"retentionPeriod": "60", "isLocked": True})
     with respx.mock() as mock:
-        mock.get(_BUCKET_URL).respond(200, json=locked)
+        _in_project(mock, locked)
         patch_route = mock.patch(_BUCKET_URL).respond(200, json=locked)
         result = await connector.gcloud_bucket_update_settings(
             _OPERATOR,
@@ -297,7 +309,7 @@ async def test_update_fails_when_the_bucket_changed_in_between(
     import httpx
 
     with respx.mock() as mock:
-        mock.get(_BUCKET_URL).respond(200, json=_bucket())
+        _in_project(mock)
         mock.patch(_BUCKET_URL).mock(return_value=httpx.Response(412, json={}))
         with pytest.raises(httpx.HTTPStatusError):
             await connector.gcloud_bucket_update_settings(
@@ -348,9 +360,9 @@ async def test_update_refuses_bad_values_before_any_call(
 
 async def test_read_shows_settings_access_and_lock(connector: GcloudConnector) -> None:
     with respx.mock() as mock:
-        mock.get(_BUCKET_URL).respond(
-            200,
-            json=_bucket(
+        _in_project(
+            mock,
+            _bucket(
                 versioning={"enabled": True},
                 retentionPolicy={"retentionPeriod": "60", "isLocked": True},
             ),
@@ -373,7 +385,7 @@ async def test_read_shows_a_bucket_with_no_settings_as_off_not_unknown(
     connector: GcloudConnector,
 ) -> None:
     with respx.mock() as mock:
-        mock.get(_BUCKET_URL).respond(200, json={"name": _BUCKET})
+        _in_project(mock, {"name": _BUCKET, "projectNumber": _NUMBER})
         mock.get(_IAM_URL).respond(200, json={"etag": "CAE="})
         result = await connector.gcloud_bucket_read(_OPERATOR, _TARGET, params={"bucket": _BUCKET})
     assert result["access"] == []
@@ -387,7 +399,7 @@ async def test_read_fails_when_the_policy_cannot_be_read(connector: GcloudConnec
     import httpx
 
     with respx.mock() as mock:
-        mock.get(_BUCKET_URL).respond(200, json=_bucket())
+        _in_project(mock)
         mock.get(_IAM_URL).mock(return_value=_forbidden())
         with pytest.raises(httpx.HTTPStatusError):
             await connector.gcloud_bucket_read(_OPERATOR, _TARGET, params={"bucket": _BUCKET})
@@ -413,6 +425,7 @@ async def test_access_add_adds_only_the_member_and_sends_the_etag(
     connector: GcloudConnector,
 ) -> None:
     with respx.mock() as mock:
+        _in_project(mock)
         mock.get(_IAM_URL).respond(200, json=_policy())
         put = mock.put(_IAM_URL).respond(200, json={"etag": "CAI="})
         result = await connector.gcloud_bucket_access_add(
@@ -439,6 +452,7 @@ async def test_access_add_makes_a_new_binding_when_the_role_has_none(
     connector: GcloudConnector,
 ) -> None:
     with respx.mock() as mock:
+        _in_project(mock)
         mock.get(_IAM_URL).respond(200, json={"etag": "CAE="})
         put = mock.put(_IAM_URL).respond(200, json={"etag": "CAI="})
         result = await connector.gcloud_bucket_access_add(
@@ -460,6 +474,7 @@ async def test_access_add_ignores_a_member_held_only_through_a_condition(
         ],
     }
     with respx.mock() as mock:
+        _in_project(mock)
         mock.get(_IAM_URL).respond(200, json=policy)
         put = mock.put(_IAM_URL).respond(200, json={"etag": "CAI="})
         result = await connector.gcloud_bucket_access_add(
@@ -473,6 +488,7 @@ async def test_access_add_ignores_a_member_held_only_through_a_condition(
 
 async def test_access_add_keeps_a_member_that_is_already_there(connector: GcloudConnector) -> None:
     with respx.mock(assert_all_called=False) as mock:
+        _in_project(mock)
         mock.get(_IAM_URL).respond(200, json=_policy())
         put = mock.put(_IAM_URL)
         result = await connector.gcloud_bucket_access_add(
@@ -487,6 +503,7 @@ async def test_access_add_refuses_a_stale_etag_without_retry(connector: GcloudCo
     import httpx
 
     with respx.mock() as mock:
+        _in_project(mock)
         mock.get(_IAM_URL).respond(200, json=_policy())
         put = mock.put(_IAM_URL).mock(return_value=httpx.Response(412, json={}))
         with pytest.raises(GcloudPolicyChangedError, match="changed after MEHO read it"):
@@ -500,6 +517,7 @@ async def test_access_add_does_not_hide_other_write_errors(connector: GcloudConn
     import httpx
 
     with respx.mock() as mock:
+        _in_project(mock)
         mock.get(_IAM_URL).respond(200, json=_policy())
         mock.put(_IAM_URL).mock(return_value=_forbidden())
         with pytest.raises(httpx.HTTPStatusError):
@@ -510,6 +528,7 @@ async def test_access_add_does_not_hide_other_write_errors(connector: GcloudConn
 
 async def test_access_add_refuses_a_policy_without_an_etag(connector: GcloudConnector) -> None:
     with respx.mock(assert_all_called=False) as mock:
+        _in_project(mock)
         mock.get(_IAM_URL).respond(200, json={"bindings": []})
         put = mock.put(_IAM_URL)
         with pytest.raises(ValueError, match="without an etag"):
@@ -538,6 +557,74 @@ async def test_access_add_refuses_bad_values_before_any_call(
         with pytest.raises(ValueError):
             await connector.gcloud_bucket_access_add(_OPERATOR, _TARGET, params=params)
     assert read.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# A bucket of another project
+# ---------------------------------------------------------------------------
+
+_ELSEWHERE = [
+    _bucket(projectNumber="999999999999"),
+    {key: value for key, value in _bucket().items() if key != "projectNumber"},
+]
+
+
+@pytest.mark.parametrize("bucket", _ELSEWHERE)
+async def test_read_refuses_a_bucket_of_another_project(
+    connector: GcloudConnector, bucket: dict[str, Any]
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _in_project(mock, bucket)
+        iam = mock.get(_IAM_URL)
+        with pytest.raises(ValueError, match="not in the project"):
+            await connector.gcloud_bucket_read(_OPERATOR, _TARGET, params={"bucket": _BUCKET})
+    assert iam.call_count == 0
+
+
+@pytest.mark.parametrize("bucket", _ELSEWHERE)
+async def test_update_refuses_a_bucket_of_another_project(
+    connector: GcloudConnector, bucket: dict[str, Any]
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _in_project(mock, bucket)
+        patch_route = mock.patch(_BUCKET_URL)
+        with pytest.raises(ValueError, match="not in the project"):
+            await connector.gcloud_bucket_update_settings(
+                _OPERATOR, _TARGET, params={"bucket": _BUCKET, "versioning": True}
+            )
+    assert patch_route.call_count == 0
+
+
+@pytest.mark.parametrize("bucket", _ELSEWHERE)
+async def test_access_add_refuses_a_bucket_of_another_project(
+    connector: GcloudConnector, bucket: dict[str, Any]
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _in_project(mock, bucket)
+        iam = mock.get(_IAM_URL)
+        put = mock.put(_IAM_URL)
+        with pytest.raises(ValueError, match="not in the project"):
+            await connector.gcloud_bucket_access_add(
+                _OPERATOR, _TARGET, params={"bucket": _BUCKET, "role": _ROLE, "member": _WRITER}
+            )
+    assert iam.call_count == 0
+    assert put.call_count == 0
+
+
+async def test_access_add_fails_when_the_project_cannot_be_read(
+    connector: GcloudConnector,
+) -> None:
+    import httpx
+
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(_BUCKET_URL).respond(200, json=_bucket())
+        mock.get(_PROJECT_URL).mock(return_value=_forbidden())
+        put = mock.put(_IAM_URL)
+        with pytest.raises(httpx.HTTPStatusError):
+            await connector.gcloud_bucket_access_add(
+                _OPERATOR, _TARGET, params={"bucket": _BUCKET, "role": _ROLE, "member": _WRITER}
+            )
+    assert put.call_count == 0
 
 
 # ---------------------------------------------------------------------------

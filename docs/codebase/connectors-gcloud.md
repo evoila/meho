@@ -217,7 +217,7 @@ with `gcloud`, which left no MEHO approval and no audit row.
 | `gcloud.storage.buckets.create` | `POST /storage/v1/b?project=<id>` | caution (a person must approve) |
 | `gcloud.storage.buckets.update_settings` | `GET`, then `PATCH /storage/v1/b/<bucket>?ifMetagenerationMatch=<n>` | caution (a person must approve) |
 | `gcloud.storage.buckets.read` | `GET /b/<bucket>` and `GET /b/<bucket>/iam` | safe |
-| `gcloud.storage.buckets.access.add` | `GET .../iam`, add one member, `PUT .../iam` with the read `etag` | dangerous (a person must approve) |
+| `gcloud.storage.buckets.access.add` | `GET /b/<bucket>`, `GET .../iam`, add one member, `PUT .../iam` with the read `etag` | dangerous (a person must approve) |
 | `gcloud.iam.service_accounts.create` | `POST /v1/projects/<id>/serviceAccounts` | caution (a person must approve) |
 
 Source: metadata in `ops_backup_bucket.py` (`BACKUP_BUCKET_OPS`, appended
@@ -235,6 +235,13 @@ How they behave:
 - **Name already used.** Bucket names are global. On `409` the create fails
   with a clear message and changes nothing. A bucket in another project
   cannot be read, so MEHO does not guess who owns it.
+- **Only buckets of the target's project.** Read, settings update and
+  access add first read the bucket and the target's project
+  (`GET cloudresourcemanager/v1/projects/<id>`). When the bucket's
+  `projectNumber` is not the project's number, or either is missing, the
+  call fails before it shows or changes anything. The account MEHO uses
+  may reach buckets of other projects, and bucket names are global, so
+  without this check a target could reach another project's bucket.
 - **Settings update** changes only what is named: `versioning`,
   `retention_period_seconds` (0 removes it) and `lifecycle_rules` (the full
   list; it replaces all rules). It reads the bucket, sends only what differs

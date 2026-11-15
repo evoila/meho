@@ -1010,8 +1010,8 @@ request share one read, so a wrong password makes one failed sign-in.
 - **A 403 at a step of `ensure_approval_flow`** after the flow exists (the
   settings of the level step, the realm's level map, the client binding):
   the run stops half-way. The error names the refused step and the flow
-  (alias, id, `flow_created`). `extras.remediation` also says what the run
-  changed before: the flow, the level setting and the level name. These
+  (id, `flow_created`). `extras.remediation` also gives the flow's name and
+  says what the run changed before: the flow, the level setting and the level name. These
   changes stay; a second run after the fix keeps them and does the rest.
 - **A 403 while an op finds or makes its flow** (`flow_refused_error`, used by
   `ensure_approval_flow` and `ensure_approval_touch`; the touch op also
@@ -1021,6 +1021,14 @@ request share one read, so a wrong password makes one failed sign-in.
   the next run, because a run finds it with other steps and stops.
 - **A refused read inside a step** is named as a read ("read what is needed
   to ..."), not as the change of the step (`read_or_write`).
+- **A refused read back after a write in the same step** (`reading_back`,
+  which raises `ReadBackRefusedError`): the text says "read back the change
+  MEHO made to ...", and the list of what the run changed holds that write,
+  marked "MEHO could not read it back". The approval op reads back only the
+  client binding; the touch op reads back the level map, the `amr` mapper
+  fix, the company login default and the binding. The short error message
+  of `ensure_approval_flow` gives the flow id but not the flow's name, so
+  the longest step still fits the 256-character limit.
 - **A 403 at a step of `ensure_approval_touch`** after the flow exists (the
   realm's level map, the client's `amr` mapper, the company login default,
   the client binding): the run stops half-way. The error names the refused
@@ -1194,9 +1202,10 @@ the client, the new flow, who is affected, and the way back:
 
 ### Park-time approval preview (#1857)
 
-Seventeen of the write ops register bespoke `proposed_effect` preview builders
+Eighteen of the write ops register bespoke `proposed_effect` preview builders
 (twelve in `connectors/keycloak/ops_write_preview.py`, one in
-`ops_login_check.py`, one in `ops_authflow.py`, one in
+`ops_user_required_actions.py`, one in `ops_login_check.py`, one in
+`ops_authflow.py`, one in
 `ops_authflow_passkey.py`, one in `ops_authflow_touch.py`, one in
 `ops_write_realm_smtp.py`), wired onto the per-op hook
 (`operations/_preview.py`, #1437) by an import side-effect in the package

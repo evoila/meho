@@ -265,30 +265,49 @@ sign-in tries can lock an account.
 
 So a connector may have an optional method
 `is_session_expired(response: httpx.Response) -> bool`. The dispatcher asks it
-when a status is outside the known set and the connector has
-`invalidate_session`. The connector reads the status and the body. The default
+when a 4xx status is outside the known set and the connector has
+`invalidate_session`. It never asks for a 5xx: after a 5xx or a timeout the
+call may have run. The connector reads the status and the body. The default
 is "no": a connector without the method, a method that raises, and any answer
 other than `True` all count as "no", and the status is handled as before (a
-real 403 stays "insufficient permission").
+real 403 stays "insufficient permission"). A wrong password or a locked
+account is not "the session ended": the method must say "no" for it.
 
-When the answer is yes, the dispatcher does what it does for a 401: it calls
-`invalidate_session`, lets the connector sign in again, and repeats the call
-once (`dispatcher._retry_after_expired_session_answer`). Rules:
+When the answer is yes, the dispatcher calls `invalidate_session`, so the
+next call signs in again. Then it decides whether to repeat the call
+(`may_resend_after_session_end`):
+
+- **Repeat once** when a repeat cannot send a change twice: the operation's
+  risk level is `safe`, or it is an ingested operation that sent exactly one
+  request (that request was refused, so nothing ran). A write is always one
+  request; a read sends more only when the connector follows pages
+  (`dispatcher._retry_after_expired_session_answer`).
+- **Do not repeat** in every other case: a typed handler or a multi-step
+  operation that is not `safe` may have sent a write before the refused
+  request. A call that runs after a person's approval is never repeated: one
+  approval is one run. The caller gets `connector_auth_failed` (cause
+  `session_ended_<status>_not_resent`) that says the session ended, that the
+  change may or may not have been made, and to check the product before a
+  new call (`dispatcher._session_ended_not_resent`).
+
+Rules for the repeat:
 
 - At most one fresh sign-in per call. It is never a loop, and the repeated
   call is not asked again.
-- If the fresh sign-in is refused, or the repeated call gets the same answer,
-  the caller gets `connector_auth_failed` with the text "the product refused
-  the sign-in: the password is wrong or the account is locked". It never says
-  to grant a permission. A connector's own `remediation` on its
-  `ConnectorAuthError` wins.
+- If the fresh sign-in is refused, the caller gets `connector_auth_failed`
+  with the text "the product refused the sign-in: the password is wrong or
+  the account is locked". It never says to grant a permission. A connector's
+  own `remediation` on its `ConnectorAuthError` wins.
+- If the repeated call gets the same answer, the caller gets
+  `connector_auth_failed` that says the product took the new sign-in and
+  still gave the same "session ended" answer, and that the account may be
+  locked or not allowed to start a session.
 - Any other answer to the repeated call is classified as it would be alone.
-- The audit row of the call has `session_relogin: true` and
+- The audit row of the call has `session_relogin` (MEHO signed in again),
+  `session_resent` (MEHO sent the operation again) and
   `session_relogin_status` (the rejected status) in its payload, and the
-  trace has one `typed` span named `session_relogin`. Both are written whether
-  the repeated call works or not.
-- Say yes only when the product rejected the call before it ran. The repeat
-  can run a write twice if the product ran it and then ended the session.
+  trace has one `typed` span named `session_relogin`. Both are written
+  whether the operation was repeated or not.
 
 The code is in `operations/_session_expired_hook.py` (the hook check, the
 audit and trace mark, the error text) and the dispatcher function above.

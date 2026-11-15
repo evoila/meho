@@ -424,7 +424,9 @@ from meho_backplane.operations._secret_values import (
 )
 from meho_backplane.operations._session_expired_hook import (
     mark_session_relogin,
-    product_refused_signin_error,
+    may_resend_after_session_end,
+    same_answer_after_signin_error,
+    session_ended_not_resent_error,
     session_expired_by_hook,
     with_refused_signin_remediation,
 )
@@ -2417,10 +2419,13 @@ async def _handle_http_status_error(
     403 + 422 + the auth-class set; every other status (404, 429, 5xx)
     flattens to the unchanged generic ``connector_error`` shape.
 
-    A connector may also say that a status outside the auth-class set means
-    "the session ended" (``is_session_expired(response)``, see
-    :mod:`~meho_backplane.operations._session_expired_hook`). That answer gets
-    the same recovery, once, in :func:`_retry_after_expired_session_answer`.
+    A connector may also say that a 4xx status outside the auth-class set
+    means "the session ended" (``is_session_expired(response)``, see
+    :mod:`~meho_backplane.operations._session_expired_hook`). MEHO then drops
+    the kept session. It repeats the call once
+    (:func:`_retry_after_expired_session_answer`) only when a repeat cannot
+    send a change twice; otherwise it returns ``connector_auth_failed`` and
+    does not send the operation again (:func:`_session_ended_not_resent`).
     """
     status_code = http_exc.response.status_code
     is_auth_failure = is_auth_failed_status(
@@ -2446,6 +2451,19 @@ async def _handle_http_status_error(
     if callable(invalidate_session) and session_expired_by_hook(
         connector_instance, http_exc.response
     ):
+        if not may_resend_after_session_end(descriptor, connector_instance, http_exc.request):
+            return await _session_ended_not_resent(
+                invalidate_session=invalidate_session,
+                rejected_exc=http_exc,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                audit_id=audit_id,
+                op_id=op_id,
+                started=started,
+            )
         return await _retry_after_expired_session_answer(
             invalidate_session=invalidate_session,
             rejected_exc=http_exc,
@@ -2479,6 +2497,45 @@ async def _handle_http_status_error(
     )
 
 
+async def _session_ended_not_resent(
+    *,
+    invalidate_session: Callable[..., Awaitable[None]],
+    rejected_exc: httpx.HTTPStatusError,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    op_id: str,
+    started: float,
+) -> OperationResult:
+    """Drop the kept session after "the session ended", without a repeat.
+
+    The operation may already have changed the product (a typed handler or a
+    multi-step operation that sent a write before the refused request, or a
+    call that ran after a person's approval). So MEHO does not send it again.
+    The next call signs in again on a fresh session. The caller gets
+    ``connector_auth_failed`` that says the change may or may not have been
+    made.
+    """
+    await invalidate_session(target, rejected=rejected_exc.request)
+    mark_session_relogin(rejected_exc.response.status_code, resent=False)
+    duration_ms = _elapsed_ms(started)
+    return await _audit_error_and_return(
+        result_connector_auth_failed(
+            op_id, session_ended_not_resent_error(rejected_exc, target), target, duration_ms
+        ),
+        audit_id=audit_id,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        duration_ms=duration_ms,
+    )
+
+
 async def _retry_after_expired_session_answer(
     *,
     invalidate_session: Callable[..., Awaitable[None]],
@@ -2496,23 +2553,27 @@ async def _retry_after_expired_session_answer(
     """Sign in again once, after the connector said an answer means "session ended".
 
     The connector's ``is_session_expired(response)`` method said yes for a
-    status outside the known set (a product that answers an ended session
-    with 403, for example). Like :func:`_retry_after_session_invalidation`,
-    this drops the kept login and repeats the call once. Differences:
+    4xx status outside the known set (a product that answers an ended
+    session with 403, for example), and a repeat cannot send a change twice
+    (:func:`may_resend_after_session_end`). Like
+    :func:`_retry_after_session_invalidation`, this drops the kept login and
+    repeats the call once. Differences:
 
     * It is never a loop. The repeated call is not asked again.
     * The audit row and the trace show that MEHO signed in again
       (:func:`mark_session_relogin`).
-    * When the fresh sign-in is refused, or the repeated call gets the same
-      "session ended" answer, the caller gets ``connector_auth_failed`` with
-      the text "the product refused the sign-in" (wrong password or locked
-      account), never "grant a permission".
+    * When the fresh sign-in is refused, the caller gets
+      ``connector_auth_failed`` with the text "the product refused the
+      sign-in" (wrong password or locked account), never "grant a
+      permission". When the repeated call gets the same "session ended"
+      answer, the text says the product took the new sign-in and still
+      ended the session.
 
     Any other answer to the repeated call is classified as it would be on
     its own, so a real 403 still reads as "insufficient permission".
     """
     await invalidate_session(target, rejected=rejected_exc.request)
-    mark_session_relogin(rejected_exc.response.status_code)
+    mark_session_relogin(rejected_exc.response.status_code, resent=True)
     try:
         raw = await _run_source_kind_branch(
             descriptor=descriptor,
@@ -2527,7 +2588,7 @@ async def _retry_after_expired_session_answer(
         if session_expired_by_hook(connector_instance, retry_exc.response):
             result = result_connector_auth_failed(
                 op_id,
-                product_refused_signin_error(retry_exc, target),
+                same_answer_after_signin_error(retry_exc, target),
                 target,
                 duration_ms,
                 relogin="reestablished",

@@ -13,16 +13,25 @@ So a connector may have an optional method::
 
     def is_session_expired(self, response: httpx.Response) -> bool: ...
 
-The dispatcher asks it when a status is not one of the known session-ended
-statuses. The connector looks at the status and the body. A connector
-without the method, or a method that raises, answers "no", and the status
-is handled as before.
+The dispatcher asks it only for a 4xx status that is not one of the known
+session-ended statuses. After a 5xx or a timeout the call may have run, so
+it is never asked and never repeated. The connector looks at the status and
+the body. A connector without the method, or a method that raises, answers
+"no", and the status is handled as before.
 
-When the answer is yes, the dispatcher drops the kept login, signs in again
-and repeats the call once (``dispatcher._retry_after_expired_session_answer``).
-It never loops. If the fresh sign-in is refused, or the repeated call gets
-the same answer, the caller gets a clear error that says the product refused
-the sign-in (wrong password or locked account).
+When the answer is yes, the dispatcher drops the kept login. It repeats the
+call once only when that cannot send a change twice
+(:func:`may_resend_after_session_end`): the operation's risk level is
+``safe``, or it is an ingested operation that sent exactly one request
+(that request was refused, so nothing ran). A call that runs after a
+person's approval is never repeated: one approval is one run. In every
+other case the caller gets ``connector_auth_failed`` that says the session
+ended and the change may or may not have been made.
+
+The repeat never loops. If the fresh sign-in is refused, the caller gets an
+error that says the product refused the sign-in (wrong password or locked
+account). If the repeated call gets the same answer, the error says that
+the product took the new sign-in and still ended the session.
 
 This module holds the pieces of that path that need no dispatcher state.
 """
@@ -36,11 +45,17 @@ import structlog
 
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.flight_recorder.typed import record_typed_call, typed_span_start
+from meho_backplane.operations._branches import _profile_pagination
+from meho_backplane.operations.composite import approved_run_var
 
 __all__ = [
+    "NOT_RESENT_REMEDIATION",
     "REFUSED_SIGNIN_REMEDIATION",
+    "SAME_ANSWER_REMEDIATION",
     "mark_session_relogin",
-    "product_refused_signin_error",
+    "may_resend_after_session_end",
+    "same_answer_after_signin_error",
+    "session_ended_not_resent_error",
     "session_expired_by_hook",
     "with_refused_signin_remediation",
 ]
@@ -56,14 +71,40 @@ REFUSED_SIGNIN_REMEDIATION = (
     "account on the product, then retry."
 )
 
+#: What to do when the product took the fresh sign-in and still gave the
+#: same "session ended" answer.
+SAME_ANSWER_REMEDIATION = (
+    "MEHO signed in again and the product accepted the new sign-in, but it "
+    'gave the same "session ended" answer again. MEHO did not try a third '
+    "time. The account may be locked or not allowed to start a session on "
+    "the product. Check the account and the stored credential on the "
+    "product, then retry."
+)
+
+#: What to do when the session ended during an operation that MEHO does not
+#: send again, because it may already have changed the product.
+NOT_RESENT_REMEDIATION = (
+    "the product said that the login session ended. MEHO dropped the kept "
+    "session, so the next call signs in again. MEHO did not send this "
+    "operation again, because it may already have changed the product: the "
+    "change may or may not have been made. Check the state on the product "
+    "before you make a new call."
+)
+
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
 
 def session_expired_by_hook(connector_instance: Any, response: httpx.Response) -> bool:
     """Whether the connector says *response* means that its login session ended.
 
-    ``False`` when the connector has no ``is_session_expired`` method, when
+    ``False`` for a status that is not 4xx, when the connector has no
+    ``is_session_expired`` method, when
     the method answers anything but ``True``, and when it raises. A broken
     hook must never turn a real 403 into a sign-in loop.
     """
+    if not 400 <= response.status_code < 500:
+        # After a 5xx the call may have run: never a reason to sign in again.
+        return False
     hook = getattr(connector_instance, "is_session_expired", None)
     if not callable(hook):
         return False
@@ -78,31 +119,59 @@ def session_expired_by_hook(connector_instance: Any, response: httpx.Response) -
         return False
 
 
-def mark_session_relogin(status_code: int) -> None:
-    """Show on the audit row and in the trace that MEHO signed in again.
+def may_resend_after_session_end(
+    descriptor: Any, connector_instance: Any, rejected: httpx.Request
+) -> bool:
+    """Whether MEHO may run the operation again after "the session ended".
 
-    The audit row gets ``session_relogin`` and ``session_relogin_status`` in
+    Yes only when a repeat cannot send a change twice:
+
+    * the operation's risk level is ``safe`` (it changes nothing), or
+    * it is an ingested operation that sent exactly one request. That one
+      request was refused, so nothing ran. A write is always one request;
+      a read sends more than one only when the connector follows pages.
+
+    Never for a call that runs after a person's approval: the approval was
+    spent on the first run. A typed handler or a multi-step operation may
+    have sent a write before the refused request, so it is not repeated
+    unless it is ``safe``.
+    """
+    if approved_run_var.get():
+        return False
+    if descriptor.safety_level == "safe":
+        return True
+    if descriptor.source_kind != "ingested":
+        return False
+    return rejected.method not in _READ_METHODS or _profile_pagination(connector_instance) is None
+
+
+def mark_session_relogin(status_code: int, *, resent: bool) -> None:
+    """Show on the audit row and in the trace what MEHO did after "session ended".
+
+    The audit row gets ``session_relogin`` (MEHO signed in again in this
+    call), ``session_resent`` (MEHO sent the operation again) and
+    ``session_relogin_status`` (the status that said the session ended), in
     its payload (through the ``audit_*`` binds, which the dispatcher drops
-    when the call ends). The trace gets one span. Neither carries a vendor
-    body or a credential.
+    when the call ends). The trace gets one ``session_relogin`` span. Neither
+    carries a vendor body or a credential.
     """
     structlog.contextvars.bind_contextvars(
-        audit_session_relogin=True,
+        audit_session_relogin=resent,
+        audit_session_resent=resent,
         audit_session_relogin_status=status_code,
     )
     record_typed_call(
         typed_span_start("session_relogin"),
-        extra={"session_relogin": True, "rejected_status": status_code},
+        extra={"session_relogin": resent, "resent": resent, "rejected_status": status_code},
     )
 
 
-def product_refused_signin_error(
+def same_answer_after_signin_error(
     retry_exc: httpx.HTTPStatusError, target: Any
 ) -> ConnectorAuthError:
     """The error for a repeated call that got the same "session ended" answer.
 
     The sign-in itself worked, yet the product ended the new session at once.
-    Same fix as a refused sign-in: check the credential and the account.
     """
     status = retry_exc.response.status_code
     error = ConnectorAuthError(
@@ -110,11 +179,28 @@ def product_refused_signin_error(
         status_code=status,
         cause=f"session_dispatch_{status}_after_relogin",
         target_name=getattr(target, "name", None),
-        remediation=REFUSED_SIGNIN_REMEDIATION,
+        remediation=SAME_ANSWER_REMEDIATION,
         stage="after_relogin",
     )
     # The result builder reads the upstream body from the chained error.
     error.__cause__ = retry_exc
+    return error
+
+
+def session_ended_not_resent_error(
+    rejected_exc: httpx.HTTPStatusError, target: Any
+) -> ConnectorAuthError:
+    """The error for "the session ended" on an operation MEHO does not repeat."""
+    status = rejected_exc.response.status_code
+    error = ConnectorAuthError(
+        f"the product said the session ended (HTTP {status}); the operation was not sent again",
+        status_code=status,
+        cause=f"session_ended_{status}_not_resent",
+        target_name=getattr(target, "name", None),
+        remediation=NOT_RESENT_REMEDIATION,
+        stage="call",
+    )
+    error.__cause__ = rejected_exc
     return error
 
 

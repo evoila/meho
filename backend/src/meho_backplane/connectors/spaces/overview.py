@@ -35,7 +35,7 @@ from meho_backplane.db.models import Sensor, SensorCadenceKind, Target
 from meho_backplane.scheduler.cron import next_fire_after
 from meho_backplane.spaces.models import ResourceAssignment, Space, SpaceMember
 
-__all__ = ["health_state", "spaces_overview"]
+__all__ = ["check_is_fresh", "health_state", "spaces_overview"]
 
 #: A check result older than this many intervals reads ``unknown``.
 _STALE_AFTER_INTERVALS = 2
@@ -61,6 +61,17 @@ def _interval_seconds(sensor: Sensor) -> float | None:
     return None
 
 
+def check_is_fresh(sensor: Sensor, now: datetime) -> bool:
+    """Whether the newest run of *sensor* is at most twice its interval old."""
+    if sensor.last_evaluated_at is None:
+        return False
+    interval = _interval_seconds(sensor)
+    if interval is None:
+        return False
+    age = now - _aware(sensor.last_evaluated_at)
+    return age <= timedelta(seconds=_STALE_AFTER_INTERVALS * interval)
+
+
 def health_state(sensors: list[Sensor], now: datetime) -> dict[str, Any]:
     """The health of one target from the checks that watch it.
 
@@ -74,9 +85,7 @@ def health_state(sensors: list[Sensor], now: datetime) -> dict[str, Any]:
     newest = max(timed, key=lambda s: _aware(s.last_evaluated_at))  # type: ignore[arg-type]
     evaluated = _aware(newest.last_evaluated_at)  # type: ignore[arg-type]
     interval = _interval_seconds(newest)
-    state = newest.last_state
-    if interval is None or now - evaluated > timedelta(seconds=_STALE_AFTER_INTERVALS * interval):
-        state = "unknown"
+    state = newest.last_state if check_is_fresh(newest, now) else "unknown"
     return {
         "state": state,
         "last_evaluated_at": evaluated.isoformat(),

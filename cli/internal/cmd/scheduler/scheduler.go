@@ -138,7 +138,7 @@ func NewRootCmd() *cobra.Command {
 		Long: "Manage tenant-scoped scheduled triggers wired by G11.3. " +
 			"A scheduled trigger fires a P1 agent run on a cron " +
 			"expression (kind=cron), at a single wall-clock instant " +
-			"(kind=one_off), or on a matching MEHO-internal event " +
+			"(kind=one_off), or on a matching internal MEHO event " +
 			"(kind=event; outbox-backed via G11.3-T3). Write verbs " +
 			"(create / cancel) require tenant_admin; the read verb " +
 			"(list) is operator-level. Tenant scoping is enforced " +

@@ -240,12 +240,10 @@ def test_shipped_subclasses_advertise_v2_metadata_per_their_initiative() -> None
     # single-impl ``impl_id == product`` shape that parse_connector_id
     # round-trips for ``"k8s-1.x"``; the library name now lives in the
     # package layout + pyproject.toml dependency, not the registry triple.
-    # ``supported_version_range`` and ``priority`` still inherit the ABC
-    # defaults from G0.6-T3 (#394).
     assert KubernetesConnector.product == "k8s"
     assert KubernetesConnector.version == "1.x"
     assert KubernetesConnector.impl_id == "k8s"
-    assert KubernetesConnector.supported_version_range is None
+    assert KubernetesConnector.supported_version_range == ">=1.32,<1.38"
     assert KubernetesConnector.priority == 0
 
 

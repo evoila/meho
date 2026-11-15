@@ -9,7 +9,7 @@ resource surface:
 * The template is registered via G0.5's ``register_mcp_resource`` and
   surfaces in ``resources/templates/list`` with the
   :class:`ResourceTemplateDefinition` wire shape (``mimeType`` =
-  ``text/markdown``; MEHO-internal ``required_role`` stripped).
+  ``text/markdown``; internal ``required_role`` stripped).
 * ``resources/read meho://kb/<existing-slug>`` returns the full
   :class:`KbEntry` payload as a JSON-encoded ``text/markdown`` content
   block.
@@ -83,7 +83,7 @@ def test_resources_templates_list_exposes_kb_entry(
     assert len(kb_entries) == 1
     template = kb_entries[0]
     assert template["mimeType"] == "text/markdown"
-    # MEHO-internal RBAC field stripped from the wire shape.
+    # internal RBAC field stripped from the wire shape.
     assert "required_role" not in template
     # #154: the description advertises the served body as untrusted
     # agent-authored content, not a directive channel.

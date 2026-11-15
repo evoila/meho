@@ -110,9 +110,9 @@ class _StubTarget:
     name: str
     host: str
     port: int | None = 443
-    secret_ref: str | None = "rdc-hetzner-dc/keycloak/admin"
+    secret_ref: str | None = "example-site/keycloak/admin"
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
-    extras: dict[str, Any] = field(default_factory=dict)
+    extras: dict[str, Any] = field(default_factory=lambda: {"managed_realm": "example"})
     tls_server_name: str | None = None  # #2398: per-target TLS SNI / cert-verify name
     # Tenant-unique cache key components (#1642/#1672).
     id: UUID = field(default_factory=uuid4)
@@ -208,8 +208,8 @@ async def test_admin_token_not_operator_token_used_on_admin_calls() -> None:
         token_route = mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": _ADMIN_TOKEN, "expires_in": 60, "token_type": "Bearer"}
         )
-        realm_route = mock.get("/admin/realms/evba").respond(
-            200, json={"realm": "evba", "enabled": True, "sslRequired": "external"}
+        realm_route = mock.get("/admin/realms/example").respond(
+            200, json={"realm": "example", "enabled": True, "sslRequired": "external"}
         )
         mock.get("/admin/serverinfo").respond(200, json={"systemInfo": {"version": "26.0.5"}})
         fp = await connector.fingerprint(_TARGET, operator=_make_operator())
@@ -247,7 +247,7 @@ async def test_client_credentials_grant_form_body() -> None:
         token_route = mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": _ADMIN_TOKEN, "expires_in": 60}
         )
-        mock.get("/admin/realms/evba").respond(200, json={"realm": "evba", "enabled": True})
+        mock.get("/admin/realms/example").respond(200, json={"realm": "example", "enabled": True})
         mock.get("/admin/serverinfo").respond(404)
         await connector.fingerprint(_TARGET, operator=_make_operator())
 
@@ -270,7 +270,7 @@ async def test_password_grant_form_body() -> None:
         token_route = mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": _ADMIN_TOKEN, "expires_in": 60}
         )
-        mock.get("/admin/realms/evba").respond(200, json={"realm": "evba", "enabled": True})
+        mock.get("/admin/realms/example").respond(200, json={"realm": "example", "enabled": True})
         mock.get("/admin/serverinfo").respond(404)
         await connector.fingerprint(_TARGET, operator=_make_operator())
 
@@ -402,10 +402,10 @@ async def test_fingerprint_surfaces_realm_metadata_and_version() -> None:
         mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": _ADMIN_TOKEN, "expires_in": 60}
         )
-        mock.get("/admin/realms/evba").respond(
+        mock.get("/admin/realms/example").respond(
             200,
             json={
-                "realm": "evba",
+                "realm": "example",
                 "enabled": True,
                 "sslRequired": "external",
                 "loginTheme": "meho",
@@ -418,13 +418,13 @@ async def test_fingerprint_surfaces_realm_metadata_and_version() -> None:
     assert fp.vendor == "keycloak"
     assert fp.product == "keycloak"
     assert fp.version == "26.0.5"
-    assert fp.probe_method == "GET /admin/realms/evba"
-    assert fp.extras["realm"] == "evba"
+    assert fp.probe_method == "GET /admin/realms/example"
+    assert fp.extras["realm"] == "example"
     assert fp.extras["enabled"] is True
     assert fp.extras["ssl_required"] == "external"
     assert fp.extras["login_theme"] == "meho"
     assert fp.extras["admin_realm"] == "master"
-    assert fp.extras["managed_realm"] == "evba"
+    assert fp.extras["managed_realm"] == "example"
 
     await connector.aclose()
 
@@ -438,7 +438,7 @@ async def test_fingerprint_version_none_when_serverinfo_unavailable() -> None:
         mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": _ADMIN_TOKEN, "expires_in": 60}
         )
-        mock.get("/admin/realms/evba").respond(200, json={"realm": "evba", "enabled": True})
+        mock.get("/admin/realms/example").respond(200, json={"realm": "example", "enabled": True})
         mock.get("/admin/serverinfo").respond(404)
         fp = await connector.fingerprint(_TARGET, operator=_make_operator())
 
@@ -726,7 +726,7 @@ async def test_user_write_password_reader_strips_trailing_newline(
     value = await _read_password_from_vault(
         _make_operator(),
         _TARGET,
-        {"password_secret_ref": "rdc/keycloak/user-pw"},
+        {"password_secret_ref": "site/keycloak/user-pw"},
     )
 
     assert value == "hunter2"
@@ -750,7 +750,7 @@ async def test_user_write_password_reader_rejects_whitespace_only_secret(
         await _read_password_from_vault(
             _make_operator(),
             _TARGET,
-            {"password_secret_ref": "rdc/keycloak/user-pw"},
+            {"password_secret_ref": "site/keycloak/user-pw"},
         )
 
 
@@ -774,7 +774,7 @@ async def test_user_write_password_reader_honours_custom_key_and_mount(
         _make_operator(),
         _TARGET,
         {
-            "password_secret_ref": "rdc/keycloak/user-pw",
+            "password_secret_ref": "site/keycloak/user-pw",
             "password_secret_key": "db_pw",
             "password_secret_mount": "kv2",
         },
@@ -784,7 +784,7 @@ async def test_user_write_password_reader_honours_custom_key_and_mount(
     # The Vault backend received the op's mount + path verbatim (mount is a
     # Vault-only knob) — proving schemeless routing is unchanged.
     assert fake.secrets.kv.v2.read_calls[-1] == {
-        "path": "rdc/keycloak/user-pw",
+        "path": "site/keycloak/user-pw",
         "mount_point": "kv2",
     }
 

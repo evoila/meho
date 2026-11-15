@@ -415,7 +415,6 @@ register_mcp_tool(
                 },
                 "work_ref": {
                     "type": ["string", "null"],
-                    "maxLength": 256,
                     "description": (
                         "Optional external change-ticket reference (a "
                         "GitHub issue 'gh:evoila/meho#13', a Jira key, a "

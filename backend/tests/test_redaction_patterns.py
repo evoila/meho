@@ -73,7 +73,7 @@ _AUTH_TOKEN_FIXTURE_POS = "auth_token" + ": " + "at_abcdefgh" + "1234"
 _SESSION_TOKEN_FIXTURE_POS = "session_token" + ": " + "st_abcdefgh" + "1234"
 _SECRET_ID_FIXTURE_POS = "secret_id" + ": " + "11111111-2222" + "-3333-aaaa"
 _PRIVATE_KEY_FIXTURE_POS = "private_key" + ": " + "MIIEvQIBADA" + "NBgkq"
-# Punctuated-value fixtures (meho-internal hardening): values carrying
+# Punctuated-value fixtures (redaction hardening): values carrying
 # bytes outside the pre-widening restrictive class must be captured to
 # their natural delimiter (whitespace / closing quote / end of blob)
 # and redacted whole. Assembled from fragments for the same
@@ -879,7 +879,7 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
 
 
 # ---------------------------------------------------------------------------
-# Full-value capture through the engine (meho-internal hardening)
+# Full-value capture through the engine (redaction hardening)
 # ---------------------------------------------------------------------------
 #
 # ``test_pattern_matches_or_not`` only proves *a* match occurs; these

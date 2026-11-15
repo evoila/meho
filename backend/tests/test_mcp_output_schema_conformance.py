@@ -952,10 +952,10 @@ async def test_list_targets_conforms(
 ) -> None:
     client, _op = client_with_operator
     await _seed_tenant()
-    await _seed_target("rdc-vault", "vault", "vault.example")
-    await _seed_target("rdc-vcenter", "vmware", "vc.example")
+    await _seed_target("example-vault", "vault", "vault.example")
+    await _seed_target("example-vcenter", "vmware", "vc.example")
     payload = _assert_conforms("list_targets", _call(client, "list_targets", {}))
-    assert [t["name"] for t in payload["targets"]] == ["rdc-vault", "rdc-vcenter"]
+    assert [t["name"] for t in payload["targets"]] == ["example-vault", "example-vcenter"]
     assert payload["next_cursor"] is None
 
 

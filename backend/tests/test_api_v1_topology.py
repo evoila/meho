@@ -386,7 +386,7 @@ def test_dependents_ambiguous_node_returns_409(client: TestClient) -> None:
 def test_dependents_untracked_node_returns_404_node_untracked(
     client: TestClient,
 ) -> None:
-    """G0.18-T4 (#1357, RDC #789 N2). Closure verb on an anchor with no
+    """G0.18-T4 (#1357, from a consumer report). Closure verb on an anchor with no
     matching ``graph_node`` returns 404 ``node_untracked`` rather than
     an empty 200 list. The distinct slug separates this case from the
     annotate-flow ``node_not_found`` so the CLI can render the
@@ -445,7 +445,7 @@ def test_dependents_tracked_node_with_no_dependents_returns_one_element_root(
 
     Companion to ``test_dependents_untracked_node_returns_404_...`` —
     the two together prove the G0.18-T4 (#1357) untracked-vs-empty
-    distinction the false-negative RDC #789 N2 hinged on. The
+    distinction the false-negative in a consumer report hinged on. The
     substrate's depth-0 anchor row is what makes this case
     structurally distinct from the untracked one (which raises before
     the CTE runs).
@@ -1213,7 +1213,7 @@ async def test_delete_node_admin_round_trip(client: TestClient) -> None:
     key, token = _admin_token_value()
     node_id = uuid.uuid4()
     fake = AsyncMock(
-        return_value=DeleteNodeResult(node_id=node_id, kind="vault-role", name="rdc-vault")
+        return_value=DeleteNodeResult(node_id=node_id, kind="vault-role", name="vault-a")
     )
     with (
         respx.mock as mock_router,

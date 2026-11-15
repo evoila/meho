@@ -100,7 +100,7 @@ async def test_announcement_serialises_with_kind_agent_announcement() -> None:
     event = AgentAnnouncementEvent(
         tenant_id=_TENANT,
         principal_sub="op-1",
-        activity="probing rdc-vcenter",
+        activity="probing example-vcenter",
         ts=datetime(2026, 5, 25, 10, 0, tzinfo=UTC),
     )
     wire = json.loads(event.model_dump_json())
@@ -117,7 +117,7 @@ async def test_parse_entry_dispatches_on_top_level_kind() -> None:
     ann = AgentAnnouncementEvent(
         tenant_id=_TENANT,
         principal_sub="op-1",
-        activity="probing rdc-vcenter",
+        activity="probing example-vcenter",
         ts=datetime(2026, 5, 25, 10, 0, tzinfo=UTC),
     )
     # Post-G0.16-T6 entry: top-level ``kind`` discriminator.
@@ -167,7 +167,7 @@ def _xrange_entry_for_ann(event: Any, entry_id: str) -> tuple[str, dict[str, str
 
 def _make_announcement(
     *,
-    activity: str = "probing rdc-vcenter",
+    activity: str = "probing example-vcenter",
     scope: str | None = None,
     target: str | None = None,
 ) -> Any:

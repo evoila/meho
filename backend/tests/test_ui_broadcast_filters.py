@@ -223,7 +223,7 @@ def test_page_renders_filter_bar_with_both_controls() -> None:
 
 def test_target_dropdown_is_tenant_scoped() -> None:
     """The target dropdown lists only the session tenant's target names."""
-    _seed_target(tenant_id=_TENANT_A, name="rdc-vcenter")
+    _seed_target(tenant_id=_TENANT_A, name="example-vcenter")
     _seed_target(tenant_id=_TENANT_A, name="lab-k8s")
     # A target in tenant B must NOT appear on tenant A's dropdown.
     _seed_target(tenant_id=_TENANT_B, name="other-tenant-target")
@@ -232,7 +232,7 @@ def test_target_dropdown_is_tenant_scoped() -> None:
         client = _authenticated_client(session_id)
         response = client.get("/ui/broadcast")
     body = response.text
-    assert 'value="rdc-vcenter"' in body
+    assert 'value="example-vcenter"' in body
     assert 'value="lab-k8s"' in body
     assert "other-tenant-target" not in body
 
@@ -309,9 +309,9 @@ def test_fragment_single_filter_embedded_in_sse_url() -> None:
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
-        response = client.get("/ui/broadcast/feed", params={"target": "vc-01"})
+        response = client.get("/ui/broadcast/feed", params={"target": "example-vcenter"})
     body = response.text
-    assert f'sse-connect="/ui/broadcast/stream?target=vc-01&amp;meho_tenant={_TENANT_A}"' in body
+    assert f'sse-connect="/ui/broadcast/stream?target=example-vcenter&amp;meho_tenant={_TENANT_A}"' in body
 
 
 def test_fragment_combined_filters_all_embedded_in_sse_url() -> None:
@@ -321,12 +321,12 @@ def test_fragment_combined_filters_all_embedded_in_sse_url() -> None:
         client = _authenticated_client(session_id)
         response = client.get(
             "/ui/broadcast/feed",
-            params={"principal": "op-7", "target": "vc-01"},
+            params={"principal": "op-7", "target": "example-vcenter"},
         )
     body = response.text
     # The two server filters are both present in the embedded URL.
     assert "principal=op-7" in body
-    assert "target=vc-01" in body
+    assert "target=example-vcenter" in body
     assert 'sse-connect="/ui/broadcast/stream?' in body
 
 
@@ -356,12 +356,12 @@ def test_fragment_filter_values_echoed_for_selection_preservation() -> None:
         client = _authenticated_client(session_id)
         response = client.get(
             "/ui/broadcast/feed",
-            params={"principal": "op-7", "target": "vc-01"},
+            params={"principal": "op-7", "target": "example-vcenter"},
         )
     body = response.text
     # The selections are echoed into the filter bar's inputs.
     assert 'value="op-7"' in body or "principal=op-7" in body
-    assert "target=vc-01" in body
+    assert "target=example-vcenter" in body
 
 
 # ---------------------------------------------------------------------------

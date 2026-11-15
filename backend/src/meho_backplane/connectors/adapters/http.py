@@ -55,8 +55,7 @@ natively. The per-target TLS trust has three states, in precedence order:
 Each resolved TLS context is carried by the per-target pinning
 **transport** (:func:`build_pinned_async_transport`), not passed as a
 client ``verify=`` argument, because the client is handed an explicit
-``transport=`` that enforces destination pinning at the socket
-(evoila-bosnia/meho-internal#275): ``connect_tcp`` re-screens the host
+``transport=`` that enforces destination pinning at the socket: ``connect_tcp`` re-screens the host
 and dials only a guard-validated address from that same resolution, so a
 resolver change between the guard's screen and the socket connect cannot
 reach a blocked destination. Only the TCP target is rewritten — TLS SNI,
@@ -115,8 +114,7 @@ class SsrfBlockedError(httpx.ConnectError):
     """Dispatch refused: the target resolves to a non-public address.
 
     Connect-time arm of the target SSRF guard
-    (:mod:`meho_backplane.targets.ssrf_guard`,
-    evoila-bosnia/meho-internal#153): raised by
+    (:mod:`meho_backplane.targets.ssrf_guard`): raised by
     :meth:`HttpConnector._http_client` *before* any pooled client is
     built or request issued, when the stored ``host`` is — or now
     resolves to — a private / loopback / link-local (``169.254.0.0/16``
@@ -144,8 +142,7 @@ class ResponseTooLargeError(Exception):
     otherwise buffers every vendor response fully into memory, so a single
     oversized body — from a compromised/malicious appliance, a MITM on a
     ``verify_tls=false`` channel, or a pathologically large legitimate
-    listing — could exhaust the single-replica pod's heap and OOM-kill it
-    (evoila-bosnia/meho-internal#297).
+    listing — could exhaust the single-replica pod's heap and OOM-kill it.
 
     A plain :class:`Exception` (not an :class:`httpx.HTTPError`): it is a
     policy rejection, not a transport fault, so it flattens through the
@@ -345,7 +342,7 @@ def json_payload_or_empty(resp: httpx.Response) -> dict[str, Any]:
 #: parse (JSONFlux, dispatcher step 8) — while bounding a multi-GB transfer
 #: from a compromised/malicious appliance, a ``verify_tls=false`` MITM, or a
 #: pathological legitimate listing that would otherwise OOM the
-#: single-replica pod (evoila-bosnia/meho-internal#297). Mirrors the
+#: single-replica pod. Mirrors the
 #: streamed byte-cap idiom the spec-fetch (``openapi._MAX_SPEC_BYTES``) and
 #: event-ingest (``events_ingest._read_capped_body``) paths already enforce;
 #: this closes the same gap on the outbound-dispatch path.
@@ -646,7 +643,7 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
     auth headers (NSX's ``X-XSRF-TOKEN``) nor — on a method-preserving
     ``307``/``308`` — the credential request body, so the login secret and
     session token leak to the redirect target (open-redirect SSRF /
-    auth-token forwarding, evoila/meho-internal#101 row L11).
+    auth-token forwarding).
 
     This client is built with ``follow_redirects=False`` and re-implements
     a *bounded, same-origin-only* redirect loop in :meth:`send`. A legitimate
@@ -816,7 +813,7 @@ class HttpConnector(Connector):
            (evoila/meho#209) stays byte-identical to a connector with no
            TLS config at all.
         """
-        # SSRF guard (evoila-bosnia/meho-internal#153): re-screen the
+        # SSRF guard: re-screen the
         # *resolved* destination on every acquisition, before the pooled
         # client is built or served. The create/update schema validators
         # already rejected a non-public literal, but the stored value can
@@ -889,7 +886,7 @@ class HttpConnector(Connector):
             )
             verify_arg = _insecure_ssl_context()
         # Pin the connection to a guard-validated address at the
-        # socket boundary (evoila-bosnia/meho-internal#275). The
+        # socket boundary. The
         # ``_http_client`` pre-check above screens the stored name
         # on every acquisition; this transport re-screens inside
         # ``connect_tcp`` and dials only an address from that same
@@ -917,7 +914,7 @@ class HttpConnector(Connector):
             # ``follow_redirects=True`` would replay the request off
             # origin and forward NSX's ``X-XSRF-TOKEN`` and the
             # login body to an attacker-controlled ``Location``
-            # (open-redirect SSRF, evoila/meho-internal#101 row L11).
+            # (open-redirect SSRF).
             transport=transport,
         )
 

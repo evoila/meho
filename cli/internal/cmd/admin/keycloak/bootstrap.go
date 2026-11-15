@@ -17,10 +17,10 @@ import (
 // needs. The cobra command fills this from flags + env vars; tests
 // fill it directly. Empty fields fall back to recipe defaults.
 type BootstrapOptions struct {
-	// KeycloakBaseURL is the realm-less root, e.g. "https://keycloak.evba.lab".
+	// KeycloakBaseURL is the realm-less root, e.g. "https://keycloak.example.test".
 	KeycloakBaseURL string
 
-	// Realm is the target realm where the clients land, e.g. "evba".
+	// Realm is the target realm where the clients land, e.g. "example".
 	Realm string
 
 	// AdminUsername / AdminPassword authenticate against the master

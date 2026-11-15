@@ -1144,11 +1144,13 @@ async def test_utf8_work_ref_header_lands_on_run_row_as_sent(client: TestClient,
 def test_header_work_ref_keeps_non_ascii_header_text() -> None:
     """A UTF-8 header value that Starlette read as latin-1 gets its text back."""
     from meho_backplane.api.v1.agent_runs import _header_work_ref
+    from meho_backplane.work_ref import WorkRefError
 
     assert _header_work_ref("Änderung-7".encode().decode("latin-1")) == "Änderung-7"
     assert _header_work_ref("  gh:evoila/meho#11  ") == "gh:evoila/meho#11"
-    assert _header_work_ref("   ") is None
     assert _header_work_ref(None) is None
+    with pytest.raises(WorkRefError, match="empty"):
+        _header_work_ref("   ")
 
 
 @pytest.mark.parametrize("ticket", ["Zadanie-Łódź", "Задача-12", "Änderung-7", "gh:evoila/meho#11"])

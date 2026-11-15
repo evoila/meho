@@ -52,11 +52,13 @@ probe agent-auto-runnable; the allow-list limits where checks can connect.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import socket
 import ssl
 import time
 from collections.abc import Iterator
+from http.cookiejar import CookieJar
 from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
@@ -67,6 +69,12 @@ import structlog
 from meho_backplane.connectors.net.allowlist import (
     ProbeNotAllowedError,
     assert_probe_allowed,
+)
+from meho_backplane.connectors.net.http_probe_trust import (
+    TRUST_RESPONSE_PROPERTIES,
+    TRUST_RESPONSE_REQUIRED,
+    ProbeTrust,
+    resolve_probe_trust,
 )
 from meho_backplane.connectors.net.ops import _HINT_SCHEMA, _add_timeout_hint
 from meho_backplane.operations.typed_register import register_typed_operation
@@ -285,6 +293,9 @@ _NET_HTTP_PROBE_RESPONSE_SCHEMA: dict[str, Any] = {
     ],
     "additionalProperties": False,
 }
+
+_NET_HTTP_PROBE_RESPONSE_SCHEMA["properties"].update(TRUST_RESPONSE_PROPERTIES)
+_NET_HTTP_PROBE_RESPONSE_SCHEMA["required"].extend(TRUST_RESPONSE_REQUIRED)
 
 _NET_HTTP_PROBE_WHEN_TO_USE = (
     "Probe an HTTP(S) URL from the backplane's network vantage and "
@@ -727,6 +738,7 @@ async def _walk_redirects(
     started: float,
     first_hop_build_kwargs: dict[str, Any],
     tenant_id: UUID | str | None,
+    pinned_client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Issue the request and walk redirects manually, re-gating each hop.
 
@@ -737,8 +749,10 @@ async def _walk_redirects(
     (the ``host_header`` vhost override, from :func:`_host_header_build_kwargs`)
     rides the **first hop only** — a redirect target has its own canonical
     host, so carrying a forced ``Host:``/SNI across hops would probe the
-    wrong virtual host.
+    wrong virtual host. ``pinned_client`` (trusts a target's CA pin) is used
+    only for hops to the first host; any other host gets ``client``.
     """
+    first_host = httpx.URL(url).host.lower()
     redirect_chain: list[dict[str, Any]] = []
     current_url = url
     current_method = method
@@ -746,7 +760,12 @@ async def _walk_redirects(
     for hop_index in range(_MAX_REDIRECTS + 1):
         build_kwargs = first_hop_build_kwargs if hop_index == 0 else {}
         request = client.build_request(current_method, current_url, **build_kwargs)
-        response = await client.send(request, stream=True)
+        hop_client = (
+            pinned_client
+            if pinned_client is not None and request.url.host.lower() == first_host
+            else client
+        )
+        response = await hop_client.send(request, stream=True)
         try:
             if response.has_redirect_location:
                 outcome = _advance_or_halt(
@@ -796,7 +815,44 @@ async def _walk_redirects(
     )
 
 
+async def _open_clients(
+    stack: contextlib.AsyncExitStack, timeout: float, trust: ProbeTrust
+) -> tuple[httpx.AsyncClient, httpx.AsyncClient | None]:
+    """The default client, and a client with the pinned CA when there is a pin.
+
+    Both clients share one cookie jar, so a cookie set on one hop is sent
+    on the next hop whichever client sends it.
+    """
+    cookie_jar = CookieJar()
+    client = await stack.enter_async_context(
+        httpx.AsyncClient(
+            follow_redirects=False, timeout=httpx.Timeout(timeout), cookies=cookie_jar
+        )
+    )
+    if not trust.pinned:
+        return client, None
+    pinned_client = await stack.enter_async_context(
+        httpx.AsyncClient(
+            follow_redirects=False,
+            timeout=httpx.Timeout(timeout),
+            verify=trust.build_ssl_context(),
+            cookies=cookie_jar,
+        )
+    )
+    return client, pinned_client
+
+
 async def net_http_probe(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Run the probe and add which TLS trust it used (``trust``, ``trust_target``)."""
+    trust = await resolve_probe_trust(operator.tenant_id, params)
+    result = await _probe_url(operator, params, trust)
+    result.update(trust.result_fields())
+    return result
+
+
+async def _probe_url(
+    operator: Operator, params: dict[str, Any], trust: ProbeTrust
+) -> dict[str, Any]:
     """Probe an HTTP(S) URL and report status/headers/redirects/TLS/timing.
 
     Op-id: ``net.http_probe``. Synthetic typed op (no vendor connector,
@@ -847,10 +903,8 @@ async def net_http_probe(operator: Operator, target: Any, params: dict[str, Any]
     # chart trust bundle honoured natively) — a verify failure surfaces
     # as reason='tls_error', still status=ok.
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=False,
-            timeout=httpx.Timeout(timeout),
-        ) as client:
+        async with contextlib.AsyncExitStack() as stack:
+            client, pinned_client = await _open_clients(stack, timeout, trust)
             return await asyncio.wait_for(
                 _walk_redirects(
                     client=client,
@@ -859,6 +913,7 @@ async def net_http_probe(operator: Operator, target: Any, params: dict[str, Any]
                     started=started,
                     first_hop_build_kwargs=first_hop_build_kwargs,
                     tenant_id=operator.tenant_id,
+                    pinned_client=pinned_client,
                 ),
                 timeout=timeout,
             )
@@ -929,7 +984,12 @@ async def register_net_http_probe_operations(
             "name (so verify stays on against a cert pinned to the vhost). "
             "The allowlist always gates the DIALED url host, never "
             "host_header (which is never dialed and cannot widen it); the "
-            "override is dropped after the first redirect hop."
+            "override is dropped after the first redirect hop. For an https "
+            "url the probe trusts the CA pin of a registered target of the "
+            "same tenant whose host or fqdn matches the probed host, with "
+            "certificate checks still on, and only for that first host; "
+            "the result says trust=pinned or trust=default and names the "
+            "target."
         ),
         parameter_schema=NET_HTTP_PROBE_PARAMETER_SCHEMA,
         response_schema=_NET_HTTP_PROBE_RESPONSE_SCHEMA,

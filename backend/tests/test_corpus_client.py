@@ -548,7 +548,11 @@ async def test_corpus_client_dials_only_a_checked_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The dial's transport checks the host when the connection opens and pins the address."""
-    monkeypatch.setattr(guard_mod, "_parse_allowlist", lambda: ((), frozenset()))
+    monkeypatch.setattr(
+        guard_mod,
+        "_parse_allowlist",
+        lambda: guard_mod._Allowlist((), frozenset(), (), frozenset()),
+    )
     client = corpus_mod._corpus_client(httpx.Timeout(1.0))
     try:
         backend = client._transport._pool._network_backend  # type: ignore[attr-defined]
@@ -574,7 +578,11 @@ async def test_corpus_client_dials_only_a_checked_address(
 def test_unresolved_name_is_refused_at_connect_time(monkeypatch: pytest.MonkeyPatch) -> None:
     """A name with no address to check is refused, not handed to the stock resolver."""
     monkeypatch.setattr(dial_guard, "_unresolved", _REAL_UNRESOLVED)
-    monkeypatch.setattr(guard_mod, "_parse_allowlist", lambda: ((), frozenset()))
+    monkeypatch.setattr(
+        guard_mod,
+        "_parse_allowlist",
+        lambda: guard_mod._Allowlist((), frozenset(), (), frozenset()),
+    )
     monkeypatch.setattr(guard_mod, "_resolve_addrs", lambda _host: [])
 
     with pytest.raises(CorpusDialBlockedError) as exc:
@@ -583,7 +591,11 @@ def test_unresolved_name_is_refused_at_connect_time(monkeypatch: pytest.MonkeyPa
     assert "corpus.test" not in str(exc.value)
 
     # A name listed verbatim on the allowlist is still dialed by name.
-    monkeypatch.setattr(guard_mod, "_parse_allowlist", lambda: ((), frozenset({"corpus.test"})))
+    monkeypatch.setattr(
+        guard_mod,
+        "_parse_allowlist",
+        lambda: guard_mod._Allowlist((), frozenset({"corpus.test"}), (), frozenset()),
+    )
     assert corpus_mod._pin_corpus_addresses("corpus.test") is None
 
 
@@ -612,7 +624,11 @@ async def test_unresolved_name_opens_no_socket_and_is_corpus_unavailable(
     """A failed lookup ends as CorpusUnavailable and the transport never dials the name."""
     _pin_settings(monkeypatch, corpus_url=_CORPUS_URL, corpus_service_token=_SERVICE_TOKEN)
     monkeypatch.setattr(dial_guard, "_unresolved", _REAL_UNRESOLVED)
-    monkeypatch.setattr(guard_mod, "_parse_allowlist", lambda: ((), frozenset()))
+    monkeypatch.setattr(
+        guard_mod,
+        "_parse_allowlist",
+        lambda: guard_mod._Allowlist((), frozenset(), (), frozenset()),
+    )
     monkeypatch.setattr(guard_mod, "_resolve_addrs", lambda _host: [])
 
     inner = _NoSocketBackend()

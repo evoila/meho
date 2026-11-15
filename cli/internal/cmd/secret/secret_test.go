@@ -126,7 +126,7 @@ func TestMoveHelpListsFlags(t *testing.T) {
 		t.Fatalf("--help execute: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"--from", "--to", "--reason"} {
+	for _, want := range []string{"--from", "--to", "--reason", "--merge"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("move --help output missing %q\n%s", want, out)
 		}
@@ -206,6 +206,61 @@ func TestSecretMovePassesRefsNotValues(t *testing.T) {
 		if strings.Contains(string(blob), leaked) {
 			t.Errorf("request body carries an inline %s field: %s", leaked, blob)
 		}
+	}
+}
+
+// TestSecretMoveMergeFlag — --merge sends merge=true; without it the
+// params carry no merge key, so a plain move is unchanged on the wire.
+func TestSecretMoveMergeFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		extra []string
+		want  any
+	}{
+		{name: "with --merge", extra: []string{"--merge"}, want: true},
+		{name: "without --merge", extra: nil, want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var body callRequestBody
+			srv := mockBackplane(t, map[string]mockHandler{
+				"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Errorf("decode body: %v", err)
+						w.WriteHeader(400)
+						return
+					}
+					writeJSON(t, w, 200, dispatch.CallResult{
+						Status: "ok", OpID: opMove,
+						Result: json.RawMessage(`{"status":"moved","value_fingerprint":"abc","length":3}`),
+					})
+				},
+			})
+			defer srv.Close()
+			primeToken(t, srv.URL)
+
+			cmd := newMoveCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs(append([]string{
+				"--from", "vault-target:vault-a/secret/db/prod#password",
+				"--to", "vault-target:vault-b/secret/db/standby#password",
+				"--reason", "copy the password",
+				"--backplane", srv.URL,
+			}, tc.extra...))
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			got, ok := body.Params["merge"]
+			if tc.want == nil {
+				if ok {
+					t.Errorf("merge must not be sent without --merge; got %v", got)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Errorf("merge: got %v want %v", got, tc.want)
+			}
+		})
 	}
 }
 

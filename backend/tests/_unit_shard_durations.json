@@ -1224,6 +1224,7 @@
   "tests/test_vra_governance_ops.py": 5.71,
   "tests/test_vra_governance_spec_reconcile.py": 0.1,
   "tests/test_well_known.py": 0.07,
-  "tests/test_work_item_signing.py": 0.19
+  "tests/test_work_item_signing.py": 0.19,
+  "tests/test_work_ref_doors.py": 5.96
  }
 }

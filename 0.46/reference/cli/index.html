@@ -18486,6 +18486,7 @@
 <li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
 <li><code>--cursor</code> — opaque forward-pagination cursor from a prior page's NEXT line</li>
 <li><code>--filter-work-ref</code> — narrow to one external change-ticket reference — "show every write authorised by ticket X"</li>
+<li><code>--full-row-lost</code> — only the short rows: the database refused the full row, so MEHO stored the row without the target's answer and the error text</li>
 <li><code>--json</code> — emit raw AuditQueryResult JSON instead of the human table</li>
 <li><code>--limit</code> — max rows per page (1..1000, server default 100 when omitted)</li>
 <li><code>--op-class</code> — narrow to one op-class (read|write|credential_read|audit_query|other)</li>
@@ -18496,6 +18497,7 @@
 <li><code>--session-id</code> — narrow to one agent session (UUID); the flat companion to <code>meho audit replay</code></li>
 <li><code>--since</code> — earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601</li>
 <li><code>--target</code> — narrow to one target (name or alias; server-side resolution)</li>
+<li><code>--text-changed</code> — only the rows where MEHO replaced a character or a number (for example a NUL character) so the database could store the row</li>
 <li><code>--until</code> — latest occurred_at; accepts the same shorthand as --since</li>
 </ul>
 <h3 id="meho-audit-recent"><code>meho audit recent</code><a class="headerlink" href="#meho-audit-recent" title="Permanent link">&para;</a></h3>

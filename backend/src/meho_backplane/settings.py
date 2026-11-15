@@ -1571,8 +1571,10 @@ class Settings(BaseModel):
         (:mod:`meho_backplane.policy.evaluate`) works out its own answer
         for every call and every approval, next to today's checks. It
         logs ``policy_shadow_mismatch`` and counts a metric when the two
-        answers differ. Today's checks still decide. When off, the
-        evaluator does not run. Env ``POLICY_ENGINE_SHADOW``; Helm
+        answers differ. It also writes the rule it matched and the policy
+        file version on the audit row and the approval request, marked
+        ``(shadow)``. Today's checks still decide. When off, the
+        evaluator does not run and nothing is written. Env ``POLICY_ENGINE_SHADOW``; Helm
         ``config.policy.engineShadow``.
     """
 

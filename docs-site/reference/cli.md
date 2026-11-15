@@ -1259,7 +1259,7 @@ Read recent agent announcements for the operator's tenant
 meho broadcast recent [flags]
 ```
 
-- `--active-only` — exclude expired TTL claims
+- `--active-only` — keep only active claims (not completed, TTL not run out)
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
 - `--cursor` — ISO-8601 window start, or next_cursor from a previous page

@@ -47,9 +47,11 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor, PermissionVerdict
 from meho_backplane.policy.classification import (
+    _SCOPES,
     ClassificationEntry,
     OpCoordinates,
     Scope,
+    _scope_wait,
     classify,
     entries_from_document,
     taxonomy_from_documents,
@@ -261,8 +263,13 @@ def _classification_view(
 
 
 def _wait_path(matched: Sequence[ClassificationEntry]) -> str | None:
-    """The most specific entry that makes the operation always wait."""
-    waits = [entry for entry in matched if entry.always_wait]
+    """The entry that makes the operation always wait, as :func:`classify` decides it.
+
+    Each scope finds its own value first, so an entry that a more specific
+    entry of its scope overrode is never named. When both scopes wait, the
+    more specific of the two is named.
+    """
+    waits = [wait for scope in _SCOPES if (wait := _scope_wait(matched, scope)) is not None]
     return max(waits, key=lambda entry: entry.rank).ref if waits else None
 
 

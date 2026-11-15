@@ -35,7 +35,8 @@ from meho_backplane.db.models import ApprovalRequest, AuditLog, TenantPolicy
 from meho_backplane.main import app
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.typed_register import register_typed_operation
-from meho_backplane.policy.explain import FILE_NEEDS_CLASSIFICATION
+from meho_backplane.policy.classification import ClassificationEntry
+from meho_backplane.policy.explain import FILE_NEEDS_CLASSIFICATION, _wait_path
 from meho_backplane.policy.explain_asker import READ_ONLY_CANNOT_CALL
 from meho_backplane.settings import get_settings
 
@@ -330,6 +331,23 @@ async def test_a_file_that_is_not_imported_changes_the_answer(
     assert wait_rules and wait_rules[0]["path"] == "file:classifications[1]"
     async with get_sessionmaker()() as session:
         assert (await session.execute(select(TenantPolicy))).first() is None
+
+
+def test_the_wait_names_the_rule_that_causes_it_not_an_overridden_one() -> None:
+    # A more specific install rule ends the install group's wait; the tenant rule waits.
+    install_group = ClassificationEntry(
+        ref="install:classifications[0]", scope="install", group="vm", always_wait=True
+    )
+    install_op = ClassificationEntry(
+        ref="install:classifications[1]", scope="install", op="explapi.vm.list", always_wait=False
+    )
+    tenant_connector = ClassificationEntry(
+        ref="tenant:classifications[0]", scope="tenant", connector="explapi-1.x", always_wait=True
+    )
+    matched = [install_group, install_op, tenant_connector]
+    assert _wait_path(matched) == "tenant:classifications[0]"
+    assert _wait_path([install_group, install_op]) is None
+    assert _wait_path([install_group, tenant_connector]) == "install:classifications[0]"
 
 
 @pytest.mark.asyncio

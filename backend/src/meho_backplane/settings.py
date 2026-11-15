@@ -1571,9 +1571,19 @@ class Settings(BaseModel):
         (:mod:`meho_backplane.policy.evaluate`) works out its own answer
         for every call and every approval, next to today's checks. It
         logs ``policy_shadow_mismatch`` and counts a metric when the two
-        answers differ. Today's checks still decide. When off, the
-        evaluator does not run. Env ``POLICY_ENGINE_SHADOW``; Helm
+        answers differ. It also writes the rule it matched and the policy
+        file version on the audit row and the approval request, marked
+        ``(shadow)``. Today's checks still decide. When off, the
+        evaluator does not run and nothing is written. Env ``POLICY_ENGINE_SHADOW``; Helm
         ``config.policy.engineShadow``.
+    policy_approver_routing:
+        Off by default. When on, a request that starts to wait stores the
+        login group kinds that may approve it, from the ``routing``
+        section of the policy file (:mod:`meho_backplane.policy.routing`).
+        At the click MEHO checks the person against them, next to today's
+        checks. When off, nothing is stored or checked and today's rule
+        decides who may approve. Env ``POLICY_APPROVER_ROUTING``; Helm
+        ``config.policy.approverRouting``.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -2487,8 +2497,9 @@ class Settings(BaseModel):
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
-    policy_classification: bool = False
+    policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
+    policy_approver_routing: bool = False
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
     #: forwarded operator JWT. Empty ("") means the add-on is not
@@ -3608,6 +3619,9 @@ def get_settings() -> Settings:
         ),
         policy_engine_shadow=parse_bool_env(
             os.environ.get("POLICY_ENGINE_SHADOW"),
+        ),
+        policy_approver_routing=parse_bool_env(
+            os.environ.get("POLICY_APPROVER_ROUTING"),
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),

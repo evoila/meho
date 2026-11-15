@@ -46,7 +46,11 @@ import httpx
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
-from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
+from meho_backplane.connectors.base import (
+    ConnectorOwnMessage,
+    ConnectorResourceNotFoundError,
+    ConnectorUpstreamError,
+)
 from meho_backplane.operations.deny_reasons import (
     AGENT_NO_GRANT,
     AGENT_STEPS_NOT_DECLARED,
@@ -67,6 +71,8 @@ if TYPE_CHECKING:
     from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
 
 __all__ = [
+    "MESSAGE_SOURCE_KEY",
+    "MESSAGE_SOURCE_MEHO",
     "READ_SCOPE_DENIED_CODE",
     "UPSTREAM_SAID",
     "VAULT_SAID",
@@ -82,6 +88,7 @@ __all__ = [
     "result_connector_auth_failed",
     "result_connector_error",
     "result_connector_http_403",
+    "result_connector_http_410",
     "result_connector_http_422",
     "result_connector_not_found",
     "result_connector_package_not_installed",
@@ -149,6 +156,12 @@ _TEXT_WITHHELD: str = "<diagnostic text withheld: redaction unavailable>"
 #: :mod:`meho_backplane.operations._vendor_text`).
 UPSTREAM_SAID: Final = " Upstream said: "
 VAULT_SAID: Final = " Vault said: "
+
+#: ``extras`` key and value that say: the ``exception_message`` is a sentence
+#: MEHO or a connector wrote itself (the error type has the
+#: :class:`~meho_backplane.connectors.base.ConnectorOwnMessage` mark).
+MESSAGE_SOURCE_KEY: Final = "message_source"
+MESSAGE_SOURCE_MEHO: Final = "meho"
 
 
 def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
@@ -1173,6 +1186,7 @@ def result_awaiting_approval(
     duration_ms: float,
     *,
     reused: bool = False,
+    audit_id: uuid.UUID | None = None,
 ) -> OperationResult:
     """Policy gate issued a ``needs-approval`` verdict; pending row created.
 
@@ -1196,6 +1210,10 @@ def result_awaiting_approval(
     existing request back instead of a new one. It adds
     ``extras["approval_request_reused"] = True``; the key is absent
     otherwise, so a new park's envelope is unchanged.
+
+    *audit_id* is the id of the committed ``approval.request`` audit row
+    of the pending request (its ``request_audit_id``). It becomes the
+    result's ``audit_id`` receipt. ``None`` when the caller has no row id.
     """
     extras: dict[str, Any] = {
         "error_code": "awaiting_approval",
@@ -1209,6 +1227,7 @@ def result_awaiting_approval(
         error=f"awaiting_approval: {op_id!r} requires approval before execution",
         duration_ms=duration_ms,
         extras=extras,
+        audit_id=audit_id,
     )
 
 
@@ -1555,6 +1574,11 @@ def result_connector_error(
         "exception_class": type(exc).__name__,
         "exception_message": msg,
     }
+    if isinstance(exc, ConnectorOwnMessage) and not isinstance(
+        exc, (httpx.HTTPStatusError, ConnectorUpstreamError)
+    ):
+        # The text of these two holds the URL or the vendor's words, mark or not.
+        extras[MESSAGE_SOURCE_KEY] = MESSAGE_SOURCE_MEHO
     if isinstance(exc, httpx.HTTPStatusError):
         extras["http_status"] = exc.response.status_code
         extras["upstream_message"] = _http_upstream_message(exc.response)
@@ -2334,6 +2358,46 @@ def result_connector_http_422(
     )
 
 
+def result_connector_http_410(
+    op_id: str,
+    exc: httpx.HTTPStatusError,
+    duration_ms: float,
+) -> OperationResult:
+    """Connector got an upstream **410 Gone** on dispatch.
+
+    A product answers 410 when its version has removed the API the call
+    named. The cause is the same for every connector, so the ``error``
+    says it plainly and tails the product's own message when it sent one.
+    ``extras`` carries ``http_status`` (always ``410``) and
+    ``upstream_message``.
+    """
+    response = exc.response
+    upstream_message = _http_upstream_message(response)
+    summary = (
+        "connector_http_410: this product version no longer has this API "
+        "(HTTP 410 Gone). The product understood the call and says the API "
+        "was removed. Use a different operation for this product version, "
+        "or check the version catalog of the connector. See "
+        "docs/codebase/error-message-shape.md for the dispatch error "
+        "convention."
+    )
+    if upstream_message is not None:
+        summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
+    extras: dict[str, Any] = {
+        "error_code": "connector_http_410",
+        "http_status": 410,
+        "upstream_message": upstream_message,
+    }
+    _add_upstream_fault(extras, response)
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras=extras,
+    )
+
+
 #: The non-2xx statuses the dispatcher classifies as an auth/session
 #: failure rather than the generic ``connector_error`` **for a typed
 #: (hand-coded) connector**. ``401`` is the load-bearing, connector-
@@ -3039,12 +3103,40 @@ _TLS_REMEDIATION_LAST_RESORT: str = (
     "tls_ca_pin above."
 )
 
+#: A target that already has ``tls_ca_pin`` must not be told to set one
+#: (#3867). The pin no longer matches what the host presents, typically
+#: because the host certificate was re-issued (for example by the VMCA of
+#: the vCenter the host joined).
+_TLS_REMEDIATION_STALE_PIN: str = (
+    "This target already has tls_ca_pin, but the pin no longer matches the "
+    "certificate the host presents now -- the pin is stale. The host "
+    "certificate was probably re-issued. Check the presented certificate "
+    "below, then re-pin on purpose: set tls_ca_pin to the CA that issued "
+    "it. For an ESXi host or a vCenter whose certificates come from the "
+    "VMCA, pin the VMCA root CA, not the host certificate, so the next "
+    "re-issue does not break the target again."
+)
+
+
+def _stale_pin_extras(presented: Mapping[str, str] | None) -> dict[str, Any]:
+    """The presented leaf, or a note that it could not be read."""
+    if presented is None:
+        return {"presented_certificate": None}
+    return {
+        "presented_certificate": {
+            "issuer": _sanitize_free_text(presented["issuer"]),
+            "subject": _sanitize_free_text(presented["subject"]),
+            "sha256": presented["sha256"],
+        }
+    }
+
 
 def result_connector_tls_verify_failed(
     op_id: str,
     exc: BaseException,
     target: Any,
     duration_ms: float,
+    presented: Mapping[str, str] | None = None,
 ) -> OperationResult:
     """Connector dispatch failed TLS certificate verification.
 
@@ -3081,6 +3173,8 @@ def result_connector_tls_verify_failed(
     """
     msg = _sanitize_free_text(str(exc))
     host = getattr(target, "host", None) or "the target host"
+    if getattr(target, "tls_ca_pin", None):
+        return _result_stale_pin(op_id, msg, exc, host, duration_ms, presented)
     summary = (
         f"connector_tls_verify_failed: TLS certificate verification failed "
         f"for {host}. The socket opened and the host answered, but its "
@@ -3103,6 +3197,45 @@ def result_connector_tls_verify_failed(
             "remediation_secure": _TLS_REMEDIATION_SECURE,
             "remediation_ca_pin": _TLS_REMEDIATION_CA_PIN,
             "remediation_last_resort": _TLS_REMEDIATION_LAST_RESORT,
+        },
+    )
+
+
+def _result_stale_pin(
+    op_id: str,
+    msg: str,
+    exc: BaseException,
+    host: str,
+    duration_ms: float,
+    presented: Mapping[str, str] | None,
+) -> OperationResult:
+    """The ``connector_tls_verify_failed`` answer for a target with a pin."""
+    if presented is None:
+        shown = "meho could not read the certificate the host presents."
+    else:
+        shown = (
+            f"The host presents a certificate issued by {presented['issuer']} "
+            f"for {presented['subject']} (SHA-256 {presented['sha256']})."
+        )
+    summary = (
+        f"connector_tls_verify_failed: TLS certificate verification failed "
+        f"for {host}. {_TLS_REMEDIATION_STALE_PIN} {shown} See "
+        f"docs/codebase/error-message-shape.md for the dispatch error "
+        f"convention."
+    )
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "connector_tls_verify_failed",
+            "host": host,
+            "exception_class": type(exc).__name__,
+            "exception_message": msg,
+            "pin_stale": True,
+            "remediation_stale_pin": _TLS_REMEDIATION_STALE_PIN,
+            **_stale_pin_extras(presented),
         },
     )
 

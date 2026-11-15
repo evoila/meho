@@ -208,11 +208,17 @@ aliases) in the tenant bound. Do this in
 `netdiag.probeAllowlistTenants`. The allow list check itself is
 unchanged.
 
-A `timeout` result from `net.tcp_check`, `net.dns_lookup` or
-`net.http_probe` carries a
-`hint` field. It says that no route from the backplane is a possible
-cause, so a timeout is not read as an outage of the probed service.
-Other results have no `hint`.
+A switch can add a `hint` field to a `timeout` result from
+`net.tcp_check`, `net.dns_lookup` or `net.http_probe`. The hint says
+that no route from the backplane is a possible cause, so a timeout is
+not read as an outage of the probed service.
+
+- The switch is the env var `MEHO_NETDIAG_TIMEOUT_HINT`. Set it with
+  the chart's `extraEnv`.
+- It is off by default. Only the value `true` turns it on. It is read
+  on each probe.
+- With the switch off, every result keeps its old shape: no `hint`.
+- Other results never have a `hint`, also with the switch on.
 
 ### 2. Audit-visible host:port
 

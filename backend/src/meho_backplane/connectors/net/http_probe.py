@@ -68,7 +68,7 @@ from meho_backplane.connectors.net.allowlist import (
     ProbeNotAllowedError,
     assert_probe_allowed,
 )
-from meho_backplane.connectors.net.ops import _HINT_SCHEMA, _TIMEOUT_HINT
+from meho_backplane.connectors.net.ops import _HINT_SCHEMA, _add_timeout_hint
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
@@ -398,9 +398,7 @@ def _result(
         "url": url,
         "method": method,
     }
-    if reason == "timeout":
-        payload["hint"] = _TIMEOUT_HINT
-    return payload
+    return _add_timeout_hint(payload)
 
 
 def _elapsed_ms(started: float) -> float:

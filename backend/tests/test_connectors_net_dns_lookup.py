@@ -363,6 +363,7 @@ async def test_lookup_failure_is_ok_status_with_reason(
 async def test_timeout_maps_to_timeout_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     """A query deadline elapsing returns reason='timeout' (handler-direct)."""
     monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "slow.example")
+    monkeypatch.setenv(net_ops.TIMEOUT_HINT_ENV, "true")
 
     async def _raise_timeout(*_a: object, **_kw: object) -> object:
         raise dns.exception.Timeout()
@@ -374,6 +375,22 @@ async def test_timeout_maps_to_timeout_reason(monkeypatch: pytest.MonkeyPatch) -
     assert result["resolved"] is False
     assert result["reason"] == "timeout"
     assert "no route from the backplane is a possible cause" in result["hint"].lower()
+
+
+async def test_timeout_has_no_hint_when_switch_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the switch unset, a timeout keeps its old answer."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "slow.example")
+    monkeypatch.delenv(net_ops.TIMEOUT_HINT_ENV, raising=False)
+
+    async def _raise_timeout(*_a: object, **_kw: object) -> object:
+        raise dns.exception.Timeout()
+
+    monkeypatch.setattr(net_ops.dns.asyncresolver.Resolver, "resolve", _raise_timeout)
+
+    result = await net_dns_lookup(_make_operator(), None, {"name": "slow.example", "type": "A"})
+
+    assert result["reason"] == "timeout"
+    assert "hint" not in result
 
 
 # ---------------------------------------------------------------------------

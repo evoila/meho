@@ -52,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ipaddress
+import os
 import socket
 import time
 from typing import TYPE_CHECKING, Any, Final
@@ -73,15 +74,21 @@ if TYPE_CHECKING:
 __all__ = [
     "NET_DNS_LOOKUP_PARAMETER_SCHEMA",
     "NET_TCP_CHECK_PARAMETER_SCHEMA",
+    "TIMEOUT_HINT_ENV",
     "net_dns_lookup",
     "net_tcp_check",
     "register_net_typed_operations",
 ]
 
 
-#: Added to a ``timeout`` result. An address can pass the allow list and
-#: still be unreachable, for example when the backplane only reaches the
-#: estate through NAT alias addresses.
+#: Switch for :data:`_TIMEOUT_HINT`. Off by default: only the value
+#: ``true`` turns it on, so a ``timeout`` result keeps its old shape.
+#: Read per call, same as the probe allow list.
+TIMEOUT_HINT_ENV: Final[str] = "MEHO_NETDIAG_TIMEOUT_HINT"
+
+#: Added to a ``timeout`` result when :data:`TIMEOUT_HINT_ENV` is on. An
+#: address can pass the allow list and still be unreachable, for example
+#: when the backplane only reaches the estate through NAT alias addresses.
 _TIMEOUT_HINT = (
     "No route from the backplane is a possible cause. The address is "
     "allowed, but the backplane may not be able to reach it. Check that "
@@ -92,11 +99,20 @@ _TIMEOUT_HINT = (
 _HINT_SCHEMA: dict[str, Any] = {
     "type": "string",
     "description": (
-        "Present only when reason is 'timeout'. Says that no route from "
+        "Present only when reason is 'timeout' and the "
+        "MEHO_NETDIAG_TIMEOUT_HINT switch is on. Says that no route from "
         "the backplane is a possible cause, so a timeout is not read as "
         "an outage of the probed service."
     ),
 }
+
+
+def _add_timeout_hint(payload: dict[str, Any]) -> dict[str, Any]:
+    """Add :data:`_TIMEOUT_HINT` to a ``timeout`` result when the switch is on."""
+    enabled = os.environ.get(TIMEOUT_HINT_ENV, "").strip().lower() == "true"
+    if enabled and payload.get("reason") == "timeout":
+        payload["hint"] = _TIMEOUT_HINT
+    return payload
 
 
 #: Default connect timeout when the caller omits ``timeout_seconds``.
@@ -228,9 +244,7 @@ def _refusal(host: str, port: int, reason: str) -> dict[str, Any]:
         "host": host,
         "port": port,
     }
-    if reason == "timeout":
-        payload["hint"] = _TIMEOUT_HINT
-    return payload
+    return _add_timeout_hint(payload)
 
 
 async def net_tcp_check(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -470,9 +484,7 @@ def _dns_refusal(name: str, record_type: str, resolver: str, reason: str) -> dic
         "authenticated_data": None,
         "reason": reason,
     }
-    if reason == "timeout":
-        payload["hint"] = _TIMEOUT_HINT
-    return payload
+    return _add_timeout_hint(payload)
 
 
 def _as_ip_literal(value: str) -> str | None:

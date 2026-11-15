@@ -437,7 +437,10 @@ async def test_the_approval_card_of_a_write_shows_the_warning(
 
     monkeypatch.setattr(dispatcher, "_resolve_connector_instance", _no_instance)
     descriptor = SimpleNamespace(
-        op_id="keycloak.user.create", safety_level="caution", requires_approval=True
+        op_id="keycloak.user.create",
+        safety_level="caution",
+        requires_approval=True,
+        policy_rule_ref=None,
     )
     effects = []
     for realm in ("master", "example"):

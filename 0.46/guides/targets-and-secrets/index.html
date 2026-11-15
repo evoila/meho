@@ -3764,7 +3764,7 @@ MEHO passes that error on and changes nothing.</p>
 <tr>
 <td>422 at registration: <em>"target destination is not a public address; refusing it as a server-side request forgery risk…"</em></td>
 <td>The SSRF guard rejects private/internal addresses by default. The number-one surprise on on-prem first installs.</td>
-<td>Add your internal ranges or hostnames to the chart's <code>config.targetSsrfAllowlist</code> (env <code>MEHO_TARGET_SSRF_ALLOWLIST</code>) and upgrade the release.</td>
+<td>Add your internal ranges or hostnames to the chart's <code>config.targetSsrfAllowlist</code> (env <code>MEHO_TARGET_SSRF_ALLOWLIST</code>) and upgrade the release. An entry can end in a port (<code>host.name:8443</code>); it then admits that host on that port only.</td>
 </tr>
 <tr>
 <td>422 <code>unknown_product</code>, listing <code>valid_products</code></td>

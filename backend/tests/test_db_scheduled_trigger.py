@@ -114,7 +114,7 @@ async def _seed_tenant_and_definition(
 
     The slug must not be ``default``: migration ``0028`` (G0.13-T7
     #1137) seeds a real tenant with that slug into the migrated test
-    DB (replacing the ``rdc-internal`` seed migration ``0018`` had
+    DB (replacing the older tenant seed migration ``0018`` had
     previously shipped), so reusing either handle would collide on
     the unique ``tenant.slug`` constraint.
     """

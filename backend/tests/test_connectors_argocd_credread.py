@@ -141,7 +141,7 @@ class _CredReadTarget:
 
     def __init__(self) -> None:
         self.product = _PRODUCT
-        # ``Connector.supported_version_range`` is ``">=2.0,<4.0"``; the
+        # ``Connector.supported_version_range`` is ``">=3.0,<4.0"``; the
         # resolver parses target.fingerprint.version as PEP 440, so use a
         # concrete dotted version (not the wildcard ``"3.x"`` triple version
         # that names the connector key but isn't PEP-440 parseable).

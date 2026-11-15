@@ -268,10 +268,8 @@ _SEED_CONVENTIONS: Final[tuple[tuple[str, str, int, str], ...]] = (
             "Operator-visible identifiers (target names, hostnames, "
             "IPs, ticket titles, lab object names) must never contain "
             "AI-tool names like 'claude', 'gpt', or other model-shaped "
-            "tokens. The lab program's Holodeck `claude` legacy is the "
-            "exception — operator-visible refs renamed; VM-internal "
-            "refs are stuck pending destroy+redeploy. New names start "
-            "clean."
+            "tokens. Older names that break this rule are renamed "
+            "where possible. New names start clean."
         ),
     ),
     (
@@ -333,7 +331,7 @@ _SEED_CONVENTIONS: Final[tuple[tuple[str, str, int, str], ...]] = (
             "specifics (real hostnames, IPs, customer names, project "
             "codes) must not appear in commits, issues, or public "
             "docs. Generic naming + sanitised examples only. Internal "
-            "coordination happens in `evoila-bosnia/meho-internal` or "
+            "coordination happens in a private repository or "
             "other private channels."
         ),
     ),

@@ -125,12 +125,12 @@ func TestDecodeRowsResultNullAndEmpty(t *testing.T) {
 }
 
 func TestDecodeWrappedObject(t *testing.T) {
-	raw := json.RawMessage(`{"realm":{"realm":"evba","enabled":true}}`)
+	raw := json.RawMessage(`{"realm":{"realm":"example","enabled":true}}`)
 	obj, err := decodeWrappedObject(raw, "realm")
 	if err != nil {
 		t.Fatalf("decodeWrappedObject: %v", err)
 	}
-	if obj["realm"] != "evba" || obj["enabled"] != true {
+	if obj["realm"] != "example" || obj["enabled"] != true {
 		t.Fatalf("decoded: %+v", obj)
 	}
 	// Missing key → nil, no error.
@@ -221,7 +221,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 			writeJSON(t, w, 200, CallResult{
 				Status: "ok",
 				OpID:   "keycloak.realm.get",
-				Result: json.RawMessage(`{"realm":{"realm":"evba"}}`),
+				Result: json.RawMessage(`{"realm":{"realm":"example"}}`),
 			})
 		},
 	})

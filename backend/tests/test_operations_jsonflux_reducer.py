@@ -1978,7 +1978,7 @@ async def test_k8s_logs_shape_with_tenant_context_spills_and_pages() -> None:
     reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
     context = {
         "op_id": "k8s.logs",
-        "operator_sub": "rdc-operator",
+        "operator_sub": "example-operator",
         "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
         "result_ordering": {"sample": "tail"},
     }
@@ -2019,7 +2019,7 @@ async def test_k8s_logs_shape_store_down_states_the_reason() -> None:
     reducer = JsonFluxReducer(sample_size=5, store=_DownStore(), max_spill_rows=10000)
     context = {
         "op_id": "k8s.logs",
-        "operator_sub": "rdc-operator",
+        "operator_sub": "example-operator",
         "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
         "result_ordering": {"sample": "tail"},
     }

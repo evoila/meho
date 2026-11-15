@@ -56,7 +56,7 @@ from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.targets.resolver import resolve_target
 
 _CONNECTOR_ID = "argocd-api-3.x"
-_TARGET_NAME = "rdc-argocd-write-e2e"
+_TARGET_NAME = "argocd-write-e2e"
 _ARGOCD_HOST = "argocd-write-e2e.test.invalid"
 _ARGOCD_BASE_URL = f"https://{_ARGOCD_HOST}"
 _BEARER_TOKEN = "argocd-write-bearer-token-e2e-DO-NOT-LEAK"
@@ -178,7 +178,7 @@ async def _seed_argocd_target() -> TargetORM:
             host=_ARGOCD_HOST,
             port=443,
             fqdn=None,
-            secret_ref="rdc-hetzner-dc/argocd/api-token",
+            secret_ref="example-site/argocd/api-token",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},

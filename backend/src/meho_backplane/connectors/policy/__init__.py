@@ -9,7 +9,9 @@ queues the registrar of ``policy.classify`` (which registers the
 operation only while the ``POLICY_CLASSIFICATION`` switch is on), records
 that a person needs the ``tenant_admin`` role for it, marks every request
 of it as a change of rights, and marks it for approval on each call (no
-standing grant and no run approval covers it).
+standing grant and no run approval covers it). Only a person asks for it,
+like for ``policy.apply``, and its approval card shows what the entry
+matches now.
 
 The same holds for ``policy.apply``, the import of a whole policy file
 (:mod:`meho_backplane.connectors.policy.apply`). Its approval card shows
@@ -29,6 +31,8 @@ from meho_backplane.connectors.policy.apply import (
 )
 from meho_backplane.connectors.policy.classify import (
     POLICY_CLASSIFY_OP_ID,
+    build_policy_classify_preview,
+    policy_classify_requester_refusal,
     register_policy_classify_operation,
 )
 from meho_backplane.connectors.policy.preview import (
@@ -51,6 +55,9 @@ register_role_floor(POLICY_CLASSIFY_OP_ID, TenantRole.TENANT_ADMIN)
 register_role_floor(POLICY_CLASSIFY_PREVIEW_OP_ID, TenantRole.TENANT_ADMIN)
 register_rights_change_op(POLICY_CLASSIFY_OP_ID)
 declare_per_call_approval([POLICY_CLASSIFY_OP_ID])
+register_requester_check(POLICY_CLASSIFY_OP_ID, policy_classify_requester_refusal)
+register_preview_builder(POLICY_CLASSIFY_OP_ID, build_policy_classify_preview)
+register_permission_preflight(POLICY_CLASSIFY_OP_ID, record_policy_apply_requester)
 
 register_typed_op_registrar(register_policy_apply_operation)
 register_role_floor(POLICY_APPLY_OP_ID, TenantRole.TENANT_ADMIN)

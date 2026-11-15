@@ -118,6 +118,7 @@ def descriptor_from_target(target: TargetORM) -> wire.ResolvedTargetDescriptor:
         secret_field_map=dict(target.secret_field_map or {}),
         extras=dict(target.extras or {}),
         updated_at=target.updated_at,
+        connection_changed_at=target.connection_changed_at,
     )
 
 

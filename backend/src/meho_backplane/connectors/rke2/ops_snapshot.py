@@ -87,6 +87,7 @@ import shlex
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors._shared.vault_creds import strip_credential_value
+from meho_backplane.connectors.base import ConnectorOwnMessage
 from meho_backplane.connectors.rke2._sudo import run_remote_bash_with_sudo
 from meho_backplane.connectors.rke2.ops import SSH_TRANSPORT_NOTE, Rke2Op
 
@@ -176,6 +177,14 @@ class Rke2SnapshotNameError(ValueError):
 
 class Rke2SnapshotPreconditionError(RuntimeError):
     """The node is not an embedded-etcd server -- a snapshot is refused."""
+
+
+class Rke2SnapshotNoSudoError(ConnectorOwnMessage, Rke2SnapshotPreconditionError):
+    """The target needs root and its secret has no sudo credential.
+
+    The message is a fixed sentence of MEHO with no host output, so an
+    operation that sends a secret still shows it (:class:`ConnectorOwnMessage`).
+    """
 
 
 class Rke2SnapshotError(RuntimeError):
@@ -324,7 +333,7 @@ async def _run_precondition_guard(
     if _guard_verdict(guard) == "needs-root":
         sudo_password = await _resolve_sudo_password(connector, target, operator)
         if sudo_password is None:
-            raise Rke2SnapshotPreconditionError(
+            raise Rke2SnapshotNoSudoError(
                 "this operation needs root; the target logs in as a normal user "
                 "and its Vault secret has no sudo_password or password"
             )

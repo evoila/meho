@@ -1334,6 +1334,27 @@ console sign, the REST fields `may_approve` / `may_approve_reason`, the
 (`approve_right_any_status`) all follow the routing. The shadow mode of
 "may approve" compares the evaluator with today's answer before routing.
 
+**When the routing changes.** A waiting request keeps the group kinds it
+stored when it started to wait. A policy file that is imported later
+applies only to new requests, not to the ones already waiting. Run
+approvals are different: they store no kinds, so they use the policy that
+is stored at the moment of the click.
+
+**Audit rows.** When a request has stored kinds, its audit rows carry
+`approver_rule` and `approver_roles`: the `approval.request` row and the
+`approval.decision` row of the approve. The approve audit row of a run
+approval carries `approver_routing`: the rule and the kinds of each routed
+entry, also when the list is refused. When the stored routing in the
+policy file is not valid, the request does not wait. One
+`approval.request` audit row records the refusal (`result_status`
+`routing_invalid`, `approver_rule` `invalid`, `routing_error`), written in
+its own transaction.
+
+**Routing on, classification off.** Then no change has a category, so a
+`category` entry fits nothing. The import and the check of a policy file
+warn for each such entry, and `/ready` shows the same sentence under
+`features.policy.notes`.
+
 **Old requests and the switch.** A request without stored kinds (made while
 the switch was off, or before migration `0167`) keeps today's rule. With
 the switch off, MEHO stores nothing and checks no stored kinds, so turning
@@ -1354,18 +1375,18 @@ closed).
 With the switch off, none of this shows, and `tab=for_you` is an unknown
 tab (422).
 
-**Run approvals** use the same routing for each entry of the list, at the
-moment a person approves it ([run-approvals.md](run-approvals.md)).
+**Run approvals** use the same routing for each entry of the list, with
+the policy that is stored at the moment a person approves it
+([run-approvals.md](run-approvals.md)).
 
-Tests: `tests/test_policy_routing.py`, `tests/test_run_approvals_routing.py`,
-`tests/test_ui_approvals_routing.py`,
+Tests: `tests/test_policy_routing.py`, `tests/test_policy_routing_classified.py`,
+`tests/test_run_approvals_routing.py`, `tests/test_ui_approvals_routing.py`,
+`tests/test_web_push_send.py`,
 `tests/migrations/test_migration_0167_add_approval_request_approver_roles.py`.
 
 **Not yet:** a team is a group kind. Bindings that give a login group
-categories, and notifications only to the people who may approve, come
-later. The "separated duties" file
-(`deploy/policy-profiles/separated-duties.yaml`, also packaged in
-`backend/src/meho_backplane/policy/profiles/`) shows the routing:
+categories come later. The "separated duties" file
+(`deploy/policy-profiles/separated-duties.yaml`) shows the routing:
 identity and secret changes only Admins, network and storage changes only
 SA-Operators and Admins.
 

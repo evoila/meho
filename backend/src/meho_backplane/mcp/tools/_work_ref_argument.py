@@ -15,10 +15,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import ValidationError
+
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.work_ref import WorkRefError, check_work_ref_filter_input
 
-__all__ = ["work_ref_argument"]
+__all__ = ["validation_error_text", "work_ref_argument"]
 
 
 def work_ref_argument(value: Any, *, name: str = "work_ref") -> str | None:
@@ -36,3 +38,17 @@ def work_ref_argument(value: Any, *, name: str = "work_ref") -> str | None:
     except WorkRefError as exc:
         raise McpInvalidParamsError(str(exc).replace("work_ref", name, 1)) from exc
     return checked
+
+
+def validation_error_text(exc: ValidationError) -> str:
+    """Return the text of a pydantic error without the refused input.
+
+    ``str(exc)`` holds each refused value (``input_value=...``), so a refused
+    ticket id would be sent back in the error. This text names only the field
+    and the rule.
+    """
+    parts = [
+        f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+        for error in exc.errors(include_url=False, include_context=False, include_input=False)
+    ]
+    return f"{exc.error_count()} validation error(s): " + "; ".join(parts)

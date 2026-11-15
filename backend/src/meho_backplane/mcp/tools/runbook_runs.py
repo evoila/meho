@@ -94,6 +94,7 @@ from meho_backplane.mcp.registry import (
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.mcp.short_texts import with_short_text
 from meho_backplane.mcp.tools._short_tool_texts import RUNBOOK_NEXT_SHORT
+from meho_backplane.mcp.tools._work_ref_argument import validation_error_text
 from meho_backplane.runbooks.engine import (
     PreviousStepNotVerifiedError,
     VerifyResponseMismatchError,
@@ -167,10 +168,13 @@ def _to_invalid_params(tool: str, exc: Exception) -> McpInvalidParamsError:
     consistent ``"<tool>: <detail>"`` message shape. A
     :class:`NotRunAssigneeError` is a permission refusal (REST 403), so it
     becomes :class:`McpPermissionDeniedError` and keeps its decision row
-    (#3757).
+    (#3757). A pydantic error is written without the refused input, so a
+    refused ticket id is not sent back.
     """
     if isinstance(exc, NotRunAssigneeError):
         return McpPermissionDeniedError(f"{tool}: {exc}")
+    if isinstance(exc, ValidationError):
+        return McpInvalidParamsError(f"{tool}: {validation_error_text(exc)}")
     return McpInvalidParamsError(f"{tool}: {exc}")
 
 

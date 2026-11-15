@@ -67,7 +67,7 @@ fresh target with no asserted version still resolves.
   `client_get`, `client_scope_list`, `user_list`, `role_mapping_get`,
   `role_list`, `role_users`, `group_list`, `group_member_list`,
   `identity_provider_list`, `auth_flow_step_list`, `required_action_list`,
-  `events_config_get`) and
+  `events_config_get`, `user_lock_status`, `realm_lock_settings`) and
   per write op (`realm_create`/`realm_update`, `client_create`/
   `client_update`, `client_scope_create`, `protocol_mapper_create`,
   `user_create`/`user_reset_password`, `role_mapping_assign`,
@@ -370,8 +370,9 @@ apart:
   `{userId, locked, numFailures, numTemporaryLockouts, lastFailure}`. The IP
   address of the last failure (`lastIPFailure`) is personal data and is never
   returned. The trace mask hides it in the flight recorder trace too.
-  `lastFailure` is ISO 8601 UTC, or `null` when it is absent or 0 (no
-  failure yet).
+  `lastFailure` is ISO 8601 UTC, or `null` when it is absent, null or 0 (no
+  failure yet). A negative number, or one that is not a finite date, is an
+  error: it never reads as "no failure".
 - Keycloak 26 answers the lock status read with 200, `disabled: false` and
   zero counts for an id it does not know. So with an `id`, the op first reads
   `GET .../users/{user-id}`. That read gives 404 for an unknown id, and the op
@@ -387,7 +388,11 @@ apart:
   `waitIncrementSeconds`, `maxFailureWaitSeconds`, `maxDeltaTimeSeconds` and
   the quick-login fields. Each field is checked: a flag must be a boolean and
   a number an integer. An absent field is `null`; a field of the wrong type is
-  an error.
+  an error. `bruteForceProtected` is the exception: absent or `null` is an
+  error too, so the caller always knows if the lock is on.
+- The integration test `tests/integration/test_keycloak_lock_reads_e2e.py`
+  runs both reads on the real Keycloak container: counts after failed
+  sign-ins, the lock, an unknown id, and the lock settings on and off.
 
 Keycloak does not say until when a temporary lock lasts. Not built here: an
 unlock operation.

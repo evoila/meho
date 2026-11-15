@@ -278,6 +278,17 @@ async def test_status_field_of_wrong_type_is_an_error(
     assert field in str(result)
 
 
+@pytest.mark.parametrize("value", [-1, -1_760_000_000_000, 1e308, 10**30])
+async def test_odd_last_failure_number_is_an_error(kc: KeycloakConnector, value: Any) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_USER_PATH).respond(200, json=_USER_ROW)
+        mock.get(_LOCK_PATH).respond(200, json={**_LOCKED, "lastFailure": value})
+        result = await _run(_STATUS_OP, {"id": _USER_UUID})
+    assert result["status"] != "ok", result
+    assert "lastFailure" in str(result)
+
+
 async def test_absent_or_null_last_failure_is_null(kc: KeycloakConnector) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
@@ -377,6 +388,19 @@ async def test_realm_lock_setting_of_wrong_type_is_an_error(
         result = await _run(_SETTINGS_OP, {})
     assert result["status"] != "ok", result
     assert field in str(result)
+
+
+async def test_realm_lock_on_off_flag_absent_or_null_is_an_error(kc: KeycloakConnector) -> None:
+    absent = {k: v for k, v in _REALM_ROW.items() if k != "bruteForceProtected"}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        route = mock.get(_REALM_PATH).respond(200, json=absent)
+        no_key = await _run(_SETTINGS_OP, {})
+        route.respond(200, json={**_REALM_ROW, "bruteForceProtected": None})
+        null = await _run(_SETTINGS_OP, {})
+    for result in (no_key, null):
+        assert result["status"] != "ok", result
+        assert "bruteForceProtected" in str(result)
 
 
 async def test_realm_lock_setting_absent_is_null(kc: KeycloakConnector) -> None:

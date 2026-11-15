@@ -23,7 +23,10 @@ tenant's file, and two entries that give one operation different
 categories at the same level. The ``routing`` entries are checked by
 :func:`meho_backplane.policy.routing.routing_mistakes`: a group kind that
 may approve none of the changes an entry routes, and a change that nobody
-may approve.
+may approve. The ``bindings`` are checked by
+:func:`~meho_backplane.policy.bindings.binding_mistakes`: no binding in the
+install's file, no runner, no agent or service with a kind that may
+approve, and no unknown category.
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.credential_read import has_credential_read_floor
 from meho_backplane.operations.role_floors import role_floor_for
+from meho_backplane.policy.bindings import binding_mistakes
 from meho_backplane.policy.classification import (
     RISK_LEVELS,
     ClassificationConflictError,
@@ -295,6 +299,7 @@ def check_document(
     mistakes = _taxonomy_mistakes(document, scope=scope, taxonomy=taxonomy)
     mistakes.extend(_entry_value_mistakes(raw_entries, taxonomy))
     mistakes.extend(routing_mistakes(list(document.get("routing") or []), taxonomy))
+    mistakes.extend(binding_mistakes(document, scope=scope, taxonomy=taxonomy))
     if mistakes:
         return _capped(mistakes)
     entries = entries_from_document(document, scope=scope)

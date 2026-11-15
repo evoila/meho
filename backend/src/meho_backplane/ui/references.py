@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Reference resolution shared by the audit + broadcast detail drawers.
+"""Reference resolution for the audit detail drawer.
 
-Both console detail drawers -- the audit row drawer
-(:mod:`meho_backplane.ui.routes.audit.routes`) and the broadcast event
-drawer (:mod:`meho_backplane.ui.routes.broadcast.event`) -- resolve the
-canonical ``audit_log`` row and, historically, rendered its reference
+The audit row drawer (:mod:`meho_backplane.ui.routes.audit.routes`; the
+broadcast event drawer shared it until #3762 removed operation rows from
+Broadcast) resolves the canonical ``audit_log`` row and, historically, rendered its reference
 columns **raw**: ``operator_sub`` as an OIDC sub, ``target_id`` /
 ``parent_audit_id`` / ``agent_session_id`` / ``run_id`` as bare UUIDs,
 ``op_id`` as a machine handle. A human reading the drawer saw

@@ -66,7 +66,10 @@ T2 (#2429) adds the **first approval-gated write op** (in the
   / `node` / `exit_status`) is returned. Neither token value ever reaches the
   world-readable `/proc/<pid>/cmdline` of the rke2 process. A read-only fingerprint gate refuses a non-server node,
   an inactive `rke2-server`, or a below-floor / known-bad (`v1.27.10+rke2r1`)
-  RKE2 version before any mutation.
+  RKE2 version before any mutation. When the target's Vault secret has no
+  `sudo_password` or `password`, the op fails with an error before any
+  mutation. The error is `Rke2WriteOwnMessageError`, a fixed sentence of MEHO,
+  so the caller sees why it failed.
 
 T3 (#2430) adds two more **approval-gated node-write ops**
 (`safety_level="dangerous"` / `requires_approval=true`), both in the shared

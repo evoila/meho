@@ -337,7 +337,9 @@ text from the error result, in one shared place.
   every marked error type in the core (`_MARKED_TYPES` in
   `tests/test_operations_own_message_of_secret_op.py`), so each new one
   is seen in review. `LinuxWriteOwnMessageError` (no sudo credential in
-  the target's secret) is the first use.
+  the target's secret) is the first use. The RKE2 connector marks the
+  same case with `Rke2WriteOwnMessageError` (write operations) and
+  `Rke2SnapshotNoSudoError` (snapshot operations).
 - **Retries are unchanged.** The rule works on the built result, not on
   the raised error. So the new login and one retry after HTTP 401, and
   the 403 and 429 results, work as before.

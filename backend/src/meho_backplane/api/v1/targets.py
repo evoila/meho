@@ -1708,6 +1708,7 @@ _CONNECTION_FIELDS = frozenset(
         "port",
         "fqdn",
         "secret_ref",
+        "secret_field_map",
         "auth_model",
         "verify_tls",
         "tls_ca_pin",
@@ -1920,6 +1921,10 @@ async def apply_target_update(
     # at create time, and only when ``secret_ref`` is omitted (see
     # :func:`create_target`).
     t.updated_at = datetime.now(UTC)
+    if _CONNECTION_FIELDS.intersection(updates):
+        # Other processes drop their kept logins when this moves, also when
+        # the same values were sent again (#3879). A probe does not move it.
+        t.connection_changed_at = t.updated_at
     _log.info(
         "target_updated",
         target_id=str(t.id),

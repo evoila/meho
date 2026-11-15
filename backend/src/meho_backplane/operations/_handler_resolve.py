@@ -26,9 +26,9 @@ Two related concerns the dispatcher needs but that don't belong in
   target is used fresh on the next dispatch (#3879).
 * :func:`forget_target_if_changed` -- the same drop, run by every process
   that executes an operation (a backplane server, a satellite runner) when
-  the target row it reads was changed since this process last saw it. The
-  process that served the change drops at once; every other process drops
-  on its next call (#3879).
+  a person changed the target since this process last saw it. A probe is
+  not such a change. The process that served the change drops at once;
+  every other process drops on its next call (#3879).
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ import structlog
 
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.resolver import resolve_connector_or_label
 
 __all__ = [
     "forget_target_if_changed",
@@ -68,8 +69,9 @@ _HANDLER_CACHE: dict[str, Callable[..., Awaitable[Any]]] = {}
 # ``type[Connector]`` -> singleton instance cache.
 _CONNECTOR_INSTANCE_CACHE: dict[type[Connector], Connector] = {}
 
-# ``target_cache_key`` -> the ``updated_at`` this process last saw for the
-# target. Per process, like the connector caches it guards (#3879).
+# ``target_cache_key`` -> the change version this process last saw for the
+# target (see :func:`_target_version`). Per process, like the connector
+# caches it guards (#3879).
 _SEEN_TARGET_VERSIONS: dict[tuple[str, str], Any] = {}
 
 # ``target_cache_key`` -> the lock a drop for the target runs under. A call
@@ -188,7 +190,7 @@ async def forget_target_in_connectors(target: Any) -> None:
     logged and skipped: the target change must still go through, and one
     connector must not stop the others from forgetting the target.
 
-    The drop runs under the target's lock, and the target's ``updated_at``
+    The drop runs under the target's lock, and the target's change version
     is recorded as seen only when every hook is done. So a dispatch that
     arrives while a hook still runs waits for the drop, and does not reuse a
     login that is about to be dropped. After that, the next dispatch in this
@@ -225,23 +227,56 @@ async def _run_forget_hooks(target: Any) -> None:
                 )
 
 
+def _target_version(target: Any) -> tuple[Any, type[Connector] | None] | None:
+    """Return what a kept login depends on, as one comparable value.
+
+    The value has two parts:
+
+    * the time a person last changed the target (``connection_changed_at``;
+      ``updated_at`` for a row or descriptor that has no such value). A
+      probe moves ``updated_at`` but not this time, so a probe alone does
+      not drop kept logins. An update that sends the same values again
+      moves it, so it still does.
+    * the connector class that serves the target now. A probe that finds a
+      new product or version can move the target to another connector. The
+      class itself is kept, not its name: two connectors in different
+      modules can have the same class name.
+
+    ``None`` when the target has no change time (a test double): it is
+    never treated as changed.
+    """
+    changed_at = getattr(target, "connection_changed_at", None) or getattr(
+        target, "updated_at", None
+    )
+    if changed_at is None:
+        return None
+    try:
+        connector_cls, _label, _message = resolve_connector_or_label(target)
+    except Exception:
+        connector_cls = None
+    return changed_at, connector_cls
+
+
 def _record_seen_version(target: Any) -> None:
-    """Store *target*'s ``updated_at`` as the version this process saw last."""
-    _SEEN_TARGET_VERSIONS[target_cache_key(target)] = getattr(target, "updated_at", None)
+    """Store *target*'s change version as the one this process saw last."""
+    _SEEN_TARGET_VERSIONS[target_cache_key(target)] = _target_version(target)
 
 
 async def forget_target_if_changed(target: Any) -> bool:
-    """Drop the kept logins for *target* when its row changed since this process last saw it.
+    """Drop the kept logins for *target* when a person changed it since this process last saw it.
 
     #3879. The target update route drops kept logins only in the process
     that serves the PATCH. Every other backplane server, and every satellite
     runner, keeps its own connector caches. So every execution path calls
     this with the target it just read, before a connector reuses a login:
     the dispatcher does, and so does the runner executor. A change shows as
-    a new ``updated_at`` on the row (the update route always refreshes it,
-    also when the same ``secret_ref`` is sent again). When the value differs
-    from the one this process saw last, the kept logins are dropped and the
-    next login uses the new values.
+    a new ``connection_changed_at`` on the row (the update route always sets
+    it, also when the same ``secret_ref`` is sent again), or as another
+    connector serving the target (see :func:`_target_version`). A probe
+    that stores the same product and version, or only a new probe time,
+    changes neither. When the value differs from the one this process saw
+    last, the kept logins are dropped and the next login uses the new
+    values.
 
     The check and the drop run under the target's lock. A second call with
     the same new version waits until the first call's drop is done, then
@@ -249,18 +284,18 @@ async def forget_target_if_changed(target: Any) -> bool:
     as handled while a hook still runs, and reuse the old login.
 
     The first sighting only records the value: nothing was kept for the
-    target by a dispatch yet. A target object with no ``updated_at`` (a test
+    target by a dispatch yet. A target object with no change time (a test
     double) is never treated as changed. Returns ``True`` when a drop ran.
     """
-    updated_at = getattr(target, "updated_at", None)
-    if updated_at is None:
+    version = _target_version(target)
+    if version is None:
         return False
     key = target_cache_key(target)
     async with _forget_lock(target):
         if key not in _SEEN_TARGET_VERSIONS:
-            _record_seen_version(target)
+            _SEEN_TARGET_VERSIONS[key] = version
             return False
-        if _SEEN_TARGET_VERSIONS[key] == updated_at:
+        if _SEEN_TARGET_VERSIONS[key] == version:
             return False
         _log.info(
             "target_changed_since_last_seen",

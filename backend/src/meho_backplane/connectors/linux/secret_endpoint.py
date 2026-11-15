@@ -49,8 +49,9 @@ compared in lower case. A normal user's home under ``/var`` (for example
 MEHO then reads the owner's home from the host (``getent passwd``) with a
 short script that carries no secret. That script refuses an owner with user
 id 0 (reason ``root-owner``), a system user (reason ``system-owner``: a user
-id below the first normal user id) and a home that does not exist (reason
-``no-home``). A system user's home is often a folder that others read or
+id below the first normal user id, or above the last normal user id, which
+is ``UID_MAX`` of the host, 60000 when the host gives none) and a home that
+does not exist (reason ``no-home``). A system user's home is often a folder that others read or
 share, such as a web root or a mail spool. MEHO refuses a path outside the
 home before the secret is sent. The script that writes the file checks the
 owner and the home again. Both scripts first check that ``realpath -m`` works

@@ -15,8 +15,9 @@ target out:
 
 * ``keycloak.user.required_actions.update`` (the handler calls
   :func:`refuse_login_user` with the user it has already read);
-* ``keycloak.user.disable`` (the handler and a check before the wait for
-  approval both call :func:`refuse_login_user_of_request`).
+* ``keycloak.user.disable`` (the handler calls :func:`refuse_login_user_rep`
+  with the user it then writes back; a check before the wait for approval
+  calls :func:`refuse_login_user_of_request`).
 
 The refusal comes before approval and again when the approved request runs.
 Nothing is written. The check only matters when the managed realm is the
@@ -49,6 +50,7 @@ __all__ = [
     "park_refusal_for_login_user",
     "refuse_login_user",
     "refuse_login_user_of_request",
+    "refuse_login_user_rep",
 ]
 
 USER_DISABLE_OP_ID = "keycloak.user.disable"
@@ -114,6 +116,26 @@ async def refuse_login_user_of_request(
     path = fill_path(_USER_PATH, {"realm": realms.managed_realm, "user-id": quote_segment(uuid)})
     user = await get_or_none(connector, target, path, operator)
     if user is None:
+        return
+    await refuse_login_user_rep(connector, operator, target, user, op_id=op_id, action=action)
+
+
+async def refuse_login_user_rep(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    user: dict[str, Any],
+    *,
+    op_id: str,
+    action: str,
+) -> None:
+    """Like :func:`refuse_login_user`, for a user the caller has already read.
+
+    The caller then writes this same *user* back (``before=`` of
+    ``read_merge_write``), so the check and the write see one read.
+    """
+    realms = resolve_realm_config(target)
+    if realms.managed_realm != realms.admin_realm:
         return
     stored = _opt_str(user.get("username"))
     if stored is None:

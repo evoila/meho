@@ -118,7 +118,7 @@ fresh target with no asserted version still resolves.
 - `USER_REQUIRED_ACTION_OPS` + `keycloak_user_required_actions_update` +
   `keycloak_user_otp_status` (`connectors/keycloak/ops_user_required_actions.py`)
   — the one-time code ops and the approval card of the write.
-- `refuse_login_user` + `refuse_login_user_of_request`
+- `refuse_login_user` + `refuse_login_user_of_request` + `refuse_login_user_rep`
   (`connectors/keycloak/ops_user_login_guard.py`) — the sign-in user check
   that `user.required_actions.update` and `user.disable` share with
   `user.delete`.
@@ -650,8 +650,10 @@ longer sign in to any app that uses this realm.
   is the realm the target signs in to. A disabled sign-in user would make
   Keycloak refuse the next sign-in of MEHO. The refusal comes before
   approval (a park check, with a reason that names no user name) and again
-  when the approved request runs. Nothing is written. `keycloak.user.enable`
-  is not checked.
+  when the approved request runs. Nothing is written. When it runs, MEHO
+  reads the user once, checks that read, and writes that same read back, so
+  a rename between two reads cannot get the sign-in user past the check.
+  `keycloak.user.enable` is not checked.
 - **Disabling does not end sessions that are already open.** To cut access at
   once, run `keycloak.user.disable`, then `keycloak.user.logout`.
 - Risk level `dangerous`, approval required, group `user_write`. On the

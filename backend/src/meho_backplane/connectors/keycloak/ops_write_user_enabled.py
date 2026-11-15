@@ -32,8 +32,9 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from meho_backplane.connectors.keycloak._paths import _USER_PATH, fill_path
-from meho_backplane.connectors.keycloak.ops_user_login_guard import refuse_login_user_of_request
+from meho_backplane.connectors.keycloak.ops_user_login_guard import refuse_login_user_rep
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
+from meho_backplane.connectors.keycloak.ops_write_delete_lookup import get_or_none
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 
@@ -73,19 +74,27 @@ async def _set_enabled(
             raise KeycloakUserNotFoundError(
                 f"{op_id}: no user with username={username!r} in realm {realms.managed_realm!r}"
             )
+    path = fill_path(_USER_PATH, {"realm": realms.managed_realm, "user-id": quote_segment(uuid)})
+    before: dict[str, Any] | None = None
     if not enabled:
-        await refuse_login_user_of_request(
-            connector, operator, target, params, op_id=op_id, action="disabling it"
+        # Check and write the same read, so a rename between two reads cannot
+        # slip the sign-in user past the check.
+        before = await get_or_none(connector, target, path, operator)
+        if before is None:
+            raise KeycloakUserNotFoundError(
+                f"{op_id}: no user with id={uuid!r} in realm {realms.managed_realm!r}"
+            )
+        await refuse_login_user_rep(
+            connector, operator, target, before, op_id=op_id, action="disabling it"
         )
     try:
         check = await read_merge_write(
             connector,
             operator,
             target,
-            path=fill_path(
-                _USER_PATH, {"realm": realms.managed_realm, "user-id": quote_segment(uuid)}
-            ),
+            path=path,
             requested={"enabled": enabled},
+            before=before,
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:

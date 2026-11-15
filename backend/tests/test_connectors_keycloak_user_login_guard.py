@@ -196,6 +196,7 @@ class _Keycloak:
         self.after: dict[str, dict[str, Any]] = {}
         self.read_back_fails = False
         self.read_back_extra: list[str] = []
+        self.rename_after_read: str | None = None
         mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
             200, json={"access_token": "kc-admin-token", "expires_in": 300}
         )
@@ -231,7 +232,11 @@ class _Keycloak:
             body = self.after[user_id]
             held = [*body["requiredActions"], *self.read_back_extra]
             return httpx.Response(200, json={**body, "requiredActions": held})
-        return httpx.Response(200, json=user)
+        response = httpx.Response(200, json=user)
+        if self.rename_after_read is not None:
+            # Someone renames the user right after this read.
+            user["username"] = self.rename_after_read
+        return response
 
 
 async def _target(name: str) -> Any:
@@ -415,6 +420,20 @@ async def test_a_user_renamed_to_the_sign_in_user_while_the_request_waits_is_ref
     assert resumed.status != "ok", resumed
     assert "target_login_user" in str(resumed.model_dump(mode="json"))
     assert api.put_ids == []
+
+
+async def test_disable_writes_back_the_user_it_checked(kc: KeycloakConnector) -> None:
+    """A rename to the sign-in name after the check cannot reach the write."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _Keycloak(mock, _ADMIN_REALM)
+        api.add(_user("event-guest", []))
+        api.rename_after_read = _LOGIN_USER
+        result = await _run(_DISABLE_OP, {"id": _USER_UUID}, _SAME_REALM_TARGET)
+    assert result["status"] == "ok", result
+    assert api.put_ids == [_USER_UUID]
+    # The write carries the name MEHO checked, not the name it was renamed to.
+    assert api.after[_USER_UUID]["username"] == "event-guest"
+    assert api.after[_USER_UUID]["enabled"] is False
 
 
 # ---------------------------------------------------------------------------

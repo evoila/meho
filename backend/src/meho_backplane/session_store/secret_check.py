@@ -40,7 +40,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Final
 
-from meho_backplane.redaction.patterns import get_pattern, secret_spans
+from meho_backplane.redaction.patterns import MASK_CHARS, get_pattern, secret_spans
 
 __all__ = ["CheckedPart", "check_part", "ends_inside_private_key"]
 
@@ -71,8 +71,11 @@ _UNCLEAR_SECRET: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 
-#: Values that are not a secret: a marker, a variable or a placeholder.
-_NOT_A_VALUE: Final[re.Pattern[str]] = re.compile(r"^(?:\[REDACTED|\$|<|\{|\*{3})")
+#: Values that are not a secret: a marker, a variable, a placeholder, or
+#: only mask characters (``password=\u2022\u2022\u2022\u2022\u2022\u2022``).
+_NOT_A_VALUE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:\[REDACTED|\$|<|\{|\*{3}|[" + MASK_CHARS + r"]+$)"
+)
 
 
 @dataclass(frozen=True)

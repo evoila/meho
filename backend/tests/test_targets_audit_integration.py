@@ -462,7 +462,12 @@ async def test_create_target_with_ca_pin_writes_ca_pin_audit_payload(
         mock_discovery_and_jwks(mr, public_jwks(key))
         response = client.post(
             "/api/v1/targets",
-            json={"name": "kappa", "product": "vmware-rest", "host": "vrli.lab", "tls_ca_pin": pem},
+            json={
+                "name": "kappa",
+                "product": "vmware-rest",
+                "host": "vrli.example.test",
+                "tls_ca_pin": pem,
+            },
             headers={"Authorization": f"Bearer {token}"},
         )
 

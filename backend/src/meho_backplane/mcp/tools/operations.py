@@ -77,6 +77,10 @@ from meho_backplane.mcp.tools._operation_recall import (
     with_recall,
 )
 from meho_backplane.mcp.tools._preview_typed_writes_text import preview_tool_for_settings
+from meho_backplane.mcp.tools._search_classification import (
+    CLASSIFICATION_PROPERTIES,
+    classification_schema_for_settings,
+)
 from meho_backplane.mcp.tools._short_tool_texts import (
     CALL_OPERATION_SHORT,
     SEARCH_OPERATIONS_SHORT,
@@ -107,6 +111,7 @@ from meho_backplane.operations.operation_run_service import MAX_RUN_WAIT_SECONDS
 from meho_backplane.recall import RECALL_KEY
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import with_data_notice
+from meho_backplane.work_ref import WorkRefError, normalize_work_ref_input
 
 __all__: list[str] = []
 
@@ -186,6 +191,24 @@ async def _search_operations_handler(
         raise McpInvalidParamsError(str(exc), data=exc.as_error_data()) from exc
 
 
+def _clean_work_ref_argument(call_arguments: dict[str, Any]) -> None:
+    """Clean the ``work_ref`` input with the one shared rule, or refuse the call.
+
+    This runs before anything else happens with the call: no target is
+    resolved, no policy check runs, and no row is written.
+    """
+    if call_arguments.get("work_ref") is None:
+        return
+    try:
+        call_arguments["work_ref"] = normalize_work_ref_input(call_arguments["work_ref"])
+    except WorkRefError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "invalid_work_ref"}) from exc
+    if not isinstance(call_arguments["work_ref"], str):
+        raise McpInvalidParamsError(
+            "work_ref must be a string", data={"reason": "invalid_work_ref"}
+        )
+
+
 async def _call_operation_handler(
     operator: Operator,
     arguments: dict[str, Any],
@@ -211,6 +234,7 @@ async def _call_operation_handler(
     if APPROVAL_REQUEST_ID in arguments:
         return await fetch_reveal_over_mcp(operator, arguments)
     call_arguments = dict(arguments)
+    _clean_work_ref_argument(call_arguments)
     run_async = bool(call_arguments.pop("async", False))
     run_id = call_arguments.pop("run_id", None)
     wait_seconds = call_arguments.pop("wait_seconds", None)
@@ -415,7 +439,9 @@ _SAFETY_LEVEL_SCHEMA: dict[str, Any] = {
 }
 
 #: Ranked mode: slim hits. The three score fields appear only when a
-#: tenant_admin caller sets ``include_scores`` (#3668).
+#: tenant_admin caller sets ``include_scores`` (#3668). ``category`` and
+#: ``labels`` appear only while the ``POLICY_CLASSIFICATION`` switch is on
+#: (``_search_classification``).
 _SEARCH_RANKED_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -436,6 +462,7 @@ _SEARCH_RANKED_OUTPUT_SCHEMA: dict[str, Any] = {
                     "group_key": {"type": ["string", "null"]},
                     "safety_level": _SAFETY_LEVEL_SCHEMA,
                     "requires_approval": {"type": "boolean"},
+                    **CLASSIFICATION_PROPERTIES,
                     "fused_score": {"type": "number"},
                     "bm25_score": {"type": ["number", "null"]},
                     "cosine_score": {"type": ["number", "null"]},
@@ -503,6 +530,7 @@ _SEARCH_EXACT_OP_OUTPUT_SCHEMA: dict[str, Any] = {
                 "group_key": {"type": ["string", "null"]},
                 "safety_level": _SAFETY_LEVEL_SCHEMA,
                 "requires_approval": {"type": "boolean"},
+                **CLASSIFICATION_PROPERTIES,
                 "parameter_schema": {"type": "object"},
                 "examples": {
                     "type": "array",
@@ -561,7 +589,9 @@ register_mcp_tool(
         name="search_operations",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
-        for_settings=with_short_text(SEARCH_OPERATIONS_SHORT),
+        for_settings=with_short_text(
+            SEARCH_OPERATIONS_SHORT, then=classification_schema_for_settings
+        ),
         description=(
             "Hybrid BM25 + cosine retrieval over a connector's enabled "
             "operations. Use this AFTER `list_operation_groups` has "

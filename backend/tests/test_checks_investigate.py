@@ -1244,7 +1244,7 @@ def test_briefing_prompt_cannot_close_its_own_fence() -> None:
 
 def test_briefing_fences_target_returned_evidence() -> None:
     """Target-returned ``last_value`` / ``last_evidence`` / offender sample sit
-    inside the untrusted-content envelope (S14, meho-internal#302).
+    inside the untrusted-content envelope (S14).
 
     A monitored host or service controls these fields; an adversarial value
     that mimics an instruction must reach the auto-fired diagnose-only

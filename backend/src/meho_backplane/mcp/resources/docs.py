@@ -98,7 +98,7 @@ is prose, often Markdown-shaped.
 
 The ``content`` field is served inside the
 ``<<UNTRUSTED_AGENT_TEXT … END_UNTRUSTED_AGENT_TEXT>>`` envelope
-(evoila-bosnia/meho-internal#304, extending the #154 read-boundary guard):
+(extending the #154 read-boundary guard):
 corpus chunk text is federated external content, so the reading agent must
 attribute it to its untrusted provenance rather than absorbing it as
 trusted context — parity with the ``search_docs`` / ``ask_docs`` tools and
@@ -200,7 +200,7 @@ async def _docs_chunk_handler(
     for chunk in result.chunks:
         if chunk.chunk_id == chunk_id:
             payload = chunk.model_dump(mode="json")
-            # Read-boundary guard (evoila-bosnia/meho-internal#304, extends
+            # Read-boundary guard (extends
             # #154): the recovered chunk's ``content`` is federated external
             # corpus text re-served into an LLM context, so wrap it in the
             # positional ``<<UNTRUSTED_AGENT_TEXT`` envelope — parity with

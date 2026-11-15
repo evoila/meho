@@ -268,7 +268,7 @@ def test_default_config_allows_canonical_per_tenant_call(
     get_settings.cache_clear()
     op = _operator(_TENANT_A)
     enforce_tenant_scope(
-        op, mount="secret", path=f"tenants/{_TENANT_A}/rdc-vcenter", read_only=True
+        op, mount="secret", path=f"tenants/{_TENANT_A}/example-vcenter", read_only=True
     )
 
 
@@ -279,7 +279,7 @@ def test_default_config_denies_cross_tenant_call(monkeypatch: pytest.MonkeyPatch
     op = _operator(_TENANT_A)
     with pytest.raises(VaultTenantScopeError):
         enforce_tenant_scope(
-            op, mount="secret", path=f"tenants/{_TENANT_B}/rdc-vcenter", read_only=True
+            op, mount="secret", path=f"tenants/{_TENANT_B}/example-vcenter", read_only=True
         )
 
 

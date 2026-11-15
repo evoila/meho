@@ -737,7 +737,7 @@ def test_corpus_search_resolves_gs_kb_source_to_canonical_link() -> None:
                 chunk_id="kb-1",
                 document_id="broadcom-kb-414551",
                 content="vCenter scaling maximums.",
-                source_url="gs://meho-knowledge-vmware-corpus/kb/broadcom-kb/articles/41/414551.html",
+                source_url="gs://example-corpus/kb/broadcom-kb/articles/41/414551.html",
                 score=0.9,
             ),
         ]
@@ -780,14 +780,12 @@ def test_corpus_search_degrades_community_gs_source_to_non_clickable() -> None:
         tenant_id=_TENANT_A,
         capabilities=frozenset({"meho-docs", "meho-docs:vmware"}),
     )
-    community_url = (
-        "gs://meho-knowledge-vmware-corpus/community/williamlam/blog/quiesce-snapshots.md"
-    )
+    community_url = "gs://example-corpus/community/example-author/blog/quiesce-snapshots.md"
     result = DocsSearchResult(
         chunks=[
             _chunk(
                 chunk_id="comm-1",
-                document_id="williamlam-quiesce",
+                document_id="example-author-quiesce",
                 content="Community guidance on quiescing snapshots.",
                 source_url=community_url,
                 score=0.7,
@@ -814,7 +812,7 @@ def test_corpus_search_degrades_community_gs_source_to_non_clickable() -> None:
     assert 'href="gs://' not in body
     # The label is rendered (document id fallback) and the raw path is shown
     # as provenance text (not a link).
-    assert "williamlam-quiesce" in body
+    assert "example-author-quiesce" in body
     assert community_url in body
 
 

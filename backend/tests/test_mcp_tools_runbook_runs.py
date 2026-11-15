@@ -9,7 +9,7 @@ that wrap :class:`~meho_backplane.runbooks.run_service.RunbookRunService`
 on the MCP transport:
 
 * Registration: all five tools register against the G0.5 registry with
-  strict 2020-12 ``inputSchema`` shapes; the MEHO-internal RBAC fields
+  strict 2020-12 ``inputSchema`` shapes; the internal RBAC fields
   never reach the wire.
 * RBAC: four tools (``meho_runbook_start`` / ``.next`` / ``.abort`` /
   ``.list_runs``) are ``OPERATOR``-callable; ``meho_runbook_reassign``
@@ -194,7 +194,7 @@ def test_all_five_tools_registered_with_strict_schema(
         schema = tools_by_name[name]["inputSchema"]
         assert schema["type"] == "object"
         assert schema["additionalProperties"] is False
-        # MEHO-internal RBAC fields never reach the wire.
+        # internal RBAC fields never reach the wire.
         assert "required_role" not in tools_by_name[name]
         assert "op_class" not in tools_by_name[name]
 

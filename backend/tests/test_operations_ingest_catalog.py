@@ -1034,7 +1034,8 @@ def test_shipped_mehoauto_row_declares_its_op_allowlist() -> None:
     """The shipped mehoauto row closes ingest to exactly launch/validate/gate,
     the run-node resume write a governed launcher nudges a failed node with
     (#3707), plus the two run-read GETs a governed launcher observes with
-    (#3699). The human-only run-node skip route is deliberately absent."""
+    (#3699), and the blueprint list GET. The human-only run-node skip route is
+    deliberately absent."""
     allow = op_allowlist_for("mehoauto", "0.1.0")
     assert allow == {
         ("POST", "/api/v1/runs"),
@@ -1043,6 +1044,7 @@ def test_shipped_mehoauto_row_declares_its_op_allowlist() -> None:
         ("POST", "/api/v1/runs/{run_id}/nodes/{node_id}/resume"),
         ("GET", "/api/v1/runs/{run_id}"),
         ("GET", "/api/v1/runs"),
+        ("GET", "/api/v1/blueprints"),
     }
 
 
@@ -1051,19 +1053,20 @@ def test_shipped_mehoauto_allowlist_covers_the_connector_safety_floor_keys() -> 
     pins MUST be on the catalog allowlist, so a pinned op can actually persist;
     the set of pinned ops can never grow beyond the set of ops that may persist.
     The allowlist may additionally carry read ops that need no floor entry — the
-    two run-read GETs land ``safe`` naturally (below the ``caution`` write
-    floor), so they are allowlisted but unpinned. If a floor key drops off the
+    two run-read GETs and the blueprint list GET land ``safe`` naturally (below
+    the ``caution`` write floor), so they are allowlisted but unpinned. If a floor key drops off the
     allowlist, or an unexpected op joins it, one of the two files drifted.
     """
     allow = op_allowlist_for("mehoauto", "0.1.0")
     floor = meho_automation_ingest_safety._CAUTION_OPS
     # Every caution-pinned op is allowlisted (a pinned op must be persistable).
     assert floor <= allow
-    # The allowlist's extra entries are exactly the two run-read GETs, which
+    # The allowlist's extra entries are exactly the three read GETs, which
     # ride the generic ``safe`` tier and are deliberately floor-free.
     assert allow - floor == {
         ("GET", "/api/v1/runs/{run_id}"),
         ("GET", "/api/v1/runs"),
+        ("GET", "/api/v1/blueprints"),
     }
 
 
@@ -1157,7 +1160,7 @@ def test_packaged_catalog_fetch_upstreams_are_raw_spec_urls_not_doc_portals() ->
 
 
 # ---------------------------------------------------------------------------
-# next_step.verb round-trips to a dispatchable ingest (claude-rdc-hetzner-dc#1136)
+# next_step.verb round-trips to a dispatchable ingest (consumer-reported)
 # ---------------------------------------------------------------------------
 
 
@@ -1165,7 +1168,7 @@ def test_packaged_catalog_fetch_upstreams_are_raw_spec_urls_not_doc_portals() ->
 async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() -> None:
     """The ``vcfa`` registered-row ``next_step.verb`` ingests dispatchably.
 
-    The claude-rdc-hetzner-dc#1136 false-success was: an operator copying
+    The consumer-reported false success was: an operator copying
     the verb ingested under a product the dispatcher never queried, so the
     catalog kept reporting ``registered, 0 ops``. #1814 (Initiative #1810)
     closed the underlying split by realigning ``VcfAutomationConnector`` to

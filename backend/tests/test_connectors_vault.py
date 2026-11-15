@@ -310,6 +310,43 @@ async def test_fingerprint_returns_hashicorp_vault_with_version(
     assert fake.sys.read_calls == [{"method": "GET"}]
 
 
+async def test_fingerprint_names_openbao_when_enterprise_key_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenBao 2.x health has no ``enterprise`` key; HashiCorp always has it."""
+    install_fake_client(
+        monkeypatch,
+        health_payload={"initialized": True, "sealed": False, "version": "2.1.0"},
+    )
+    result = await VaultConnector().fingerprint(_make_target())
+
+    assert result.vendor == "openbao"
+    assert result.product == "openbao"
+    assert result.version == "2.1.0"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"version": "2.2.0", "enterprise": False},
+        {"version": "1.18.0", "enterprise": False},
+        {"version": "1.15.0"},
+        {"version": "not-a-version"},
+        {"sealed": False},
+    ],
+)
+async def test_fingerprint_stays_hashicorp_vault(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, object],
+) -> None:
+    """The ``enterprise`` key, a version below 2.0, or no usable version is not OpenBao."""
+    install_fake_client(monkeypatch, health_payload=payload)
+    result = await VaultConnector().fingerprint(_make_target())
+
+    assert result.vendor == "hashicorp"
+    assert result.product == "vault"
+
+
 async def test_fingerprint_version_none_for_non_200_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

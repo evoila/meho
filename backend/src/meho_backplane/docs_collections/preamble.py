@@ -111,7 +111,7 @@ def _neutralise_delimiters(text: str) -> str:
     Rewriting the delimiter substrings to :data:`_NEUTRALISED_DELIMITER`
     before the positional wrapper runs guarantees the assembled band
     carries exactly one delimiter pair. Legitimate metadata never contains
-    these MEHO-internal sentinels, so it renders unchanged.
+    these internal sentinels, so it renders unchanged.
     """
     for delimiter in (BLOCK_START, BLOCK_END):
         text = text.replace(delimiter, _NEUTRALISED_DELIMITER)

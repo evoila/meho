@@ -50,6 +50,7 @@ from typing import Final
 
 import structlog
 from fastapi import Depends, FastAPI, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -63,6 +64,7 @@ from meho_backplane.agents import (
     stop_grant_expiry_sweeper,
 )
 from meho_backplane.api.openapi_maturity import inject_maturity_extensions
+from meho_backplane.api.request_validation import request_validation_exception_handler
 from meho_backplane.api.v1.addon_capability import router as api_v1_addon_capability_router
 from meho_backplane.api.v1.addon_pairing import router as api_v1_addon_pairing_router
 from meho_backplane.api.v1.agent_budgets import router as api_v1_agent_budgets_router
@@ -1073,6 +1075,9 @@ app.add_middleware(RequestBodyLimitMiddleware)
 # ``fastapi.HTTPException`` raises from route dependencies too (the
 # FastAPI handling-errors override pattern).
 app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
+# A 422 for a bad request body that encodes even when the refused input
+# holds a lone surrogate (FastAPI's stock handler answers that with a 500).
+app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
 
 app.include_router(health_router)
 app.include_router(first_start_router)
@@ -1576,8 +1581,8 @@ def build_openapi_schema() -> dict[str, object]:
     the ``product`` property on the ``TargetCreate`` request schema
     renders as a JSON Schema enum populated from the live connector
     registry. Without this hook the schema would surface ``product`` as
-    a free-form string — the dogfood signal 5 UX miss in
-    ``claude-rdc-hetzner-dc#697`` (operator typed ``'kubernetes'``,
+    a free-form string — the dogfood signal 5 UX miss
+    in consumer feedback (operator typed ``'kubernetes'``,
     resolver matched on ``'k8s'``, no early signal). Paired with the
     runtime 422 in :func:`~meho_backplane.api.v1.targets.create_target`
     (Options A + C from the task body, sharing one source-of-truth

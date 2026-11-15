@@ -66,6 +66,12 @@ func TestBuildAuditQueryRequestEmptyOptsHasZeroNonNilFilters(t *testing.T) {
 	if body.Limit != nil {
 		t.Errorf("Limit should be nil; got %v", *body.Limit)
 	}
+	if body.FullRowLost != nil {
+		t.Errorf("FullRowLost should be nil; got %v", *body.FullRowLost)
+	}
+	if body.TextChanged != nil {
+		t.Errorf("TextChanged should be nil; got %v", *body.TextChanged)
+	}
 }
 
 // TestBuildAuditQueryRequestEmptyOptsWireShape — pin the wire-shape
@@ -113,6 +119,8 @@ func TestBuildAuditQueryRequestEveryFlagLandsOnWire(t *testing.T) {
 		ParentAuditID: "00000000-0000-0000-0000-000000000002",
 		SessionID:     "00000000-0000-0000-0000-000000000003",
 		WorkRef:       "gh:evoila/meho#1",
+		FullRowLost:   true,
+		TextChanged:   true,
 		Limit:         50,
 		Cursor:        "opaque-cursor-bytes",
 	}
@@ -137,6 +145,8 @@ func TestBuildAuditQueryRequestEveryFlagLandsOnWire(t *testing.T) {
 		`"parent_audit_id":"00000000-0000-0000-0000-000000000002"`,
 		`"agent_session_id":"00000000-0000-0000-0000-000000000003"`,
 		`"work_ref":"gh:evoila/meho#1"`,
+		`"full_row_lost":true`,
+		`"text_changed":true`,
 		`"limit":50`,
 		`"cursor":"opaque-cursor-bytes"`,
 	} {

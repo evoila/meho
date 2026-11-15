@@ -1130,7 +1130,8 @@ are left. Each is a follow-up task.
 
 ```
 [ ] 1. Tasks merged; merge-queue CI GREEN on the tagged commit, nightly green (cancelled ≠ green —
-       re-run + wait for success); version picked
+       do not re-run a queue run, wait for the next green nightly run on `main`
+       that contains the commit); version picked
 [ ] 1a. Advisory ledger reconciled: `### Security` headings == ledger rows;
         GHSA count recorded; at a GA tag zero "Owed — decision pending"
         rows (docs/security/advisory-ledger.md; SECURITY.md disclosure steps)
@@ -1205,8 +1206,9 @@ are left. Each is a follow-up task.
   made a red `main` read as "cancelled" rather than "failed", and a
   cancelled run was treated as good enough to tag. A cancelled run is
   inconclusive, not a pass. Step 1 now makes both gates explicit:
-  confirm the tagged commit's merge-queue run is a real `success`, and
-  re-run any `cancelled` run before trusting it.
+  confirm the tagged commit's merge-queue run is a real `success`. For a
+  `cancelled` or missing run, wait for the next green nightly run on `main`
+  that contains the commit. Do not re-run the queue run.
 
 ## v0.7 follow-ups (deprecation removals)
 

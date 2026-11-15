@@ -126,6 +126,29 @@ _KEPT: Final[list[str]] = [
 ]
 
 
+_MARK: Final = "[REDACTED:command_line_secret]"
+
+#: (line, the whole filter output): only the value goes, every other word stays.
+_WHOLE_OUTPUT: Final[list[tuple[str, str]]] = [
+    (
+        f"run --password={PW} --user alice --verbose",  # trufflehog:ignore
+        f"run --password={_MARK} --user alice --verbose",
+    ),
+    (f"run -{_PASSWORD_IS}{PW} --user alice", f"run -{_PASSWORD_IS}{_MARK} --user alice"),
+    (
+        f"login {_PASSWORD_IS.lower()}{PW} user=alice; echo ok",
+        f"login {_PASSWORD_IS.lower()}{_MARK} user=alice; echo ok",
+    ),
+    (f"{_PASSWORD_IS}{PW} long phrase;Database=d", f"{_PASSWORD_IS}{_MARK};Database=d"),
+    (f"Server=db;{_PASSWORD_IS}{PW} long phrase", f"Server=db;{_PASSWORD_IS}{_MARK}"),
+]
+
+
+@pytest.mark.parametrize(("line", "expected"), _WHOLE_OUTPUT)
+def test_only_the_value_is_replaced(line: str, expected: str) -> None:
+    assert redact(line, get_default_policy()).redacted == expected
+
+
 @pytest.mark.parametrize(("line", "gone", "kept"), _HIDDEN)
 def test_hidden_forms_lose_the_value_and_keep_the_words(line: str, gone: str, kept: str) -> None:
     out = redact(line, get_default_policy()).redacted

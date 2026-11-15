@@ -19,7 +19,9 @@ option name and the words around it stay readable:
   with quoted, joined and escaped password parts (``user/"x y"@service``);
 * ``Password=``, ``Pwd=`` and ``pw=`` in a connection string; a value
   without quotes runs to the ``;`` (or the end of the line), so it may
-  hold spaces;
+  hold spaces. Text counts as a connection string when a ``;`` stands
+  before the label or a ``;`` and the next ``key=`` part follow the
+  value. Elsewhere ``password=`` takes one shell word, as an option does;
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
   ``_SECRET``, ``_TOKEN`` or ``_KEY`` (``DB_PASSWORD=x``);
 * the text inside an XML element named like a secret
@@ -358,6 +360,8 @@ _VALUE_MAX: Final = 1024
 #: line break or a quote (the end of the string the connection string is in)
 #: also ends it.
 _VALUE_STOP: Final = re.compile(r"""[\r\n;'"]""")
+#: The next ``key=`` part of a connection string, after the ``;`` that ends a value.
+_NEXT_PART: Final = re.compile(r";[ \t]*[A-Za-z][\w .-]{0,63}=")
 
 
 def _quoted_connection_value(text: str, start: int) -> tuple[int, int]:
@@ -389,11 +393,14 @@ def _connection_span(text: str, match: re.Match[str]) -> tuple[int, int] | None:
     if earlier is not None:
         stop_at = earlier.start()
     end = start + len(text[start:stop_at].rstrip())
-    if match["label"].lower() != "password":
-        # ``pwd`` and ``pw`` are connection string words only between semicolons.
-        before = text[max(0, match.start() - 40) : match.start()].rstrip()
-        if not (before.endswith(";") or text.startswith(";", stop_at)):
+    before = text[max(0, match.start() - 40) : match.start()].rstrip()
+    if not (before.endswith(";") or _NEXT_PART.match(text, stop_at)):
+        # Not in a connection string (``--password=x --user a``, ``password=x user=a``):
+        # the value is one shell word, so the words after it stay. ``pwd`` and ``pw``
+        # are connection string words only.
+        if match["label"].lower() != "password":
             return None
+        return _value_span(text, start)
     return (start, end) if _is_hidden(text[start:end]) else None
 
 

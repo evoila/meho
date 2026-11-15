@@ -179,7 +179,8 @@ PARAMETER_SCHEMA: Final[dict[str, Any]] = {
             "type": "boolean",
             "description": (
                 "true: every call of a matched operation waits for approval. false: back "
-                "to the operation's own value, never below it."
+                "to the operation's own value, never below it. false is refused when the "
+                "install's policy makes a matched operation always wait."
             ),
         },
     },

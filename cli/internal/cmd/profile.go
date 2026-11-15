@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -77,7 +78,12 @@ func nameLoginHints(r *doctorReport, name string) {
 // the output of a person who never uses profiles is exactly as before
 // (scripts read it).
 func printProfile(w io.Writer, cmd *cobra.Command) {
-	if name := auth.ProfileFrom(cmd.Context()); name != auth.DefaultProfile {
+	printProfileFor(cmd.Context(), w)
+}
+
+// printProfileFor is printProfile for the profile a context carries.
+func printProfileFor(ctx context.Context, w io.Writer) {
+	if name := auth.ProfileFrom(ctx); name != auth.DefaultProfile {
 		fmt.Fprintf(w, "Profile: %s\n", name)
 	}
 }

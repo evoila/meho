@@ -88,6 +88,7 @@ __all__ = [
     "result_connector_auth_failed",
     "result_connector_error",
     "result_connector_http_403",
+    "result_connector_http_410",
     "result_connector_http_422",
     "result_connector_not_found",
     "result_connector_package_not_installed",
@@ -2346,6 +2347,46 @@ def result_connector_http_422(
         "http_status": 422,
         "upstream_message": upstream_message,
         "validation_errors": validation_errors,
+    }
+    _add_upstream_fault(extras, response)
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras=extras,
+    )
+
+
+def result_connector_http_410(
+    op_id: str,
+    exc: httpx.HTTPStatusError,
+    duration_ms: float,
+) -> OperationResult:
+    """Connector got an upstream **410 Gone** on dispatch.
+
+    A product answers 410 when its version has removed the API the call
+    named. The cause is the same for every connector, so the ``error``
+    says it plainly and tails the product's own message when it sent one.
+    ``extras`` carries ``http_status`` (always ``410``) and
+    ``upstream_message``.
+    """
+    response = exc.response
+    upstream_message = _http_upstream_message(response)
+    summary = (
+        "connector_http_410: this product version no longer has this API "
+        "(HTTP 410 Gone). The product understood the call and says the API "
+        "was removed. Use a different operation for this product version, "
+        "or check the version catalog of the connector. See "
+        "docs/codebase/error-message-shape.md for the dispatch error "
+        "convention."
+    )
+    if upstream_message is not None:
+        summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
+    extras: dict[str, Any] = {
+        "error_code": "connector_http_410",
+        "http_status": 410,
+        "upstream_message": upstream_message,
     }
     _add_upstream_fault(extras, response)
     return OperationResult(

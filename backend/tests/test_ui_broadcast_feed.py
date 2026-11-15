@@ -9,7 +9,7 @@ The acceptance criteria on issue #867 are:
 * ``GET /ui/broadcast`` renders the feed for the logged-in operator's
   tenant (extends ``base.html``; sidebar active-state on Broadcast).
 * Live events render as server-side Jinja2 row fragments via the HTMX
-  ``sse`` extension; ``op_class`` colour-coding via DaisyUI badges.
+  ``sse`` extension; since #3762 only agent announcements are shown.
 * Reconnect after a forced drop replays missed events via
   ``Last-Event-Id`` (the SSE bridge reuses the feed cursor resolver).
 * In-DOM list capped at 1000 rows (Alpine trim); empty state renders
@@ -49,7 +49,6 @@ from fastapi.testclient import TestClient
 from meho_backplane.api.v1.feed import FeedStart
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.broadcast import (
-    OP_CLASS_ENUM,
     reset_broadcast_blocking_client_for_testing,
     reset_broadcast_client_for_testing,
 )
@@ -74,11 +73,7 @@ from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.routes.broadcast import stream as stream_module
-from meho_backplane.ui.routes.broadcast.feed import (
-    IN_DOM_ROW_CAP,
-    OP_CLASS_BADGE_CLASSES,
-    OP_CLASS_FILTER_OPTIONS,
-)
+from meho_backplane.ui.routes.broadcast.feed import IN_DOM_ROW_CAP
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
@@ -326,14 +321,14 @@ def test_feed_page_renders_empty_state() -> None:
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         response = client.get("/ui/broadcast")
-    assert "No activity matching your filters." in response.text
+    assert "No agent announcements match your filters yet." in response.text
 
 
-def test_feed_page_embeds_row_cap_and_badge_palette() -> None:
-    """The 1000-row cap + the op_class badge colour table reach the page.
+def test_feed_page_embeds_row_cap_and_no_operation_palette() -> None:
+    """The 1000-row cap reaches the page; no operation badge table does.
 
-    The cap drives the Alpine trim (work item #9); the badge JSON is the
-    server-authored colour policy the row builder reads (work item #2).
+    The cap drives the Alpine trim (work item #9). Broadcast shows no
+    operations since #3762, so the op class colour table is gone.
     """
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     with respx.mock(assert_all_called=False):
@@ -342,49 +337,27 @@ def test_feed_page_embeds_row_cap_and_badge_palette() -> None:
     body = response.text
     assert str(IN_DOM_ROW_CAP) in body
     assert IN_DOM_ROW_CAP == 1000
-    # The colour table is serialised into the page for the row builder.
-    for op_class, badge_class in OP_CLASS_BADGE_CLASSES.items():
-        assert op_class in body
-        assert badge_class in body
+    assert "badgeClasses" not in body
+    assert "credential_read" not in body
 
 
-def test_badge_and_filter_tables_cover_the_full_op_class_enum() -> None:
-    """Both UI lookup tables span exactly ``OP_CLASS_ENUM`` (#2731).
-
-    Before #2731 the two tables omitted ``approval`` /
-    ``credential_write`` / ``checks``: nothing broke — badges fell back
-    to ``badge-ghost`` and the classes stayed reachable by hand-typed
-    query param — but the filter dropdown could not name them. Set
-    equality (not superset) so a class removed from the enum cannot
-    linger as a dead dropdown option or badge entry either.
-    """
-    assert set(OP_CLASS_BADGE_CLASSES) == set(OP_CLASS_ENUM), (
-        f"OP_CLASS_BADGE_CLASSES drifted from OP_CLASS_ENUM: "
-        f"missing={sorted(set(OP_CLASS_ENUM) - set(OP_CLASS_BADGE_CLASSES))}, "
-        f"extra={sorted(set(OP_CLASS_BADGE_CLASSES) - set(OP_CLASS_ENUM))}"
-    )
-    assert set(OP_CLASS_FILTER_OPTIONS) == set(OP_CLASS_ENUM), (
-        f"OP_CLASS_FILTER_OPTIONS drifted from OP_CLASS_ENUM: "
-        f"missing={sorted(set(OP_CLASS_ENUM) - set(OP_CLASS_FILTER_OPTIONS))}, "
-        f"extra={sorted(set(OP_CLASS_FILTER_OPTIONS) - set(OP_CLASS_ENUM))}"
-    )
-
-
-def test_feed_page_carries_aggregate_only_placeholder_logic() -> None:
-    """The aggregate-only placeholder text is wired in the surface JS.
-
-    Credential reads + audit queries broadcast aggregate-only (decision
-    #3); the row builder renders ``(aggregate-only)`` when the redacted
-    payload carries no ``params`` key.
-    """
+def test_feed_js_renders_announcements_only() -> None:
+    """The surface JS shows announcements only and has no operation helpers (#3762)."""
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         client.get("/ui/broadcast")
         js = client.get("/ui/static/src/app/broadcast-feed.js")
     assert js.status_code == 200, js.text
-    assert "(aggregate-only)" in js.text
-    assert "payloadSummary" in js.text
+    assert "this.events.filter((ev) => this.isAnnouncement(ev))" in js.text
+    for gone in (
+        "payloadSummary",
+        "openDrawer",
+        "badgeClass(",
+        "opIdFilter",
+        "/ui/broadcast/event/",
+    ):
+        assert gone not in js.text
 
 
 def test_broadcast_stub_is_replaced_by_real_route() -> None:

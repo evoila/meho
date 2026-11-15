@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for the Broadcast history pane (#2549, #3758).
+"""Behavioural tests for the Broadcast history pane (#2549, #3758, #3762).
 
 Since #3758 the pane reads stored agent announcements from the archive
 (Broadcast carries agent announcements only):
@@ -9,7 +9,8 @@ Since #3758 the pane reads stored agent announcements from the archive
 * ``GET /ui/broadcast/history`` renders the session tenant's stored
   announcements of the retention window into the seed data island,
   newest first; another tenant's announcements never appear.
-* ``?kind=agent_announcement`` keeps them; ``?kind=operation`` is empty.
+* The pane has no kind or operation filter (#3762); an old ``?kind=``
+  link still renders the announcements.
 * Announcement free text is emitted through Jinja ``| tojson`` (which
   escapes ``<`` / ``>`` / ``&``) and bound via Alpine ``x-text``, so an
   ``activity`` carrying ``<script>`` never reaches the DOM as markup.
@@ -55,11 +56,6 @@ from meho_backplane.ui.csrf import CSRFMiddleware
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.routes.broadcast import history as history_module
-from meho_backplane.ui.routes.broadcast.history import (
-    _event_kind,
-    _matches_kind_filter,
-    _normalise_kind_filter,
-)
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests.broadcast_admission_helpers import seed_announcement
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
@@ -149,41 +145,6 @@ def _authenticated_client(session_id: uuid.UUID) -> TestClient:
 
 
 # ---------------------------------------------------------------------------
-# Pure helper unit tests
-# ---------------------------------------------------------------------------
-
-
-def test_event_kind_normalises_discriminator() -> None:
-    assert _event_kind({"kind": "agent_announcement"}) == "agent_announcement"
-    assert _event_kind({"event_kind": "agent_announcement"}) == "agent_announcement"
-    assert _event_kind({"kind": "operation"}) == "operation"
-    # Pre-migration entry with neither field → operation default.
-    assert _event_kind({"op_id": "x"}) == "operation"
-
-
-def test_normalise_kind_filter_clamps_unknown_to_none() -> None:
-    assert _normalise_kind_filter("operation") == "operation"
-    assert _normalise_kind_filter("agent_announcement") == "agent_announcement"
-    assert _normalise_kind_filter("") is None
-    assert _normalise_kind_filter(None) is None
-    assert _normalise_kind_filter("garbage") is None
-
-
-def test_matches_kind_filter_none_keeps_both() -> None:
-    assert _matches_kind_filter({"kind": "operation"}, None) is True
-    assert _matches_kind_filter({"kind": "agent_announcement"}, None) is True
-
-
-def test_matches_kind_filter_selects_single_kind() -> None:
-    op = {"kind": "operation"}
-    ann = {"kind": "agent_announcement"}
-    assert _matches_kind_filter(op, "operation") is True
-    assert _matches_kind_filter(ann, "operation") is False
-    assert _matches_kind_filter(ann, "agent_announcement") is True
-    assert _matches_kind_filter(op, "agent_announcement") is False
-
-
-# ---------------------------------------------------------------------------
 # Route tests
 # ---------------------------------------------------------------------------
 
@@ -214,15 +175,17 @@ def test_history_is_tenant_scoped() -> None:
 
 
 def test_history_announcement_row_markup_is_agent_authored() -> None:
-    """The row partial carries the announcement branch + escaped activity binding."""
+    """The row partial renders announcements only, with escaped activity binding."""
     session_id = _seed_session_sync()
     _seed()
     client = _authenticated_client(session_id)
     response = client.get("/ui/broadcast/history")
     assert response.status_code == 200
     body = response.text
-    assert "isAnnouncement(ev)" in body
     assert 'x-text="ev.activity"' in body
+    # No operation branch is left in the row (#3762).
+    for gone in ('x-text="ev.op_id"', "openDrawer", "badgeClass(", "isAggregateOnly"):
+        assert gone not in body
     assert "announcementTargets(ev)" in body
     assert "announcementMeta(ev)" in body
     assert "phaseBadgeClass(ev.phase)" in body
@@ -240,16 +203,16 @@ def test_history_activity_is_html_escaped_in_island() -> None:
     assert "\\u003cscript\\u003e" in body
 
 
-def test_history_kind_filter() -> None:
-    """``?kind=agent_announcement`` keeps announcements; ``?kind=operation`` is empty."""
+def test_history_has_no_kind_filter() -> None:
+    """No "All / Operations / Announcements" control; an old ``?kind=`` link is ignored."""
     session_id = _seed_session_sync()
     _seed(activity="rotating tokens on cluster X")
     client = _authenticated_client(session_id)
-    announcements = client.get("/ui/broadcast/history", params={"kind": "agent_announcement"})
-    operations = client.get("/ui/broadcast/history", params={"kind": "operation"})
-    assert "rotating tokens on cluster X" in announcements.text
-    assert operations.status_code == 200
-    assert "rotating tokens on cluster X" not in operations.text
+    response = client.get("/ui/broadcast/history", params={"kind": "operation"})
+    assert response.status_code == 200
+    assert "rotating tokens on cluster X" in response.text
+    assert "kind=" not in response.text
+    assert 'aria-label="Filter by event kind"' not in response.text
 
 
 def test_history_database_error_renders_empty_pane() -> None:

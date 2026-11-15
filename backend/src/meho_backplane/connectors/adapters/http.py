@@ -53,7 +53,7 @@ natively. The per-target TLS trust has three states, in precedence order:
    as an unconfigured client would).
 
 Each resolved TLS context is carried by the per-target pinning
-**transport** (:func:`build_pinned_async_transport`), not passed as a
+**transport** (:func:`build_port_pinned_async_transport`), not passed as a
 client ``verify=`` argument, because the client is handed an explicit
 ``transport=`` that enforces destination pinning at the socket: ``connect_tcp`` re-screens the host
 and dials only a guard-validated address from that same resolution, so a
@@ -99,7 +99,7 @@ from meho_backplane.connectors._shared.cache_key import (
     target_cache_key,
 )
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
-from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
+from meho_backplane.connectors._shared.pinned_transport import build_port_pinned_async_transport
 from meho_backplane.connectors.base import Connector
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.targets.ssrf_guard import (
@@ -258,7 +258,7 @@ def _ca_pin_digest(ca_pem: str | None) -> str:
     return hashlib.sha256(ca_pem.encode("utf-8")).hexdigest()[:16]
 
 
-def _pin_target_addresses(host: str) -> list[str] | None:
+def _pin_target_addresses(host: str, port: int | None = None) -> list[str] | None:
     """Connect-time screen for the pinned transport, in ``SsrfBlockedError`` terms.
 
     Wraps :func:`~meho_backplane.connectors._shared.dial_guard.screen_dial_addresses`
@@ -275,7 +275,7 @@ def _pin_target_addresses(host: str) -> list[str] | None:
     the pre-check's rejection is: the verdict is deterministic policy.
     """
     try:
-        return screen_dial_addresses(host)
+        return screen_dial_addresses(host, port)
     except TargetDestinationBlockedError as exc:
         raise SsrfBlockedError(str(exc)) from exc
 
@@ -826,7 +826,7 @@ class HttpConnector(Connector):
         # lookup so a previously-pooled client for a now-rebinding
         # hostname is refused too.
         try:
-            await assert_public_destination_async(str(target.host))
+            await assert_public_destination_async(str(target.host), self._dial_port(target))
         except TargetDestinationBlockedError as exc:
             raise SsrfBlockedError(str(exc)) from exc
         cache_key = self._client_cache_key(target)
@@ -898,7 +898,8 @@ class HttpConnector(Connector):
         # blocked answer surfaces as ``SsrfBlockedError`` via
         # ``_pin_target_addresses``, reaching the dispatcher's
         # ``ConnectError`` arm and staying out of the retry policy.
-        transport = build_pinned_async_transport(_pin_target_addresses, verify=verify_arg)
+        # The screen gets the port the socket dials.
+        transport = build_port_pinned_async_transport(_pin_target_addresses, verify=verify_arg)
         client_class = self._client_class or _SameOriginRedirectClient
         return client_class(
             base_url=self._base_url(target),
@@ -925,7 +926,7 @@ class HttpConnector(Connector):
         must not share the pooled client's cookie jar (evoila/meho#3890).
         """
         try:
-            await assert_public_destination_async(str(target.host))
+            await assert_public_destination_async(str(target.host), self._dial_port(target))
         except TargetDestinationBlockedError as exc:
             raise SsrfBlockedError(str(exc)) from exc
         return self._build_http_client(target)
@@ -950,6 +951,19 @@ class HttpConnector(Connector):
         """
         del target, operator
         return path
+
+    def _dial_port(self, target: Target) -> int | None:
+        """The port the client dials for *target*, or ``None`` when it cannot tell.
+
+        Read from the connector's own :meth:`_base_url`, so a connector with
+        another default scheme (or port) is checked on the port it dials.
+        A base URL that cannot be built gives ``None``; the guard then
+        screens the host as before and the usual error comes later.
+        """
+        try:
+            return _effective_port(httpx.URL(self._base_url(target)))
+        except (KeyError, ValueError, httpx.InvalidURL):
+            return None
 
     def _base_url(self, target: Target) -> str:
         scheme = _effective_scheme(target)

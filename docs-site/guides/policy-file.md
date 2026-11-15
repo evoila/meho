@@ -160,10 +160,28 @@ refused, and the message names the entry and the operation.
   `caution` and always waits.
 - A file can raise a risk level, but never lower it below the level in
   MEHO's code.
-- When the install's policy makes an operation always wait, it waits in
-  every tenant. A tenant's file can make more operations wait. An entry
-  with `always_wait: false` that would end an install-wide wait is
-  refused, and the message names the install entry.
+- **The stricter of install and tenant counts.** What the install's file
+  sets is a floor for every tenant. A tenant's file can raise a risk level
+  and make more operations wait. It cannot set a lower risk level than
+  the install, and cannot end an install-wide wait: such an entry is
+  refused. The message names the install entry and the operation. The
+  install cannot end a wait that a tenant's own entry adds either.
+- A wide tenant entry, for example `{match: {connector: X}, risk: caution}`,
+  is refused when the install sets one operation of `X` higher. The level
+  does not count for that operation, but it still counts for the other
+  operations of `X`. So do not remove the level. Add a more specific
+  tenant entry for that operation with the install's level or higher, or
+  leave the operation out of the match. With such an entry, the file is
+  accepted.
+- Which install values make **every** call wait: `always_wait: true` and
+  `risk: destructive`. With `risk: dangerous`, a call waits too, but a
+  standing grant or a run approval of a service account can still let it
+  run without a new approval.
+- An install entry matches connectors by their id, not by product. A
+  connector that a tenant registers itself, under its own id, is matched
+  only by an install entry with a wildcard connector, for example
+  `{connector: "*"}` for every operation of every connector, or
+  `{connector: "*", op: "<op-id-pattern>"}` for some operations.
 
 ## Commands
 
@@ -192,13 +210,15 @@ platform admin may do that.
 5. The import **replaces the whole policy**. An entry that is not in the
    file is removed.
 
-!!! note "Install-wide always wait"
+!!! note "Install-wide always wait and risk level"
 
-    An install file can make operations always wait. This holds for every
-    tenant: a tenant cannot set it back. A tenant entry stored before this
-    rule that sets it back has no effect on the wait. `meho policy export`
-    writes a `# Has no effect:` comment above such an entry. Remove it
-    before you import the file again.
+    An install file can make operations always wait and raise their risk
+    level. This holds for every tenant: a tenant cannot set it back. A
+    stored tenant entry that sets it back has no effect for that part.
+    `meho policy export` writes a `# Has no effect:` comment above such an
+    entry, one for each part. The comment names the operation where the
+    part does not count, and says how to fix the entry. Fix it before you
+    import the file again.
 
 ## REST
 

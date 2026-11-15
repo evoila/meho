@@ -1196,7 +1196,10 @@ decides: not the requester, a person in a chosen tenant, and an admin
 - An operation registered with `register_rights_change_op` is a rights
   change on every request. `policy.classify` (a change of a category,
   labels or the "always wait" mark, see
-  [policy-classification.md](policy-classification.md)) is one.
+  [policy-classification.md](policy-classification.md)) is one. The
+  Keycloak connector registers every write that is a change of rights this
+  way, also the three group and role writes above, so they carry the mark
+  in every realm. The login-realm checks above come on top.
 - Any other caller passes `rights_change=True` to `create_pending_request`.
 
 **No grant and no run approval covers a registered change of rights.**

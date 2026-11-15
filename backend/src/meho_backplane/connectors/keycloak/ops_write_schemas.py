@@ -34,10 +34,9 @@ another person's request, and the single-operator self-approval switch
 (``APPROVAL_ALLOW_SELF_APPROVAL``) does not cover them
 (``operations/approval_queue.py``).
 
-All of them except the password reset are also changes of rights
-(:mod:`.rights_changes`): another admin must approve, the requester never
-approves their own request, and no standing grant or run approval covers
-a call.
+All of them are also changes of rights (:mod:`.rights_changes`): another
+admin must approve, the requester never approves their own request, and no
+standing grant or run approval covers a call.
 """
 
 from __future__ import annotations
@@ -111,10 +110,9 @@ _WHEN_TO_USE_PROTOCOL_MAPPER_WRITE = (
 
 _WHEN_TO_USE_USER_WRITE = (
     "Use to create a user (``keycloak.user.create``) or reset a user's "
-    "password (``keycloak.user.reset_password``). Both are dangerous. User "
-    "create is a change of rights: another admin must approve each call, "
-    "never the requester. For a password reset, a MEHO-SA-Operator or a "
-    "tenant admin must approve. "
+    "password (``keycloak.user.reset_password``). Both are dangerous and "
+    "both are changes of rights: another admin must approve each call, "
+    "never the requester. "
     "The password is NEVER passed inline — supply ``password_secret_ref`` "
     "(a Vault KV-v2 path; optional ``password_secret_mount`` / "
     "``password_secret_key``) and the connector reads it from Vault under "

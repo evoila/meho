@@ -16,21 +16,21 @@ Every Keycloak write is on exactly one of the two tables below, with the
 reason. ``tests/test_keycloak_rights_change_writes.py`` fails when a new
 Keycloak write is on neither table, so each new write gets this decision.
 
-The three writes of one login or one group (``keycloak.group.member.add``,
-``keycloak.role_mapping.assign`` and ``keycloak.group.update_attributes``)
-are registered by :mod:`.ops_write_grant` with
+:func:`register_rights_change_ops` registers every write of
+:data:`RIGHTS_CHANGE_OPS` with
+:func:`~meho_backplane.operations.grant_approval.register_rights_change_op`,
+in every realm. That adds the per-call mark. The three writes of one login
+or one group (``keycloak.group.member.add``, ``keycloak.role_mapping.assign``
+and ``keycloak.group.update_attributes``) are also registered by
+:mod:`.ops_write_grant` with
 :func:`~meho_backplane.operations.grant_approval.register_grant_op`, which
-also checks who the change is for. :func:`register_rights_change_ops`
-registers the others with
-:func:`~meho_backplane.operations.grant_approval.register_rights_change_op`.
-Both register functions add the per-call mark.
+also checks who the change is for.
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-from meho_backplane.connectors.keycloak.ops_write_grant import GRANT_OPS
 from meho_backplane.operations.grant_approval import register_rights_change_op
 
 __all__ = ["NOT_RIGHTS_CHANGE_OPS", "RIGHTS_CHANGE_OPS", "register_rights_change_ops"]
@@ -56,6 +56,10 @@ RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
         "a client scope carries protocol mappers and role scope mappings for tokens"
     ),
     "keycloak.protocol_mapper.create": "a protocol mapper decides which claims a token holds",
+    "keycloak.user.reset_password": (
+        "sets the password of any login, also of an admin, from a Vault path the "
+        "requester names; whoever reads that path can sign in as that login"
+    ),
     "keycloak.user.create": (
         "the new user can carry groups, roles and attributes that mappers put into tokens"
     ),
@@ -66,10 +70,6 @@ RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
 
 #: op_id -> why the write cannot change what a token says or who has a role.
 NOT_RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
-    "keycloak.user.reset_password": (
-        "sets a password; it changes no role and no claim. It is dangerous: only "
-        "a MEHO-SA-Operator or a tenant admin approves another person's request"
-    ),
     "keycloak.user.required_actions.update": (
         "changes the steps a user must do at the next sign-in, not roles or claims"
     ),
@@ -103,14 +103,9 @@ NOT_RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
 
 
 def register_rights_change_ops() -> None:
-    """Register every write of :data:`RIGHTS_CHANGE_OPS` as a change of rights.
-
-    The writes of :data:`~.ops_write_grant.GRANT_OPS` are registered there,
-    with the facts of the login and the group they are for.
-    """
+    """Register every write of :data:`RIGHTS_CHANGE_OPS` as a change of rights."""
     for op_id in RIGHTS_CHANGE_OPS:
-        if op_id not in GRANT_OPS:
-            register_rights_change_op(op_id)
+        register_rights_change_op(op_id)
 
 
 register_rights_change_ops()

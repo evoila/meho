@@ -342,17 +342,60 @@ async def test_a_request_without_facts_gets_the_strict_rule() -> None:
         await _approve(request_id, _person("person-admin"), params)
 
 
-@pytest.mark.asyncio
-async def test_a_change_for_another_login_outside_the_login_realm_keeps_the_usual_rules() -> None:
-    params = {"group_id": _GROUP, "user_id": _OTHER_USER}
-    request_id = await _park(params, _grant(login_realm=False), requester_sa=True)
+_OUTSIDE_CASES = [
+    (_ADD, {"group_id": _GROUP, "user_id": _OTHER_USER}, {"user_id": _OTHER_USER}),
+    (_ROLES, {"id": _OTHER_USER, "roles": ["example-role"]}, {"user_id": _OTHER_USER}),
+    (_ATTRS, {"id": _GROUP, "attributes": {"tenant_role": ["admin"]}}, {"members": None}),
+]
 
-    await _approve(
-        request_id, _person(_REQUESTER, role=TenantRole.OPERATOR, sa_operator=True), params
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("op_id", "params", "facts"), _OUTSIDE_CASES)
+async def test_an_sa_operator_cannot_approve_their_own_change_outside_the_login_realm(
+    op_id: str, params: dict[str, Any], facts: dict[str, Any]
+) -> None:
+    request_id = await _park(
+        params, _grant(login_realm=False, **facts), op_id=op_id, requester_sa=True
     )
 
+    with pytest.raises(ApprovalRoleFloorError) as exc:
+        await _approve(
+            request_id, _person(_REQUESTER, role=TenantRole.OPERATOR, sa_operator=True), params
+        )
+
+    assert exc.value.reason_text == RIGHTS_CHANGE_REFUSAL
+    assert (await _row(request_id)).rights_change is True
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("op_id", "params", "facts"), _OUTSIDE_CASES)
+async def test_an_sa_operator_who_is_not_an_admin_cannot_approve_outside_the_login_realm(
+    op_id: str, params: dict[str, Any], facts: dict[str, Any]
+) -> None:
+    request_id = await _park(params, _grant(login_realm=False, **facts), op_id=op_id)
+
+    with pytest.raises(ApprovalRoleFloorError) as exc:
+        await _approve(
+            request_id, _person("person-sa", role=TenantRole.OPERATOR, sa_operator=True), params
+        )
+
+    assert exc.value.reason_text == RIGHTS_CHANGE_REFUSAL
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("op_id", "params", "facts"), _OUTSIDE_CASES)
+async def test_another_admin_approves_a_change_outside_the_login_realm(
+    op_id: str, params: dict[str, Any], facts: dict[str, Any]
+) -> None:
+    request_id = await _park(params, _grant(login_realm=False, **facts), op_id=op_id)
+
+    await _approve(request_id, _person("person-admin"), params)
+
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
     payload = await _decision_payload(request_id)
-    assert payload["approval_rule"] == ApprovalRule.SA_OPERATOR_SELF_APPROVAL.value
+    assert payload["grant_in_login_realm"] is False
     assert payload["grant_for_approver"] is False
 
 

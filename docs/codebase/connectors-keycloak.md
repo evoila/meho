@@ -480,10 +480,10 @@ Keycloak write, with the reason:
 | `client_scope.create` | yes | a client scope carries protocol mappers and role scope mappings |
 | `protocol_mapper.create` | yes | a mapper decides which claims a token holds |
 | `user.create` | yes | the new user can carry groups, roles and attributes that mappers read |
+| `user.reset_password` | yes | sets the password of any login, also of an admin, from a Vault path the requester names; whoever reads that path can sign in as that login |
 | `role_mapping.assign` | yes | gives a user realm roles |
 | `group.member.add` | yes | puts a user into a group and gives them its roles |
 | `group.update_attributes` | yes | group attributes fill the tenant claims of every member |
-| `user.reset_password` | no | sets a password; no role or claim changes (it stays `dangerous`) |
 | `user.required_actions.update` | no | changes the next sign-in steps, not roles or claims |
 | `user.check_login` | no | tests one sign-in and changes nothing |
 | `user.logout`, `user.disable`, `user.delete` | no | they only take away |
@@ -500,18 +500,22 @@ for each change of rights, that the requester cannot approve it, that a
 standing grant and a run approval do not clear the wait, and that an
 agent's call waits.
 
-The three writes of one login or group (`group.member.add`,
-`role_mapping.assign`, `group.update_attributes`) are registered with
-`register_grant_op` (see "Changes of rights: the login is never its own
-approver" in [approvals.md](approvals.md)); the others with
-`register_rights_change_op`. Both functions add the per-call mark, so no
-connector has to set it a second time.
+Every "yes" write is registered with `register_rights_change_op`, so the
+rule holds in every realm, not only in MEHO's own login realm. The three
+writes of one login or group (`group.member.add`, `role_mapping.assign`,
+`group.update_attributes`) are also registered with `register_grant_op`,
+which adds the checks of who the change is for (see "Changes of rights:
+the login is never its own approver" in [approvals.md](approvals.md)).
+Both functions add the per-call mark, so no connector has to set it a
+second time.
 
 **The approval card.** `connectors/keycloak/ops_write_rights_card.py`
 shows the object as it is now next to the new values:
 
 - `client.update` and `realm.update`: `current_values` (the value now of
-  each field the request sends) and the new values;
+  each field the request sends) and the new values. For a map field such
+  as `attributes` or `smtpServer`, the write changes only the keys it
+  sends, so `current_values` shows only those keys;
 - `protocol_mapper.create`: `current_mappers` (the client's mappers now)
   and `new_mapper`.
 

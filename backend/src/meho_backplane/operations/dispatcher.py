@@ -29,6 +29,11 @@ phases the parent Initiative names:
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
    Invalid -> structured ``invalid_params`` error. So for a guarded op a
    target the catalogs cannot serve is reported before bad params.
+   Then check that the audit row of the call can be stored
+   (:func:`~meho_backplane.operations.audit_row_precheck.audit_row_problem`,
+   values only, no database statement). A row that can never be stored ->
+   structured ``audit_row_invalid`` error naming the field; nothing is sent
+   to the target and no approval request is made.
 4. Policy gate (G11.2-T3 + T4;
    :func:`~meho_backplane.operations._validate.policy_gate`). **Agent**
    principals resolve a three-state
@@ -88,6 +93,9 @@ Detail payloads land in ``extras``. Codes:
 * ``unknown_connector`` -- the ``connector_id`` matches no connector the
   caller can see (#4031), the same test the discovery meta-tools use.
 * ``invalid_params`` -- params failed JSON Schema validation.
+* ``audit_row_invalid`` -- the audit row of the call can never be stored
+  (for example a NUL character in the ticket id). Refused before the call;
+  ``extras["field"]`` names the value, never its content.
 * ``invalid_op_schema`` -- the **stored** ``parameter_schema`` itself is
   broken: it carries a ``$ref`` the validator cannot resolve within the
   stored schema document (a descriptor ingested before #3095's
@@ -326,12 +334,14 @@ from meho_backplane.operations._branches import (
 )
 from meho_backplane.operations._catalog_guard import select_catalog_for_target
 from meho_backplane.operations._errors import (
+    MESSAGE_SOURCE_KEY,
     is_auth_failed_status,
     is_probe_pool_busy,
     is_probe_refused,
     result_ambiguous_connector,
     result_announce_required,
     result_audit_commit_failed,
+    result_audit_row_invalid,
     result_awaiting_approval,
     result_blast_radius_required,
     result_composite_terminal_error,
@@ -411,6 +421,7 @@ from meho_backplane.operations._secret_values import (
     split_reveal_secret,
 )
 from meho_backplane.operations._target_connector_match import refuse_target_connector_mismatch
+from meho_backplane.operations._target_version_range import refuse_version_outside_range
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
     InvalidOpSchemaError,
@@ -428,6 +439,7 @@ from meho_backplane.operations._vendor_text import (
     withhold_vendor_text,
 )
 from meho_backplane.operations.approved_step_check import approved_step_refusal
+from meho_backplane.operations.audit_row_precheck import audit_row_problem
 from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
@@ -450,6 +462,7 @@ from meho_backplane.operations.dispatch_limits import (
     resolve_dispatch_rate_limit,
 )
 from meho_backplane.operations.license_reads import is_license_read
+from meho_backplane.operations.op_policy import approval_classification
 from meho_backplane.operations.reducer import (
     SECRET_REVEAL_CONTEXT_KEY,
     PassThroughReducer,
@@ -682,7 +695,7 @@ async def _resolve_connector_instance(
     :func:`~meho_backplane.connectors.resolve_connector_or_label`
     helper so the dispatcher and the ``/api/v1/targets/{name}/probe``
     route reach the same yes/no/ambiguous answer for the same target
-    (consumer feedback signal 19, ``claude-rdc-hetzner-dc#697``).
+    (consumer feedback signal 19).
     """
     if descriptor.source_kind == "ingested":
         await _restore_saved_ingest_profiles(target)
@@ -2079,6 +2092,20 @@ def _error_extras_for_audit(result: OperationResult) -> dict[str, Any] | None:
     return dict(extras) if extras else None
 
 
+def _without_message_source(result: OperationResult) -> OperationResult:
+    """Drop the own-message mark from an error result a handler returned.
+
+    Only :func:`~meho_backplane.operations._errors.result_connector_error`
+    sets the mark, from the type of the raised error. A handler that returns
+    its own result cannot set it, so the vendor text of an operation that
+    sends a secret stays hidden.
+    """
+    if MESSAGE_SOURCE_KEY not in result.extras:
+        return result
+    extras = {key: value for key, value in result.extras.items() if key != MESSAGE_SOURCE_KEY}
+    return result.model_copy(update={"extras": extras})
+
+
 async def _audit_returned_result(
     raw: Any,
     *,
@@ -2128,7 +2155,7 @@ async def _audit_returned_result(
     duration_ms = _elapsed_ms(started)
     if raw.status == "error":
         return await _audit_error_and_return(
-            raw,
+            _without_message_source(raw),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
@@ -2325,7 +2352,7 @@ async def _handle_http_status_error(
 
     G0.24-T4 (#1649): an upstream 403 or 422 carries actionable detail the
     generic ``connector_error`` arm would bury in ``extras.exception_message``
-    (consumer ``claude-rdc-hetzner-dc#1138``), because the shared
+    (consumer feedback), because the shared
     ``HttpConnector`` adapter does no error mapping. 403 -> insufficient
     permission (authenticated but lacking the op's scope); 422 -> invalid
     payload (the upstream parsed the request and rejected its content).
@@ -3149,6 +3176,10 @@ async def _build_proposed_effect(
         # ``op_class`` / ``preview`` / fail-soft-marker envelope built by
         # :func:`build_proposed_effect` itself unchanged.
         base["safety_level"] = descriptor.safety_level
+        # #6041: the category, labels and classification rule, so an
+        # approver sees at once what kind of change waits. Nothing while
+        # the POLICY_CLASSIFICATION switch is off.
+        base.update(approval_classification(descriptor))
         # #3980: a person's ``caution`` call that waits only because it came
         # with a token says so on the request. The same person may then
         # approve it with a click in the web interface.
@@ -3551,10 +3582,17 @@ async def _handle_needs_approval(
                 preview_hash=preview_hash,
                 idempotency_key=idempotency_key,
                 reveal_secret=reveal_secret,
+                category=descriptor.policy_category,
             )
             await session.commit()
         if getattr(request, "_reused", False):
-            return result_awaiting_approval(op_id, request.id, duration_ms, reused=True)
+            return result_awaiting_approval(
+                op_id,
+                request.id,
+                duration_ms,
+                reused=True,
+                audit_id=request.request_audit_id,
+            )
         # Record the add-on step events AFTER commit so a phantom event
         # cannot outlive a failed transaction (the helper is fail-open).
         expired_request = getattr(request, "_expired_request", None)
@@ -3571,7 +3609,9 @@ async def _handle_needs_approval(
             decision="pending",
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
-        return result_awaiting_approval(op_id, request.id, duration_ms)
+        return result_awaiting_approval(
+            op_id, request.id, duration_ms, audit_id=request.request_audit_id
+        )
     except IdempotencyKeyConflictError as exc:
         return await _audit_denied_and_return(
             result_idempotency_key_conflict(op_id, exc.request_id, duration_ms),
@@ -3827,6 +3867,17 @@ async def _dispatch_now(
     )
     if mismatch is not None:
         return mismatch
+    # A target whose known version is outside the range of the connector
+    # picked for it (through the fallback entry) is refused the same way.
+    outside = await refuse_version_outside_range(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+    )
+    if outside is not None:
+        return outside
 
     # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility
@@ -3863,6 +3914,24 @@ async def _dispatch_now(
     params_error = _params_error(descriptor, op_id, params, started)
     if params_error is not None:
         return params_error
+
+    # --- Step 3.4: the audit row must be storable ---------------------------
+    # Refuse a call whose audit row can never be stored, before anything is
+    # sent to the target and before an approval request is made. Every path
+    # (direct, a step of a multi-step operation, a call resumed after
+    # approval, runbook, scheduler, agent) comes through here.
+    audit_problem = audit_row_problem(
+        operator=operator, descriptor=descriptor, params_hash=params_hash
+    )
+    if audit_problem is not None:
+        _log.warning(
+            "dispatch_refused_audit_row_invalid",
+            op_id=op_id,
+            field=audit_problem.field,
+        )
+        return result_audit_row_invalid(
+            op_id, audit_problem.field, audit_problem.reason, _elapsed_ms(started)
+        )
 
     # --- Step 3.5: dispatch limits (#3500) --------------------------------
     # Per-principal rate limit + per-principal concurrent-op cap, enforced

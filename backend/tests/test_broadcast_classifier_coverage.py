@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Classifier-coverage sweep over the registered typed-op set (meho-internal #151).
+"""Classifier-coverage sweep over the registered typed-op set.
 
 Whether a secret-bearing write op collapses to aggregate-only on the
 broadcast feed depends on a human having declared it ``credential_write``

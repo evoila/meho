@@ -3,7 +3,7 @@
 
 """Tenant chip + cascade tests for G0.15-T9 (#1217).
 
-The v0.7.0 closed-loop dogfood (rdc-hetzner-dc#753) flagged three
+The v0.7.0 closed-loop dogfood flagged three
 correlated symptoms on the operator UI:
 
 1. The page-header tenant chip rendered the stub literal
@@ -88,8 +88,8 @@ def _ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
 _BACKPLANE_URL = "https://meho.test"
 
 _TENANT_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
-#: Distinct from the chassis-migration seeded ``default`` / ``rdc-internal``
-#: slugs (see migrations ``0018`` / ``0028``) so the per-test insert
+#: Distinct from the chassis-migration seeded ``default`` slug and the older seed
+#: slug (see migrations ``0018`` / ``0028``) so the per-test insert
 #: cannot collide on the ``tenant_slug_idx`` unique constraint.
 _TENANT_SLUG = "tenant-chip-fixture"
 _TENANT_NAME = "Tenant Chip Fixture"

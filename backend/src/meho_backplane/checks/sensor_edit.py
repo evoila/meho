@@ -21,7 +21,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy import select
@@ -40,6 +40,7 @@ from meho_backplane.checks.schemas import (
     SensorParams,
     SensorRead,
 )
+from meho_backplane.checks.sensor_pause import set_sensor_status
 from meho_backplane.checks.service import (
     SensorNameConflictError,
     SensorOperationNotFoundError,
@@ -79,6 +80,9 @@ class SensorUpdate(BaseModel):
     field: ``interval_seconds`` for ``interval``, ``cron_expr`` (and
     optionally ``timezone``) for ``cron``. The field of the old kind is
     cleared.
+
+    ``status`` (``paused`` or ``active``) pauses or resumes the Sensor. It is
+    sent alone, without other fields.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -97,11 +101,15 @@ class SensorUpdate(BaseModel):
     cron_expr: Annotated[str, Field(min_length=1, max_length=_CRON_EXPR_MAX_LENGTH)] | None = None
     timezone: Annotated[str, Field(min_length=1, max_length=_TIMEZONE_MAX_LENGTH)] | None = None
     severity: SensorSeverity | None = None
+    status: Literal["active", "paused"] | None = None
 
     @model_validator(mode="after")
     def _require_a_change(self) -> SensorUpdate:
-        if not self.model_dump(exclude_none=True):
+        changes = self.model_dump(exclude_none=True)
+        if not changes:
             raise ValueError("set at least one field to change")
+        if "status" in changes and len(changes) > 1:
+            raise ValueError("status cannot be changed together with other fields")
         return self
 
 
@@ -213,7 +221,8 @@ def _apply(row: Sensor, merged: SensorCreate, now: datetime) -> None:
     The waiting state change of the old check (``pending_state``) is
     dropped, because it was measured with the old settings. A Sensor the
     runner paused for a broken cadence is active again: the new cadence
-    passed the same check as a create.
+    passed the same check as a create. A Sensor an operator paused, or the
+    runner paused after refused logins, stays paused until it is resumed.
     """
     row.name = merged.name
     row.connector_id = merged.connector_id
@@ -227,8 +236,9 @@ def _apply(row: Sensor, merged: SensorCreate, now: datetime) -> None:
     row.severity = merged.severity.value
     row.pending_state = None
     row.pending_count = 0
-    row.status = SensorStatus.ACTIVE.value
-    row.status_reason = None
+    if (row.status_reason or "").startswith("invalid_cadence"):
+        row.status = SensorStatus.ACTIVE.value
+        row.status_reason = None
     row.next_fire_at = now
 
 
@@ -252,6 +262,11 @@ async def edit_sensor(
         SensorNameConflictError: the new name is taken in the tenant.
     """
     now = now or datetime.now(UTC)
+    if patch.status is not None:
+        changed = await set_sensor_status(tenant_id, sensor_id, SensorStatus(patch.status), now=now)
+        if changed is None:
+            return None
+        return SensorEditResult(changed.sensor, changed.before, changed.after)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await lock_connector_usage_shared(session)

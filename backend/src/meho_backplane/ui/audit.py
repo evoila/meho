@@ -5,7 +5,7 @@
 
 Initiative #1209 (G0.15 v0.7.0 closed-loop dogfood hardening), Task
 #1216 (T7). The consumer's v0.7.0 closed-loop dogfood
-(``claude-rdc-hetzner-dc#753``) flagged the governance product
+ flagged the governance product
 completeness gap: an operator browsing 5 ``/ui/*`` surfaces generated
 **zero** ``audit_log`` rows under their ``principal_sub``. The agent
 path (``/mcp`` + ``/api/v1/*``) is audited correctly per-request;
@@ -107,7 +107,7 @@ __all__ = [
 #: so operators can filter them in/out independently --
 #: ``meho audit query op_class=ui_view`` returns only UI page views, the
 #: complement returns the agent + REST traffic. The consumer's v0.7.0
-#: closed-loop feedback (``claude-rdc-hetzner-dc#753``) proposed Option B
+#: closed-loop feedback proposed Option B
 #: (new class) over Option A (reuse ``read``) so retention policies can
 #: prune the high-cardinality UI view trail independently of the
 #: governance-load-bearing agent dispatch trail.

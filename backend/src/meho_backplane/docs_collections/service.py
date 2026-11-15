@@ -158,8 +158,7 @@ class DocCollectionEndpointError(Exception):
     ``url``) is the URL the federation transport later dials with a
     credential attached. Left unscreened, a ``tenant_admin`` could point it
     at ``http://``, loopback, RFC 1918 space, or ``169.254.169.254`` (cloud
-    metadata) — a credential-capture + SSRF path
-    (evoila-bosnia/meho-internal#290). The create rejects a non-``https`` or
+    metadata) — a credential-capture + SSRF path. The create rejects a non-``https`` or
     non-public endpoint here so it never persists, mirroring the
     ``create_target`` SSRF screen. Carries a structured 422 ``detail`` (a
     stable ``kind`` + a human ``message``); it never echoes any resolved

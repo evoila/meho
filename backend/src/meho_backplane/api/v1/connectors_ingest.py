@@ -732,7 +732,7 @@ async def _ingest_result_dispatchable(
     *,
     tenant_id: UUID,
 ) -> bool:
-    """Post-run honesty gate for the async ingest job (claude-rdc-hetzner-dc#1136).
+    """Post-run honesty gate for the async ingest job.
 
     Resolve the connector exactly the way the dispatch/query
     meta-tools do — parse the ``connector_id`` into its natural-key

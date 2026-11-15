@@ -275,7 +275,7 @@ IDENTITY_PROVIDER_OPS: tuple[KeycloakOp, ...] = (
             "next_step": (
                 "A provider with redirect_flows sends people there without the "
                 "login form. The approval sign-in flow must not redirect: check "
-                "that 'meho approval sign-in' is not in any redirect_flows."
+                "that 'meho approval sign-in level' is not in any redirect_flows."
             ),
         },
     ),

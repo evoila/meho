@@ -199,6 +199,41 @@ async def test_a_probe_that_finds_a_new_version_on_the_same_connector_drops_noth
     assert recorder.calls == []
 
 
+def _connector_named_impl(module: str, version: str, version_range: str) -> type[Connector]:
+    cls = type(
+        "Impl",
+        (_OldConnector,),
+        {
+            "__module__": module,
+            "product": "same-name",
+            "version": version,
+            "impl_id": f"same-name-{version}",
+            "supported_version_range": version_range,
+        },
+    )
+    cls.__qualname__ = "Impl"
+    return cls
+
+
+@pytest.mark.asyncio
+async def test_a_probe_that_moves_the_target_to_a_connector_with_the_same_class_name_drops() -> (
+    None
+):
+    old = _connector_named_impl("connectors_a.impl", "1.x", ">=1.0,<2.0")
+    new = _connector_named_impl("connectors_b.impl", "2.x", ">=2.0,<3.0")
+    assert old.__qualname__ == new.__qualname__
+    register_connector_v2(product="same-name", version="1.x", impl_id="", cls=old)
+    register_connector_v2(product="same-name", version="2.x", impl_id="", cls=new)
+    recorder = _Recorder()
+    _CONNECTOR_INSTANCE_CACHE[type("A", (), {})] = recorder  # type: ignore[index]
+
+    before = _Target(product="same-name")
+    await forget_target_if_changed(before)
+    after = replace(before, updated_at=_PROBE_TIME, version="2.0")
+    assert await forget_target_if_changed(after) is True
+    assert recorder.calls == ["invalidate_session", "invalidate_credentials"]
+
+
 @pytest.mark.asyncio
 async def test_a_target_without_any_change_time_is_never_treated_as_changed() -> None:
     recorder = _recorder()

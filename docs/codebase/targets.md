@@ -125,7 +125,7 @@ fields. Connectors keep logins and credentials per target, keyed on
 `(tenant_id, id)`, and a change does not alter that key. So when the
 PATCH sends a field that changes how MEHO reaches or logs in to the
 target (`_CONNECTION_FIELDS`: `product`, `version`, `preferred_impl_id`, `host`,
-`port`, `fqdn`, `secret_ref`, `auth_model`, `verify_tls`, `tls_ca_pin`,
+`port`, `fqdn`, `secret_ref`, `secret_field_map`, `auth_model`, `verify_tls`, `tls_ca_pin`,
 `tls_server_name`, `extras`), the route calls `forget_target_in_connectors(target)`
 (`operations/_handler_resolve.py`, through
 `_drop_kept_logins_on_connection_change`).
@@ -148,8 +148,8 @@ Limits:
   its next call: the dispatcher and the runner executor call
   `forget_target_if_changed` with the target they just read. It keeps,
   per process, a change version for each target: the time a person last
-  changed it (`connection_changed_at`) and the connector that serves it
-  now. The update route sets `connection_changed_at` whenever it gets a
+  changed it (`connection_changed_at`) and the connector class that
+  serves it now (the class itself, not its name). The update route sets `connection_changed_at` whenever it gets a
   connection field (the same fields as above), also when the same
   `secret_ref` is sent again. A probe does not move it: a probe moves
   `updated_at` and stores the detected product and version, but MEHO does

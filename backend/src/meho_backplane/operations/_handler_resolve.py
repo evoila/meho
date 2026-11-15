@@ -227,7 +227,7 @@ async def _run_forget_hooks(target: Any) -> None:
                 )
 
 
-def _target_version(target: Any) -> tuple[Any, str | None] | None:
+def _target_version(target: Any) -> tuple[Any, type[Connector] | None] | None:
     """Return what a kept login depends on, as one comparable value.
 
     The value has two parts:
@@ -237,8 +237,10 @@ def _target_version(target: Any) -> tuple[Any, str | None] | None:
       probe moves ``updated_at`` but not this time, so a probe alone does
       not drop kept logins. An update that sends the same values again
       moves it, so it still does.
-    * the connector that serves the target now. A probe that finds a new
-      product or version can move the target to another connector.
+    * the connector class that serves the target now. A probe that finds a
+      new product or version can move the target to another connector. The
+      class itself is kept, not its name: two connectors in different
+      modules can have the same class name.
 
     ``None`` when the target has no change time (a test double): it is
     never treated as changed.
@@ -252,7 +254,7 @@ def _target_version(target: Any) -> tuple[Any, str | None] | None:
         connector_cls, _label, _message = resolve_connector_or_label(target)
     except Exception:
         connector_cls = None
-    return changed_at, (connector_cls.__qualname__ if connector_cls is not None else None)
+    return changed_at, connector_cls
 
 
 def _record_seen_version(target: Any) -> None:

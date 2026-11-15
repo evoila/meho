@@ -51,7 +51,9 @@ classifications:
 
 The `routing` section says which login groups may approve a change that
 waits. It needs the setting `POLICY_APPROVER_ROUTING` (Helm
-`config.policy.approverRouting`), off by default.
+`config.policy.approverRouting`), off by default. This one setting turns on
+both parts: the bindings at sign-in (next section) and the routing at the
+click.
 
 ```yaml
 routing:

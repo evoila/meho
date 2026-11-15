@@ -105,12 +105,12 @@ func TestValidateSendsTheFileAsYAML(t *testing.T) {
 func TestValidateListsMistakesAndFails(t *testing.T) {
 	var got seen
 	srv := server(t, 200,
-		`{"ok":false,"scope":"tenant","mistakes":["`+"`bindings`"+` is not a known key."],"warnings":[]}`, &got)
+		`{"ok":false,"scope":"tenant","mistakes":["`+"`owners`"+` is not a known key."],"warnings":[]}`, &got)
 	stdout, _, err := run(t, "validate", writeFile(t), "--backplane", srv.URL)
 	if err == nil {
 		t.Fatal("expected an error for a file with mistakes")
 	}
-	if !strings.Contains(stdout, "mistake: `bindings` is not a known key.") {
+	if !strings.Contains(stdout, "mistake: `owners` is not a known key.") {
 		t.Errorf("stdout: %s", stdout)
 	}
 }

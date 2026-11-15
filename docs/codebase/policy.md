@@ -67,6 +67,8 @@ routing:
   five group kinds and a set of categories. They count only while the
   switch `POLICY_APPROVER_ROUTING` is on. See
   [policy-bindings.md](policy-bindings.md).
+- The one switch `POLICY_APPROVER_ROUTING` turns on both: the bindings at
+  sign-in and the routing at the click.
 
 ## Checks
 

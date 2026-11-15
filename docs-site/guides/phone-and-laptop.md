@@ -77,7 +77,8 @@ The notification holds only these things:
 
 A notification never holds the operation, its parameters or the target.
 It is encrypted on its way to your device, so the push service of the
-browser maker cannot read it either.
+browser maker cannot read the text. The push service does see the
+request id (see [What leaves your network](#what-leaves-your-network)).
 
 A tap opens the approvals page of your MEHO. You approve there as always:
 with a fresh sign-in or a passkey, and a click. A notification does not
@@ -148,12 +149,19 @@ the browser maker. It carries:
 - the address of the approvals page, as a path (`/ui/approvals`);
 - the address of your MEHO, in the signed key token (when it is an
   `https://` address);
-- the push address of the person's browser, which the browser maker made.
+- the push address of the person's browser, which the browser maker made;
+- the request id again, readable, in the `Topic` header. With it the push
+  service replaces a waiting message by its result, when the first one
+  was not delivered yet. A summary message has the fixed word
+  `approvalsummary` there.
 
 The title, text and page address are encrypted for the browser. The push
-service sees only the push address, the token and the size and time of
-the message. Nothing else of the request leaves your network: no
-operation, no parameters, no target and no name of a person.
+service sees the push address, the token, the request id in the `Topic`
+header, and the size and time of the message. With the request id it can
+tell which messages belong to the same request. The request id is a
+random number: it says nothing about the operation. Nothing else of the
+request leaves your network: no operation, no parameters, no target and
+no name of a person.
 
 ## Sign in with a passkey
 

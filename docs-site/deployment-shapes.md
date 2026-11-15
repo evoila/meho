@@ -83,7 +83,7 @@ up yourself.
 
 | Feature | Default | Goes to | What leaves |
 |---|---|---|---|
-| Approval notifications (`webPush.enabled`) | Off | The push services of Apple, Google, Microsoft and Mozilla ([host names](install/index.md#push-services-for-approval-notifications)) | One message for each notification, encrypted for the person's browser: "an approval waits" (or the result), the tenant name and the request id. Never the operation, its parameters or the target. [Details](guides/phone-and-laptop.md#what-leaves-your-network) |
+| Approval notifications (`webPush.enabled`) | Off | The push services of Apple, Google, Microsoft and Mozilla ([host names](install/index.md#push-services-for-approval-notifications)) | One message for each notification, encrypted for the person's browser: "an approval waits" (or the result), the tenant name and the request id. The request id is also sent readable, so the push service can replace a waiting message by its result. Never the operation, its parameters or the target. [Details](guides/phone-and-laptop.md#what-leaves-your-network) |
 
 ### Broadcast runs single-replica, with ephemeral streams
 

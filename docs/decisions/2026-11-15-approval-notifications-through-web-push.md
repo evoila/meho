@@ -16,7 +16,9 @@ with the merge of its pull request
   the result such as "Approval approved"), the tenant name, the request
   id, and the path of the approvals page. Never the operation, its
   parameters, the target or a person's name. The message is encrypted
-  for the browser (RFC 8291), so the push service cannot read it.
+  for the browser (RFC 8291), so the push service cannot read it. Only
+  the request id is also sent readable, in the `Topic` header (see
+  "What leaves the network").
 - **Off by default.** An admin turns the feature on for the whole MEHO
   (`WEB_PUSH_ENABLED`, chart `webPush.enabled`). Then each person turns
   it on for each browser on the account page. While the setting is off,
@@ -55,8 +57,13 @@ did not set up. So we keep it small and say exactly what it is:
   the title, the tenant name, the request id and the approvals page
   path. Readable by the push service: the push address of the browser
   (made by the browser maker), the signed key token (which names the
-  MEHO address when it is an `https://` address), and the size and time
-  of the message.
+  MEHO address when it is an `https://` address), the request id in the
+  `Topic` header, and the size and time of the message. The `Topic`
+  header lets the push service replace an undelivered "An approval
+  waits" with its result. So the push service can tell which messages
+  belong to the same request. The request id is a random number and
+  says nothing about the request's content. A summary message has the
+  fixed word `approvalsummary` there.
 - **Not:** the request content, any secret, any target detail, any
   audit data.
 

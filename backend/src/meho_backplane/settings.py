@@ -389,7 +389,14 @@ class Settings(BaseModel):
         group paths. Upper and lower case do not count either:
         ``meho-operators`` is the same group as ``MEHO-Operators``.
         Override with ``JWT_ROLE_GROUPS`` (comma-separated) when a site
-        renames the groups; a blank value keeps the default.
+        renames the groups; a blank value keeps the default. With
+        ``POLICY_APPROVER_ROUTING`` on, these groups are also the shipped
+        bindings of a tenant without stored bindings
+        (:func:`~meho_backplane.policy.bindings.shipped_bindings`): each
+        group, by its top-level full path, gets the group kind its name
+        ends with. A renamed group must end with its kind
+        (``Corp-Operators``); a name that ends with no kind gets no
+        shipped binding.
     jwt_principal_kind_claim_name:
         Name of the JWT claim that carries the principal-kind
         discriminator (``user`` / ``service`` / ``agent``) added by
@@ -488,7 +495,11 @@ class Settings(BaseModel):
         current tenant's ``SA-Operators`` entry decides. Off when the
         group is missing; a machine login never gets the flag. Change it
         only together with ``JWT_ROLE_GROUPS``, when the site renamed the
-        groups. A blank value keeps the default.
+        groups. A blank value keeps the default. With
+        ``POLICY_APPROVER_ROUTING`` on, this group is also a shipped
+        binding of a tenant without stored bindings: by its top-level
+        full path it gets the kind ``SA-Operators``
+        (:func:`~meho_backplane.policy.bindings.shipped_bindings`).
     jwt_runner_id_claim_name:
         Name of the JWT claim that carries a satellite runner principal's
         row UUID (Initiative #2415, #2502). Default ``runner_id`` matches
@@ -1581,8 +1592,12 @@ class Settings(BaseModel):
         login group kinds that may approve it, from the ``routing``
         section of the policy file (:mod:`meho_backplane.policy.routing`).
         At the click MEHO checks the person against them, next to today's
-        checks. When off, nothing is stored or checked and today's rule
-        decides who may approve. Env ``POLICY_APPROVER_ROUTING``; Helm
+        checks. Also, the ``bindings`` of the tenant's policy file decide
+        which login group is which team: a group, matched by its full path
+        or its group attribute, gets one of the five group kinds and a set
+        of categories (:mod:`meho_backplane.policy.bindings`). When off,
+        nothing is stored or checked, MEHO reads no binding, and today's
+        rule decides who may approve. Env ``POLICY_APPROVER_ROUTING``; Helm
         ``config.policy.approverRouting``.
     """
 
@@ -1856,10 +1871,11 @@ class Settings(BaseModel):
     #: ``HTTP_MAX_REQUEST_BODY_BYTES``.
     http_max_request_body_bytes: int = Field(default=32 * 1024 * 1024, ge=1024)
     #: Look-back window (minutes) for the dispatch-time target-activity
-    #: advisory (#2550). A write-class dispatch on a target with peer
-    #: activity inside this window carries a compact
-    #: ``extras["target_activity_advisory"]`` on its response. ``0``
-    #: disables the feature entirely (no stream read on any dispatch).
+    #: advisory (#2550, #3762). A write-class dispatch on a target where
+    #: another agent holds an active claim, whose newest step is inside
+    #: this window, carries a compact ``extras["target_activity_advisory"]``
+    #: on its response. ``0`` disables the feature entirely (no archive
+    #: read on any dispatch).
     dispatch_activity_advisory_window_minutes: int = Field(default=30, ge=0)
     #: Dedupe window (minutes) for the dispatch-time checks-alert
     #: advisory (#2718). A successful dispatch by a caller whose tenant

@@ -48,6 +48,7 @@ from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.role_floors import requester_check_denial, role_floor_denial
+from meho_backplane.policy.stamp import forget_rule
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.settings import get_settings
 
@@ -1013,7 +1014,10 @@ async def policy_gate(
     The op's requester check (:func:`_requester_denial`) reads *params* too.
 
     With ``POLICY_ENGINE_SHADOW`` on, :mod:`meho_backplane.policy.shadow`
-    compares the policy evaluator with this answer; this answer counts."""
+    compares the policy evaluator with this answer; this answer counts. It
+    keeps the rule the evaluator matched for
+    :func:`~meho_backplane.policy.stamp.take_rule` (#6044)."""
+    forget_rule()
     requester_denial = _requester_denial(operator, descriptor, params)
     if requester_denial is not None:
         return PermissionVerdict.DENY, requester_denial

@@ -1003,6 +1003,7 @@
   "tests/test_operations_spec_provenance.py": 0.42,
   "tests/test_operations_subop_policy_gate.py": 0.91,
   "tests/test_operations_tenant_row_authoritative.py": 2.09,
+  "tests/test_operations_tls_presented.py": 0.65,
   "tests/test_operations_typed_register.py": 1.5,
   "tests/test_operations_upstream_fault.py": 0.24,
   "tests/test_outside_backend_tests.py": 2.03,

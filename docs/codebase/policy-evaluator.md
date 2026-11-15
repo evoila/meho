@@ -39,7 +39,7 @@ All are frozen dataclasses.
 | `Asked` | What is asked: connector id, op id, group key, category, risk level, "always wait" (the effective approval flag), labels, mutating, op class marks, caller address, target. |
 | `Lookups` | What the caller found in the database for this call: the matching agent grant (also of the hosted agent), a standing grant, a run approval, the read-scope refusal, sandbox mode, `AGENT_GRANT_REQUIRED`. The evaluator never reads the database itself. |
 | `RuleRef` | The rule that decided: source (`floor`, `tenant_rule`, `default`, `agent_grant`, `standing_grant`, `run_approval`, `read_scope`, `role_floor`), rule id, policy version (empty in part 1), text. |
-| `Decision` | Verdict (`run`, `wait`, `deny`), the rule, the groups that may approve (only for `wait`), `waits_because` (`token_call` for a person's `caution` call that waits only because it came with a token), and a trace of every step. |
+| `Decision` | Verdict (`run`, `wait`, `deny`), the rule, the groups that may approve (only for `wait`), `waits_because` (`token_call` for a person's `caution` call that waits only because it came with a token), every step in order (`steps`, each a `Step` with its rule and verdict), and the same steps as text lines (`trace`). |
 
 The op class marks of `Asked` come from the code: `root_shell`,
 `credential_read`, `per_call_approval`, `delete_shaped` and
@@ -145,6 +145,72 @@ shadow fails, nothing is kept and the columns stay empty. Each gate
 first drops a rule an earlier gate kept (a preview, for example), so a
 row never gets the rule of another call.
 
+## `meho policy explain` (#6045)
+
+`POST /api/v1/policy/explain` and `meho policy explain` say why one call
+runs, waits or is denied, and who may approve it. Nothing runs and nothing
+is written: no audit row for the call, no approval request, no grant use,
+no call to an outside system. The REST request itself is logged as
+`policy.explain` (a read).
+
+Code: `policy/explain.py` (the work), `policy/explain_asker.py` (who
+asks), `policy/explain_models.py` (the answer),
+`policy/who_approves.py` (who may approve; shared with the preview),
+`api/v1/policy.py` (the route), `cli/internal/cmd/policy/explain.go`.
+
+**Who asks.**
+
+- `me`: the caller. Needs the `operator` role, like the preview and the
+  call. `via` can ask for a person in the web interface or with a token.
+- `groups` (+ `principal`: `person`, `agent` or `service`): a login made
+  up from login group kinds, in the caller's tenant, with a `sub` that no
+  grant names. So it has no agent grant, no standing grant, no run
+  approval and no read scope. An agent gets at most the `operator` role,
+  as a real agent token. Groups that give only `read_only` are refused:
+  such a login cannot call operations. Needs a tenant admin or a platform
+  admin.
+- `request_id`: the rule stored on an approval request (`policy_rule`,
+  `policy_version`) and the stored approver groups (or today's rule when
+  none were stored). Needs the right to read approvals.
+
+**What it answers.** The same steps as the preview, in the same order:
+target by name, descriptor and catalog choice (`_resolve_descriptor`),
+then `_governance_fields`, which calls `policy_gate(decide_only=True)` and
+the step checks of a multi-step operation. Then, only with
+`POLICY_ENGINE_SHADOW` on, `evaluate_call(decide_only=True)`. The gate's
+shadow keeps a rule; explain drops it (`forget_rule`).
+
+- `answer`: today's answer (`run`, `wait`, `deny`). While the evaluator is
+  off or in shadow mode, today's checks decide (`decided_by: today`).
+- `today`: the gate's verdict and reason.
+- `evaluator` (null while the switch is off): its verdict, the rule that
+  decided, the floor that decided (when the rule is a `floor` or
+  `role_floor`), every step in order (`Decision.steps`), and
+  `same_as_today`. The `always_wait` step carries `path`: the most
+  specific classification entry that makes the operation always wait.
+- `classification`: the risk level and the approval flag the call is
+  checked with, the category and labels, and every classification entry
+  that matches, least specific first, each with its place
+  (`install:classifications[0]`, `tenant:classifications[2]`,
+  `tenant:override`).
+- `approvers` (only when the answer is `wait`): the login groups that may
+  approve another person's call, and the rule. A change of rights: only
+  `MEHO-Admins` (`rights_change`). With `POLICY_APPROVER_ROUTING` on: the
+  first routing entry that fits (`tenant:routing[0]`). Else today's rule
+  (`default`).
+
+**A file that is not imported (`file`).** Needs a tenant admin (or a
+platform admin for `scope: install`) and `POLICY_CLASSIFICATION` (with it
+off, 409: a file changes no answer). The file is checked like
+`meho policy validate` (`build_plan`); a file with mistakes is 422 with
+the list. Its classification and routing take the place of the stored
+policy of its scope; its entries are named `file:classifications[N]` and
+`file:routing[N]`. The operation's values are worked out again in the
+dispatch order (`policy_in_force`: the code's value, the overrides, the
+classification, the floors), so today's gate and the evaluator both see
+the file. The steps of a multi-step operation are still checked with the
+stored policy.
+
 ## How to read a mismatch line
 
 ```
@@ -200,6 +266,11 @@ switch off and on.
   the rule on audit rows, approval requests and the console, and the
   migration on PostgreSQL with the append-only trigger (#6044).
 - `backend/tests/test_policy_shadow_load.py`: the load check.
+- `backend/tests/test_policy_explain.py`: `meho policy explain`: one
+  answer per verdict, the floor, the switch off, a file that is not
+  imported, a stored request, who may ask, and no audit row or request.
+  `backend/tests/test_operations_request_preview.py`: the preview's
+  `policy_rule` and `approvers`. `cli/internal/cmd/policy/explain_test.go`.
 
 ## References
 

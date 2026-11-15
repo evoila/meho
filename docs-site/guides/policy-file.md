@@ -136,6 +136,58 @@ meho policy history                  # the last 20 imported files
 Add `--scope install` to work on the policy of the whole install. Only a
 platform admin may do that.
 
+## Why does a call run, wait or fail? `meho policy explain`
+
+`meho policy explain` says what MEHO does with one call: it **runs**,
+**waits** for approval, or is **denied**. It also says why, and who may
+approve it. Nothing runs and nothing is written.
+
+```bash
+meho policy explain <connector-id> <op-id> --me
+meho policy explain <connector-id> <op-id> --groups Operators --target <target-name>
+meho policy explain <connector-id> <op-id> --groups Operators --principal agent
+meho policy explain <connector-id> <op-id> --groups Operators --file policy.yaml
+meho policy explain --request <request-id>
+```
+
+- `--me` asks for yourself. You need the operator role, as for a call.
+- `--groups` asks for a login in these groups, with no grants of its own.
+  `--principal` says if it is a `person` (the default), an `agent` or a
+  `service` login. `--via web` asks for a person in the web interface.
+  Only a tenant admin or a platform admin may ask for other groups.
+- `--file` asks with a policy file that is not imported. The file takes
+  the place of your stored policy. It needs `POLICY_CLASSIFICATION`.
+- `--request` shows the rule stored on an approval request.
+
+An example answer, for a person with a token who asks for a `caution`
+operation that a file makes always wait:
+
+```text
+Answer: wait (today's checks decide)
+Who may approve: MEHO-Operators, MEHO-SA-Operators, MEHO-Admins, MEHO-Approvers (rule: default)
+Today: needs-approval: <today's reason>
+Policy evaluator (shadow): wait, same as today
+Decided by: floor token_runs_only_safe: wait (<rule text>)
+Floor: floor token_runs_only_safe: wait (<rule text>)
+Rules in order:
+  1. default person.token.caution: wait (risk level caution waits)
+  2. default always_wait: wait (the operation always waits) at file:classifications[1]
+  3. floor token_runs_only_safe: wait (<rule text>)
+Risk level: caution, always waits: yes, category: compute
+  matched file:classifications[0]
+  matched file:classifications[1]
+```
+
+!!! note "The policy evaluator is off by default"
+
+    The lines about the policy evaluator need the setting
+    `POLICY_ENGINE_SHADOW` (Helm `config.policy.engineShadow`). With it
+    on, the evaluator works out its own answer next to today's checks, and
+    explain lists every rule it matched, in order, with the place of a
+    rule in the policy file (for example `file:classifications[1]`).
+    Today's checks still decide. With the setting off, explain shows
+    today's answer only.
+
 ## What an import does
 
 1. MEHO checks the file and works out the diff.
@@ -169,6 +221,8 @@ platform admin may do that.
 | `POST /api/v1/policy/import` | asks to import; waits for approval |
 | `GET /api/v1/policy/export` | the stored policy as a file |
 | `GET /api/v1/policy/history` | the imported files |
+| `POST /api/v1/policy/explain` | why a call runs, waits or is denied; runs nothing |
 
 Send the file as the request body with `Content-Type: application/yaml`.
-Every route takes `?scope=tenant` (the default) or `?scope=install`.
+Every file route takes `?scope=tenant` (the default) or `?scope=install`.
+`explain` takes a JSON body with the same questions as the command.

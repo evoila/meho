@@ -278,6 +278,16 @@ preview looked the same whether the call would run at once or wait for
 approval, and an operator in a lab only found out with a second command
 (`meho operation search --op-id`).
 
+**`policy_rule` and `approvers` (#6045).** Only with
+`POLICY_ENGINE_SHADOW` on (off by default), the governance fields also
+carry `policy_rule`, the rule the policy evaluator matched for the call's
+own gate (`{source, rule_id, text, decided: false}`, taken with
+`take_rule` right after the gate; `null` when the evaluator failed), and
+`approvers`, the login groups that may approve when `policy_verdict` is
+`needs-approval` (`policy/who_approves.py`), else `[]`. Both are
+advisory and unhashed. With the switch off neither key is present, and
+the MCP `outputSchema` does not list them.
+
 Operator-input faults come back **inside** the envelope (not as
 exceptions), mirroring the dispatcher's never-raises contract so the REST
 route and MCP tool keep one uniform shape. Target failures

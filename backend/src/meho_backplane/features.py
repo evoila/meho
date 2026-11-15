@@ -550,8 +550,8 @@ def _policy_block(settings: Settings) -> dict[str, Any]:
     evaluator runs next to today's checks and logs every difference
     (:mod:`meho_backplane.policy.shadow`). It also writes the rule it
     matched on audit rows and approval requests
-    (:mod:`meho_backplane.policy.stamp`). It decides nothing. Off by
-    default.
+    (:mod:`meho_backplane.policy.stamp`), and a preview shows the rule
+    and who may approve. It decides nothing. Off by default.
 
     ``approver_routing`` is the ``POLICY_APPROVER_ROUTING`` switch: a
     waiting request stores who may approve it, from the policy file's

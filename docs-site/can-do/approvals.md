@@ -74,8 +74,8 @@ no exception per system.
 - An approved request that runs only as approved comes from v0.40.0.
 - From v0.47.0, approving a request that asks for a secret value
   (`reveal_secret: true`) does not run it. The person who asked fetches
-  the value once, within 15 minutes. A client that read the value from
-  the stored result must change. See the
+  the value once, within 15 minutes. A client that reads the value from
+  the stored result gets none and must change. See the
   [upgrade note](../install/upgrades.md#version-specific-notes).
 
 ## Operator guide

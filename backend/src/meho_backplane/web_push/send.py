@@ -393,3 +393,7 @@ async def wait_for_sends_for_testing() -> None:
     """Wait until every background send (and summary) has finished."""
     while _TASKS:
         await asyncio.gather(*list(_TASKS), return_exceptions=True)
+        # A gather of tasks that are all done ends without giving the loop a
+        # turn, so their done callbacks (which drop them from _TASKS) would
+        # never run and this loop would spin.
+        await asyncio.sleep(0)

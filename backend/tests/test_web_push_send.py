@@ -619,6 +619,23 @@ async def test_the_decision_arrives_after_a_delayed_waiting_message(
     ]
 
 
+async def test_waiting_for_sends_ends_when_a_done_task_is_still_listed() -> None:
+    """A done task whose callbacks have not run yet must not make the wait spin."""
+
+    async def _nothing() -> None:
+        return None
+
+    loop = asyncio.get_running_loop()
+    task = loop.create_task(_nothing())
+    await asyncio.wait({task})
+    send_module._TASKS.add(task)
+    loop.call_soon(send_module._TASKS.discard, task)
+
+    await asyncio.wait_for(send_module.wait_for_sends_for_testing(), timeout=5)
+
+    assert task not in send_module._TASKS
+
+
 def test_the_remembered_requests_stay_bounded() -> None:
     limit = send_module._RateLimit(30.0)
     ids = [uuid.uuid4() for _ in range(send_module._SHOWN_LIMIT + 1)]

@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.runbooks.run_service import StepCallerRequiredError
-from meho_backplane.runbooks.runs_schemas import RunCompletedResponse
+from meho_backplane.runbooks.run_service import PreviousStepFailedError, StepCallerRequiredError
+from meho_backplane.runbooks.runs_schemas import CurrentStepResponse, RunCompletedResponse
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.routes.runbooks import driver
 
@@ -95,3 +95,25 @@ async def test_login_not_checkable_shows_inline_alert(
 
     assert result == "rendered"
     assert render.await_args.kwargs["error_message"] == "needs the caller"
+
+
+@pytest.mark.asyncio
+async def test_failed_check_shows_the_reason(
+    monkeypatch: pytest.MonkeyPatch, render: AsyncMock
+) -> None:
+    monkeypatch.setattr(driver, "resolve_ui_operator", AsyncMock(return_value=_operator()))
+    reason = "step 'check' check call did not run: no grant for this operation"
+    _patch_next(monkeypatch, side_effect=PreviousStepFailedError(reason))
+    current = MagicMock(spec=CurrentStepResponse)
+    monkeypatch.setattr(
+        driver.RunbookRunService, "get_current_step", AsyncMock(return_value=current)
+    )
+    view = MagicMock(return_value="failed-view")
+    monkeypatch.setattr(driver, "step_view", view)
+
+    result = await driver._advance(MagicMock(), _session(), uuid.uuid4(), "operation_call", "")
+
+    assert result == "rendered"
+    view.assert_called_once_with(current, failed=True)
+    assert render.await_args.kwargs["view"] == "failed-view"
+    assert render.await_args.kwargs["error_message"] == reason

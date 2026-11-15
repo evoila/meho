@@ -42,7 +42,9 @@ is no stand-in identity.
 When the call is refused (`denied`), fails (`error`), or waits for
 approval (`awaiting_approval`), the step fails, whatever its `expect`
 says. The `PreviousStepFailedError` text names the reason, for example
-`step 'check' check call did not run: denied: ...`. The step's
+`step 'check' check call did not run: denied: ...`. REST and MCP return
+this text as the error. The console shows it as an inline alert above the
+failed-step banner. The step's
 `verify_response.actual` holds `status` and `error` of the call. The
 assignee can fix the cause and retry the step
 ([runbook-step-retry.md](runbook-step-retry.md)).

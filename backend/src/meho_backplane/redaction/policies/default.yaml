@@ -73,6 +73,14 @@ rules:
     action: redact
     reason: "user part and signature / credential / token query values of a URL"
 
+  # Before the api_key rule too: it reads a value the way a shell does
+  # (quotes, escaped spaces), and the api_key rule stops at the first
+  # space or quote, so it would leave the tail of such a value.
+  - name: strip-command-line-secret
+    pattern: command_line_secret
+    action: redact
+    reason: "password or token on a command line, in a login or in a connection string"
+
   - name: strip-api-key
     pattern: api_key
     action: redact

@@ -13,6 +13,8 @@
 * An operation no floor touches keeps its stored risk level, approval flag
   and op class.
 * Ingest refuses a class that is not allowed, and names the operation.
+  A floor may set only ``credential_read`` or ``write``.
+* A stored ``credential_read`` is never replaced by another class.
 """
 
 from __future__ import annotations
@@ -411,6 +413,42 @@ async def test_reingest_stores_a_class_the_floor_gives_later(
     assert (row.safety_level, row.requires_approval) == ("caution", True)
 
 
+def _class_floor(op_class: str) -> Any:
+    def floor(version: str, proto: EndpointDescriptorProto) -> EndpointDescriptorProto:
+        if proto.op_id != _CLIENTS:
+            return proto
+        return proto.model_copy(update={"op_class": op_class})
+
+    return floor
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first", "second", "stored"),
+    [
+        pytest.param("credential_read", "write", "credential_read", id="read-stays-on-write"),
+        pytest.param("credential_read", None, "credential_read", id="read-stays-on-none"),
+        pytest.param(None, "credential_read", "credential_read", id="none-raised-to-read"),
+        pytest.param("write", "credential_read", "credential_read", id="write-raised-to-read"),
+        pytest.param("write", None, "write", id="write-stays-on-none"),
+    ],
+)
+async def test_reingest_never_replaces_a_stored_credential_read(
+    stub_embedding_service: AsyncMock, first: str | None, second: str | None, stored: str
+) -> None:
+    if first is not None:
+        register_ingest_safety_floor(product=_PRODUCT, impl_id=_IMPL_ID, floor=_class_floor(first))
+    await _register(stub_embedding_service)
+    assert (await _row(_CLIENTS)).op_class == first
+    _FLOORS.clear()
+    if second is not None:
+        register_ingest_safety_floor(product=_PRODUCT, impl_id=_IMPL_ID, floor=_class_floor(second))
+
+    await _register(stub_embedding_service)
+
+    assert (await _row(_CLIENTS)).op_class == stored
+
+
 def test_stored_class_never_replaces_a_credential_or_audit_class() -> None:
     assert resolve_op_class("vault.kv.read", "write") == "credential_read"
     assert resolve_op_class(_CLIENTS, "credential_read") == "credential_read"
@@ -465,29 +503,36 @@ async def test_untouched_operations_keep_their_stored_policy(
 # -- refusing a class that is not allowed -------------------------------------------
 
 
-@pytest.mark.parametrize("bad", ["credential_reads", "read", "audit_query", ""])
+@pytest.mark.parametrize(
+    "bad",
+    ["credential_mint", "credential_write", "credential_reads", "read", "audit_query", ""],
+)
 def test_ingest_refuses_a_class_that_is_not_allowed(bad: str) -> None:
     def floor(version: str, proto: EndpointDescriptorProto) -> EndpointDescriptorProto:
         return proto.model_copy(update={"op_class": bad})
 
     register_ingest_safety_floor(product=_PRODUCT, impl_id=_IMPL_ID, floor=floor)
 
-    with pytest.raises(InvalidOpClassError, match=r"GET:/clients"):
+    with pytest.raises(InvalidOpClassError) as raised:
         apply_safety_floor(
             product=_PRODUCT, version=_VERSION, impl_id=_IMPL_ID, proto=_ops()[_CLIENTS]
         )
 
+    assert "GET:/clients" in str(raised.value)
+    assert "Allowed classes: credential_read, write." in str(raised.value)
+
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["nonsense", "credential_mint", "credential_write"])
 async def test_register_refuses_a_class_that_is_not_allowed_and_stores_nothing(
-    stub_embedding_service: AsyncMock,
+    stub_embedding_service: AsyncMock, bad: str
 ) -> None:
     def floor(version: str, proto: EndpointDescriptorProto) -> EndpointDescriptorProto:
-        return proto.model_copy(update={"op_class": "nonsense"})
+        return proto.model_copy(update={"op_class": bad})
 
     register_ingest_safety_floor(product=_PRODUCT, impl_id=_IMPL_ID, floor=floor)
 
-    with pytest.raises(InvalidOpClassError, match="nonsense"):
+    with pytest.raises(InvalidOpClassError, match=bad):
         await _register(stub_embedding_service)
 
     async with get_sessionmaker()() as session:

@@ -7,8 +7,9 @@ Four sources raise the parsed safety of an ingested operation:
 
 * a connector-owned floor, registered in code by the connector module. It
   sees the full answer schema of the operation, with the shared schemas it
-  uses, and it may set the op class of the operation (``op_class``). MEHO
-  stores the class on the row, so every process applies it;
+  uses, and it may set the op class of the operation (``op_class``), to
+  ``credential_read`` or ``write`` only. MEHO stores the class on the row,
+  so every process applies it;
 * the per-spec ``safety_overlay`` declared on the catalog row; and
 * the op class of the operation: a read whose answer holds credentials
   (``credential_read``, see :mod:`meho_backplane.operations.credential_read`)
@@ -28,8 +29,8 @@ catalog row and no overlay list: a marker on the operation is enough.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Final
 
-from meho_backplane.op_classes import DECLARABLE_OP_CLASSES
 from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
@@ -42,10 +43,21 @@ from meho_backplane.operations.ingest.catalog import safety_overlay_for
 from meho_backplane.operations.ingest.exceptions import InvalidOpClassError
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto, SafetyLevel
 
-__all__ = ["apply_safety_floor", "has_safety_floor", "register_ingest_safety_floor"]
+__all__ = [
+    "FLOOR_OP_CLASSES",
+    "apply_safety_floor",
+    "has_safety_floor",
+    "register_ingest_safety_floor",
+]
 
 IngestSafetyFloor = Callable[[str, EndpointDescriptorProto], EndpointDescriptorProto]
 _FLOORS: dict[tuple[str, str], IngestSafetyFloor] = {}
+
+#: The classes a connector floor may set. MEHO has a rule for each of them
+#: on every call that reads the stored class. ``credential_mint`` and
+#: ``credential_write`` are not allowed yet: some places still read the
+#: class from the op id only (``docs/codebase/spec-ingestion.md``).
+FLOOR_OP_CLASSES: Final[frozenset[str]] = frozenset({"credential_read", "write"})
 
 _SAFETY_RANK: dict[SafetyLevel, int] = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
 
@@ -121,11 +133,11 @@ def _apply_caller_address_floor(proto: EndpointDescriptorProto) -> EndpointDescr
 
 def _check_op_class(proto: EndpointDescriptorProto) -> None:
     """Refuse an op class that a connector floor set and that is not allowed."""
-    if proto.op_class is not None and proto.op_class not in DECLARABLE_OP_CLASSES:
+    if proto.op_class is not None and proto.op_class not in FLOOR_OP_CLASSES:
         raise InvalidOpClassError(
             f"operation {proto.op_id!r}: a safety floor set the op class "
             f"{proto.op_class!r}, which is not allowed. Allowed classes: "
-            f"{', '.join(sorted(DECLARABLE_OP_CLASSES))}."
+            f"{', '.join(sorted(FLOOR_OP_CLASSES))}."
         )
 
 

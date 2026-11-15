@@ -346,8 +346,9 @@ def _apply_safety_metadata(existing: EndpointDescriptor, ctx: UpsertContext) -> 
 
     A class from the floor is stored. When the floor gives none, the stored
     class stays, like the stored risk level: a re-ingest never weakens a row.
+    A stored ``credential_read`` is never replaced by another class.
     """
-    if ctx.proto.op_class is not None:
+    if ctx.proto.op_class is not None and existing.op_class != "credential_read":
         existing.op_class = ctx.proto.op_class
     if not _keeps_stored_policy(existing, ctx):
         existing.safety_level = ctx.proto.safety_level

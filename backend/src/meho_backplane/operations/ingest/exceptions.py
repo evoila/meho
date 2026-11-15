@@ -246,8 +246,10 @@ class InvalidSchemaError(ValueError):
 class InvalidOpClassError(InvalidSchemaError):
     """A connector's safety floor set an op class that is not allowed.
 
-    Only the classes in :data:`~meho_backplane.op_classes.DECLARABLE_OP_CLASSES`
-    may be set. The message names the operation.
+    Only the classes in
+    :data:`~meho_backplane.operations.ingest.safety_floors.FLOOR_OP_CLASSES`
+    (``credential_read`` and ``write``) may be set. The message names the
+    operation and the allowed classes.
     """
 
 

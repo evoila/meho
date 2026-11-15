@@ -378,6 +378,7 @@
   "tests/test_connectors_mssql.py": 5.72,
   "tests/test_connectors_net_dns_lookup.py": 1.61,
   "tests/test_connectors_net_http_probe.py": 1.45,
+  "tests/test_connectors_net_http_probe_trust.py": 16.8,
   "tests/test_connectors_net_icmp.py": 1.38,
   "tests/test_connectors_net_ntp_check.py": 1.34,
   "tests/test_connectors_net_probe.py": 0.93,

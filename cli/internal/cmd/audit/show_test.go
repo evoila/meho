@@ -252,7 +252,7 @@ func TestPrintEntrySummaryShowsPolicyRule(t *testing.T) {
 	printEntrySummary(&buf, &api.AuditEntry{
 		Id:             mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:             mustTS(t, "2026-05-13T00:00:00Z"),
-		PrincipalSub:   "damir",
+		PrincipalSub:   "alice",
 		Method:         "DISPATCH",
 		Path:           "x.y",
 		StatusCode:     200,

@@ -3863,13 +3863,6 @@ async def _dispatch_now(
             target=target,
             params_hash=params_hash,
         )
-    # An ingested op whose row stores a class (a connector's safety floor set
-    # it at ingest) is a secret read or a secret maker like any other.
-    stored_op_class = getattr(descriptor, "op_class", None)
-    if stored_op_class is not None:
-        op_class = resolve_op_class(op_id, stored_op_class)
-        secret_read = secret_read or op_class == "credential_read"
-        makes_new_secret = op_class == "credential_mint"
     # An ingested read of licence keys never runs: the ingest would give it
     # the safe level of its HTTP method, and its answer carries the keys in
     # full. Refused before the target check, the catalog guard, the policy
@@ -3944,6 +3937,15 @@ async def _dispatch_now(
         descriptor = selection.descriptor
         connector_id = selection.connector_id
         product, version = descriptor.product, descriptor.version
+    # An ingested op whose row stores a class (a connector's safety floor set
+    # it at ingest) is a secret read like any other. Read from the row that
+    # runs, after any switch to a sibling catalog, so the audit row, the
+    # policy and this flag all use the same row.
+    stored_op_class = getattr(descriptor, "op_class", None)
+    if stored_op_class is not None:
+        op_class = resolve_op_class(op_id, stored_op_class)
+        secret_read = secret_read or op_class == "credential_read"
+        makes_new_secret = op_class == "credential_mint"
     params_error = _params_error(descriptor, op_id, params, started)
     if params_error is not None:
         return params_error

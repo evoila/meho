@@ -985,6 +985,7 @@ async def enforce_subop_policy(
                     # re-run belongs to the requester of that request, not to the
                     # reviewer who runs the re-run. ``None`` outside a re-run.
                     requester=resume_requester_var.get(),
+                    category=descriptor.policy_category,
                 )
                 await session.commit()
             # Record AFTER commit so a step event can never outlive a failed
@@ -995,7 +996,9 @@ async def enforce_subop_policy(
                 decision="pending",
                 audit_id=request._audit_id,  # type: ignore[attr-defined]
             )
-            return result_awaiting_approval(op_id, request.id, duration_ms)
+            return result_awaiting_approval(
+                op_id, request.id, duration_ms, audit_id=request.request_audit_id
+            )
 
         # DENY, or any unexpected verdict — fail closed: the sub-op never
         # runs. Only an explicit AUTO_EXECUTE clears the gate. #4275: the step

@@ -38,6 +38,7 @@ const (
 	reasonNoApprovalAccess = "no_approval_access"
 	reasonNotAPerson       = "not_a_person"
 	reasonNotPending       = "not_pending"
+	reasonNotRouted        = "not_routed"
 )
 
 // Approval rules the server sends in approval_rule after an approve.
@@ -120,6 +121,8 @@ func approveRightText(may *bool, reason *string) string {
 		return "no, only a person can approve"
 	case reasonNotPending:
 		return "no, the request is not pending"
+	case reasonNotRouted:
+		return "no, approvals of this change go to other login groups (the web interface names them)"
 	default:
 		return "no (" + *reason + ")"
 	}

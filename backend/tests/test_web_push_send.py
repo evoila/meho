@@ -379,6 +379,27 @@ async def test_a_rights_change_reaches_only_another_admin(
     assert push_service.to(sa_operator) == []
 
 
+async def test_a_routed_request_reaches_only_the_routed_groups(
+    push_service: _FakePushService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With approver routing on, a person outside the stored group kinds gets no push."""
+    monkeypatch.setenv("POLICY_APPROVER_ROUTING", "true")
+    get_settings.cache_clear()
+    admin, approver, sa_operator = _browser("admin"), _browser("approver"), _browser("sa")
+    await _subscribe(admin, sub="admin", login="admin")
+    await _subscribe(approver, sub="approver", login="approver")
+    await _subscribe(sa_operator, sub="sa-op", login="sa")
+    request = _request(level="caution")
+    request.approver_roles = ["SA-Operators", "Admins"]
+    request.approver_rule = "install:routing[0]"
+
+    await _step(request)
+
+    assert [m["title"] for m in push_service.to(admin)] == ["An approval waits"]
+    assert [m["title"] for m in push_service.to(sa_operator)] == ["An approval waits"]
+    assert push_service.to(approver) == []
+
+
 @pytest.mark.parametrize(
     ("days", "sent"), [(6, True), (8, False)], ids=["read-6-days-ago", "read-8-days-ago"]
 )

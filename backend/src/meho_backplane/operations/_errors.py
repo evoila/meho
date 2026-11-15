@@ -46,7 +46,11 @@ import httpx
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
-from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
+from meho_backplane.connectors.base import (
+    ConnectorOwnMessage,
+    ConnectorResourceNotFoundError,
+    ConnectorUpstreamError,
+)
 from meho_backplane.operations.deny_reasons import (
     AGENT_NO_GRANT,
     AGENT_STEPS_NOT_DECLARED,
@@ -67,6 +71,8 @@ if TYPE_CHECKING:
     from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
 
 __all__ = [
+    "MESSAGE_SOURCE_KEY",
+    "MESSAGE_SOURCE_MEHO",
     "READ_SCOPE_DENIED_CODE",
     "UPSTREAM_SAID",
     "VAULT_SAID",
@@ -149,6 +155,12 @@ _TEXT_WITHHELD: str = "<diagnostic text withheld: redaction unavailable>"
 #: :mod:`meho_backplane.operations._vendor_text`).
 UPSTREAM_SAID: Final = " Upstream said: "
 VAULT_SAID: Final = " Vault said: "
+
+#: ``extras`` key and value that say: the ``exception_message`` is a sentence
+#: MEHO or a connector wrote itself (the error type has the
+#: :class:`~meho_backplane.connectors.base.ConnectorOwnMessage` mark).
+MESSAGE_SOURCE_KEY: Final = "message_source"
+MESSAGE_SOURCE_MEHO: Final = "meho"
 
 
 def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
@@ -1555,6 +1567,11 @@ def result_connector_error(
         "exception_class": type(exc).__name__,
         "exception_message": msg,
     }
+    if isinstance(exc, ConnectorOwnMessage) and not isinstance(
+        exc, (httpx.HTTPStatusError, ConnectorUpstreamError)
+    ):
+        # The text of these two holds the URL or the vendor's words, mark or not.
+        extras[MESSAGE_SOURCE_KEY] = MESSAGE_SOURCE_MEHO
     if isinstance(exc, httpx.HTTPStatusError):
         extras["http_status"] = exc.response.status_code
         extras["upstream_message"] = _http_upstream_message(exc.response)

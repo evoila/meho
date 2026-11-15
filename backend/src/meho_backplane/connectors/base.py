@@ -26,6 +26,7 @@ from meho_backplane.connectors.schemas import (
 
 __all__ = [
     "Connector",
+    "ConnectorOwnMessage",
     "ConnectorResourceNotFoundError",
     "ConnectorUpstreamError",
     "ShimKind",
@@ -35,6 +36,18 @@ __all__ = [
 # Forward declaration — replaced with `from meho_backplane.targets import Target`
 # in G0.2-T5 once G0.3 lands the Target model.
 type Target = Any
+
+
+class ConnectorOwnMessage:
+    """Mark an error whose message MEHO or the connector wrote itself.
+
+    Add it as a base class of an error type when the message is a fixed
+    sentence of the connector (for example "the account may not read
+    licences"). The message must hold no secret and no text from the vendor
+    system. For an operation that sends a secret, the dispatcher then shows
+    this message instead of hiding it. Never put vendor text, a value from
+    the call, or a secret into such a message.
+    """
 
 
 class ConnectorResourceNotFoundError(Exception):

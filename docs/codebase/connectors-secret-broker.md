@@ -412,7 +412,8 @@ linux:<target>/<absolute path>#<owner>
 - `<owner>` is the Linux user who will own the file. A user name only:
   lower-case letters, digits, `_` and `-`. A normal user: never `root`,
   never a user with user id 0, and never a system user (a user id below the
-  host's first normal user id).
+  host's first normal user id), and never a user with a user id above the
+  host's last normal user id.
 - A ref has no spaces, because the `secret.move` parameter schema refuses
   them.
 
@@ -473,7 +474,10 @@ What MEHO does on the host:
     written there would not stay with one user;
   - the reason `system-owner` also for an owner whose user id is above the
     host's last normal user id (`UID_MAX` in `/etc/login.defs`; 60000 when
-    the file gives none), for example `nobody`;
+    the file gives none), for example `nobody`. A user from a directory service (for example SSSD,
+    FreeIPA or Active Directory) often has a much larger user id, so it is
+    refused with `system-owner` too. To allow such users, an admin of the
+    host raises `UID_MAX` in `/etc/login.defs`;
   - the reason `no-home` when the home does not exist.
 
   When the path is not inside the home, MEHO stops before it sends the

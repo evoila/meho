@@ -257,16 +257,29 @@ The name rule is the shared `broadcast.events.is_secret_param_name`
 broadcast scrub and the approval echo use. The full word list:
 
 - anywhere in the name: `password`, `passwords`, `passwd`, `pwd`,
-  `passphrase`, `passphrases`, `apikey`, `kubeconfig`;
+  `passphrase`, `passphrases` (also written `pass_phrase`), `apikey`,
+  `kubeconfig`;
 - at the end of the name: `secret`, `secrets`, `token`, `credential`,
   `credentials`, `psk` (the pre-shared key of a VPN session);
 - the pairs `api_key`, `access_key`, `private_key`, `encryption_key`,
   `license_key`, `licence_key`, `license_keys`, `licence_keys`,
-  `product_key`, `secret_id`, `secret_value`, `secret_data` anywhere in
-  the name;
+  `product_key`, `secret_id`, `secret_value`, `secret_data`, `pass_phrase`
+  anywhere in the name;
 - the pairs `secret_key`, `shared_key`, `preshared_key`,
-  `connection_string`, `connection_strings` only at the end of the name
-  (`secret_key_ref` is the name of a Kubernetes Secret and stays plain).
+  `connection_string`, `connection_strings`, `authentication_key` and
+  `privacy_key` (the SNMP keys), `store_key`, `application_key`,
+  `snmp_community` only at the end of the name (`secret_key_ref` is the
+  name of a Kubernetes Secret and stays plain, and so is
+  `authentication_key_id`). `shared_secret` ends in `secret`, so it is
+  hidden by the rule above;
+- a bare `community` field, when a sibling field name has an `snmp` word
+  (`snmp_version`, `snmpPort`): `broadcast.events.is_snmp_community_key`,
+  asked next to the name rule by every walk over data. The text step has
+  no sibling, so it hides `snmp_community` but not a bare `community`;
+- never hidden, whatever the rules say: `primary_key`, `partition_key`,
+  `sort_key`, `key_id`, `public_key` (plain identifiers that end in a key
+  word; the list is `_PLAIN_KEY_NAMES`, tested in
+  `test_secret_name_new_fields.py`).
 
 Names are read in snake, camel and kebab case.
 Numbers, booleans and `null` stay, except in the trace scrub: there a number

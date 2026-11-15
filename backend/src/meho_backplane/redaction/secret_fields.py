@@ -164,6 +164,12 @@ def _is_secret_name(name: str) -> bool:
     return is_secret_param_name(name)
 
 
+def _is_snmp_community(node: Mapping[Any, Any], key: Any) -> bool:
+    from meho_backplane.broadcast.events import is_snmp_community_key
+
+    return is_snmp_community_key(node, key)
+
+
 def _is_secret_pair(node: Mapping[Any, Any]) -> bool:
     from meho_backplane.broadcast.events import is_secret_name_value_pair
 
@@ -462,7 +468,11 @@ def scrub_secret_fields(node: Any, *, hide_numbers: bool = False) -> Any:
         return {
             key: (
                 SECRET_FIELD_MARKER
-                if (_is_secret_name(str(key)) or (hide_pair_value and key == "value"))
+                if (
+                    _is_secret_name(str(key))
+                    or _is_snmp_community(node, key)
+                    or (hide_pair_value and key == "value")
+                )
                 and _can_hold_secret(value, hide_numbers)
                 else scrub_secret_fields(value, hide_numbers=hide_numbers)
             )

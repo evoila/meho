@@ -1005,6 +1005,8 @@ _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("secret", "id"),
         ("secret", "value"),
         ("secret", "data"),
+        ("pass", "phrase"),
+        ("pass", "phrases"),
     }
 )
 
@@ -1024,7 +1026,20 @@ _SECRET_NAME_FINAL_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("preshared", "key"),
         ("connection", "string"),
         ("connection", "strings"),
+        ("authentication", "key"),
+        ("privacy", "key"),
+        ("store", "key"),
+        ("application", "key"),
+        ("snmp", "community"),
     }
+)
+
+#: Names that end in a key word but are plain identifiers, never secrets,
+#: written as snake_case. A name here is not hidden, whatever the rules
+#: above say. The check runs first, so a later rule cannot hide one by
+#: accident.
+_PLAIN_KEY_NAMES: Final[frozenset[str]] = frozenset(
+    {"primary_key", "partition_key", "sort_key", "key_id", "public_key"}
 )
 
 #: Replacement value for a secret-named param. Mirrors the Tier-1
@@ -1046,9 +1061,10 @@ def _is_secret_param_name(name: str) -> bool:
     agree on what "secret-bearing" means.
     """
     flat = name.replace("-", "_").replace(".", "_")
-    return _tokens_are_secret(_CAMEL_BOUNDARY.sub("_", flat).lower()) or _tokens_are_secret(
-        flat.lower()
-    )
+    split = _CAMEL_BOUNDARY.sub("_", flat).lower()
+    if split in _PLAIN_KEY_NAMES:
+        return False
+    return _tokens_are_secret(split) or _tokens_are_secret(flat.lower())
 
 
 def _tokens_are_secret(normalised: str) -> bool:
@@ -1105,6 +1121,28 @@ def is_secret_name_value_pair(
         and isinstance(name, str)
         and name not in plain_names
         and _is_secret_param_name(name)
+    )
+
+
+def is_snmp_community_key(node: Mapping[Any, Any], key: Any) -> bool:
+    """True when *key* is a bare ``community`` next to an SNMP field in *node*.
+
+    An SNMP community string is a shared password, but ``community`` alone
+    is also a plain word elsewhere (a social group). So it is hidden only
+    when a sibling name has the token ``snmp`` (``snmp_version``,
+    ``snmpv3_user``, ``SnmpPort``). ``snmp_community`` needs no sibling:
+    the name rule hides it. Every walk that hides secret-named values asks
+    this next to the name rule.
+    """
+    if not (isinstance(key, str) and key.lower() == "community"):
+        return False
+    return any(
+        isinstance(other, str)
+        and any(
+            token.startswith("snmp")
+            for token in _CAMEL_BOUNDARY.sub("_", other).lower().replace("-", "_").split("_")
+        )
+        for other in node
     )
 
 
@@ -1180,7 +1218,11 @@ def _scrub_secret_named_keys(
             if name in plain_names:
                 scrubbed[name] = value
                 continue
-            secret_named = _is_secret_param_name(name) or (hide_pair_value and name == "value")
+            secret_named = (
+                _is_secret_param_name(name)
+                or is_snmp_community_key(node, name)
+                or (hide_pair_value and name == "value")
+            )
             if secret_named and _is_secret_value(value, hide_numbers):
                 scrubbed[name] = _REDACTED_PARAM
                 found = True

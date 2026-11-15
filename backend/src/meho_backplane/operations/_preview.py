@@ -86,6 +86,7 @@ from meho_backplane.broadcast.events import (
     classify_op,
     is_secret_name_value_pair,
     is_secret_param_name,
+    is_snmp_community_key,
 )
 from meho_backplane.redaction import apply_connector_boundary_redaction, get_default_policy, redact
 
@@ -253,7 +254,11 @@ def _scrub_secret_param_keys(value: Any) -> Any:
             key: (
                 _PARAM_REDACTED
                 if isinstance(key, str)
-                and (is_secret_param_name(key) or (hide_pair_value and key == "value"))
+                and (
+                    is_secret_param_name(key)
+                    or is_snmp_community_key(value, key)
+                    or (hide_pair_value and key == "value")
+                )
                 and isinstance(item, (str, Mapping, Sequence))
                 else _scrub_secret_param_keys(item)
             )

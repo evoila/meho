@@ -125,7 +125,8 @@ def _insert_target(url: str, tenant_id: str, name: str) -> str:
                         "INSERT INTO targets (id, tenant_id, name, aliases, product, host,"
                         " auth_model, vpn_required, verify_tls, extras, created_at, updated_at)"
                         " VALUES (:id, :tenant_id, :name, ARRAY[]::text[], 'kubernetes',"
-                        " 'k8s.example.test', 'shared_service_account', false, true, '{}'::jsonb, now(), now())"
+                        " 'k8s.example.test', 'shared_service_account', false, true, '{}'::jsonb,"
+                        " now(), now())"
                     ),
                     {"id": uuid.UUID(target_id), "tenant_id": uuid.UUID(tenant_id), "name": name},
                 )

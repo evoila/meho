@@ -1538,6 +1538,90 @@ async def test_etcd_snapshot_list_never_leaks_credentials(
         assert canary not in caplog.text
 
 
+_SUDO_RUN = "meho_backplane.connectors.rke2.ops_snapshot.run_remote_bash_with_sudo"
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_list_non_root_login_runs_guard_and_list_under_sudo() -> None:
+    """A normal-user login: guard says needs-root, then both commands use sudo."""
+    connector = Rke2SshConnector()
+    with (
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+        patch.object(connector, "_resolve_secret", new_callable=AsyncMock) as mock_secret,
+        patch(_SUDO_RUN, new_callable=AsyncMock) as mock_sudo,
+    ):
+        mock_cmd.return_value = _proc(stdout="needs-root\n")
+        mock_secret.return_value = {"username": "ops", "sudo_password": "made-up-pw"}
+        mock_sudo.side_effect = [_proc(stdout="ok\n"), _proc(stdout=_LIST_TABLE_OK)]
+        result = await connector.etcd_snapshot_list(_TARGET, {})
+    assert len(result["snapshots"]) == 3
+    # Only the id check ran plain; the guard and the list ran under sudo.
+    mock_cmd.assert_awaited_once()
+    scripts = [call.args[2] for call in mock_sudo.await_args_list]
+    assert "datastore-endpoint" in scripts[0]
+    assert scripts[1] == "/var/lib/rancher/rke2/bin/rke2 etcd-snapshot list"
+    assert all(c.kwargs["sudo_password"] == "made-up-pw" for c in mock_sudo.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_save_non_root_login_runs_under_sudo_falls_back_to_password() -> None:
+    connector = Rke2SshConnector()
+    with (
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+        patch.object(connector, "_resolve_secret", new_callable=AsyncMock) as mock_secret,
+        patch(_SUDO_RUN, new_callable=AsyncMock) as mock_sudo,
+    ):
+        mock_cmd.return_value = _proc(stdout="needs-root\n")
+        mock_secret.return_value = {"username": "ops", "password": "made-up-pw"}
+        mock_sudo.side_effect = [_proc(stdout="ok\n"), _proc(stderr=_SAVE_LOG_OK)]
+        result = await connector.etcd_snapshot_save(_TARGET, {})
+    assert result["snapshot_name"] == "on-demand-rke2-node-1754907117"
+    assert mock_sudo.await_args_list[1].args[2].endswith("etcd-snapshot save")
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_non_root_login_without_password_says_needs_root() -> None:
+    """No sudo password: a clear needs-root error, not "not an embedded-etcd server"."""
+    connector = Rke2SshConnector()
+    for op in (connector.etcd_snapshot_list, connector.etcd_snapshot_save):
+        with (
+            patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+            patch.object(connector, "_resolve_secret", new_callable=AsyncMock) as mock_secret,
+            patch(_SUDO_RUN, new_callable=AsyncMock) as mock_sudo,
+        ):
+            mock_cmd.return_value = _proc(stdout="needs-root\n")
+            mock_secret.return_value = {"username": "ops"}
+            with pytest.raises(Rke2SnapshotPreconditionError, match="needs root") as exc:
+                await op(_TARGET, {})
+        assert "embedded-etcd" not in str(exc.value)
+        mock_sudo.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_sudo_failure_is_an_error_not_a_verdict() -> None:
+    """A failed sudo (wrong password) is a guard failure, never "no etcd"."""
+    from meho_backplane.connectors.rke2.ops_snapshot import Rke2SnapshotError
+
+    connector = Rke2SshConnector()
+    with (
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+        patch.object(connector, "_resolve_secret", new_callable=AsyncMock) as mock_secret,
+        patch(_SUDO_RUN, new_callable=AsyncMock) as mock_sudo,
+    ):
+        mock_cmd.return_value = _proc(stdout="needs-root\n")
+        mock_secret.return_value = {"password": "made-up-pw"}
+        mock_sudo.return_value = _proc(stderr="sudo: incorrect password attempt\n", exit_status=1)
+        with pytest.raises(Rke2SnapshotError, match="guard failed to run"):
+            await connector.etcd_snapshot_list(_TARGET, {})
+    mock_sudo.assert_awaited_once()
+
+
+def test_snapshot_guard_script_checks_for_root_first() -> None:
+    from meho_backplane.connectors.rke2.ops_snapshot import _GUARD_SCRIPT
+
+    assert _GUARD_SCRIPT.startswith('if [ "$(id -u)" != 0 ]; then echo needs-root;')
+
+
 # ===========================================================================
 # rke2.token.rotate write op (#2429)
 # ===========================================================================
@@ -1727,7 +1811,7 @@ async def test_token_rotate_vault_write_failure_is_honest_no_token() -> None:
 
 
 def test_token_rotate_keeps_tokens_off_argv() -> None:
-    """AC (S12 / meho-internal#300): neither token reaches the rke2 argv.
+    """AC (S12): neither token reaches the rke2 argv.
 
     The OLD token rides the ``RKE2_TOKEN`` env (the upstream ``EnvVar`` backing
     for ``--token``); the NEW token is minted node-side by ``rke2`` itself

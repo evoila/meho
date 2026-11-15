@@ -51,8 +51,8 @@ func newConfigShowCmd() *cobra.Command {
 			"sub-dict.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho holodeck config show --target holorouter-hetzner-dc\n" +
-			"  meho holodeck config show --target holorouter-hetzner-dc --json | jq .result.config",
+		Example: "  meho holodeck config show --target my-router\n" +
+			"  meho holodeck config show --target my-router --json | jq .result.config",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

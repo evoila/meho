@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Real-Postgres concurrency check for transactional approval transitions (F12 / #274).
+"""Real-Postgres concurrency check for transactional approval transitions (F12).
 
-Security review finding F12 (meho-internal#274). The approval decision paths
+Security review finding F12. The approval decision paths
 (approve / reject) load the row ``SELECT ... FOR UPDATE`` and the expiry sweep
 uses ``FOR UPDATE SKIP LOCKED``, so a competing approve / reject / expiry on
 one row serialises on the row lock and yields exactly **one** winning

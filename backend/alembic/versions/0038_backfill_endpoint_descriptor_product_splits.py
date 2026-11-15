@@ -21,7 +21,7 @@ spelling, and every dispatch probe (``connector_exists``,
 ``search_operations``, ``list_operation_groups``) keys on the short,
 parser-derived product -- the pre-existing rows are invisible, the
 catalog reports ``registered, 0 ops``, and the operations are
-non-dispatchable (claude-rdc-hetzner-dc v0.14.0 cycle-10 finding
+non-dispatchable (a consumer's v0.14.0 cycle-10 finding
 CI-3). This migration is the one-shot data backfill that reconciles
 those orphaned rows.
 

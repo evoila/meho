@@ -182,7 +182,7 @@ def _make_operator(
 ) -> Operator:
     # Defaults to a USER (human) principal: deciding a parked op — approve /
     # reject / decide / expire — is a human-only action on every transport
-    # (v0.1-spec §7, meho-internal#289), so ``_check_reviewer_role`` now
+    # (v0.1-spec §7), so ``_check_reviewer_role`` now
     # refuses a machine ``principal_kind`` (agent / service / runner). These
     # service-level tests exercise the reviewer path, so the default reviewer
     # must be human; a test modelling an agent *parker* passes

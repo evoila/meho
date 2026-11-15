@@ -13,7 +13,7 @@ G3-G9 Goal depends on:
 
 * A new ``tenant`` table (id UUID PK, slug TEXT UNIQUE NOT NULL,
   name TEXT NOT NULL, created_at timestamptz NOT NULL DEFAULT now()).
-  ``slug`` is what operators see (``rdc-internal``, ``customer-a``);
+  ``slug`` is what operators see (``tenant-a``, ``customer-a``);
   ``id`` is the FK keystone every per-tenant feature will join on.
 * A new ``tenant_id uuid`` column on ``audit_log``, **nullable in
   v0.2 by design**. Every authenticated request post-G0.1-T3 will

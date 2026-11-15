@@ -330,6 +330,41 @@ async def test_call_of_another_run_or_without_run_waits() -> None:
 
 
 @pytest.mark.asyncio
+async def test_non_ascii_run_ref_in_body_matches_same_id_sent_as_utf8_header() -> None:
+    """An approval for ``Zadanie-Łódź`` covers a call whose UTF-8 header says the same.
+
+    The approval takes the id from a body field. A call sends it in the
+    ``Meho-Work-Ref`` header as UTF-8 bytes; the audit middleware turns
+    those bytes back into the same text, so the approval matches. Another
+    id does not match.
+    """
+    from meho_backplane.audit import _extract_work_ref
+
+    ticket = "Zadanie-Łódź"
+    service = RunApprovalService()
+    read = await service.request(
+        _operator(),
+        RunApprovalCreate(
+            work_ref=ticket,
+            entries=[RunApprovalEntry(connector_id=_CONNECTOR, op_id=_WRITE_OP)],
+            reason="build one VM",
+        ),
+    )
+    await service.approve(_person(), read.id)
+
+    for header_bytes, expected in (
+        (ticket.encode(), PermissionVerdict.AUTO_EXECUTE),
+        ("Zadanie-Łódź-2".encode(), PermissionVerdict.NEEDS_APPROVAL),
+    ):
+        bound = _extract_work_ref({"headers": [(b"meho-work-ref", header_bytes)]})
+        token = work_ref_var.set(bound)
+        try:
+            assert (await _verdict(None, decide_only=True))[0] is expected
+        finally:
+            work_ref_var.reset(token)
+
+
+@pytest.mark.asyncio
 async def test_other_principal_with_same_run_ref_waits(run_ref: str) -> None:
     await _approved(RunApprovalEntry(connector_id=_CONNECTOR, op_id=_WRITE_OP))
 

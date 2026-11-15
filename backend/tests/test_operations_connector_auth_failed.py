@@ -153,7 +153,7 @@ class _FakeTarget:
         product: str = "vcfops",
         version: str | None = "9",
         name: str = "vrli-lab",
-        host: str = "vrli.lab.internal",
+        host: str = "vrli.example.test",
         port: int = 443,
         auth_model: str | None = "shared_service_account",
     ) -> None:
@@ -182,7 +182,7 @@ def _make_http_status_error(
     exercises the genuine httpx exception shape (``exc.response`` access)
     rather than a hand-faked stand-in.
     """
-    request = httpx.Request("GET", "https://vrli.lab.internal/api/v2/events")
+    request = httpx.Request("GET", "https://vrli.example.test/api/v2/events")
     kwargs: dict[str, Any] = {"headers": headers or {}, "request": request}
     if json_body is not None:
         kwargs["json"] = json_body
@@ -542,7 +542,7 @@ def test_result_connector_auth_failed_shape_401() -> None:
         json_body={"message": "session token invalid or expired"},
     )
     out = result_connector_auth_failed(
-        "GET:/api/v2/events", exc, _FakeTarget(host="vrli.lab.internal"), duration_ms=1.0
+        "GET:/api/v2/events", exc, _FakeTarget(host="vrli.example.test"), duration_ms=1.0
     )
 
     assert out.status == "error"
@@ -550,7 +550,7 @@ def test_result_connector_auth_failed_shape_401() -> None:
     assert out.error is not None
     assert out.error.startswith("connector_auth_failed:")
     # Names the host + the actual status.
-    assert "vrli.lab.internal" in out.error
+    assert "vrli.example.test" in out.error
     assert "401" in out.error
     # Names the likely cause (per-request credential rejected OR auth scheme).
     assert "auth_model" in out.error
@@ -574,7 +574,7 @@ def test_result_connector_auth_failed_shape_401() -> None:
     assert extras["cause"] == "dispatch_401"
     assert extras["http_status"] == 401
     assert extras["target"] == "vrli-lab"
-    assert extras["host"] == "vrli.lab.internal"
+    assert extras["host"] == "vrli.example.test"
     assert extras["secret_ref"] is None
     assert "meho vault kv put" in extras["remediation"]
     # The httpx (dispatch) path has no connector-composed establish message.
@@ -900,7 +900,7 @@ async def test_dispatch_converts_401_to_connector_auth_failed(
         operator=_make_operator(),
         connector_id="vcfops-rest-9",
         op_id="GET:/api/v2/events",
-        target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),
+        target=_FakeTarget(name="vrli-lab", host="vrli.example.test"),
         params={},
     )
 
@@ -909,14 +909,14 @@ async def test_dispatch_converts_401_to_connector_auth_failed(
     assert result.error.startswith("connector_auth_failed:")
     # Host + remediation in the operator-facing message. This connector has no
     # invalidate_session hook -> #2400 ``dispatch_401`` stage (no re-login).
-    assert "vrli.lab.internal" in result.error
+    assert "vrli.example.test" in result.error
     assert "meho vault kv put" in result.error
     assert "meho target credential set" not in result.error
     assert "already re-logged-in" not in result.error
     assert result.extras["cause"] == "dispatch_401"
     assert result.extras["error_code"] == "connector_auth_failed"
     assert result.extras["http_status"] == 401
-    assert result.extras["host"] == "vrli.lab.internal"
+    assert result.extras["host"] == "vrli.example.test"
     # NOT the pre-#1804 flattened shape.
     assert "connector_error" not in result.error
     assert result.extras["error_code"] != "connector_error"
@@ -1024,7 +1024,7 @@ async def test_dispatch_converts_440_to_connector_auth_failed(
         operator=_make_operator(),
         connector_id="vcfops-rest-440-9",
         op_id="GET:/api/v2/events",
-        target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),
+        target=_FakeTarget(name="vrli-lab", host="vrli.example.test"),
         params={},
     )
 
@@ -1071,7 +1071,7 @@ async def test_dispatch_404_falls_through_to_connector_error(
         operator=_make_operator(),
         connector_id="vcfops-rest-404-9",
         op_id="GET:/api/v2/events",
-        target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),
+        target=_FakeTarget(name="vrli-lab", host="vrli.example.test"),
         params={},
     )
 
@@ -1117,7 +1117,7 @@ async def test_dispatch_500_falls_through_to_connector_error(
         operator=_make_operator(),
         connector_id="vcfops-rest-500-9",
         op_id="GET:/api/v2/events",
-        target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),
+        target=_FakeTarget(name="vrli-lab", host="vrli.example.test"),
         params={},
     )
 
@@ -1163,7 +1163,7 @@ async def test_dispatch_403_still_maps_to_connector_http_403(
         operator=_make_operator(),
         connector_id="vcfops-rest-403-9",
         op_id="GET:/api/v2/events",
-        target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),
+        target=_FakeTarget(name="vrli-lab", host="vrli.example.test"),
         params={},
     )
 
@@ -1224,7 +1224,7 @@ async def test_dispatch_440_with_default_profile_falls_through(
         operator=_make_operator(),
         connector_id="vcfops-rest-440-default-profile-9",
         op_id="GET:/api/v2/events",
-        target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),
+        target=_FakeTarget(name="vrli-lab", host="vrli.example.test"),
         params={},
     )
 
@@ -1267,7 +1267,7 @@ async def test_dispatch_440_with_vrli_profile_maps_to_auth_failed(
         operator=_make_operator(),
         connector_id="vcfops-rest-440-vrli-profile-9",
         op_id="GET:/api/v2/events",
-        target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),
+        target=_FakeTarget(name="vrli-lab", host="vrli.example.test"),
         params={},
     )
 
@@ -1311,13 +1311,13 @@ async def test_dispatch_profiled_login_post_401_is_establish_not_after_relogin(
         embedding=stub_embedding_service.encode_one.return_value,
     )
 
-    target = _FakeTarget(name="vrli-lab", host="vrli.lab.internal")
+    target = _FakeTarget(name="vrli-lab", host="vrli.example.test")
     # The real profiled connector keys its session/client cache on the
     # tenant-unique ``(tenant_id, id)`` tuple (the typed ``_Http4xx`` fakes
     # never reach ``target_cache_key`` because they short-circuit
     # ``_request_json``), so the target needs a ``tenant_id``.
     target.tenant_id = _TENANT
-    async with respx.mock(base_url="https://vrli.lab.internal") as mock:
+    async with respx.mock(base_url="https://vrli.example.test") as mock:
         login = mock.post("/api/v2/sessions").respond(401, json={"message": "login refused"})
         result = await dispatch(
             operator=_make_operator(),
@@ -1501,7 +1501,7 @@ async def test_dispatch_recovers_401_via_invalidate_and_retry_once(
         embedding=stub_embedding_service.encode_one.return_value,
     )
 
-    target = _FakeTarget(name="rdc-vcenter", host="vcenter.lab.internal")
+    target = _FakeTarget(name="example-vcenter", host="vcenter.example.test")
     result = await dispatch(
         operator=_make_operator(),
         connector_id="vcfops-rest-recovering-9",
@@ -1556,7 +1556,7 @@ async def test_dispatch_recovers_440_via_invalidate_and_retry_once(
         embedding=stub_embedding_service.encode_one.return_value,
     )
 
-    target = _FakeTarget(name="vrli-lab", host="vrli.lab.internal")
+    target = _FakeTarget(name="vrli-lab", host="vrli.example.test")
     result = await dispatch(
         operator=_make_operator(),
         connector_id="vcfops-rest-recovering-440-9",
@@ -1598,7 +1598,7 @@ async def test_dispatch_recovers_non_idempotent_post_on_401(
         path="/api/v2/events",
     )
 
-    target = _FakeTarget(name="rdc-vcenter", host="vcenter.lab.internal")
+    target = _FakeTarget(name="example-vcenter", host="vcenter.example.test")
     result = await dispatch(
         operator=_make_operator(),
         connector_id="vcfops-rest-recovering-9",
@@ -1637,7 +1637,7 @@ async def test_dispatch_second_auth_failure_resolves_to_auth_failed_no_loop(
         embedding=stub_embedding_service.encode_one.return_value,
     )
 
-    target = _FakeTarget(name="rdc-vcenter", host="vcenter.lab.internal")
+    target = _FakeTarget(name="example-vcenter", host="vcenter.example.test")
     result = await dispatch(
         operator=_make_operator(),
         connector_id="vcfops-rest-persistent-401-9",
@@ -1698,7 +1698,7 @@ async def test_dispatch_5xx_with_hook_is_not_retried(
         embedding=stub_embedding_service.encode_one.return_value,
     )
 
-    target = _FakeTarget(name="rdc-vcenter", host="vcenter.lab.internal")
+    target = _FakeTarget(name="example-vcenter", host="vcenter.example.test")
     result = await dispatch(
         operator=_make_operator(),
         connector_id="vcfops-rest-recovering-500-9",
@@ -1746,7 +1746,7 @@ async def test_dispatch_stateless_connector_without_hook_is_not_retried(
         operator=_make_operator(),
         connector_id="vcfops-rest-9",
         op_id="GET:/api/v2/events",
-        target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),
+        target=_FakeTarget(name="vrli-lab", host="vrli.example.test"),
         params={},
     )
 
@@ -1781,8 +1781,8 @@ async def test_dispatch_recovery_preserves_per_tenant_cache_isolation(
 
     # Two distinct targets (distinct ``.id``) standing in for two tenants'
     # same-named appliance. Each independently fails-once-then-recovers.
-    target_a = _FakeTarget(name="vcenter", host="vcenter.lab.internal")
-    target_b = _FakeTarget(name="vcenter", host="vcenter.lab.internal")
+    target_a = _FakeTarget(name="vcenter", host="vcenter.example.test")
+    target_b = _FakeTarget(name="vcenter", host="vcenter.example.test")
     assert target_a.id != target_b.id
 
     for tgt in (target_a, target_b):

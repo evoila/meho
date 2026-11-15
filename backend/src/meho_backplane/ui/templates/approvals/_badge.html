@@ -18,13 +18,15 @@
   bell.
 
   Context:
-    pending_count -- int: number of pending approval requests for the tenant
+    pending_count -- int: number of pending approval requests for the tenant;
+                     with approver routing on, the ones this person may approve
+    for_you       -- bool: the count is the requests this person may approve
 -#}
 <span data-pending-count="{{ pending_count }}" aria-live="polite">
   {% if pending_count > 0 %}
     <span
       class="badge badge-error badge-xs absolute -top-0.5 -right-0.5 grid min-h-4 min-w-4 place-items-center px-1 font-mono text-[0.6rem] leading-none"
-      aria-label="{{ pending_count }} pending approval request{% if pending_count != 1 %}s{% endif %}"
+      aria-label="{{ pending_count }} pending approval request{% if pending_count != 1 %}s{% endif %}{% if for_you %} for you{% endif %}"
     >{{ pending_count if pending_count < 100 else "99+" }}</span>
   {% endif %}
 </span>

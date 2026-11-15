@@ -91,6 +91,7 @@ and `get_broadcast_client` (see "Left out" below), plus `Target`.
 | Answers | `FingerprintResult`, `ProbeResult`, `OperationResult` | `connectors/schemas.py` | The answers of `fingerprint`, `probe` and `execute`. |
 | Answers | `AuthModel` | `connectors/schemas.py` | How a target logs in. |
 | Errors | `ConnectorUpstreamError` | `connectors/base.py` | The vendor answered with an error status. |
+| Errors | `ConnectorOwnMessage` | `connectors/base.py` | Mark an error type whose message the connector wrote itself. For an operation that sends a secret, MEHO then shows that message instead of hiding it. |
 | Errors | `ConnectorAuthError` | `connectors/_shared/vcf_auth.py` | The vendor refused the credential. |
 | Errors | `CredentialsReadError`, `VaultCredentialsReadError` | `connectors/_shared/credential_backend.py`, `connectors/_shared/vault_creds.py` | MEHO could not read the target's secret. |
 | Errors | `VaultClientError` | `auth/vault.py` | MEHO could not log in to Vault for the caller. |

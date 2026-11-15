@@ -4,7 +4,7 @@
 """Import knowledge pages that the caller sends in the request (#5728).
 
 ``POST /api/v1/kb/import`` calls :func:`import_pages`. The caller is a
-CI job of the team wiki repo (or a tenant admin). It has the pages on
+CI job of the tenant's wiki repo (or a tenant admin). It has the pages on
 its own machine and sends each one as ``{"path", "content"}``. MEHO
 reads no folder and fetches nothing, so it never needs Git credentials.
 

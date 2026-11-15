@@ -202,7 +202,7 @@ def test_search_docs_present_with_strict_collection_schema(
     ``collections`` / ``collection="all"`` satisfies it — T5 #1554),
     ``additionalProperties: false``, product/version demoted to optional,
     ``collections`` added for the cross-collection fan-out, and the
-    MEHO-internal RBAC + capability fields stripped by
+    internal RBAC + capability fields stripped by
     :meth:`ToolDefinition.to_wire`. Tool visibility rides only the base
     ``meho-docs`` capability — the per-collection entitlement is enforced at
     call time, not at list time.

@@ -288,7 +288,7 @@ on/off switch.
 
 Example create payload (derived from
 `examples/r1-tiered-triage/agent.deep-tier-investigator.json`; the read-only
-toolset + no write grants is the diagnose-only posture):
+toolset is the diagnose-only posture):
 
 ```json
 {
@@ -304,8 +304,14 @@ toolset + no write grants is the diagnose-only posture):
 }
 ```
 
-Grant this principal `*.read` / `*.list` auto-execute and any `*.write`
-**needs-approval** (the `examples/r1-tiered-triage/permissions.json` mould).
+Create its agent principal with the starting grant set `read-everything`
+(`meho agent-principal register checks-investigator --grants read-everything`,
+see `agent-permission-grants.md`, "Starting grant sets"). The agent only reads.
+The set gives `auto-execute` on every operation and target, and the risk-level
+ceiling makes anything above `safe` that it tries wait for a person. So it keeps
+working with `AGENT_GRANT_REQUIRED=on`, where an agent with no grant runs
+nothing. The definition then needs no `starting_grants`: its agent already has
+a grant.
 
 ## Diagnose-only contract (the CRUX)
 
@@ -326,8 +332,9 @@ This wiring never executes a change op:
 - `recommended_action` is persisted as memory text only.
 - Any write op the **agent** attempts is not executed by this wiring: the
   policy gate parks it as a durable `ApprovalRequest`
-  (`operations/approval_queue.py`, #817) because the agent principal holds
-  `*.write` grants as needs-approval. Approval + execution is a separate,
+  (`operations/approval_queue.py`, #817), because no agent grant lets an
+  operation above `safe` run at once (the risk-level ceiling in
+  `auth/permissions.py`). Approval + execution is a separate,
   operator-driven step (R2 territory), not this hook.
 
 The topology reads and memory read/write run under a synthetic per-tenant
@@ -438,7 +445,8 @@ principal, so no execution path inherits the role.
   applies to inbound event bodies.
 - Mould: `examples/r1-tiered-triage/workflow.py` (harness-persists rationale,
   briefing builder, render/persist shape), `agent.deep-tier-investigator.json`
-  (definition payload), `permissions.json` (`*.write` needs-approval).
+  (definition payload). Grants: the starting grant set `read-everything`
+  (`agents/grant_sets.py`).
 - Seams: `agent/invocation.py` (`run_scheduled`), `scheduler/loop.py`
   (step 4 caller), `scheduler/credentials.py`, `operations/budget_enforcement.py`,
   `operations/approval_queue.py` (#817), `topology/query.py`.

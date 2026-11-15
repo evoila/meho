@@ -33,6 +33,8 @@ the gap between them: it drives the *spec-ingest* path end to end.
 
 from __future__ import annotations
 
+import gzip
+import json
 from collections.abc import Iterator
 from importlib.resources import files
 from unittest.mock import AsyncMock
@@ -341,8 +343,10 @@ async def _stub_loader(_target: HetznerRobotTargetLike, _operator: Operator) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("gzip_body", [False, True], ids=["plain", "gzip"])
 async def test_ingested_read_op_returns_non_empty_via_call_operation(
     stub_embedding_service: AsyncMock,
+    gzip_body: bool,
 ) -> None:
     """An ingested read op returns non-empty mocked data through ``call_operation``.
 
@@ -356,6 +360,10 @@ async def test_ingested_read_op_returns_non_empty_via_call_operation(
     Runs against the autouse-migrated SQLite engine (same as the argocd /
     nsx / keycloak E2E dispatch tests); the connector's httpx client is
     routed to a respx-mocked Webservice, so no real network egress fires.
+
+    The ``gzip`` case answers with a ``Content-Encoding: gzip`` body, so the
+    per-PR lane reads a real compressed vendor response through the whole
+    dispatch path. A body decoded twice would fail here (#3521).
     """
     operator = _make_operator()
     reset_dispatcher_caches()
@@ -419,7 +427,14 @@ async def test_ingested_read_op_returns_non_empty_via_call_operation(
             assert_all_called=False,
             assert_all_mocked=False,
         ) as mock:
-            mock.get("/server").respond(200, json=servers)
+            if gzip_body:
+                mock.get("/server").respond(
+                    200,
+                    content=gzip.compress(json.dumps(servers).encode()),
+                    headers={"content-type": "application/json", "content-encoding": "gzip"},
+                )
+            else:
+                mock.get("/server").respond(200, json=servers)
             result = await call_operation(
                 operator,
                 {

@@ -55,8 +55,14 @@ Use your own names.
 ## Step 1 — Register the agent's identity
 
 ```bash
-meho agent-principal register pod-reader
+meho agent-principal register pod-reader --grants none
 ```
+
+`--grants` picks the agent's first grants. `none` writes no grant: this
+guide adds the grants by hand in Step 5. The other choices are in
+[Starting grants](#starting-grants-pick-them-when-you-create-the-agent).
+When your MEHO needs a pick and you leave `--grants` out, the CLI creates
+nothing and prints the three choices.
 
 The output looks like this:
 
@@ -67,6 +73,7 @@ registered agent principal "pod-reader"
   owner_sub:           <your sub>
   revoked:             false
   created_at:          2026-10-18T09:00:00Z
+grants of agent:pod-reader: none
 ```
 
 Two values matter:
@@ -251,7 +258,8 @@ meho agent create pod-reader \
   --model-tier standard \
   --turn-budget 20 \
   --system-prompt "You are pod-reader. You only read. You never change anything. Use the connector k8s-1.x and the target cluster-a. Find the operation with search_operations, then run it with call_operation. Answer in short plain sentences. Say which operation you used." \
-  --toolset @pod-reader-toolset.json
+  --toolset @pod-reader-toolset.json \
+  --grants none
 ```
 
 The flags:
@@ -265,6 +273,7 @@ The flags:
 | `--system-prompt` | yes | The standing rules from Step 2. |
 | `--toolset` | no | The JSON from Step 3. Write it inline, as `@<file>`, or as `@-` to read it from stdin (for example from a pipe). Default: `{}`. |
 | `--disabled` | no | Create the definition switched off. Nobody can run it until you switch it on. |
+| `--grants` | only when MEHO asks | The agent's first grants, as in Step 1. MEHO asks only when the switch `AGENT_GRANT_REQUIRED` is `observe` or `on` and the agent has no grant yet. `pod-reader` still has none, so this guide passes `--grants none` again. |
 
 Check the result:
 
@@ -291,6 +300,19 @@ no grant matches.
 
 ### What the agent may do with no grants
 
+The server setting `AGENT_GRANT_REQUIRED` decides what an agent may do
+when none of its grants matches a call. An admin of the MEHO install sets
+it (on Kubernetes with `extraEnv` in the chart values). It has three
+states:
+
+| `AGENT_GRANT_REQUIRED` | An agent with no matching grant |
+|---|---|
+| `off` (the default) | Gets the safety-level default in the table below. |
+| `on` | Runs nothing. Every call is refused, also a `safe` one. The error code is `agent_no_grant`. The error names the agent and the operation, and says how an admin adds a grant. |
+| `observe` | The same as `off`. MEHO also writes one log line `agent_no_grant_would_deny` for each call that `on` would refuse. Use it to find agents that still need a grant before you turn the switch `on`. |
+
+With the switch `off` or `observe`:
+
 | Safety level | With no grant |
 |---|---|
 | `safe` (reads) | Runs without approval. |
@@ -298,9 +320,98 @@ no grant matches.
 | `dangerous` | Waits until a person approves. |
 | `destructive` | Waits until a person approves. The agent must preview the operation first. |
 
-So a new agent can already run **every `safe` operation** on every
-connector and target, with no grant at all. To make it truly read-only
-on one thing, you add grants. See the recipe below.
+So with the switch `off`, a new agent can already run **every `safe`
+operation** on every connector and target, with no grant at all. With
+the switch `on`, it can run nothing until it has a grant.
+
+The switch changes only agents. People (in the web interface or with a
+token), service accounts and runners keep their rules in every state.
+The discovery tools stay open for an agent in every state (see
+[How a grant works](#how-a-grant-works)), so a new agent can look around
+and see what it could ask for.
+
+### Starting grants: pick them when you create the agent
+
+When you register an agent (`meho agent-principal register`) or create a
+definition (`meho agent create`), you pick its first grants with
+`--grants`. The console forms show the same three choices.
+
+| `--grants` | What MEHO writes | What the agent can do |
+|---|---|---|
+| `none` | No grant. | With the switch `on`: nothing, until an admin adds a grant. |
+| `read-everything` | One grant: every operation, every target, `auto-execute`. | `safe` operations run at once on every target in this tenant, also on targets added later. Everything else waits for a person's approval. |
+| `read-targets` | One grant for each target you name with `--target <name>`: every operation, that target, `auto-execute`. | The same, but only on the targets you named. With the switch `on`, the agent can run nothing on other targets. |
+
+Good to know:
+
+- **When MEHO asks.** With the switch `observe` or `on`, `register`
+  needs a pick. A definition needs a pick only when its agent has no
+  grant yet. With the switch `off`, you may leave `--grants` out.
+- **`none` and `read-targets` limit the agent only with the switch
+  `on`.** With `off` or `observe`, the agent can still run every `safe`
+  operation on every target, as in the table above.
+- **No grant lets a change run alone.** `read-everything` and
+  `read-targets` give `auto-execute`, but the ceiling in
+  [How a grant works](#how-a-grant-works) still makes every `caution`,
+  `dangerous` and `destructive` call wait for a person.
+- **The grants are normal grants.** They show in
+  `meho agent grant list`, and you remove them with
+  `meho agent grant revoke` like any other grant. The audit row of the
+  creation names the set you picked.
+- **Agents that existed before the upgrade** got one "read everything"
+  grant, marked `meho:upgrade-read-everything` in the `CREATED_BY`
+  column. So they keep working when the switch goes `on`. Remove it to
+  narrow such an agent. See
+  [Upgrades](../install/upgrades.md#version-specific-notes).
+
+### Example: an agent that reads two systems
+
+Goal: `report-reader` reads `cluster-a` and `cluster-b`, and nothing
+else. This example assumes the switch is `on`.
+
+1. Register the agent, and pick read access to the two targets:
+
+    ```bash
+    meho agent-principal register report-reader \
+      --grants read-targets --target cluster-a --target cluster-b
+    ```
+
+    The output ends with the grants MEHO wrote, one for each target:
+
+    ```text
+    grants of agent:report-reader:
+      <grant-id-1>  op=* target=<cluster-a-uuid> verdict=auto-execute
+      <grant-id-2>  op=* target=<cluster-b-uuid> verdict=auto-execute
+    ```
+
+    A name that matches no target, or more than one, stops the command,
+    and MEHO creates nothing.
+
+2. Check the grants at any time:
+
+    ```bash
+    meho agent grant list --principal agent:report-reader --json | \
+      jq '.grants[] | {op_pattern, target_scope, verdict}'
+    ```
+
+3. Create the definition as in [Step 4](#step-4-create-the-definition),
+   with `--identity-ref agent:report-reader`. It needs no `--grants`:
+   the agent already has grants.
+
+4. What happens when the agent calls operations:
+
+    | The agent calls | Result |
+    |---|---|
+    | `k8s.pod.list` (`safe`) on `cluster-a` | Runs at once. |
+    | `k8s.pod.list` (`safe`) on `cluster-c` | Refused with `agent_no_grant`. No grant covers `cluster-c`. |
+    | `k8s.scale` (`caution`) on `cluster-b` | Waits until a person approves. A grant never lets a change run alone. |
+
+To give the agent a third target later, add one more grant:
+
+```bash
+meho agent grant create --principal agent:report-reader \
+  --op '*' --target <cluster-c-uuid> --verdict auto-execute
+```
 
 ### Who the grants apply to
 
@@ -318,7 +429,9 @@ to every run of the agent:
 
 The safety-level table above applies to both kinds of run. With no
 grant, a `caution`, `dangerous` or `destructive` operation waits until a
-person approves, even when you may run it yourself.
+person approves, even when you may run it yourself. With the switch
+`AGENT_GRANT_REQUIRED` `on`, a call with no grant is refused in both
+kinds of run, also when you may run it yourself.
 See [Approvals and break-glass](approvals-and-break-glass.md) for which
 calls wait for a second person.
 
@@ -346,7 +459,8 @@ When MEHO checks a call, it follows these rules:
 3. If two matching grants are equally specific, the stricter verdict
    wins.
 4. If no grant matches, the safety-level default from the table above
-   applies.
+   applies. With the switch `AGENT_GRANT_REQUIRED` `on`, the call is
+   refused instead (`agent_no_grant`).
 5. Last, MEHO applies a **ceiling**. A grant can never make an operation
    more open than this:
 
@@ -367,8 +481,9 @@ discovery tools (`meho_connector_list`, `list_operation_groups`,
 
 ### Recipe: a read-only agent for one operation on one target
 
-Goal: `pod-reader` may run `k8s.pod.list` on `cluster-a`, without
-approval. Everything else is denied.
+Use this recipe to allow one operation only. Goal: `pod-reader` may run
+`k8s.pod.list` on `cluster-a`, without approval. Everything else is
+denied.
 
 First, find the target's UUID. It is the `id:` line:
 
@@ -396,6 +511,10 @@ Why this works:
   `deny`.
 - Every other operation matches only `*`. The verdict is `deny`, even
   for `safe` reads.
+
+With the switch `on`, the second grant alone would be enough: no grant
+already means "refused". Keep the `deny` grant anyway. It keeps the agent
+read-only on one thing in every switch state.
 
 Check the grants:
 
@@ -521,8 +640,10 @@ Before the first scheduled run, two things must be in place:
   [scheduler guide](scheduler.md) explains where to store it. Without
   it, the scheduler skips the fire and shows
   `last_skip_reason=credentials_unresolved`.
-- The grants from Step 5 must exist. Otherwise the agent runs with the
-  safety-level defaults, which allow every `safe` operation.
+- The grants from Step 5 must exist. Otherwise, with the switch `off`,
+  the agent runs with the safety-level defaults, which allow every `safe`
+  operation. With the switch `on`, every call is refused with
+  `agent_no_grant`.
 
 After the time passes, find the run and check it:
 
@@ -638,6 +759,9 @@ Every change of a cap writes an audit row (`agent.budget.set` and
 | The agent says it has no tool for something | The tool is not in `meta_tools`, the name is misspelled, or hosted agents do not have that tool. | Check the tool table in Step 3. |
 | The agent says a connector is not allowed | The connector is not in the `connectors` list. | Add the connector id to `connectors`, or remove the list. |
 | A call is `denied` | A grant or the safety level denies it. | Check `meho agent grant list --principal agent:<name>` and the operation's `safety_level`. |
+| A call is refused with `agent_no_grant` | The switch `AGENT_GRANT_REQUIRED` is `on`, and no grant of the agent covers this operation on this target. | Add a grant with `meho agent grant create --principal agent:<name>`. |
+| `agent-principal register` or `agent create` prints the three `--grants` choices and creates nothing | The switch is `observe` or `on`, and you did not pick the agent's first grants. | Run the command again with `--grants none`, `--grants read-everything`, or `--grants read-targets --target <name>`. |
+| An agent's multi-step call that waited for approval is refused when a person runs it | The call started to wait while the switch was `off`, and the switch is `on` now. MEHO checks each step of such a call again before it runs, and it cannot check a call that started to wait while the switch was `off`. | The agent asks again. Its new request is checked against its grants. |
 | A run you started by hand is denied an operation that you may run | The agent's grants deny it. In a run by hand, the stricter answer wins. | Add a grant with `meho agent grant create --principal agent:<name>`, or run the operation yourself. |
 | The run fails with `turn budget exhausted` | The agent used all its turns. | Raise `--turn-budget` with `meho agent edit`, or make the task smaller. |
 | A run is refused with `budget_exceeded` | The agent's login has reached a spend cap. | Run `meho agent budget show agent:<name>`, then raise the cap with `meho agent budget set` or remove it with `meho agent budget clear`. |

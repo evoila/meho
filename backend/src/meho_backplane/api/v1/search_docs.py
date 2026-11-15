@@ -212,7 +212,7 @@ class SearchDocsResponse(BaseModel):
     relevance-judged: a query that retrieves topically-irrelevant chunks at
     high scores still reports ``grounded=True``. Distinguishing that case
     needs a calibrated per-collection score floor, deferred as the Option-A
-    follow-on (evoila-bosnia/meho-internal#133); it will refine
+    follow-on; it will refine
     ``retrieval_is_grounded`` in one place for both surfaces.
     """
 

@@ -128,6 +128,13 @@ target registration) is documented in
   the shared `auth.vault` seams. `execute` is a thin shim that
   delegates to the G0.6 dispatcher (parameter validation, policy gate,
   audit, broadcast, JSONFlux) so pre-G0.6 callers keep working.
+  `fingerprint` also tells HashiCorp Vault from OpenBao, which share
+  this connector and the same API. An OpenBao health answer has no
+  `enterprise` key (every HashiCorp answer has one) and its version is
+  2.0 or higher. Then the fingerprint says vendor and product
+  `openbao`; otherwise `hashicorp` and `vault`. The connector still
+  declares no version range, so a target of either product resolves to
+  it as before.
 - **Operator-aware JWT (G0.8-T3 #629)** — the operator's bearer token
   is request-scoped state on the `Operator` the dispatcher threads to
   handlers whose signature names an `operator` parameter

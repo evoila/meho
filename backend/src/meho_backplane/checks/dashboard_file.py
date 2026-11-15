@@ -328,14 +328,17 @@ def _update_sensor(row: Sensor, body: SensorCreate, now: datetime) -> None:
     """Write the file's settings onto *row* and make the Sensor due at once.
 
     Same as a Sensor edit: the waiting state change measured with the old
-    settings is dropped, and a Sensor the runner paused is active again.
+    settings is dropped, and a Sensor the runner paused for a broken cadence
+    is active again. A Sensor an operator paused, or the runner paused after
+    refused logins, stays paused until it is resumed.
     """
     for field, value in _wanted_sensor(body).items():
         setattr(row, field, value)
     row.pending_state = None
     row.pending_count = 0
-    row.status = SensorStatus.ACTIVE.value
-    row.status_reason = None
+    if (row.status_reason or "").startswith("invalid_cadence"):
+        row.status = SensorStatus.ACTIVE.value
+        row.status_reason = None
     row.next_fire_at = now
 
 

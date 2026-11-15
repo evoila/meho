@@ -59,6 +59,7 @@ __all__ = [
     "_EVENTS_CONFIG_PATH",
     "_IDENTITY_PROVIDERS_PATH",
     "_REQUIRED_ACTIONS_PATH",
+    "_USER_BRUTE_FORCE_PATH",
     "_USER_CREDENTIALS_PATH",
     "_USER_CREDENTIAL_PATH",
     "_USER_ROLE_MAPPINGS_CLIENT_PATH",
@@ -85,6 +86,7 @@ _USER_RESET_PASSWORD_PATH = "/admin/realms/{realm}/users/{user-id}/reset-passwor
 _USER_LOGOUT_PATH = "/admin/realms/{realm}/users/{user-id}/logout"
 _USER_SESSIONS_PATH = "/admin/realms/{realm}/users/{user-id}/sessions"
 _USER_CREDENTIALS_PATH = "/admin/realms/{realm}/users/{user-id}/credentials"
+_USER_BRUTE_FORCE_PATH = "/admin/realms/{realm}/attack-detection/brute-force/users/{user-id}"
 # Client role writes: a user's role mappings on one client (the spec names the
 # client placeholder ``{client-id}`` here, though it holds the client UUID), and
 # the role of one client.

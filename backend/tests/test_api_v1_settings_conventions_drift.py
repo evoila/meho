@@ -3,7 +3,7 @@
 
 """``POST /api/v1/settings/conventions-drift`` and its login.
 
-The team wiki's CI job sends the team rules as a settings file that holds
+The tenant wiki's CI job sends the team rules as a settings file that holds
 only conventions. MEHO answers what differs from the tenant's operational
 conventions: added, changed, and only in MEHO. Covers each kind of drift, that
 the check saves nothing, the mistakes it reports, and that the
@@ -272,7 +272,7 @@ async def test_the_check_saves_nothing_and_writes_one_read_audit_row(client: Tes
 @pytest.mark.parametrize(
     ("content", "expected"),
     [
-        (_file(_RULES, policies={"announce_gate_enabled": True}), "spec.tenants[0].policies"),
+        (_file(_RULES, policies={"run_approval_target_kinds": True}), "spec.tenants[0].policies"),
         (_file(_RULES, targets=[]), "spec.tenants[0].targets"),
         (_file(None), "spec.tenants[0].conventions` is required"),
         (_file([{**_RULES[0], "kind": "reference"}]), "conventions[0].kind` must be"),

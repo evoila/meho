@@ -5,8 +5,7 @@
 # build-download.sh: build meho-linux-<version>-amd64.tar, the one download
 # of install form 2. It holds install.sh, RKE2, the chart, every image,
 # helm, the meho CLI and the licence texts, so the install needs no
-# internet. The layout is the one of the form-2 design, section 4, in
-# meho-internal docs/design/2026-10-10-install-forms/.
+# internet. The layout is the one of the form-2 design, section 4.
 #
 # The release workflow .github/workflows/linux-download.yml runs it, then
 # check-download.sh. See docs/codebase/linux-server-download.md.

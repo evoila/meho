@@ -10,7 +10,9 @@
   approved the import (the ``policy.apply`` operation,
   :mod:`meho_backplane.connectors.policy.apply`). It plans again first:
   when the stored policy changed after the plan, nothing is written.
-* :func:`export_policy` writes the stored policy as a file.
+* :func:`export_policy` writes the stored policy as a file. A tenant
+  entry that tries to set back an install-wide "always wait" or risk
+  level gets a comment that says which part has no effect.
 * :func:`list_history` returns the imported files, newest first.
 
 The import replaces the whole policy of its scope (a tenant, or the
@@ -21,6 +23,7 @@ revision is written.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -32,6 +35,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import PolicyRevision, TenantPolicy
+from meho_backplane.policy.bindings import routing_enabled, shipped_binding_documents
 from meho_backplane.policy.classification import (
     Classification,
     ClassificationEntry,
@@ -39,6 +43,7 @@ from meho_backplane.policy.classification import (
     Taxonomy,
     classify,
     entries_from_document,
+    install_floor_texts,
     taxonomy_from_documents,
 )
 from meho_backplane.policy.document import (
@@ -49,8 +54,10 @@ from meho_backplane.policy.document import (
     normalise_document,
     parse_policy_file,
 )
+from meho_backplane.policy.routing import category_routing_warnings
 from meho_backplane.policy.store import _lock_tenant_policy, _override_entries_for
 from meho_backplane.policy.validate import KnownOp, check_document, load_known_ops
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "KEEP_REVISIONS",
@@ -144,14 +151,26 @@ def _values(result: Classification) -> tuple[Any, ...]:
     )
 
 
-def _match_key(entry: dict[str, Any]) -> str:
-    match = entry.get("match") or {}
-    return "|".join(f"{k}={match.get(k) or ''}" for k in ("connector", "group", "op"))
+def _match_key(entry: Any) -> str:
+    """The key of *entry* in the diff: two different matches never share one.
+
+    Each part is quoted (JSON), so no pattern text can look like another
+    part. A stored entry that is not a map, or whose ``match`` is not a
+    map, keys on its whole text: the import shows it as removed.
+    """
+    match = entry.get("match") if isinstance(entry, dict) else None
+    if not isinstance(match, dict):
+        return json.dumps(["not-valid", entry], sort_keys=True, default=str)
+    return json.dumps([match.get(k) or None for k in ("connector", "group", "op")])
 
 
-def _counts(
-    raw: dict[str, Any], scope: Scope, ops: Sequence[KnownOp], changed: set[int]
-) -> dict[str, Any]:
+def _raw_entries(document: dict[str, Any]) -> list[Any]:
+    """The ``classifications`` of *document*; a value that is not a list is no entry."""
+    raw = document.get("classifications")
+    return list(raw) if isinstance(raw, list) else []
+
+
+def _counts(raw: Any, scope: Scope, ops: Sequence[KnownOp], changed: set[int]) -> dict[str, Any]:
     """How many operations *raw* matches, and how many of those change.
 
     Both are ``None`` for a stored entry that is not valid (it matched nothing).
@@ -165,8 +184,8 @@ def _counts(
 
 
 def _classification_diff(
-    before: list[dict[str, Any]],
-    after: list[dict[str, Any]],
+    before: list[Any],
+    after: list[Any],
     *,
     scope: Scope,
     ops: Sequence[KnownOp],
@@ -203,6 +222,28 @@ def _taxonomy_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, A
     }
 
 
+def _binding_key(binding: dict[str, Any]) -> str:
+    key = [binding.get("principal") or "person", binding.get("match") or {}]
+    return json.dumps(key, sort_keys=True)
+
+
+def _bindings_diff(
+    before: list[dict[str, Any]], after: list[dict[str, Any]]
+) -> dict[str, list[dict[str, Any]]]:
+    """Added, changed and removed bindings, by login kind and ``match``."""
+    old = {_binding_key(b): b for b in before}
+    new = {_binding_key(b): b for b in after}
+    return {
+        "added": [{"entry": b} for k, b in new.items() if k not in old],
+        "changed": [
+            {"before": old[k], "after": b}
+            for k, b in new.items()
+            if k in old and normalise_document(old[k]) != normalise_document(b)
+        ],
+        "removed": [{"entry": b} for k, b in old.items() if k not in new],
+    }
+
+
 def _description_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     old, new = before.get("description"), after.get("description")
     if old == new:
@@ -212,6 +253,31 @@ def _description_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str
     if new is None:
         return {"added": [], "changed": [], "removed": [old]}
     return {"added": [], "changed": [{"before": old, "after": new}], "removed": []}
+
+
+def _routing_diff(before: list[Any], after: list[Any]) -> dict[str, list[dict[str, Any]]]:
+    """Routing entries by ``match``: added, changed (other approvers or place), removed."""
+
+    def key(entry: Any) -> str:
+        match = entry.get("match") if isinstance(entry, dict) else None
+        return json.dumps(match, sort_keys=True)
+
+    old = {key(e): (i, e) for i, e in enumerate(before)}
+    new = {key(e): (i, e) for i, e in enumerate(after)}
+    out: dict[str, list[dict[str, Any]]] = {"added": [], "changed": [], "removed": []}
+    for match, (index, entry) in new.items():
+        if match not in old:
+            out["added"].append({"entry": entry, "index": index})
+        elif old[match] != (index, entry):
+            out["changed"].append(
+                {"before": old[match][1], "after": entry, "index": index, "was": old[match][0]}
+            )
+    out["removed"].extend(
+        {"entry": entry, "index": index}
+        for match, (index, entry) in old.items()
+        if match not in new
+    )
+    return out
 
 
 def _sides(
@@ -261,11 +327,15 @@ def _build_diff(
         "description": _description_diff(old, after),
         "taxonomy": _taxonomy_diff(old, after),
         "classifications": _classification_diff(
-            list(old.get("classifications") or []),
-            list(after.get("classifications") or []),
+            _raw_entries(old),
+            _raw_entries(after),
             scope=scope,
             ops=ops,
             changed=changed,
+        ),
+        "routing": _routing_diff(list(old.get("routing") or []), list(after.get("routing") or [])),
+        "bindings": _bindings_diff(
+            list(old.get("bindings") or []), list(after.get("bindings") or [])
         ),
         "operations_changed": len(changed),
     }
@@ -292,6 +362,7 @@ async def build_plan(
         plan.mistakes = parsed.mistakes
         return plan
     document = document_of(parsed.model)
+    plan.warnings.extend(category_routing_warnings(document.get("routing") or []))
     install_document: dict[str, Any] | None = document
     other: list[ClassificationEntry] = []
     if scope == "tenant":
@@ -301,7 +372,7 @@ async def build_plan(
             other = await _override_entries_for(session, tenant_id)
     ops = await load_known_ops(session, scope=scope, tenant_id=tenant_id)
     try:
-        plan.mistakes, plan.warnings = check_document(
+        plan.mistakes = check_document(
             document,
             scope=scope,
             install_document=install_document,
@@ -332,7 +403,7 @@ async def build_plan(
 def _summary(diff: dict[str, Any]) -> dict[str, int]:
     return {
         f"{section}_{kind}": len(diff[section][kind])
-        for section in ("description", "taxonomy", "classifications")
+        for section in ("description", "taxonomy", "classifications", "routing", "bindings")
         for kind in ("added", "changed", "removed")
     }
 
@@ -427,19 +498,83 @@ class _NoAliasDumper(yaml.SafeDumper):  # type: ignore[misc]  # yaml has no stub
         return True
 
 
-async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.UUID | None) -> str:
-    """The stored policy of *scope* as a ``policy: v1`` file."""
-    stored = await _stored_row(session, scope, tenant_id)
-    document = normalise_document(stored.document if stored is not None else None)
-    out: dict[str, Any] = {"policy": POLICY_VERSION}
-    for key in ("description", "taxonomy"):
-        if key in document:
-            out[key] = document[key]
-    out["classifications"] = list(document.get("classifications") or [])
+def _dump(value: Any) -> str:
     text: str = yaml.dump(
-        out, Dumper=_NoAliasDumper, sort_keys=False, allow_unicode=True, default_flow_style=False
+        value, Dumper=_NoAliasDumper, sort_keys=False, allow_unicode=True, default_flow_style=False
     )
     return text
+
+
+async def _no_effect_notes(
+    session: AsyncSession, tenant_id: uuid.UUID | None, entries: list[dict[str, Any]]
+) -> dict[int, list[str]]:
+    """The parts of tenant entries that the install's policy overrules, by entry index.
+
+    A part is ``always_wait: false`` against an install-wide wait, or a
+    ``risk`` below the install's level.
+    """
+    install_row = await _stored_row(session, "install", None)
+    install_entries = _entries_or_note(
+        install_row.document if install_row is not None else None,
+        "install",
+        "the install's stored policy",
+        [],
+    )
+    if not any(e.always_wait or e.risk for e in install_entries):
+        return {}
+    ops = await load_known_ops(session, scope="tenant", tenant_id=tenant_id)
+    coords = [op.coords for op in ops]
+    parsed: dict[int, ClassificationEntry] = {}
+    for index, raw in enumerate(entries):
+        try:
+            parsed[index] = entries_from_document({"classifications": [raw]}, scope="tenant")[0]
+        except (ValueError, IndexError):
+            continue
+    both = [*install_entries, *parsed.values()]
+    notes: dict[int, list[str]] = {}
+    for index, entry in parsed.items():
+        texts = install_floor_texts(f"`classifications[{index}]`", entry, coords, both)
+        if texts:
+            notes[index] = texts
+    return notes
+
+
+async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.UUID | None) -> str:
+    """The stored policy of *scope* as a ``policy: v1`` file.
+
+    In a tenant's file, each part of an entry that tries to set back an
+    "always wait" or a risk level of the install's policy gets a
+    ``# Has no effect:`` comment above the entry.
+
+    A tenant's file holds its stored bindings. When it has none and the
+    ``POLICY_APPROVER_ROUTING`` switch is on, it holds the shipped bindings
+    (:func:`~meho_backplane.policy.bindings.shipped_binding_documents`),
+    the ones that are in effect.
+    """
+    stored = await _stored_row(session, scope, tenant_id)
+    document = normalise_document(stored.document if stored is not None else None)
+    head: dict[str, Any] = {"policy": POLICY_VERSION}
+    for key in ("description", "taxonomy"):
+        if key in document:
+            head[key] = document[key]
+    tail: dict[str, Any] = {}
+    if document.get("routing"):
+        tail["routing"] = list(document["routing"])
+    if document.get("bindings"):
+        tail["bindings"] = list(document["bindings"])
+    elif scope == "tenant" and routing_enabled():
+        tail["bindings"] = shipped_binding_documents(get_settings())
+    entries = list(document.get("classifications") or [])
+    if not entries:
+        return _dump({**head, "classifications": [], **tail})
+    notes = await _no_effect_notes(session, tenant_id, entries) if scope == "tenant" else {}
+    parts = [_dump(head), "classifications:\n"]
+    for index, entry in enumerate(entries):
+        parts.extend(f"# Has no effect: {note}\n" for note in notes.get(index, []))
+        parts.append(_dump([entry]))
+    if tail:
+        parts.append(_dump(tail))
+    return "".join(parts)
 
 
 async def list_history(

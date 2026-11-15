@@ -13,7 +13,7 @@ at **three layers** — create/update, a connect-time pre-check, and the
 socket boundary itself — and is overridable only through an explicit,
 operator-configured allowlist env var.
 
-The socket-boundary layer (evoila-bosnia/meho-internal#275) is what
+The socket-boundary layer is what
 makes the guard robust against a resolver whose answer changes *between*
 the screen and the connect (DNS rebinding, split-horizon flip). Screening
 a hostname and then handing the *name* to httpx leaves httpx free to
@@ -33,8 +33,12 @@ off-switch.
 - `meho_backplane/targets/ssrf_guard.py` — the shared guard module:
   - `TARGET_SSRF_ALLOWLIST_ENV` = `MEHO_TARGET_SSRF_ALLOWLIST`.
     Comma-separated CIDR ranges (`10.0.0.0/8`), bare IPs, and/or
-    hostname literals (`vcenter.lab.internal`). Read per call (no
-    process cache). A malformed CIDR raises a loud `ValueError` —
+    hostname literals (`vcenter.lab.internal`). A hostname or IP entry
+    may end in a port (`vcenter.lab.internal:8443`, `192.168.7.10:8443`,
+    `[fd00::5]:8443`): it admits that destination on that port only,
+    while a plain entry admits every port. A CIDR range takes no port.
+    A port that is not 1 to 65535 raises a loud `ValueError`. Read per
+    call (no process cache). A malformed CIDR raises a loud `ValueError` —
     silently dropping an entry would re-block a destination the
     operator explicitly opted in.
   - `TargetDestinationBlockedError(ValueError)` — raised on rejection.
@@ -42,6 +46,22 @@ off-switch.
   - `assert_public_destination(host)` / `assert_public_destination_async(host)`
     — sync (schema-validator) and async (dispatch pre-check hot path, via
     `asyncio.to_thread`) entry points; screen and discard.
+  - Port checks — `assert_public_destination`, `screen_and_resolve`,
+    `screen_dial_addresses` and `connect_checked` take an optional
+    `port`. A port embedded in the stored host wins over it (an explicit
+    `:443` counts too). The HTTP pre-check takes the port from the
+    connector's own base URL (`HttpConnector._dial_port`), so a connector
+    with another default scheme is checked on its own default port. The
+    Postgres, MSSQL, MongoDB and SSH paths pass the port they dial (the
+    target port, else their default). For them (`connect_checked`) that
+    port is the one checked, also when the host has a port in it: these
+    drivers get only the checked address and dial their own port
+    (`use_embedded_port=False`). A port written in the host is dropped
+    also when the host is a name on the allowlist: the driver gets the
+    name without the port and dials its own port. An entry with a port never matches
+    while the port is unknown, so the guard stays closed. A target update
+    that sends `host`, `fqdn` or `port` checks the new destination: the
+    sent values, else the stored ones (`screen_destination_change`).
   - `screen_and_resolve(host)` — the connect-time arm the pinning
     transport consumes: it shares `_screen` with
     `assert_public_destination` (same allowlist, same block predicate,
@@ -50,7 +70,8 @@ off-switch.
     literal / unresolvable name).
   - `is_allowlisted(host)` — true when the host is an exact entry on the
     allowlist: a hostname listed verbatim, or an IP literal listed as a
-    single address (bare IP, `/32`, or `/128`). An IP that only falls
+    single address (bare IP, `/32`, or `/128`), or as `host:port` when the
+    caller gives that port. An IP that only falls
     inside a wider listed range does not count. No DNS lookup. The corpus client uses it to allow
     plain `http` for a trusted in-cluster corpus host (#3573); it grants
     nothing on the target dial path.
@@ -64,6 +85,9 @@ off-switch.
 - `meho_backplane/connectors/_shared/pinned_transport.py` — the
   address-pinning httpx transports shared by the target-dispatch and
   spec-ingest paths:
+  - `build_port_pinned_async_transport(resolver, verify=...)` — the
+    same, but the resolver also gets the port the socket dials. The HTTP
+    connector uses it, so the socket check uses the real port.
   - `build_pinned_async_transport(resolver, verify=...)` /
     `build_pinned_sync_transport(...)` — build an
     `httpx.AsyncHTTPTransport` / `httpx.HTTPTransport` and swap its
@@ -112,7 +136,7 @@ off-switch.
    shape — no dispatcher changes. It is excluded from the transport
    retry policy (`_retryable`): the verdict is deterministic.
 3. **Socket boundary** — the pooled client is built on a pinning
-   transport (`build_pinned_async_transport(_pin_target_addresses, …)`).
+   transport (`build_port_pinned_async_transport(_pin_target_addresses, …)`).
    When httpcore opens a new connection its `connect_tcp` runs
    `_pin_target_addresses` → `screen_and_resolve`, which resolves the
    host once, screens that exact answer, and returns the validated
@@ -205,9 +229,7 @@ private-range example.
 
 ## References
 
-- Task: evoila-bosnia/meho-internal#153 (parent backlog #101, goal #87)
-- Socket-boundary pinning: evoila-bosnia/meho-internal#275 (F13, the
-  2026-09-06 security review) — bind SSRF destination checks to the
+- Socket-boundary pinning: binds the SSRF destination check to the
   actual HTTP connection.
 - OWASP SSRF Prevention Cheat Sheet:
   <https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html>

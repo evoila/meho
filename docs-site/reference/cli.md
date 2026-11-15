@@ -18,7 +18,7 @@ Every command accepts the global flags below.
 - `--config` — path to the meho config file (default: `$XDG_CONFIG_HOME/meho/config.json`).
 - `--profile` — named login to use (default: `$MEHO_PROFILE`, else `default`). Each profile keeps its own login, so one person can hold several identities side by side. `meho login <url> --profile <name>` stores the login under that name. The flag wins over `$MEHO_PROFILE`.
 - `--verbose`, `-v` — enable verbose output.
-- `--work-ref` — external change-ticket reference, any ticket id on one line (for example `gh:evoila/meho#13` or `CHG0012345`; default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Five commands have their own `--work-ref` flag that tags the run with the reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the header. List commands filter by reference with `--filter-work-ref`.
+- `--work-ref` — external change-ticket reference, any ticket id on one line (for example `gh:evoila/meho#13` or `CHG0012345`; default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Five commands have their own `--work-ref` flag that tags the run with the reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the header. List commands filter by reference with `--filter-work-ref`. The backplane cleans every ticket id with one rule: it removes white space at both ends, refuses an empty value, control characters (also a tab inside the id) and invisible characters, allows at most 256 characters, and stores the text in Unicode form NFC.
 
 ## Current tenant
 
@@ -873,6 +873,7 @@ meho audit query [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--cursor` — opaque forward-pagination cursor from a prior page's NEXT line
 - `--filter-work-ref` — narrow to one external change-ticket reference — "show every write authorised by ticket X"
+- `--full-row-lost` — only the short rows: the database refused the full row, so MEHO stored the row without the target's answer and the error text
 - `--json` — emit raw AuditQueryResult JSON instead of the human table
 - `--limit` — max rows per page (1..1000, server default 100 when omitted)
 - `--op-class` — narrow to one op-class (read|write|credential_read|audit_query|other)
@@ -883,6 +884,7 @@ meho audit query [flags]
 - `--session-id` — narrow to one agent session (UUID); the flat companion to `meho audit replay`
 - `--since` — earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601
 - `--target` — narrow to one target (name or alias; server-side resolution)
+- `--text-changed` — only the rows where MEHO replaced a character or a number (for example a NUL character) so the database could store the row
 - `--until` — latest occurred_at; accepts the same shorthand as --since
 
 ### `meho audit recent`
@@ -1115,7 +1117,7 @@ meho bind9 record add <fqdn> <ip> [flags]
 - `--target` — target slug to dispatch against
 - `--type` — record type (A / AAAA). Omitted → handler default (A).
 - `--view` — split-horizon view owning the zone. Required only when the zone is in multiple views.
-- `--zone` — owning zone (e.g. example.com). Omitted → handler resolves via longest-suffix match.
+- `--zone` — owning zone (e.g. example.test). Omitted → handler resolves via longest-suffix match.
 
 #### `meho bind9 record get`
 
@@ -1142,7 +1144,7 @@ meho bind9 record remove <fqdn> [flags]
 - `--json` — emit the full OperationResult envelope as JSON
 - `--target` — target slug to dispatch against
 - `--view` — split-horizon view owning the zone. Required only when the zone is in multiple views.
-- `--zone` — owning zone (e.g. example.com). Omitted → handler resolves via longest-suffix match.
+- `--zone` — owning zone (e.g. example.test). Omitted → handler resolves via longest-suffix match.
 
 ### `meho bind9 zone`
 
@@ -1259,7 +1261,7 @@ Read recent agent announcements for the operator's tenant
 meho broadcast recent [flags]
 ```
 
-- `--active-only` — exclude expired TTL claims
+- `--active-only` — keep only active claims (not completed, TTL not run out)
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
 - `--cursor` — ISO-8601 window start, or next_cursor from a previous page
@@ -1327,7 +1329,7 @@ meho connector classify [flags]
 - `--group` — operation group key pattern
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
 - `--label` — a key=value label (repeat for more); replaces the labels of this entry
-- `--no-always-wait` — back to the operation's own approval value (never below it)
+- `--no-always-wait` — back to the operation's own approval value (never below it); refused when the install's policy makes a matched operation always wait
 - `--op` — operation id pattern, for example 'k8s.deployment.*'
 
 ### `meho connector delete`
@@ -5110,7 +5112,7 @@ meho service-principals read-scope show <principal-sub> [flags]
 
 ## `meho sessions`
 
-Upload, list, show and delete stored agent sessions
+Upload, list, show, download and delete stored agent sessions
 
 ```
 meho sessions
@@ -5128,6 +5130,17 @@ meho sessions delete <session-id> [flags]
 - `--confirm` — do not ask before deleting
 - `--json` — print the result as JSON
 
+### `meho sessions get`
+
+Download one stored agent session as whole files
+
+```
+meho sessions get <session-id> <folder> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by `meho login`)
+- `--json` — print what was written as JSON
+
 ### `meho sessions list`
 
 List the stored agent sessions of your tenant (GET /api/v1/sessions)
@@ -5141,7 +5154,9 @@ meho sessions list [flags]
 - `--json` — print the sessions as JSON
 - `--limit` — sessions per page (1 to 200)
 - `--project` — only sessions of this project
+- `--since` — only sessions with an upload at or after this time (RFC 3339 with a time zone, for example 2026-11-02T00:00:00Z)
 - `--state` — only sessions in this state: open, ended or unfinished
+- `--until` — only sessions that started before this time (RFC 3339 with a time zone)
 
 ### `meho sessions push`
 

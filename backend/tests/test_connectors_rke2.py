@@ -1811,7 +1811,7 @@ async def test_token_rotate_vault_write_failure_is_honest_no_token() -> None:
 
 
 def test_token_rotate_keeps_tokens_off_argv() -> None:
-    """AC (S12 / meho-internal#300): neither token reaches the rke2 argv.
+    """AC (S12): neither token reaches the rke2 argv.
 
     The OLD token rides the ``RKE2_TOKEN`` env (the upstream ``EnvVar`` backing
     for ``--token``); the NEW token is minted node-side by ``rke2`` itself

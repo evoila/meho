@@ -213,6 +213,8 @@ def _seed_request(
     withdraw_reason: str | None = None,
     created_at: datetime | None = None,
     preview_hash: str | None = None,
+    policy_rule: dict[str, object] | None = None,
+    policy_version: int | None = None,
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
@@ -253,6 +255,8 @@ def _seed_request(
                     withdrawn_at=withdrawn_at,
                     withdraw_reason=withdraw_reason,
                     preview_hash=preview_hash,
+                    policy_rule=policy_rule,
+                    policy_version=policy_version,
                 ),
             )
         return rid
@@ -2228,20 +2232,50 @@ def test_detail_modal_pending_row_still_offers_decisions() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _render_modal(effect: dict[str, object]) -> str:
-    """Seed a pending request with *effect* and return the rendered modal HTML."""
-    _seed_tenant(_TENANT_A, "tenant-a")
-    rid = _seed_request(tenant_id=_TENANT_A, proposed_effect=effect)
+def _render_modal_of(rid: uuid.UUID) -> str:
+    """Return the rendered modal HTML of the seeded request *rid*."""
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
-
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
             response = client.get(f"/ui/approvals/{rid}")
-
     assert response.status_code == 200, response.text
     return response.text
+
+
+def _render_modal(effect: dict[str, object]) -> str:
+    """Seed a pending request with *effect* and return the rendered modal HTML."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    return _render_modal_of(_seed_request(tenant_id=_TENANT_A, proposed_effect=effect))
+
+
+def test_modal_shows_the_policy_rule_marked_as_shadow() -> None:
+    """The modal names the matched policy rule and says it did not decide (#6044)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        policy_rule={
+            "source": "default",
+            "rule_id": "person.token",
+            "text": "a token call waits",
+            "decided": False,
+        },
+        policy_version=3,
+    )
+    body = _render_modal_of(rid)
+    block = body.split('data-testid="approval-policy-rule"')[1].split("</div>")[0]
+    assert "default:person.token" in block
+    assert "policy version 3" in block
+    assert "a token call waits" in block
+    assert "data-policy-rule-shadow" in block
+
+
+def test_modal_shows_no_policy_rule_without_one() -> None:
+    """A request made with the switch off has no policy rule line (#6044)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    body = _render_modal_of(_seed_request(tenant_id=_TENANT_A))
+    assert 'data-testid="approval-policy-rule"' not in body
 
 
 def test_modal_bespoke_preview_renders_as_a_field_table() -> None:
@@ -2399,6 +2433,50 @@ def test_modal_write_capability_warning_renders_a_denial_alert() -> None:
     assert 'role="alert"' in body
     warning = body.split("Write may be denied")[1].split("</div>")[0]
     assert "may still be denied" in warning
+
+
+def test_modal_shows_the_classification() -> None:
+    """The category badge, the labels and the classification rule (#6041)."""
+    body = _render_modal(
+        {
+            "op_id": "switch.port.disable",
+            "connector_id": "switch-1.x",
+            "safety_level": "caution",
+            "category": "network",
+            "labels": {"team": "net", "env": "prod"},
+            "classification_rule": "tenant:classifications[1]",
+        }
+    )
+    assert 'title="Category">network<' in body
+    block = body.split('data-testid="approval-classification"')[1].split("</dl>")[0]
+    assert "env=prod, team=net" in block
+    assert "tenant:classifications[1]" in block
+    assert "disagree" not in block
+
+
+def test_modal_names_a_classification_conflict() -> None:
+    """A null category says that two classification rules disagree."""
+    conflict = _render_modal(
+        {
+            "op_id": "switch.port.disable",
+            "connector_id": "switch-1.x",
+            "safety_level": "caution",
+            "category": None,
+            "labels": {},
+            "classification_rule": "tenant:classifications[0]",
+        }
+    )
+    assert "two classification rules disagree" in conflict
+    assert "tenant:classifications[0]" in conflict
+
+
+def test_modal_shows_no_classification_without_one() -> None:
+    """A request made with the switch off has no classification block."""
+    plain = _render_modal(
+        {"op_id": "switch.port.disable", "connector_id": "switch-1.x", "safety_level": "caution"}
+    )
+    assert 'data-testid="approval-classification"' not in plain
+    assert 'title="Category"' not in plain
 
 
 def test_modal_preview_unavailable_renders_blast_radius_unknown() -> None:

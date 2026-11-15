@@ -72,7 +72,7 @@ the v1 :func:`~meho_backplane.connectors.registry.get_connector` lookup
 while dispatch consulted v2's
 :func:`~meho_backplane.connectors.resolve_connector`, producing
 disagreeing yes/no answers for the same target (consumer feedback
-signal 19 in ``claude-rdc-hetzner-dc#697`` — a target got 501
+signal 19 in consumer feedback — a target got 501
 from ``/probe`` while ``POST /operations/call`` resolved the same
 target's connector cleanly).
 
@@ -107,7 +107,7 @@ DELETE + product PATCH (G0.14-T4 #1145)
 
 The G0.14-T4 amendment closes the
 *"misregistered target cannot be recovered"* hole the v0.6.0 dogfood
-exercise surfaced (signal 6, `claude-rdc-hetzner-dc#697`):
+exercise surfaced (signal 6):
 
 * **``DELETE /api/v1/targets/{name}``** soft-deletes the row by
   stamping ``deleted_at``; the row stays queryable from the
@@ -124,7 +124,7 @@ exercise surfaced (signal 6, `claude-rdc-hetzner-dc#697`):
   design and would always block the DELETE.
 * **``PATCH /api/v1/targets/{name}``** now accepts ``product`` so
   an operator who misregisters ``product='kubernetes'`` (the real
-  ``rke2-infra`` typo from the dogfood) can correct it to ``'k8s'``
+  ``rke2-ops`` typo from the dogfood) can correct it to ``'k8s'``
   in-place instead of deleting and re-creating. The new value is
   validated at request time against the registered connector
   products; an unknown product yields a structured 422 listing the
@@ -202,6 +202,10 @@ from meho_backplane.targets.schemas import (
 from meho_backplane.targets.secret_field_map import (
     check_secret_field_map_sources,
     merge_secret_field_map,
+)
+from meho_backplane.targets.ssrf_guard import (
+    TargetDestinationBlockedError,
+    assert_public_destination,
 )
 from meho_backplane.targets.vault_login_extras import enforce_vault_login_extras_platform_admin
 
@@ -1459,7 +1463,7 @@ async def probe_target(
       connector's :meth:`fingerprint` raises (G0.15-T1 #1210; mirrors
       the dispatcher's ``connector_error`` envelope at the route
       boundary so probe + dispatch agree on the shape of a connector
-      failure — sub-signal A of ``claude-rdc-hetzner-dc#753``).
+      failure — sub-signal A of consumer feedback).
 
     No error branch writes to the DB row, so the column always
     reflects the *last successful* probe. The path value is a name,
@@ -1486,7 +1490,7 @@ async def probe_and_store_fingerprint(
     lists. The caller owns the transaction: this function only
     ``flush``-es.
     """
-    cls, label, exception_message = resolve_connector_or_label(t)
+    cls, label, exception_message = resolve_connector_or_label(t, for_probe=True)
     if label == "no_connector":
         raise HTTPException(
             status_code=501,
@@ -1748,6 +1752,34 @@ async def _drop_kept_logins_on_connection_change(
         _drop_again_after_commit(session, t)
 
 
+def screen_destination_change(updates: dict[str, Any], t: TargetORM) -> None:
+    """Run the SSRF guard on the destination a PATCH leaves, when it changes.
+
+    *updates* holds only the sent fields (``exclude_unset``). The new
+    destination is each sent ``host`` / ``fqdn`` / ``port``, else the stored
+    one. A sent host or fqdn is screened with the new port. A sent port
+    (also ``null``, which clears it) screens the stored host and fqdn
+    again, because a ``host:port`` allowlist entry admits one port only.
+    Raises :class:`TargetDestinationBlockedError`.
+    """
+    port_sent = "port" in updates
+    port = updates["port"] if port_sent else t.port
+    for key in ("host", "fqdn"):
+        if key not in updates and not port_sent:
+            continue
+        value = updates[key] if key in updates else getattr(t, key)
+        if value is not None:
+            assert_public_destination(value, port)
+
+
+def _screen_sent_destination(updates: dict[str, Any], t: TargetORM) -> None:
+    """:func:`screen_destination_change` with the route's 422 answer."""
+    try:
+        screen_destination_change(updates, t)
+    except TargetDestinationBlockedError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 def _validate_update_body_fields(
     updates: dict[str, Any],
     t: TargetORM,
@@ -1783,6 +1815,7 @@ def _validate_update_body_fields(
       :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
     effective_product = _apply_product_patch(updates, t.product)
+    _screen_sent_destination(updates, t)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:
         _enforce_secret_ref_tenant_scope(updates["secret_ref"], operator, t.name)
@@ -1980,7 +2013,7 @@ async def delete_target(
     """Soft-delete a target.
 
     G0.14-T4 (#1145) — recovery path for misregistered targets
-    (signal 6 in ``claude-rdc-hetzner-dc#697``). Stamps
+    (signal 6 in consumer feedback). Stamps
     ``deleted_at`` on the row instead of removing it so the
     append-only :attr:`AuditLog.target_id` soft-FK keeps pointing
     at *something* (audit is append-only per v0.1-spec §6); every

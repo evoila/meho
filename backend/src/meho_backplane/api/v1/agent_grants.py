@@ -78,7 +78,7 @@ router = APIRouter(prefix="/api/v1/agents/grants", tags=["agent-grants"])
 
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
-#: Human-only governance gate (meho-internal#289). Attached to grant
+#: Human-only governance gate. Attached to grant
 #: **create** and **elevate** so a non-human ``principal_kind`` (agent /
 #: service / runner) cannot mint or widen a grant over REST, even holding
 #: the ``tenant_admin`` role an agent principal is minted with — the REST

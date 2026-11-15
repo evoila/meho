@@ -965,8 +965,9 @@ request field, header or command-line flag can set it.
 
 **The approval sign-in flow is checked (#6280).** The client
 `meho-cli-approve` must sign in through its own Keycloak login flow
-`meho approval sign-in`: the password form, then the one-time code step
-when the person has a code app. No other step. The built-in realm has it
+`meho approval sign-in level`: one conditional sub-flow with the level
+step (approval level 2, maximum age 0), the password form, then the
+one-time code step when the person has a code app. No other step. The built-in realm has it
 from the realm file; the bootstrap Job makes it and binds the client on
 every upgrade, and stops when `meho-admin` lacks `manage-realm`
 (docs/codebase/core-bootstrap.md). On a customer's own Keycloak an admin
@@ -981,18 +982,95 @@ the backplane's Keycloak admin client and puts the state into
 | `flow_missing` | The realm has no flow with that name. |
 | `flow_differs` | The flow has other steps; `detail` names the first difference. The realm stage and the operation never bind the client to it. |
 | `not_bound` | The flow is right, but the client is missing, has no own browser flow, or uses another flow (`detail`). |
-| `not_checked` | The read failed; `detail` is a reason word: `keycloak_admin_not_configured`, `no_right_to_read_login_flows`, `no_right_to_read_clients`, `keycloak_timeout` (5 seconds for the whole check), `keycloak_unexpected_answer` or `keycloak_unreachable`. |
+| `not_checked` | The check could not run; `detail` is a reason word. A setup MEHO knows: `keycloak_admin_not_configured`, `no_right_to_read_login_flows`, `no_right_to_read_realm`, `no_right_to_read_clients`. A failed read (`read_failed`): `keycloak_timeout` (5 seconds for the whole check), `keycloak_unexpected_answer`, `keycloak_unreachable` or `keycloak_check_error` (any other error). |
 
 A failed read is never `ok`. The answer is kept for 60 seconds per
 admin URL and client (`_KEEP_S`), because `/api/v1/health` and
 `meho_status` are called often; a fix in Keycloak shows up within a
-minute. The expected steps are the ones of
+minute. A failed read is kept only 5 seconds (`_KEEP_FAILED_S`), so one
+short error does not hold approvals back for a minute. The expected steps are the ones of
 `keycloak.authflow.ensure_approval_flow` (`approval_flow_difference` in
 `connectors/keycloak/ops_authflow.py`), so the check, the operation and the
 realm file agree. `meho doctor` turns the state into its line `approval
 sign-in` (`cli/internal/cmd/doctor_approval.go`): `ok` passes, every other
-state is a warning with the fix. The check only reports; the approve path
-does not read it.
+state is a warning with the fix. Under `auto`, the approve path reads this
+check to decide whether it requires the approval level (see below).
+
+**The approval level (#6281).** With no level names in the realm,
+Keycloak gives `acr` `"1"` to every sign-in that asked for credentials,
+whatever flow ran. So the realm names its levels in the realm attribute
+`acr.loa.map`, one table shared with the passkey touch:
+
+| Level | `acr` | Given by |
+|---|---|---|
+| 1 | `"1"` (no name) | any normal sign-in |
+| 2 | `meho-approve` | the approval sign-in flow (its level step: level 2, maximum age 0) |
+| 3 | `meho-touch` | the passkey touch flow |
+
+A higher level counts where a lower one is asked for
+(`APPROVAL_LEVEL_ACRS` in `auth/approval_sign_in.py`). `meho approvals
+approve` sends `acr_values=meho-approve` (`cli/internal/auth/freshsignin.go`).
+Keycloak's level condition is true on the first pass of a sign-in, so the
+flow reaches level 2 also without the request. A sign-in through a
+company login does not run the flow's steps: Keycloak gives it no level,
+so `acr` stays `"1"`.
+
+`APPROVAL_SIGN_IN_LEVEL` (`off` | `observe` | `auto` | `required`,
+default `auto`) decides what `check_fresh_approval_sign_in` does with a
+token of the approval client whose `acr` is not one of those names
+(`has_approval_level`). The routes resolve the setting first with
+`sign_in_level_in_force` (`auth/approval_sign_in_flow.py`). `auto` is
+`observe` only when MEHO knows for sure that the realm does not give the
+level: the read worked and the state is `flow_missing`, `flow_differs` or
+`not_bound`, or the state is `not_checked` for a setup MEHO knows (no
+admin client, no right to read). In every other case `auto` is
+`required`: when the state is `ok`, and also when the read failed. A
+failure means "refuse", never "allow". A caller that passes no resolved
+value gets an unresolved `auto` as `required` (fail closed).
+
+- `off`: accepted as before;
+- `observe`: accepted, the warning `approval_sign_in_level_missing` is
+  logged, and `approval_auth.level_missing` is `true` in the
+  `approval.decision` audit row (next to the `acr` it saw);
+- `required`: the same `401` as an old sign-in. When the level is the
+  one missing part, the detail ends with `LEVEL_MISSING_REMEDIATION`
+  ("Your sign-in did not reach the approval level. An admin must check
+  approvals.sign_in in /api/v1/health."). When `auto` requires the
+  level only because the read failed, the detail ends with
+  `LEVEL_UNCHECKED_REMEDIATION` instead ("MEHO could not check the
+  approval sign-in of the realm. Try again in a moment."). The refusal
+  log `approval_sign_in_not_fresh` carries `approval_level`.
+
+The `approval.decision` audit row records the mode in force for the
+approve in `approval_auth.level_in_force` (`off`, `observe` or
+`required`), next to the `acr` it saw.
+
+The web path (`check_fresh_web_approval_sign_in`) does not check the
+level. `/api/v1/health` shows the value in `approvals.sign_in_level`,
+what is in force in `approvals.sign_in_level_in_force`, and
+`approvals.sign_in_level_warning` whenever the level is not required in
+practice, and its own warning when the read failed ("MEHO could not
+check the approval sign-in of the realm ..."). When MEHO has no admin
+client, or the admin client may not read, the warning names that fix:
+the admin client settings, or the realm-management role `view-realm`
+(`view-clients` for `no_right_to_read_clients`). `meho doctor` shows the last two in its line `approval level`.
+`approvals.sign_in` is `ok` only when the realm really gives the level:
+the flow steps, the level step settings (`loa-condition-level` 2,
+`loa-max-age` 0), `acr.loa.map` with `meho-approve` = 2 and no other name
+on level 2, no own `acr.loa.map` on the client, and the binding. Direct
+grant or device grant on the client is `flow_differs` too. The
+realm stage (`core/keycloak_flows.py:ensure_levels`, and step settings in
+`ensure_flows`), `meho admin keycloak bootstrap-clients` and
+`keycloak.authflow.ensure_approval_flow` all add `meho-approve` to
+`acr.loa.map` and keep the names already there. All three stop before
+they write when another name already has level 2, or when the approval
+client has its own `acr.loa.map` (shared rules in
+`core/keycloak_levels.py`; the Go copy is in `flows.go`). The realm stage
+makes only the login flows that the realm file binds to a client other
+than `meho-web` (`stage_flows`), so it never makes or binds a flow of the
+console client, such as the passkey touch flow. The flow got a new name
+with the level, so an upgraded realm gets the new flow and the client is
+bound to it; the earlier flow `meho approval sign-in` stays unused.
 
 Every approval records who approved (`reviewed_by`), whether it was a
 self-approval (`self_approved`), which rule allowed it (`approval_rule`)
@@ -1192,6 +1270,138 @@ answers differ, MEHO logs `policy_shadow_mismatch` with `kind=approval`
 and counts the metric `policy_shadow_mismatch_total`. Today's answer still
 decides. Run approvals are not compared. See
 [policy-evaluator.md](policy-evaluator.md).
+
+### The policy rule on the request (#6044)
+
+With the same switch on, a new request also stores the policy rule that
+the evaluator matched for the call: `approval_request.policy_rule`
+(`{"source", "rule_id", "text", "decided"}`) and `policy_version`
+(migration `0168`). Its `approval.request` audit row has the same rule in
+`audit_log.policy_rule`. The `approval.decision` rows name no rule, also
+an expiry that a retry writes for an old overdue request. `decided` is
+`false` in shadow mode: today's
+checks decided. The console shows a "Policy rule" line in the request
+details, with "(shadow: watched only, today's checks decided)". With the
+switch off both columns stay empty and the line is not shown.
+
+### Approver routing (`POLICY_APPROVER_ROUTING`)
+
+Off by default (Helm `config.policy.approverRouting`). With it on, a
+customer can send approvals to the right team: for example only
+MEHO-SA-Operators and MEHO-Admins approve network changes. The rules are
+the `routing` section of the policy file ([policy.md](policy.md)). The
+code is `policy/routing.py`.
+
+**When a request starts to wait** (`create_pending_request`, used by the
+dispatcher and by a step of a multi-step operation), `stamp_approver_set`
+works out who may approve it and stores it on the request:
+
+- `approver_roles` (JSON): the login group kinds that may approve, for
+  example `["SA-Operators", "Admins"]`. Group kinds only, never people.
+  MEHO stores no members, so the requester is never in it. Whether the
+  requester may approve their own change is today's rule (below).
+- `approver_rule` (text): the routing entry that set them
+  (`tenant:routing[0]`, `install:routing[2]`), or `default`.
+- Migration `0167` adds both columns, nullable.
+
+How the kinds are found:
+
+1. The tenant's routing entries, then the install's. The first entry whose
+   `match` fits wins. A `match` can name a `category`, a `connector`
+   pattern and a `risk` level; all that it names must fit.
+2. The entry's kinds are cut to the kinds that may approve the change
+   today (`today_kinds`, the same rule as `approver_groups` in
+   `policy/evaluate.py`): a `dangerous` or `destructive` change only
+   SA-Operators and Admins; a lower one also Operators and Approvers; an
+   operation that needs the `tenant_admin` role only Admins. So routing
+   only narrows. It never lets a group approve more than today.
+3. No entry fits: today's kinds, rule `default`. MEHO without a policy file
+   therefore asks the same people as today.
+4. A change of rights is not routed (both columns stay NULL). Only another
+   admin approves it, as today.
+
+The risk level comes from `proposed_effect` (`safety_level`). The
+category is the one the classification gave the looked-up operation
+(`EndpointDescriptor.policy_category`, set by `apply_effective_policy` and
+`apply_step_classification` while `POLICY_CLASSIFICATION` is on). The
+dispatcher and the step gate pass it to `create_pending_request`. A request
+without a category fits only entries without `category`.
+
+**At the click** (`_load_pending_for_approval`) today's checks run first,
+in their order: a person only, the read-only check, still pending, the
+deadline, the rights-change and group rules (also the rules on own
+changes), the role floor. Then `_check_routed_approver`: the person's
+group kind (`kind_of`: Admins, SA-Operators, Operators, Approvers or
+Readers) must be in the stored kinds. If not, `ApprovalRoutingError` (a
+subclass of `ApprovalGroupForbiddenError`, so every approve route answers
+403) with one sentence that names who may approve, for example: "Only
+MEHO-SA-Operators or MEHO-Admins may approve this change (routing rule
+`install:routing[0]`). You are in MEHO-Operators." The fresh sign-in, the
+params check and the destructive preview binding still run after it.
+Routing also narrows an own click: a MEHO-SA-Operator whose own network
+change is routed to Admins only cannot approve it.
+
+`approve_right` gives the same answer with the reason `not_routed`. So the
+console sign, the REST fields `may_approve` / `may_approve_reason`, the
+"waiting for you" order and the push recipients
+(`approve_right_any_status`) all follow the routing. The shadow mode of
+"may approve" compares the evaluator with today's answer before routing.
+
+**When the routing changes.** A waiting request keeps the group kinds it
+stored when it started to wait. A policy file that is imported later
+applies only to new requests, not to the ones already waiting. Run
+approvals are different: they store no kinds, so they use the policy that
+is stored at the moment of the click.
+
+**Audit rows.** When a request has stored kinds, its audit rows carry
+`approver_rule` and `approver_roles`: the `approval.request` row and the
+`approval.decision` row of the approve. The approve audit row of a run
+approval carries `approver_routing`: the rule and the kinds of each routed
+entry, also when the list is refused. When the stored routing in the
+policy file is not valid, the request does not wait. One
+`approval.request` audit row records the refusal (`result_status`
+`routing_invalid`, `approver_rule` `invalid`, `routing_error`), written in
+its own transaction.
+
+**Routing on, classification off.** Then no change has a category, so a
+`category` entry fits nothing. The import and the check of a policy file
+warn for each such entry, and `/ready` shows the same sentence under
+`features.policy.notes`.
+
+**Old requests and the switch.** A request without stored kinds (made while
+the switch was off, or before migration `0167`) keeps today's rule. With
+the switch off, MEHO stores nothing and checks no stored kinds, so turning
+the switch off brings back today's rule for every waiting request too. A
+stored value that is not a list of kinds lets nobody approve (fail
+closed).
+
+**Console.** With the switch on:
+
+- the request window and the bell list show "Who can approve: Members of
+  MEHO-SA-Operators or MEHO-Admins." when the request has stored kinds
+  (`who_can_approve`);
+- the approvals page has a **For you** tab: the pending requests the
+  signed-in person may approve (the `approve_right` answer). When MEHO
+  cannot check the person, the tab answers 503 instead of an empty list;
+- the bell counts only the requests the person may approve.
+
+With the switch off, none of this shows, and `tab=for_you` is an unknown
+tab (422).
+
+**Run approvals** use the same routing for each entry of the list, with
+the policy that is stored at the moment a person approves it
+([run-approvals.md](run-approvals.md)).
+
+Tests: `tests/test_policy_routing.py`, `tests/test_policy_routing_classified.py`,
+`tests/test_run_approvals_routing.py`, `tests/test_ui_approvals_routing.py`,
+`tests/test_web_push_send.py`,
+`tests/migrations/test_migration_0167_add_approval_request_approver_roles.py`.
+
+**Not yet:** a team is a group kind. Bindings that give a login group
+categories come later. The "separated duties" file
+(`deploy/policy-profiles/separated-duties.yaml`) shows the routing:
+identity and secret changes only Admins, network and storage changes only
+SA-Operators and Admins.
 
 ## Delegated decisions: the reason-line convention (#3692)
 
@@ -2767,6 +2977,28 @@ top. The only path that does **not** carry it is the bare identifier
 default the caller stores when `_build_proposed_effect` returns `None`
 (connector-resolution / hook fault) — that degraded path is unchanged.
 
+**Category, labels and classification rule (#6041).** While the switch
+`POLICY_CLASSIFICATION` is on, the same seam also stamps the operation's
+classification (`approval_classification` in `operations/op_policy.py`):
+
+- `category` — for example `network`; `null` when two classification
+  rules disagree;
+- `labels` — a map of free `key=value` text;
+- `classification_rule` — the classification entry that set them, for
+  example `tenant:classifications[2]` or `taxonomy.default`.
+
+The values come from the looked-up row (`policy_category`,
+`policy_labels`, `policy_rule_ref`, set by `apply_effective_policy`, and
+by `apply_step_classification` for a step of a multi-step operation).
+So an approver sees at once what kind of change waits. The console
+modal shows the category as a badge next to the risk level, and the
+labels and rule below it (`data-testid="approval-classification"`).
+`meho approvals show` prints `Category:`, `Labels:` and `Rule:` lines
+after `Operation:`. With the switch off, none of the three keys is on
+the request, and both surfaces show nothing new. The values are stored when
+the request is made, so a later edit of the classification does not
+change the card of an older request.
+
 ## Destructive tier: preview-hash binding + mandatory blast-radius (#3197)
 
 The `destructive` safety tier (the fourth `safety_level`, #3196 —
@@ -3292,14 +3524,14 @@ CLI) the token must prove it:
   Keycloak 26 gives `"1"` to a sign-in that asked for the password and
   `"0"` to one that did not (`AcrProtocolMapper`, from the client
   session; a refreshed token keeps it). The approval client's own login
-  flow `meho approval sign-in` has only the password form and the
-  conditional one-time code step, so its tokens carry `"1"` or a mapped
-  level. A token without `acr` is refused.
+  flow `meho approval sign-in level` has only the level step, the
+  password form and the conditional one-time code step, so its tokens
+  carry `meho-approve`. A token without `acr` is refused.
 - **A passkey sign-in counts (#6006).** A passkey (WebAuthn) sign-in is
   not made from the session cookie, so Keycloak gives it `acr` `"1"` and
   a new `auth_time`, like a password sign-in. The checks need no passkey
   case: they never read `amr`. The password form of both the browser
-  flow and `meho approval sign-in` offers the passkey when the realm has
+  flow and `meho approval sign-in level` offers the passkey when the realm has
   passkeys on. Only the browser flow has Keycloak's step that skips the
   one-time code after a passkey, so on the command line a person with a
   code still types it. `tests/test_approval_passkey_sign_in.py` pins a
@@ -3482,7 +3714,7 @@ flow, PKCE and `http://127.0.0.1:*` only, no device flow, no
 `offline_access`, no refresh token (`use.refresh.tokens` `false`) and an
 access token that lasts 900 seconds (`access.token.lifespan`), the claim
 mappers of `meho-cli` without the MCP
-audience, and its own login flow `meho approval sign-in`
+audience, and its own login flow `meho approval sign-in level`
 (`authenticationFlowBindingOverrides.browser`) — is set by `meho admin keycloak bootstrap-clients`, the
 bundled realm `deploy/charts/meho/charts/keycloak/files/meho-realm.json`
 (new installs; the realm stage adds the flow to a running realm when it

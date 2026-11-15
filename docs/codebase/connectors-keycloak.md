@@ -67,7 +67,7 @@ fresh target with no asserted version still resolves.
   `client_get`, `client_scope_list`, `user_list`, `role_mapping_get`,
   `role_list`, `role_users`, `group_list`, `group_member_list`,
   `identity_provider_list`, `auth_flow_step_list`, `required_action_list`,
-  `events_config_get`) and
+  `events_config_get`, `user_lock_status`, `realm_lock_settings`) and
   per write op (`realm_create`/`realm_update`, `client_create`/
   `client_update`, `client_scope_create`, `protocol_mapper_create`,
   `user_create`/`user_reset_password`, `role_mapping_assign`,
@@ -370,8 +370,9 @@ apart:
   `{userId, locked, numFailures, numTemporaryLockouts, lastFailure}`. The IP
   address of the last failure (`lastIPFailure`) is personal data and is never
   returned. The trace mask hides it in the flight recorder trace too.
-  `lastFailure` is ISO 8601 UTC, or `null` when it is absent or 0 (no
-  failure yet).
+  `lastFailure` is ISO 8601 UTC, or `null` when it is absent, null or 0 (no
+  failure yet). A negative number, or one that is not a finite date, is an
+  error: it never reads as "no failure".
 - Keycloak 26 answers the lock status read with 200, `disabled: false` and
   zero counts for an id it does not know. So with an `id`, the op first reads
   `GET .../users/{user-id}`. That read gives 404 for an unknown id, and the op
@@ -387,7 +388,11 @@ apart:
   `waitIncrementSeconds`, `maxFailureWaitSeconds`, `maxDeltaTimeSeconds` and
   the quick-login fields. Each field is checked: a flag must be a boolean and
   a number an integer. An absent field is `null`; a field of the wrong type is
-  an error.
+  an error. `bruteForceProtected` is the exception: absent or `null` is an
+  error too, so the caller always knows if the lock is on.
+- The integration test `tests/integration/test_keycloak_lock_reads_e2e.py`
+  runs both reads on the real Keycloak container: counts after failed
+  sign-ins, the lock, an unknown id, and the lock settings on and off.
 
 Keycloak does not say until when a temporary lock lasts. Not built here: an
 unlock operation.
@@ -892,10 +897,12 @@ steps as the other delete verbs.
 
 Two ops in their own modules, registered by the same walk:
 
-- `keycloak.authflow.ensure_approval_flow` (`ops_authflow.py`) — risk
+- `keycloak.authflow.ensure_approval_flow` (`ops_authflow.py`, its
+  registration metadata in `ops_authflow_schemas.py`) — risk
   level `caution`, approval required, group `authflow_write`. It gives a
-  realm that already runs the login flow `meho approval sign-in` from the
-  chart's realm file, and binds it as the browser flow of the client
+  realm that already runs the login flow `meho approval sign-in level` from
+  the chart's realm file, names its level `meho-approve` (level 2) in the
+  realm attribute `acr.loa.map`, and binds it as the browser flow of the client
   `meho-cli-approve` (param `client_id` to name another client). On the
   target's managed realm:
   1. Find the client. None: stop with `client_not_found`; nothing is
@@ -903,15 +910,27 @@ Two ops in their own modules, registered by the same walk:
   2. Find the flow by alias (`GET .../authentication/flows`).
      - Missing: make it (`POST .../authentication/flows`), add the steps
        (`POST .../flows/{flowAlias}/executions/execution` and
-       `.../executions/flow` for the sub-flow
-       `meho approval sign-in - one-time code`), then set each step's
+       `.../executions/flow` for the sub-flows
+       `meho approval sign-in level - level 2` and
+       `meho approval sign-in level - one-time code`), then set each step's
        requirement (`PUT .../flows/{flowAlias}/executions`); a new step
        starts as `DISABLED`. The steps are read again and must match.
+     - The level step `conditional-level-of-authentication` gets its
+       settings (`POST .../executions/{id}/config`: level 2, maximum age
+       0) when it has none; settings with other values stop the op with
+       `other_steps`.
      - Present with the same steps (same order, level, name and
        requirement): nothing is written.
      - Present with other steps: stop with `other_steps`, naming the first
        difference. Nothing is written.
-  3. Bind: read the client, put `authenticationFlowBindingOverrides.browser`
+  3. Name the level: read the realm, add `"meho-approve": 2` to its
+     `acr.loa.map` (other names stay), and write the whole attribute map
+     back (Keycloak drops attributes a write leaves out). These checks run
+     before anything is written: a map that is not a JSON object stops
+     the op with `levels_not_object`, another name on level 2 with
+     `level_taken`, and an own `acr.loa.map` on the client with
+     `client_level_map`.
+  4. Bind: read the client, put `authenticationFlowBindingOverrides.browser`
      on top (other overrides and every other field stay), write it back,
      and read it again. A binding that does not read back is an error
      (`check_failed`). Already bound: nothing is written.
@@ -948,7 +967,7 @@ target's account before the call waits for approval
 
 | op_id | roles the run needs |
 |---|---|
-| `keycloak.authflow.ensure_approval_flow` | `manage-realm` (the flow), `manage-clients` (the client binding) |
+| `keycloak.authflow.ensure_approval_flow` | `manage-realm` (the flow and the realm's level map), `manage-clients` (the client binding) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `manage-realm` (the flow copy and the realm's browser flow) |
 | `keycloak.authflow.ensure_approval_touch` | `manage-realm` (the flow and the realm's level map), `manage-clients` (the client's `amr` mapper and the client binding) |
 
@@ -988,11 +1007,12 @@ request share one read, so a wrong password makes one failed sign-in.
   `http_status` 403 and `exception_class` `KeycloakMissingRightsError`.
   `extras.remediation` names the roles the op needs, the admin client and
   the account, and the missing roles when they could be read.
-- **A 403 when `ensure_approval_flow` binds the client** (the account has
-  `manage-realm` but may not change the client): the run stops half-way.
-  The error says what the run changed: the flow alias, its id and
-  `flow_created`. The flow stays in the realm; a second run after the fix
-  finds it and only binds it.
+- **A 403 at a step of `ensure_approval_flow`** after the flow exists (the
+  settings of the level step, the realm's level map, the client binding):
+  the run stops half-way. The error names the refused step and the flow
+  (alias, id, `flow_created`). `extras.remediation` also says what the run
+  changed before: the flow, the level setting and the level name. These
+  changes stay; a second run after the fix keeps them and does the rest.
 - **A 403 at a step of `ensure_approval_touch`** after the flow exists (the
   realm's level map, the client's `amr` mapper, the company login default,
   the client binding): the run stops half-way. The error names the refused

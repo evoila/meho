@@ -516,7 +516,7 @@ def test_resolve_preferred_impl_id_still_works_with_wildcard_demotion() -> None:
     """The consumer's existing workaround stays valid.
 
     Operators who already pinned ``preferred_impl_id="k8s"`` on their
-    Target row (per ``claude-rdc-hetzner-dc#697``) keep resolving the
+    Target row (per a consumer repository) keep resolving the
     same versioned class. The demotion step happens before operator
     preference, so the explicit pick still threads cleanly.
     """

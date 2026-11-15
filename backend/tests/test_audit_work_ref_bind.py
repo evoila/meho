@@ -599,8 +599,9 @@ async def test_header_bind_stamps_row_and_resets_in_task(
 
 
 def test_extract_work_ref_header_parsing() -> None:
-    """``_extract_work_ref`` returns the value, strips it, and NULLs the empties."""
+    """``_extract_work_ref`` returns the value, strips it, and refuses a blank value."""
     from meho_backplane.audit import _extract_work_ref
+    from meho_backplane.work_ref import WorkRefError
 
     present = {"headers": [(b"meho-work-ref", b"  gh:evoila/meho#7  ")]}
     assert _extract_work_ref(present) == "gh:evoila/meho#7"  # type: ignore[arg-type]
@@ -609,7 +610,8 @@ def test_extract_work_ref_header_parsing() -> None:
     assert _extract_work_ref(upper) == "gh:evoila/meho#7"  # type: ignore[arg-type]
 
     empty = {"headers": [(b"meho-work-ref", b"   ")]}
-    assert _extract_work_ref(empty) is None  # type: ignore[arg-type]
+    with pytest.raises(WorkRefError, match="empty"):
+        _extract_work_ref(empty)  # type: ignore[arg-type]
 
     absent = {"headers": [(b"x-request-id", b"abc")]}
     assert _extract_work_ref(absent) is None  # type: ignore[arg-type]

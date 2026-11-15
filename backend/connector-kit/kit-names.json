@@ -1,5 +1,5 @@
 {
-  "kit_version": "1.3",
+  "kit_version": "1.4",
   "names": {
     "AuthModel": {
       "kind": "class"
@@ -12,6 +12,9 @@
       "kind": "class"
     },
     "ConnectorAuthError": {
+      "kind": "class"
+    },
+    "ConnectorOwnMessage": {
       "kind": "class"
     },
     "ConnectorUpstreamError": {

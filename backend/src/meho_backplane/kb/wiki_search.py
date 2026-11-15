@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Search the tenant's team wiki next to the knowledge store (#5976).
+"""Search the tenant's wiki next to the knowledge store.
 
 A tenant may keep its lessons as pages in a Git wiki. A knowledge index
 loads the wiki, and MEHO reaches the index as a docs collection. The tenant
@@ -256,7 +256,7 @@ def _message(key: str, reason: WikiSkipReason) -> str:
             "search again without them to include it"
         ),
     }[reason]
-    return f"The team wiki (docs collection `{key}`) was not searched: {why}."
+    return f"Your wiki (docs collection `{key}`) was not searched: {why}."
 
 
 async def _imported_copies(

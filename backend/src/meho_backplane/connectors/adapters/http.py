@@ -53,10 +53,9 @@ natively. The per-target TLS trust has three states, in precedence order:
    as an unconfigured client would).
 
 Each resolved TLS context is carried by the per-target pinning
-**transport** (:func:`build_pinned_async_transport`), not passed as a
+**transport** (:func:`build_port_pinned_async_transport`), not passed as a
 client ``verify=`` argument, because the client is handed an explicit
-``transport=`` that enforces destination pinning at the socket
-(evoila-bosnia/meho-internal#275): ``connect_tcp`` re-screens the host
+``transport=`` that enforces destination pinning at the socket: ``connect_tcp`` re-screens the host
 and dials only a guard-validated address from that same resolution, so a
 resolver change between the guard's screen and the socket connect cannot
 reach a blocked destination. Only the TCP target is rewritten — TLS SNI,
@@ -100,7 +99,7 @@ from meho_backplane.connectors._shared.cache_key import (
     target_cache_key,
 )
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
-from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
+from meho_backplane.connectors._shared.pinned_transport import build_port_pinned_async_transport
 from meho_backplane.connectors.base import Connector
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.targets.ssrf_guard import (
@@ -115,8 +114,7 @@ class SsrfBlockedError(httpx.ConnectError):
     """Dispatch refused: the target resolves to a non-public address.
 
     Connect-time arm of the target SSRF guard
-    (:mod:`meho_backplane.targets.ssrf_guard`,
-    evoila-bosnia/meho-internal#153): raised by
+    (:mod:`meho_backplane.targets.ssrf_guard`): raised by
     :meth:`HttpConnector._http_client` *before* any pooled client is
     built or request issued, when the stored ``host`` is — or now
     resolves to — a private / loopback / link-local (``169.254.0.0/16``
@@ -144,8 +142,7 @@ class ResponseTooLargeError(Exception):
     otherwise buffers every vendor response fully into memory, so a single
     oversized body — from a compromised/malicious appliance, a MITM on a
     ``verify_tls=false`` channel, or a pathologically large legitimate
-    listing — could exhaust the single-replica pod's heap and OOM-kill it
-    (evoila-bosnia/meho-internal#297).
+    listing — could exhaust the single-replica pod's heap and OOM-kill it.
 
     A plain :class:`Exception` (not an :class:`httpx.HTTPError`): it is a
     policy rejection, not a transport fault, so it flattens through the
@@ -261,7 +258,7 @@ def _ca_pin_digest(ca_pem: str | None) -> str:
     return hashlib.sha256(ca_pem.encode("utf-8")).hexdigest()[:16]
 
 
-def _pin_target_addresses(host: str) -> list[str] | None:
+def _pin_target_addresses(host: str, port: int | None = None) -> list[str] | None:
     """Connect-time screen for the pinned transport, in ``SsrfBlockedError`` terms.
 
     Wraps :func:`~meho_backplane.connectors._shared.dial_guard.screen_dial_addresses`
@@ -278,7 +275,7 @@ def _pin_target_addresses(host: str) -> list[str] | None:
     the pre-check's rejection is: the verdict is deterministic policy.
     """
     try:
-        return screen_dial_addresses(host)
+        return screen_dial_addresses(host, port)
     except TargetDestinationBlockedError as exc:
         raise SsrfBlockedError(str(exc)) from exc
 
@@ -345,7 +342,7 @@ def json_payload_or_empty(resp: httpx.Response) -> dict[str, Any]:
 #: parse (JSONFlux, dispatcher step 8) — while bounding a multi-GB transfer
 #: from a compromised/malicious appliance, a ``verify_tls=false`` MITM, or a
 #: pathological legitimate listing that would otherwise OOM the
-#: single-replica pod (evoila-bosnia/meho-internal#297). Mirrors the
+#: single-replica pod. Mirrors the
 #: streamed byte-cap idiom the spec-fetch (``openapi._MAX_SPEC_BYTES``) and
 #: event-ingest (``events_ingest._read_capped_body``) paths already enforce;
 #: this closes the same gap on the outbound-dispatch path.
@@ -646,7 +643,7 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
     auth headers (NSX's ``X-XSRF-TOKEN``) nor — on a method-preserving
     ``307``/``308`` — the credential request body, so the login secret and
     session token leak to the redirect target (open-redirect SSRF /
-    auth-token forwarding, evoila/meho-internal#101 row L11).
+    auth-token forwarding).
 
     This client is built with ``follow_redirects=False`` and re-implements
     a *bounded, same-origin-only* redirect loop in :meth:`send`. A legitimate
@@ -816,7 +813,7 @@ class HttpConnector(Connector):
            (evoila/meho#209) stays byte-identical to a connector with no
            TLS config at all.
         """
-        # SSRF guard (evoila-bosnia/meho-internal#153): re-screen the
+        # SSRF guard: re-screen the
         # *resolved* destination on every acquisition, before the pooled
         # client is built or served. The create/update schema validators
         # already rejected a non-public literal, but the stored value can
@@ -829,7 +826,7 @@ class HttpConnector(Connector):
         # lookup so a previously-pooled client for a now-rebinding
         # hostname is refused too.
         try:
-            await assert_public_destination_async(str(target.host))
+            await assert_public_destination_async(str(target.host), self._dial_port(target))
         except TargetDestinationBlockedError as exc:
             raise SsrfBlockedError(str(exc)) from exc
         cache_key = self._client_cache_key(target)
@@ -889,7 +886,7 @@ class HttpConnector(Connector):
             )
             verify_arg = _insecure_ssl_context()
         # Pin the connection to a guard-validated address at the
-        # socket boundary (evoila-bosnia/meho-internal#275). The
+        # socket boundary. The
         # ``_http_client`` pre-check above screens the stored name
         # on every acquisition; this transport re-screens inside
         # ``connect_tcp`` and dials only an address from that same
@@ -901,7 +898,8 @@ class HttpConnector(Connector):
         # blocked answer surfaces as ``SsrfBlockedError`` via
         # ``_pin_target_addresses``, reaching the dispatcher's
         # ``ConnectError`` arm and staying out of the retry policy.
-        transport = build_pinned_async_transport(_pin_target_addresses, verify=verify_arg)
+        # The screen gets the port the socket dials.
+        transport = build_port_pinned_async_transport(_pin_target_addresses, verify=verify_arg)
         client_class = self._client_class or _SameOriginRedirectClient
         return client_class(
             base_url=self._base_url(target),
@@ -917,7 +915,7 @@ class HttpConnector(Connector):
             # ``follow_redirects=True`` would replay the request off
             # origin and forward NSX's ``X-XSRF-TOKEN`` and the
             # login body to an attacker-controlled ``Location``
-            # (open-redirect SSRF, evoila/meho-internal#101 row L11).
+            # (open-redirect SSRF).
             transport=transport,
         )
 
@@ -928,7 +926,7 @@ class HttpConnector(Connector):
         must not share the pooled client's cookie jar (evoila/meho#3890).
         """
         try:
-            await assert_public_destination_async(str(target.host))
+            await assert_public_destination_async(str(target.host), self._dial_port(target))
         except TargetDestinationBlockedError as exc:
             raise SsrfBlockedError(str(exc)) from exc
         return self._build_http_client(target)
@@ -953,6 +951,19 @@ class HttpConnector(Connector):
         """
         del target, operator
         return path
+
+    def _dial_port(self, target: Target) -> int | None:
+        """The port the client dials for *target*, or ``None`` when it cannot tell.
+
+        Read from the connector's own :meth:`_base_url`, so a connector with
+        another default scheme (or port) is checked on the port it dials.
+        A base URL that cannot be built gives ``None``; the guard then
+        screens the host as before and the usual error comes later.
+        """
+        try:
+            return _effective_port(httpx.URL(self._base_url(target)))
+        except (KeyError, ValueError, httpx.InvalidURL):
+            return None
 
     def _base_url(self, target: Target) -> str:
         scheme = _effective_scheme(target)

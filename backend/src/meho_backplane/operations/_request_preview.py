@@ -11,8 +11,7 @@ only a **hashed** ``params_hash`` (an intentional privacy + row-size
 choice -- full args may carry secrets), not the resolved method / path /
 body. During the #1656 dogfood the consumer had to "bisect payload
 shapes from the outside" to discover the body was being sent wrapped,
-because nothing inside meho exposed the constructed request
-(``claude-rdc-hetzner-dc#1138``).
+because nothing inside meho exposed the constructed request.
 
 This module is the lowest-friction fix consistent with the dumb-substrate
 posture: a **read-only preview** that resolves an op + params to the
@@ -104,6 +103,7 @@ from meho_backplane.operations._preview_steps import (
 )
 from meho_backplane.operations._secret_values import split_reveal_secret
 from meho_backplane.operations._target_connector_match import mismatch_preview_envelope
+from meho_backplane.operations._target_version_range import version_range_preview_envelope
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     _is_mutating,
@@ -395,6 +395,11 @@ async def _resolve_descriptor(
     )
     if mismatch is not None:
         return mismatch
+    outside = version_range_preview_envelope(
+        descriptor=descriptor, connector_id=connector_id, target=target
+    )
+    if outside is not None:
+        return outside
 
     return await _catalog_choice(
         operator=operator, descriptor=descriptor, connector_id=connector_id, target=target

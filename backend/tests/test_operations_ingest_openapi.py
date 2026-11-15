@@ -16,6 +16,7 @@ HTTPS endpoints so the same parsing assertions remain valid.
 from __future__ import annotations
 
 import datetime
+import gzip
 import json
 import socket
 import tracemalloc
@@ -1675,6 +1676,28 @@ def test_http_fetch_round_trip() -> None:
     assert op_ids == {"GET:/vets", "POST:/vets"}
 
 
+def test_http_fetch_gzip_encoded_spec_decodes_once() -> None:
+    """A gzip-compressed spec response is decoded once and parses.
+
+    The fetch keeps the decoded bytes (``iter_bytes``) and never reads the
+    response again, so a retained ``Content-Encoding`` header cannot make
+    httpx decode a second time.
+    """
+    with respx.mock(assert_all_called=False) as mock_router:
+        mock_router.get("https://example.test/spec.yaml").mock(
+            return_value=httpx.Response(
+                200,
+                content=gzip.compress(PETSTORE_31_YAML.read_bytes()),
+                headers={
+                    "content-type": "application/yaml",
+                    "content-encoding": "gzip",
+                },
+            )
+        )
+        rows = parse_openapi("https://example.test/spec.yaml", spec_source="http")
+    assert {r.op_id for r in rows} == {"GET:/vets", "POST:/vets"}
+
+
 def test_http_fetch_404_raises() -> None:
     with respx.mock(assert_all_called=False) as mock_router:
         mock_router.get("https://example.test/missing.yaml").mock(
@@ -2470,7 +2493,7 @@ def test_find_unresolvable_local_refs_reports_only_dangling_pointers() -> None:
     assert find_unresolvable_local_refs({"$ref": "#/allOf/0", "allOf": [{}]}) == []
 
 
-# -- Spec-fetch address pinning (F13, evoila-bosnia/meho-internal#275) -------
+# -- Spec-fetch address pinning (F13) ----------------------------------------
 
 
 def test_screen_fetch_host_returns_public_addresses() -> None:

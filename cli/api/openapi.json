@@ -1373,7 +1373,7 @@
           "targets"
         ],
         "summary": "Delete Target",
-        "description": "Soft-delete a target.\n\nG0.14-T4 (#1145) \u2014 recovery path for misregistered targets\n(signal 6 in ``claude-rdc-hetzner-dc#697``). Stamps\n``deleted_at`` on the row instead of removing it so the\nappend-only :attr:`AuditLog.target_id` soft-FK keeps pointing\nat *something* (audit is append-only per v0.1-spec \u00a76); every\nread path filters ``deleted_at IS NULL`` so the row is\ninvisible to dispatch / probe / list / discover after the\nDELETE returns.\n\nCascade-check: counts ``graph_node.target_id`` references\n(G9.1-T1 #448 substrate) and defaults to **409 with the\ncount + a ``?force=true`` hint** when the target is wired\ninto the topology graph. ``?force=true`` proceeds with the\nsoft-delete anyway \u2014 the FK is\n``ON DELETE SET NULL`` so the graph rows survive the delete\nsafely; the operator confirms by passing ``force=true``.\nAudit references are not counted because the audit table\naccumulates a row per authenticated request against the\ntarget and would always block the delete.\n\nReturns 204 on success. The audit row is written by the\n:class:`~meho_backplane.audit.AuditMiddleware` with\n``audit_op_id='targets.delete'`` (mirrors the\n``meho_connector_edit_*`` precedent so cross-tenant audit\nqueries can filter by op id prefix).\n\nThe path value is a name, an alias or an id (see\n:func:`resolve_route_target`). Re-deletes collapse to 404 \u2014\nevery lookup step filters ``deleted_at IS NULL``, so the row no\nlonger resolves once the first DELETE flushes.\n\n``tenant_admin`` role required (cross-tenant DELETE, by name or\nby id, returns the standard 404).",
+        "description": "Soft-delete a target.\n\nG0.14-T4 (#1145) \u2014 recovery path for misregistered targets\n(signal 6 in consumer feedback). Stamps\n``deleted_at`` on the row instead of removing it so the\nappend-only :attr:`AuditLog.target_id` soft-FK keeps pointing\nat *something* (audit is append-only per v0.1-spec \u00a76); every\nread path filters ``deleted_at IS NULL`` so the row is\ninvisible to dispatch / probe / list / discover after the\nDELETE returns.\n\nCascade-check: counts ``graph_node.target_id`` references\n(G9.1-T1 #448 substrate) and defaults to **409 with the\ncount + a ``?force=true`` hint** when the target is wired\ninto the topology graph. ``?force=true`` proceeds with the\nsoft-delete anyway \u2014 the FK is\n``ON DELETE SET NULL`` so the graph rows survive the delete\nsafely; the operator confirms by passing ``force=true``.\nAudit references are not counted because the audit table\naccumulates a row per authenticated request against the\ntarget and would always block the delete.\n\nReturns 204 on success. The audit row is written by the\n:class:`~meho_backplane.audit.AuditMiddleware` with\n``audit_op_id='targets.delete'`` (mirrors the\n``meho_connector_edit_*`` precedent so cross-tenant audit\nqueries can filter by op id prefix).\n\nThe path value is a name, an alias or an id (see\n:func:`resolve_route_target`). Re-deletes collapse to 404 \u2014\nevery lookup step filters ``deleted_at IS NULL``, so the row no\nlonger resolves once the first DELETE flushes.\n\n``tenant_admin`` role required (cross-tenant DELETE, by name or\nby id, returns the standard 404).",
         "operationId": "delete_target_api_v1_targets__name__delete",
         "parameters": [
           {
@@ -1467,7 +1467,7 @@
           "targets"
         ],
         "summary": "Probe Target",
-        "description": "Invoke the registered connector's ``fingerprint`` method for a target.\n\nThe probe verb returns the connector's\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` and\npersists it to ``targets.fingerprint`` so the G0.6 resolver (#388)\ncan pick an implementation without re-probing the live target.\nConnector selection uses\n:func:`~meho_backplane.connectors.resolver.resolve_connector_or_label`\nso this route and the dispatcher consult the same v2 registry\nthrough the same tie-break ladder (G0.14-T1 #1142). Returns:\n\n* **501** when the resolver reports ``no_connector``. ``detail``\n  carries the resolver's exception message naming the target's\n  product slug + the absence of a matching candidate.\n* **409** when the resolver reports ``ambiguous_connector``.\n  ``detail`` carries the resolver's exception message naming the\n  candidate set and the remediation step (set\n  ``target.preferred_impl_id`` to one of them).\n* **500** with the structured ``fingerprint_failed`` envelope from\n  :func:`_build_fingerprint_failed_detail` when the resolved\n  connector's :meth:`fingerprint` raises (G0.15-T1 #1210; mirrors\n  the dispatcher's ``connector_error`` envelope at the route\n  boundary so probe + dispatch agree on the shape of a connector\n  failure \u2014 sub-signal A of ``claude-rdc-hetzner-dc#753``).\n\nNo error branch writes to the DB row, so the column always\nreflects the *last successful* probe. The path value is a name,\nan alias or an id (:func:`resolve_route_target`); no match is 404.\nThe work is done by :func:`probe_and_store_fingerprint`, which the\n``targets.probe`` operation calls too.",
+        "description": "Invoke the registered connector's ``fingerprint`` method for a target.\n\nThe probe verb returns the connector's\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` and\npersists it to ``targets.fingerprint`` so the G0.6 resolver (#388)\ncan pick an implementation without re-probing the live target.\nConnector selection uses\n:func:`~meho_backplane.connectors.resolver.resolve_connector_or_label`\nso this route and the dispatcher consult the same v2 registry\nthrough the same tie-break ladder (G0.14-T1 #1142). Returns:\n\n* **501** when the resolver reports ``no_connector``. ``detail``\n  carries the resolver's exception message naming the target's\n  product slug + the absence of a matching candidate.\n* **409** when the resolver reports ``ambiguous_connector``.\n  ``detail`` carries the resolver's exception message naming the\n  candidate set and the remediation step (set\n  ``target.preferred_impl_id`` to one of them).\n* **500** with the structured ``fingerprint_failed`` envelope from\n  :func:`_build_fingerprint_failed_detail` when the resolved\n  connector's :meth:`fingerprint` raises (G0.15-T1 #1210; mirrors\n  the dispatcher's ``connector_error`` envelope at the route\n  boundary so probe + dispatch agree on the shape of a connector\n  failure \u2014 sub-signal A of consumer feedback).\n\nNo error branch writes to the DB row, so the column always\nreflects the *last successful* probe. The path value is a name,\nan alias or an id (:func:`resolve_route_target`); no match is 404.\nThe work is done by :func:`probe_and_store_fingerprint`, which the\n``targets.probe`` operation calls too.",
         "operationId": "probe_target_api_v1_targets__name__probe_post",
         "parameters": [
           {
@@ -5975,7 +5975,7 @@
           "connectors"
         ],
         "summary": "Classify Connector",
-        "description": "Ask to set the category, labels or \"always wait\" of one whole connector.\n\nIts groups and operations take these values unless they have their own.\nWaits until another tenant admin approves it.",
+        "description": "Ask to set the category, labels or \"always wait\" of one whole connector.\n\nIts groups and operations take these values unless they have their own.\nWaits until another tenant admin approves it. A connector id with\n``*``, ``?`` or ``[`` is refused with ``400``: this route edits one\nconnector, never a pattern.",
         "operationId": "classify_connector_api_v1_connectors__connector_id__classification_patch",
         "parameters": [
           {
@@ -6617,7 +6617,7 @@
           "knowledge"
         ],
         "summary": "Import Kb Pages",
-        "description": "Import knowledge pages sent in the request into the caller's tenant (#5728).\n\nThe team wiki's CI job calls this after each merge, with the\n``kb_import_only`` login. A ``tenant_admin`` may call it too. Every\npage gets one row in the answer: ``create``, ``update``,\n``unchanged`` or ``skip`` with the reason. ``dry_run`` writes\nnothing. The rules are in :mod:`meho_backplane.kb.page_import`.\n\nBinds ``audit_op_id=\"kb.import\"`` + ``audit_op_class=\"write\"`` and\nthe four counters. The page texts are never in the audit payload.",
+        "description": "Import knowledge pages sent in the request into the caller's tenant (#5728).\n\nThe tenant wiki's CI job calls this after each merge, with the\n``kb_import_only`` login. A ``tenant_admin`` may call it too. Every\npage gets one row in the answer: ``create``, ``update``,\n``unchanged`` or ``skip`` with the reason. ``dry_run`` writes\nnothing. The rules are in :mod:`meho_backplane.kb.page_import`.\n\nBinds ``audit_op_id=\"kb.import\"`` + ``audit_op_class=\"write\"`` and\nthe four counters. The page texts are never in the audit payload.",
         "operationId": "import_kb_pages_api_v1_kb_import_post",
         "parameters": [
           {
@@ -6671,7 +6671,7 @@
           "knowledge"
         ],
         "summary": "Export Kb Pages",
-        "description": "Return the caller's confirmed and candidate generic entries as Markdown pages (#5730).\n\nThe team wiki's CI job calls this with the ``kb_export_only`` login,\nwrites the pages into the wiki and opens a merge request there. An\noperator may call it too (``meho kb export``). MEHO writes nothing.\nThe rules are in :mod:`meho_backplane.kb.page_export`.\n\nBinds ``audit_op_id=\"kb.export\"`` + ``audit_op_class=\"read\"`` and\nthe three counters. The page texts are never in the audit payload.",
+        "description": "Return the caller's confirmed and candidate generic entries as Markdown pages (#5730).\n\nThe tenant wiki's CI job calls this with the ``kb_export_only`` login,\nwrites the pages into the wiki and opens a merge request there. An\noperator may call it too (``meho kb export``). MEHO writes nothing.\nThe rules are in :mod:`meho_backplane.kb.page_export`.\n\nBinds ``audit_op_id=\"kb.export\"`` + ``audit_op_class=\"read\"`` and\nthe three counters. The page texts are never in the audit payload.",
         "operationId": "export_kb_pages_api_v1_kb_export_post",
         "parameters": [
           {
@@ -8334,6 +8334,106 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AuditEntry"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit/traces": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Search Traces",
+        "description": "Find stored flight-recorder traces without their audit row (#6452).\n\nFilters: ``request_id`` (the id of the request that made the call),\n``caller`` (the exact login subject of the caller) and the window\n``since`` / ``until`` (duration shorthand or ISO-8601; ``since`` defaults\nto 24 hours). The newest traces come first. Use it when the audit row of\na call was never stored, so ``GET /{audit_id}/trace`` cannot be used.\n\nThe trace tables hold the request id and the caller since migration\n``0169``; an older trace is found by the time window only. The access\nrules are those of the single trace read: a person reads every trace of\nthe tenant; an agent login reads none unless the tenant lets agents read\ntraces, and never a trace marked ``redaction_uncertain``.",
+        "operationId": "search_traces_api_v1_audit_traces_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "caller",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512,
+              "nullable": true,
+              "title": "Caller"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "24h",
+              "title": "Since"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "nullable": true,
+              "title": "Until"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditTraceSearchResult"
                 }
               }
             }
@@ -10601,7 +10701,7 @@
           "sessions"
         ],
         "summary": "List Agent Sessions",
-        "description": "List the tenant's sessions, newest upload first.",
+        "description": "List the tenant's sessions, newest upload first.\n\nWith ``since`` and ``until`` (ISO 8601, with a time zone) only the\nsessions active in that time: the last upload is at or after\n``since``, and the start is before ``until``.",
         "operationId": "list_agent_sessions_api_v1_sessions_get",
         "parameters": [
           {
@@ -10652,6 +10752,32 @@
               "nullable": true,
               "title": "Cursor"
             }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "description": "Only sessions with an upload at or after this time.",
+              "title": "Since"
+            },
+            "description": "Only sessions with an upload at or after this time."
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "description": "Only sessions that started before this time.",
+              "title": "Until"
+            },
+            "description": "Only sessions that started before this time."
           },
           {
             "name": "authorization",
@@ -15006,20 +15132,9 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast Feed",
-        "description": "``GET /ui/broadcast[?op_class=&principal=&target=&op_id=&wall=1]``.\n\nFilters are accepted on the full-page route too so a copy-pasted\nfiltered URL reproduces the operator's view (the filter bar sets\n``hx-push-url`` on the fragment route, mirroring topology).\n``wall=1`` selects the no-chrome wall-monitor layout (work item\n#5).",
+        "description": "``GET /ui/broadcast[?principal=&target=&wall=1]``.\n\nFilters are accepted on the full-page route too so a copy-pasted\nfiltered URL reproduces the operator's view (the filter bar sets\n``hx-push-url`` on the fragment route, mirroring topology).\n``wall=1`` selects the no-chrome wall-monitor layout (work item\n#5).",
         "operationId": "ui_broadcast_feed_ui_broadcast_get",
         "parameters": [
-          {
-            "name": "op_class",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 64,
-              "default": "",
-              "title": "Op Class"
-            }
-          },
           {
             "name": "principal",
             "in": "query",
@@ -15040,17 +15155,6 @@
               "maxLength": 256,
               "default": "",
               "title": "Target"
-            }
-          },
-          {
-            "name": "op_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 256,
-              "default": "",
-              "title": "Op Id"
             }
           },
           {
@@ -15096,20 +15200,9 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast Feed Fragment",
-        "description": "``GET /ui/broadcast/feed[?op_class=&principal=&target=&op_id=]``.\n\nThe filter-bar submit target. Returns the feed fragment with the\nfiltered ``sse-connect`` URL embedded.",
+        "description": "``GET /ui/broadcast/feed[?principal=&target=]``.\n\nThe filter-bar submit target. Returns the feed fragment with the\nfiltered ``sse-connect`` URL embedded.",
         "operationId": "ui_broadcast_feed_fragment_ui_broadcast_feed_get",
         "parameters": [
-          {
-            "name": "op_class",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 64,
-              "default": "",
-              "title": "Op Class"
-            }
-          },
           {
             "name": "principal",
             "in": "query",
@@ -15130,17 +15223,6 @@
               "maxLength": 256,
               "default": "",
               "title": "Target"
-            }
-          },
-          {
-            "name": "op_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 256,
-              "default": "",
-              "title": "Op Id"
             }
           }
         ],
@@ -15177,17 +15259,6 @@
         "description": "``GET /ui/broadcast/stream`` -- stream the session tenant's announcements.",
         "operationId": "ui_broadcast_stream_ui_broadcast_stream_get",
         "parameters": [
-          {
-            "name": "op_class",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 64,
-              "nullable": true,
-              "title": "Op Class"
-            }
-          },
           {
             "name": "principal",
             "in": "query",
@@ -15246,23 +15317,8 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast History",
-        "description": "``GET /ui/broadcast/history[?kind=]`` -- the Last-24h replay fragment.\n\nReads the session tenant's stored announcements of the retention\nwindow (fail-soft, :func:`_fetch_history`), passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.\n\nThe optional ``kind`` query parameter narrows the pane to a\nsingle event kind (``operation`` / ``agent_announcement``); it is\nclamped to a known kind by :func:`_normalise_kind_filter`, so a\nblank or unknown value renders both kinds.",
+        "description": "``GET /ui/broadcast/history`` -- the Last-24h replay fragment.\n\nReads the session tenant's stored announcements of the retention\nwindow (fail-soft, :func:`_fetch_history`), passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.",
         "operationId": "ui_broadcast_history_ui_broadcast_history_get",
-        "parameters": [
-          {
-            "name": "kind",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 64,
-              "nullable": true,
-              "description": "Optional event-kind filter: 'operation' (audit-driven) or 'agent_announcement'. Absent/blank renders both kinds.",
-              "title": "Kind"
-            },
-            "description": "Optional event-kind filter: 'operation' (audit-driven) or 'agent_announcement'. Absent/blank renders both kinds."
-          }
-        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -15270,16 +15326,6 @@
               "text/html": {
                 "schema": {
                   "type": "string"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -15400,69 +15446,6 @@
                   "type": "string"
                 }
               }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ui/broadcast/event/{audit_id}": {
-      "get": {
-        "tags": [
-          "ui-broadcast"
-        ],
-        "summary": "Ui Broadcast Event Detail",
-        "description": "``GET /ui/broadcast/event/{audit_id}[?event_id=...]``.\n\nResolves the audit row tenant-scoped, classifies its op for the\naggregate-only gate, and renders ``broadcast/_event_drawer.html``\nwith the full detail (or the \ud83d\udd12 placeholder for sensitive\nclasses). A missing / cross-tenant id renders the not-found\nfragment with HTTP 404.",
-        "operationId": "ui_broadcast_event_detail_ui_broadcast_event__audit_id__get",
-        "parameters": [
-          {
-            "name": "audit_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Audit Id"
-            }
-          },
-          {
-            "name": "event_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "maxLength": 128,
-              "description": "Broadcast (Valkey-stream) event id, for display only.",
-              "default": "",
-              "title": "Event Id"
-            },
-            "description": "Broadcast (Valkey-stream) event id, for display only."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Audit id does not exist in this tenant (or exists only for another tenant). Returns the not-found drawer fragment.",
-            "content": {
-              "text/html": {}
             }
           },
           "422": {
@@ -17396,17 +17379,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UISessionContext",
-                "nullable": true,
-                "title": "Session Ctx"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -24058,13 +24030,57 @@
         }
       }
     },
+    "/ui/operations/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "ui-operations"
+        ],
+        "summary": "Operations Run State",
+        "description": "Where a Run from this page is now (#5111): the dialog asks this until it ends.\n\nReads the stored run, so it works on every MEHO server process. Only\nthe person who started a run reads it, and only a run started from\nthis page. Any other id is 404, so no id is confirmed.",
+        "operationId": "operations_run_state_ui_operations_runs__run_id__get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/operations/call": {
       "post": {
         "tags": [
           "ui-operations"
         ],
         "summary": "Operations Call",
-        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403\nbefore anything is dispatched or queued, like on REST); calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.\n\n``preview_hash`` comes from the run window's preview step. A\n``destructive`` op needs it, or MEHO refuses to store the approval\nrequest (#5015).",
+        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403\nbefore anything is dispatched or queued, like on REST); calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.\n\nBackground run (#5111): the call starts as a background run and the\nroute answers within about a second, however long the operation\ntakes. A quick run shows its result at once; a long one shows\n\"running\", and the dialog asks ``GET /ui/operations/runs/{run_id}``\nuntil it ends. A call with ``reveal_secret: true`` cannot run in\nthe background (its answer would be stored), so it runs inline.\n\n``preview_hash`` comes from the run window's preview step. A\n``destructive`` op needs it, or MEHO refuses to store the approval\nrequest (#5015).",
         "operationId": "operations_call_ui_operations_call_post",
         "requestBody": {
           "content": {
@@ -27654,7 +27670,7 @@
           "flow": {
             "type": "string",
             "title": "Flow",
-            "default": "meho approval sign-in"
+            "default": "meho approval sign-in level"
           },
           "client": {
             "type": "string",
@@ -27691,6 +27707,21 @@
           "sign_in": {
             "$ref": "#/components/schemas/ApprovalSignInStatus",
             "nullable": true
+          },
+          "sign_in_level": {
+            "type": "string",
+            "nullable": true,
+            "title": "Sign In Level"
+          },
+          "sign_in_level_in_force": {
+            "type": "string",
+            "nullable": true,
+            "title": "Sign In Level In Force"
+          },
+          "sign_in_level_warning": {
+            "type": "string",
+            "nullable": true,
+            "title": "Sign In Level Warning"
           }
         },
         "type": "object",
@@ -27700,7 +27731,7 @@
           "delegated_decision_posture"
         ],
         "title": "ApprovalsStatus",
-        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`)."
+        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``\nis the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,\n``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is\nwhat MEHO does now with an approval sign-in that lacks the approval\nlevel: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``\nonly while ``sign_in`` shows for sure that the realm does not give the\nlevel, and ``required`` when it is ``ok`` or its read failed).\n``sign_in_level_warning`` is a short sentence whenever the level is not\nrequired in practice or the read failed, else ``None``."
       },
       "ApproveRequestBody": {
         "properties": {
@@ -28036,6 +28067,16 @@
             "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
+          },
+          "full_row_lost": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Full Row Lost"
+          },
+          "text_changed": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Text Changed"
           }
         },
         "additionalProperties": false,
@@ -28149,6 +28190,16 @@
             "nullable": true,
             "title": "Policy Decision"
           },
+          "policy_rule": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Rule"
+          },
+          "policy_version": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Policy Version"
+          },
           "event_class": {
             "type": "string",
             "title": "Event Class"
@@ -28214,7 +28265,7 @@
           "legacy_request"
         ],
         "title": "AuditEventClass",
-        "description": "What kind of accountable event one ``audit_log`` row records (#3733).\n\nThe set is closed. The database CHECK ``ck_audit_log_event_class``\nrejects any other value, so a new class needs a code change and a\nmigration together.\n\n* :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation\n  (success or failure), or a MEHO-internal action such as a topology\n  edit, a retention sweep or a reaper.\n* :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:\n  a policy deny, a rate-limit refusal, or a park for approval.\n* :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,\n  rejected, or let an approval request expire, or its sender withdrew\n  it (#5717). The operation did not run on any of these rows.\n* :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a\n  refresh-token replay or a broken satellite effect chain. The\n  ``mcp.session_open`` row of a new MCP session has this class too.\n* :attr:`CONFIG_CHANGE` -- an operator changed the settings of\n  operations, and none of them ran. Two writers: an edit of one\n  operation with ``meho_connector_edit_op`` (turned it on or off, or\n  changed its risk level, approval rule, description or guidance,\n  #5791), and a tenant's own on or off switch with\n  ``meho_connector_tenant_setting``, for one operation or a whole\n  group (#5864). The row's ``payload[\"op_id\"]`` names the edited\n  operation; a group switch names ``payload[\"group_key\"]`` instead.\n* :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every\n  row written before migration ``0106`` reads as this class; it is never\n  guessed from ``method`` / ``path``. The REST and MCP request wrapper\n  rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;\n  with it on they write a decision or execution class, or no row\n  (#3757, :mod:`meho_backplane.audit_cutover`)."
+        "description": "What kind of accountable event one ``audit_log`` row records (#3733).\n\nThe set is closed. The database CHECK ``ck_audit_log_event_class``\nrejects any other value, so a new class needs a code change and a\nmigration together.\n\n* :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation\n  (success or failure), or an internal action such as a topology\n  edit, a retention sweep or a reaper.\n* :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:\n  a policy deny, a rate-limit refusal, or a park for approval.\n* :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,\n  rejected, or let an approval request expire, or its sender withdrew\n  it (#5717). The operation did not run on any of these rows.\n* :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a\n  refresh-token replay or a broken satellite effect chain. The\n  ``mcp.session_open`` row of a new MCP session has this class too.\n* :attr:`CONFIG_CHANGE` -- an operator changed the settings of\n  operations, and none of them ran. Two writers: an edit of one\n  operation with ``meho_connector_edit_op`` (turned it on or off, or\n  changed its risk level, approval rule, description or guidance,\n  #5791), and a tenant's own on or off switch with\n  ``meho_connector_tenant_setting``, for one operation or a whole\n  group (#5864). The row's ``payload[\"op_id\"]`` names the edited\n  operation; a group switch names ``payload[\"group_key\"]`` instead.\n* :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every\n  row written before migration ``0106`` reads as this class; it is never\n  guessed from ``method`` / ``path``. The REST and MCP request wrapper\n  rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;\n  with it on they write a decision or execution class, or no row\n  (#3757, :mod:`meho_backplane.audit_cutover`)."
       },
       "AuditQueryRequest": {
         "properties": {
@@ -28283,6 +28334,16 @@
             "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
+          },
+          "full_row_lost": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Full Row Lost"
+          },
+          "text_changed": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Text Changed"
           },
           "event_class": {
             "$ref": "#/components/schemas/AuditEventClass",
@@ -28407,6 +28468,23 @@
         ],
         "title": "AuditTraceResult",
         "description": "200 body for ``GET /api/v1/audit/{audit_id}/trace`` (#3215).\n\nThe operator read surface of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``). Wraps the tenant-scoped\n:class:`~meho_backplane.flight_recorder.TraceView` with the echoed\n``audit_id`` and a ``trace_present`` discriminator, the same REST-envelope\nlayering :class:`AuditReplayResult` follows over the substrate's\n:class:`ReplayNode`.\n\nTwo-level absence semantics -- distinct on purpose:\n\n* The **audit row** being missing or in another tenant is a 404 from the\n  route, matching ``GET /show/{audit_id}``: existence never leaks across\n  the tenant boundary.\n* The audit row existing but carrying **no captured trace** is *not* a 404 --\n  it is a 200 with ``trace_present=False`` and ``trace=None``. Capture is a\n  per-tenant/per-target opt-in and best-effort (F1/F7), so \"no trace\" is a\n  normal state an operator must be able to observe, not an error. The\n  console pane renders a \"no trace captured\" empty state for this case.\n\nOnly an ``operation_execution`` row resolves to the flight recorder\n(#3747). A decision, security or legacy row is not an execution, so it\nanswers ``trace_present=False`` and the route never reads a trace for\nit. ``event_class`` echoes the row's class so the reason is visible.\n\n``trace.redaction_uncertain`` surfaces the F5 degrade flag so an operator\n(and a paired add-on reading over this route with its operator principal)\ncan see when a trace was withheld from the agent handle. The operator plane\nkeeps **full** access regardless of that flag.\n\nFrozen like the models it carries."
+      },
+      "AuditTraceSearchResult": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TraceView"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "AuditTraceSearchResult",
+        "description": "200 body for ``GET /api/v1/audit/traces`` (#6452).\n\nThe stored traces that match the request id, caller and time window,\nnewest first. A trace is listed even when its audit row was never\nstored."
       },
       "AuthConfigResponse": {
         "properties": {
@@ -29253,7 +29331,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 512,
             "title": "Work Ref",
             "default": ""
           },
@@ -29521,7 +29598,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 512,
             "title": "Work Ref",
             "default": ""
           }
@@ -29828,7 +29904,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -30489,10 +30564,6 @@
             "maxLength": 5,
             "nullable": true,
             "title": "Always Wait"
-          },
-          "session_ctx": {
-            "$ref": "#/components/schemas/UISessionContext",
-            "nullable": true
           }
         },
         "type": "object",
@@ -30535,10 +30606,6 @@
             "maxLength": 5,
             "nullable": true,
             "title": "Always Wait"
-          },
-          "session_ctx": {
-            "$ref": "#/components/schemas/UISessionContext",
-            "nullable": true
           }
         },
         "type": "object",
@@ -30593,7 +30660,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -30886,8 +30952,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
-            "minLength": 1,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -31222,7 +31286,6 @@
           },
           "work_ref": {
             "type": "string",
-            "minLength": 1,
             "nullable": true,
             "title": "Work Ref"
           },
@@ -31493,7 +31556,7 @@
             "type": "boolean",
             "nullable": true,
             "title": "Always Wait",
-            "description": "true: every call of a matched operation waits for approval. false: back to the operation's own value, never below it."
+            "description": "true: every call of a matched operation waits for approval. false: back to the operation's own value, never below it. false is refused when the install's policy makes a matched operation always wait."
           }
         },
         "additionalProperties": false,
@@ -31556,6 +31619,25 @@
         ],
         "title": "ClassificationEntryOut",
         "description": "One stored entry. ``ref`` names it, for example ``tenant:classifications[0]``."
+      },
+      "ClassificationInForce": {
+        "properties": {
+          "risk": {
+            "type": "string",
+            "title": "Risk"
+          },
+          "waits": {
+            "type": "boolean",
+            "title": "Waits"
+          }
+        },
+        "type": "object",
+        "required": [
+          "risk",
+          "waits"
+        ],
+        "title": "ClassificationInForce",
+        "description": "What applies to one operation: the code's value, overrides, classification, floors.\n\nA floor (a minimum-level rule in the code) can keep a wait or a level\nthat the classification alone would not set."
       },
       "ClassificationListResponse": {
         "properties": {
@@ -31788,6 +31870,14 @@
           "rule_ref": {
             "type": "string",
             "title": "Rule Ref"
+          },
+          "in_force": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ClassificationInForce"
+              }
+            ],
+            "nullable": true
           }
         },
         "type": "object",
@@ -31796,10 +31886,11 @@
           "labels",
           "risk",
           "always_wait",
-          "rule_ref"
+          "rule_ref",
+          "in_force"
         ],
         "title": "ClassificationValues",
-        "description": "The classified values of one operation, before the floors."
+        "description": "The classified values of one operation, before the floors, and what is in force.\n\n``in_force`` is ``null`` when the operation's row is gone."
       },
       "ConfirmVerify": {
         "properties": {
@@ -38741,7 +38832,7 @@
           "based_on"
         ],
         "title": "PolicyImportResponse",
-        "description": "The preview and the import answer.\n\n``diff`` has the sections ``description``, ``taxonomy`` and\n``classifications``, each with ``added``, ``changed`` (``before`` and\n``after``) and ``removed``. Each classification entry also says how many\noperations it ``matches`` and how many of those it ``changes``.\n``operations_changed`` counts the operations whose values change. ``diff``\nis ``null`` when the file has mistakes. ``based_on`` is the SHA-256 of\nthe stored policy the plan was made against. On an import that waits,\n``approval_request_id`` names the request."
+        "description": "The preview and the import answer.\n\n``diff`` has the sections ``description``, ``taxonomy``,\n``classifications`` and ``bindings``, each with ``added``, ``changed``\n(``before`` and ``after``) and ``removed``. Each classification entry also says how many\noperations it ``matches`` and how many of those it ``changes``.\n``operations_changed`` counts the operations whose values change. ``diff``\nis ``null`` when the file has mistakes. ``based_on`` is the SHA-256 of\nthe stored policy the plan was made against. On an import that waits,\n``approval_request_id`` names the request."
       },
       "PolicyRevisionView": {
         "properties": {
@@ -39615,6 +39706,16 @@
             "nullable": true,
             "title": "Policy Decision"
           },
+          "policy_rule": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Rule"
+          },
+          "policy_version": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Policy Version"
+          },
           "event_class": {
             "type": "string",
             "title": "Event Class"
@@ -40170,7 +40271,7 @@
           "wiki": {
             "$ref": "#/components/schemas/KbWikiSearch",
             "nullable": true,
-            "description": "Only with source='kb' on a tenant that keeps its lessons in a team wiki: the wiki's hits, or why the wiki was not searched. Null otherwise."
+            "description": "Only with source='kb' on a tenant that keeps its lessons in a tenant wiki: the wiki's hits, or why the wiki was not searched. Null otherwise."
           }
         },
         "type": "object",
@@ -40228,8 +40329,6 @@
         "properties": {
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
-            "minLength": 1,
             "title": "Work Ref",
             "description": "The run reference. Calls of the run send it in the Meho-Work-Ref header."
           },
@@ -41149,7 +41248,6 @@
           },
           "work_ref": {
             "type": "string",
-            "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
           }
@@ -41430,7 +41528,7 @@
           "grounded"
         ],
         "title": "SearchDocsResponse",
-        "description": "Successful response shape for ``/api/v1/search_docs``.\n\n``chunks`` is the corpus's ranked cited-chunk list (best first),\nprojected into MEHO's :class:`~meho_backplane.docs_search.DocsChunk`\nsurface so the wire contract is decoupled from the corpus's. Frozen\nso an accidental post-construction mutation surfaces as a pydantic\nerror rather than a silently-altered response.\n\n``grounded`` is the **out-of-corpus discipline signal** (#133): ``True``\nwhen retrieval returned at least one chunk to ground on, ``False`` when it\nreturned none. A consumer must treat ``grounded=False`` as *\"the corpus\nhas no answer\"* and **not** fall back to ungrounded generation \u2014 the\nfeature's contract (*empty/low-score = not in the corpus; do not silently\nfall back to training data*). The verdict is computed server-side by the\nshared :func:`~meho_backplane.docs_search.retrieval_is_grounded` seam \u2014\nthe **same** determination ``ask_docs`` uses to short-circuit to its \"no\ngrounded answer\" reply, so the two surfaces never diverge.\n\n**Score scale + limits of this signal.** Each chunk's ``score`` is the\ncorpus's raw relevance score \u2014 an **opaque, backend-defined scale** MEHO\ndoes not normalise or threshold; do not compare it across collections or\nagainst a fixed cutoff. ``grounded`` is therefore **presence-based**, not\nrelevance-judged: a query that retrieves topically-irrelevant chunks at\nhigh scores still reports ``grounded=True``. Distinguishing that case\nneeds a calibrated per-collection score floor, deferred as the Option-A\nfollow-on (evoila-bosnia/meho-internal#133); it will refine\n``retrieval_is_grounded`` in one place for both surfaces."
+        "description": "Successful response shape for ``/api/v1/search_docs``.\n\n``chunks`` is the corpus's ranked cited-chunk list (best first),\nprojected into MEHO's :class:`~meho_backplane.docs_search.DocsChunk`\nsurface so the wire contract is decoupled from the corpus's. Frozen\nso an accidental post-construction mutation surfaces as a pydantic\nerror rather than a silently-altered response.\n\n``grounded`` is the **out-of-corpus discipline signal** (#133): ``True``\nwhen retrieval returned at least one chunk to ground on, ``False`` when it\nreturned none. A consumer must treat ``grounded=False`` as *\"the corpus\nhas no answer\"* and **not** fall back to ungrounded generation \u2014 the\nfeature's contract (*empty/low-score = not in the corpus; do not silently\nfall back to training data*). The verdict is computed server-side by the\nshared :func:`~meho_backplane.docs_search.retrieval_is_grounded` seam \u2014\nthe **same** determination ``ask_docs`` uses to short-circuit to its \"no\ngrounded answer\" reply, so the two surfaces never diverge.\n\n**Score scale + limits of this signal.** Each chunk's ``score`` is the\ncorpus's raw relevance score \u2014 an **opaque, backend-defined scale** MEHO\ndoes not normalise or threshold; do not compare it across collections or\nagainst a fixed cutoff. ``grounded`` is therefore **presence-based**, not\nrelevance-judged: a query that retrieves topically-irrelevant chunks at\nhigh scores still reports ``grounded=True``. Distinguishing that case\nneeds a calibrated per-collection score floor, deferred as the Option-A\nfollow-on; it will refine\n``retrieval_is_grounded`` in one place for both surfaces."
       },
       "SelectSpec": {
         "properties": {
@@ -42179,7 +42277,7 @@
             "minLength": 1,
             "nullable": true,
             "title": "Target Name Pattern",
-            "description": "Target selector (#3349): match any dispatch whose target name matches this fnmatch glob (e.g. 'esx-dc*'). Requires target_id to be null. This glob is the explicit any-target request \u2014 it is never implied by a null target_id."
+            "description": "Target selector (#3349): match any dispatch whose target name matches this fnmatch glob (e.g. 'esx-site*'). Requires target_id to be null. This glob is the explicit any-target request \u2014 it is never implied by a null target_id."
           },
           "reason": {
             "type": "string",
@@ -44943,6 +45041,17 @@
           "redaction_uncertain": {
             "type": "boolean",
             "title": "Redaction Uncertain"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Request Id"
+          },
+          "operator_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Operator Sub"
           },
           "spans": {
             "items": {

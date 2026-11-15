@@ -4,7 +4,7 @@
 """The backend-agnostic search-backend interface (G4.6-T2 #1551).
 
 A :class:`SearchBackend` is the seam that lets one doc collection sit on a
-managed RAG and another on ``meho-knowledge`` / Qdrant **behind the same
+managed RAG and another on a self-hosted store / Qdrant **behind the same
 ``search_docs``** — the agent never sees which backend answered. The
 ``collection → backend{type, ref}`` router
 (:func:`~meho_backplane.docs_search.backends.resolver.resolve_backend`)

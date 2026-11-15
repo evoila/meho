@@ -12,18 +12,28 @@ The floors are rules in the code that no policy file can loosen:
   (:mod:`meho_backplane.operations.caller_address`).
 * A file can raise a risk level, never lower it below the level in the
   code.
+* A tenant's file cannot switch off an "always wait" that the install's
+  policy sets, and cannot set a lower risk level than the install's
+  policy: the stricter of install and tenant counts.
 
 Each problem is one sentence that names the entry
 (``classifications[N]``) and the operation. :func:`check_document` also
 refuses an unknown category or risk level, a ``taxonomy.default`` in a
 tenant's file, and two entries that give one operation different
-categories at the same level.
+categories at the same level. The ``routing`` entries are checked by
+:func:`meho_backplane.policy.routing.routing_mistakes`: a group kind that
+may approve none of the changes an entry routes, and a change that nobody
+may approve. The ``bindings`` are checked by
+:func:`~meho_backplane.policy.bindings.binding_mistakes`: no binding in the
+install's file, no runner, no agent or service with a kind that may
+approve, and no unknown category.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from typing import Any, Final
 from uuid import UUID
 
@@ -34,6 +44,8 @@ from sqlalchemy.orm import aliased
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.credential_read import has_credential_read_floor
+from meho_backplane.operations.role_floors import role_floor_for
+from meho_backplane.policy.bindings import binding_mistakes
 from meho_backplane.policy.classification import (
     RISK_LEVELS,
     ClassificationConflictError,
@@ -42,9 +54,12 @@ from meho_backplane.policy.classification import (
     Scope,
     Taxonomy,
     check_no_conflict,
+    classify,
     entries_from_document,
+    install_floor_texts,
     taxonomy_from_documents,
 )
+from meho_backplane.policy.routing import group_names, routing_mistakes, today_kinds
 
 __all__ = ["MAX_MISTAKES", "KnownOp", "check_document", "load_known_ops"]
 
@@ -174,14 +189,82 @@ def _floor_mistakes(entries: Sequence[ClassificationEntry], ops: Sequence[KnownO
     return mistakes
 
 
-def _install_wait_warnings(entries: Sequence[ClassificationEntry]) -> list[str]:
-    return [
-        f"`classifications[{index}]` makes operations always wait for the whole install. "
-        "A tenant's own entry that is as specific or more specific can set it back to "
-        "the operation's own value."
-        for index, entry in enumerate(entries)
-        if entry.always_wait is True
+def _lowest_level(op: KnownOp, classified_risk: str | None) -> int:
+    """The index in :data:`RISK_LEVELS` of the lowest level *op* can wait at."""
+    levels = [
+        RISK_LEVELS.index(lvl) for lvl in (op.safety_level, classified_risk) if lvl in RISK_LEVELS
     ]
+    return max(levels, default=0)
+
+
+def _routing_floor_mistakes(
+    raw_routes: Sequence[dict[str, Any]],
+    ops: Sequence[KnownOp],
+    entries: Sequence[ClassificationEntry],
+    taxonomy: Taxonomy,
+) -> list[str]:
+    """A routing entry that sends an operation with a role floor to kinds that may not approve it.
+
+    Only Admins may approve an operation with the ``tenant_admin`` role
+    floor (for example ``targets.register``), at every risk level. Routing
+    only narrows, so an entry without Admins would leave such a change with
+    nobody to approve it. The check works like the run: for each risk level
+    the operation can wait at, the first entry that fits that level wins,
+    and only that entry is checked. An entry with ``risk`` fits only that
+    level; an entry without ``risk`` fits every level.
+    """
+    mistakes: list[str] = []
+    for op in ops:
+        if role_floor_for(op.coords.op_id) is None:
+            continue
+        classified = classify(op.coords, entries, taxonomy)
+        for level in RISK_LEVELS[_lowest_level(op, classified.risk) :]:
+            winner = _first_route(raw_routes, op, classified.category, level)
+            if winner is None:
+                continue
+            index, approvers = winner
+            kinds = today_kinds(level, op.coords.op_id)
+            if not approvers & set(kinds):
+                sentence = (
+                    f"`routing[{index}]` fits `{op.coords.op_id}` of connector "
+                    f"`{op.coords.connector_id}`, but only {group_names(kinds)} may approve "
+                    "it and the entry does not ask them. It would wait until it expires."
+                )
+                if sentence not in mistakes:
+                    mistakes.append(sentence)
+    return mistakes
+
+
+def _first_route(
+    raw_routes: Sequence[dict[str, Any]], op: KnownOp, category: str | None, level: str
+) -> tuple[int, set[str]] | None:
+    """The index and approvers of the first routing entry that fits *op* at *level*."""
+    for index, raw in enumerate(raw_routes):
+        match = raw.get("match") or {}
+        if match.get("category") is not None and match["category"] != category:
+            continue
+        connector = match.get("connector")
+        if connector is not None and not fnmatchcase(op.coords.connector_id, connector):
+            continue
+        if match.get("risk") is not None and match["risk"] != level:
+            continue
+        return index, {str(kind) for kind in raw.get("approvers") or []}
+    return None
+
+
+def _install_floor_mistakes(
+    entries: Sequence[ClassificationEntry],
+    install_entries: Sequence[ClassificationEntry],
+    ops: Sequence[KnownOp],
+) -> list[str]:
+    """A tenant entry that undoes an install-wide wait or risk level: one sentence each part."""
+    coords = [op.coords for op in ops]
+    both = [*install_entries, *entries]
+    mistakes: list[str] = []
+    for index, entry in enumerate(entries):
+        name = f"`classifications[{index}]`"
+        mistakes.extend(install_floor_texts(name, entry, coords, both))
+    return mistakes
 
 
 def _capped(mistakes: list[str]) -> list[str]:
@@ -198,13 +281,14 @@ def check_document(
     install_document: dict[str, Any] | None,
     ops: Sequence[KnownOp],
     other_entries: Sequence[ClassificationEntry] = (),
-) -> tuple[list[str], list[str]]:
-    """Return the mistakes and the warnings of *document*, a valid file's stored form.
+) -> list[str]:
+    """Return the mistakes of *document*, a valid file's stored form.
 
     *install_document* is the stored install policy (for a tenant's file:
-    its taxonomy is the base, and its entries take part in the conflict
-    check). *other_entries* are more entries that apply next to the file
-    (the category and labels set on one operation).
+    its taxonomy is the base, its "always wait" entries and risk levels
+    cannot be set back, and its entries take part in the conflict check).
+    *other_entries* are more entries that apply next to the file (the
+    category and labels set on one operation).
     """
     taxonomy = (
         taxonomy_from_documents(document, None)
@@ -214,17 +298,26 @@ def check_document(
     raw_entries: list[dict[str, Any]] = list(document.get("classifications") or [])
     mistakes = _taxonomy_mistakes(document, scope=scope, taxonomy=taxonomy)
     mistakes.extend(_entry_value_mistakes(raw_entries, taxonomy))
+    mistakes.extend(routing_mistakes(list(document.get("routing") or []), taxonomy))
+    mistakes.extend(binding_mistakes(document, scope=scope, taxonomy=taxonomy))
     if mistakes:
-        return _capped(mistakes), []
+        return _capped(mistakes)
     entries = entries_from_document(document, scope=scope)
+    base = entries_from_document(install_document, scope="install") if scope == "tenant" else []
     mistakes = _floor_mistakes(entries, ops)
+    mistakes.extend(_install_floor_mistakes(entries, base, ops))
     if not mistakes:
-        base = entries_from_document(install_document, scope="install") if scope == "tenant" else []
         try:
             check_no_conflict(
                 (op.coords for op in ops), [*base, *entries, *other_entries], taxonomy
             )
         except ClassificationConflictError as exc:
             mistakes.append(str(exc))
-    warnings = _install_wait_warnings(entries) if scope == "install" else []
-    return _capped(mistakes), warnings
+        if not mistakes:
+            mistakes = _routing_floor_mistakes(
+                list(document.get("routing") or []),
+                ops,
+                [*base, *entries, *other_entries],
+                taxonomy,
+            )
+    return _capped(mistakes)

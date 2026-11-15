@@ -806,7 +806,7 @@ async def test_list_operation_count_includes_typed_and_composite(
 ) -> None:
     """The ``operation_count`` rollup counts typed + composite rows, not only ingested.
 
-    Regression for Signal #4 in the 2026-05-20 RDC v0.3.0 dogfood (#728):
+    Regression for Signal #4 in the 2026-05-20 consumer v0.3.0 dogfood (#728):
     ``_operation_count_by_connector`` used to filter ``source_kind ==
     "ingested"``, so typed connectors like ``bind9-ssh-9.x`` /
     ``k8s-1.x`` / ``vault-1.x`` -- whose groups surface (the groups
@@ -975,7 +975,7 @@ async def test_list_surfaces_register_connector_v2_only_entries(
       ``state="ingested"`` without a ``connector_id`` change.
 
     #1814 (Initiative #1810) — the SDDC connector registers under the
-    short, dispatch-canonical ``"sddc"`` token (RDC #789 Finding 6's
+    short, dispatch-canonical ``"sddc"`` token (a consumer report's
     original ``"sddc" -> "sddc-manager"`` alias, added in G0.18-T2
     #1355, was dropped). So an operator copying ``product`` out of this
     listing into ``POST /api/v1/targets`` succeeds directly: ``"sddc"``
@@ -1334,7 +1334,7 @@ async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
 ) -> None:
     """Catalog-hit + ``catalog_ingest="spec-only"``: row carries the ``--spec`` verb.
 
-    G0.18-T8 (#1361) / RDC #789 N8. The meho-automation add-on row ships
+    G0.18-T8 (#1361), from a consumer report. The meho-automation add-on row ships
     with ``catalog_ingest: spec-only`` because no MEHO-authored spec ships
     for it (the OpenAPI is read from the live add-on at registration), so
     it cannot drive ``meho connector ingest --catalog`` server-side. The
@@ -1480,7 +1480,7 @@ async def test_list_drops_stale_impl_id_rows_whose_connector_id_will_not_resolve
 ) -> None:
     """A stale-rename row that won't round-trip is filtered out.
 
-    G0.9.1-T1 (#773) regression for Signal #6 in the 2026-05-21 RDC
+    G0.9.1-T1 (#773) regression for Signal #6 in the 2026-05-21 consumer
     v0.3.1 dogfood. The consumer deploy carried ``operation_group`` /
     ``endpoint_descriptor`` rows under ``impl_id="kubernetes-asyncio"``
     from the G3.2 (#320) ship, but the connector now registers under
@@ -3134,7 +3134,7 @@ def test_ingest_async_cross_tenant_tenant_id_rejected_403_no_job(
                 "specs": [{"uri": "https://specs.test/never-fetched.yaml"}],
                 "tenant_id": str(other_tenant),
                 # Explicit for readability — async=true is also the
-                # default, i.e. the exact shape the RDC consumer hit.
+                # default, i.e. the exact shape the consumer hit.
                 "async": True,
             },
             headers=_authed(token),
@@ -3589,7 +3589,7 @@ paths:
 # ---------------------------------------------------------------------------
 # T1 (#1646) — manual --spec spec_info_versions_compatible opt-in
 #
-# The vRLI catch-22 (claude-rdc-hetzner-dc#1136): the version-stable
+# The vRLI catch-22 (a consumer repository): the version-stable
 # vRLI ``/api/v2`` surface self-identifies as ``info.version="v2"``
 # while the seeded ``VcfLogsConnector`` label is ``9.0``
 # (supported_version_range ``>=9.0,<10.0``). Ingesting under ``9.0``
@@ -4757,7 +4757,7 @@ def test_ingest_catalog_entry_sddc_manager_9_0_html_portal_returns_422(
     HTML-portal trap as ``vmware/9.0`` and surfaces the same structured 422.
 
     The two entries are the cycle's two confirmed offenders per
-    ``claude-rdc-hetzner-dc#753`` sub-signal B; pinning both shapes in
+    a consumer repository sub-signal B; pinning both shapes in
     distinct tests guards against a future refactor that splits the
     detection logic by product.
     """
@@ -5132,12 +5132,12 @@ def _build_large_openapi_fixture(spec_path: Any, *, op_count: int) -> int:
     path as the live spec.
 
     The repro target from
-    ``claude-rdc-hetzner-dc#771`` Finding 20 is **7.55 MB / 1275 ops**.
+    a consumer repository Finding 20 is **7.55 MB / 1275 ops**.
     A 1500-op fixture lands ≥ 7 MB which is representative enough for
     the non-blocking-budget assertion -- the issue body's
     "≥ 7 MB / ≥ 1000 ops" guidance applies. Live ingest of the actual
     vmware spec is reserved for the consumer-side dogfood in
-    ``claude-rdc-hetzner-dc`` (Finding 20's signal directory).
+    a consumer repository (Finding 20's signal directory).
 
     Per-op padding lives in a module-level constant rather than a
     per-op-derived string so the builder stays O(op_count) on
@@ -5218,7 +5218,7 @@ async def test_ingest_async_default_returns_202_with_job_handle(
     times out, restartCount does not increment, pod stays Ready)``.
     The kubelet liveness probe deadline is the asymptotic version
     of "the request returns inside a budget". The integration check
-    is the consumer-side dogfood in ``claude-rdc-hetzner-dc`` --
+    is the consumer-side dogfood in a consumer repository --
     here we mirror the repro with a representative-size fixture
     (≥ 7 MB / ≥ 1000 ops) and assert the request completes in a
     non-blocking budget that's well under the 25-second probe
@@ -5340,7 +5340,7 @@ async def test_ingest_async_default_returns_202_with_job_handle(
         f"{request_duration_seconds:.2f} s; the route is supposed to "
         "fire the pipeline off the request thread and return 202 + "
         "handle inside the kubelet liveness-probe budget. See "
-        "claude-rdc-hetzner-dc#771 Finding 20 for the pod-crash repro."
+        "a consumer repository Finding 20 for the pod-crash repro."
     )
 
 

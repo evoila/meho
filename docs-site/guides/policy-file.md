@@ -2,8 +2,8 @@
 
 The policy file says which category each connector, operation group and
 operation is in, which labels it has, and which operations always wait
-for approval. Later, approvals will be routed by category: for example,
-only the network team approves network changes.
+for approval. It can also route approvals: for example, only
+MEHO-SA-Operators and MEHO-Admins approve network changes.
 
 You keep the policy as one file, `policy: v1`. You can:
 
@@ -47,6 +47,108 @@ classifications:
 - `labels` follow the same rules as a single label change: at most 32
   labels, a key of 1 to 63 characters, a value of 1 to 255 characters.
 
+## Who approves: routing
+
+The `routing` section says which login groups may approve a change that
+waits. It needs the setting `POLICY_APPROVER_ROUTING` (Helm
+`config.policy.approverRouting`), off by default. This one setting turns on
+both parts: the bindings at sign-in (next section) and the routing at the
+click.
+
+```yaml
+routing:
+  - match: {category: network}
+    approvers: [SA-Operators, Admins]
+  - match: {connector: "<connector-id-pattern>", risk: destructive}
+    approvers: [Admins]
+```
+
+- `match` names a `category`, a `connector` (`*` is any text) and a
+  `risk` level, or some of them. All that it names must fit.
+- `approvers` lists login group kinds: `Readers`, `Operators`,
+  `SA-Operators`, `Admins`, `Approvers`.
+- The first entry that fits wins. A tenant's entries come before the
+  install's. When no entry fits, the same people as today may approve.
+- Routing only makes the list shorter. A group never approves more than it
+  may today: for example, Operators and Approvers never approve another
+  person's `dangerous` or `destructive` change.
+- MEHO refuses an entry that asks a group that may approve none of its
+  changes, and an entry that leaves a risk level that nobody may approve.
+- Only Admins approve an operation that needs the admin role, for example
+  registering a target. MEHO refuses an entry that fits such an operation
+  and does not ask Admins.
+- A change of rights (for example a policy import) is not routed. Another
+  admin approves it, as today.
+
+When a change starts to wait, MEHO stores the groups that may approve it.
+The approvals page shows "Who can approve", and the **For you** tab lists
+the changes you may approve. A person outside the stored groups gets one
+sentence that names who may approve. A change that started to wait before
+the setting was on keeps today's rule.
+
+MEHO ships a starting file, "separated duties"
+(`deploy/policy-profiles/separated-duties.yaml`): identity and secret
+changes only Admins approve, network and storage changes only
+SA-Operators and Admins.
+
+## Which login group is which team
+
+A tenant's file can say which login group is which team, in `bindings`.
+A binding gives a group one of the five group kinds (`Readers`,
+`Operators`, `SA-Operators`, `Admins`, `Approvers`) and a set of
+categories.
+
+```yaml
+bindings:
+  - match: {group: /MEHO-Operators/Network}   # the full path of the group
+    kind: SA-Operators
+    categories: [network]
+  - match: {attribute: "<tenant>-storage"}    # the group attribute meho_group
+    kind: Operators
+    categories: [storage]
+```
+
+- MEHO matches the group by its **full path** or by its **group
+  attribute** `meho_group`, never by its short name. A short name can
+  belong to more than one group. The login setup must send full paths or
+  the attribute: see [Keycloak realm setup](../install/keycloak-realm.md).
+- `categories: ["*"]` means every category.
+- A binding never changes a person's base level (read-only, operator or
+  admin). It can only pick between the kinds of that level: `Operators`
+  or `SA-Operators`, `Readers` or `Approvers`.
+- A person whose groups match two kinds in one tenant cannot log in. Fix
+  the bindings or the groups.
+- A person whose groups match no binding keeps the kind they have today.
+- `principal: agent` or `principal: service` binds a machine login. It can
+  only get `Readers`: only a person approves. A runner gets no binding.
+- A token whose `groups` claim is not a list of texts matches no binding.
+- When your file has no bindings, MEHO uses the shipped bindings: the
+  groups of the settings `JWT_ROLE_GROUPS` and `JWT_SELF_APPROVER_GROUP`,
+  by their full path. They count only for a person whose token has no
+  tenant list (`meho_tenants`, the older login setup). With a tenant list,
+  the person's entry for the tenant decides, as without bindings.
+  `meho policy export` shows them.
+- A shipped binding takes its kind from the **end** of the group name:
+  `Corp-Operators` gives `Operators`. If your site renamed the groups,
+  check that each name ends with its kind. Run `meho policy export` and
+  read `bindings`. A group whose name ends with no kind (for example
+  `Corp-Read-Only`) is not there: write its binding yourself.
+- `meho policy diff` and the import compare your file with the **stored**
+  bindings, not the shipped ones. So the first import of an exported file
+  lists the shipped bindings as added. A file without `bindings` removes
+  the stored ones, and the shipped bindings count again.
+- A binding can name any group of the login setup, also a group of
+  another tenant. Who is in that group is then decided by whoever manages
+  it. Bind only groups that your tenant manages. Two admins of the tenant
+  decide the bindings: one imports the file, a second one approves it.
+
+!!! note "Off by default"
+
+    Bindings count only while the setting `POLICY_APPROVER_ROUTING` (Helm
+    `config.policy.approverRouting`) is on. The policy commands, and so
+    the import of bindings, also need the setting `POLICY_CLASSIFICATION`
+    (Helm `config.policy.classification`).
+
 ## Rules that no file can loosen
 
 MEHO checks each file against these rules. A file that breaks one is
@@ -58,6 +160,28 @@ refused, and the message names the entry and the operation.
   `caution` and always waits.
 - A file can raise a risk level, but never lower it below the level in
   MEHO's code.
+- **The stricter of install and tenant counts.** What the install's file
+  sets is a floor for every tenant. A tenant's file can raise a risk level
+  and make more operations wait. It cannot set a lower risk level than
+  the install, and cannot end an install-wide wait: such an entry is
+  refused. The message names the install entry and the operation. The
+  install cannot end a wait that a tenant's own entry adds either.
+- A wide tenant entry, for example `{match: {connector: X}, risk: caution}`,
+  is refused when the install sets one operation of `X` higher. The level
+  does not count for that operation, but it still counts for the other
+  operations of `X`. So do not remove the level. Add a more specific
+  tenant entry for that operation with the install's level or higher, or
+  leave the operation out of the match. With such an entry, the file is
+  accepted.
+- Which install values make **every** call wait: `always_wait: true` and
+  `risk: destructive`. With `risk: dangerous`, a call waits too, but a
+  standing grant or a run approval of a service account can still let it
+  run without a new approval.
+- An install entry matches connectors by their id, not by product. A
+  connector that a tenant registers itself, under its own id, is matched
+  only by an install entry with a wildcard connector, for example
+  `{connector: "*"}` for every operation of every connector, or
+  `{connector: "*", op: "<op-id-pattern>"}` for some operations.
 
 ## Commands
 
@@ -86,11 +210,15 @@ platform admin may do that.
 5. The import **replaces the whole policy**. An entry that is not in the
    file is removed.
 
-!!! warning "Install-wide always wait"
+!!! note "Install-wide always wait and risk level"
 
-    An install file can make operations always wait. A tenant's own entry
-    that is as specific or more specific can set this back to the
-    operation's own value. MEHO shows a warning for such an entry.
+    An install file can make operations always wait and raise their risk
+    level. This holds for every tenant: a tenant cannot set it back. A
+    stored tenant entry that sets it back has no effect for that part.
+    `meho policy export` writes a `# Has no effect:` comment above such an
+    entry, one for each part. The comment names the operation where the
+    part does not count, and says how to fix the entry. Fix it before you
+    import the file again.
 
 ## REST
 

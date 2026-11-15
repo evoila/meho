@@ -131,7 +131,11 @@ from meho_backplane.operations.delivery_budget import (
 from meho_backplane.operations.dispatch_limits import rate_limited_read_envelope
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
-from meho_backplane.operations.op_policy import OpKey, effective_policy_map
+from meho_backplane.operations.op_policy import (
+    OpKey,
+    effective_policy_map,
+    hidden_classification_fields,
+)
 from meho_backplane.retrieval.retriever import RRF_K
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
@@ -139,6 +143,7 @@ from meho_backplane.targets.resolver import (
     TargetNotFoundError,
     resolve_target,
 )
+from meho_backplane.work_ref import WorkRef
 
 __all__ = [
     "SEARCH_CLASSIFY_MIN_HITS",
@@ -356,7 +361,7 @@ class OperationGroupSummary(BaseModel):
     so groups-first discovery isn't blind to per-op enablement — an agent
     that called ``list_operation_groups`` FIRST (as the tool description
     instructs) still sees the group whose ops ``search_operations`` and
-    dispatch already treat as live (claude-rdc-hetzner-dc#1136).
+    dispatch already treat as live.
 
     * ``operation_count`` / ``enabled_op_count`` — both count the group's
       ``is_enabled=True`` descriptors. They are equal by construction;
@@ -392,6 +397,11 @@ class OperationSearchHit(BaseModel):
     ``description`` is the original text, or the admin's
     ``custom_description`` while the ``AGENT_READS_CUSTOM_DESCRIPTION``
     switch is on (:func:`~meho_backplane.operations._search.agent_description`).
+
+    ``category`` and ``labels`` are the operation's classification for the
+    caller's tenant. :func:`search_operations` leaves them out while the
+    ``POLICY_CLASSIFICATION`` switch is off. ``category`` is ``None`` when
+    two classification entries conflict.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -402,6 +412,8 @@ class OperationSearchHit(BaseModel):
     group_key: str | None
     safety_level: str
     requires_approval: bool
+    category: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
     fused_score: float
     bm25_score: float | None
     cosine_score: float | None
@@ -544,7 +556,7 @@ class CallOperationBody(BaseModel):
     op_id: str = Field(min_length=1)
     target: _TargetArg = None
     params: dict[str, Any] = Field(default_factory=dict)
-    work_ref: str | None = Field(default=None, min_length=1)
+    work_ref: WorkRef | None = None
     preview_hash: str | None = Field(
         default=None,
         min_length=1,
@@ -826,7 +838,7 @@ def _build_operation_groups_query(
     the prior page's last ``group_key`` via strict ``>`` — keyset
     pagination with no offset and no overlap.
 
-    Visibility predicate (claude-rdc-hetzner-dc#1136): a group surfaces
+    Visibility predicate: a group surfaces
     when it is fully enabled (``review_status='enabled'``) **or** still
     ``staged``/``disabled`` at the group level yet holding ≥1 per-op-
     enabled descriptor. The per-op branch is a correlated ``EXISTS`` over
@@ -941,7 +953,7 @@ async def list_operation_groups(
     ``edit_op is_enabled=true``); the latter carries ``partial=True`` with
     a non-zero ``enabled_op_count`` so groups-first discovery isn't blind
     to per-op enablement that ``search_operations`` + dispatch already
-    honour (claude-rdc-hetzner-dc#1136). A group that is not enabled and
+    honour. A group that is not enabled and
     holds zero enabled ops stays hidden. Tenant scoping:
     :func:`~meho_backplane.operations._lookup.visible_scope_clause` — the
     tenant's own rows when it has a row for the connector, the built-in
@@ -1374,7 +1386,9 @@ async def search_operations(
     **Ranked mode.** Returns ``{"hits": [...], "query_duration_ms":
     float, "outcome": str, "advisory": str | None, "narrowing":
     [str]}``. Each hit carries ``op_id`` / ``summary`` / ``description``
-    / ``group_key`` / ``safety_level`` / ``requires_approval``. The
+    / ``group_key`` / ``safety_level`` / ``requires_approval``, and
+    ``category`` / ``labels`` while the ``POLICY_CLASSIFICATION`` switch
+    is on. The
     ranking scores are added only when ``include_scores`` is true and
     the caller is ``tenant_admin``; anyone else gets the slim hit. Tenant
     boundary enforced: every candidate query filters on the same
@@ -1487,7 +1501,7 @@ async def search_operations(
         tenant_id=str(operator.tenant_id),
         duration_ms=duration_ms,
     )
-    exclude = None if show_scores else set(_SCORE_FIELDS)
+    exclude = hidden_classification_fields() | (set() if show_scores else set(_SCORE_FIELDS))
     return {
         "hits": [h.model_dump(mode="json", exclude=exclude) for h in hits],
         "query_duration_ms": duration_ms,

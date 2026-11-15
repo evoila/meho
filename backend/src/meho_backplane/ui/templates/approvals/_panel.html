@@ -19,6 +19,7 @@
                 (id / op_id / connector_id / principal_sub /
                  proposed_effect / created_at / chain)
                 chain is {work_ref, step, total} or None (#3596)
+                who_can_approve is the approver-routing line or None
 
   Phone layout (#6000): below the ``sm`` width the dialog opens as a sheet
   from the bottom of the screen, each row stacks, its text wraps instead
@@ -64,6 +65,11 @@
                 <span aria-hidden="true">&middot;</span>
                 <span>requested by {{ subject(req.requester) }}</span>
               </p>
+              {% if req.who_can_approve %}
+                <p class="text-xs text-base-content/55 [overflow-wrap:anywhere]" data-approval-who-can-approve>
+                  Who can approve: {{ req.who_can_approve }}
+                </p>
+              {% endif %}
             </div>
             <button
               type="button"

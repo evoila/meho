@@ -166,7 +166,11 @@ func render(root *cobra.Command) string {
 		"Five commands have their own `--work-ref` flag that tags the run with the " +
 		"reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, " +
 		"and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the " +
-		"header. List commands filter by reference with `--filter-work-ref`.\n\n")
+		"header. List commands filter by reference with `--filter-work-ref`. " +
+		"The backplane cleans every ticket id with one rule: it removes white space at both " +
+		"ends, refuses an empty value, control characters (also a tab inside the id) and " +
+		"invisible characters, allows at most 256 characters, and stores the text in " +
+		"Unicode form NFC.\n\n")
 	sb.WriteString("## Current tenant\n\n")
 	sb.WriteString("One login can be in several tenants. MEHO then works in one current " +
 		"tenant, and every command sends it in the `Meho-Tenant` header. Choose it with " +

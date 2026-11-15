@@ -84,13 +84,13 @@ async def test_list_targets_returns_targets(client: TestClient) -> None:
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vsphere",
         host="10.1.0.1",
     )
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rdc-vault",
+        name="vault-a",
         product="vault",
         host="10.1.0.2",
     )
@@ -103,8 +103,8 @@ async def test_list_targets_returns_targets(client: TestClient) -> None:
         )
     assert response.status_code == 200
     names = {t["name"] for t in response.json()["items"]}
-    assert "rdc-vcenter" in names
-    assert "rdc-vault" in names
+    assert "example-vcenter" in names
+    assert "vault-a" in names
 
 
 @pytest.mark.asyncio
@@ -161,7 +161,7 @@ async def test_describe_target_exact_name(client: TestClient) -> None:
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vsphere",
         host="vcenter.corp.internal",
         port=443,
@@ -170,12 +170,12 @@ async def test_describe_target_exact_name(client: TestClient) -> None:
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.get(
-            "/api/v1/targets/rdc-vcenter",
+            "/api/v1/targets/example-vcenter",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 200
     data = response.json()
-    assert data["name"] == "rdc-vcenter"
+    assert data["name"] == "example-vcenter"
     assert data["product"] == "vsphere"
     assert data["port"] == 443
     # Full Target must carry tenant_id
@@ -188,7 +188,7 @@ async def test_describe_target_alias_match(client: TestClient) -> None:
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vsphere",
         host="10.1.0.1",
         aliases=["vcenter", "vc.corp.internal"],
@@ -201,7 +201,7 @@ async def test_describe_target_alias_match(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 200
-    assert response.json()["name"] == "rdc-vcenter"
+    assert response.json()["name"] == "example-vcenter"
 
 
 def test_describe_target_not_found_returns_404(client: TestClient) -> None:
@@ -222,23 +222,23 @@ async def test_describe_target_not_found_includes_near_misses(client: TestClient
     """404 detail includes near-misses when the prefix matches."""
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
-        tenant_id=uuid.UUID(tenant_id), name="rdc-vcenter", product="vsphere", host="10.1.0.1"
+        tenant_id=uuid.UUID(tenant_id), name="example-vcenter", product="vsphere", host="10.1.0.1"
     )
     await _insert_target(
-        tenant_id=uuid.UUID(tenant_id), name="rdc-vault", product="vault", host="10.1.0.2"
+        tenant_id=uuid.UUID(tenant_id), name="example-vault", product="vault", host="10.1.0.2"
     )
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.get(
-            "/api/v1/targets/rdc-v",
+            "/api/v1/targets/example-v",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 404
     detail = response.json()["detail"]
     near_miss_names = {m["name"] for m in detail["matches"]}
-    assert "rdc-vcenter" in near_miss_names
-    assert "rdc-vault" in near_miss_names
+    assert "example-vcenter" in near_miss_names
+    assert "example-vault" in near_miss_names
 
 
 # ---------------------------------------------------------------------------
@@ -288,8 +288,8 @@ async def test_probe_ambiguous_connector_returns_409(client: TestClient) -> None
     :func:`resolve_connector_or_label` so the v2 tie-break ladder's
     ambiguous outcome surfaces as a structured 409 with the
     resolver's exception message naming the candidate set + the
-    remediation step. This is the live ``rdc-rke2-infra-k8s`` shape
-    from ``claude-rdc-hetzner-dc#697`` signal 19 — pre-fix the
+    remediation step. This is the live ``example-rke2-k8s`` shape
+    from a consumer repository signal 19 — pre-fix the
     operator saw bare 500; post-fix they see the resolver's
     diagnostic.
     """
@@ -327,7 +327,7 @@ async def test_probe_ambiguous_connector_returns_409(client: TestClient) -> None
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rdc-clash",
+        name="site-clash",
         product="kclash",
         host="10.0.0.7",
     )
@@ -335,7 +335,7 @@ async def test_probe_ambiguous_connector_returns_409(client: TestClient) -> None
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.post(
-            "/api/v1/targets/rdc-clash/probe",
+            "/api/v1/targets/site-clash/probe",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 409
@@ -400,7 +400,7 @@ async def test_probe_resolves_v2_only_registration(client: TestClient) -> None:
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vmwarelike",
         host="vcenter.corp.internal",
     )
@@ -408,7 +408,7 @@ async def test_probe_resolves_v2_only_registration(client: TestClient) -> None:
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.post(
-            "/api/v1/targets/rdc-vcenter/probe",
+            "/api/v1/targets/example-vcenter/probe",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 200
@@ -561,7 +561,7 @@ async def test_probe_forwards_operator_jwt_with_three_part_token(
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rke2-infra-k8s",
+        name="example-rke2-k8s",
         product="opcaptureprobe",
         host="capture.test",
     )
@@ -569,7 +569,7 @@ async def test_probe_forwards_operator_jwt_with_three_part_token(
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.post(
-            "/api/v1/targets/rke2-infra-k8s/probe",
+            "/api/v1/targets/example-rke2-k8s/probe",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 200
@@ -612,7 +612,7 @@ async def test_probe_fingerprint_exception_returns_structured_500(
     """Connector ``fingerprint`` raises → structured 500, not bare 500.
 
     G0.15-T1 (#1210) acceptance criterion. Replays sub-signal A from
-    ``claude-rdc-hetzner-dc#753``: ``POST /api/v1/targets/<resolvable
+    a consumer repository: ``POST /api/v1/targets/<resolvable
     target>/probe`` against a target whose connector resolves cleanly
     but whose ``fingerprint(target)`` raises (credential load fails,
     target unreachable, k8s API timing, etc.) used to surface as
@@ -657,7 +657,7 @@ async def test_probe_fingerprint_exception_returns_structured_500(
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
-        name="rke2-infra-k8s",
+        name="example-rke2-k8s",
         product="k8sfail",
         host="10.10.0.1",
     )
@@ -665,7 +665,7 @@ async def test_probe_fingerprint_exception_returns_structured_500(
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.post(
-            "/api/v1/targets/rke2-infra-k8s/probe",
+            "/api/v1/targets/example-rke2-k8s/probe",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 500
@@ -680,7 +680,7 @@ async def test_probe_fingerprint_exception_returns_structured_500(
     # clause of the convention.
     assert detail["error"] == "fingerprint_failed"
     assert detail["connector_id"] == "k8sfail-1.x"
-    assert detail["target_name"] == "rke2-infra-k8s"
+    assert detail["target_name"] == "example-rke2-k8s"
     assert detail["exception_class"] == "RuntimeError"
     assert "kubeconfig credential load failed" in detail["exception_message"]
     assert detail["docs"] == "docs/codebase/error-message-shape.md"
@@ -825,13 +825,13 @@ def test_create_target_with_all_fields(client: TestClient) -> None:
         response = client.post(
             "/api/v1/targets",
             json={
-                "name": "rdc-vcenter",
+                "name": "example-vcenter",
                 "aliases": ["vcenter", "vc"],
                 "product": "vsphere",
                 "host": "vcenter.corp.internal",
                 "port": 443,
                 "fqdn": "vcenter.corp.internal",
-                "secret_ref": f"tenants/{DEFAULT_TENANT_ID}/rdc-vcenter",
+                "secret_ref": f"tenants/{DEFAULT_TENANT_ID}/example-vcenter",
                 "auth_model": "impersonation",
                 "vpn_required": True,
                 "extras": {"dc": "fra1"},
@@ -860,7 +860,7 @@ def _register_fake_k8s_connector() -> None:
     registry between tests, so each enum-validation test that needs a
     known set of valid products registers its own minimal stand-in
     here. ``product='k8s'`` mirrors the real dogfood case
-    (``claude-rdc-hetzner-dc#697`` signal 5 — operator typed
+    (a consumer repository signal 5 — operator typed
     ``'kubernetes'``, real registration is ``'k8s'``).
     """
     from meho_backplane.connectors.base import Connector
@@ -886,7 +886,7 @@ def test_create_target_unknown_product_returns_422(client: TestClient) -> None:
     """POST with a product no connector advertises returns a structured 422.
 
     G0.14-T3 (#1144) acceptance criterion. Replays the real-world
-    typo from ``claude-rdc-hetzner-dc#697`` signal 5: the operator
+    typo from a consumer repository signal 5: the operator
     posts ``product='kubernetes'`` (the friendly common name) when the
     registered connector advertises ``'k8s'``. Before this PR the
     POST succeeded and the broken row was unrecoverable (no DELETE,
@@ -901,7 +901,7 @@ def test_create_target_unknown_product_returns_422(client: TestClient) -> None:
         response = client.post(
             "/api/v1/targets",
             json={
-                "name": "rdc-rke2-infra",
+                "name": "example-rke2-b",
                 "product": "kubernetes",
                 "host": "10.10.0.1",
             },
@@ -938,7 +938,7 @@ def test_create_target_unknown_product_does_not_create_row(client: TestClient) -
         r_typo = client.post(
             "/api/v1/targets",
             json={
-                "name": "rdc-rke2-infra",
+                "name": "example-rke2-b",
                 "product": "kubernetes",
                 "host": "10.10.0.1",
             },
@@ -949,7 +949,7 @@ def test_create_target_unknown_product_does_not_create_row(client: TestClient) -
         r_retry = client.post(
             "/api/v1/targets",
             json={
-                "name": "rdc-rke2-infra",
+                "name": "example-rke2-b",
                 "product": "k8s",
                 "host": "10.10.0.1",
             },
@@ -973,7 +973,7 @@ def test_create_target_valid_product_succeeds(client: TestClient) -> None:
         response = client.post(
             "/api/v1/targets",
             json={
-                "name": "rdc-rke2-infra",
+                "name": "example-rke2-b",
                 "product": "k8s",
                 "host": "10.10.0.1",
             },
@@ -1061,7 +1061,7 @@ def test_create_target_unknown_product_lists_all_valid(client: TestClient) -> No
 # ---------------------------------------------------------------------------
 # #1814 (Initiative #1810) — SDDC product realigned to the short token
 #
-# RDC #789 Finding 6 originally caught that ``meho connector list``
+# A consumer report originally caught that ``meho connector list``
 # emits ``product="sddc"`` (parser-derived, load-bearing for the #773
 # connector_id round-trip) while ``POST /api/v1/targets`` validated
 # against the registry's then-canonical ``"sddc-manager"`` — bridged by
@@ -1131,7 +1131,7 @@ def test_create_target_accepts_sddc_short_token(client: TestClient) -> None:
             "/api/v1/targets",
             json={
                 "product": "sddc",
-                "name": "rdc-sddc",
+                "name": "site-sddc",
                 "host": "sddc.corp.internal",
             },
             headers={"Authorization": f"Bearer {_admin_token(key)}"},
@@ -1157,7 +1157,7 @@ def test_create_target_rejects_retired_sddc_manager_long_token(client: TestClien
             "/api/v1/targets",
             json={
                 "product": "sddc-manager",
-                "name": "rdc-sddc-long",
+                "name": "site-sddc-long",
                 "host": "sddc.corp.internal",
             },
             headers={"Authorization": f"Bearer {_admin_token(key)}"},
@@ -1298,9 +1298,9 @@ def test_create_target_with_version_persisted(client: TestClient) -> None:
     {"name": "test-vc", "product": "vmware", "version": "9.0", ...}``
     → 201 with ``version: "9.0"`` in the response body.
 
-    The replays the v0.7.0 dogfood signal-6 reproducer (RDC #753):
-    operator knows the target's product version up-front (consumer
-    deployed vCenter 9.0 in `rdc-hetzner-dc`) and seeds it at create
+    This replays the v0.7.0 dogfood signal-6 reproducer from a consumer
+    report: the operator knows the target's product version up-front (the
+    consumer deployed vCenter 9.0 in a lab) and seeds it at create
     time so the very first dispatch resolves the versioned connector
     without round-tripping through PATCH.
     """
@@ -1353,7 +1353,7 @@ def test_update_target_sets_version_from_null(client: TestClient) -> None:
     """PATCH ``{"version": "9.0"}`` updates a target's version column.
 
     G0.15-T6 (#1215) acceptance criterion: ``PATCH /api/v1/targets/
-    rdc-vcenter {"version": "9.0"}`` → 200 with the row's ``version``
+    example-vcenter {"version": "9.0"}`` → 200 with the row's ``version``
     updated from null to ``"9.0"``. Closes the dogfood foot-gun where
     a fresh target with ``version=None`` had no operator-driven path
     to set the version (TargetUpdate omitted the field).
@@ -1418,8 +1418,8 @@ def test_create_target_unknown_preferred_impl_id_returns_422(
 ) -> None:
     """POST with an unregistered ``preferred_impl_id`` returns a structured 422.
 
-    G0.15-T6 (#1215) acceptance criterion: the v0.7.0 dogfood (RDC
-    #753) caught operators PATCHing typo'd ``preferred_impl_id`` values
+    G0.15-T6 (#1215) acceptance criterion: the v0.7.0 dogfood (a
+    consumer report) caught operators PATCHing typo'd ``preferred_impl_id`` values
     (e.g. ``"vmware-rest"`` instead of the full ``"vmware-rest-9.0"``)
     and the resolver silently ignored them. This validator surfaces
     the foot-gun at write time with the same error-message-shape as
@@ -1810,7 +1810,7 @@ async def test_cross_tenant_isolation(client: TestClient) -> None:
     tenant_b = str(uuid.uuid4())
     await _insert_target(
         tenant_id=uuid.UUID(tenant_a),
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vsphere",
         host="10.1.0.1",
     )
@@ -1818,7 +1818,7 @@ async def test_cross_tenant_isolation(client: TestClient) -> None:
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.get(
-            "/api/v1/targets/rdc-vcenter",
+            "/api/v1/targets/example-vcenter",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_b)}"},
         )
     assert response.status_code == 404
@@ -2405,12 +2405,12 @@ def test_create_target_derives_per_tenant_secret_ref(client: TestClient) -> None
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.post(
             "/api/v1/targets",
-            json={"name": "rdc-vcenter", "product": "ssh", "host": "10.0.0.5"},
+            json={"name": "example-vcenter", "product": "ssh", "host": "10.0.0.5"},
             headers={"Authorization": f"Bearer {_admin_token(key)}"},
         )
     assert response.status_code == 201
     data = response.json()
-    assert data["secret_ref"] == f"tenants/{DEFAULT_TENANT_ID}/rdc-vcenter"
+    assert data["secret_ref"] == f"tenants/{DEFAULT_TENANT_ID}/example-vcenter"
     # Never the retired per-``sub`` layout.
     assert "targets/" not in data["secret_ref"]
 

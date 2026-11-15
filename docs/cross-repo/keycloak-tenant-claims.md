@@ -309,6 +309,28 @@ MEHO reads the list and works in one current tenant per request. The
 steps for an admin are in the guide
 [One person in several tenants](../../docs-site/guides/several-tenants.md).
 
+### Team groups for the policy file's bindings
+
+The `bindings` of a tenant's policy file give a team group a group kind
+and categories (switch `POLICY_APPROVER_ROUTING`,
+[policy-bindings.md](../codebase/policy-bindings.md)). MEHO matches the
+group by its full path or by a group attribute, never by its short name.
+The realm sends one of the two:
+
+- **Full path:** the group-membership mapper `groups-claim` with
+  **Full group path** on. The `groups` claim then holds
+  `/MEHO-Operators/Network`. The shipped realm has it off, so the claim
+  holds short names, and only attribute bindings match.
+- **Group attribute:** each team group carries `meho_group` (for
+  example `<tenant>-network`). A stock User Attribute mapper
+  `meho-groups`: **User Attribute** `meho_group`, **Token Claim Name**
+  `meho_groups`, **Claim JSON Type** `String`, **Multivalued** on,
+  **Aggregate attribute values** on, access token on. Keep the person's
+  own `meho_group` empty and **Unmanaged Attributes** not **Enabled**, as
+  for the other attributes.
+
+A binding never changes the `tenant_role` in the token.
+
 ### Upgrading a realm that still has fixed values
 
 Older realms often have **Hardcoded claim** mappers that put the same

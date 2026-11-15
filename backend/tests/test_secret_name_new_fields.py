@@ -4,8 +4,13 @@
 """SNMP keys, passphrases and other key-word names are hidden in every place.
 
 One name rule (``broadcast.events.is_secret_param_name``) serves the normal
-answer and the audit row, the approval preview, the broadcast params and the
-text/trace scrub. Plain identifiers that only end in "key" stay visible.
+answer and the audit row, the approval preview (also the Keycloak one), the
+broadcast params, the trace, the error text and the query names of a link.
+Plain identifiers and references stay visible.
+
+The tests are one table: a new secret name is one new row in
+:data:`_SECRET_NAMES`, a new plain name one new row in :data:`_PLAIN_NAMES`.
+Each row is checked in four spellings, with an SNMP prefix too.
 """
 
 from __future__ import annotations
@@ -19,119 +24,168 @@ from meho_backplane.broadcast.events import (
     scrub_broadcast_params,
     scrub_secret_named_values,
 )
+from meho_backplane.connectors.keycloak.redaction import REDACTED, redact_secret_fields
 from meho_backplane.operations._preview import _PARAM_REDACTED, _scrub_secret_param_keys
 from meho_backplane.operations._secret_values import hide_secret_values
-from meho_backplane.redaction.secret_fields import scrub_secret_fields
+from meho_backplane.redaction.secret_fields import (
+    scrub_secret_fields,
+    scrub_secret_fields_in_text,
+)
+from meho_backplane.redaction.url_secret import is_secret_query_name
 
 _MARK = "[REDACTED:param_name]"
 _VALUE = "made-up-value-123"
 
+#: Secret names, in snake case. Each is hidden in every spelling.
 _SECRET_NAMES = [
-    ("authenticationKey", "authentication_key", "authentication-key"),
-    ("privacyKey", "privacy_key", "privacy-key"),
-    ("passphrase", "pass_phrase", "pass-phrase"),
-    ("PassPhrase", "PASSPHRASE", "Pass-Phrase"),
-    ("storeKey", "store_key", "store-key"),
-    ("applicationKey", "application_key", "application-key"),
-    ("sharedSecret", "shared_secret", "shared-secret"),
-    ("snmpCommunity", "snmp_community", "snmp-community"),
+    "auth_key",
+    "priv_key",
+    "community_string",
+    "tacacs_key",
+    "radius_key",
+    "hmac_key",
+    "signing_key",
+    "shared_key",
+    "pre_shared_key",
+    "license_key",
+    "authentication_key",
+    "privacy_key",
+    "pass_phrase",
+    "store_key",
+    "application_key",
+    "snmp_community",
 ]
-_ALL_SECRET_NAMES = [name for row in _SECRET_NAMES for name in row]
 
+#: Plain names, in snake case. Each stays visible in every spelling.
 _PLAIN_NAMES = [
-    "primaryKey",
-    "primary_key",
-    "primary-key",
-    "partitionKey",
-    "partition_key",
-    "sortKey",
-    "sort-key",
-    "keyId",
+    "auth_key_id",
     "key_id",
-    "publicKey",
+    "community_id",
     "public_key",
-    "authenticationKeyId",
+    "secret_ref",
+    "password_ref",
+    "api_key_ref",
+    "snmp_auth_key_ref",
+    "primary_key",
+    "partition_key",
+    "sort_key",
+    "authentication_key_id",
 ]
 
 
-@pytest.mark.parametrize("name", _ALL_SECRET_NAMES)
-def test_each_new_name_is_secret(name: str) -> None:
-    assert is_secret_param_name(name) is True
+def _spellings(snake: str) -> list[str]:
+    """``auth_key``, ``authKey``, ``auth-key``, ``AUTHKEY``, ``snmp_auth_key``, ``snmpAuthKey``."""
+    words = snake.split("_")
+    camel = words[0] + "".join(word.title() for word in words[1:])
+    return [
+        snake,
+        camel,
+        snake.replace("_", "-"),
+        snake.replace("_", "").upper(),
+        f"snmp_{snake}",
+        "snmp" + "".join(word.title() for word in words),
+    ]
 
 
-@pytest.mark.parametrize("name", _PLAIN_NAMES)
-def test_plain_identifiers_are_not_secret(name: str) -> None:
-    assert is_secret_param_name(name) is False
+_ALL_SECRET = [spelling for name in _SECRET_NAMES for spelling in _spellings(name)]
+_ALL_PLAIN = [spelling for name in _PLAIN_NAMES for spelling in _spellings(name)[:4]]
+# Older names, hidden before this table: the capital spelling is one word.
+_ALL_SECRET += ["sharedSecret", "shared_secret", "shared-secret", "PassPhrase", "PASSPHRASE"]
+_ALL_PLAIN += ["snmpCommunityId", "snmp_public_key", "snmpKeyId"]
 
 
-def _nest(name: str) -> dict[str, Any]:
-    return {
+@pytest.mark.parametrize("name", _ALL_SECRET)
+def test_secret_name_is_hidden_in_every_place(name: str) -> None:
+    node = {
         "top": {name: _VALUE},
         "rows": [{"id": 1, name: _VALUE}, {"deep": [{name: {"inner": _VALUE}}]}],
         name: _VALUE,
     }
 
+    def hidden(mark: str) -> dict[str, Any]:
+        return {
+            "top": {name: mark},
+            "rows": [{"id": 1, name: mark}, {"deep": [{name: mark}]}],
+            name: mark,
+        }
 
-def _hidden(name: str, mark: str = _MARK) -> dict[str, Any]:
-    return {
-        "top": {name: mark},
-        "rows": [{"id": 1, name: mark}, {"deep": [{name: mark}]}],
-        name: mark,
-    }
-
-
-@pytest.mark.parametrize("name", _ALL_SECRET_NAMES)
-def test_result_and_audit_hide_each_name_at_every_depth(name: str) -> None:
-    # The normal answer and the audit copy both use this walk.
-    shown, found = scrub_secret_named_values(_nest(name))
-    assert found is True
-    assert shown == _hidden(name)
-    assert hide_secret_values("any.op", _nest(name)) == _hidden(name)
-
-
-@pytest.mark.parametrize("name", _ALL_SECRET_NAMES)
-def test_approval_preview_hides_each_name(name: str) -> None:
-    assert _scrub_secret_param_keys(_nest(name)) == _hidden(name, _PARAM_REDACTED)
+    assert is_secret_param_name(name) is True
+    assert scrub_secret_named_values(node) == (hidden(_MARK), True)  # result
+    assert hide_secret_values("any.op", node) == hidden(_MARK)  # audit row
+    assert scrub_broadcast_params(node) == (hidden(_MARK), True)  # broadcast
+    assert _scrub_secret_param_keys(node) == hidden(_PARAM_REDACTED)  # preview
+    assert redact_secret_fields(node) == hidden(REDACTED)  # Keycloak preview
+    assert scrub_secret_fields(node, hide_numbers=True) == hidden(_MARK)  # trace
+    assert _VALUE not in scrub_secret_fields_in_text(f'{{"{name}": "{_VALUE}"}}')  # error text
+    assert is_secret_query_name(name) is True  # a link's query
 
 
-@pytest.mark.parametrize("name", _ALL_SECRET_NAMES)
-def test_broadcast_hides_each_name(name: str) -> None:
-    scrubbed, found = scrub_broadcast_params(_nest(name))
-    assert found is True
-    assert scrubbed == _hidden(name)
-
-
-@pytest.mark.parametrize("name", _ALL_SECRET_NAMES)
-def test_trace_and_text_scrub_hide_each_name(name: str) -> None:
-    assert scrub_secret_fields(_nest(name)) == _hidden(name)
-    text = scrub_secret_fields(f'{{"{name}": "{_VALUE}"}}')
-    assert _VALUE not in text
-
-
-@pytest.mark.parametrize("name", _PLAIN_NAMES)
-def test_plain_identifiers_stay_in_every_place(name: str) -> None:
+@pytest.mark.parametrize("name", _ALL_PLAIN)
+def test_plain_name_stays_in_every_place(name: str) -> None:
     node = {"top": {name: "abc"}, "list": [{name: "abc"}]}
+    text = f'{{"{name}": "abc"}}'
+    assert is_secret_param_name(name) is False
     assert scrub_secret_named_values(node) == (node, False)
-    assert _scrub_secret_param_keys(node) == node
+    assert hide_secret_values("any.op", node) == node
     assert scrub_broadcast_params(node) == (node, False)
-    assert scrub_secret_fields(node) == node
+    assert _scrub_secret_param_keys(node) == node
+    assert redact_secret_fields(node) == node
+    assert scrub_secret_fields(node, hide_numbers=True) == node
+    assert scrub_secret_fields_in_text(text) == text
 
 
-_SNMP_NODE = {"snmp_version": "v2c", "community": _VALUE, "port": 161}
+#: A ``community`` in an SNMP place, with the path to it.
+_SNMP_PLACES: list[tuple[Any, tuple[Any, ...]]] = [
+    ({"snmp_version": "v2c", "community": _VALUE}, ("community",)),
+    ({"SnmpPort": 161, "Community": _VALUE}, ("Community",)),
+    ({"snmp": {"community": _VALUE}}, ("snmp", "community")),
+    ({"SNMP": {"v2c": {"COMMUNITY": _VALUE}}}, ("SNMP", "v2c", "COMMUNITY")),
+    ({"snmpCommunities": [{"community": _VALUE}]}, ("snmpCommunities", 0, "community")),
+    ({"snmp-targets": [[{"community": _VALUE}]]}, ("snmp-targets", 0, 0, "community")),
+    ({"fields": [{"value": _VALUE, "name": "community"}]}, ("fields", 0, "value")),
+    ({"settings": [{"name": "COMMUNITY", "value": _VALUE}]}, ("settings", 0, "value")),
+]
 
 
-def test_community_next_to_an_snmp_field_is_hidden_in_every_place() -> None:
-    want = {"snmp_version": "v2c", "community": _MARK, "port": 161}
-    assert scrub_secret_named_values(_SNMP_NODE)[0] == want
-    assert _scrub_secret_param_keys(_SNMP_NODE) == {**want, "community": _PARAM_REDACTED}
-    assert scrub_broadcast_params(_SNMP_NODE)[0] == want
-    assert scrub_secret_fields(_SNMP_NODE) == want
-    assert (
-        scrub_secret_named_values({"SnmpPort": 161, "community": _VALUE})[0]["community"] == _MARK
-    )
+def _at(node: Any, path: tuple[Any, ...]) -> Any:
+    for step in path:
+        node = node[step]
+    return node
 
 
-def test_community_without_an_snmp_field_stays() -> None:
-    node = {"community": "gardeners", "members": 4}
+@pytest.mark.parametrize(("node", "path"), _SNMP_PLACES)
+def test_community_in_an_snmp_place_is_hidden_in_every_place(
+    node: Any, path: tuple[Any, ...]
+) -> None:
+    assert _at(scrub_secret_named_values(node)[0], path) == _MARK
+    assert _at(hide_secret_values("any.op", node), path) == _MARK
+    assert _at(scrub_broadcast_params(node)[0], path) == _MARK
+    assert _at(_scrub_secret_param_keys(node), path) == _PARAM_REDACTED
+    assert _at(scrub_secret_fields(node), path) == _MARK
+
+
+def test_name_value_pair_community_is_hidden_in_text() -> None:
+    text = f'[{{"name": "community", "value": "{_VALUE}"}}]'
+    assert _VALUE not in scrub_secret_fields_in_text(text)
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        {"community": "gardeners", "members": 4},
+        {"groups": {"community": "gardeners"}},
+        {"teams": [{"community": "gardeners"}]},
+        {"snmp": {"community_id": "c-1"}},
+        [{"name": "community_id", "value": "c-1"}],
+    ],
+)
+def test_community_outside_an_snmp_place_stays(node: Any) -> None:
     assert scrub_secret_named_values(node) == (node, False)
+    assert scrub_broadcast_params({"params": node}) == ({"params": node}, False)
+    assert _scrub_secret_param_keys(node) == node
     assert scrub_secret_fields(node) == node
+
+
+def test_keycloak_scrub_keeps_flags_under_a_secret_name() -> None:
+    node = {"resetPasswordAllowed": True, "passwordPolicy": "length(8)"}
+    assert redact_secret_fields(node) == {"resetPasswordAllowed": True, "passwordPolicy": REDACTED}

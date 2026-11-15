@@ -267,19 +267,47 @@ broadcast scrub and the approval echo use. The full word list:
   anywhere in the name;
 - the pairs `secret_key`, `shared_key`, `preshared_key`,
   `connection_string`, `connection_strings`, `authentication_key` and
-  `privacy_key` (the SNMP keys), `store_key`, `application_key`,
+  `privacy_key` (the SNMP keys), `auth_key`, `priv_key`,
+  `community_string`, `community_strings`, `tacacs_key`, `radius_key`,
+  `hmac_key`, `signing_key`, `store_key`, `application_key`,
   `snmp_community` only at the end of the name (`secret_key_ref` is the
-  name of a Kubernetes Secret and stays plain, and so is
-  `authentication_key_id`). `shared_secret` ends in `secret`, so it is
-  hidden by the rule above;
-- a bare `community` field, when a sibling field name has an `snmp` word
-  (`snmp_version`, `snmpPort`): `broadcast.events.is_snmp_community_key`,
-  asked next to the name rule by every walk over data. The text step has
-  no sibling, so it hides `snmp_community` but not a bare `community`;
+  name of a Kubernetes Secret and stays plain, and so are `auth_key_id`
+  and `authentication_key_id`). `pre_shared_key` ends in `shared_key`,
+  and `license_key` counts anywhere. `shared_secret` ends in `secret`, so
+  it is hidden by the rule above;
+- a name in capitals has no word boundary (`AUTHKEY`, `LICENSEKEY`), so a
+  pair written as one word counts too: a final pair as the last word, any
+  other pair as any word;
+- a bare `community` field in an SNMP place
+  (`broadcast.events.is_snmp_community_key`): next to a sibling field
+  whose name has an `snmp` word (`snmp_version`, `snmpPort`), or anywhere
+  under a key with an `snmp` word (`{"snmp": {"community": ...}}`,
+  `{"snmpCommunities": [{"community": ...}]}`). Every walk over data
+  asks it next to the name rule and carries the SNMP place down. The text
+  step sees no parent or sibling, so it hides `snmp_community` but not a
+  bare `community` key;
+- the `value` of a name/value pair named `community`
+  (`[{"name": "community", "value": ...}]`), in data and in text
+  (`broadcast.events.is_secret_pair_name`): such a list gives the pair no
+  SNMP sibling, and a setting named `community` there is the SNMP
+  community;
 - never hidden, whatever the rules say: `primary_key`, `partition_key`,
   `sort_key`, `key_id`, `public_key` (plain identifiers that end in a key
-  word; the list is `_PLAIN_KEY_NAMES`, tested in
-  `test_secret_name_new_fields.py`).
+  word; the list is `_PLAIN_KEY_NAMES`), and every name whose last word
+  is `ref` (`secret_ref`, `password_ref`, `apiKeyRef`): it names where a
+  secret is kept, not the secret.
+
+The rule is one table test, `test_secret_name_new_fields.py`: each secret
+name in four spellings and with an SNMP prefix, each plain name in four
+spellings, checked in every place below and in the Keycloak scrub. A new
+name is one new row.
+
+The same rule serves the places that had a list of their own: the Keycloak
+scrub (`connectors/keycloak/redaction.py`, used by the Keycloak approval
+previews, its results and its trace) hides its own field names and every
+name the shared rule marks (a flag or a number stays), and the secret query
+names of a link (`redaction/url_secret.py::is_secret_query_name`) are its
+own last words plus every name the shared rule marks.
 
 Names are read in snake, camel and kebab case.
 Numbers, booleans and `null` stay, except in the trace scrub: there a number

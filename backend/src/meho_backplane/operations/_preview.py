@@ -84,6 +84,7 @@ import structlog
 
 from meho_backplane.broadcast.events import (
     classify_op,
+    has_snmp_word,
     is_secret_name_value_pair,
     is_secret_param_name,
     is_snmp_community_key,
@@ -222,7 +223,7 @@ def _redact_preview_message(message: str) -> str:
     return redacted
 
 
-def _scrub_secret_param_keys(value: Any) -> Any:
+def _scrub_secret_param_keys(value: Any, *, in_snmp: bool = False) -> Any:
     """Replace secret-by-name param values with :data:`_PARAM_REDACTED`.
 
     Walks any mapping and any sequence (other than strings and bytes)
@@ -245,6 +246,10 @@ def _scrub_secret_param_keys(value: Any) -> Any:
     a secret keyed deep inside the params tree is still caught. The input
     is never mutated; a new structure is returned.
 
+    A bare ``community`` is hidden in an SNMP place: next to an SNMP field,
+    or under a key with an SNMP word (*in_snmp*,
+    :func:`~meho_backplane.broadcast.events.is_snmp_community_key`).
+
     This is the key-name half of the generic echo's redaction; the
     value-shape half is :func:`apply_connector_boundary_redaction`.
     """
@@ -256,16 +261,16 @@ def _scrub_secret_param_keys(value: Any) -> Any:
                 if isinstance(key, str)
                 and (
                     is_secret_param_name(key)
-                    or is_snmp_community_key(value, key)
+                    or is_snmp_community_key(value, key, in_snmp=in_snmp)
                     or (hide_pair_value and key == "value")
                 )
                 and isinstance(item, (str, Mapping, Sequence))
-                else _scrub_secret_param_keys(item)
+                else _scrub_secret_param_keys(item, in_snmp=in_snmp or has_snmp_word(key))
             )
             for key, item in value.items()
         }
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_scrub_secret_param_keys(item) for item in value]
+        return [_scrub_secret_param_keys(item, in_snmp=in_snmp) for item in value]
     return value
 
 

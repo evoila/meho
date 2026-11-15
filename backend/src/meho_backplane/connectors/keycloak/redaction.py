@@ -44,6 +44,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from meho_backplane.broadcast.events import is_secret_param_name
+
 __all__ = ["REDACTED", "redact_secret_fields", "redact_trace_fields"]
 
 #: Sentinel written in place of a scrubbed secret value. A non-empty
@@ -107,7 +109,8 @@ def redact_secret_fields(value: Any) -> Any:
     """Return *value* with Keycloak secret material scrubbed, recursively.
 
     Walks dicts and lists. For every dict, a key matching
-    :data:`_SECRET_FIELDS` (case-insensitively) has its whole value
+    :data:`_SECRET_FIELDS` (case-insensitively), or a key the shared name
+    rule marks as secret (:func:`_is_shared_secret`), has its whole value
     replaced with :data:`REDACTED`; every other value is walked
     recursively so a secret nested inside a protocol mapper, an
     identity-provider config, or a ``smtpServer`` map is still caught.
@@ -144,7 +147,7 @@ def _redact(value: Any, fields: frozenset[str]) -> Any:
         return {
             key: (
                 REDACTED
-                if isinstance(key, str) and key.lower() in fields
+                if isinstance(key, str) and (key.lower() in fields or _is_shared_secret(key, item))
                 else _redact(item, fields)
             )
             for key, item in value.items()
@@ -152,3 +155,14 @@ def _redact(value: Any, fields: frozenset[str]) -> Any:
     if isinstance(value, list):
         return [_redact(item, fields) for item in value]
     return value
+
+
+def _is_shared_secret(key: str, item: Any) -> bool:
+    """True when the shared name rule hides *item* under *key*.
+
+    The rule every other place uses
+    (:func:`~meho_backplane.broadcast.events.is_secret_param_name`), with
+    its value rule: a string, an object or a list is hidden; a flag or a
+    number (``resetPasswordAllowed``) stays.
+    """
+    return is_secret_param_name(key) and isinstance(item, (str, dict, list))

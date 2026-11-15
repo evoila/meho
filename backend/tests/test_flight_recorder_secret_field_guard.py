@@ -194,14 +194,18 @@ def registered_ops() -> list[_Op]:
 
 
 def test_the_guard_sees_the_registered_operations(registered_ops: list[_Op]) -> None:
-    """Not empty: the registrars ran, and the known secret operations are flagged."""
+    """Not empty: the registrars ran, and the known secret operations are flagged.
+
+    ``msad.user.set-password`` is not in the list: its only secret-like
+    field is ``password_ref``, a reference, and a name that ends in
+    ``_ref`` is plain.
+    """
     assert len(registered_ops) >= 100
     flagged = {op.op_id for op in registered_ops if _flagged_fields(op.parameter_schema or {})}
     assert {
         "k8s.secret.update",
         "keycloak.user.create",
         "keycloak.user.reset_password",
-        "msad.user.set-password",
         "secret.handoff.import",
         "vault.auth.userpass.update_password",
         "vault.auth.userpass.write",

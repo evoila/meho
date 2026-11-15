@@ -185,7 +185,7 @@ from meho_backplane.topology.query import (
 )
 from meho_backplane.topology.refresh import RefreshResult, refresh_target_topology
 from meho_backplane.topology.refresh_read_scope import RefreshReadScopeDeniedError
-from meho_backplane.topology.resolvers import NodeNotFoundError
+from meho_backplane.topology.resolvers import NodeNotFoundError, resolve_node
 from meho_backplane.topology.schemas import (
     TopologyDiffResult,
     TopologyEdge,
@@ -246,6 +246,41 @@ async def _dispatch_graph_write(
     return await dispatch_rest_write(
         operator, connector_id=TOPOLOGY_GRAPH_CONNECTOR_ID, op_id=op_id, params=params
     )
+
+
+async def _raise_if_edge_unknown(
+    session: AsyncSession, tenant_id: uuid.UUID, edge_id: uuid.UUID
+) -> None:
+    """Answer 404 ``edge_not_found`` now when the tenant has no edge with *edge_id*.
+
+    A token call then makes no approval request that can only fail.
+    """
+    edge = await session.get(GraphEdge, edge_id)
+    if edge is None or edge.tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "edge_not_found",
+                "edge_id": str(edge_id),
+                "message": f"graph_edge {edge_id} not found in this tenant",
+            },
+        )
+
+
+async def _raise_if_node_unknown(
+    session: AsyncSession, tenant_id: uuid.UUID, node_id: uuid.UUID
+) -> None:
+    """Answer 404 ``node_not_found`` now when the tenant has no node with *node_id*."""
+    node = await session.get(GraphNode, node_id)
+    if node is None or node.tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "node_not_found",
+                "node_id": str(node_id),
+                "message": str(NodeNotFoundForDeleteError(node_id)),
+            },
+        )
 
 
 #: Canonical op identifiers bound into ``audit_op_id`` per route.
@@ -945,8 +980,16 @@ async def annotate_edge_route(
       to multiple kinds in the tenant — pass ``kind`` on the
       endpoint to disambiguate.
     """
-    # A call made with a token waits for approval (module docstring).
+    # A call made with a token waits for approval (module docstring). Both
+    # endpoints are resolved first, so an unknown node answers at once.
     if not runs_at_once(operator):
+        try:
+            for endpoint in (body.from_endpoint, body.to_endpoint):
+                await resolve_node(session, operator.tenant_id, endpoint.name, endpoint.kind)
+        except AmbiguousNodeError as exc:
+            raise _ambiguous_node_http(exc) from exc
+        except NodeNotFoundError as exc:
+            raise _node_not_found_http(exc) from exc
         return await _dispatch_graph_write(operator, TOPOLOGY_ANNOTATE_OP_ID, _edge_params(body))
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_ANNOTATE,
@@ -1015,6 +1058,7 @@ async def unannotate_edge_route(
     """
     # A call made with a token waits for approval (module docstring).
     if not runs_at_once(operator):
+        await _raise_if_edge_unknown(session, operator.tenant_id, edge_id)
         return await _dispatch_graph_write(
             operator, TOPOLOGY_UNANNOTATE_OP_ID, {"edge_id": str(edge_id)}
         )
@@ -1103,6 +1147,7 @@ async def delete_node_route(
     """
     # A call made with a token waits for approval (module docstring).
     if not runs_at_once(operator):
+        await _raise_if_node_unknown(session, operator.tenant_id, node_id)
         return await _dispatch_graph_write(
             operator, TOPOLOGY_DELETE_NODE_OP_ID, {"node_id": str(node_id)}
         )
@@ -1368,17 +1413,6 @@ async def bulk_import_edges_route(
     request is fundamentally a list mutation (create + update mix)
     where 201 is misleading for the update / dry-run path.
     """
-    # A call made with a token waits for approval; a dry run changes nothing.
-    if not body.dry_run and not runs_at_once(operator):
-        return await _dispatch_graph_write(
-            operator,
-            TOPOLOGY_BULK_IMPORT_OP_ID,
-            {"rows": [_edge_params(edge) for edge in body.edges]},
-        )
-    structlog.contextvars.bind_contextvars(
-        audit_op_id=_OP_BULK_IMPORT,
-        audit_op_class="write",
-    )
     rows = [
         BulkImportRow(
             from_ref=edge.from_endpoint.to_ref(),
@@ -1389,11 +1423,32 @@ async def bulk_import_edges_route(
         )
         for edge in body.edges
     ]
+    # A call made with a token waits for approval; a dry run changes nothing.
+    # The rows are checked with a dry run first, so a bad row answers at once.
+    if not body.dry_run and not runs_at_once(operator):
+        await _bulk_import_or_422(session, operator, rows, dry_run=True)
+        return await _dispatch_graph_write(
+            operator,
+            TOPOLOGY_BULK_IMPORT_OP_ID,
+            {"rows": [_edge_params(edge) for edge in body.edges]},
+        )
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_BULK_IMPORT,
+        audit_op_class="write",
+    )
     if body.dry_run:
         # A dry run changes nothing, so the request needs no audit row (#3757).
         note_preview()
+    result = await _bulk_import_or_422(session, operator, rows, dry_run=body.dry_run)
+    return _bulk_import_response(result)
+
+
+async def _bulk_import_or_422(
+    session: AsyncSession, operator: Operator, rows: list[BulkImportRow], *, dry_run: bool
+) -> BulkImportResult:
+    """Run :func:`bulk_import_edges`; a row that fails its check answers 422 ``invalid_bulk``."""
     try:
-        result = await bulk_import_edges(session, operator, rows, dry_run=body.dry_run)
+        return await bulk_import_edges(session, operator, rows, dry_run=dry_run)
     except BulkImportValidationError as exc:
         # Surface every row's failure together. The operator's source
         # YAML / JSON is authoritative; a single 422 with the structured
@@ -1416,7 +1471,6 @@ async def bulk_import_edges_route(
                 ],
             },
         ) from exc
-    return _bulk_import_response(result)
 
 
 def _node_not_found_http(exc: NodeNotFoundError) -> HTTPException:

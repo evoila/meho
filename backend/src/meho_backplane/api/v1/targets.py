@@ -2107,14 +2107,23 @@ async def update_target_route(
 
     The path value is a name, an alias or an id. A person in the web
     interface changes the target at once (200). A call made with a token is
-    checked first and then waits for approval as ``targets.update``, with
-    the id of the target, so the approved change goes to this target even
-    when a name or alias changes later (202 with the approval request id).
+    checked first (a body with no field answers 422) and then waits for
+    approval as ``targets.update``, with the id of the target, so the
+    approved change goes to this target even when a name or alias changes
+    later (202 with the approval request id).
     """
     if runs_at_once(operator):
         return await update_target(name=name, body=body, operator=operator, session=session)
-    t = await resolve_route_target(session, operator.tenant_id, name)
     updates = body.model_dump(mode="json", exclude_unset=True)
+    if not updates:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "no_fields",
+                "message": "send at least one field to change; nothing was changed",
+            },
+        )
+    t = await resolve_route_target(session, operator.tenant_id, name)
     _enforce_merged_tls_trust_exclusion(t, updates)
     _validate_update_body_fields(dict(updates), t, operator)
     return await _dispatch_targets_write(

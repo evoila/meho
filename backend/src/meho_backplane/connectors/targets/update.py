@@ -42,6 +42,7 @@ Approval and role:
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
@@ -58,6 +59,7 @@ from meho_backplane.connectors.targets.ops import (
     _parse_target_id,
 )
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.operations._preview import _redact_echoed_params
 from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.targets.resolver import resolve_target_by_id
@@ -305,11 +307,35 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
     }
 
 
-async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Show which target ``targets.update`` would change, and which fields.
+def _preview_changes(row: Any, params: dict[str, Any], ctx: PreviewContext) -> dict[str, Any]:
+    """Map each sent field to ``{"from": <stored value>, "to": <new value>}``.
 
-    Names the target (id, name, host) and its connector link, and lists
-    the names of the fields the call sends. When no live target with the
+    Secret-shaped values are hidden the same way the generic parameter echo
+    hides them. ``secret_ref`` is a Vault path, not a secret, so it shows.
+    """
+    changes = {
+        field: {"from": _stored_value(getattr(row, field, None)), "to": value}
+        for field, value in params.items()
+        if field != "target_id"
+    }
+    return _redact_echoed_params(
+        changes,
+        connector_id=ctx.connector_id,
+        tenant=str(ctx.operator.tenant_id),
+        op_id=TARGETS_UPDATE_OP_ID,
+    )
+
+
+def _stored_value(value: Any) -> Any:
+    return value.value if isinstance(value, Enum) else value
+
+
+async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Show which target ``targets.update`` would change, and each change.
+
+    Names the target (id, name, host) and its connector link. ``changes``
+    holds each sent field with its stored value and its new value, so the
+    approver sees for example the new host. When no live target with the
     id exists in the caller's tenant, it says so; the call would fail.
     Reads only.
     """
@@ -335,6 +361,7 @@ async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | 
             "preferred_impl_id": row.preferred_impl_id,
         },
         "fields": fields,
+        "changes": _preview_changes(row, ctx.params, ctx),
         "result_if_run": "updated" if fields else "fails",
     }
 

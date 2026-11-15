@@ -1322,7 +1322,7 @@
           "targets"
         ],
         "summary": "Update Target",
-        "description": "Change a target (``tenant_admin``, a person). Only the sent fields change.\n\nThe path value is a name, an alias or an id. A person in the web\ninterface changes the target at once (200). A call made with a token is\nchecked first and then waits for approval as ``targets.update``, with\nthe id of the target, so the approved change goes to this target even\nwhen a name or alias changes later (202 with the approval request id).",
+        "description": "Change a target (``tenant_admin``, a person). Only the sent fields change.\n\nThe path value is a name, an alias or an id. A person in the web\ninterface changes the target at once (200). A call made with a token is\nchecked first (a body with no field answers 422) and then waits for\napproval as ``targets.update``, with the id of the target, so the\napproved change goes to this target even when a name or alias changes\nlater (202 with the approval request id).",
         "operationId": "update_target_api_v1_targets__name__patch",
         "parameters": [
           {

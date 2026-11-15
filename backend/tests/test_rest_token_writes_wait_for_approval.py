@@ -11,9 +11,12 @@
   writes exactly what the request held. ``PATCH`` and ``DELETE`` carry the
   id of the target, so a new name or alias does not move the change.
 * **Checked before the wait** -- a failed write check (``POST``,
-  ``PATCH``), an unknown
-  target (``PATCH``) and a target that topology rows point at
-  (``DELETE`` without ``force``) answer at once; no request is made.
+  ``PATCH``), an unknown target or a body with no field (``PATCH``), a
+  target that topology rows point at (``DELETE`` without ``force``), an
+  unknown graph node or edge and a bad bulk row answer at once; no request
+  is made.
+* **Shows the change** -- the approval of a ``PATCH`` shows each sent
+  field with its stored and its new value.
 * **Runs at once** -- a bulk dry run changes nothing and runs at once, and
   a person in the web interface writes at once.
 """
@@ -259,6 +262,7 @@ async def test_a_token_change_waits_and_runs_on_the_same_target_id(client: TestC
     assert result.result["target_id"] == str(row.id)
     assert result.result["updated_fields"] == ["host"]
     assert (await _live_targets())[_EXISTING].host == "other.example"
+    await _assert_audit_names_requester_and_approver(request_id, "targets.update")
 
 
 async def test_a_token_change_of_an_unknown_target_answers_404(client: TestClient) -> None:
@@ -276,6 +280,35 @@ async def test_a_token_change_with_a_null_product_answers_422(client: TestClient
     assert await _requests() == []
 
 
+async def test_a_token_change_with_no_field_answers_422_at_once(client: TestClient) -> None:
+    await _insert_target(name=_EXISTING, host=_EXISTING_HOST)
+    response = _send(client, "PATCH", f"/api/v1/targets/{_EXISTING}", {})
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["error"] == "no_fields"
+    assert await _requests() == []
+
+
+@pytest.mark.parametrize(
+    ("field", "stored", "new"),
+    [
+        ("host", _EXISTING_HOST, "other.example"),
+        ("secret_ref", f"tenants/{_TENANT_ID}/old-ref", f"tenants/{_TENANT_ID}/new-ref"),
+    ],
+)
+async def test_a_token_change_shows_the_stored_and_the_new_value_on_the_approval(
+    client: TestClient, field: str, stored: str, new: str
+) -> None:
+    await _insert_target(name=_EXISTING, **{"host": _EXISTING_HOST, field: stored})
+    response = _send(client, "PATCH", f"/api/v1/targets/{_EXISTING}", {field: new})
+
+    _assert_waits(response, "targets.update")
+    [request] = await _requests()
+    assert request.proposed_effect is not None
+    preview = request.proposed_effect["preview"]
+    assert preview["changes"] == {field: {"from": stored, "to": new}}
+
+
 async def test_a_token_delete_waits_and_runs_after_approval(client: TestClient) -> None:
     row = await _insert_target(name=_EXISTING, host=_EXISTING_HOST)
     response = _send(client, "DELETE", f"/api/v1/targets/{_EXISTING}")
@@ -288,6 +321,7 @@ async def test_a_token_delete_waits_and_runs_after_approval(client: TestClient) 
     result = await _approve_and_run(request_id)
     assert result.status == "ok", result
     assert _EXISTING not in await _live_targets()
+    await _assert_audit_names_requester_and_approver(request_id, "targets.remove")
 
 
 async def test_a_token_delete_with_topology_rows_answers_409_at_once(client: TestClient) -> None:
@@ -448,6 +482,7 @@ async def test_a_token_graph_write_waits_and_runs_after_approval(
     edges, nodes = await _graph()
     edge_count, node_names = _EXPECTED_GRAPH[write]
     assert (len(edges), nodes) == (edge_count, node_names)
+    await _assert_audit_names_requester_and_approver(request_id, op_id)
 
 
 async def test_a_token_bulk_dry_run_runs_at_once(client: TestClient) -> None:
@@ -458,6 +493,41 @@ async def test_a_token_bulk_dry_run_runs_at_once(client: TestClient) -> None:
 
     assert response.status_code == 200, response.text
     assert response.json()["dry_run"] is True
+    assert await _requests() == []
+    assert await _graph() == ({ids["edge"]}, {"app", "db", "cache", "lonely"})
+
+
+_UNKNOWN_EDGE = {"from": {"name": "app"}, "kind": "depends-on", "to": {"name": "no-such-node"}}
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body", "status", "error"),
+    [
+        ("POST", "/api/v1/topology/edges", _UNKNOWN_EDGE, 404, "node_not_found"),
+        ("POST", "/api/v1/topology/edges/bulk", {"edges": [_EDGE, _UNKNOWN_EDGE]}, 422, None),
+        ("DELETE", f"/api/v1/topology/edges/{uuid.uuid4()}", None, 404, "edge_not_found"),
+        ("DELETE", f"/api/v1/topology/nodes/{uuid.uuid4()}", None, 404, "node_not_found"),
+    ],
+    ids=["annotate", "bulk", "unannotate", "delete_node"],
+)
+async def test_a_token_graph_write_with_an_unknown_node_answers_at_once(
+    client: TestClient,
+    method: str,
+    path: str,
+    body: Any,
+    status: int,
+    error: str | None,
+) -> None:
+    ids = await _seed_graph()
+    response = _send(client, method, path, body)
+
+    assert response.status_code == status, response.text
+    detail = response.json()["detail"]
+    if error is None:
+        assert detail["error"] == "invalid_bulk"
+        assert [row["index"] for row in detail["errors"]] == [1]
+    else:
+        assert detail["error"] == error
     assert await _requests() == []
     assert await _graph() == ({ids["edge"]}, {"app", "db", "cache", "lonely"})
 

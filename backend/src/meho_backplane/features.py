@@ -548,7 +548,9 @@ def _policy_block(settings: Settings) -> dict[str, Any]:
 
     ``engine_shadow`` is the ``POLICY_ENGINE_SHADOW`` switch: the policy
     evaluator runs next to today's checks and logs every difference
-    (:mod:`meho_backplane.policy.shadow`). It decides nothing. Off by
+    (:mod:`meho_backplane.policy.shadow`). It also writes the rule it
+    matched on audit rows and approval requests
+    (:mod:`meho_backplane.policy.stamp`). It decides nothing. Off by
     default.
 
     ``approver_routing`` is the ``POLICY_APPROVER_ROUTING`` switch: a

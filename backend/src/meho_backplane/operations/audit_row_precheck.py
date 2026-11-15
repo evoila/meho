@@ -64,7 +64,11 @@ CHECKED_TEXT_COLUMNS: Final[frozenset[str]] = INDEXED_TEXT_COLUMNS | {"path", "s
 
 #: Text columns that only ever get a fixed value from the code (a constant, an
 #: enum, or a value the table's CHECK rule limits). Nothing to check.
-FIXED_TEXT_COLUMNS: Final[frozenset[str]] = frozenset({"method", "event_class", "policy_decision"})
+#: ``policy_rule`` is the source and id of a policy rule, both fixed in the
+#: code (:mod:`meho_backplane.policy.evaluate`).
+FIXED_TEXT_COLUMNS: Final[frozenset[str]] = frozenset(
+    {"method", "event_class", "policy_decision", "policy_rule"}
+)
 
 #: JSON columns checked before the call: every text in them (keys and values).
 CHECKED_JSON_COLUMNS: Final[frozenset[str]] = frozenset({"payload"})

@@ -744,7 +744,8 @@ config:
   # before. See `docs/codebase/policy-classification.md`.
   # `policy.engineShadow` is rendered into `POLICY_ENGINE_SHADOW`. When
   # `"true"`, the policy evaluator works out its own answer next to
-  # today's checks and logs every difference. It decides nothing. When
+  # today's checks and logs every difference. It also writes the rule it
+  # matched on audit rows and approval requests. It decides nothing. When
   # `"false"` (the default), it does not run. See
   # `docs/codebase/policy-evaluator.md`.
   # `policy.approverRouting` is rendered into `POLICY_APPROVER_ROUTING`.

@@ -549,6 +549,19 @@ class HarborConnector(HttpConnector):
             "secret": result["secret"],
         }
 
+    async def artifact_copy(
+        self,
+        operator: Operator,
+        target: HarborTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``harbor.artifact.copy`` shim: copy an image inside Harbor, a held image is a no-op."""
+        from meho_backplane.connectors.harbor.ops_artifact_copy import (
+            harbor_artifact_copy_impl,
+        )
+
+        return await harbor_artifact_copy_impl(self, operator, target, params)
+
     async def robot_delete(
         self,
         operator: Operator,

@@ -1078,6 +1078,7 @@
   "tests/test_secret_broker_handoff.py": 2.01,
   "tests/test_secret_broker_keycloak_client_secret_source.py": 0.29,
   "tests/test_secret_broker_keycloak_sink.py": 0.2,
+  "tests/test_secret_broker_vault_target.py": 1.75,
   "tests/test_secret_leak_checks.py": 7.35,
   "tests/test_secret_move_approval.py": 5.81,
   "tests/test_secret_values_hidden.py": 2.36,

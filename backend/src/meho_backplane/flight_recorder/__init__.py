@@ -47,7 +47,7 @@ from meho_backplane.flight_recorder.config import (
     should_capture,
     should_expose_to_agent,
 )
-from meho_backplane.flight_recorder.read import TraceSpanView, TraceView, load_trace
+from meho_backplane.flight_recorder.read import TraceSpanView, TraceView, find_traces, load_trace
 from meho_backplane.flight_recorder.store import SpanInput, record_trace
 
 __all__ = [
@@ -57,6 +57,7 @@ __all__ = [
     "TraceView",
     "attach_agent_trace_handle",
     "compute_expires_at",
+    "find_traces",
     "load_trace",
     "materialize_agent_trace_handle",
     "record_trace",

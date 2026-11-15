@@ -128,6 +128,49 @@ func TestListRefusesAnUnknownState(t *testing.T) {
 	}
 }
 
+func TestListSendsTheTimeWindow(t *testing.T) {
+	var got []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.Query().Get("since"), r.URL.Query().Get("until"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{summary("inside")}, "next_cursor": nil})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedToken(t, srv.URL)
+
+	cmd, stdout, stderr := newCmd(t, "")
+	opts := listOptions{
+		Since: "2026-11-02T00:00:00Z", Until: "2026-11-09T00:00:00+01:00", Limit: 50, BackplaneOverride: srv.URL,
+	}
+	if err := runList(cmd, opts); err != nil {
+		t.Fatalf("runList: %v; stderr=%s", err, stderr.String())
+	}
+	if strings.Join(got, ",") != "2026-11-02T00:00:00Z,2026-11-09T00:00:00+01:00" {
+		t.Fatalf("since,until = %q", got)
+	}
+	if !strings.Contains(stdout.String(), "inside") {
+		t.Fatalf("out = %q", stdout.String())
+	}
+}
+
+func TestListRefusesABadTimeWindow(t *testing.T) {
+	for _, opts := range []listOptions{
+		{Since: "2026-11-02T00:00:00", Limit: 10},
+		{Until: "last week", Limit: 10},
+		{Since: "2026-11-09T00:00:00Z", Until: "2026-11-02T00:00:00Z", Limit: 10},
+	} {
+		cmd, _, stderr := newCmd(t, "")
+		if err := runList(cmd, opts); err == nil {
+			t.Fatalf("%+v: want an error", opts)
+		}
+		if !strings.Contains(stderr.String(), "--since") && !strings.Contains(stderr.String(), "--until") {
+			t.Fatalf("stderr = %q", stderr.String())
+		}
+	}
+}
+
 func TestShowWithoutTheRightIsInsufficientRole(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/sessions/abc", func(w http.ResponseWriter, _ *http.Request) {

@@ -303,3 +303,13 @@ async def test_a_probe_moves_updated_at_but_not_the_connection_time() -> None:
     assert after.fingerprint is not None
     assert after.updated_at != before.updated_at
     assert after.connection_changed_at == before.connection_changed_at
+
+
+@pytest.mark.asyncio
+async def test_an_update_of_secret_field_map_moves_the_connection_time() -> None:
+    inserted = await _insert_target(name="demo-d", product="github", secret_ref="tenants/x/d")
+    before = await _row(inserted.id)
+    body = {"secret_field_map": {"password": "token"}}
+    assert _patch(TestClient(_build_app()), "demo-d", body).status_code == 200
+    after = await _row(inserted.id)
+    assert after.connection_changed_at != before.connection_changed_at

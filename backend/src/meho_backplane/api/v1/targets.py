@@ -1672,6 +1672,7 @@ _CONNECTION_FIELDS = frozenset(
         "port",
         "fqdn",
         "secret_ref",
+        "secret_field_map",
         "auth_model",
         "verify_tls",
         "tls_ca_pin",

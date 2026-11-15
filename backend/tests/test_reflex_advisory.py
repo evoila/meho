@@ -55,11 +55,9 @@ import structlog
 from meho_backplane.agent.invoke import current_agent_run_id_var
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import (
-    BroadcastEvent,
     get_broadcast_client,
     reset_broadcast_client_for_testing,
 )
-from meho_backplane.broadcast.announce_gate import reset_announce_gate_cache_for_testing
 from meho_backplane.broadcast.reflex import (
     _ANNOUNCE_NUDGES,
     _READ_NUDGE,
@@ -86,7 +84,7 @@ from meho_backplane.operations.addon_orchestration import (
 from meho_backplane.settings import get_settings
 
 from ._request_usage_helpers import seed_usage_event
-from .broadcast_admission_helpers import seed_agent_principal, seed_agent_run
+from .broadcast_admission_helpers import seed_agent_principal, seed_agent_run, seed_announcement
 
 _TENANT = UUID("00000000-0000-0000-0000-000000003133")
 _SESSION = UUID("33333333-3333-3333-3333-333333333333")
@@ -104,10 +102,8 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("REFLEX_ADVISORY_WINDOW_MINUTES", "30")
     get_settings.cache_clear()
     reset_broadcast_client_for_testing()
-    reset_announce_gate_cache_for_testing()
     yield
     reset_broadcast_client_for_testing()
-    reset_announce_gate_cache_for_testing()
     get_settings.cache_clear()
 
 
@@ -863,29 +859,16 @@ async def test_three_advisory_fragments_coexist_on_one_response(
 ) -> None:
     """#2550 + #2718 + #3133 fragments ride one ``extras`` -- distinct keys.
 
-    A write-class dispatch on a target with peer activity (#2550) by a
+    A write-class dispatch on a target with another agent's active claim
+    (#2550, #3762) by a
     caller whose tenant has a critical Dashboard (#2718) in an MCP session
     that never read the feed (#3133 read nudge) carries all three
     fragments -- the plain dict merge is a clobber-free union.
     """
     await _seed_dashboard(state="critical")
     await _register_op("vault.kv.delete", stub_embedding_service)
-    peer_event = BroadcastEvent(
-        event_id=uuid.uuid4(),
-        ts=datetime.now(UTC),
-        tenant_id=_TENANT,
-        principal_sub="peer-a",
-        target_name="vault-1",
-        op_id="vault.kv.delete",
-        op_class="write",
-        result_status="ok",
-        audit_id=uuid.uuid4(),
-        actor_sub=None,
-        payload={"op_class": "write", "params": {}, "result_status": "ok"},
-    )
-
-    async def _xrevrange(name: str, **kwargs: Any) -> list[tuple[str, dict[str, str]]]:
-        return [("1747800001000-0", {"event": peer_event.model_dump_json()})]
+    # An active claim of another agent on the same target (#3762).
+    await seed_announcement(_TENANT, principal_sub="peer-a", target="vault-1", ttl_minutes=60)
 
     store = _FakeSetStore()
     pipe = _FakeNxPipeline()
@@ -893,7 +876,6 @@ async def test_three_advisory_fragments_coexist_on_one_response(
     with (
         _patch_set(store),
         patch.object(bc, "pipeline", new=pipe.pipeline),
-        patch.object(bc, "xrevrange", new=_xrevrange),
         _bound_session(_SESSION),
     ):
         result = await dispatch(
@@ -922,29 +904,14 @@ async def test_write_with_an_unknown_last_word_gets_both_write_warnings(
     await _seed_tenant()
     await _seed_broadcast_recent(_SESSION)  # no read nudge, so announce is reached
     await _register_op("vault.kv.purge", stub_embedding_service, safety_level="caution")
-    peer_event = BroadcastEvent(
-        event_id=uuid.uuid4(),
-        ts=datetime.now(UTC),
-        tenant_id=_TENANT,
-        principal_sub="peer-a",
-        target_name="vault-1",
-        op_id="vault.kv.purge",
-        op_class="write",
-        result_status="ok",
-        audit_id=uuid.uuid4(),
-        actor_sub=None,
-        payload={"op_class": "write", "params": {}, "result_status": "ok"},
-    )
-
-    async def _xrevrange(name: str, **kwargs: Any) -> list[tuple[str, dict[str, str]]]:
-        return [("1747800001000-0", {"event": peer_event.model_dump_json()})]
+    # An active claim of another agent on the same target (#3762).
+    await seed_announcement(_TENANT, principal_sub="peer-a", target="vault-1", ttl_minutes=60)
 
     claim_gap = AsyncMock(return_value="no_claim")
     bc = get_broadcast_client()
     with (
         _patch_set(_FakeSetStore()),
         patch.object(bc, "pipeline", new=_FakeNxPipeline().pipeline),
-        patch.object(bc, "xrevrange", new=_xrevrange),
         patch("meho_backplane.broadcast.reflex.announce_claim_gap", new=claim_gap),
         # This test is about the op class; who may announce is tested above.
         patch(

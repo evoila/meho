@@ -140,6 +140,11 @@ from meho_backplane.operations._audit import (
 )
 from meho_backplane.operations._lookup import enabled_for_tenant_clause
 from meho_backplane.operations.meta_tools import call_operation
+from meho_backplane.runbooks.check_approval import (
+    APPROVAL_REQUEST_KEY,
+    linked_approval_id,
+    read_linked_approval,
+)
 from meho_backplane.runbooks.engine import (
     AdvanceOutcome,
     advance,
@@ -309,6 +314,8 @@ class _NextStepInputs:
     run_target: str
     run_params: dict[str, Any]
     retry: bool = False
+    #: The approval request the failed step's check waits for; read on a retry.
+    approval_request_id: uuid.UUID | None = None
 
 
 class RunbookRunService:
@@ -500,6 +507,7 @@ class RunbookRunService:
                 current_step=inputs.current_step,
                 request_verify=request.verify_response,
                 caller=caller,
+                approval_request_id=inputs.approval_request_id,
             )
         except _CheckCallNotRunError as exc:
             check_failure = exc.reason
@@ -548,6 +556,13 @@ class RunbookRunService:
                 run_target=run.target,
                 run_params=dict(run.params),
                 retry=retrying,
+                approval_request_id=(
+                    linked_approval_id(
+                        cast("dict[str, Any] | None", step_states[current_step_id].verify_response)
+                    )
+                    if retrying
+                    else None
+                ),
             )
 
     async def _write_next_step_outcome(
@@ -1278,6 +1293,7 @@ class RunbookRunService:
         current_step: Step,
         request_verify: VerifyResponse | None,
         caller: Operator | None = None,
+        approval_request_id: uuid.UUID | None = None,
     ) -> VerifyResponse | None:
         """Produce the verify response the engine should evaluate.
 
@@ -1301,6 +1317,10 @@ class RunbookRunService:
         call result whose ``status`` is not ``ok`` raises
         :class:`_CheckCallNotRunError`, so the step fails with the call's
         error text.
+
+        *approval_request_id* is the approval request the failed step's
+        check waits for (a retry). The check then reads that request
+        (:func:`_linked_call_result`) and does not run the call again.
         """
         verify = current_step.verify
         if not isinstance(verify, OperationCallVerify):
@@ -1329,26 +1349,13 @@ class RunbookRunService:
             "params": dict(substituted_params_obj),
         }
 
-        # Bind run / step / work_ref onto the shared ContextVars around the
-        # dispatch so the dispatcher's audit writer stamps them on the
-        # operation_call step's audit row. ``work_ref`` is the run's
-        # durable change-ticket reference (work_ref I3-T1 #1661): binding
-        # it here -- once per step, from the run row -- is the "bind once,
-        # inherit" boundary that gives every dispatching step's audit row
-        # the same ``work_ref`` without each step having to carry it.
-        run_token = run_id_var.set(run.run_id)
-        step_token = step_id_var.set(current_step.id)
-        work_ref_token = work_ref_var.set(run.work_ref)
-        # A check step follows the token rule on every path: also when the
-        # run is advanced from the web console, only a ``safe`` check runs
-        # at once for a person; a ``caution`` or higher check waits.
-        token_caller = caller.model_copy(update={"web_session": False})
-        try:
-            call_result = await call_operation(token_caller, call_arguments)
-        finally:
-            work_ref_var.reset(work_ref_token)
-            step_id_var.reset(step_token)
-            run_id_var.reset(run_token)
+        call_result = await self._linked_call_result(
+            caller, approval_request_id, call_arguments=call_arguments
+        )
+        if call_result is None:
+            call_result = await self._dispatch_check_call(
+                run=run, step_id=current_step.id, caller=caller, call_arguments=call_arguments
+            )
 
         _raise_unless_call_ok(call_result)
         actual = call_result.get("result", {})
@@ -1364,6 +1371,81 @@ class RunbookRunService:
             matched=False,
             actual=actual,
         )
+
+    @staticmethod
+    async def _linked_call_result(
+        caller: Operator,
+        approval_request_id: uuid.UUID | None,
+        *,
+        call_arguments: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Return the result of the approved call the check waited for.
+
+        Returns ``None`` when the check must run its call (no linked
+        request, or :func:`read_linked_approval` says so). Raises
+        :class:`_CheckCallNotRunError` while the request waits or the
+        approved call has not finished; the step keeps the link, and no
+        new approval request is made.
+        """
+        if approval_request_id is None:
+            return None
+        linked = await read_linked_approval(
+            caller,
+            approval_request_id,
+            op_id=call_arguments["op_id"],
+            connector_id=call_arguments["connector_id"],
+        )
+        if linked is None:
+            return None
+        if linked.result is None:
+            error = (
+                f"awaiting_approval: approval request {linked.request_id} for "
+                f"{call_arguments['op_id']!r} has no result yet; retry the step after it "
+                f"is approved and has run"
+            )
+            raise _CheckCallNotRunError(
+                error,
+                OperationCallVerifyResponse(
+                    type="operation_call",
+                    matched=False,
+                    actual={
+                        "status": "awaiting_approval",
+                        "error": error,
+                        APPROVAL_REQUEST_KEY: str(linked.request_id),
+                    },
+                ),
+            )
+        return linked.result
+
+    @staticmethod
+    async def _dispatch_check_call(
+        *,
+        run: RunbookRun,
+        step_id: str,
+        caller: Operator,
+        call_arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Run the check call as *caller*, with the run's ids bound for the audit row."""
+        # Bind run / step / work_ref onto the shared ContextVars around the
+        # dispatch so the dispatcher's audit writer stamps them on the
+        # operation_call step's audit row. ``work_ref`` is the run's
+        # durable change-ticket reference (work_ref I3-T1 #1661): binding
+        # it here -- once per step, from the run row -- is the "bind once,
+        # inherit" boundary that gives every dispatching step's audit row
+        # the same ``work_ref`` without each step having to carry it.
+        run_token = run_id_var.set(run.run_id)
+        step_token = step_id_var.set(step_id)
+        work_ref_token = work_ref_var.set(run.work_ref)
+        # A check step follows the token rule on every path: also when the
+        # run is advanced from the web console, only a ``safe`` check runs
+        # at once for a person; a ``caution`` or higher check waits.
+        token_caller = caller.model_copy(update={"web_session": False})
+        try:
+            return await call_operation(token_caller, call_arguments)
+        finally:
+            work_ref_var.reset(work_ref_token)
+            step_id_var.reset(step_token)
+            run_id_var.reset(run_token)
 
     async def _resolve_connector_id_for_op(
         self,
@@ -1647,13 +1729,17 @@ def _raise_unless_call_ok(call_result: dict[str, Any]) -> None:
     if status == "ok":
         return
     error = call_result.get("error") or f"the call ended with status {status!r}"
+    actual: dict[str, Any] = {"status": status, "error": error}
+    # A check that waits for approval keeps the id of its request, so a
+    # retry reads that request instead of making a new one.
+    extras = call_result.get("extras")
+    if status == "awaiting_approval" and isinstance(extras, dict):
+        request_id = extras.get(APPROVAL_REQUEST_KEY)
+        if request_id is not None:
+            actual[APPROVAL_REQUEST_KEY] = str(request_id)
     raise _CheckCallNotRunError(
         str(error),
-        OperationCallVerifyResponse(
-            type="operation_call",
-            matched=False,
-            actual={"status": status, "error": error},
-        ),
+        OperationCallVerifyResponse(type="operation_call", matched=False, actual=actual),
     )
 
 

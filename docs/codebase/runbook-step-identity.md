@@ -51,9 +51,27 @@ kind, client id, roles, session id and token. So:
   scope, standing grants), as on a direct call;
 - a `credential_read` check never runs at once, for any caller.
 
-To run such an operation, the person calls it directly and approves it,
-or an approver approves the waiting request. Then the assignee retries
-the step.
+## A check that waits for approval
+
+When the check call waits for approval, the step fails, and MEHO keeps the
+id of the approval request in the step's `verify_response.actual`
+(`approval_request_id`). An approver approves the request, and the
+approved call runs. Then the assignee retries the step
+(`meho runbook next --retry`, or **Try this step again** in the console).
+On the retry, MEHO reads the linked request
+(`runbooks/check_approval.py`) and does not run the call again:
+
+- the request still waits, or the approved call has not finished: the
+  step waits again with the same request. MEHO makes no new request;
+- the request is approved and its call ran: the check uses the stored
+  result of that call (`resume_result`) and compares it with `expect`;
+- the request was rejected, expired or withdrawn: the check runs the call
+  again, so it asks for approval again.
+
+Only the caller who made the check wait reads the request, in the same
+tenant (`read_approval_result`). The read writes an `approval.result`
+audit row. An approved result is used once: the next retry of the same
+step runs the call again.
 
 ## When the check call does not return `ok`
 
@@ -70,5 +88,7 @@ assignee can fix the cause and retry the step
 ## References
 
 - `backend/src/meho_backplane/runbooks/run_service.py`
+- `backend/src/meho_backplane/runbooks/check_approval.py`
 - `backend/src/meho_backplane/ui/routes/runbooks/driver.py`
 - `backend/tests/test_runbook_step_caller_identity.py`
+- `backend/tests/test_runbook_check_approval.py`

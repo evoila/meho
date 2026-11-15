@@ -171,6 +171,7 @@ from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envel
 from meho_backplane.settings import get_settings
 from meho_backplane.work_ref import (
     WORK_REF_FIELD_DESCRIPTION,
+    WORK_REF_MAX_CHARS,
     WorkRefFilter,
     work_ref_filter_values,
 )
@@ -908,6 +909,7 @@ async def list_approvals(
                 "'gh:evoila/meho#1' — the requests authorised by change ticket X "
                 "(work_ref I2-T1 #1659). Omit for no work_ref filter. " + WORK_REF_FIELD_DESCRIPTION
             ),
+            max_length=WORK_REF_MAX_CHARS,
         ),
     ] = None,
     limit: int | None = Query(

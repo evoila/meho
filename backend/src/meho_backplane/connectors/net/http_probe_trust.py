@@ -147,5 +147,7 @@ async def resolve_probe_trust(tenant_id: UUID, params: dict[str, Any]) -> ProbeT
     if not rows:
         return ProbeTrust()
     # Prefer the target registered with the probed port; else the first by name.
-    chosen = next((r for r in rows if r.port is not None and r.port == parsed.port), rows[0])
+    # httpx gives port None for the default https port, also for an explicit ":443".
+    port = parsed.port or 443
+    chosen = next((r for r in rows if r.port == port), rows[0])
     return ProbeTrust(ca_pem=chosen.tls_ca_pin, target_name=chosen.name)

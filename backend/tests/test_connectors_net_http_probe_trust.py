@@ -11,6 +11,7 @@ A local HTTPS server uses a certificate from a private test CA.
   ``trust: pinned``, and names the target.
 * A pin of another tenant, or of a deleted target, is never used.
 * The pin is used for the first host only, not after a redirect.
+* A target with the probed port wins, also for the default port 443.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from meho_backplane.connectors.net.http_probe import (
     net_http_probe,
     register_net_http_probe_operations,
 )
+from meho_backplane.connectors.net.http_probe_trust import resolve_probe_trust
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
@@ -314,6 +316,23 @@ async def test_pin_is_used_for_a_redirect_to_the_same_host(tmp_path: Path) -> No
     assert result["reachable"] is True
     assert result["status"] == 200
     assert result["trust"] == "pinned"
+
+
+@pytest.mark.parametrize("url", ["https://127.0.0.1/", "https://127.0.0.1:443/"])
+async def test_target_on_port_443_wins_for_the_default_port(url: str) -> None:
+    # "a-..." sorts first by name, so only the port match picks "b-...".
+    await _insert_target(
+        tenant_id=_TENANT, name="a-port-8443", host="127.0.0.1", port=8443, tls_ca_pin="PIN-8443"
+    )
+    await _insert_target(
+        tenant_id=_TENANT, name="b-port-443", host="127.0.0.1", port=443, tls_ca_pin="PIN-443"
+    )
+    trust = await resolve_probe_trust(_TENANT, {"url": url})
+    assert trust.target_name == "b-port-443"
+    assert trust.ca_pem == "PIN-443"
+
+    other = await resolve_probe_trust(_TENANT, {"url": "https://127.0.0.1:8443/"})
+    assert other.target_name == "a-port-8443"
 
 
 async def test_plain_http_probe_reports_default_trust_without_a_lookup(

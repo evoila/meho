@@ -358,11 +358,12 @@ async def _deliver(
         return
     status = response.status_code
     if status in (404, 410):
-        # A failed delete must not stop the other sends of this step.
+        # A failed delete must not stop the other sends of this step. A
+        # refused connection or a timeout can come as a bare OSError.
         try:
             async with get_sessionmaker()() as db, db.begin():
                 await delete_gone(db, subscription_id=target.id)
-        except SQLAlchemyError as exc:
+        except (SQLAlchemyError, OSError) as exc:
             _log.warning(
                 "web_push_gone_not_removed",
                 service=service,

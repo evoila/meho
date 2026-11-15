@@ -468,8 +468,17 @@ async def test_a_gone_browser_is_removed(push_service: _FakePushService, status:
     assert gone.endpoint not in repr(logs)
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        OperationalError("DELETE", {}, Exception("database is down")),
+        ConnectionRefusedError(111, "Connect call failed"),
+        TimeoutError(),
+    ],
+    ids=["OperationalError", "ConnectionRefusedError", "TimeoutError"],
+)
 async def test_a_failed_delete_of_a_gone_browser_does_not_stop_the_other_sends(
-    push_service: _FakePushService, monkeypatch: pytest.MonkeyPatch
+    push_service: _FakePushService, monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
     gone, alive, other = _browser("gone"), _browser("alive"), _browser("other")
     await _subscribe(gone, sub="admin", login="admin")
@@ -478,7 +487,7 @@ async def test_a_failed_delete_of_a_gone_browser_does_not_stop_the_other_sends(
     push_service.status[gone.endpoint] = 410
 
     async def _database_down(*_args: Any, **_kwargs: Any) -> None:
-        raise OperationalError("DELETE", {}, Exception("database is down"))
+        raise error
 
     monkeypatch.setattr(send_module, "delete_gone", _database_down)
 
@@ -488,7 +497,7 @@ async def test_a_failed_delete_of_a_gone_browser_does_not_stop_the_other_sends(
     assert [m["title"] for m in push_service.to(alive)] == ["An approval waits"]
     assert [m["title"] for m in push_service.to(other)] == ["An approval waits"]
     failed = [entry for entry in logs if entry["event"] == "web_push_gone_not_removed"]
-    assert failed and failed[0]["error"] == "OperationalError"
+    assert failed and failed[0]["error"] == type(error).__name__
     assert not any(entry["event"] == "web_push_step_failed" for entry in logs)
     assert gone.endpoint not in repr(logs)
     assert len(await _rows()) == 3

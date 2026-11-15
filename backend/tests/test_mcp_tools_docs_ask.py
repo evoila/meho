@@ -714,7 +714,7 @@ def test_tools_call_ask_docs_resolves_gs_kb_citation_to_canonical_link(
         chunk_id="kb-414551-0001",
         document_id="broadcom-kb-414551",
         content="vCenter Server scaling maximums for vSphere 9.0.",
-        source_url="gs://meho-knowledge-vmware-corpus/kb/broadcom-kb/articles/41/414551.html",
+        source_url="gs://example-corpus/kb/broadcom-kb/articles/41/414551.html",
         score=0.95,
     )
     corpus = _fake_corpus(kb_chunk)

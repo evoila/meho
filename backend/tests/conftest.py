@@ -584,7 +584,7 @@ def _default_backplane_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _default_target_ssrf_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
     """Exempt the suite's fixture address space from the target SSRF guard.
 
-    evoila-bosnia/meho-internal#153 rejects targets whose ``host``/
+    The host check rejects targets whose ``host``/
     ``fqdn`` is — or resolves to — a private / loopback / link-local
     address at create/update *and* connect time, overridable only via
     ``MEHO_TARGET_SSRF_ALLOWLIST``. The suite predates that guard and
@@ -1051,8 +1051,8 @@ def mint_token(
     private_key: Any,
     *,
     sub: str = "op-42",
-    name: str | None = "Damir",
-    email: str | None = "damir@example.com",
+    name: str | None = "Alice",
+    email: str | None = "alice@example.com",
     issuer: str = DEFAULT_ISSUER,
     audience: str = DEFAULT_AUDIENCE,
     expires_in: int = 3600,
@@ -1209,6 +1209,33 @@ def pytest_fixture_setup(fixturedef, request):
     _PERF_FIXTURE_TIMINGS.append(
         (round(time.perf_counter() - start, 3), fixturedef.argname, str(fixturedef.scope)),
     )
+
+
+def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> None:
+    """Write this process id and its running test to a progress file, in CI only.
+
+    ``MEHO_CI_PROGRESS_DIR`` is set by the CI test jobs. The memory sampler
+    (``scripts/ci/memory_sampler.sh``) reads these files: it looks up the
+    memory of each process id, so its log line names the pytest worker with
+    the most memory and the test each worker runs. This hook runs only in the
+    process that runs the test, so an xdist controller writes no file. A
+    killed runner loses its files, but the lines the sampler already printed
+    stay in the job log. A write error never fails a test. Returns None, so
+    pytest still runs the test.
+    """
+    directory = os.environ.get("MEHO_CI_PROGRESS_DIR")
+    if not directory:
+        return
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    try:
+        target = os.path.join(directory, f"{worker}.txt")
+        with open(f"{target}.tmp", "w") as fh:
+            fh.write(f"{os.getpid()} {item.nodeid}\n")
+        os.replace(f"{target}.tmp", target)
+    except OSError:
+        # The file only helps the memory sampler; a full or missing folder
+        # must never fail or stop a test.
+        return
 
 
 def _save_worker_coverage_data() -> None:

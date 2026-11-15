@@ -16,7 +16,7 @@ Two parallel registries, mirroring the MCP 2025-06-18 separation of tools
 
 * **Tool registry** — name → ``(ToolDefinition, ToolHandler)``. The
   definition carries the JSON-Schema ``inputSchema`` MCP clients pass to
-  the LLM as the tool's contract, plus two MEHO-internal fields used for
+  the LLM as the tool's contract, plus two internal fields used for
   server-side filtering (``required_role``, ``op_class``). The handler
   receives the validated :class:`Operator` and the (jsonschema-validated)
   arguments dict, and returns a structured result.
@@ -371,10 +371,10 @@ READ_ONLY: Final[ToolAnnotations] = ToolAnnotations(readOnlyHint=True)
 
 
 class ToolDefinition(BaseModel):
-    """MCP tool definition + MEHO-internal RBAC metadata.
+    """MCP tool definition + internal RBAC metadata.
 
     The wire shape exposed via ``tools/list`` is derived through
-    :meth:`to_wire`, which drops the MEHO-internal fields (``required_role``,
+    :meth:`to_wire`, which drops the internal fields (``required_role``,
     ``op_class``, ``required_capability``, ``surface``, ``required_addon_family``)
     — clients don't need them and they'd leak server-side policy detail.
 
@@ -409,7 +409,7 @@ class ToolDefinition(BaseModel):
     collection loudly rather than defaulting into a silent bucket
     (mirrors the required-no-default ``feature`` contract). AND-composed
     with the role + capability gates by :func:`surface_visible`;
-    MEHO-internal — dropped from the wire shape like the RBAC fields.
+    internal — dropped from the wire shape like the RBAC fields.
 
     ``required_addon_family`` (Initiative #2900, Task #3029) is an optional
     fourth gating axis, *orthogonal* to the other three, that binds a tool to
@@ -424,7 +424,7 @@ class ToolDefinition(BaseModel):
     is applied by :func:`addon_family_active` against a per-request-resolved
     active-family set rather than a pure operator-claim membership test.
     ``None`` (the default) means "no add-on gate", so every existing tool
-    keeps its behaviour. MEHO-internal — dropped from the wire shape like the
+    keeps its behaviour. internal — dropped from the wire shape like the
     RBAC fields.
 
     ``feature`` (#2675) names the tool's owning entry in
@@ -441,7 +441,7 @@ class ToolDefinition(BaseModel):
     precedent — e.g. ``meho_status``, a health mirror, and the runbooks
     surface, which the provisional #2664 table does not classify).
     Explicit ``None`` stays greppable for the #2678 drift guard.
-    MEHO-internal: dropped from the wire shape like the RBAC fields.
+    internal: dropped from the wire shape like the RBAC fields.
 
     ``broadcast_omit_args`` (#3948) names argument keys the dispatcher never
     puts on the broadcast feed. A ``tools/call`` with full-detail broadcast
@@ -449,21 +449,21 @@ class ToolDefinition(BaseModel):
     subscriber reads; a tool whose argument is as sensitive as data the caller
     is entitled to (``read_docs``'s ``read_handle`` carries a few words of a
     hit) lists it here. The audit row is unaffected (it stores only the
-    arguments' hash). Empty by default. MEHO-internal: dropped from the wire
+    arguments' hash). Empty by default. internal: dropped from the wire
     shape like the RBAC fields.
 
     ``approver_may_call`` widens the role gate of one tool: a person who
     can decide approvals in the tenant (:attr:`Operator.approver`, a human
     principal) may list and call it even below ``required_role``. Those
     people are the tenant's reviewers. ``False`` by default.
-    MEHO-internal: dropped from the wire shape like the RBAC fields.
+    internal: dropped from the wire shape like the RBAC fields.
 
     ``caller_check`` (#5770) is an optional check of who calls. The
     dispatcher runs it after the role, capability, surface and add-on gates
     and before the input check, so a caller the tool always refuses gets
     that refusal on the first try, not an input error. It raises
     :class:`~meho_backplane.mcp.server.McpInvalidParamsError` to refuse.
-    ``None`` by default. MEHO-internal: dropped from the wire shape like the
+    ``None`` by default. internal: dropped from the wire shape like the
     RBAC fields.
 
     ``for_settings`` is an optional function that gives the tool as it is
@@ -474,7 +474,7 @@ class ToolDefinition(BaseModel):
     switch is off, so an agent reads nothing about a feature that is off.
     :func:`all_tools_for` and the ``tools/call`` handler apply it (through
     :func:`tool_for_settings`), so ``tools/list`` and the ``tools/call``
-    input check use the same tool. ``None`` by default. MEHO-internal:
+    input check use the same tool. ``None`` by default. internal:
     dropped from the wire shape like the RBAC fields.
 
     ``annotations`` (#4202) are the MCP tool hints, see
@@ -524,7 +524,7 @@ class ToolDefinition(BaseModel):
         return value
 
     def to_wire(self) -> dict[str, Any]:
-        """Serialise to the MCP wire shape, dropping MEHO-internal fields.
+        """Serialise to the MCP wire shape, dropping internal fields.
 
         Spec fields kept: ``name``, ``description``, ``inputSchema``,
         optional ``title`` / ``outputSchema`` / ``annotations`` / ``_meta``
@@ -560,7 +560,7 @@ class ToolDefinition(BaseModel):
 
 
 class ResourceTemplateDefinition(BaseModel):
-    """MCP resource-template definition + MEHO-internal RBAC metadata.
+    """MCP resource-template definition + internal RBAC metadata.
 
     The wire shape exposed via ``resources/templates/list`` is derived
     through :meth:`to_wire`; ``required_role`` and ``required_capability``
@@ -607,7 +607,7 @@ class ResourceTemplateDefinition(BaseModel):
     audit_redact_uri: bool = False
 
     def to_wire(self) -> dict[str, Any]:
-        """Serialise to the MCP wire shape, dropping MEHO-internal fields."""
+        """Serialise to the MCP wire shape, dropping internal fields."""
         out: dict[str, Any] = {
             "uriTemplate": self.uriTemplate,
             "name": self.name,

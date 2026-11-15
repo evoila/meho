@@ -35,7 +35,7 @@ func newPodCmd() *cobra.Command {
 // rows inline today.
 //
 // This is the 1:1 replacement for the consumer's
-// `./scripts/holodeck.sh --target holorouter 'pwsh -c
+// `./scripts/holodeck.sh --target my-router 'pwsh -c
 // "Get-HoloDeckPod | Format-Table"'` invocation.
 func newPodListCmd() *cobra.Command {
 	var (
@@ -56,8 +56,8 @@ func newPodListCmd() *cobra.Command {
 			"OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho holodeck pod list --target holorouter-hetzner-dc\n" +
-			"  meho holodeck pod list --target holorouter-hetzner-dc --json | jq '.result.rows[]'",
+		Example: "  meho holodeck pod list --target my-router\n" +
+			"  meho holodeck pod list --target my-router --json | jq '.result.rows[]'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -155,8 +155,8 @@ func newPodInfoCmd() *cobra.Command {
 			"the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho holodeck pod info HoloPod-001 --target holorouter-hetzner-dc\n" +
-			"  meho holodeck pod info HoloPod-001 --target holorouter-hetzner-dc --json | jq .result.pod",
+		Example: "  meho holodeck pod info HoloPod-001 --target my-router\n" +
+			"  meho holodeck pod info HoloPod-001 --target my-router --json | jq .result.pod",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

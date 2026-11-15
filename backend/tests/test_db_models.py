@@ -115,7 +115,7 @@ async def test_tenant_round_trip_persists_every_field() -> None:
     The slug here is intentionally NOT ``default``: migration
     ``0028`` seeds that slug into the per-worker schema template
     (:func:`tests.conftest._schema_template_db`) -- and migration
-    ``0018`` had previously seeded ``rdc-internal`` there before
+    ``0018`` had previously seeded an older tenant slug there before
     G0.13-T7 (#1137) generalised the seed -- so this test would
     trip ``UNIQUE constraint failed: tenant.slug`` if it tried to
     insert a fresh tenant under either handle. A throwaway fixture
@@ -359,7 +359,7 @@ def test_migration_installs_tenant_table_and_indexes(
                 "mail_recipient_allowlist",  # #3499 per-tenant mail recipient allowlist
                 "agent_model_prices",  # #5853 per-tenant prices of unknown agent models
                 "run_approval_target_kinds_enabled",  # #4126 target kinds in run approvals
-                "knowledge_wiki_collection",  # #5976 docs collection of the team wiki
+                "knowledge_wiki_collection",  # docs collection of the tenant's wiki
             }
 
             audit_columns = {col["name"] for col in inspector.get_columns("audit_log")}

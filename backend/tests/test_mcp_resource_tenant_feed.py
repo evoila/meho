@@ -89,7 +89,7 @@ def test_resources_templates_list_exposes_tenant_feed_for_operator(
     tenant_feed = [t for t in templates if t["uriTemplate"] == "meho://tenant/{tenant_id}/feed"]
     assert len(tenant_feed) == 1
     assert tenant_feed[0]["mimeType"] == "application/json"
-    # MEHO-internal RBAC field stripped from the wire shape.
+    # internal RBAC field stripped from the wire shape.
     assert "required_role" not in tenant_feed[0]
     # #154: the description advertises announcement free-text as
     # untrusted agent-authored content, not a directive channel.

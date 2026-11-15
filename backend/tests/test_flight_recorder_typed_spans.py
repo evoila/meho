@@ -489,6 +489,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "rabbitmq-management",
         "rke2-ssh",
         "secret-broker",
+        "spaces-records",
         "targets-registry",
         "tempo-api",
         "topology-graph",

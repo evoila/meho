@@ -163,10 +163,16 @@ func TestFilterWorkRefOnReadCommands(t *testing.T) {
 			t.Run("old spelling after the command name", func(t *testing.T) {
 				check(t, "", with(nil, "--work-ref", tag), tag, tag, true)
 			})
-			// A filter value that is not in the tag shape still
-			// filters; it is not sent as the header.
-			t.Run("old spelling with a non-tag value filters and warns", func(t *testing.T) {
-				check(t, "", with(nil, "--work-ref", "CHG-123"), "", "CHG-123", true)
+			// A ticket id that is not a GitHub reference tags and
+			// filters too: the CLI takes any ticket id, like the
+			// backplane.
+			t.Run("old spelling with a non-GitHub value tags, filters and warns", func(t *testing.T) {
+				check(t, "", with(nil, "--work-ref", "CHG-123"), "CHG-123", "CHG-123", true)
+			})
+			// A value the header cannot carry still filters; it is
+			// not sent as the header.
+			t.Run("old spelling with a line break filters and warns", func(t *testing.T) {
+				check(t, "", with(nil, "--work-ref", "CHG-1\n2"), "", "CHG-1\n2", true)
 			})
 			// An empty --filter-work-ref means "no filter". The old
 			// spelling then only tags, with no warning.
@@ -174,13 +180,14 @@ func TestFilterWorkRefOnReadCommands(t *testing.T) {
 				check(t, "", with([]string{"--work-ref", tag}, "--"+workref.FilterFlag+"="), tag, "", false)
 			})
 			// With --filter-work-ref given, --work-ref only tags, so a
-			// value that is not a tag is an error before any request.
-			t.Run("non-tag value with the filter flag is rejected", func(t *testing.T) {
+			// value the header cannot carry is an error before any
+			// request.
+			t.Run("bad value with the filter flag is rejected", func(t *testing.T) {
 				t.Setenv(api.WorkRefEnv, "")
 				rec := newFilterBackplane(t)
-				stdout, stderr := runRootOutErr(t, with([]string{"--work-ref", "CHG-123"}, "--"+workref.FilterFlag, filter)...)
-				if !strings.Contains(stderr, "--work-ref must match") {
-					t.Errorf("stderr = %q; want the shape error", stderr)
+				stdout, stderr := runRootOutErr(t, with([]string{"--work-ref", "CHG-1\n2"}, "--"+workref.FilterFlag, filter)...)
+				if !strings.Contains(stderr, "--work-ref "+api.WorkRefRule) {
+					t.Errorf("stderr = %q; want the work-ref error", stderr)
 				}
 				if strings.Contains(stderr, "--"+workref.FilterFlag+" to filter") {
 					t.Errorf("stderr = %q; want no fallback warning", stderr)

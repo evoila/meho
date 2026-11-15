@@ -3309,10 +3309,28 @@ refused, and the message names the entry and the operation.</p>
   <code>caution</code> and always waits.</li>
 <li>A file can raise a risk level, but never lower it below the level in
   MEHO's code.</li>
-<li>When the install's policy makes an operation always wait, it waits in
-  every tenant. A tenant's file can make more operations wait. An entry
-  with <code>always_wait: false</code> that would end an install-wide wait is
-  refused, and the message names the install entry.</li>
+<li><strong>The stricter of install and tenant counts.</strong> What the install's file
+  sets is a floor for every tenant. A tenant's file can raise a risk level
+  and make more operations wait. It cannot set a lower risk level than
+  the install, and cannot end an install-wide wait: such an entry is
+  refused. The message names the install entry and the operation. The
+  install cannot end a wait that a tenant's own entry adds either.</li>
+<li>A wide tenant entry, for example <code>{match: {connector: X}, risk: caution}</code>,
+  is refused when the install sets one operation of <code>X</code> higher. The level
+  does not count for that operation, but it still counts for the other
+  operations of <code>X</code>. So do not remove the level. Add a more specific
+  tenant entry for that operation with the install's level or higher, or
+  leave the operation out of the match. With such an entry, the file is
+  accepted.</li>
+<li>Which install values make <strong>every</strong> call wait: <code>always_wait: true</code> and
+  <code>risk: destructive</code>. With <code>risk: dangerous</code>, a call waits too, but a
+  standing grant or a run approval of a service account can still let it
+  run without a new approval.</li>
+<li>An install entry matches connectors by their id, not by product. A
+  connector that a tenant registers itself, under its own id, is matched
+  only by an install entry with a wildcard connector, for example
+  <code>{connector: "*"}</code> for every operation of every connector, or
+  <code>{connector: "*", op: "&lt;op-id-pattern&gt;"}</code> for some operations.</li>
 </ul>
 <h2 id="commands">Commands<a class="headerlink" href="#commands" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>policy<span class="w"> </span>validate<span class="w"> </span>policy.yaml<span class="w">     </span><span class="c1"># list every mistake</span>
@@ -3338,12 +3356,14 @@ platform admin may do that.</p>
    file is removed.</li>
 </ol>
 <div class="admonition note">
-<p class="admonition-title">Install-wide always wait</p>
-<p>An install file can make operations always wait. This holds for every
-tenant: a tenant cannot set it back. A tenant entry stored before this
-rule that sets it back has no effect on the wait. <code>meho policy export</code>
-writes a <code># Has no effect:</code> comment above such an entry. Remove it
-before you import the file again.</p>
+<p class="admonition-title">Install-wide always wait and risk level</p>
+<p>An install file can make operations always wait and raise their risk
+level. This holds for every tenant: a tenant cannot set it back. A
+stored tenant entry that sets it back has no effect for that part.
+<code>meho policy export</code> writes a <code># Has no effect:</code> comment above such an
+entry, one for each part. The comment names the operation where the
+part does not count, and says how to fix the entry. Fix it before you
+import the file again.</p>
 </div>
 <h2 id="rest">REST<a class="headerlink" href="#rest" title="Permanent link">&para;</a></h2>
 <table>

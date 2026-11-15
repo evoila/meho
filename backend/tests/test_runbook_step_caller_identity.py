@@ -36,6 +36,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane import op_classes
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
@@ -48,10 +49,6 @@ from meho_backplane.db.models import (
     RunbookRunStepState,
     Target,
     Tenant,
-)
-from meho_backplane.op_classes import (
-    _reset_declared_op_classes_for_testing,
-    declare_op_classes,
 )
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.service_read_scope_schemas import (
@@ -332,11 +329,9 @@ async def _set_read_scope(target_id: uuid.UUID) -> None:
 
 
 @pytest.fixture
-def _secret_op_class() -> Iterator[None]:
-    """Declare :data:`_SECRET_OP` as a ``credential_read`` operation."""
-    declare_op_classes(credential_read=[_SECRET_OP])
-    yield
-    _reset_declared_op_classes_for_testing()
+def _secret_op_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Declare :data:`_SECRET_OP` as a ``credential_read`` operation, for this test only."""
+    monkeypatch.setitem(op_classes._DECLARED, _SECRET_OP, "credential_read")
 
 
 @pytest.mark.asyncio

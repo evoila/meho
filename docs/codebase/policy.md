@@ -1,8 +1,10 @@
 # The policy file (`policy: v1`)
 
-The policy file holds the categories (the taxonomy) and the
+The policy file holds the categories (the taxonomy), the
 classifications of connectors, operation groups and operations
-([policy-classification.md](policy-classification.md)). It is a file of
+([policy-classification.md](policy-classification.md)), and the routing
+of approvals: who may approve which waiting change
+([approvals.md](approvals.md), "Approver routing"). It is a file of
 its own, with its own command (`meho policy`) and its own REST routes. It
 is **not** a section of the settings file
 ([settings.md](settings.md)): the settings import adds and updates but
@@ -28,6 +30,11 @@ classifications:
     always_wait: true
   - match: {op: "<op-id-pattern>"}
     risk: dangerous
+routing:
+  - match: {category: "<category-a>"}
+    approvers: [SA-Operators, Admins]
+  - match: {connector: "<connector-id-pattern>", risk: destructive}
+    approvers: [Admins]
 ```
 
 - `policy` is required and is always `v1`.
@@ -47,8 +54,15 @@ classifications:
   [policy-classification.md](policy-classification.md) (a key uses only
   letters, digits and `. _ / -`; a value has no line breaks and no control
   characters). A mistake names the entry.
-- Later changes add `bindings` and `routing`. Until then they are unknown
-  keys.
+- Each `routing` entry has a `match` (at least one of `category`,
+  `connector`, `risk`; `connector` is a pattern, the other two are exact)
+  and `approvers`: one to five of the login group kinds `Readers`,
+  `Operators`, `SA-Operators`, `Admins`, `Approvers`. The order counts: the
+  first entry that fits a waiting change wins, and a tenant's entries come
+  before the install's. Two entries with the same `match` are a mistake.
+  Routing only narrows who may approve; see
+  [approvals.md](approvals.md), "Approver routing".
+- A later change adds `bindings`. Until then it is an unknown key.
 
 ## Checks
 
@@ -72,38 +86,74 @@ is one sentence that names the entry:
   (`operations/caller_address.py`).
 - **Floor: the code's level.** A `risk` below the operation's level in the
   code is refused. A file can raise a risk level, not lower it.
-- **An install-wide "always wait".** In a tenant's file, an entry with
-  `always_wait: false` that matches an operation the install's policy makes
-  always wait is refused. The sentence names the install entry, for example
-  `install:classifications[0]`. A tenant can make more operations wait,
-  not fewer.
+- **An install-wide "always wait" or risk level.** In a tenant's file, an
+  entry with `always_wait: false` that matches an operation the install's
+  policy makes always wait is refused. So is an entry that decides a lower
+  `risk` than the install's level for a matching operation; a more
+  specific tenant entry with the install's level or higher makes it fine.
+  The sentence names the install entry, for example
+  `install:classifications[0]`, and the operation where the part does not
+  count. For a wide entry it suggests a more specific entry or a narrower
+  match, not to remove the level, because the level still counts for the
+  other operations.
 - Two entries that give one operation a different category (or a different
   value for one label key) at the same level.
+- **Routing** (`policy/routing.py`, `routing_mistakes`): an unknown
+  category or risk level in `match`; a group kind that may approve none of
+  the changes the entry routes ("`routing[N]` asks `ROLE`, but `ROLE` has
+  no `approve` rule for these changes."); and a risk level that no group
+  kind of the entry may approve ("A LEVEL change in category CAT can wait,
+  but no role may approve it. It would wait until it expires."). An entry
+  without `risk` is checked on all four risk levels. Readers never
+  approve; Operators and Approvers approve only `safe` and `caution`
+  changes of other people.
+- **Routing and the role floor** (`policy/validate.py`,
+  `_routing_floor_mistakes`): only Admins approve an operation that needs
+  the `tenant_admin` role (for example `targets.register`). For each known
+  operation with that floor, the check works like the run: for each risk
+  level the operation can wait at (its level and every level above), the
+  first entry that fits wins (by its category, its connector, and a
+  `risk` that is that level, or no `risk`). Only that entry is checked.
+  When it does not ask Admins, that is a mistake ("`routing[N]` fits
+  `OP` of connector `C`, but only MEHO-Admins may approve it and the entry
+  does not ask them. It would wait until it expires."). So an earlier
+  entry with `risk: caution` that asks Admins covers the `caution` level,
+  and a later entry is not checked at that level.
 
 At most 50 mistakes are listed, then one line says how many more there
 are.
 
-An install file with `always_wait: true` is binding for every tenant
-(decision of 12 November 2026): when the install's most specific entry
-that sets `always_wait` says `true`, the operation waits in every tenant,
-whatever the tenant's entries say. The rule is in `classify`
+**The stricter of install and tenant counts** (decision of 12 November
+2026). For the risk level and for "always wait", the install and the
+tenant each find their own value; then the higher risk level counts, and
+the operation always waits when either says so. So what the install's
+file sets is a floor for every tenant, and a tenant can only make things
+stricter. A more specific install entry with `always_wait: false` does
+not end a wait that a tenant entry adds. The rule is in `classify`
 (`policy/classification.py`), so dispatch, preview, search, the policy
-evaluator and its compare-only run (`POLICY_ENGINE_SHADOW`) all follow it.
+evaluator and its compare-only run (`POLICY_ENGINE_SHADOW`) all follow
+it. The details and the case of a connector that a tenant registers
+under its own id are in [policy-classification.md](policy-classification.md).
 
-**Stored before the upgrade.** A tenant entry stored before this rule
-that sets an install-wide wait back now has no effect on the wait (its
-other fields still count). `export_policy` writes a
-`# Has no effect: ...` comment above such an entry, and a new import of
-the same entry is refused, so the tenant admin removes it.
+**A stored tenant entry against the install.** A stored tenant entry
+that sets an install-wide wait back, or that sets a lower risk level
+than the install, has no effect for that part on that operation (its
+other fields, and its level on other operations, still count).
+`export_policy` writes one `# Has no effect: ...` comment for each such
+part above the entry, with the same text as the import refusal, and a
+new import of the same entry is refused until the tenant admin fixes
+it.
 
 ## Plan, import, approval
 
 `policy/service.py`:
 
 - `build_plan` parses and checks the file and works out the diff. It
-  writes nothing. The diff has the sections `description`, `taxonomy` and
-  `classifications`, each with `added`, `changed` (`before` and `after`)
-  and `removed`. Each classification entry also has `matches` (how many
+  writes nothing. The diff has the sections `description`, `taxonomy`,
+  `classifications` and `routing`, each with `added`, `changed` (`before`
+  and `after`) and `removed`. A routing entry is found by its `match`; it
+  is `changed` when its approvers or its place in the list changed
+  (`index`, and `was` for the old place). Each classification entry also has `matches` (how many
   operations it matches) and `changes` (how many of those get other
   values). Entries are told apart by their whole `match` (each part on its
   own), so two different matches never share one line. `operations_changed` counts all operations whose values change.
@@ -171,7 +221,10 @@ the switch is on. The error names the document and the entry, for example
 classify operations: tenant:classifications[3]: ...". An import of a good
 file replaces it; the preview says so in a warning. This holds also when
 an entry or its `match` is not a map, or `classifications` is not a list:
-the diff then lists such an entry as removed.
+the diff then lists such an entry as removed. With approver routing
+on, a bad `routing` entry makes every request of that tenant fail to start
+waiting: the call is refused ("approval queue unavailable") instead of
+waiting with an unknown approver set.
 
 ## Endpoints and CLI
 
@@ -196,4 +249,7 @@ Code: `backend/src/meho_backplane/api/v1/policy.py`,
 versions), `backend/tests/test_api_v1_policy.py` (routes, waiting import,
 approval by a second admin),
 `backend/tests/migrations/test_migration_0163_add_policy_revision.py`,
+`backend/tests/test_policy_routing.py` (the `routing` section, its checks,
+diff and export, the "separated duties" file, the stored approver kinds
+and the click),
 `cli/internal/cmd/policy/file_test.go`.

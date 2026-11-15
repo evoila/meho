@@ -3,8 +3,8 @@
 
 """Add ``dispatch_trace.request_id`` and ``dispatch_trace.operator_sub``.
 
-Revision ID: 0167
-Revises: 0166
+Revision ID: 0169
+Revises: 0168
 Create Date: 2026-11-13
 
 Two nullable columns on the trace header: the request id of the call and
@@ -24,8 +24,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0167"
-down_revision: str | None = "0166"
+revision: str = "0169"
+down_revision: str | None = "0168"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

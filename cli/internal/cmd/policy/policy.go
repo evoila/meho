@@ -3,8 +3,9 @@
 
 // Package policy holds the `meho policy ...` commands.
 //
-// The policy file (`policy: v1`) holds the categories (taxonomy) and the
-// classifications of connectors, operation groups and operations. It is a
+// The policy file (`policy: v1`) holds the categories (taxonomy), the
+// classifications of connectors, operation groups and operations, and the
+// routing of approvals (who may approve which changes). It is a
 // file of its own, not a section of the settings file. The commands call
 // the `/api/v1/policy` routes; see file.go.
 package policy
@@ -30,8 +31,9 @@ func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "policy",
 		Short: "Manage the policy file (validate / diff / import / export / history)",
-		Long: "Manage the policy file (policy: v1): the categories and the " +
-			"classifications of connectors, operation groups and operations. " +
+		Long: "Manage the policy file (policy: v1): the categories, the " +
+			"classifications of connectors, operation groups and operations, " +
+			"and the routing of approvals (who may approve which changes). " +
 			"A tenant admin works on their own tenant; a platform admin can " +
 			"work on the whole install with --scope install. An import " +
 			"replaces the whole policy and waits until a second admin " +

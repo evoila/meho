@@ -56,6 +56,7 @@ from meho_backplane.operations.audit_row_safe import (
     storable_and_changed,
 )
 from meho_backplane.operations.caller_gone import caller_gone_at
+from meho_backplane.policy.stamp import RuleStamp
 from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.work_ref import normalize_work_ref
 
@@ -69,6 +70,8 @@ __all__ = [
     "descriptor_op_class",
     "parent_audit_id_var",
     "policy_decision_var",
+    "policy_rule_columns",
+    "policy_rule_var",
     "resolve_agent_session_id",
     "restore_audit_extras",
     "reveal_secret_var",
@@ -223,6 +226,20 @@ policy_decision_var: ContextVar[str | None] = ContextVar(
     default=None,
 )
 
+#: The policy rule that matched the in-flight dispatch (#6044). Cleared at
+#: the start of each ``dispatch`` and reset when it returns, so a step
+#: refused before its own gate names no rule. Set right after the policy
+#: gate (and by the step gate of a multi-step operation). The same two
+#: writers as :data:`policy_decision_var` read it, for
+#: ``audit_log.policy_rule`` and ``policy_version``; the approval queue
+#: writes it only on its "request" row and on the new ``approval_request``
+#: row. ``None`` while the ``POLICY_ENGINE_SHADOW`` switch is off and where
+#: no gate ran.
+policy_rule_var: ContextVar[RuleStamp | None] = ContextVar(
+    "policy_rule",
+    default=None,
+)
+
 
 #: ContextVar carrying the ``reveal_secret`` opt-in of a dispatch (#2467).
 #: Bound in :func:`~meho_backplane.operations.dispatcher.dispatch` with a
@@ -238,6 +255,14 @@ reveal_secret_var: ContextVar[bool | None] = ContextVar(
     "reveal_secret",
     default=None,
 )
+
+
+def policy_rule_columns() -> dict[str, Any]:
+    """``policy_rule`` and ``policy_version`` of an audit row, from :data:`policy_rule_var`."""
+    stamp = policy_rule_var.get()
+    if stamp is None:
+        return {"policy_rule": None, "policy_version": None}
+    return {"policy_rule": stamp.label(), "policy_version": stamp.policy_version}
 
 
 def resolve_agent_session_id() -> uuid.UUID | None:
@@ -764,6 +789,7 @@ async def write_audit_row(
     # is added by migration ``0051``. ``None`` when no gate ran for this row.
     if hasattr(AuditLog, "policy_decision"):
         runbook_kwargs["policy_decision"] = policy_decision_var.get()
+    runbook_kwargs.update(policy_rule_columns())
     row_fields: dict[str, Any] = {
         "id": audit_id,
         "occurred_at": datetime.now(UTC),

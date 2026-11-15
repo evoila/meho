@@ -4,10 +4,13 @@
 """The caller's active-claim lookup (#4091).
 
 Does the caller hold an active announcement that covers a write-class op,
-and if not, why not? The reflex advisory's announce-before-mutate nudge
-(:mod:`meho_backplane.broadcast.reflex`) asks this on every write from an
-agent session, through :func:`announce_claim_gap`. The answer is advice
-only; no write waits for a claim (#3762).
+and if not, why not? Two features ask this on every write from an agent:
+
+* the reflex advisory's announce-before-mutate nudge
+  (:mod:`meho_backplane.broadcast.reflex`) uses :func:`announce_claim_gap`;
+* the opt-in announce gate (:mod:`meho_backplane.broadcast.announce_gate`)
+  uses :func:`caller_has_active_announce_claim`. The gate asks only for an
+  agent; a person's write never waits for a claim (#3762).
 
 The lookup reads the ``agent_announcement`` archive, the same record
 ``meho_broadcast_recent`` reads. The index
@@ -36,6 +39,7 @@ from meho_backplane.db.models import AgentAnnouncement
 __all__ = [
     "ClaimGap",
     "announce_claim_gap",
+    "caller_has_active_announce_claim",
 ]
 
 #: Lookback for the caller's own active-claim lookup. Announcement TTLs are
@@ -112,8 +116,10 @@ async def announce_claim_gap(
 ) -> ClaimGap | None:
     """Return ``None`` when the caller holds an active claim covering this op.
 
-    Otherwise return why not (:data:`ClaimGap`), for the #3133 reflex
-    advisory's announce-before-mutate heuristic.
+    Otherwise return why not (:data:`ClaimGap`). Shared by the #3133 reflex
+    advisory's announce-before-mutate heuristic and the #3133 opt-in
+    announce gate (through :func:`caller_has_active_announce_claim`), so
+    the two agree on what "an active claim covering this op" means.
 
     Reads the caller's announcements of the last
     :data:`_CLAIM_SCAN_WINDOW_MINUTES` minutes from the
@@ -143,8 +149,8 @@ async def announce_claim_gap(
     * its target attribution covers the op (see :func:`_claim_covers_target`),
       matched on the stored values, never on the read tools' untrusted wrap.
 
-    Propagates database errors to the caller's fail-open guard (the reflex
-    advisory answers ``{}``).
+    Propagates database errors to the caller's fail-open guard (reflex
+    advisory: ``{}``; announce gate: "do not block").
     """
     since = datetime.now(UTC) - timedelta(minutes=_CLAIM_SCAN_WINDOW_MINUTES)
     stmt = (
@@ -175,3 +181,16 @@ async def announce_claim_gap(
         if _CLAIM_GAP_RANK[row_gap] > _CLAIM_GAP_RANK[gap]:
             gap = row_gap
     return gap
+
+
+async def caller_has_active_announce_claim(
+    operator: Operator,
+    *,
+    op_class: str,
+    target_name: str | None,
+) -> bool:
+    """Return ``True`` iff the caller holds an active claim covering this op.
+
+    The yes/no form of :func:`announce_claim_gap`, for the announce gate.
+    """
+    return await announce_claim_gap(operator, op_class=op_class, target_name=target_name) is None

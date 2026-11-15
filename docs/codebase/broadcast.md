@@ -482,9 +482,9 @@ path, merged as a clobber-free union of distinct keys
    publish" below) gets the announce nudge; a person or a service login
    does not. The full table is in
    [`reflex-advisory.md`](reflex-advisory.md).
-   #3133 also shipped an opt-in announce gate that refused a write
-   without a claim; #3762 removed it (see *People read, agents publish*
-   below).
+   #3133 also shipped an opt-in announce gate that refuses a write
+   without a claim; since #3762 it asks only agents (see *People read,
+   agents publish* below).
 
 ## Who can publish (#3736)
 
@@ -605,16 +605,17 @@ stay readable as history, but no step can continue them: an `update` or
 **People read, agents publish (#3762).** People read Broadcast under
 their tenant role (`meho_broadcast_recent`, `watch`, REST, CLI, the UI).
 Only trusted agents publish. Nothing in MEHO announces for anyone on its
-own. So nothing may wait for an announcement a person cannot make:
+own. So a person's write may not wait for an announcement a person
+cannot make:
 
-- **No announce gate.** The opt-in per-tenant gate that refused a
-  caution-or-higher write without an active claim is gone: the module,
-  the `announce_required` refusal and the `Tenant.announce_gate_enabled`
-  model field. The settings file no longer exports
-  `policies.announce_gate_enabled`; an older file that still has the key
-  is accepted and the key is ignored. The database column stays,
-  because migrations only add ([migrations.md](migrations.md)); no code
-  reads it.
+- **The announce gate asks only agents.** The opt-in per-tenant gate
+  (`broadcast/announce_gate.py`) refuses a caution-or-higher write
+  without an active claim. Before #3762 it did not look at who called
+  and stopped people too. Now it first checks `is_agent_caller`
+  (`auth/agent_admission.py`, the same check that decides who may
+  publish). A person's write is never refused for a missing claim; an
+  agent's still is, in a tenant with `announce_gate_enabled` on. See
+  [reflex-advisory.md](reflex-advisory.md).
 - **Reads use trusted claims.** The target advisory and the reflex claim
   lookup use only trusted claims, judged by their newest step (see *When
   a claim is active* above). "Newest" means committed last: the reads

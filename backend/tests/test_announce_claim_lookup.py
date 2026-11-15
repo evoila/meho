@@ -5,8 +5,8 @@
 
 ``announce_claim_gap`` decides whether the caller holds an active announce
 claim that covers a write-class op, and if not, why. The reflex advisory
-uses it. Since #3762 only trusted claims count, and each claim is judged by
-its newest step.
+and the opt-in announce gate both use it. Since #3762 only trusted claims
+count, and each claim is judged by its newest step.
 
 Before #4091 the lookup read the newest 100 entries of the Valkey stream.
 On a busy tenant the caller's claim fell out of those 100 entries while
@@ -31,7 +31,14 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import announce_claim_lookup
 from meho_backplane.broadcast import client as broadcast_client
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
-from meho_backplane.broadcast.announce_claim_lookup import announce_claim_gap
+from meho_backplane.broadcast.announce_claim_lookup import (
+    announce_claim_gap,
+    caller_has_active_announce_claim,
+)
+from meho_backplane.broadcast.announce_gate import (
+    announce_gate_blocks,
+    reset_announce_gate_cache_for_testing,
+)
 from meho_backplane.broadcast.archive_sequence import next_announcement_seq
 from meho_backplane.broadcast.publisher import _announcement_row
 from meho_backplane.broadcast.reflex import (
@@ -40,6 +47,7 @@ from meho_backplane.broadcast.reflex import (
     build_reflex_advisory,
 )
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import Tenant
 from meho_backplane.operations._audit import agent_session_id_var
 from meho_backplane.settings import get_settings
 
@@ -61,7 +69,9 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     monkeypatch.setenv("REFLEX_ADVISORY_WINDOW_MINUTES", "30")
     get_settings.cache_clear()
+    reset_announce_gate_cache_for_testing()
     yield
+    reset_announce_gate_cache_for_testing()
     get_settings.cache_clear()
 
 
@@ -80,7 +90,9 @@ def _no_stream_read() -> Iterator[None]:
         yield
 
 
-def _operator(sub: str = _ME, *, tenant_id: UUID = _TENANT) -> Operator:
+def _operator(
+    sub: str = _ME, *, tenant_id: UUID = _TENANT, kind: PrincipalKind = PrincipalKind.USER
+) -> Operator:
     return Operator(
         sub=sub,
         name=sub,
@@ -88,7 +100,7 @@ def _operator(sub: str = _ME, *, tenant_id: UUID = _TENANT) -> Operator:
         raw_jwt="fixture-jwt-not-real",
         tenant_id=tenant_id,
         tenant_role=TenantRole.OPERATOR,
-        principal_kind=PrincipalKind.USER,
+        principal_kind=kind,
     )
 
 
@@ -141,6 +153,7 @@ async def test_issue_claims_cover_the_target(rows: str) -> None:
             work_ref="gh:evoila/meho#1",
         )
     assert await _gap() is None
+    assert await caller_has_active_announce_claim(_operator(), op_class=_OP_CLASS, target_name=_VC)
 
 
 async def test_peer_announcements_do_not_hide_the_callers_claim(
@@ -166,6 +179,9 @@ async def test_peer_announcements_do_not_hide_the_callers_claim(
 
 async def test_no_claim_at_all() -> None:
     assert await _gap() == "no_claim"
+    assert not await caller_has_active_announce_claim(
+        _operator(), op_class=_OP_CLASS, target_name=_VC
+    )
 
 
 async def test_completed_claim_is_no_claim() -> None:
@@ -288,7 +304,7 @@ async def test_op_without_target_is_covered_by_any_active_claim() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The user of the lookup: the reflex advisory
+# The two users of the lookup
 # ---------------------------------------------------------------------------
 
 
@@ -337,3 +353,28 @@ async def test_reflex_advisory_says_the_claim_expired() -> None:
     with _agent_session(), may_announce:
         advisory = await build_reflex_advisory(_operator(), op_class=_OP_CLASS, target_name=_VC)
     assert advisory == {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGES["expired"]}
+
+
+async def _enable_gate() -> None:
+    async with get_sessionmaker()() as session:
+        session.add(Tenant(id=_TENANT, slug="t-4091", name="Tenant", announce_gate_enabled=True))
+        await session.commit()
+
+
+async def test_announce_gate_passes_with_an_archived_claim() -> None:
+    """The gate asks only an agent for a claim (#3762); the archive holds it."""
+    await _enable_gate()
+    agent = _operator(kind=PrincipalKind.AGENT)
+    assert (
+        await announce_gate_blocks(
+            agent, op_class=_OP_CLASS, safety_level="caution", target_name=_VC
+        )
+        is not None
+    )
+    await _claim(target=_VC)
+    assert (
+        await announce_gate_blocks(
+            agent, op_class=_OP_CLASS, safety_level="caution", target_name=_VC
+        )
+        is None
+    )

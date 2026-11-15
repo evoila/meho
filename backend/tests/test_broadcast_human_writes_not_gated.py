@@ -3,14 +3,14 @@
 
 """A person's write never waits for an announcement (#3762).
 
-The opt-in announce gate is retired. People read Broadcast; only trusted
-agents publish on it. So no write can depend on an announcement that a
-person cannot make:
+People read Broadcast; only trusted agents publish on it. So a person's
+write cannot depend on an announcement that a person cannot make. The
+opt-in announce gate asks only agents for a claim
+(``tests/test_announce_gate.py``):
 
 * a person's ``caution`` write runs without any claim, with and without
-  an MCP session, also in a tenant whose old gate column is still ``true``;
-* its audit row says ``ok``, never ``denied``;
-* the tenant model and the settings file no longer offer the gate.
+  an MCP session, also in a tenant that turned the gate on;
+* its audit row says ``ok``, never ``denied``.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.base import Connector
@@ -31,7 +31,6 @@ from meho_backplane.connectors.registry import clear_registry, register_connecto
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, Tenant
-from meho_backplane.instance_settings.schema import TenantPolicies
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._audit import agent_session_id_var
 from meho_backplane.settings import get_settings
@@ -142,22 +141,16 @@ async def _register_write_op() -> None:
     )
 
 
-async def _seed_tenant_with_old_gate_on() -> None:
-    """A tenant whose retired gate column is still ``true`` in the database."""
+async def _seed_tenant_with_gate_on() -> None:
+    """A tenant that turned the announce gate on."""
     async with get_sessionmaker()() as session:
-        session.add(Tenant(id=_TENANT, slug="t-3762", name="Tenant"))
-        await session.commit()
-        updated = await session.execute(
-            text("UPDATE tenant SET announce_gate_enabled = :on WHERE id = :id"),
-            {"on": True, "id": _TENANT.hex},
-        )
-        assert getattr(updated, "rowcount", 0) == 1
+        session.add(Tenant(id=_TENANT, slug="t-3762", name="Tenant", announce_gate_enabled=True))
         await session.commit()
 
 
 @pytest.mark.parametrize("session", [_SESSION, None], ids=["mcp-session", "cli-no-session"])
 async def test_person_write_without_announcement_runs(session: UUID | None) -> None:
-    await _seed_tenant_with_old_gate_on()
+    await _seed_tenant_with_gate_on()
     await _register_write_op()
     with _bound_session(session):
         result = await dispatch(
@@ -175,14 +168,3 @@ async def test_person_write_without_announcement_runs(session: UUID | None) -> N
             (await fresh.execute(select(AuditLog).where(AuditLog.path == _OP_ID))).scalars().all()
         )
     assert [row.payload["result_status"] for row in rows] == ["ok"]
-
-
-def test_tenant_model_has_no_gate_flag() -> None:
-    assert "announce_gate_enabled" not in Tenant.__table__.columns
-
-
-def test_settings_file_offers_no_gate_policy() -> None:
-    # Older files still carry the key, so it is accepted, but never written out.
-    policies = TenantPolicies.model_validate({"announce_gate_enabled": True})
-    assert "announce_gate_enabled" not in policies.model_dump()
-    assert "announce_gate_enabled" not in policies.model_dump(exclude_unset=True)

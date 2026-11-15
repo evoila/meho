@@ -1,9 +1,159 @@
 # MEHO on your phone and laptop
 
-This page explains how to use MEHO on a phone or a laptop. Today it has
-one part: how you sign in and approve with a passkey. The steps to
-install MEHO as an app and to turn on notifications come with that
-feature.
+This page explains how to use MEHO on a phone or a laptop:
+
+- install MEHO as an app, so it opens in its own window on the approvals
+  page;
+- turn on a notification for each request that waits for your approval;
+- sign in and approve with a passkey.
+
+The app shows only pages of your MEHO. Your phone or laptop needs the
+same network access as the web console, for example the VPN.
+
+## Install MEHO as an app
+
+1. Open MEHO in the browser, over the VPN.
+2. Install it, as in the table below. The account page of MEHO shows the
+   same steps, under **Install MEHO as an app**.
+
+| Device | Browser | How you install |
+|---|---|---|
+| iPhone or iPad | Safari | Tap **Share**, then **Add to Home Screen**. |
+| Android phone | Chrome | Open the menu (three dots), then tap **Install app** or **Add to Home screen**. |
+| Mac or Windows laptop | Chrome or Edge | Click the install icon at the right end of the address bar, then **Install**. |
+| Mac | Safari | Choose **File**, then **Add to Dock**. |
+
+The app opens on the approvals page. Installing needs the `https://`
+address of your MEHO.
+
+**With the VPN off**, the app shows the page "MEHO is not reachable.
+Connect to the VPN and try again." It never shows an old copy of the
+approvals list. The app keeps only its icons, styles and this offline
+page on the device. It keeps no approval, broadcast or API answer.
+
+## Get a notification when an approval waits
+
+MEHO can send a notification to your phone or laptop when a request waits
+for your approval. You turn it on once for each browser or installed app.
+
+### Before you start
+
+- Your admin has turned the feature on (see
+  [For admins](#for-admins-turn-notifications-on)). Without it, the account
+  page has no notification switch.
+- **iPhone and iPad:** install MEHO on the home screen first (iOS 16.4 or
+  newer), and turn the switch on inside the installed app. Safari on an
+  iPhone shows no web notification outside an installed app.
+- **Android, Mac and Windows:** the switch works in the installed app and
+  in the normal browser.
+
+### Turn it on
+
+1. In MEHO (the installed app, or the browser), open **Account** from the
+   user menu.
+2. Under **Approval notifications**, switch on **Notify me about
+   approvals in this browser**.
+3. The browser asks you to allow notifications. Allow them.
+4. The page says "Notifications are on in this browser." Below the switch,
+   the list shows each browser of yours that gets notifications.
+
+To turn it off, switch it off again on the same device. To stop a lost or
+old device, click **Remove** next to it in the list. A tenant admin can
+remove any browser of their tenant in the same list.
+
+If the page says "Notifications are blocked for this site in the browser
+settings", allow notifications for your MEHO address in the browser or
+phone settings, then switch it on again.
+
+### What the notification says
+
+The notification holds only these things:
+
+| When | Title | Text |
+|---|---|---|
+| A request waits for your approval | An approval waits | Tenant `<tenant name>`. Request `<request id>`. |
+| The request is decided or ends | Approval approved, Approval rejected, Approval expired or Approval withdrawn | The same text. It replaces the first notification on the device. |
+| More requests came within 30 seconds | Approvals changed | `<n>` more approval messages. Open the approvals page. |
+
+A notification never holds the operation, its parameters or the target.
+It is encrypted on its way to your device, so the push service of the
+browser maker cannot read it either.
+
+A tap opens the approvals page of your MEHO. You approve there as always:
+with a fresh sign-in or a passkey, and a click. A notification does not
+let you approve, and it does not change who may approve.
+
+### The VPN
+
+- The notification arrives **without** the VPN. It comes through the push
+  service of your browser maker (Apple, Google, Microsoft or Mozilla), not
+  from MEHO directly.
+- Opening it **needs** the VPN, because the approvals page comes from your
+  MEHO. Without the VPN you see the offline page. Connect to the VPN and
+  tap the notification again, or open the app.
+
+### Who gets a notification
+
+You get one when you may approve the request, by the same rules as the
+approve button: your role in that tenant, your login groups and the risk
+level of the operation. You get none for requests in other tenants.
+
+MEHO reads your login groups when you turn the switch on, at each sign-in
+to the web console and each time you open the account page. So:
+
+- **Sign in to the web console at least once a week.** When your last
+  sign-in is more than 7 days old, MEHO sends you no notification until
+  you sign in again. Your groups may have changed since.
+- A change of your login groups counts from your next sign-in.
+
+### When no notification comes
+
+| What you see | What to do |
+|---|---|
+| The account page has no **Approval notifications** part | The feature is off. Ask your admin to turn it on. |
+| The switch says the browser cannot show notifications | On an iPhone or iPad, install MEHO on the home screen and turn the switch on in the app. Otherwise use a newer browser. |
+| The switch is on, but nothing arrives | Sign in to the web console once (see above). Check that the phone allows notifications for the app and is not in a focus or do-not-disturb mode. |
+| Only one notification for many requests | That is the limit: at most one "An approval waits" per tenant every 30 seconds, then one summary. Open the approvals page to see all requests. |
+| The notifications stopped after an upgrade | Sign in to the web console once. |
+
+## For admins: turn notifications on
+
+The feature is off until an admin turns it on for the whole MEHO.
+
+1. Allow MEHO to reach the push services of the browser makers. See
+   [Push services for approval notifications](../install/index.md#push-services-for-approval-notifications)
+   for the host names and the network rule.
+2. Set `webPush.enabled: true` in your Helm values, and upgrade.
+
+With a built-in core part (the default), the install makes the push key
+(VAPID: a key that proves the messages come from your MEHO) once and
+keeps it on every upgrade. Without a built-in core part, store your own
+key in a Secret and set `webPush.secretName`. The details are in
+[`docs/deploying.md`](https://github.com/evoila/meho/blob/main/docs/deploying.md#operational-chart-knobs),
+under `webPush.*`. MEHO never logs or shows the key.
+
+With more than one copy of MEHO running (`replicaCount` above 1), each
+copy keeps its own limit of one message every 30 seconds, and its own
+order of the messages of one request. So a person may get more
+messages, and in rare cases a result may arrive before its "An approval
+waits".
+
+### What leaves your network
+
+Each notification is one HTTPS request from MEHO to the push service of
+the browser maker. It carries:
+
+- the title and text from the table above: the words, the tenant name and
+  the request id;
+- the address of the approvals page, as a path (`/ui/approvals`);
+- the address of your MEHO, in the signed key token (when it is an
+  `https://` address);
+- the push address of the person's browser, which the browser maker made.
+
+The title, text and page address are encrypted for the browser. The push
+service sees only the push address, the token and the size and time of
+the message. Nothing else of the request leaves your network: no
+operation, no parameters, no target and no name of a person.
 
 ## Sign in with a passkey
 
@@ -55,8 +205,6 @@ through the same Apple or Google account.
 | Android phone (Android 9 or newer) | Chrome | Fingerprint, face or screen lock | Google Password Manager. Other devices with the same Google account get it too. |
 | Mac | Safari or Chrome | Touch ID, or your Mac password | iCloud Keychain (Safari) or your Chrome profile |
 | Windows laptop | Edge or Chrome | Windows Hello: face, fingerprint or PIN | Windows Hello on this laptop |
-
-The MEHO app on an iPhone home screen needs iOS 16.4 or newer.
 
 ### Sign in
 

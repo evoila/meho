@@ -73,6 +73,18 @@ registering a target outside the allowlist is rejected, not warned
 about.
 ([`docs/deploying.md` § Operational chart knobs](https://github.com/evoila/meho/blob/main/docs/deploying.md#operational-chart-knobs).)
 
+### What leaves your network
+
+MEHO connects to the systems you add as targets, and to the services you
+set up for it yourself: for example your AI service, your company login,
+or a mail server or webhook for check notifications. This table lists
+what MEHO sends to a service outside your network that you did not set
+up yourself.
+
+| Feature | Default | Goes to | What leaves |
+|---|---|---|---|
+| Approval notifications (`webPush.enabled`) | Off | The push services of Apple, Google, Microsoft and Mozilla ([host names](install/index.md#push-services-for-approval-notifications)) | One message for each notification, encrypted for the person's browser: "an approval waits" (or the result), the tenant name and the request id. Never the operation, its parameters or the target. [Details](guides/phone-and-laptop.md#what-leaves-your-network) |
+
 ### Broadcast runs single-replica, with ephemeral streams
 
 The activity-broadcast bus is deliberately **one replica** in the
@@ -314,6 +326,10 @@ caveat is one-directional — setting a **custom**
 `config.retrievalEmbeddingModel` makes the backplane download it at
 runtime, which is exactly what an air-gapped estate cannot do. Keep the
 default model.
+
+Keep approval notifications off (`webPush.enabled: false`, the default).
+They reach a phone or laptop only through the push services of the
+browser makers on the internet.
 
 **Three artefacts have to be mirrored:**
 

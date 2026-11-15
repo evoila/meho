@@ -9,7 +9,8 @@ what the browser would show.
 
 * A new request goes to the people who may approve it, in its tenant only.
 * A decision sends a follow-up with the same tag.
-* A push service that answers 404 or 410 removes the subscription.
+* A push service that answers 404 or 410 removes the subscription; a
+  failed delete does not stop the other sends.
 * A person gets at most one message per window, then one summary.
 * The message holds no operation, parameter or target.
 * The message goes out only after the audit row committed; a failed commit
@@ -41,6 +42,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -464,6 +466,32 @@ async def test_a_gone_browser_is_removed(push_service: _FakePushService, status:
     assert [row.endpoint for row in await _rows()] == [alive.endpoint]
     assert any(entry["event"] == "web_push_subscription_gone" for entry in logs)
     assert gone.endpoint not in repr(logs)
+
+
+async def test_a_failed_delete_of_a_gone_browser_does_not_stop_the_other_sends(
+    push_service: _FakePushService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gone, alive, other = _browser("gone"), _browser("alive"), _browser("other")
+    await _subscribe(gone, sub="admin", login="admin")
+    await _subscribe(alive, sub="admin", login="admin")
+    await _subscribe(other, sub="admin-2", login="admin")
+    push_service.status[gone.endpoint] = 410
+
+    async def _database_down(*_args: Any, **_kwargs: Any) -> None:
+        raise OperationalError("DELETE", {}, Exception("database is down"))
+
+    monkeypatch.setattr(send_module, "delete_gone", _database_down)
+
+    with capture_logs() as logs:
+        await _step(_request())
+
+    assert [m["title"] for m in push_service.to(alive)] == ["An approval waits"]
+    assert [m["title"] for m in push_service.to(other)] == ["An approval waits"]
+    failed = [entry for entry in logs if entry["event"] == "web_push_gone_not_removed"]
+    assert failed and failed[0]["error"] == "OperationalError"
+    assert not any(entry["event"] == "web_push_step_failed" for entry in logs)
+    assert gone.endpoint not in repr(logs)
+    assert len(await _rows()) == 3
 
 
 async def test_another_error_keeps_the_browser(push_service: _FakePushService) -> None:

@@ -31,7 +31,8 @@ so the request never waits for a push service.
   burst of decisions (for example many requests expiring at once) does not
   flood a phone.
 * A push service that answers 404 or 410 (the browser dropped the
-  subscription) gets its row deleted.
+  subscription) gets its row deleted. When that delete fails, MEHO logs it
+  and the other sends of the step go on.
 * Messages go only to the browser makers' push services (checked again here,
   not only when the subscription was stored), without following redirects.
   Logs name the row id, the person, the push service and the status. Never
@@ -54,6 +55,7 @@ from typing import Any
 import httpx
 import structlog
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, Tenant
@@ -356,8 +358,19 @@ async def _deliver(
         return
     status = response.status_code
     if status in (404, 410):
-        async with get_sessionmaker()() as db, db.begin():
-            await delete_gone(db, subscription_id=target.id)
+        # A failed delete must not stop the other sends of this step.
+        try:
+            async with get_sessionmaker()() as db, db.begin():
+                await delete_gone(db, subscription_id=target.id)
+        except SQLAlchemyError as exc:
+            _log.warning(
+                "web_push_gone_not_removed",
+                service=service,
+                status=status,
+                error=type(exc).__name__,
+                **fields,
+            )
+            return
         _log.info("web_push_subscription_gone", service=service, status=status, **fields)
     elif not 200 <= status < 300:
         _log.warning("web_push_send_refused", service=service, status=status, **fields)

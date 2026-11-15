@@ -662,6 +662,7 @@ Append a row here in the same PR that carries an upgrade-relevant change
 | **v0.47.0** | **Action needed (API clients).** Approving a request with `reveal_secret: true` that waits for approval runs nothing (#6034 / #6168). The approve answer says `dispatch_status: "waiting_for_requester"` and holds no value. MEHO stores no value. In `GET /api/v1/approvals/{id}/result`, `result` is `null` until the person who asked fetches the value. After the fetch, the stored result has `result: null`, `handle: null` and `extras.secret_value_withheld: true`. A client that reads the stored result gets no value. The person who asked fetches the value with `POST /api/v1/approvals/{id}/reveal` or `meho secret read --approval <id> --field <name>` (or "Show value" in the console). This works once, and only within 15 minutes of the approval. On MCP, with `MCP_REVEAL_FETCH` on (off by default), the person calls `call_operation` again with `approval_request_id`. | Change every client that waits for such an approval and then reads the stored result. After the approval, the person who asked calls `POST /api/v1/approvals/{id}/reveal` (or `meho secret read --approval <id> --field <name>`) once, within 15 minutes. A second fetch is refused with `409` and `reveal_already_used`, a late one with `reveal_window_passed`; then send the request again. No schema action. |
 | **v0.47.0** | A new switch `POLICY_APPROVER_ROUTING` (Helm `config.policy.approverRouting`, default off) sends approvals to the login groups that the `routing` section of the policy file names. Migration `0167` adds two nullable columns to `approval_request`: `approver_roles` and `approver_rule`. No existing row changes; a request made before the upgrade keeps today's rule. With the switch on and `POLICY_CLASSIFICATION` off, a routing entry that matches on `category` fits nothing; `/ready` shows a note under `features.policy.notes`. | Nothing to do for the upgrade: the migration runs by itself. To use routing, add a `routing` section to the policy file, import it, and turn the switch on. Turn on `POLICY_CLASSIFICATION` too when an entry matches on `category`. See [`codebase/approvals.md`](codebase/approvals.md). |
 | **v0.47.0** | **Action needed.** An entry in `MEHO_TARGET_SSRF_ALLOWLIST` (chart `config.targetSsrfAllowlist`) may end in a port: `host.name:8443`, `10.1.2.3:8443` or `[fd00::5]:8443`. It admits that host on that port only. An entry without a port admits every port. An entry whose port is not a number from 1 to 65535 (for example `name:abc` or `name:0`) stops target connections with an error that names the entry. For SSH, PostgreSQL, MSSQL and MongoDB targets MEHO dials the target's `port` field, or the default port when the field is empty. It does not dial a port written in the host. An entry with a port matches a target only when the target has its port set. | Check `MEHO_TARGET_SSRF_ALLOWLIST` before the upgrade: every port after a colon must be a number from 1 to 65535. A target of type SSH, PostgreSQL, MSSQL or MongoDB that has its port only in the host (for example `db-01:27018`) needs the port in its `port` field. |
+| **v0.47.0** | With approval notifications on (`webPush.enabled: true`), MEHO now sends them (#6002). A browser that a person switched on before the upgrade gets messages again only after that person's next sign-in to the web console, or the next time they open the account page. Until then MEHO does not know their login groups for it. After that, a person whose last sign-in is more than 7 days old gets no message until they sign in again. | Ask the people who use notifications to sign in to the web console once after the upgrade. Allow MEHO to reach the push services of the browser makers: see [Push services for approval notifications](../docs-site/install/index.md#push-services-for-approval-notifications). |
 
 ## Operational chart knobs
 
@@ -715,8 +716,15 @@ each lives inline in
   a person can switch on "Notify me about approvals in this browser". With a
   built-in core part, the install makes the push key in
   `<release>-core-web-push`; without one, set `webPush.secretName` to your
-  own Secret (key `vapid_private_key`), or the render stops. See
-  `docs/codebase/ui.md`, "Approval notifications".
+  own Secret (key `vapid_private_key`), or the render stops. MEHO then
+  needs outbound HTTPS to the push services of Apple, Google, Microsoft
+  and Mozilla; the host names are in
+  [Push services for approval notifications](../docs-site/install/index.md#push-services-for-approval-notifications).
+  With `replicaCount` above 1, each copy keeps its own rate limit and its
+  own order of the messages of one request, so a person may get more
+  messages, and a result may in rare cases arrive before its first
+  message. See `docs/codebase/ui.md`, "Approval notifications", and the
+  user guide `docs-site/guides/phone-and-laptop.md`.
 - **`API_DOCS_ENABLED`** (via `extraEnv`) — the API docs pages
   (`/openapi.json`, `/docs`, `/redoc`) are off unless this is `true`. They
   need no login, so turn them on only on an instance where that is fine.

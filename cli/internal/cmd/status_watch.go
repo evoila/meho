@@ -120,7 +120,7 @@ func runWatch(ctx context.Context, opts watchOptions) error {
 	}
 
 	if !opts.JSONOut {
-		printProfileFor(opts.Stdout, ctx)
+		printProfileFor(ctx, opts.Stdout)
 	}
 
 	feedURL, err := buildFeedURL(opts.BackplaneURL, opts.OpClass, opts.Principal, opts.Target)

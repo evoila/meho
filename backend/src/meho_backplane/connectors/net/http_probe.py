@@ -58,6 +58,7 @@ import socket
 import ssl
 import time
 from collections.abc import Iterator
+from http.cookiejar import CookieJar
 from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
@@ -811,6 +812,33 @@ async def _walk_redirects(
     )
 
 
+async def _open_clients(
+    stack: contextlib.AsyncExitStack, timeout: float, trust: ProbeTrust
+) -> tuple[httpx.AsyncClient, httpx.AsyncClient | None]:
+    """The default client, and a client with the pinned CA when there is a pin.
+
+    Both clients share one cookie jar, so a cookie set on one hop is sent
+    on the next hop whichever client sends it.
+    """
+    cookie_jar = CookieJar()
+    client = await stack.enter_async_context(
+        httpx.AsyncClient(
+            follow_redirects=False, timeout=httpx.Timeout(timeout), cookies=cookie_jar
+        )
+    )
+    if not trust.pinned:
+        return client, None
+    pinned_client = await stack.enter_async_context(
+        httpx.AsyncClient(
+            follow_redirects=False,
+            timeout=httpx.Timeout(timeout),
+            verify=trust.build_ssl_context(),
+            cookies=cookie_jar,
+        )
+    )
+    return client, pinned_client
+
+
 async def net_http_probe(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Run the probe and add which TLS trust it used (``trust``, ``trust_target``)."""
     trust = await resolve_probe_trust(operator.tenant_id, params)
@@ -873,20 +901,7 @@ async def _probe_url(
     # as reason='tls_error', still status=ok.
     try:
         async with contextlib.AsyncExitStack() as stack:
-            client = await stack.enter_async_context(
-                httpx.AsyncClient(follow_redirects=False, timeout=httpx.Timeout(timeout))
-            )
-            pinned_client = (
-                await stack.enter_async_context(
-                    httpx.AsyncClient(
-                        follow_redirects=False,
-                        timeout=httpx.Timeout(timeout),
-                        verify=trust.build_ssl_context(),
-                    )
-                )
-                if trust.pinned
-                else None
-            )
+            client, pinned_client = await _open_clients(stack, timeout, trust)
             return await asyncio.wait_for(
                 _walk_redirects(
                     client=client,

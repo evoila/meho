@@ -12,6 +12,7 @@ A local HTTPS server uses a certificate from a private test CA.
 * A pin of another tenant, or of a deleted target, is never used.
 * The pin is used for the first host only, not after a redirect.
 * A target with the probed port wins, also for the default port 443.
+* A cookie set on one hop is sent on the next hop.
 """
 
 from __future__ import annotations
@@ -156,6 +157,34 @@ async def _start_https(pki: _Pki, location: str | None = None) -> asyncio.Abstra
                 head = f"HTTP/1.1 302 Found\r\nLocation: {location}\r\n"
             else:
                 head = "HTTP/1.1 200 OK\r\n"
+            writer.write((head + "Content-Length: 0\r\nConnection: close\r\n\r\n").encode())
+            await writer.drain()
+        finally:
+            writer.close()
+
+    return await asyncio.start_server(_handle, "127.0.0.1", 0, ssl=ctx)
+
+
+async def _start_cookie_https(pki: _Pki) -> asyncio.AbstractServer:
+    """HTTPS server that answers 200 only when the request carries its cookie.
+
+    Without the cookie it sets the cookie and redirects to itself.
+    """
+    import ssl
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(pki.cert_path, pki.key_path)
+
+    async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            has_cookie = False
+            while (line := await reader.readline()) not in (b"\r\n", b"\n", b""):
+                if line.lower().startswith(b"cookie:") and b"session=ok" in line:
+                    has_cookie = True
+            if has_cookie:
+                head = "HTTP/1.1 200 OK\r\n"
+            else:
+                head = "HTTP/1.1 302 Found\r\nLocation: /next\r\nSet-Cookie: session=ok; Path=/\r\n"
             writer.write((head + "Content-Length: 0\r\nConnection: close\r\n\r\n").encode())
             await writer.drain()
         finally:
@@ -313,6 +342,23 @@ async def test_pin_is_used_for_a_redirect_to_the_same_host(tmp_path: Path) -> No
         )
     finally:
         await _stop(first, second)
+    assert result["reachable"] is True
+    assert result["status"] == 200
+    assert result["trust"] == "pinned"
+
+
+async def test_cookie_from_a_redirect_is_sent_with_the_pin(tmp_path: Path) -> None:
+    pki = _make_pki(tmp_path)
+    await _insert_target(
+        tenant_id=_TENANT, name="demo-app", host="127.0.0.1", tls_ca_pin=pki.ca_pem
+    )
+    server = await _start_cookie_https(pki)
+    try:
+        result = await net_http_probe(
+            _operator(), None, {"url": f"https://127.0.0.1:{_port(server)}/"}
+        )
+    finally:
+        await _stop(server)
     assert result["reachable"] is True
     assert result["status"] == 200
     assert result["trust"] == "pinned"

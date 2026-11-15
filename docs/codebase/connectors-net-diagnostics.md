@@ -392,7 +392,10 @@ host (or the host name in `host_header`), ignoring case, and that has a
   certificate chain and host name checks stay on.
 - The pin is used for the first host only. `_walk_redirects` sends a hop
   to another host through the default-trust client. A redirect to the
-  same host keeps the pin.
+  same host keeps the pin. Both clients share one cookie jar, so a
+  cookie set on one hop is sent on the next.
+- When several targets match, the one registered with the probed port
+  wins (port 443 when the URL has no port). Else the first by name.
 - No target lookup runs for a plain-http URL or for a host the allowlist
   refuses.
 - The result carries `trust` (`default` or `pinned`) and `trust_target`

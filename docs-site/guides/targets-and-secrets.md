@@ -392,7 +392,7 @@ Real failure modes, with the errors they actually produce:
 
 | Symptom | What it means | Fix |
 |---|---|---|
-| 422 at registration: *"target destination is not a public address; refusing it as a server-side request forgery risk…"* | The SSRF guard rejects private/internal addresses by default. The number-one surprise on on-prem first installs. | Add your internal ranges or hostnames to the chart's `config.targetSsrfAllowlist` (env `MEHO_TARGET_SSRF_ALLOWLIST`) and upgrade the release. |
+| 422 at registration: *"target destination is not a public address; refusing it as a server-side request forgery risk…"* | The SSRF guard rejects private/internal addresses by default. The number-one surprise on on-prem first installs. | Add your internal ranges or hostnames to the chart's `config.targetSsrfAllowlist` (env `MEHO_TARGET_SSRF_ALLOWLIST`) and upgrade the release. An entry can end in a port (`host.name:8443`); it then admits that host on that port only. |
 | 422 `unknown_product`, listing `valid_products` | The `product` token isn't one a registered connector advertises. Product tokens are exact — `k8s`, not `kubernetes`. | Pick a token from the error's `valid_products` list. |
 | 422 `secret_ref_outside_tenant_scope` | You supplied a Vault ref outside `tenants/<tenant-id>/…`. It would fail with "permission denied" at every dispatch. | Use the `expected_secret_ref` the error names — or omit `secret_ref` and take the server default. |
 | 422 `secret_ref_project_not_allowed` | You supplied a `gsm:` ref in a Google Cloud project that `GSM_PARAM_ALLOWED_PROJECTS` does not list. MEHO would refuse every read of it. | List the project in `GSM_PARAM_ALLOWED_PROJECTS` and upgrade the release — or point `secret_ref` at a secret in a listed project. |

@@ -123,7 +123,7 @@ def test_an_anchor_is_a_mistake() -> None:
 @pytest.mark.parametrize(
     ("text", "sentence"),
     [
-        ("policy: v1\nbindings: []\n", "`bindings` is not a known key."),
+        ("policy: v1\nroles: []\n", "`roles` is not a known key."),
         (
             "policy: v1\nclassifications:\n  - match: {op: x}\n    colour: red\n",
             "`classifications[0].colour` is not a known key.",

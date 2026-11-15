@@ -224,8 +224,9 @@ Arguments (all optional):
   its `targets` list.
 * `filter.work_ref` — a change-ticket reference such as
   `gh:evoila/meho#123`.
-* `filter.active_only` — `true` drops claims whose time to live has
-  run out.
+* `filter.active_only` — `true` keeps only active claims: not completed,
+  and with a time to live that has not run out. Operation events, older
+  announcements and announcements without a time to live are left out.
 * `filter.op_class` / `filter.actor_sub` — still accepted, but they
   match operation events only, so no announcement matches them.
 * `limit` — integer in `[1, 1000]`, default 100. It caps the rows MEHO

@@ -20,6 +20,9 @@ sign-in (``lastIPFailure``) is personal data, so it is never returned. A read
 that fails, or a body of the wrong shape, is an error: it is never read as
 "not locked". Keycloak gives times in milliseconds; they are returned as
 ISO 8601 in UTC. A last failure of 0 means "no failure yet" and is ``null``.
+A last failure that is negative, not finite or too large for a date is an
+error, never "no failure". A realm answer whose ``bruteForceProtected`` is
+absent or ``null`` is an error too: the caller must know if the lock is on.
 
 Keycloak answers the lock status read with ``locked: false`` and zero counts
 for an id it does not know, and for every user when the realm's lock is off.
@@ -30,6 +33,7 @@ lock is on.
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.keycloak._paths import (
@@ -90,13 +94,26 @@ def _typed(rep: dict[str, Any], field: str, kind: type) -> Any:
 
 
 def _last_failure(rep: dict[str, Any]) -> str | None:
-    """``lastFailure`` as ISO 8601 UTC; ``None`` when absent or 0; an error when not a number."""
+    """``lastFailure`` as ISO 8601 UTC; ``None`` when absent or 0; else an error if odd.
+
+    A number that is negative, not finite or cannot be a date is an error: it
+    must not read as "no failure yet".
+    """
     value = rep.get("lastFailure")
-    if value is not None and (isinstance(value, bool) or not isinstance(value, int | float)):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
         raise KeycloakUnexpectedResponseError(
             f"'lastFailure' is {type(value).__name__}, not a number"
         )
-    return _iso(value)
+    if not math.isfinite(value) or value < 0:
+        raise KeycloakUnexpectedResponseError(f"'lastFailure' is {value}, not a time")
+    if value == 0:
+        return None
+    moment = _iso(value)
+    if moment is None:
+        raise KeycloakUnexpectedResponseError(f"'lastFailure' is {value}, not a time")
+    return moment
 
 
 async def keycloak_user_lock_status(
@@ -139,8 +156,10 @@ async def keycloak_realm_lock_settings(
     row = await self._get_admin_json(
         target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
     )
-    if "bruteForceProtected" not in row:
-        raise KeycloakUnexpectedResponseError("the realm answer has no 'bruteForceProtected'")
+    if row.get("bruteForceProtected") is None:
+        raise KeycloakUnexpectedResponseError(
+            "the realm answer has no 'bruteForceProtected' (absent or null)"
+        )
     return {"realm": realm, **{field: _typed(row, field, kind) for field, kind in _SETTING_FIELDS}}
 
 
@@ -199,7 +218,7 @@ _SETTINGS_RESPONSE: dict[str, Any] = {
     "type": "object",
     "properties": {
         "realm": {"type": "string"},
-        "bruteForceProtected": {"type": ["boolean", "null"], "description": "Is the lock on."},
+        "bruteForceProtected": {"type": "boolean", "description": "Is the lock on."},
         "permanentLockout": {
             "type": ["boolean", "null"],
             "description": "True: a locked account stays locked until an admin unlocks it.",

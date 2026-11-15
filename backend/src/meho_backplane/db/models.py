@@ -2087,6 +2087,11 @@ class EndpointDescriptor(Base):
     # settings on it stay, so they come back with the package. See
     # ``docs/codebase/connector-packages.md``.
     owner_package: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # #6485: the class a connector's safety floor gave to an ingested op
+    # (one of ``DECLARABLE_OP_CLASSES``). NULL means none: the class comes
+    # from the op id. Stored on the row so every process applies it, also
+    # after a restart.
+    op_class: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

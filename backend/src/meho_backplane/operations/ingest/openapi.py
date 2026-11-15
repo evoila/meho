@@ -46,11 +46,11 @@ re-read — so a stored descriptor validates params standalone. A nested
 ref to a component the spec never defines fails the ingest with
 :exc:`InvalidSchemaError` (same posture as a dangling top-level ref);
 before #3095 it was stored silently and crashed dispatch with an
-unhandled ``PointerToNowhere``. ``response_schema`` is deliberately
-**not** bundled: nothing validates against it at dispatch (its only
-consumer is the JSONFlux reducer, which never resolves refs), and
-bundling it would multiply storage for the large recursive response
-types the vCenter / NSX specs declare.
+unhandled ``PointerToNowhere``. ``response_schema`` gets the same bundle
+(#6485), so a connector's safety floor sees the shared schemas of the answer, for example a
+``password`` field inside a ``Client`` schema. A ref to a component the
+spec never defines is left as it is in the answer schema: nothing
+validates against it at dispatch, so it must not fail the ingest.
 
 Known limitation: when an operation declares two parameters with the
 same ``name`` in different ``in`` locations (e.g. a ``cluster`` path
@@ -1252,6 +1252,7 @@ def _build_proto(
     op_id = f"{method}:{path}"
     _assert_json_serializable(op_id=op_id, field="parameter_schema", schema=parameter_schema)
     if response_schema is not None:
+        _bundle_response_components(response_schema, component_schemas)
         _assert_json_serializable(op_id=op_id, field="response_schema", schema=response_schema)
     _assert_parameter_schema_standalone(op_id=op_id, parameter_schema=parameter_schema)
 
@@ -1442,6 +1443,23 @@ def _build_parameter_schema(
         schema=schema, component_schemas=component_schemas, path=path, method=method
     )
     return schema
+
+
+def _bundle_response_components(
+    response_schema: dict[str, object], component_schemas: dict[str, Any]
+) -> None:
+    """Bundle the shared schemas the answer schema uses, so a safety floor can read them.
+
+    A nested ref to a component the spec never defines is left as it is:
+    an answer schema is never validated at dispatch, so it must not fail
+    an ingest that worked before.
+    """
+    try:
+        closure = _collect_component_schema_closure(response_schema, component_schemas)
+    except InvalidSchemaError:
+        return
+    if closure:
+        response_schema["components"] = {"schemas": closure}
 
 
 def _attach_component_closure(

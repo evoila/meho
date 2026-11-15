@@ -105,6 +105,12 @@ class EndpointDescriptorProto(BaseModel):
     also flip it during review (T4) for ops that should pause the
     dispatcher for out-of-band approval."""
 
+    op_class: str | None = None
+    """The class a connector's safety floor gave to this operation, for
+    example ``credential_read``. ``None`` from the parser. Only a floor
+    sets it, to one of ``DECLARABLE_OP_CLASSES``; ingest refuses any other
+    value. Registration stores it on the row."""
+
     llm_instructions: dict[str, object] | None = None
     """Agent guidance for this operation. ``None`` from the parser. A
     connector-owned spec correction may set it; registration then stores

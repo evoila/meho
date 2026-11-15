@@ -5,7 +5,10 @@
 
 Four sources raise the parsed safety of an ingested operation:
 
-* a connector-owned floor, registered in code by the connector module;
+* a connector-owned floor, registered in code by the connector module. It
+  sees the full answer schema of the operation, with the shared schemas it
+  uses, and it may set the op class of the operation (``op_class``). MEHO
+  stores the class on the row, so every process applies it;
 * the per-spec ``safety_overlay`` declared on the catalog row; and
 * the op class of the operation: a read whose answer holds credentials
   (``credential_read``, see :mod:`meho_backplane.operations.credential_read`)
@@ -26,6 +29,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from meho_backplane.op_classes import DECLARABLE_OP_CLASSES
 from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
@@ -35,6 +39,7 @@ from meho_backplane.operations.credential_read import (
     raise_for_credential_read,
 )
 from meho_backplane.operations.ingest.catalog import safety_overlay_for
+from meho_backplane.operations.ingest.exceptions import InvalidOpClassError
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto, SafetyLevel
 
 __all__ = ["apply_safety_floor", "has_safety_floor", "register_ingest_safety_floor"]
@@ -83,10 +88,11 @@ def _apply_credential_read_floor(proto: EndpointDescriptorProto) -> EndpointDesc
     otherwise, so :func:`has_safety_floor` sees every credential read as
     governed.
     """
-    if not has_credential_read_floor(proto.op_id):
+    if not has_credential_read_floor(proto.op_id, stored_op_class=proto.op_class):
         return proto
     safety_level, requires_approval = raise_for_credential_read(
         proto.op_id,
+        stored_op_class=proto.op_class,
         safety_level=proto.safety_level,
         requires_approval=proto.requires_approval,
     )
@@ -113,6 +119,16 @@ def _apply_caller_address_floor(proto: EndpointDescriptorProto) -> EndpointDescr
     )
 
 
+def _check_op_class(proto: EndpointDescriptorProto) -> None:
+    """Refuse an op class that a connector floor set and that is not allowed."""
+    if proto.op_class is not None and proto.op_class not in DECLARABLE_OP_CLASSES:
+        raise InvalidOpClassError(
+            f"operation {proto.op_id!r}: a safety floor set the op class "
+            f"{proto.op_class!r}, which is not allowed. Allowed classes: "
+            f"{', '.join(sorted(DECLARABLE_OP_CLASSES))}."
+        )
+
+
 def has_safety_floor(
     *, product: str, version: str, impl_id: str, proto: EndpointDescriptorProto
 ) -> bool:
@@ -127,5 +143,6 @@ def apply_safety_floor(
     """Apply the connector floor, the catalog overlay, then the two marker floors, to *proto*."""
     floor = _FLOORS.get((product, impl_id))
     floored = floor(version, proto) if floor is not None else proto
+    _check_op_class(floored)
     overlaid = _apply_catalog_overlay(product=product, version=version, proto=floored)
     return _apply_caller_address_floor(_apply_credential_read_floor(overlaid))

@@ -2428,20 +2428,20 @@ def test_response_schema_is_not_strict_additional_properties() -> None:
     assert "additionalProperties" not in page
 
 
-def test_parse_response_schema_is_deliberately_not_bundled() -> None:
-    """``response_schema`` keeps nested refs unbundled — nothing validates it.
+def test_parse_response_schema_bundles_the_shared_schemas_it_uses() -> None:
+    """``response_schema`` holds the shared schemas its nested refs use (#6485).
 
-    Scope decision on #3095: the JSONFlux reducer (the response schema's
-    only dispatch-time consumer) never resolves refs, and bundling the
-    large recursive response types of the vCenter/NSX specs would
-    multiply per-op storage for no functional gain.
+    A connector's safety floor reads them. Nothing validates the answer
+    schema at dispatch, so the bundle is only there to be read.
     """
     with respx.mock(assert_all_called=False) as router:
         url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
         rows = parse_openapi(url)
     page = _by_op_id(rows)["GET:/pets"].response_schema
     assert page is not None
-    assert "components" not in page
+    bundled = page["components"]["schemas"]  # type: ignore[index]
+    assert sorted(bundled) == ["Pet", "Tag"]
+    assert page["properties"]["items"]["items"] == {"$ref": "#/components/schemas/Pet"}  # type: ignore[index]
 
 
 def test_iter_schema_refs_walks_schema_positions_only() -> None:

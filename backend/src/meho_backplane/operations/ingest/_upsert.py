@@ -303,6 +303,7 @@ def _build_new_descriptor(
         llm_instructions=ctx.proto.llm_instructions,
         safety_level=ctx.proto.safety_level,
         requires_approval=ctx.proto.requires_approval,
+        op_class=ctx.proto.op_class,
         is_enabled=False,
         needs_reingest=False,
         embedding=embedding,
@@ -324,7 +325,13 @@ def _seed_llm_instructions(existing: EndpointDescriptor, ctx: UpsertContext) -> 
 
 
 def _apply_safety_metadata(existing: EndpointDescriptor, ctx: UpsertContext) -> None:
-    """Refresh safety metadata without weakening a connector-owned floor."""
+    """Refresh safety metadata without weakening a connector-owned floor.
+
+    A class from the floor is stored. When the floor gives none, the stored
+    class stays, like the stored risk level: a re-ingest never weakens a row.
+    """
+    if ctx.proto.op_class is not None:
+        existing.op_class = ctx.proto.op_class
     if not has_safety_floor(
         product=ctx.product,
         version=ctx.version,

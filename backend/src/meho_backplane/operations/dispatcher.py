@@ -294,7 +294,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
-from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
+from meho_backplane.broadcast.events import (
+    classify_op,
+    resolve_op_class,
+    scrub_secret_named_values,
+)
 from meho_backplane.broadcast.reflex import build_reflex_advisory
 from meho_backplane.broadcast.target_advisory import build_target_activity_advisory
 from meho_backplane.checks.advisory import build_checks_alert_advisory
@@ -3156,7 +3160,9 @@ async def _build_proposed_effect(
         # identifier fields are merged below, so an identifier-only
         # (declined) envelope is classified not-populated rather than
         # mislabelled by the merged ``op_id``.
-        preview_populated, preview_reason = describe_preview_provenance(preview, op_id=op_id)
+        preview_populated, preview_reason = describe_preview_provenance(
+            preview, op_id=op_id, stored_op_class=getattr(descriptor, "op_class", None)
+        )
         base["preview_populated"] = preview_populated
         if preview_reason is not None:
             base["preview_reason"] = preview_reason
@@ -3176,7 +3182,7 @@ async def _build_proposed_effect(
             op_id=op_id, connector_id=connector_id, target=target
         ).items():
             base.setdefault(_key, _value)
-        base.setdefault("op_class", classify_op(op_id))
+        base.setdefault("op_class", resolve_op_class(op_id, getattr(descriptor, "op_class", None)))
         # Promote the catalog severity onto every parked op's envelope
         # (#1855). ``safety_level`` is op-identity metadata read straight
         # off the descriptor -- not recomputed -- so a parked ``dangerous``
@@ -3857,6 +3863,13 @@ async def _dispatch_now(
             target=target,
             params_hash=params_hash,
         )
+    # An ingested op whose row stores a class (a connector's safety floor set
+    # it at ingest) is a secret read or a secret maker like any other.
+    stored_op_class = getattr(descriptor, "op_class", None)
+    if stored_op_class is not None:
+        op_class = resolve_op_class(op_id, stored_op_class)
+        secret_read = secret_read or op_class == "credential_read"
+        makes_new_secret = op_class == "credential_mint"
     # An ingested read of licence keys never runs: the ingest would give it
     # the safe level of its HTTP method, and its answer carries the keys in
     # full. Refused before the target check, the catalog guard, the policy

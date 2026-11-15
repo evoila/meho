@@ -483,7 +483,8 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `description` | `description` | Verbatim from spec |
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
-| `response_schema` | `response_schema` | Success-response schema or `None` |
+| `response_schema` | `response_schema` | Success-response schema or `None`. The shared schemas it uses are bundled under `components.schemas`, like in `parameter_schema` |
+| `op_class` | `op_class` | `None` from the parser; set only by a connector floor (see "A floor sees the answer and sets the op class") |
 | `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay`, then the op class floor (a `credential_read` is at least `caution`), then the caller-address floor (an op with a parameter marked `x-meho-caller-address: true` is at least `caution`) |
 | `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, a `credential_read` op class, or a parameter marked `x-meho-caller-address: true` |
 | `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
@@ -533,6 +534,41 @@ are monotonic: they only raise the parsed tier and set approval; re-ingest keeps
 an already stricter safety tier and an existing approval requirement. Existing
 enablement, review state, and other operator metadata are unchanged by this
 promotion. The dry-run path applies the same floor before reporting its result.
+
+#### A floor sees the answer and sets the op class
+
+A connector floor gets one operation at a time, with its full answer
+schema. The stored `response_schema` holds the shared schemas the answer
+uses, under `components.schemas`, the same way `parameter_schema` does. A
+`$ref` to a shared schema that the file does not define is left as it is
+and does not fail the ingest, because nothing validates an answer schema at
+dispatch.
+
+Example: an API has `GET /clients`. Its answer is a list of
+`#/components/schemas/Client`, and `Client` has a `password` field. The
+floor reads `proto.response_schema["components"]["schemas"]["Client"]`,
+finds the field, and returns a copy of the operation with
+`op_class="credential_read"`.
+
+- **Allowed values.** The ones in `DECLARABLE_OP_CLASSES`
+  (`op_classes.py`). Any other value stops the ingest with
+  `InvalidOpClassError`, which names the operation.
+- **Stored on the row.** `EndpointDescriptor.op_class` (nullable). A
+  re-ingest stores the class when the floor gives one. When the floor gives
+  none, the class of an earlier ingest stays: a floor never weakens a row.
+- **Used on every call.** The credential read floor (at ingest and at
+  lookup), the secret-read handling in the dispatcher, the audit row, the
+  approval request and the preview use the stored class first. A stored
+  class never replaces a credential or audit class that the op id already
+  gives (`resolve_op_class`). So it also holds in a process that has no
+  floor and no op class list.
+- **Not a global list.** The class is not added to `op_classes.py`.
+  Ingested op ids such as `GET:/clients` are not unique across connectors.
+- **A two-argument floor** (version, operation) works as before.
+
+The bundle makes stored answer schemas bigger, because each operation
+stores the shared schemas it uses. The size is in the pull request that
+added it (#6485). Tests: `tests/test_ingest_floor_answer_schema_op_class.py`.
 
 #### Connector spec corrections
 

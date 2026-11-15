@@ -78,7 +78,7 @@ def test_connector_error_redacts_labelled_password() -> None:
     """``str(exc)`` carrying ``password=...`` never reaches extras raw."""
     result = result_connector_error("op.read", RuntimeError(_PASSWORD_TEXT), 1.0)
     msg = result.extras["exception_message"]
-    assert "[REDACTED:api_key]" in msg
+    assert "[REDACTED:command_line_secret]" in msg
     assert _PASSWORD_SECRET not in msg
     assert "P@ssw0rd" not in msg
     assert "withMore" not in msg

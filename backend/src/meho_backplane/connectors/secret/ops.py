@@ -42,6 +42,7 @@ from meho_backplane.connectors.secret.endpoints import (
     parse_secret_ref,
     resolve_secret_endpoint,
 )
+from meho_backplane.connectors.secret.vault_target_endpoint import check_vault_target_refs
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
@@ -189,6 +190,9 @@ async def secret_move(operator: Operator, target: Any, params: dict[str, Any]) -
        the param schema, so both are present and colon-shaped);
     2. resolves each kind to a :class:`~.endpoints.SecretEndpoint` via
        the registry;
+    2a. checks, before any store is asked: the sink path is inside the
+       tenant, and each ``vault-target`` side names a Vault target with
+       its own role that the caller may use for that read or write;
     3. ``read_secret`` from the source (the value enters memory only as
        a :class:`~.endpoints.SecretMaterial`);
     4. ``write_secret`` to the sink — entirely server-side.
@@ -213,6 +217,13 @@ async def secret_move(operator: Operator, target: Any, params: dict[str, Any]) -
         raise SecretMergeUnsupportedError(
             f"the sink kind {sink_ref.kind!r} does not support merge: true"
         )
+
+    # Refuse a sink path outside the tenant, and a vault-target side the
+    # caller may not use, before the source is read or any store is asked.
+    check_write_allowed = getattr(sink, "check_write_allowed", None)
+    if check_write_allowed is not None:
+        check_write_allowed(operator)
+    await check_vault_target_refs(operator, params)
 
     # Server-side read → write. The value lives only inside ``material``
     # for the duration of this call; it never crosses back to the caller.

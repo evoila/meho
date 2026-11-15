@@ -29,6 +29,7 @@ from meho_backplane.connectors.secret.endpoints import SECRET_ENDPOINT_REGISTRY
 from meho_backplane.connectors.secret.ops import register_secret_broker_operations
 from meho_backplane.connectors.secret.vault_endpoint import VaultSecretRefError
 from meho_backplane.connectors.secret.vault_target_endpoint import VaultTargetKvSecretEndpoint
+from meho_backplane.connectors.vault.ops import register_vault_typed_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.db.models import Target as TargetORM
@@ -101,6 +102,7 @@ async def _seed_target(name: str, *, product: str = "vault", role: str | None = 
 @pytest.fixture
 async def _env(stub_embedding_service: AsyncMock) -> AsyncIterator[None]:
     await register_secret_broker_operations(embedding_service=stub_embedding_service)
+    await register_vault_typed_operations(embedding_service=stub_embedding_service)
     await _seed_target("vault-src", role="role-src")
     await _seed_target("vault-dst", role="role-dst")
     await _seed_target("not-vault", product="keycloak")

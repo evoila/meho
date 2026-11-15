@@ -1727,7 +1727,7 @@ async def create_pending_request(
     try:
         await stamp_approver_set(session, request, category=category)
     except ValueError as exc:
-        await _audit_routing_refusal(operator, request, str(exc))
+        await _audit_routing_refusal(operator, request, request_audit_id, str(exc))
         raise
     if idempotency_key is None:
         session.add(request)
@@ -1773,12 +1773,12 @@ async def create_pending_request(
 
 
 async def _audit_routing_refusal(
-    operator: Operator, request: ApprovalRequest, routing_error: str
+    operator: Operator, request: ApprovalRequest, audit_id: uuid.UUID, routing_error: str
 ) -> None:
     """Write the audit row of a park refused because the stored routing is not valid.
 
     The caller's transaction rolls back with the refusal, so the row is
-    written in its own session. Its id is the request's
+    written in its own session. Its id *audit_id* is the request's
     ``request_audit_id``, the id the "request" row would have had. A failed
     write is logged; the park is refused either way.
     """
@@ -1788,7 +1788,7 @@ async def _audit_routing_refusal(
         async with get_sessionmaker()() as session:
             await _write_audit_row(
                 session,
-                audit_id=request.request_audit_id,
+                audit_id=audit_id,
                 event_class=AuditEventClass.POLICY_DECISION,
                 operator=operator,
                 request=request,

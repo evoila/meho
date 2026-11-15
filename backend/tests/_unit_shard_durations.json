@@ -350,6 +350,7 @@
   "tests/test_connectors_k8s_wcp.py": 3.45,
   "tests/test_connectors_k8s_workload.py": 0.44,
   "tests/test_connectors_k8s_write.py": 0.77,
+  "tests/test_connectors_keycloak_account_writes.py": 102.56,
   "tests/test_connectors_keycloak_auth.py": 0.5,
   "tests/test_connectors_keycloak_check_login.py": 9.55,
   "tests/test_connectors_keycloak_delete_ops.py": 25.4,

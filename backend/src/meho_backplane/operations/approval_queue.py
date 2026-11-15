@@ -1368,6 +1368,11 @@ async def _write_audit_row(
         "principal_sub": request.principal_sub,
         "result_status": path.split(".")[-1],  # "request" | "decision"
     }
+    # The class of the operation that waits, as the approval request stores
+    # it (the stored class of an ingested row counts). Only on the "request" row.
+    op_class = (request.proposed_effect or {}).get("op_class")
+    if path == "approval.request" and isinstance(op_class, str):
+        payload["op_class"] = op_class
     # Hoist the acting operator's display name so the name-aware audit views
     # resolve the approval row's ``operator_sub`` to a human name (#3300) --
     # the same ``payload['principal_name']`` shape the MCP wrapper rows (#1212)

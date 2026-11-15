@@ -205,6 +205,8 @@ def _snapshot(tenant_id: uuid.UUID, request: ApprovalRequest) -> ApprovalRequest
         params=request.params,
         proposed_effect=request.proposed_effect,
         rights_change=request.rights_change,
+        approver_roles=request.approver_roles,
+        approver_rule=request.approver_rule,
         status=request.status,
     )
 

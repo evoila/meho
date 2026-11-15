@@ -54,6 +54,7 @@ __all__ = [
     "_AUTH_FLOW_ADD_SUBFLOW_PATH",
     "_AUTH_FLOW_COPY_PATH",
     "_AUTH_FLOW_EXECUTIONS_PATH",
+    "_CLIENT_SCOPE_PATH",
     "_CLIENT_SCOPE_PROTOCOL_MAPPERS_PATH",
     "_CLIENT_SCOPE_PROTOCOL_MAPPER_PATH",
     "_EVENTS_CONFIG_PATH",
@@ -75,6 +76,7 @@ _CLIENT_PROTOCOL_MAPPERS_PATH = (
     "/admin/realms/{realm}/clients/{client-uuid}/protocol-mappers/models"
 )
 _CLIENT_SCOPES_PATH = "/admin/realms/{realm}/client-scopes"
+_CLIENT_SCOPE_PATH = "/admin/realms/{realm}/client-scopes/{client-scope-id}"
 _CLIENT_SCOPE_PROTOCOL_MAPPERS_PATH = (
     "/admin/realms/{realm}/client-scopes/{client-scope-id}/protocol-mappers/models"
 )

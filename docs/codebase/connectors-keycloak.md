@@ -679,15 +679,25 @@ the existing mapper is changed.
   "not found" error) and nothing is written. A name that matches more than
   one object raises `ValueError`. A scope list that cannot be read is an
   error, never "not found".
-- Safe to run twice. The result names the scope and the mapper and lists the
-  changed field names (`changed_fields`, `unrequested_changes`), never values.
-  Check the new value with `keycloak.client_scope.list`.
+- An id and a name sent together must name one object: the name stored in
+  Keycloak for that id must be the name sent. Otherwise MEHO refuses the
+  request before it waits for approval (`refused_before_approval`), and
+  again when it runs. Nothing is written.
+- Safe to run twice. The result shows the ids and the names stored in
+  Keycloak, and lists the changed field names (`changed_fields`,
+  `unrequested_changes`), never values. Check the new value with
+  `keycloak.client_scope.list`.
 - Risk level `dangerous`, approval required, group `protocol_mapper_write`.
   A mapper decides what goes into the login token, so only a
   MEHO-SA-Operator or a tenant admin may approve, and the self-approval
   switch does not cover it (see the list of `dangerous` writes above).
-  The approval card shows the generic params echo, which names the scope and
-  the mapper. The audit row holds the same params.
+  The approval card shows the scope and the mapper with their ids and the
+  names stored in Keycloak (also when the caller sent only one of them), the
+  changed field names and the requested fields with secrets hidden. After
+  approval the run acts on the ids on the card and does not look a name up
+  again. When a stored name is no longer the one on the card, or the card
+  has no ids (the objects could not be read when the request was made), the
+  run is refused and nothing is written.
 - Not offered: adding a mapper to a client scope, and changing or deleting a
   mapper on a client.
 

@@ -12,7 +12,12 @@ What is proven:
   the ``protocol_mapper_write`` group;
 * the mapper is read, the requested fields are changed, and every other
   field (also the other ``config`` keys) is written back as it was;
-* names are looked up to ids; ids are used as they are;
+* names are looked up to ids; ids are read, and the result shows the
+  names stored in Keycloak;
+* an id and a name that do not belong together are refused before the
+  wait for approval, and when the call runs;
+* the approval card shows the ids and the stored names; the approved run
+  acts on those ids and is refused when a name changed in between;
 * a name that matches nothing is an error and nothing is written; a name
   that matches two is an error too;
 * a vendor error is an error, not a success;
@@ -182,10 +187,12 @@ async def _run(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
     return dumped
 
 
-def _mount_token(mock: respx.MockRouter) -> None:
+def _mount_token(mock: respx.MockRouter) -> respx.Route:
+    """Mount the admin login and the scope read; return the scope read."""
     mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
         200, json={"access_token": "kc-admin-token", "expires_in": 300}
     )
+    return mock.get(_SCOPE_PATH).respond(200, json={"id": _SCOPE_UUID, "name": _SCOPE_NAME})
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +281,9 @@ async def test_change_by_names_keeps_every_other_field(kc: KeycloakConnector) ->
     assert _NEW_VALUE not in str(result)
 
 
-async def test_change_by_ids_skips_the_lookups(kc: KeycloakConnector) -> None:
+async def test_change_by_ids_skips_the_lookups_and_shows_stored_names(
+    kc: KeycloakConnector,
+) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         scopes = mock.get(f"/admin/realms/{_REALM}/client-scopes").respond(200, json=[])
@@ -291,8 +300,8 @@ async def test_change_by_ids_skips_the_lookups(kc: KeycloakConnector) -> None:
             {"scope_id": _SCOPE_UUID, "mapper_id": _MAPPER_UUID, "representation": _CHANGE},
         )
     assert result["status"] == "ok", result
-    assert result["result"]["scope_name"] is None
-    assert result["result"]["mapper_name"] is None
+    assert result["result"]["scope_name"] == _SCOPE_NAME
+    assert result["result"]["mapper_name"] == _MAPPER_NAME
     assert not scopes.called
     assert not mappers.called
 
@@ -503,3 +512,174 @@ async def test_change_waits_for_approval_then_runs_and_audit_names_both(
     )
     assert _SCOPE_NAME in audit
     assert _MAPPER_NAME in audit
+
+
+async def _park(params: dict[str, Any]) -> dict[str, Any]:
+    return await call_operation(
+        _operator("kc-mapper-requester"),
+        {"connector_id": _CONNECTOR_ID, "op_id": _OP, "target": _TARGET_NAME, "params": params},
+    )
+
+
+async def _card(request_id: uuid.UUID) -> dict[str, Any]:
+    async with get_sessionmaker()() as session:
+        pending = await session.get(ApprovalRequest, request_id)
+        assert pending is not None
+        preview: dict[str, Any] = pending.proposed_effect["preview"]
+    return preview
+
+
+async def _approve_and_resume(request_id: uuid.UUID) -> Any:
+    approver = _operator("kc-mapper-approver", TenantRole.TENANT_ADMIN)
+    async with get_sessionmaker()() as session:
+        await approve_request(session, request_id, operator=approver, params=None)
+        await session.commit()
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+        assert row is not None
+        return await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+
+
+def _mount_all(mock: respx.MockRouter) -> respx.Route:
+    """Mount every read and the write; return the write."""
+    _mount_token(mock)
+    mock.get(f"/admin/realms/{_REALM}/client-scopes").respond(200, json=_scope_rows())
+    mock.get(_MAPPERS_PATH).respond(200, json=_mapper_rows())
+    mock.get(_MAPPER_PATH).respond(200, json=_mapper())
+    return mock.put(url__regex=r".*/protocol-mappers/.*").respond(204)
+
+
+async def _stored_requests() -> list[ApprovalRequest]:
+    async with get_sessionmaker()() as session:
+        return list((await session.execute(select(ApprovalRequest))).scalars().all())
+
+
+@pytest.mark.parametrize(
+    ("ids", "message"),
+    [
+        (
+            {"scope_id": _SCOPE_UUID, "scope_name": "other", "mapper_name": _MAPPER_NAME},
+            "'scope_id' and 'scope_name' name different client scopes",
+        ),
+        (
+            {"scope_name": _SCOPE_NAME, "mapper_id": _MAPPER_UUID, "mapper_name": "other-mapper"},
+            "'mapper_id' and 'mapper_name' name different protocol mappers",
+        ),
+    ],
+    ids=["scope", "mapper"],
+)
+async def test_id_and_name_of_different_objects_is_refused_before_approval(
+    kc: KeycloakConnector, ids: dict[str, Any], message: str
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount_all(mock)
+        call = await _park({**ids, "representation": _CHANGE})
+        result = await _run(_OP, {**ids, "representation": _CHANGE})
+    assert call["status"] == "denied", call
+    assert call["extras"]["error_code"] == "refused_before_approval"
+    assert message in call["error"]
+    assert await _stored_requests() == []
+    # The same request is refused when it runs.
+    assert result["status"] != "ok"
+    assert message in str(result)
+    assert not put.called
+
+
+async def test_id_and_name_of_the_same_objects_waits_for_approval(kc: KeycloakConnector) -> None:
+    params = {
+        "scope_id": _SCOPE_UUID,
+        "scope_name": _SCOPE_NAME,
+        "mapper_id": _MAPPER_UUID,
+        "mapper_name": _MAPPER_NAME,
+        "representation": _CHANGE,
+    }
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount_all(mock)
+        call = await _park(params)
+        assert call["status"] == "awaiting_approval", call
+        resumed = await _approve_and_resume(uuid.UUID(call["extras"]["approval_request_id"]))
+    assert resumed.status == "ok", resumed
+    assert put.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        {"scope_id": _SCOPE_UUID, "mapper_id": _MAPPER_UUID},
+        {"scope_name": _SCOPE_NAME, "mapper_name": _MAPPER_NAME},
+    ],
+    ids=["ids-only", "names-only"],
+)
+async def test_card_shows_the_ids_and_the_stored_names(
+    kc: KeycloakConnector, ids: dict[str, Any]
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount_all(mock)
+        call = await _park({**ids, "representation": _CHANGE})
+        assert call["status"] == "awaiting_approval", call
+        card = await _card(uuid.UUID(call["extras"]["approval_request_id"]))
+    assert card["scope_id"] == _SCOPE_UUID
+    assert card["scope_name"] == _SCOPE_NAME
+    assert card["mapper_id"] == _MAPPER_UUID
+    assert card["mapper_name"] == _MAPPER_NAME
+    assert card["realm"] == _REALM
+    assert card["changed_fields"] == ["config"]
+    assert card["current_available"] is True
+    assert not put.called
+
+
+async def test_approved_run_acts_on_the_mapper_id_on_the_card(kc: KeycloakConnector) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount_all(mock)
+        call = await _park(
+            {"scope_name": _SCOPE_NAME, "mapper_name": _MAPPER_NAME, "representation": _CHANGE}
+        )
+        # While the request waits, the lookups would find other objects.
+        scopes = mock.get(f"/admin/realms/{_REALM}/client-scopes").respond(200, json=[])
+        mappers = mock.get(_MAPPERS_PATH).respond(200, json=[])
+        mock.reset()  # count only the calls of the approved run
+        resumed = await _approve_and_resume(uuid.UUID(call["extras"]["approval_request_id"]))
+    assert resumed.status == "ok", resumed
+    assert not scopes.called
+    assert not mappers.called
+    assert put.call_count == 1
+    assert put.calls.last.request.url.path == _MAPPER_PATH
+    assert resumed.result["mapper_name"] == _MAPPER_NAME
+
+
+@pytest.mark.parametrize("renamed", ["scope", "mapper"])
+async def test_approved_run_is_refused_when_a_name_changed_after_approval(
+    kc: KeycloakConnector, renamed: str
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount_all(mock)
+        call = await _park(
+            {"scope_name": _SCOPE_NAME, "mapper_name": _MAPPER_NAME, "representation": _CHANGE}
+        )
+        if renamed == "scope":
+            mock.get(_SCOPE_PATH).respond(200, json={"id": _SCOPE_UUID, "name": "renamed"})
+        else:
+            mock.get(_MAPPER_PATH).respond(200, json={**_mapper(), "name": "renamed"})
+        resumed = await _approve_and_resume(uuid.UUID(call["extras"]["approval_request_id"]))
+    assert resumed.status != "ok"
+    assert "on the approval card has another name now" in str(resumed.model_dump(mode="json"))
+    assert not put.called
+
+
+async def test_approved_run_is_refused_when_the_card_has_no_ids(kc: KeycloakConnector) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount_all(mock)
+        scopes = mock.get(f"/admin/realms/{_REALM}/client-scopes").respond(500)
+        call = await _park(
+            {"scope_name": _SCOPE_NAME, "mapper_name": _MAPPER_NAME, "representation": _CHANGE}
+        )
+        assert call["status"] == "awaiting_approval", call
+        request_id = uuid.UUID(call["extras"]["approval_request_id"])
+        card = await _card(request_id)
+        scopes.respond(200, json=_scope_rows())
+        resumed = await _approve_and_resume(request_id)
+    assert card["current_available"] is False
+    assert card["scope_id"] is None
+    assert resumed.status != "ok"
+    assert "approval card does not show the ids" in str(resumed.model_dump(mode="json"))
+    assert not put.called

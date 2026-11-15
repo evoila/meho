@@ -72,12 +72,12 @@ _RESULT: dict[str, Any] = {
         "scope_id": {"type": "string", "description": "The client scope UUID."},
         "scope_name": {
             "type": ["string", "null"],
-            "description": "The scope name from the request; null when only scope_id was passed.",
+            "description": "The scope name stored in Keycloak.",
         },
         "mapper_id": {"type": "string", "description": "The protocol mapper UUID."},
         "mapper_name": {
             "type": ["string", "null"],
-            "description": "The mapper name from the request; null when only mapper_id was passed.",
+            "description": "The mapper name stored in Keycloak.",
         },
         "changed_fields": {
             "type": "array",
@@ -105,8 +105,8 @@ SCOPE_MAPPER_OPS: tuple[KeycloakOp, ...] = (
         description=(
             "Finds a client scope and one of its protocol mappers by id or exact "
             "name, then changes only the fields in ``representation``. Other "
-            "fields stay. ``config`` merges key by key. Safe to run twice. "
-            "requires_approval=True."
+            "fields stay. ``config`` merges key by key. An id and a name sent "
+            "together must name one object. Safe to run twice. requires_approval=True."
         ),
         parameter_schema=_PARAMS,
         response_schema=_RESULT,
@@ -127,7 +127,9 @@ SCOPE_MAPPER_OPS: tuple[KeycloakOp, ...] = (
             "when_to_call": "When the claim a client scope puts into tokens must change.",
             "preconditions": (
                 "The client scope and the mapper exist in the target's managed realm. "
-                "Read them first with keycloak.client_scope.list."
+                "Read them first with keycloak.client_scope.list. When you send "
+                "an id and a name, they must belong together, or the call is "
+                "refused before it waits for approval."
             ),
             "next_step": (
                 "Run keycloak.client_scope.list and check the new value in the mapper's config."

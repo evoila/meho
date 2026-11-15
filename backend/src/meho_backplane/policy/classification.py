@@ -296,14 +296,20 @@ def install_wait_undone(
     return None
 
 
-def install_wait_text(name: str, op_id: str, install_ref: str) -> str:
-    """The sentences that refuse or mark an entry found by :func:`install_wait_undone`."""
-    return (
+def install_wait_text(name: str, op_id: str, install_ref: str, *, single_edit: bool = False) -> str:
+    """The sentences that refuse or mark an entry found by :func:`install_wait_undone`.
+
+    *single_edit* is true for one edit sent on its own: it has no file
+    entry, so the text says what not to send.
+    """
+    head = (
         f"{name} sets `always_wait: false` on `{op_id}`, but `{install_ref}` makes it "
         "always wait for the whole install. A tenant can make more operations wait, "
-        "not fewer. Remove `always_wait: false` from the tenant entry; its other "
-        "fields can stay."
+        "not fewer."
     )
+    if single_edit:
+        return f"{head} Do not send `always_wait: false`."
+    return f"{head} Remove `always_wait: false` from the tenant entry; its other fields can stay."
 
 
 def _tenant_risk_decided_by(
@@ -327,11 +333,11 @@ def install_risk_lowered(
     entry: ClassificationEntry,
     coords: Iterable[OpCoordinates],
     entries: Sequence[ClassificationEntry],
-) -> tuple[str, str, str] | None:
+) -> tuple[OpCoordinates, str, str] | None:
     """Where a tenant *entry* decides a lower risk level than the install's policy.
 
     *entries* are the install's entries and the other entries of the
-    tenant. Returns ``(op_id, install_ref, install_level)`` for the first
+    tenant. Returns ``(coords, install_ref, install_level)`` for the first
     operation in *coords* that *entry* matches, where *entry* decides the
     tenant's level and an install entry sets a higher one. A more specific
     tenant entry that sets the install's level or higher decides that
@@ -351,18 +357,22 @@ def install_risk_lowered(
         if tenant_level is not None and RISK_LEVELS.index(tenant_level) < RISK_LEVELS.index(
             install_level
         ):
-            return one.op_id, install.ref, install_level
+            return one, install.ref, install_level
     return None
 
 
 def install_risk_text(
-    name: str, risk: str, op_id: str, install_ref: str, level: str, *, wide: bool
+    name: str, risk: str, coords: OpCoordinates, install_ref: str, level: str, *, wide: bool
 ) -> str:
     """The sentences that refuse or mark an entry found by :func:`install_risk_lowered`.
 
     *wide* is true when the entry also matches other operations. Then the
-    text keeps its risk level, because it still counts for those.
+    text keeps its risk level, because it still counts for those. The
+    suggested entry names the connector too: the same op id can exist on
+    another connector, and an entry without a connector would set its
+    level as well.
     """
+    op_id = coords.op_id
     head = (
         f"{name} sets `risk: {risk}`, but `{install_ref}` sets `{op_id}` to `{level}` "
         f"for the whole install, so `risk: {risk}` does not count for `{op_id}`."
@@ -371,8 +381,8 @@ def install_risk_text(
         return f"{head} Set `risk: {level}` or higher in this entry; its other fields can stay."
     return (
         f"{head} The entry still counts for the other operations it matches. Add a "
-        f"tenant entry for `{op_id}` with `risk: {level}` or higher, or leave `{op_id}` "
-        "out of this entry's match."
+        f"tenant entry for `{op_id}` of connector `{coords.connector_id}` with "
+        f"`risk: {level}` or higher, or leave `{op_id}` out of this entry's match."
     )
 
 
@@ -394,7 +404,12 @@ def install_floor_texts(
         texts.append(install_wait_text(name, *undone))
     lowered = install_risk_lowered(entry, coords, entries)
     if lowered is not None and entry.risk is not None:
-        wide = any(entry.matches(one) and one.op_id != lowered[0] for one in coords)
+        found = lowered[0]
+        wide = any(
+            entry.matches(one)
+            and (one.connector_id, one.op_id) != (found.connector_id, found.op_id)
+            for one in coords
+        )
         texts.append(install_risk_text(name, entry.risk, *lowered, wide=wide))
     return texts
 

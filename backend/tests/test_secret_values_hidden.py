@@ -518,18 +518,18 @@ async def test_guest_env_read_hides_values_by_default(stub_embedding_service: As
 
 
 @pytest.mark.parametrize(
-    "text",
+    ("text", "label"),
     [
-        f"DB_PASSWORD={_PASSWORD}",
-        f"export GITHUB_TOKEN={_TOKEN}",
-        f"x-api-key: {_TOKEN}",
+        (f"DB_PASSWORD={_PASSWORD}", "command_line_secret"),
+        (f"export GITHUB_TOKEN={_TOKEN}", "command_line_secret"),
+        (f"x-api-key: {_TOKEN}", "api_key"),
     ],
 )
-def test_label_after_an_underscore_or_dash_is_redacted(text: str) -> None:
+def test_label_after_an_underscore_or_dash_is_redacted(text: str, label: str) -> None:
     redacted = redact(text, get_default_policy()).redacted
     assert _PASSWORD not in redacted
     assert _TOKEN not in redacted
-    assert "[REDACTED:api_key]" in redacted
+    assert f"[REDACTED:{label}]" in redacted
 
 
 def test_label_glued_to_letters_is_not_redacted() -> None:

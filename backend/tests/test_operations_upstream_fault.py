@@ -227,7 +227,7 @@ def test_redaction_runs_before_cap_on_both_fields() -> None:
         assert _PASSWORD_SECRET not in text
         assert "P@ssw0rd" not in text
     # The redaction marker itself is what the cap cuts, not the secret.
-    assert "admin:[REDACTED:" in fault["faultstring"]
+    assert "admin:password=[RE" in fault["faultstring"]
     assert fault["faultstring"].endswith("...<truncated>")
     assert fault["type"] == "NotAuthenticated"
 
@@ -241,7 +241,7 @@ def test_redaction_applies_to_soap_faultstring() -> None:
     )
     fault = out.extras["upstream_fault"]
     assert _PASSWORD_SECRET not in fault["faultstring"]
-    assert "[REDACTED:api_key]" in fault["faultstring"]
+    assert "[REDACTED:command_line_secret]" in fault["faultstring"]
     assert out.error is not None
     assert _PASSWORD_SECRET not in out.error
 

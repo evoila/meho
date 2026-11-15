@@ -323,7 +323,7 @@ async def test_k8s_apply_preview_shows_api_server_denial(
 @pytest.mark.parametrize(
     ("message", "secret", "marker"),
     [
-        (_PASSWORD_DENIAL, _PASSWORD_SECRET, "[REDACTED:api_key]"),
+        (_PASSWORD_DENIAL, _PASSWORD_SECRET, "[REDACTED:command_line_secret]"),
         (_BEARER_DENIAL, _BEARER_SECRET, "[REDACTED:bearer_token]"),
     ],
 )
@@ -368,8 +368,8 @@ async def test_k8s_apply_preview_redacts_credential_across_length_limit(
     assert reason.startswith(_K8S_REASON_PREFIX)
     assert reason.endswith(" [truncated]")
     assert len(reason) == 500 + len(" [truncated]")
-    assert "[REDACTED:" in reason
-    assert label not in reason
+    # The label now stays, so the cap may cut the marker itself, never the secret.
+    assert "password=[RE" in reason
     assert _PASSWORD_SECRET[:3] not in reason
 
 

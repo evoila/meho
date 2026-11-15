@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Broadcast UI routes: live feed page + SSE bridge + filters + drawer.
+"""Broadcast UI routes: live feed page + SSE bridge + filters.
 
 Initiative #338 (G10.1 Activity broadcast UI). Task #867 (G10.1-T1)
 shipped the live feed; Task #868 (G10.1-T2) adds the filter bar, the
@@ -13,7 +13,7 @@ Module layout:
 * :mod:`~meho_backplane.ui.routes.broadcast.feed` -- the
   ``GET /ui/broadcast`` (full page) and ``GET /ui/broadcast/feed``
   (filtered fragment) routes. The page renders the live-feed view (SSE
-  wrapper + filter bar + drawer slot + empty state + server-rendered
+  wrapper + filter bar + empty state + server-rendered
   event-row ``<template>`` + the Alpine 1000-row cap); the fragment
   route is the filter-submit target that re-renders the feed with the
   active server-side filters baked into a fresh ``sse-connect`` URL.

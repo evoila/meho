@@ -311,7 +311,10 @@ def test_fragment_single_filter_embedded_in_sse_url() -> None:
         client = _authenticated_client(session_id)
         response = client.get("/ui/broadcast/feed", params={"target": "example-vcenter"})
     body = response.text
-    assert f'sse-connect="/ui/broadcast/stream?target=example-vcenter&amp;meho_tenant={_TENANT_A}"' in body
+    assert (
+        f'sse-connect="/ui/broadcast/stream?target=example-vcenter&amp;meho_tenant={_TENANT_A}"'
+        in body
+    )
 
 
 def test_fragment_combined_filters_all_embedded_in_sse_url() -> None:

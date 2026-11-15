@@ -5,9 +5,8 @@
 
 Initiative #338 (G10.1 Activity broadcast UI), Task #869 (G10.1-T3)
 work item #6. The broadcast view's "Last 24h" tab ``hx-get``s this
-fragment; it renders the historical events the operator can scroll
-back through, with each row opening the same T2 event-detail drawer on
-a click.
+fragment; it renders the stored announcements the operator can scroll
+back through.
 
 What it reads (#3758)
 =====================
@@ -25,8 +24,8 @@ are not on Broadcast, so the pane has no operation or kind filter
 (#3762); ``query_audit`` and the audit console are the record of
 operations.
 
-Why reuse the live feed's row + drawer
-======================================
+Why reuse the live feed's row
+==============================
 
 The history rows render through the same ``broadcast/_event_row.html``
 partial and ``broadcastFeed`` Alpine controller the live feed uses,

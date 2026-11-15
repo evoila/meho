@@ -255,6 +255,46 @@ The guard has two parts:
 the `auth_model == "shared_service_account"` boundary — and does not itself
 reject the system caller; the loader and the cache guards do.)
 
+### A connector says an answer means "the session ended"
+
+The dispatcher signs in again once for a known session-ended status (401,
+vRLI's 440, or a profile's `expiry_statuses`). Some products answer an ended
+session with another status, for example 403 with a body of their own. Treating
+every 403 that way would be wrong: a real 403 means missing rights, and more
+sign-in tries can lock an account.
+
+So a connector may have an optional method
+`is_session_expired(response: httpx.Response) -> bool`. The dispatcher asks it
+when a status is outside the known set and the connector has
+`invalidate_session`. The connector reads the status and the body. The default
+is "no": a connector without the method, a method that raises, and any answer
+other than `True` all count as "no", and the status is handled as before (a
+real 403 stays "insufficient permission").
+
+When the answer is yes, the dispatcher does what it does for a 401: it calls
+`invalidate_session`, lets the connector sign in again, and repeats the call
+once (`dispatcher._retry_after_expired_session_answer`). Rules:
+
+- At most one fresh sign-in per call. It is never a loop, and the repeated
+  call is not asked again.
+- If the fresh sign-in is refused, or the repeated call gets the same answer,
+  the caller gets `connector_auth_failed` with the text "the product refused
+  the sign-in: the password is wrong or the account is locked". It never says
+  to grant a permission. A connector's own `remediation` on its
+  `ConnectorAuthError` wins.
+- Any other answer to the repeated call is classified as it would be alone.
+- The audit row of the call has `session_relogin: true` and
+  `session_relogin_status` (the rejected status) in its payload, and the
+  trace has one `typed` span named `session_relogin`. Both are written whether
+  the repeated call works or not.
+- Say yes only when the product rejected the call before it ran. The repeat
+  can run a write twice if the product ran it and then ended the session.
+
+The code is in `operations/_session_expired_hook.py` (the hook check, the
+audit and trace mark, the error text) and the dispatcher function above.
+The connector kit needs no new name: the method is found by name, like
+`invalidate_session`.
+
 ### Cache eviction — establish-auth failures (#2396)
 
 The credential caches above are populated on the **first** load and are

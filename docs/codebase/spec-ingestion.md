@@ -484,7 +484,7 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None`. The shared schemas it uses are bundled under `components.schemas`, like in `parameter_schema` |
-| `op_class` | `op_class` | `None` from the parser; set only by a connector floor (see "A floor sees the answer and sets the op class") |
+| `op_class` | `op_class` | `None` from the parser; set only by a connector floor, to `credential_read` or `write` (see "A floor sees the answer and sets the op class") |
 | `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay`, then the op class floor (a `credential_read` is at least `caution`), then the caller-address floor (an op with a parameter marked `x-meho-caller-address: true` is at least `caution`) |
 | `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, a `credential_read` op class, or a parameter marked `x-meho-caller-address: true` |
 | `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
@@ -543,6 +543,8 @@ uses, under `components.schemas`, the same way `parameter_schema` does. A
 `$ref` to a shared schema that the file does not define is left as it is
 and does not fail the ingest, because nothing validates an answer schema at
 dispatch. The shared schemas that the file does define are still bundled.
+So a floor must treat a `$ref` it cannot find as unknown: the field behind
+it may hold a secret.
 
 Example: an API has `GET /clients`. Its answer is a list of
 `#/components/schemas/Client`, and `Client` has a `password` field. The
@@ -550,29 +552,54 @@ floor reads `proto.response_schema["components"]["schemas"]["Client"]`,
 finds the field, and returns a copy of the operation with
 `op_class="credential_read"`.
 
-- **Allowed values.** The ones in `DECLARABLE_OP_CLASSES`
-  (`op_classes.py`). Any other value stops the ingest with
-  `InvalidOpClassError`, which names the operation.
+- **Allowed values: `credential_read` and `write` only**
+  (`FLOOR_OP_CLASSES` in `ingest/safety_floors.py`). MEHO has a rule for
+  each of these two on every call. Any other value, also `credential_mint`
+  and `credential_write`, stops the ingest with `InvalidOpClassError`. The
+  message names the operation and the two allowed values, and nothing is
+  stored. `credential_mint` and `credential_write` come in a later Task,
+  when every place below that still reads the op id reads the stored class
+  too.
 - **Stored on the row.** `EndpointDescriptor.op_class` (nullable). A
   re-ingest stores the class when the floor gives one. When the floor gives
   none, the class of an earlier ingest stays: a floor never weakens a row.
-  A row with a class also keeps its stored risk level and approval flag
-  when they are stricter: a re-ingest only raises them.
-- **Used on every call.** The credential read floor (at ingest and at
-  lookup), the secret-read handling in the dispatcher, the audit row, the
-  approval request and the preview use the stored class first. A stored
-  class never replaces a credential or audit class that the op id already
-  gives (`resolve_op_class`). So it also holds in a process that has no
-  floor and no op class list. A standing grant never clears an operation
-  with a stored `credential_read`: grant create refuses it, and an
-  existing grant row does not run it.
+  A stored `credential_read` is never replaced by another class: a floor
+  that later gives `write` leaves it in place. A floor may still raise a
+  row from no class, or from `write`, to `credential_read`. A row with a
+  class also keeps its stored risk level and approval flag when they are
+  stricter: a re-ingest only raises them.
+- **Places that use the stored class.** A stored class never replaces a
+  credential or audit class that the op id already gives
+  (`resolve_op_class`). So it also holds in a process that has no floor
+  and no op class list.
+  - The credential read floor, at ingest and at lookup (`op_policy.py`):
+    a stored `credential_read` is at least `caution` and waits for a
+    person.
+  - The dispatcher's secret read flag (`dispatcher.py`). It is read from
+    the row that runs, after any switch to a sibling catalog, so the
+    audit row, the policy and the flag use the same row.
+  - The audit row of a call (`descriptor_op_class` in `_audit.py`) and the
+    audit row written when a call waits for approval (`approval_queue.py`).
+  - The approval request: the class in `proposed_effect`, and the preview,
+    which hides the parameters for a secret class (`_preview.py`).
+  - Standing grants (`service_grants.py`): grant create refuses an op with
+    a stored `credential_read`, and an existing grant row does not run it.
+    The shadow policy marks use the same check (`policy/shadow.py`).
+  - The call trace (`flight_recorder/capture.py` and `typed.py`, through
+    `classify_body_exclusion`): no request body and no answer body is
+    recorded.
+- **Places that still read the op id only.** The subject and outcome of
+  the approval card, the policy file check, the console drawers, the outer
+  MCP row, and the result reducer. A later Task makes them read the stored
+  class before a connector floor sets a class.
 - **Not a global list.** The class is not added to `op_classes.py`.
   Ingested op ids such as `GET:/clients` are not unique across connectors.
 - **A two-argument floor** (version, operation) works as before.
 
 The bundle makes stored answer schemas bigger, because each operation
 stores the shared schemas it uses. The size is in the pull request that
-added it (#6485). Tests: `tests/test_ingest_floor_answer_schema_op_class.py`.
+added it (#6485). Tests: `tests/test_ingest_floor_answer_schema_op_class.py`
+and `tests/test_ingest_floor_op_class_calls.py`.
 
 #### Connector spec corrections
 

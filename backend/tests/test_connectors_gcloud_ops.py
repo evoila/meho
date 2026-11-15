@@ -18,10 +18,11 @@ Covers:
   required service_account_email; no key material in the row schema.
 - ``register_gcloud_typed_operations`` — idempotent; AttributeError on
   missing handler; raises on unknown group_key.
-- GCLOUD_OPS has 18 entries; all ops are safe + non-approving except the
+- GCLOUD_OPS has 23 entries; all ops are safe + non-approving except the
   workload identity changes (pool create and delete, provider create and key
   update) and the service-account binding add and removal,
-  which wait for approval (handlers tested in
+  which wait for approval, as do the bucket changes and the service account create
+  (handlers tested in
   ``test_connectors_gcloud_workload_identity.py`` and
   ``test_connectors_gcloud_workload_identity_write.py``).
 
@@ -131,8 +132,8 @@ def _make_connector(token: str = "test-bearer-token") -> GcloudConnector:
 # ---------------------------------------------------------------------------
 
 
-def test_gcloud_ops_has_eighteen_entries() -> None:
-    assert len(GCLOUD_OPS) == 18
+def test_gcloud_ops_has_twenty_three_entries() -> None:
+    assert len(GCLOUD_OPS) == 23
 
 
 def test_gcloud_ops_op_ids_are_unique() -> None:
@@ -146,8 +147,14 @@ _APPROVAL_OPS = {
     "gcloud.iam.workload_identity_pools.providers.create",
     "gcloud.iam.workload_identity_pools.providers.update_keys",
     "gcloud.iam.service_accounts.binding.add",
+    "gcloud.storage.buckets.access.add",
 }
-_CAUTION_OPS = {"gcloud.iam.workload_identity_pools.create"}
+_CAUTION_OPS = {
+    "gcloud.iam.workload_identity_pools.create",
+    "gcloud.storage.buckets.create",
+    "gcloud.storage.buckets.update_settings",
+    "gcloud.iam.service_accounts.create",
+}
 
 
 def test_gcloud_ops_are_safe_except_the_approval_writes() -> None:
@@ -190,6 +197,11 @@ def test_all_gcloud_ops_have_expected_op_ids() -> None:
         "gcloud.iam.workload_identity_pools.providers.create",
         "gcloud.iam.workload_identity_pools.providers.update_keys",
         "gcloud.iam.service_accounts.binding.add",
+        "gcloud.storage.buckets.create",
+        "gcloud.storage.buckets.update_settings",
+        "gcloud.storage.buckets.read",
+        "gcloud.storage.buckets.access.add",
+        "gcloud.iam.service_accounts.create",
     }
     actual = {op.op_id for op in GCLOUD_OPS}
     assert actual == expected
@@ -1071,8 +1083,8 @@ async def test_register_gcloud_typed_operations_idempotent() -> None:
     ):
         await GcloudConnector.register_gcloud_typed_operations()
         await GcloudConnector.register_gcloud_typed_operations()
-    # 18 ops x 2 calls = 36 total register invocations
-    assert mock_register.call_count == 36
+    # 23 ops x 2 calls = 46 total register invocations
+    assert mock_register.call_count == 46
 
 
 @pytest.mark.asyncio
@@ -1098,7 +1110,7 @@ async def test_register_gcloud_typed_operations_accepts_embedding_service_kwarg(
     ):
         # Mirrors run_typed_op_registrars: the kwarg is always supplied.
         await GcloudConnector.register_gcloud_typed_operations(embedding_service=None)
-    assert mock_register.call_count == 18
+    assert mock_register.call_count == 23
 
 
 @pytest.mark.asyncio

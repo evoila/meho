@@ -81,7 +81,7 @@
         hx-include="[name='work_ref']"
         hx-push-url="/ui/approvals?tab={{ tab }}{% if work_ref %}&work_ref={{ work_ref | urlencode }}{% endif %}"
       >
-        {{ "Outcome unknown" if tab == "outcome_unknown" else tab | capitalize }}
+        {{ {"outcome_unknown": "Outcome unknown", "for_you": "For you"}.get(tab, tab | capitalize) }}
       </button>
     {% endfor %}
   </div>

@@ -1586,13 +1586,17 @@ class Settings(BaseModel):
         evaluator does not run. Env ``POLICY_ENGINE_SHADOW``; Helm
         ``config.policy.engineShadow``.
     policy_approver_routing:
-        Off by default. When on, the ``bindings`` of the tenant's policy
-        file decide which login group is which team: a group, matched by
-        its full path or its group attribute, gets one of the five group
-        kinds and a set of categories
-        (:mod:`meho_backplane.policy.bindings`). When off, MEHO reads no
-        binding and the login works as today. Env
-        ``POLICY_APPROVER_ROUTING``; Helm ``config.policy.approverRouting``.
+        Off by default. When on, a request that starts to wait stores the
+        login group kinds that may approve it, from the ``routing``
+        section of the policy file (:mod:`meho_backplane.policy.routing`).
+        At the click MEHO checks the person against them, next to today's
+        checks. Also, the ``bindings`` of the tenant's policy file decide
+        which login group is which team: a group, matched by its full path
+        or its group attribute, gets one of the five group kinds and a set
+        of categories (:mod:`meho_backplane.policy.bindings`). When off,
+        nothing is stored or checked, MEHO reads no binding, and today's
+        rule decides who may approve. Env ``POLICY_APPROVER_ROUTING``; Helm
+        ``config.policy.approverRouting``.
     """
 
     keycloak_issuer_url: HttpUrl

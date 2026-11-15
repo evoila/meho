@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
-from meho_backplane.db.models import Target, Tenant
+from meho_backplane.db.models import Tenant
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
 
 pytestmark = pytest.mark.skipif(not DOCKER_AVAILABLE, reason=SKIP_REASON)
@@ -117,15 +117,17 @@ def _insert_target(url: str, tenant_id: str, name: str) -> str:
         engine = create_async_engine(url)
         try:
             async with engine.begin() as conn:
+                # Raw SQL, not the ORM: the schema here may be older than the
+                # model, so a column added later (``connection_changed_at``)
+                # must not be in the statement.
                 await conn.execute(
-                    insert(Target).values(
-                        id=uuid.UUID(target_id),
-                        tenant_id=uuid.UUID(tenant_id),
-                        name=name,
-                        aliases=[],
-                        product="kubernetes",
-                        host="k8s.example.test",
-                    )
+                    text(
+                        "INSERT INTO targets (id, tenant_id, name, aliases, product, host,"
+                        " auth_model, vpn_required, verify_tls, extras, created_at, updated_at)"
+                        " VALUES (:id, :tenant_id, :name, ARRAY[]::text[], 'kubernetes',"
+                        " 'k8s.example.test', 'shared_service_account', false, true, '{}'::jsonb, now(), now())"
+                    ),
+                    {"id": uuid.UUID(target_id), "tenant_id": uuid.UUID(tenant_id), "name": name},
                 )
         finally:
             await engine.dispose()

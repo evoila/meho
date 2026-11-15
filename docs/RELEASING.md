@@ -152,28 +152,33 @@ How users get the new version is in the
   workflow (`image.yml` / `cli-release.yml` / `chart.yml`) fires on the
   `v*` tag with **no** other gate, so the tag publishes whatever `main`
   is at — a red `main` ships a broken or incomplete image, chart, and
-  CLI. Confirm the **tagged commit's** `main` CI run is green before
-  step 4:
+  CLI. A push to `main` starts no CI run. The proof of green for the
+  tagged commit is the **merge-queue run** of that merge commit. Confirm
+  it before step 4, and also look at the latest nightly run on `main`:
 
   ```bash
-  gh run list --repo evoila/meho --branch main --limit 5 \
-    --json headSha,conclusion,status,name,url
+  gh run list --repo evoila/meho --commit <merge-commit-sha> \
+    --event merge_group --json headSha,conclusion,status,name,url
+  gh run list --repo evoila/meho --workflow ci.yml --event schedule \
+    --branch main --limit 3 --json headSha,conclusion,status,url
   ```
+
+  An empty list is not green. A commit that was merged outside the
+  merge queue (see "Merging an advisory fix" below) has no merge-queue
+  run. For such a commit, the proof is the first green nightly CI run
+  on `main` that contains the commit. Do not tag before that run is
+  green.
 
 - [ ] **"cancelled" ≠ "green".** A cancelled CI run is *inconclusive*,
-  not a pass. Merge-storm concurrency cancellation (a later push
-  cancels an in-flight run on the same ref) is the common cause, and a
-  cancelled run reads green-ish in a glance — it is not. (A hung
+  not a pass, even though it reads green-ish in a glance. (A hung
   `python-coverage` job is *no longer* a cause: since #2800 a pytest
   hang trips the step-level timeout and degrades to an absorbed job
-  failure with run conclusion `success`, so a `cancelled` main run
-  means a genuine cancel.) If the latest
-  `main` run for the tagged commit is `cancelled`, **re-run it and wait
-  for a real `success`** before tagging:
-
-  ```bash
-  gh run rerun <run-id> --repo evoila/meho   # then re-check conclusion
-  ```
+  failure with run conclusion `success`, so a `cancelled` run
+  means a genuine cancel.) Do not re-run a cancelled merge-queue run:
+  after the merge the queue branch is gone, and the watchdog job
+  cancels the re-run. When the merge-queue run of the tagged commit is
+  `cancelled` or missing, the proof is the next green nightly run on
+  `main` that contains the commit. Wait for it before tagging.
 
 - [ ] **Security-advisory reconciliation (every rc and GA tag).** Every
   `### Security` entry in `CHANGELOG.md` must have a row in the advisory
@@ -202,7 +207,10 @@ How users get the new version is in the
   The steps are in decision record 0010
   (`docs/decisions/0010-who-approves-pull-requests.md` in the private
   maintainer repo). Every other pull
-  request keeps the normal path.
+  request keeps the normal path. Such a merge gets no merge-queue run,
+  and a push to `main` starts no CI run. So after the merge, wait for
+  the next green nightly CI run on `main` that contains the fix before
+  you push the release tag.
 
 - [ ] **The appliance's CIS exception list is approved (every release
   that ships the appliance OVA).** `deploy/appliance/cis/exceptions.md`
@@ -837,7 +845,7 @@ git fetch origin main
 RC_SHA=$(git rev-parse origin/main)   # the candidate; do not recompute it later
 RC_PREV=$(git describe --tags --abbrev=0 "$RC_SHA")   # previous tag of any kind, relative to the candidate (not to your checkout)
 git log -1 --format='%H %s' "$RC_SHA"
-gh run list --repo evoila/meho --commit "$RC_SHA" --branch main   # the CI run you are verifying
+gh run list --repo evoila/meho --commit "$RC_SHA" --event merge_group   # the CI run you are verifying
 ```
 
 If `main` moves while you work through R3, you have two honest
@@ -847,7 +855,7 @@ checks below — that is the moving-branch race the final-release
 procedure avoids by selecting its merge commit explicitly.
 
 Run step 1 as written (Tasks closed; **real** `success` on the
-`$RC_SHA` `main` CI run; cancelled ≠ green). Then:
+merge-queue run of `$RC_SHA` (`--event merge_group`), plus the nightly run; cancelled ≠ green). Then:
 
 - [ ] **Contract gates green on the candidate commit.** Gate 4 of
   #2661 — "contract snapshots + compat gates green across the rc
@@ -1121,8 +1129,9 @@ are left. Each is a follow-up task.
 ## Checklist
 
 ```
-[ ] 1. Tasks merged; main CI GREEN on the tagged commit (cancelled ≠ green —
-       re-run + wait for success); version picked
+[ ] 1. Tasks merged; merge-queue CI GREEN on the tagged commit, nightly green (cancelled ≠ green —
+       do not re-run a queue run, wait for the next green nightly run on `main`
+       that contains the commit); version picked
 [ ] 1a. Advisory ledger reconciled: `### Security` headings == ledger rows;
         GHSA count recorded; at a GA tag zero "Owed — decision pending"
         rows (docs/security/advisory-ledger.md; SECURITY.md disclosure steps)
@@ -1197,8 +1206,9 @@ are left. Each is a follow-up task.
   made a red `main` read as "cancelled" rather than "failed", and a
   cancelled run was treated as good enough to tag. A cancelled run is
   inconclusive, not a pass. Step 1 now makes both gates explicit:
-  confirm the tagged commit's `main` run is a real `success`, and
-  re-run any `cancelled` run before trusting it.
+  confirm the tagged commit's merge-queue run is a real `success`. For a
+  `cancelled` or missing run, wait for the next green nightly run on `main`
+  that contains the commit. Do not re-run the queue run.
 
 ## v0.7 follow-ups (deprecation removals)
 

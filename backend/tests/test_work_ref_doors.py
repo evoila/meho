@@ -3,8 +3,9 @@
 
 """A new door for a ticket id (work ref) cannot be added without the shared rule.
 
-The test walks every REST request model field, every REST query, path and
-header parameter, and every MCP tool argument named ``work_ref``. It fails
+The test walks every REST and console request model field, every query,
+path, header and form parameter, and every MCP tool argument named
+``work_ref``. It fails
 when one of them neither uses the shared type or function nor is on a short
 list with a reason. The search filters get a request test of their own: a bad
 filter value is refused with the rule and without the refused text.
@@ -56,6 +57,9 @@ _SHARED_VALIDATORS = (normalize_work_ref_input, check_work_ref_filter_input)
 
 # ---------------------------------------------------------------- REST doors
 
+_CONSOLE_FORM = "console form: the handler cleans it with form_work_ref (the shared rule)"
+_CONSOLE_SEARCH = "console search box: matched with work_ref_filter_values like the REST filter"
+
 #: Parameters that read a ticket id without the shared type. Each has a
 #: reason, and the test fails when an entry no longer matches a route.
 _REST_OTHER_DOORS: dict[tuple[str, str], str] = {
@@ -66,6 +70,28 @@ _REST_OTHER_DOORS: dict[tuple[str, str], str] = {
     ("/api/v1/agents/{name}/run/events", "meho_work_ref"): (
         "header: the audit middleware refuses a bad value first, and "
         "_header_work_ref decodes it with decode_work_ref_header"
+    ),
+    # Console forms that store a ticket id: the handler cleans the field with
+    # form_work_ref (meho_backplane.ui.routes.work_ref_form), which uses the
+    # shared rule. A blank field means "no ticket", so the type stays str.
+    ("/ui/agents/{name}/run", "work_ref"): _CONSOLE_FORM,
+    ("/ui/operations/call", "work_ref"): _CONSOLE_FORM,
+    ("/ui/runbooks/runs", "work_ref"): _CONSOLE_FORM,
+    ("/ui/scheduler/create", "work_ref"): _CONSOLE_FORM,
+    # Console search boxes: the value goes to the same search as the REST
+    # filter (work_ref_filter_values), which finds the cleaned id and the
+    # exact stored text. A bad value finds nothing; the page shows an empty
+    # list instead of a 422.
+    ("/ui/agents/runs", "work_ref"): _CONSOLE_SEARCH,
+    ("/ui/approvals", "work_ref"): _CONSOLE_SEARCH,
+    ("/ui/approvals/list", "work_ref"): _CONSOLE_SEARCH,
+    ("/ui/audit", "work_ref"): _CONSOLE_SEARCH,
+    ("/ui/audit/results", "work_ref"): _CONSOLE_SEARCH,
+    ("/ui/scheduler", "work_ref"): _CONSOLE_SEARCH,
+    ("/ui/approvals/in-order", "work_ref"): (
+        "console: reads the pending requests of one ticket with the approvals "
+        "search (work_ref_filter_values); it stores no ticket id, and each step "
+        "keeps the id stored on its own request"
     ),
 }
 
@@ -95,6 +121,28 @@ def _models_in(annotation: Any) -> Iterator[type[BaseModel]]:
         yield annotation
     for arg in typing.get_args(annotation):
         yield from _models_in(arg)
+
+
+def _flat_routes(routes: list[Any]) -> Iterator[Any]:
+    """Yield every route, also those of an included router.
+
+    FastAPI keeps an included router as one entry that holds the router
+    (``original_router``), not as a copy of its routes.
+    """
+    for route in routes:
+        included = getattr(route, "original_router", None)
+        if isinstance(included, APIRouter):
+            yield from _flat_routes(included.routes)
+        else:
+            yield route
+
+
+def _console_routers() -> list[APIRouter]:
+    """The console routers. They are built by a function, not kept in a module."""
+    from meho_backplane.ui.auth import build_router as build_ui_auth_router
+    from meho_backplane.ui.routes import build_router as build_ui_router
+
+    return [build_ui_auth_router(), build_ui_router()]
 
 
 def _api_routers() -> list[APIRouter]:
@@ -164,8 +212,11 @@ def _route_doors(
 
 
 def _rest_doors() -> tuple[list[tuple[str, str, bool]], list[tuple[str, bool]]]:
-    """Return the ``work_ref`` parameters and model fields of every REST route."""
-    return _route_doors([route for router in _api_routers() for route in router.routes])
+    """Return the ``work_ref`` parameters and model fields of every REST and console route."""
+    routers = _api_routers() + _console_routers()
+    return _route_doors(
+        list(_flat_routes([route for router in routers for route in router.routes]))
+    )
 
 
 def test_every_rest_work_ref_parameter_uses_the_shared_type() -> None:
@@ -358,6 +409,18 @@ def test_a_bad_rest_filter_is_refused_with_the_rule(
     assert "hidden" not in response.text
 
 
+def test_the_openapi_file_shows_the_limit_of_each_filter() -> None:
+    schema = _filter_app().app.openapi()  # type: ignore[attr-defined]
+    for path, name in _REST_FILTERS:
+        (param,) = [p for p in schema["paths"][path]["get"]["parameters"] if p["name"] == name]
+        (string,) = [s for s in param["schema"]["anyOf"] if s.get("type") == "string"]
+        assert string["maxLength"] == 256, path
+    for model in ("AuditQueryRequest", "AuditClassCountsRequest"):
+        field = schema["components"]["schemas"][model]["properties"]["work_ref"]
+        (string,) = [s for s in field["anyOf"] if s.get("type") == "string"]
+        assert string["maxLength"] == 256, model
+
+
 @pytest.mark.parametrize(("label", "raw", "words"), _BAD_FILTERS)
 def test_a_bad_audit_path_filter_is_refused_with_the_rule(label: str, raw: str, words: str) -> None:
     response = _filter_app().get(f"/api/v1/audit/by-work-ref/{raw}")
@@ -431,6 +494,66 @@ def test_the_mcp_filter_error_names_the_argument_and_not_the_value() -> None:
     assert message.startswith("filter.work_ref must not contain")
     assert "U+200B" in message
     assert "hidden" not in message
+
+
+def _admin_operator() -> Operator:
+    return Operator(
+        sub="op-mcp",
+        name="Mcp Caller",
+        email=None,
+        raw_jwt="<test-jwt>",
+        tenant_id=uuid.uuid4(),
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+
+
+def _model_doors() -> list[tuple[str, Callable[..., Any], dict[str, Any]]]:
+    """The MCP tools that read ``work_ref`` through a pydantic model."""
+    from meho_backplane.mcp.tools import runbook_runs as runbook_tools
+    from meho_backplane.mcp.tools import scheduler as scheduler_tools
+
+    return [
+        ("meho_runbook_list_runs", runbook_tools._list_runs_handler, {}),
+        (
+            "meho_runbook_start",
+            runbook_tools._start_handler,
+            {"template_slug": "tpl", "target": "t1"},
+        ),
+        (
+            "meho_scheduler_create",
+            scheduler_tools._create_handler,
+            {"name": "n", "kind": "cron", "cron_expr": "0 * * * *", "agent_name": "a"},
+        ),
+    ]
+
+
+@pytest.mark.parametrize(("tool", "handler", "arguments"), _model_doors())
+@pytest.mark.parametrize(
+    "bad", ["CHG-hidden" + _ZWSP + "7", "CHG-hidden\x007", "hidden" + "a" * 260]
+)
+async def test_an_mcp_model_error_does_not_show_the_refused_ticket_id(
+    tool: str, handler: Callable[..., Any], arguments: dict[str, Any], bad: str
+) -> None:
+    with pytest.raises(McpInvalidParamsError) as caught:
+        await handler(_admin_operator(), {**arguments, "work_ref": bad})
+    message = str(caught.value)
+    assert "work_ref" in message, (tool, message)
+    assert "hidden" not in message, (tool, message)
+    assert "input_value" not in message, (tool, message)
+
+
+def test_the_mcp_model_error_text_names_the_field_and_the_rule() -> None:
+    from pydantic import ValidationError
+
+    from meho_backplane.mcp.tools._work_ref_argument import validation_error_text
+    from meho_backplane.runbooks.runs_schemas import ListRunsFilter
+
+    with pytest.raises(ValidationError) as caught:
+        ListRunsFilter.model_validate({"work_ref": "CHG-hidden" + _ZWSP})
+    text = validation_error_text(caught.value)
+    assert text.startswith("1 validation error(s): work_ref: ")
+    assert "control or invisible characters (found U+200B)" in text
+    assert "hidden" not in text
 
 
 def test_the_broadcast_history_filter_is_checked_or_refused() -> None:

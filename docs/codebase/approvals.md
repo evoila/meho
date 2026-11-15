@@ -2658,8 +2658,11 @@ way (#1452): `argocd.app.set` / `argocd.appproject.update` populate
 `{cascade_resources}` from read-only GETs against the live
 Application / AppProject — wired in
 `connectors/argocd/ops_write_preview.py`. The `secret.move` broker op
-populates a ref-only `{action, source, sink}` summary with no store I/O
-(#1580, `connectors/secret/move_preview.py`). The 8 vmware write
+populates a ref-only `{action, source, sink, merge}` summary with no store
+I/O (#1580, `connectors/secret/move_preview.py`). `source` and `sink` are
+`{kind, ref}`; a `vault-target` side also has `target`, the name of the
+Vault target whose role does that read or write. `merge` is `true` when
+the sink keeps the other fields of the secret. The 8 vmware write
 composites register builders in
 `connectors/vmware_rest/composites/_write_preview.py` (#1608): the
 fan-out composites (`vm.power.bulk`, `host.evacuate`,

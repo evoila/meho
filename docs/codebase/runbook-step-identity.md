@@ -37,6 +37,24 @@ is no stand-in identity.
   that moment, it shows the refusal as an inline alert.
 - A `confirm` check runs no operation, so it needs no `caller`.
 
+## The token rule holds on every path
+
+The check call always follows the token rule of
+[approvals.md](approvals.md), also when the run is advanced from the web
+console. `_resolve_verify_response` calls the operation with
+`caller.model_copy(update={"web_session": False})`. It keeps the caller's
+kind, client id, roles, session id and token. So:
+
+- for a person, only a `safe` check runs at once. A `caution` or higher
+  check waits for approval, and the step fails with `awaiting_approval`;
+- an agent and a service login follow their own rules (grants, read
+  scope, standing grants), as on a direct call;
+- a `credential_read` check never runs at once, for any caller.
+
+To run such an operation, the person calls it directly and approves it,
+or an approver approves the waiting request. Then the assignee retries
+the step.
+
 ## When the check call does not return `ok`
 
 When the call is refused (`denied`), fails (`error`), or waits for

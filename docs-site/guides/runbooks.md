@@ -146,8 +146,13 @@ meho runbook next 7c2a…
 `confirm` verify asks you to confirm; an `operation_call` verify
 dispatches its op and checks the result against `expect`. The op runs as
 you, the caller who advances the run: your grants, read scope and role
-apply, the same as when you call the op directly. If MEHO refuses the
-call, the step fails and the message says why. The run only
+apply, the same as when you call the op directly. The check follows the
+token rule on every path, also when you advance the run from the web
+console: for a person, only a `safe` check runs at once, and a `caution`
+or higher check waits for approval. See the
+[developer notes on step identity](https://github.com/evoila/meho/blob/main/docs/codebase/runbook-step-identity.md).
+If MEHO refuses the call, or the call waits for approval, the step fails
+and the message says why. The run only
 advances when verify passes. A failing verify marks the step `failed`.
 To try a failed step again, fix the cause and run
 `meho runbook next --retry` (over MCP: `"retry": true`). The step's

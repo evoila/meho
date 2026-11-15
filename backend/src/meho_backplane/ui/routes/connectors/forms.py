@@ -99,6 +99,7 @@ from meho_backplane.ui.routes.connectors.forms_realm import (
     is_keycloak,
     realm_extras,
     realm_field_error,
+    saved_with_warnings,
 )
 from meho_backplane.ui.templating import get_templates
 
@@ -380,15 +381,14 @@ async def submit_create(
             values=raw_values,
         )
 
-    await create_target(body=body, operator=operator, session=db_session)
+    created = await create_target(body=body, operator=operator, session=db_session)
     _log.info(
         "ui_target_create",
         tenant_id=str(session_ctx.tenant_id),
         operator_sub=session_ctx.operator_sub,
         name=body.name,
     )
-    del request  # HX-Redirect needs no request context.
-    return _redirect_to_list()
+    return saved_with_warnings(request, body.name, created.warnings) or _redirect_to_list()
 
 
 async def submit_edit(
@@ -468,7 +468,7 @@ async def submit_edit(
             values=raw_values,
         )
 
-    await update_target(
+    updated = await update_target(
         name=target_name,
         body=body,
         operator=operator,
@@ -480,8 +480,7 @@ async def submit_edit(
         operator_sub=session_ctx.operator_sub,
         name=target_name,
     )
-    del request
-    return _redirect_to_list()
+    return saved_with_warnings(request, target_name, updated.warnings) or _redirect_to_list()
 
 
 def _coerce_port(raw: str | None) -> int | None:

@@ -8,16 +8,24 @@ A Keycloak target must name the realm MEHO manages
 edit form both carry the field, so an older target without a realm can be
 fixed in the console too. The value is checked as it is typed: it is never
 trimmed. Other products ignore the field.
+
+When the saved realm is the admin realm or MEHO's own sign-in realm, the
+form does not go straight back to the list: it shows the same warning
+lines REST, the CLI and the approval card show (:func:`saved_with_warnings`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-from meho_backplane.targets.required_extras import KEYCLOAK_PRODUCT, keycloak_realm_problem
+from fastapi import Request
+from fastapi.responses import HTMLResponse
 
-__all__ = ["is_keycloak", "realm_extras", "realm_field_error"]
+from meho_backplane.targets.required_extras import KEYCLOAK_PRODUCT, keycloak_realm_problem
+from meho_backplane.ui.templating import get_templates
+
+__all__ = ["is_keycloak", "realm_extras", "realm_field_error", "saved_with_warnings"]
 
 _MISSING = "A Keycloak target must name the realm MEHO manages."
 
@@ -42,3 +50,20 @@ def realm_extras(current: Mapping[str, Any] | None, managed_realm: str) -> dict[
     extras = dict(current) if isinstance(current, Mapping) else {}
     extras["managed_realm"] = managed_realm
     return extras
+
+
+def saved_with_warnings(
+    request: Request, target_name: str, warnings: Sequence[str]
+) -> HTMLResponse | None:
+    """The "saved, with a warning" modal; ``None`` when there is no warning.
+
+    The target is already saved. The modal swaps into the same container
+    as the form and links back to the targets list.
+    """
+    if not warnings:
+        return None
+    return get_templates().TemplateResponse(
+        request,
+        "connectors/_saved_warning_modal.html",
+        {"target_name": target_name, "warnings": list(warnings)},
+    )

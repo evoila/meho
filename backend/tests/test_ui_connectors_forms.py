@@ -576,6 +576,19 @@ def test_create_submit_keycloak_with_a_realm_persists_it() -> None:
     assert row.extras == {"managed_realm": "example"}
 
 
+def test_create_submit_keycloak_with_the_admin_realm_shows_the_warning() -> None:
+    """The target is saved, and the form shows the warning instead of the list."""
+    response = _post_keycloak_create("kc-admin", "master")
+    assert response.status_code == 200, response.text
+    assert "HX-Redirect" not in response.headers
+    assert 'id="connectors-saved-warning-modal"' in response.text
+    assert "admin realm of this Keycloak" in response.text
+    assert 'href="/ui/connectors"' in response.text
+    row = _load_target(_TENANT_A, "kc-admin")
+    assert row is not None
+    assert row.extras == {"managed_realm": "master"}
+
+
 @pytest.mark.parametrize("managed_realm", [" example ", "a/b", "..", "name?x=", "name#"])
 def test_create_submit_keycloak_with_a_realm_that_is_not_plain_shows_a_field_error(
     managed_realm: str,
@@ -643,6 +656,25 @@ def test_edit_submit_fixes_an_old_keycloak_target_without_a_realm() -> None:
     row = _load_target(_TENANT_A, "kc-old")
     assert row is not None
     assert row.extras == {"admin_realm": "master", "managed_realm": "example"}
+
+
+def test_edit_submit_keycloak_with_the_meho_sign_in_realm_shows_the_warning() -> None:
+    """The edit is saved, and the form shows the warning instead of the list."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(
+        tenant_id=_TENANT_A,
+        name="kc-own",
+        product="keycloak",
+        extras={"managed_realm": "example"},
+    )
+    response = _patch_keycloak_edit("kc-own", "meho")
+    assert response.status_code == 200, response.text
+    assert "HX-Redirect" not in response.headers
+    assert 'id="connectors-saved-warning-modal"' in response.text
+    assert "realm MEHO itself signs in with" in response.text
+    row = _load_target(_TENANT_A, "kc-own")
+    assert row is not None
+    assert row.extras == {"managed_realm": "meho"}
 
 
 @pytest.mark.parametrize("managed_realm", [None, "", " example ", "a/../b"])

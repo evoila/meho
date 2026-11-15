@@ -279,8 +279,9 @@ when you leave it out.
   the start or the end, not only dots, and at most 255 characters. MEHO
   does not trim a value; it refuses it.
 - MEHO allows a managed realm that is the admin realm, or the realm MEHO
-  itself signs in with, but it warns you: at create, at update, and on
-  the approval card of each write on that target.
+  itself signs in with, but it warns you: at create, at update (REST,
+  CLI and the console forms), and on the approval card of each write on
+  that target.
 - `meho doctor` lists the Keycloak targets MEHO refuses. A platform
   admin sees the targets of every tenant. You can fix one with
   `meho targets update`, or in the console edit form ("Managed realm").

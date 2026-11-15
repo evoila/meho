@@ -14,6 +14,8 @@
   swapping ``#connectors-modal-container`` (``hx-swap="innerHTML"``).
     * Success -> the handler returns 204 + ``HX-Redirect: /ui/connectors``
       so HTMX reloads the list page with the new row.
+    * Success with a warning -> 200 + ``_saved_warning_modal.html``,
+      which shows the warning and links back to the list.
     * Validation failure -> the handler returns 422 + this same modal
       re-rendered with ``errors`` populated and the operator's typed
       values echoed back; HTMX replaces the container's dialog so the

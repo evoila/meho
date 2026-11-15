@@ -1339,6 +1339,9 @@ admin realm (`master` by default), or the realm MEHO itself signs in with
   stderr.
 - `targets.register` and `targets.update` add `warnings` to their answer,
   only when there is one.
+- The console create and edit forms show the lines after the save
+  (`_saved_warning_modal.html`, from `forms_realm.saved_with_warnings`)
+  instead of going straight back to the targets list.
 - The dispatcher stamps the lines as `target_warnings` on the approval
   card of every write on such a target; the console shows them as a
   "Check the target" box.

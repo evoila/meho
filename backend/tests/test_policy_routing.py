@@ -28,6 +28,7 @@ from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.features import CATEGORY_WITHOUT_CLASSIFICATION, build_features_block
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog, TenantPolicy
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
@@ -55,7 +56,7 @@ from meho_backplane.policy.routing import (
     today_kinds,
     who_can_approve,
 )
-from meho_backplane.policy.service import _routing_diff, export_policy
+from meho_backplane.policy.service import _routing_diff, build_plan, export_policy
 from meho_backplane.policy.validate import KnownOp, check_document
 from meho_backplane.settings import get_settings
 from tests.test_api_v1_approvals_fresh_sign_in import (
@@ -493,6 +494,53 @@ async def test_export_writes_the_routing_back() -> None:
     parsed = parse_policy_file(text.encode())
     assert parsed.model is not None
     assert document_of(parsed.model)["routing"] == _NETWORK_ONLY_SA["routing"]
+
+
+_CATEGORY_AND_RISK_FILE = (
+    "policy: v1\n"
+    "routing:\n"
+    "  - {match: {category: network}, approvers: [SA-Operators, Admins]}\n"
+    "  - {match: {risk: caution}, approvers: [Admins]}\n"
+)
+
+
+async def _import_warnings() -> list[str]:
+    async with get_sessionmaker()() as session:
+        plan = await build_plan(
+            session, scope="install", tenant_id=None, content=_CATEGORY_AND_RISK_FILE.encode()
+        )
+    assert plan.mistakes == []
+    return plan.warnings
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_routing_on")
+async def test_routing_on_and_classification_off_warns_on_a_category_entry() -> None:
+    assert await _import_warnings() == [
+        f"`routing[0]` matches on `category`: {CATEGORY_WITHOUT_CLASSIFICATION}"
+    ]
+    ready = build_features_block(get_settings())["policy"]
+    assert ready["approver_routing"] is True
+    assert ready["notes"] == [CATEGORY_WITHOUT_CLASSIFICATION]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("routing", "classification"),
+    [(True, True), (False, False)],
+    ids=["both-on", "routing-off"],
+)
+async def test_no_category_warning_unless_routing_on_and_classification_off(
+    monkeypatch: pytest.MonkeyPatch, routing: bool, classification: bool
+) -> None:
+    monkeypatch.setenv("POLICY_APPROVER_ROUTING", str(routing).lower())
+    monkeypatch.setenv("POLICY_CLASSIFICATION", str(classification).lower())
+    get_settings.cache_clear()
+
+    assert await _import_warnings() == []
+    ready = build_features_block(get_settings())["policy"]
+    assert ready["approver_routing"] is routing
+    assert ready["notes"] == []
 
 
 # ---------------------------------------------------------------------------

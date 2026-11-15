@@ -106,7 +106,7 @@ References
 
 from __future__ import annotations
 
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Final, Literal, NotRequired, TypedDict
 
 from cryptography.fernet import Fernet
 
@@ -114,6 +114,7 @@ from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import Settings
 
 __all__ = [
+    "CATEGORY_WITHOUT_CLASSIFICATION",
     "FEATURE_MATURITY",
     "Maturity",
     "MaturityInfo",
@@ -526,6 +527,16 @@ def _vault_tenant_scope_block(settings: Settings) -> dict[str, Any]:
     }
 
 
+#: The ``/ready`` policy note, and the import warning, when approver routing
+#: is on and the classification is off
+#: (:func:`meho_backplane.policy.routing.category_routing_warnings`).
+CATEGORY_WITHOUT_CLASSIFICATION: Final[str] = (
+    "POLICY_APPROVER_ROUTING is on and POLICY_CLASSIFICATION is off, so no change has "
+    "a category and a routing entry that matches on `category` fits nothing. Turn on "
+    "POLICY_CLASSIFICATION, or match on connector or risk."
+)
+
+
 def _policy_block(settings: Settings) -> dict[str, Any]:
     """The policy switches, so ``/ready`` shows which are on.
 
@@ -544,12 +555,22 @@ def _policy_block(settings: Settings) -> dict[str, Any]:
     waiting request stores who may approve it, from the policy file's
     ``routing`` section (:mod:`meho_backplane.policy.routing`). Off by
     default.
+
+    ``notes`` holds one sentence when ``approver_routing`` is on and
+    ``classification`` is off: then no change has a category, so a routing
+    entry that matches on ``category`` fits nothing. Empty otherwise.
     """
+    notes = (
+        [CATEGORY_WITHOUT_CLASSIFICATION]
+        if settings.policy_approver_routing and not settings.policy_classification
+        else []
+    )
     return {
         "configured": True,
         "classification": settings.policy_classification,
         "engine_shadow": settings.policy_engine_shadow,
         "approver_routing": settings.policy_approver_routing,
+        "notes": notes,
         "missing_env": [],
     }
 
@@ -608,7 +629,7 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
                              "short_tool_texts": <bool>, "missing_env": []},
           "policy":         {"configured": true, "classification": <bool>,
                              "engine_shadow": <bool>, "approver_routing": <bool>,
-                             "missing_env": []}
+                             "notes": [<text>], "missing_env": []}
         }
     """
     block: dict[str, dict[str, Any]] = {

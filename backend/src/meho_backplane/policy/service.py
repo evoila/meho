@@ -54,6 +54,7 @@ from meho_backplane.policy.document import (
     normalise_document,
     parse_policy_file,
 )
+from meho_backplane.policy.routing import category_routing_warnings
 from meho_backplane.policy.store import _lock_tenant_policy, _override_entries_for
 from meho_backplane.policy.validate import KnownOp, check_document, load_known_ops
 
@@ -335,6 +336,7 @@ async def build_plan(
         plan.mistakes = parsed.mistakes
         return plan
     document = document_of(parsed.model)
+    plan.warnings.extend(category_routing_warnings(document.get("routing") or []))
     install_document: dict[str, Any] | None = document
     other: list[ClassificationEntry] = []
     if scope == "tenant":

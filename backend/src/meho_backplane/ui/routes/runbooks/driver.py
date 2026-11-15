@@ -130,6 +130,7 @@ from meho_backplane.runbooks.run_service import (
     RunAlreadyTerminalError,
     RunbookRunService,
     RunNotFoundError,
+    StepCallerRequiredError,
 )
 from meho_backplane.runbooks.runs_schemas import (
     AbortRunRequest,
@@ -145,6 +146,7 @@ from meho_backplane.ui.auth.middleware import (
     require_ui_admin,
     require_ui_operator,
 )
+from meho_backplane.ui.roles import resolve_ui_operator
 from meho_backplane.ui.routes.connectors.operator import resolve_role_probe
 from meho_backplane.ui.routes.runbooks.driver_render import (
     StepView,
@@ -196,6 +198,7 @@ _VERIFY_VALUE_ERRORS: Final[tuple[type[ValueError], ...]] = (
     PreviousStepNotVerifiedError,
     ConfirmVerifyAnswerNotYesError,
     RunAlreadyCompletedError,
+    StepCallerRequiredError,
 )
 
 
@@ -255,9 +258,16 @@ async def _advance(
       operation_call verify did not match), so Advance is hidden and the
       forward moves are "Try this step again" or Abort.
     * terminal / verify ``ValueError``s -> an inline alert.
+
+    For an ``operation_call`` check the person's checked login
+    (:func:`resolve_ui_operator`) goes to the service as ``caller``, so
+    the check runs as that person. When the login cannot be checked right
+    now (or the form names another check type), the service refuses a
+    check that runs an operation, and the driver shows an inline alert.
     """
     service = RunbookRunService()
     request_model = _build_next_request(verify_type, answer, retry=retry)
+    caller = await resolve_ui_operator(session) if verify_type != "confirm" else None
 
     structlog.contextvars.bind_contextvars(
         operator_sub=session.operator_sub,
@@ -267,7 +277,7 @@ async def _advance(
     )
     try:
         result = await service.next_step(
-            session.tenant_id, session.operator_sub, run_id, request_model
+            session.tenant_id, session.operator_sub, run_id, request_model, caller=caller
         )
     except NotRunAssigneeError:
         return await _reassigned_away_fragment(request, session, run_id)

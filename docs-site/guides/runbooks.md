@@ -144,7 +144,10 @@ meho runbook next 7c2a…
 
 `next` runs the step's `verify` — the **substrate is the oracle**. A
 `confirm` verify asks you to confirm; an `operation_call` verify
-dispatches its op and checks the result against `expect`. The run only
+dispatches its op and checks the result against `expect`. The op runs as
+you, the caller who advances the run: your grants, read scope and role
+apply, the same as when you call the op directly. If MEHO refuses the
+call, the step fails and the message says why. The run only
 advances when verify passes. A failing verify marks the step `failed`.
 To try a failed step again, fix the cause and run
 `meho runbook next --retry` (over MCP: `"retry": true`). The step's

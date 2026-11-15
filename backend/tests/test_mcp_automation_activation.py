@@ -175,7 +175,7 @@ def test_automation_tool_declares_the_addon_family_gate() -> None:
 
 
 def test_addon_family_dropped_from_wire_shape() -> None:
-    """``to_wire`` never leaks the MEHO-internal ``required_addon_family`` field."""
+    """``to_wire`` never exposes the internal ``required_addon_family`` field."""
     entry = get_tool(_AUTOMATION_TOOL)
     assert entry is not None
     defn, _handler = entry

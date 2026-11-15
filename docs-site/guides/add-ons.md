@@ -122,6 +122,9 @@ for agents. The choice is per collection, off unless an administrator
 turns it on, and reversible with one collection update. With it on, the
 answer is written by the service's answer model, not the backplane's.
 
+`meho docs ask` shows where an answer came from (the service's own answer
+or the backplane's), so you can check a collection right after you switch it.
+
 **Reading around a passage.** A passage is one part of a page. When a
 collection is configured to allow it, each passage and each source of an
 answer carries a short-lived read handle. `read_docs` (and `meho docs read`,

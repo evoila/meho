@@ -5,7 +5,7 @@
 
 Initiative #804 (G11.3 Scheduler P2), Task #824 (T3). The
 third trigger shape for the scheduler: an agent run fires in response
-to a MEHO-internal event (an audit predicate match, a connector
+to an internal event (an audit predicate match, a connector
 alert, or another agent run reaching a terminal state).
 
 Per the issue's research note: plain PostgreSQL ``LISTEN/NOTIFY`` is

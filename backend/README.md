@@ -164,7 +164,7 @@ exit status is `0`. Verification failure (wrong identity, unsigned image,
 tampered registry) exits non-zero with a structured error.
 
 These are the same identity-regex + issuer values
-`claude-rdc-hetzner-dc`'s
+a downstream deployment's
 `install.sh` uses as a **gating** check before pulling the image (per Goal #11
 cross-repo coordination).
 
@@ -201,8 +201,7 @@ SPDX document; `jq '.predicate.packages | length'` returns the package count
 (expect ~120 — Python interpreter + FastAPI + every locked dep in
 `uv.lock`).
 
-The downstream `install.sh` from
-`claude-rdc-hetzner-dc`
+A downstream `install.sh`
 can run this exact command to confirm the SBOM is intact and the bill of
 materials matches the image being pulled.
 

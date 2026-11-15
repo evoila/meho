@@ -42,6 +42,31 @@ var waitingAnswer = map[string]any{
 	"changed_operations":  1,
 }
 
+// previewAnswer is a dry run with one operation in force and one whose row is gone.
+var previewAnswer = map[string]any{
+	"match": map[string]any{"op": "k8s.deployment.*"}, "rule_ref": "tenant:classifications[0]",
+	"entry": map[string]any{}, "matched_operations": 1, "changed_operations": 1,
+	"conflict": nil,
+	"operations": []any{map[string]any{
+		"connector_id": "k8s-1.x", "group_key": "workload", "op_id": "k8s.deployment.scale",
+		"changes": true,
+		"before": map[string]any{"category": "other", "labels": map[string]any{}, "risk": nil,
+			"always_wait": true, "rule_ref": "taxonomy.default",
+			"in_force": map[string]any{"risk": "caution", "waits": true}},
+		"after": map[string]any{"category": "compute", "labels": map[string]any{"team": "ops"},
+			"risk": nil, "always_wait": false, "rule_ref": "tenant:classifications[0]",
+			"in_force": map[string]any{"risk": "caution", "waits": true}},
+	}, map[string]any{
+		"connector_id": "k8s-1.x", "group_key": "workload", "op_id": "k8s.deployment.gone",
+		"changes": true,
+		"before": map[string]any{"category": "other", "labels": map[string]any{}, "risk": nil,
+			"always_wait": false, "rule_ref": "taxonomy.default", "in_force": nil},
+		"after": map[string]any{"category": "compute", "labels": map[string]any{},
+			"risk": nil, "always_wait": false, "rule_ref": "tenant:classifications[0]",
+			"in_force": nil},
+	}},
+}
+
 // TestClassifyDryRunIsTheDefault: without --apply the command only asks
 // for the dry run and prints every matched operation.
 func TestClassifyDryRunIsTheDefault(t *testing.T) {
@@ -49,19 +74,7 @@ func TestClassifyDryRunIsTheDefault(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"POST /api/v1/policy/classification/preview": func(w http.ResponseWriter, r *http.Request) {
 			got = decodeBody(t, r)
-			writeJSON(t, w, http.StatusOK, map[string]any{
-				"match": map[string]any{"op": "k8s.deployment.*"}, "rule_ref": "tenant:classifications[0]",
-				"entry": map[string]any{}, "matched_operations": 1, "changed_operations": 1,
-				"conflict": nil,
-				"operations": []any{map[string]any{
-					"connector_id": "k8s-1.x", "group_key": "workload", "op_id": "k8s.deployment.scale",
-					"changes": true,
-					"before": map[string]any{"category": "other", "labels": map[string]any{}, "risk": nil,
-						"always_wait": false, "rule_ref": "taxonomy.default"},
-					"after": map[string]any{"category": "compute", "labels": map[string]any{"team": "ops"},
-						"risk": nil, "always_wait": false, "rule_ref": "tenant:classifications[0]"},
-				}},
-			})
+			writeJSON(t, w, http.StatusOK, previewAnswer)
 		},
 	})
 	defer srv.Close()
@@ -80,9 +93,64 @@ func TestClassifyDryRunIsTheDefault(t *testing.T) {
 	if labels["team"] != "ops" {
 		t.Errorf("labels = %v", got["labels"])
 	}
-	for _, want := range []string{"Dry run: 1 operation(s) matched", "k8s.deployment.scale", "other -> compute", "--apply"} {
+	for _, want := range []string{
+		"Dry run: 1 operation(s) matched", "k8s.deployment.scale", "other -> compute", "--apply",
+		"IN FORCE", "true -> false", "caution, waits -> caution, waits", "- -> -",
+	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("output misses %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestClassifyDryRunJSONKeepsNull: with --json, an operation whose row is
+// gone prints "in_force": null, never an empty value that reads as "does not wait".
+func TestClassifyDryRunJSONKeepsNull(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/policy/classification/preview": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(t, w, http.StatusOK, previewAnswer)
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	stdout, stderr, err := runCmd(t, "classify", "--op", "k8s.deployment.*", "--category", "compute",
+		"--json", "--backplane", srv.URL)
+	if err != nil {
+		t.Fatalf("classify --json: %v\n%s", err, stderr)
+	}
+	var got struct {
+		Operations []struct {
+			OpID   string                     `json:"op_id"`
+			Before map[string]json.RawMessage `json:"before"`
+			After  map[string]json.RawMessage `json:"after"`
+		} `json:"operations"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("decode stdout: %v\n%s", err, stdout)
+	}
+	if len(got.Operations) != 2 {
+		t.Fatalf("operations = %d, want 2:\n%s", len(got.Operations), stdout)
+	}
+	inForce := map[string]string{
+		"k8s.deployment.scale": `{"risk":"caution","waits":true}`,
+		"k8s.deployment.gone":  "null",
+	}
+	for _, op := range got.Operations {
+		want := inForce[op.OpID]
+		for side, values := range map[string]map[string]json.RawMessage{"before": op.Before, "after": op.After} {
+			raw, ok := values["in_force"]
+			if !ok {
+				t.Errorf("%s %s: in_force is missing", op.OpID, side)
+				continue
+			}
+			var compact bytes.Buffer
+			if err := json.Compact(&compact, raw); err != nil {
+				t.Fatalf("compact: %v", err)
+			}
+			if compact.String() != want {
+				t.Errorf("%s %s: in_force = %s, want %s", op.OpID, side, compact.String(), want)
+			}
 		}
 	}
 }

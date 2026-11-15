@@ -203,13 +203,14 @@ entries:
       the two run-read GETs a governed launcher needs to observe the run it
       created (GET /api/v1/runs/{run_id} — single-run read carrying
       awaiting_decision_nodes + per-node states; GET /api/v1/runs — the
-      set-shaped run list, #3699). Ingest at registration from /openapi.json
+      set-shaped run list, #3699), and the blueprint list read
+      (GET /api/v1/blueprints — which blueprints an agent may run). Ingest at registration from /openapi.json
       via `--spec`; NO spec is vendored here. After ingest the connector-owned
       safety floor (connectors/meho_automation/ingest_safety.py) pins the
       four write ops at `caution` (no backplane approval park — the add-on's
       own gate nodes are the human control, operator decision); validate is a
       read-side dry-run that still rides `caution` because an ingested POST
-      never sits below the caution floor. The two GETs are reads: the generic
+      never sits below the caution floor. The three GETs are reads: the generic
       verb heuristic lands them `safe` (below the caution write floor), so the
       floor pins no key for them. See
       docs/codebase/connectors-meho-automation.md.
@@ -217,8 +218,8 @@ entries:
     # /openapi.json publishes ~30 mutating routes (tenant/site/adoption/run
     # DELETEs, fleet import, blueprint/environment/deployment CRUD). This
     # connector's op set is CLOSED to exactly launch / validate / gate / resume
-    # plus the two run-read GETs (#3699), so the ingest path persists ONLY these
-    # six (method, path) pairs and DROPS every other parsed op before
+    # plus the two run-read GETs (#3699) and the blueprint list GET, so the ingest
+    # path persists ONLY these seven (method, path) pairs and DROPS every other parsed op before
     # persistence — an operator who curls the full spec and `meho connector
     # enable`s cannot cascade is_enabled onto a tenant DELETE (or onto the
     # human-only run-node .../skip route, whose (method, path) pair is not on
@@ -227,7 +228,7 @@ entries:
     # (connectors/meho_automation/ingest_safety.py) by a drift-guard test
     # (test_operations_ingest_catalog.py): the floor keys must be a subset of
     # this allowlist (a pinned op must be persistable), and the extra entries
-    # are exactly the two GET reads, which need no floor (reads land `safe`).
+    # are exactly the three GET reads, which need no floor (reads land `safe`).
     op_allowlist:
       - method: POST
         path: /api/v1/runs
@@ -252,3 +253,9 @@ entries:
         path: /api/v1/runs/{run_id}
       - method: GET
         path: /api/v1/runs
+      # Blueprint list GET — read-class, lands `safe` (no floor entry). Shows
+      # which blueprints an agent can run. Set-shaped: a big list comes back as
+      # a result handle. Only the list route: blueprint item reads and the
+      # blueprint writes stay off this list.
+      - method: GET
+        path: /api/v1/blueprints

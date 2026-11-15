@@ -153,6 +153,13 @@ between `[REDACTED:` and `]`, and the value ends there. A value that
 only starts like one (`[REDACTED:made-up`) or goes on after the `]`
 (`[REDACTED:x]made-up`) is redacted whole.
 
+The `api_key` rule also skips a value made only of mask characters:
+`*`, `•`, `●` and `·` (`patterns.py::MASK_CHARS`). A tool that reads a
+password prints one of them for each key, and that is not a secret. A
+value that goes on after the masks (`****abc123`) is redacted whole.
+The upload check of the session store uses the same characters, so such
+a value does not send an upload to quarantine.
+
 The secret-*value* part of `authorization_header`, `bearer_token`,
 and `api_key` consumes any non-whitespace, non-quote byte
 (`patterns.py::_VALUE_CHARS`, bounded by `_VALUE_MAX`): the value is

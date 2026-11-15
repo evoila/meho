@@ -46,7 +46,7 @@ func newExportCmd() *cobra.Command {
 		Use:   "export <directory>",
 		Short: "Write the generic kb entries as Markdown pages into a local folder (operator)",
 		Long: "export calls POST /api/v1/kb/export and writes the answer into <directory> " +
-			"on this machine, for example a folder of the team wiki repo.\n\n" +
+			"on this machine, for example a folder of the tenant's wiki repo.\n\n" +
 			"The answer holds the entries of your tenant with status: confirmed or " +
 			"candidate and applies_to: product-and-version that were written in MEHO. " +
 			"A candidate keeps status: candidate, so a person reviews it. Entries that " +

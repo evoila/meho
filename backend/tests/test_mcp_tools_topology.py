@@ -199,7 +199,7 @@ def test_query_topology_input_schema_is_conditional_on_kind(
     assert "allOf" not in wire_schema
     assert "oneOf" not in wire_schema
     assert "anyOf" not in wire_schema
-    # MEHO-internal fields stripped from the wire shape.
+    # internal fields stripped from the wire shape.
     assert "required_role" not in tools["query_topology"]
     assert "op_class" not in tools["query_topology"]
 

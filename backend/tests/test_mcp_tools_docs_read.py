@@ -170,7 +170,7 @@ def test_read_docs_absent_without_docs_capability(docs_client: TestClient) -> No
 
 
 def test_read_docs_listed_with_strict_schema(docs_client: TestClient) -> None:
-    """Required ``[collection, read_handle]``, bounded window, no MEHO-internal fields."""
+    """Required ``[collection, read_handle]``, bounded window, no internal fields."""
     response = post_mcp(docs_client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = {t["name"]: t for t in response.json()["result"]["tools"]}
     tool = tools["read_docs"]

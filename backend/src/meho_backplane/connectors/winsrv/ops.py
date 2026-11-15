@@ -93,8 +93,8 @@ WINSRV_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "features": (
         "Use to inventory and manage Windows roles/features: list "
         "(``winsrv.feature.list``, read-only) and install / remove "
-        "(``caution``) via the ServerManager cmdlets. This is the c1sql1 "
-        "Failover-Clustering install path. Install/remove never auto-restart "
+        "(``caution``) via the ServerManager cmdlets. This is the path for a "
+        "Failover-Clustering role install. Install/remove never auto-restart "
         "-- check ``restart_needed`` and use the approval-gated "
         "``winsrv.power.reboot``."
     ),

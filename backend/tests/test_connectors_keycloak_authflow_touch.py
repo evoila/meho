@@ -28,7 +28,9 @@ What is proven:
   settings turned on before the bind;
 * the binding keeps the client's other settings and is read back;
 * the op is ``caution`` with approval, a plain ``write`` on the feed, and
-  waits for approval; its approval card names the client and the flow.
+  waits for approval; its approval card names the client and the flow;
+* a step that Keycloak refuses with HTTP 403 stops the run; the error says
+  what the run changed before and which step was refused.
 """
 
 from __future__ import annotations
@@ -482,7 +484,7 @@ def test_op_flow_is_the_flow_of_the_realm_file() -> None:
     web = next(c for c in realm["clients"] if c["clientId"] == "meho-web")
     file_mapper = next(m for m in web["protocolMappers"] if m["name"] == "amr")
     assert file_mapper == AMR_MAPPER
-    assert json.loads(realm["attributes"]["acr.loa.map"]) == {"meho-touch": 3}
+    assert json.loads(realm["attributes"]["acr.loa.map"]) == {"meho-approve": 2, "meho-touch": 3}
 
 
 # ---------------------------------------------------------------------------
@@ -1153,3 +1155,66 @@ async def test_amr_mapper_fix_that_does_not_read_back_is_not_bound(
     assert result["status"] != "ok"
     assert "check_failed" in json.dumps(result)
     assert fake.client == _client()
+
+
+# ---------------------------------------------------------------------------
+# Keycloak refuses a step with HTTP 403: the error says what the run changed
+# ---------------------------------------------------------------------------
+
+
+_MAPPERS = f"{_ADMIN}/clients/{_CLIENT_UUID}/protocol-mappers/models"
+
+
+@pytest.mark.parametrize("step", ["mapper", "bind"])
+async def test_refused_step_says_what_the_run_changed(kc: KeycloakConnector, step: str) -> None:
+    fake = FakeKeycloak(client=_client())
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        if step == "mapper":
+            refused = mock.post(_MAPPERS).respond(403, json={"error": "HTTP 403 Forbidden"})
+        else:
+            refused = mock.put(f"{_ADMIN}/clients/{_CLIENT_UUID}").respond(
+                403, json={"error": "HTTP 403 Forbidden"}
+            )
+        fake.mount(mock)
+        result = await _run({})
+
+    assert refused.call_count == 1
+    assert result["status"] == "error", result
+    extras = result["extras"]
+    assert extras["http_status"] == 403
+    assert extras["exception_class"] == "KeycloakMissingRightsError"
+    message = extras["exception_message"]
+    assert "stopped half-way" in message
+    assert "<truncated>" not in message
+    flow_id = fake.flows[TOUCH_FLOW_ALIAS]["id"]
+    remediation = extras["remediation"]
+    assert f"(id {flow_id!r}, flow_created=true) is made by this run" in remediation
+    assert "the realm maps 'meho-touch' to level 3" in remediation
+    assert ("the client 'meho-web' has the 'amr' mapper" in remediation) is (step == "bind")
+    wanted = (
+        "add or fix the 'amr' mapper of the client 'meho-web'"
+        if step == "mapper"
+        else "bind the flow to the client 'meho-web'"
+    )
+    assert f"Keycloak refused (HTTP 403) to {wanted}" in message
+    assert f"Keycloak refused (HTTP 403) to {wanted}" in remediation
+    assert "These changes stay" in remediation
+    assert "manage-clients" in remediation
+    assert "try again after that" in remediation
+    # The kept admin token is dropped, so the next call signs in again.
+    assert kc._admin_tokens == {}
+
+
+async def test_refused_step_of_a_flow_that_was_there_says_so(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(client=_client())
+    await _made(fake)
+    fake.client = _client()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.put(f"{_ADMIN}/clients/{_CLIENT_UUID}").respond(403)
+        fake.mount(mock)
+        result = await _run({})
+    remediation = result["extras"]["remediation"]
+    assert "flow_created=false) is already there" in remediation
+    assert "maps 'meho-touch'" not in remediation
+    assert "'amr' mapper" not in remediation.split("refused")[0]
+    assert fake.writes == []

@@ -10,7 +10,7 @@ Covers acceptance criteria 4 + 7 on issue #399:
   ``call_operation``.
 * Each tool's ``inputSchema`` is JSON-Schema-2020-12 well-formed with
   ``additionalProperties: false``.
-* MEHO-internal fields (``required_role``, ``op_class``) are stripped
+* internal fields (``required_role``, ``op_class``) are stripped
   from the wire shape (same contract as the meho_status reference tool).
 * ``tools/call list_operation_groups`` against a seeded group returns the
   groups list with the agent-facing ``when_to_use`` blurb.
@@ -91,7 +91,7 @@ def test_tools_list_input_schemas_are_strict_2020_12(
         # Connector id is required on every operation tool.
         assert "connector_id" in schema["properties"]
         assert "connector_id" in schema["required"]
-        # MEHO-internal fields are stripped from the wire shape.
+        # internal fields are stripped from the wire shape.
         assert "required_role" not in tools[tool_name]
         assert "op_class" not in tools[tool_name]
 
@@ -340,7 +340,7 @@ def test_tools_call_call_operation_accepts_bare_string_target(
                     # not that the dispatch completed cleanly.
                     "connector_id": "vault-1.x",
                     "op_id": "vault.does.not.exist",
-                    "target": "rdc-vault",
+                    "target": "example-vault",
                 },
             },
         },

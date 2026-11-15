@@ -18,7 +18,7 @@ Coverage matrix (issue #468 acceptance criteria):
   :class:`ToolDefinition`. End-to-end aggregate-only-broadcast
   verification is T5's job (#469).
 * AC6 — ``tools/list`` schema validates as JSON-Schema-2020-12;
-  MEHO-internal fields stripped from the wire shape.
+  internal fields stripped from the wire shape.
 * AC7 — (MCP-inspector smoke test) — out of scope here; T5 covers it.
 * AC8 — Per-shape conveniences (``audit.show`` / ``audit.who_touched`` /
   ``audit.my_recent``) NOT registered against MCP — only ``query_audit``.
@@ -112,7 +112,7 @@ def test_tools_list_input_schema_is_strict_2020_12(
     assert schema["additionalProperties"] is False
     # Every filter field is optional; no `required` array.
     assert "required" not in schema or schema["required"] == []
-    # MEHO-internal fields stripped from the wire shape.
+    # internal fields stripped from the wire shape.
     assert "required_role" not in tool
     assert "op_class" not in tool
 

@@ -732,7 +732,7 @@ async def test_operator_tenant_maps_to_dedicated_role_when_configured(
 
     This is the core: a sandbox-tenant operator's target-less ``vault.kv.*``
     and ``secret_ref`` reads run under a role whose ``bound_claims`` + policy
-    it satisfies, so one fixed role stops spanning tenants (meho-internal#356).
+    it satisfies, so one fixed role stops spanning tenants.
     """
     monkeypatch.setenv("VAULT_OIDC_ROLE_BY_TENANT", f"{_TENANT_A}=meho-mcp-sandbox")
     get_settings.cache_clear()
@@ -854,7 +854,7 @@ async def test_explicit_mount_path_override_wins_over_settings(
 ) -> None:
     """An explicit ``mount_path`` logs in against that JWT auth mount.
 
-    The ``rdc-vault-teardown`` target's role lives on the ``jwt-meho`` auth
+    The ``vault-teardown`` target's role lives on the ``jwt-meho`` auth
     mount (``extras["vault_mount"]``); absent, the settings-global mount
     stands. The role is untouched when only the mount is overridden.
     """

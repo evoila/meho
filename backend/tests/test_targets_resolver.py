@@ -422,14 +422,14 @@ async def test_resolve_target_near_misses_exclude_soft_deleted() -> None:
     tenant_id = uuid.uuid4()
     deleted = _make_target(
         tenant_id=tenant_id,
-        name="rke2-infra",
+        name="k8s-infra",
         product="ssh",
         host="10.0.0.1",
         deleted_at=datetime.now(UTC),
     )
     live = _make_target(
         tenant_id=tenant_id,
-        name="rke2-infra-k8s",
+        name="k8s-infra-ssh",
         product="ssh",
         host="10.0.0.2",
     )
@@ -440,11 +440,11 @@ async def test_resolve_target_near_misses_exclude_soft_deleted() -> None:
 
     async with sessionmaker() as session:
         with pytest.raises(TargetNotFoundError) as exc_info:
-            await resolve_target(session, tenant_id, "rke2")
+            await resolve_target(session, tenant_id, "k8s")
 
     matches = exc_info.value.detail["matches"]
     names = {m["name"] for m in matches}
-    assert names == {"rke2-infra-k8s"}
+    assert names == {"k8s-infra-ssh"}
 
 
 # ---------------------------------------------------------------------------

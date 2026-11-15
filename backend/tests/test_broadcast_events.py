@@ -581,7 +581,7 @@ class TestRedactPayload:
         """AC #7 — filter never reaches the stream; row_count is allowed."""
         result = redact_payload(
             "audit_query",
-            {"filter": "principal=damir", "since": "24h"},
+            {"filter": "principal=operator-a", "since": "24h"},
             "ok",
         )
         assert result == {
@@ -596,7 +596,7 @@ class TestRedactPayload:
         """The publisher pre-merges request + response; row_count plumbs through."""
         result = redact_payload(
             "audit_query",
-            {"filter": "principal=damir", "row_count": 42},
+            {"filter": "principal=operator-a", "row_count": 42},
             "ok",
         )
         assert result["row_count"] == 42
@@ -751,13 +751,13 @@ class TestRedactPayloadDetailKwarg:
     def test_detail_full_on_audit_query_returns_full_params(self) -> None:
         result = redact_payload(
             "audit_query",
-            {"filter": "principal=damir"},
+            {"filter": "principal=operator-a"},
             "ok",
             detail="full",
         )
         assert result == {
             "op_class": "audit_query",
-            "params": {"filter": "principal=damir"},
+            "params": {"filter": "principal=operator-a"},
             "result_status": "ok",
         }
 

@@ -47,10 +47,18 @@ func newExplainCmd() *cobra.Command {
 			"example --groups Operators) and --principal person, agent or " +
 			"service. Such a login has no grants. --via web asks for a person " +
 			"in the web interface. --file asks with a policy file that is not " +
-			"imported. --request ID shows the rule stored on an approval request.\n\n" +
-			"While the policy evaluator is off or in shadow mode, today's " +
-			"checks decide. With POLICY_ENGINE_SHADOW on, the answer also lists " +
-			"every rule the evaluator matched, in order, and the floor that decided.",
+			"imported. --request ID shows the rule stored on an approval request, " +
+			"and the groups that may approve it.\n\n" +
+			"explain asks about a call with no parameters. For an operation " +
+			"whose answer depends on its parameters, the answer is the one of " +
+			"a call without parameters.\n\n" +
+			"explain works with POLICY_ENGINE_SHADOW off: it then shows today's " +
+			"answer only. Today's checks decide while the policy evaluator is off " +
+			"or in shadow mode. With POLICY_ENGINE_SHADOW on, the answer also lists " +
+			"every rule the evaluator matched, in order, and the floor that decided.\n\n" +
+			"Only a tenant admin or a platform admin sees the entries of the " +
+			"policy and their places in it. Everyone else gets the answer, the " +
+			"reason, the risk level and who may approve.",
 		Example: "  meho policy explain <connector-id> <op-id> --me\n" +
 			"  meho policy explain <connector-id> <op-id> --groups Operators --target <target-name>\n" +
 			"  meho policy explain <connector-id> <op-id> --groups Operators --principal agent\n" +
@@ -68,7 +76,8 @@ func newExplainCmd() *cobra.Command {
 	f.StringSliceVar(&opts.Groups, "groups", nil,
 		"ask for a login in these groups: Readers, Operators, SA-Operators, Admins, Approvers")
 	f.StringVar(&opts.Principal, "principal", "person", "with --groups: person, agent or service")
-	f.StringVar(&opts.Via, "via", "", "for a person: web or token (default: as you call)")
+	f.StringVar(&opts.Via, "via", "",
+		"for a person: web or token (default: as you call with --me, token with --groups)")
 	f.StringVar(&opts.Target, "target", "", "the target's name")
 	f.StringVar(&opts.File, "file", "", "a policy file that is not imported")
 	f.StringVar(&opts.Scope, "scope", "tenant", "with --file: tenant or install")
@@ -225,7 +234,12 @@ func printApprovers(w io.Writer, a api.ExplainApprovers) {
 	if len(a.Groups) > 0 {
 		groups = strings.Join(a.Groups, ", ")
 	}
-	fmt.Fprintf(w, "Who may approve: %s (rule: %s)\n", sanitize(groups), sanitize(a.Rule))
+	// Only a tenant admin or a platform admin gets the rule.
+	if rule := deref(a.Rule); rule != "" {
+		fmt.Fprintf(w, "Who may approve: %s (rule: %s)\n", sanitize(groups), sanitize(rule))
+		return
+	}
+	fmt.Fprintf(w, "Who may approve: %s\n", sanitize(groups))
 }
 
 func ruleLine(r api.ExplainRule) string {

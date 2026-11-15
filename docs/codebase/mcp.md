@@ -1726,12 +1726,13 @@ resolved has two more fields (#6045):
   `null` when the evaluator failed.
 * `approvers`: the login groups that may approve the call when
   `policy_verdict` is `needs-approval` (for example
-  `["MEHO-SA-Operators", "MEHO-Admins"]`), else `[]`.
+  `["MEHO-SA-Operators", "MEHO-Admins"]`), else `[]`. `null` when the
+  stored routing is not valid: the preview still answers.
 
 No new MCP tool: the default working surface stays the same. The person
 who wants every rule in order uses `meho policy explain`
 ([policy-evaluator.md](policy-evaluator.md)). **Before turning the switch
-on by default** (measurement plan of #6045): compare the benchmark lane
+on by default** (measurement plan, tracked in #6518): compare the benchmark lane
 with the switch off and on, for a small model and for Claude, then one
 live run on the sandbox MEHO: preview a call that waits and one that runs,
 and check `policy_rule` and `approvers` against `meho policy explain`.

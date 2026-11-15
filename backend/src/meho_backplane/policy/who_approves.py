@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from typing import Any, Final
 from uuid import UUID
 
+import structlog
+
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.policy.routing import (
@@ -38,14 +40,18 @@ from meho_backplane.policy.routing import (
 )
 from meho_backplane.policy.shadow import shadow_enabled
 from meho_backplane.policy.stamp import RuleStamp
+from meho_backplane.policy.store import InvalidStoredPolicyError
 
 __all__ = [
     "RIGHTS_CHANGE_RULE",
     "Approvers",
     "approvers_for",
     "approvers_from_routes",
+    "invalid_routing",
     "preview_policy_fields",
 ]
+
+_log = structlog.get_logger(__name__)
 
 #: The rule of the approver groups of a change of rights: only another admin.
 RIGHTS_CHANGE_RULE: Final[str] = "rights_change"
@@ -60,6 +66,14 @@ class Approvers:
 
     groups: tuple[str, ...]
     rule: str
+
+
+def invalid_routing(exc: ValueError) -> InvalidStoredPolicyError:
+    """The error for a stored ``routing`` section that is not valid, as for a classification."""
+    return InvalidStoredPolicyError(
+        f"The stored routing is not valid, so MEHO cannot say who may approve: {exc} "
+        "Import a fixed policy file."
+    )
 
 
 def _names(kinds: Sequence[str]) -> tuple[str, ...]:
@@ -92,7 +106,11 @@ def approvers_from_routes(
 async def approvers_for(
     *, tenant_id: UUID, connector_id: str, descriptor: EndpointDescriptor
 ) -> Approvers:
-    """The approver groups of a call of *descriptor*, from the stored policy."""
+    """The approver groups of a call of *descriptor*, from the stored policy.
+
+    Raises :class:`~meho_backplane.policy.store.InvalidStoredPolicyError`
+    when the stored ``routing`` section is not valid.
+    """
     level = descriptor.safety_level
     category = descriptor.policy_category
     if not routing_enabled() or _rights_change(descriptor.op_id):
@@ -100,14 +118,17 @@ async def approvers_for(
             None, connector_id=connector_id, op_id=descriptor.op_id, level=level, category=category
         )
     async with get_sessionmaker()() as session:
-        found = await approver_set_for(
-            session,
-            tenant_id=tenant_id,
-            connector_id=connector_id,
-            op_id=descriptor.op_id,
-            level=level,
-            category=category,
-        )
+        try:
+            found = await approver_set_for(
+                session,
+                tenant_id=tenant_id,
+                connector_id=connector_id,
+                op_id=descriptor.op_id,
+                level=level,
+                category=category,
+            )
+        except ValueError as exc:
+            raise invalid_routing(exc) from exc
     return Approvers(_names(found.kinds), found.rule)
 
 
@@ -124,17 +145,22 @@ async def preview_policy_fields(
     ``policy_rule`` is the rule the evaluator matched for the call's own
     policy gate (*stamp*), or ``None`` when the evaluator failed.
     ``approvers`` lists the login groups that may approve when the call
-    waits, else it is empty.
+    waits, else it is empty. It is ``None`` when the stored routing is not
+    valid: the preview still answers, but cannot say who may approve.
     """
     if not shadow_enabled():
         return {}
-    groups: tuple[str, ...] = ()
+    approvers: list[str] | None = []
     if verdict is PermissionVerdict.NEEDS_APPROVAL:
-        found = await approvers_for(
-            tenant_id=tenant_id, connector_id=connector_id, descriptor=descriptor
-        )
-        groups = found.groups
+        try:
+            found = await approvers_for(
+                tenant_id=tenant_id, connector_id=connector_id, descriptor=descriptor
+            )
+            approvers = list(found.groups)
+        except InvalidStoredPolicyError as exc:
+            _log.warning("preview_approvers_unknown", error=str(exc))
+            approvers = None
     return {
         "policy_rule": stamp.as_json() if stamp is not None else None,
-        "approvers": list(groups),
+        "approvers": approvers,
     }

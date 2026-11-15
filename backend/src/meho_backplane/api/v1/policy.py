@@ -24,7 +24,8 @@ see ``docs/codebase/policy.md``. The work is in
   ``operator`` role, like the preview. Asking for login groups or with a
   file that is not imported needs a ``tenant_admin`` or a
   ``platform_admin``. Asking about an approval request (``request_id``)
-  needs the right to read approvals.
+  needs the right to read approvals. Only a tenant admin or a platform
+  admin sees the entries of the policy and their places in it.
 
 Every file route takes ``scope``: ``tenant`` (the caller's own tenant, the
 default) or ``install`` (the whole install, only a platform admin who is a
@@ -61,6 +62,7 @@ from meho_backplane.policy.explain import (
     CallQuestion,
     explain_call,
     explain_request,
+    without_policy,
 )
 from meho_backplane.policy.explain_asker import ExplainInputError, Principal, what_if_operator
 from meho_backplane.policy.explain_models import PolicyExplainResponse
@@ -83,9 +85,13 @@ _POLICY_CONNECTOR_ID: Final[str] = "policy-registry-1.x"
 PolicyScope = Literal["tenant", "install"]
 
 
+def _is_policy_admin(operator: Operator) -> bool:
+    return operator.platform_admin or operator.tenant_role == TenantRole.TENANT_ADMIN
+
+
 def _require_policy_admin(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
     """``tenant_admin`` or ``platform_admin``; anyone else gets 403 ``insufficient_role``."""
-    if operator.platform_admin or operator.tenant_role == TenantRole.TENANT_ADMIN:
+    if _is_policy_admin(operator):
         return operator
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="insufficient_role")
 
@@ -348,7 +354,9 @@ class PolicyExplainBody(BaseModel):
     )
     principal: Principal = "person"
     via: Literal["web", "token"] | None = Field(
-        default=None, description="For a person: web interface or token. Default: as you call."
+        default=None,
+        description="For a person: web interface or token. Default: as you call with `me`, "
+        "token with `groups`.",
     )
     file: str | None = Field(
         default=None,
@@ -436,9 +444,18 @@ async def explain(
     evaluator's answer with every rule it matched (with
     ``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and
     the groups that may approve. No audit row for a call, no approval
-    request, no call to an outside system.
+    request, no call to an outside system. A caller who is not a tenant
+    admin or a platform admin gets the answer without the policy's entries
+    (:func:`~meho_backplane.policy.explain.without_policy`).
     """
     _bind_audit("policy.explain", "read")
+    answer = await _explain(operator, body, session)
+    return answer if _is_policy_admin(operator) else without_policy(answer)
+
+
+async def _explain(
+    operator: Operator, body: PolicyExplainBody, session: AsyncSession
+) -> PolicyExplainResponse:
     if body.request_id is not None:
         return await _explain_request(operator, body, body.request_id)
     if body.connector_id is None or body.op_id is None:

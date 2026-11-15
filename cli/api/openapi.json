@@ -2283,7 +2283,7 @@
           "policy"
         ],
         "summary": "Explain",
-        "description": "Why a call runs, waits or is denied, and who may approve it. Runs nothing.\n\nThe answer is today's answer (the policy gate, decide-only), the policy\nevaluator's answer with every rule it matched (with\n``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and\nthe groups that may approve. No audit row for a call, no approval\nrequest, no call to an outside system.",
+        "description": "Why a call runs, waits or is denied, and who may approve it. Runs nothing.\n\nThe answer is today's answer (the policy gate, decide-only), the policy\nevaluator's answer with every rule it matched (with\n``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and\nthe groups that may approve. No audit row for a call, no approval\nrequest, no call to an outside system. A caller who is not a tenant\nadmin or a platform admin gets the answer without the policy's entries\n(:func:`~meho_backplane.policy.explain.without_policy`).",
         "operationId": "explain_api_v1_policy_explain_post",
         "parameters": [
           {
@@ -35534,14 +35534,14 @@
           },
           "rule": {
             "type": "string",
+            "nullable": true,
             "title": "Rule",
-            "description": "default, rights_change, or a routing entry such as tenant:routing[0]."
+            "description": "default, rights_change, or a routing entry such as tenant:routing[0]. Null for a caller who is not a tenant admin or a platform admin."
           }
         },
         "type": "object",
         "required": [
-          "groups",
-          "rule"
+          "groups"
         ],
         "title": "ExplainApprovers",
         "description": "The login groups that may approve another person's call, and the rule that says so."
@@ -35599,7 +35599,8 @@
           "category": {
             "type": "string",
             "nullable": true,
-            "title": "Category"
+            "title": "Category",
+            "description": "Category, labels and entries are shown only to a tenant admin or a platform admin."
           },
           "labels": {
             "additionalProperties": {
@@ -39311,7 +39312,7 @@
             ],
             "nullable": true,
             "title": "Via",
-            "description": "For a person: web interface or token. Default: as you call."
+            "description": "For a person: web interface or token. Default: as you call with `me`, token with `groups`."
           },
           "file": {
             "type": "string",

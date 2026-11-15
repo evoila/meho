@@ -37,12 +37,13 @@ PREVIEW_POLICY_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
         },
     },
     "approvers": {
-        "type": "array",
+        "type": ["array", "null"],
         "items": {"type": "string"},
         "description": (
             "The login groups that may approve this call when "
             "`policy_verdict` is `needs-approval`, for example "
-            "`MEHO-SA-Operators`. Empty when the call does not wait."
+            "`MEHO-SA-Operators`. Empty when the call does not wait. "
+            "Null when the stored policy is broken."
         ),
     },
 }

@@ -32,6 +32,10 @@ it.
 
 While the evaluator is off or in shadow mode, today's checks decide, so
 ``answer`` is today's answer.
+
+Explain asks about a call with no parameters. For an operation whose
+answer depends on its parameters, the answer is the one of a call
+without parameters.
 """
 
 from __future__ import annotations
@@ -41,8 +45,10 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Final, Literal
 from uuid import UUID
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.delegation import ACTOR_SUB_KEY
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor, PermissionVerdict
@@ -86,6 +92,7 @@ from meho_backplane.policy.who_approves import (
     Approvers,
     approvers_for,
     approvers_from_routes,
+    invalid_routing,
 )
 
 __all__ = [
@@ -93,6 +100,7 @@ __all__ = [
     "CallQuestion",
     "explain_call",
     "explain_request",
+    "without_policy",
 ]
 
 #: The answer to ``file`` while the ``POLICY_CLASSIFICATION`` switch is off.
@@ -186,7 +194,13 @@ async def _policy_view(
         tenant_entries = _file_entries(file_document, "tenant")
     routes = None
     if routing_enabled():
-        routes = [*_routes(tenant_doc, labels["tenant"]), *_routes(install_doc, labels["install"])]
+        try:
+            routes = [
+                *_routes(tenant_doc, labels["tenant"]),
+                *_routes(install_doc, labels["install"]),
+            ]
+        except ValueError as exc:
+            raise invalid_routing(exc) from exc
     return _PolicyView([*install_entries, *tenant_entries], (install_doc, tenant_doc), routes)
 
 
@@ -217,7 +231,7 @@ async def _apply_file(
 
     stored = await session.get(EndpointDescriptor, descriptor.id)
     if stored is None:  # the row went away after the lookup
-        raise ExplainInputError("The operation is no longer registered. Ask again.")
+        raise ExplainInputError("The operation is not registered. Ask again.")
     overrides = (await load_overrides(session, tenant_id=tenant_id, keys=[OpKey.of(stored)])).get(
         OpKey.of(stored), []
     )
@@ -372,17 +386,21 @@ async def _resolve(
 
 
 async def _today_and_evaluator(
-    asker: Operator, descriptor: EndpointDescriptor, connector_id: str, target: Any
+    question: CallQuestion, descriptor: EndpointDescriptor, connector_id: str, target: Any
 ) -> tuple[dict[str, Any], Decision | None]:
     """Today's policy fields and the evaluator's decision.
 
-    Today's fields come from ``policy_gate`` with ``decide_only=True``.
+    Today's fields come from ``policy_gate`` with ``decide_only=True``. A
+    question with groups unbinds the hosted agent of the caller's run, so
+    its grants are never read: the made-up login asks alone.
     """
     from meho_backplane.auth.permissions import agent_no_grant_log_scope
     from meho_backplane.operations._request_preview import _governance_fields
 
+    asker = question.asker
+    actor = {} if question.me else {ACTOR_SUB_KEY: None}
     try:
-        with agent_no_grant_log_scope():
+        with agent_no_grant_log_scope(), structlog.contextvars.bound_contextvars(**actor):
             governance = await _governance_fields(
                 operator=asker,
                 descriptor=descriptor,
@@ -437,9 +455,7 @@ async def explain_call(question: CallQuestion) -> PolicyExplainResponse:
         file_document=question.file_document,
         file_scope=question.file_scope,
     )
-    governance, decision = await _today_and_evaluator(
-        question.asker, descriptor, connector_id, target
-    )
+    governance, decision = await _today_and_evaluator(question, descriptor, connector_id, target)
     today_verdict = PermissionVerdict(governance["policy_verdict"])
     answer = _FROM_TODAY[today_verdict]
     approvers = None
@@ -471,18 +487,63 @@ def _approvers_view(found: Approvers) -> ExplainApprovers:
     return ExplainApprovers(groups=list(found.groups), rule=found.rule)
 
 
+def _without_place(rule: ExplainRule | None) -> ExplainRule | None:
+    return rule.model_copy(update={"path": None}) if rule is not None else None
+
+
+def _without_rule(approvers: ExplainApprovers | None) -> ExplainApprovers | None:
+    return approvers.model_copy(update={"rule": None}) if approvers is not None else None
+
+
+def without_policy(response: PolicyExplainResponse) -> PolicyExplainResponse:
+    """The answer for a caller who is not a tenant admin or a platform admin.
+
+    It keeps the answer, the reason, the risk level and who may approve.
+    The entries of the policy and their places in it are left out: the
+    matching classification entries with their category and labels, the
+    place of each evaluator rule, and the routing entry that names the
+    approvers.
+    """
+    update: dict[str, Any] = {"approvers": _without_rule(response.approvers)}
+    if response.classification is not None:
+        update["classification"] = ExplainClassification(
+            risk_level=response.classification.risk_level,
+            requires_approval=response.classification.requires_approval,
+        )
+    if response.evaluator is not None:
+        evaluator = response.evaluator
+        update["evaluator"] = evaluator.model_copy(
+            update={
+                "rule": _without_place(evaluator.rule),
+                "floor": _without_place(evaluator.floor),
+                "rules": [rule.model_copy(update={"path": None}) for rule in evaluator.rules],
+            }
+        )
+    if response.request is not None:
+        update["request"] = response.request.model_copy(
+            update={"approvers": _without_rule(response.request.approvers)}
+        )
+    return response.model_copy(update=update)
+
+
 # ---------------------------------------------------------------------------
 # Explain a stored approval request
 # ---------------------------------------------------------------------------
 
 
 def _request_approvers(request: ApprovalRequest, level: str | None) -> Approvers:
-    """The groups stored on *request*, or today's rule when it has none."""
+    """The groups that may approve *request*: the ones the approve check uses.
+
+    The groups stored on the request count only while the
+    ``POLICY_APPROVER_ROUTING`` switch is on, as in
+    :func:`~meho_backplane.policy.routing.routing_refusal`. With the switch
+    off, or with no stored groups, today's rule.
+    """
     from meho_backplane.operations.grant_approval import is_rights_change
 
     if is_rights_change(request):
         return Approvers(("MEHO-Admins",), RIGHTS_CHANGE_RULE)
-    kinds = stored_kinds(request.approver_roles)
+    kinds = stored_kinds(request.approver_roles) if routing_enabled() else None
     if kinds is not None:
         return Approvers(tuple(f"MEHO-{kind}" for kind in kinds), request.approver_rule or "")
     return Approvers(

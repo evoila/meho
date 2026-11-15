@@ -154,10 +154,26 @@ meho policy explain --request <request-id>
 - `--groups` asks for a login in these groups, with no grants of its own.
   `--principal` says if it is a `person` (the default), an `agent` or a
   `service` login. `--via web` asks for a person in the web interface.
-  Only a tenant admin or a platform admin may ask for other groups.
+  For a person, `--via` is `token` by default with `--groups`, and as you
+  call with `--me`. Only a tenant admin or a platform admin may ask for
+  other groups.
 - `--file` asks with a policy file that is not imported. The file takes
   the place of your stored policy. It needs `POLICY_CLASSIFICATION`.
-- `--request` shows the rule stored on an approval request.
+- `--request` shows the rule stored on an approval request, and the
+  groups that may approve it. The groups stored on the request count only
+  while `POLICY_APPROVER_ROUTING` is on. With it off, explain shows
+  today's groups, the same groups the approve check uses.
+
+Good to know:
+
+- explain asks about a call **with no parameters**. For an operation
+  whose answer depends on its parameters, the answer is the one of a call
+  without parameters.
+- explain works with `POLICY_ENGINE_SHADOW` off. It then shows today's
+  answer only.
+- Only a tenant admin or a platform admin sees the entries of the policy
+  and their places in it. Everyone else gets the answer, the reason, the
+  risk level and who may approve.
 
 An example answer, for a person with a token who asks for a `caution`
 operation that a file makes always wait:
@@ -183,8 +199,10 @@ Risk level: caution, always waits: yes, category: compute
     The lines about the policy evaluator need the setting
     `POLICY_ENGINE_SHADOW` (Helm `config.policy.engineShadow`). With it
     on, the evaluator works out its own answer next to today's checks, and
-    explain lists every rule it matched, in order, with the place of a
-    rule in the policy file (for example `file:classifications[1]`).
+    explain lists every rule it matched, in order. Only the `always_wait`
+    step carries a place in the policy file (for example
+    `file:classifications[1]`). The other classification entries that
+    match are listed under the classification (the `matched` lines).
     Today's checks still decide. With the setting off, explain shows
     today's answer only.
 

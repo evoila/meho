@@ -91,6 +91,20 @@ func TestExplainWithTheEvaluatorOffSaysSo(t *testing.T) {
 	}
 }
 
+func TestExplainWithoutTheApproverRulePrintsOnlyTheGroups(t *testing.T) {
+	var got seen
+	srv := server(t, 200, `{"status":"ok","engine":"off","answer":"wait","decided_by":"today",
+		"approvers":{"groups":["MEHO-Admins"],"rule":null},
+		"today":{"verdict":"wait","policy_verdict":"needs-approval","reason":null},"evaluator":null}`, &got)
+	stdout, stderr, err := run(t, "explain", "<connector-id>", "<op-id>", "--me", "--backplane", srv.URL)
+	if err != nil {
+		t.Fatalf("explain: %v; stderr=%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "Who may approve: MEHO-Admins\n") || strings.Contains(stdout, "rule:") {
+		t.Errorf("stdout: %s", stdout)
+	}
+}
+
 func TestExplainRequestShowsTheStoredRule(t *testing.T) {
 	var got seen
 	srv := server(t, 200, `{"status":"ok","engine":"shadow","request":{

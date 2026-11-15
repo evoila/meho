@@ -66,8 +66,10 @@ class ExplainApprovers(_Frozen):
     """The login groups that may approve another person's call, and the rule that says so."""
 
     groups: list[str]
-    rule: str = Field(
-        description="default, rights_change, or a routing entry such as tenant:routing[0]."
+    rule: str | None = Field(
+        default=None,
+        description="default, rights_change, or a routing entry such as tenant:routing[0]. "
+        "Null for a caller who is not a tenant admin or a platform admin.",
     )
 
 
@@ -86,7 +88,11 @@ class ExplainClassification(_Frozen):
 
     risk_level: str
     requires_approval: bool
-    category: str | None = None
+    category: str | None = Field(
+        default=None,
+        description="Category, labels and entries are shown only to a tenant admin "
+        "or a platform admin.",
+    )
     labels: dict[str, str] = Field(default_factory=dict)
     entries: list[ExplainEntry] = Field(
         default_factory=list, description="Every matching entry, least specific first."

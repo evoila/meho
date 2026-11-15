@@ -284,8 +284,8 @@ carry `policy_rule`, the rule the policy evaluator matched for the call's
 own gate (`{source, rule_id, text, decided: false}`, taken with
 `take_rule` right after the gate; `null` when the evaluator failed), and
 `approvers`, the login groups that may approve when `policy_verdict` is
-`needs-approval` (`policy/who_approves.py`), else `[]`. Both are
-advisory and unhashed. With the switch off neither key is present, and
+`needs-approval` (`policy/who_approves.py`), else `[]`, and `null` when
+the stored routing is not valid. Both are advisory and unhashed. With the switch off neither key is present, and
 the MCP `outputSchema` does not list them.
 
 Operator-input faults come back **inside** the envelope (not as

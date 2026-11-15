@@ -6653,8 +6653,8 @@ type EventSourceUpdate struct {
 type ExplainApprovers struct {
 	Groups []string `json:"groups"`
 
-	// Rule default, rights_change, or a routing entry such as tenant:routing[0].
-	Rule string `json:"rule"`
+	// Rule default, rights_change, or a routing entry such as tenant:routing[0]. Null for a caller who is not a tenant admin or a platform admin.
+	Rule *string `json:"rule"`
 }
 
 // ExplainAsker Who the question is for.
@@ -6671,6 +6671,7 @@ type ExplainAskerVia string
 
 // ExplainClassification The values the call is checked with, and the classification entries that matched.
 type ExplainClassification struct {
+	// Category Category, labels and entries are shown only to a tenant admin or a platform admin.
 	Category *string `json:"category"`
 
 	// Entries Every matching entry, least specific first.
@@ -8900,7 +8901,7 @@ type PolicyExplainBody struct {
 	// Target The target's name.
 	Target *string `json:"target"`
 
-	// Via For a person: web interface or token. Default: as you call.
+	// Via For a person: web interface or token. Default: as you call with `me`, token with `groups`.
 	Via *PolicyExplainBodyVia `json:"via"`
 }
 
@@ -8910,7 +8911,7 @@ type PolicyExplainBodyPrincipal string
 // PolicyExplainBodyScope defines model for PolicyExplainBody.Scope.
 type PolicyExplainBodyScope string
 
-// PolicyExplainBodyVia For a person: web interface or token. Default: as you call.
+// PolicyExplainBodyVia For a person: web interface or token. Default: as you call with `me`, token with `groups`.
 type PolicyExplainBodyVia string
 
 // PolicyExplainResponse The answer of “POST /api/v1/policy/explain“.

@@ -253,7 +253,8 @@ async def test_with_the_switch_off_only_todays_answer(
     assert body["answer"] == "wait"
     assert body["today"]["policy_verdict"] == "needs-approval"
     assert body["asker"]["me"] is True
-    assert body["approvers"]["rule"] == "default"
+    # An operator sees who may approve, not the rule that says so.
+    assert body["approvers"]["rule"] is None
 
 
 @pytest.mark.asyncio

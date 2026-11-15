@@ -4212,7 +4212,7 @@ meho policy explain [CONNECTOR_ID OP_ID] [flags]
 - `--request` — show the rule stored on this approval request
 - `--scope` — with --file: tenant or install
 - `--target` — the target's name
-- `--via` — for a person: web or token (default: as you call)
+- `--via` — for a person: web or token (default: as you call with --me, token with --groups)
 
 ### `meho policy export`
 

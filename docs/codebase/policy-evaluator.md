@@ -161,17 +161,35 @@ asks), `policy/explain_models.py` (the answer),
 **Who asks.**
 
 - `me`: the caller. Needs the `operator` role, like the preview and the
-  call. `via` can ask for a person in the web interface or with a token.
+  call. `via` can ask for a person in the web interface or with a token;
+  without it, as the caller calls.
 - `groups` (+ `principal`: `person`, `agent` or `service`): a login made
   up from login group kinds, in the caller's tenant, with a `sub` that no
   grant names. So it has no agent grant, no standing grant, no run
   approval and no read scope. An agent gets at most the `operator` role,
   as a real agent token. Groups that give only `read_only` are refused:
   such a login cannot call operations. Needs a tenant admin or a platform
-  admin.
+  admin. `via` is `token` unless asked. The made-up `sub` is
+  `WHAT_IF_SUB` (`policy-explain-what-if`): the agent grant service and
+  the standing grant service refuse a grant that names it. The question
+  also unbinds the hosted agent of the caller's run (`ACTOR_SUB_KEY`), so
+  it never reads the grants of the real caller or of a hosted agent that
+  acts for the caller.
 - `request_id`: the rule stored on an approval request (`policy_rule`,
-  `policy_version`) and the stored approver groups (or today's rule when
-  none were stored). Needs the right to read approvals.
+  `policy_version`) and the groups that may approve it, as the approve
+  check sees them: the stored approver groups only while
+  `POLICY_APPROVER_ROUTING` is on, else today's rule. Needs the right to
+  read approvals.
+
+**Who sees the policy.** Only a tenant admin or a platform admin gets the
+whole answer. Everyone else gets it through `without_policy`: the answer,
+today's reason, the risk level, the approval flag and the approver
+groups. Left out: the matching classification entries, the category and
+labels, the place of each evaluator rule, and the approver rule.
+
+**No parameters.** Explain asks about a call with no parameters
+(`params={}`). For an operation whose answer depends on its parameters,
+the answer is the one of a call without parameters.
 
 **What it answers.** The same steps as the preview, in the same order:
 target by name, descriptor and catalog choice (`_resolve_descriptor`),
@@ -186,8 +204,10 @@ shadow keeps a rule; explain drops it (`forget_rule`).
 - `evaluator` (null while the switch is off): its verdict, the rule that
   decided, the floor that decided (when the rule is a `floor` or
   `role_floor`), every step in order (`Decision.steps`), and
-  `same_as_today`. The `always_wait` step carries `path`: the most
+  `same_as_today`. Only the `always_wait` step carries `path`: the most
   specific classification entry that makes the operation always wait.
+  The other classification entries that match are listed under
+  `classification`.
 - `classification`: the risk level and the approval flag the call is
   checked with, the category and labels, and every classification entry
   that matches, least specific first, each with its place
@@ -210,6 +230,13 @@ dispatch order (`policy_in_force`: the code's value, the overrides, the
 classification, the floors), so today's gate and the evaluator both see
 the file. The steps of a multi-step operation are still checked with the
 stored policy.
+
+**A stored policy that is not valid.** A stored classification or a
+stored routing that is not valid gives 409 with one sentence that names
+it (`InvalidStoredPolicyError`; for the routing `invalid_routing` in
+`policy/who_approves.py`). A preview in that state still answers: with
+`POLICY_ENGINE_SHADOW` on, its `approvers` is `null` when the routing is
+not valid.
 
 ## How to read a mismatch line
 
@@ -269,6 +296,9 @@ switch off and on.
 - `backend/tests/test_policy_explain.py`: `meho policy explain`: one
   answer per verdict, the floor, the switch off, a file that is not
   imported, a stored request, who may ask, and no audit row or request.
+  `backend/tests/test_policy_explain_access.py`: who sees the policy, the
+  made-up login and its grants, the approver groups of a stored request in
+  both routing states, and a stored routing that is not valid.
   `backend/tests/test_operations_request_preview.py`: the preview's
   `policy_rule` and `approvers`. `cli/internal/cmd/policy/explain_test.go`.
 

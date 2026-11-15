@@ -6,7 +6,9 @@
 A made-up login (:func:`what_if_operator`) has the role and the flags its
 groups give (:func:`~meho_backplane.auth.operator.group_grant`), in the
 caller's tenant, and a ``sub`` that no grant names. So it has no standing
-grant, no agent grant and no read scope.
+grant, no agent grant and no read scope. A question with groups also never
+reads the grants of a hosted agent that acts for the caller
+(:mod:`meho_backplane.policy.explain` unbinds it).
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from meho_backplane.policy.explain_models import ExplainAsker
 __all__ = [
     "READ_ONLY_CANNOT_CALL",
     "WHAT_IF_SUB",
+    "WHAT_IF_SUB_REFUSAL",
     "ExplainInputError",
     "Principal",
     "asker_view",
@@ -41,8 +44,15 @@ READ_ONLY_CANNOT_CALL: Final[str] = (
     "so there is no call to explain."
 )
 
-#: The ``sub`` of a login made up for a question with groups. No grant names it.
+#: The ``sub`` of a login made up for a question with groups. No grant names it:
+#: the agent grants and the standing grants refuse it (:data:`WHAT_IF_SUB_REFUSAL`).
 WHAT_IF_SUB: Final[str] = "policy-explain-what-if"
+
+#: The answer to a grant that names :data:`WHAT_IF_SUB`.
+WHAT_IF_SUB_REFUSAL: Final[str] = (
+    f"principal_sub {WHAT_IF_SUB!r} is the made-up login of `meho policy explain`. "
+    "No grant can name it."
+)
 
 _KIND: Final[dict[Principal, PrincipalKind]] = {
     "person": PrincipalKind.USER,

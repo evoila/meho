@@ -120,6 +120,13 @@ class AuditQueryFilters(BaseModel):
     # returns a trace for. ``False`` keeps the other rows. ``None`` (the
     # default) applies no filter.
     has_trace: bool | None = None
+    # Rows the audit writer marked (#6452). ``full_row_lost=True`` keeps only
+    # the short rows (the database refused the full row); ``text_changed=True``
+    # keeps only the rows where a character or a number was replaced so the
+    # table could store it. ``False`` keeps the other rows. ``None`` (the
+    # default) applies no filter.
+    full_row_lost: bool | None = None
+    text_changed: bool | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     cursor: str | None = None
 

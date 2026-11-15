@@ -10,6 +10,7 @@
   "tests/integration/test_approval_idempotent_retry_pg.py": 4.71,
   "tests/integration/test_approval_presence_race_pg.py": 34.68,
   "tests/integration/test_approval_transactional_transitions_e2e.py": 4.37,
+  "tests/integration/test_audit_row_text_pg.py": 3.0,
   "tests/integration/test_auth_keycloak_client_credentials.py": 33.02,
   "tests/integration/test_broadcast_archive_cursor_pg.py": 9.16,
   "tests/integration/test_broadcast_claim_steps_pg.py": 8.67,

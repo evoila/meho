@@ -89,7 +89,6 @@ _OPERATOR_FLOOR_PAGES: tuple[tuple[str, str, str, str], ...] = (
     ("GET", "/ui/broadcast/feed", "GET", "/api/v1/broadcast/recent"),
     ("GET", "/ui/broadcast/history", "GET", "/api/v1/broadcast/recent"),
     ("GET", "/ui/broadcast/stream", "GET", "/api/v1/feed"),
-    ("GET", "/ui/broadcast/event/{audit_id}", "GET", "/api/v1/audit/show/{audit_id}"),
     ("GET", "/ui/agents", "GET", "/api/v1/agents"),
     ("GET", "/ui/agents/{name}", "GET", "/api/v1/agents/{name}"),
     ("GET", "/ui/agents/principals", "GET", "/api/v1/agent-principals"),

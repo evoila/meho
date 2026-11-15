@@ -66,7 +66,7 @@ Your package imports MEHO only through one module:
 import meho_connector_kit as kit
 ```
 
-The kit version this page describes: **1.3**.
+The kit version this page describes: **1.4**.
 
 The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
@@ -91,6 +91,7 @@ part that starts with an underscore is private by its name too.
 | Answers | `AuthModel` | How a target logs in. |
 | Errors | `ConnectorUpstreamError` | The vendor answered with an error status. |
 | Errors | `ConnectorAuthError` | The vendor refused the credential. |
+| Errors | `ConnectorOwnMessage` | Mark an error type whose message the connector wrote itself, so MEHO shows it also for an operation that sends a secret. |
 | Errors | `CredentialsReadError` | MEHO could not read the target's secret. |
 | Errors | `VaultCredentialsReadError` | MEHO could not read the target's secret from Vault. |
 | Errors | `VaultClientError` | MEHO could not log in to Vault for the caller. |
@@ -138,6 +139,13 @@ operations you register, not `execute`.
 - **Errors.** Raise `kit.ConnectorUpstreamError` when the vendor answers
   with an error, and `kit.ConnectorAuthError` when it refuses the
   credential. A failed read must never look like an empty answer.
+  For an operation that sends a secret, MEHO hides every error text,
+  because vendor text may hold the secret. When your error message is a
+  fixed sentence you wrote yourself, add `kit.ConnectorOwnMessage` as a
+  base class of the error type, and MEHO shows the message. Never put
+  vendor text, a call input or a secret into such a message. A package
+  that uses `kit.ConnectorOwnMessage` needs kit 1.4 or higher:
+  `meho-connector-kit>=1.4,<2`.
 - **Version range.** Set `supported_version_range` (for example
   `">=1.0,<2.0"`) to the product versions the connector is built for. When no
   range applies, for example for a cloud API with no product version, leave

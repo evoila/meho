@@ -10,7 +10,7 @@ checked-out content, and for a fork `pull_request` event the fork's own
 copy of the workflow body) on internal infrastructure — the class of
 self-hosted-runner risk GitHub documents in its secure-use reference.
 
-The finding (meho-internal#268) was that the fix for this had only been
+The finding  was that the fix for this had only been
 applied to the principal CI file: `migration-compat.yml`,
 `dependency-license-check.yml`, `readme-version-check.yml`,
 `secret-scan.yml` and `security-scan.yml` scheduled the internal pool on
@@ -502,9 +502,9 @@ def test_contributing_fork_steps_start_a_ci_run() -> None:
     # The maintainer pushes the exact commit they read, not the fork branch.
     assert "git push origin <full-sha>:refs/heads/ci/pr-<number>" in section
     triggers = _triggers(_load_workflow(_WORKFLOWS_DIR / "ci.yml"))
-    # A pushed ci/pr-<number> branch alone starts no run; the draft pull
-    # request does.
-    assert triggers["push"]["branches"] == ["main"]
+    # A pushed ci/pr-<number> branch starts no run, because ci.yml has no
+    # push trigger; the draft pull request starts the run.
+    assert "push" not in triggers
     assert "workflow_dispatch" not in triggers
 
 

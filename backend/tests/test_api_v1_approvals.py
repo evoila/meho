@@ -786,7 +786,7 @@ def test_show_returns_reviewer_context(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
-# meho-internal#289 — the approval DECISION verbs are human-only on every
+# the approval DECISION verbs are human-only on every
 # transport. An agent principal is minted ``tenant_admin`` with the REST
 # audience, so it clears ``require_approvals_access``; the human-only guard
 # must still refuse it (approve / reject / decide), while a human operator

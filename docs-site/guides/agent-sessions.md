@@ -294,6 +294,7 @@ use the session routes.
 | Upload own sessions | `read_only` | `meho sessions push`, `POST /api/v1/sessions` |
 | List sessions | `operator` | `meho sessions list`, `GET /api/v1/sessions` |
 | Read a session | `operator` | `meho sessions show`, `GET /api/v1/sessions/{session_id}` |
+| Download a session as whole files | `operator` | `meho sessions get <session-id> <folder>`, `GET /api/v1/sessions/{session_id}/uploads/{seq}` |
 | Delete a session | `tenant_admin` | `meho sessions delete`, `DELETE /api/v1/sessions/{session_id}` |
 | Open an upload in quarantine | `tenant_admin` | `GET /api/v1/sessions/{session_id}/uploads/{seq}` |
 | Read or set the retention period | `tenant_admin` | `GET` / `PUT /api/v1/sessions/retention` |
@@ -335,6 +336,9 @@ A quarantined upload is stored, with the known secrets replaced. Only a
 tenant admin can download it. An operator gets
 `403 session_upload_quarantined`, and MEHO writes an audit row for the
 refused download. `meho sessions show` marks the upload as in quarantine.
+`meho sessions get` skips it for an operator and says so. A file that
+needs the skipped upload is written only up to it, and is marked
+incomplete.
 
 ## Related
 

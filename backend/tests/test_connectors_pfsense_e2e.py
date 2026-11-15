@@ -324,7 +324,7 @@ _DANGEROUS_OP_IDS: frozenset[str] = frozenset(
     }
 )
 
-#: The parameterized read op (meho-internal#252). ``safe`` like the rest of
+#: The parameterized read op. ``safe`` like the rest of
 #: the read surface, but it takes real params (``sanctioned_src`` /
 #: ``mgmt_nets`` are required), so it is held separate from the empty-params
 #: dispatch/audit sweep (covered by ``test_connectors_pfsense_ops.py``).

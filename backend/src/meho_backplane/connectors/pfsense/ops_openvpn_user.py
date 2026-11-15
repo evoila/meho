@@ -23,7 +23,9 @@ The create steps
 ----------------
 
 1. The Vault target is checked against the caller's tenant path, before
-   the firewall is touched.
+   the firewall is touched. Then ``/etc/version`` is read: a pfSense
+   release other than 2.7.2, the one release whose sources the fragment is
+   checked against, is refused (``version_not_checked``).
 2. ``config.xml`` is read. A user with that name already there is left
    alone (``exists``; safe to run twice and no password is made).
 3. The Vault path is checked, still before any change: it must not be the
@@ -82,22 +84,22 @@ with any permission, and for the user the target's SSH login uses. It
 refuses ``rules_remain`` while a firewall rule carries the user's tag
 ``meho-vpn-user:<name>`` (see
 :mod:`~meho_backplane.connectors.pfsense.ops_openvpn_rule`), or while a
-rule on the OpenVPN tab has the user's fixed tunnel address as its source,
-tagged or not. ``force`` does not skip this: such a rule grants access by
-tunnel address, and the delete frees that address for the next user. Then
-it asks every enabled user-login OpenVPN server for its connected clients
-through the server's management socket (``status 2``), then plays back one
-fragment. The fragment counts these rules again and changes nothing when
-there are any (``MEHO_VPN_RULES_REMAIN``), with the override addresses as
-they are at that moment. It checks groups and permissions again too
-(``MEHO_VPN_PROTECTED``, refused as ``protected``). It also refuses a name that is a
-system account or group of the firewall (a line in ``/etc/passwd`` with
-another ``uid``, or a line in ``/etc/group``), and any name when it cannot
-read these files: ``local_user_del()`` would remove that system account.
-Else it does ``openvpn_delete_csc()`` and removal of each override with
-that common name, ``local_user_del()``, removal of the user,
-``write_config()``. A server whose answer cannot be read counts as
-unknown, not as "nobody connected": the call is refused
+rule on any interface tab has a source that holds the user's fixed tunnel
+address (the address, a network or an alias with it), tagged or not. ``force``
+does not skip this: such a rule grants access by tunnel address, and the
+delete frees that address for the next user. Then it asks every enabled
+user-login OpenVPN server for its connected clients through the server's
+management socket (``status 2``), then plays back one fragment. The
+fragment counts these rules again and changes nothing when there are any
+(``MEHO_VPN_RULES_REMAIN``), with the override addresses as they are at that
+moment. It checks groups and permissions again too (``MEHO_VPN_PROTECTED``,
+refused as ``protected``). It also refuses a name that is a system account
+or group of the firewall (a line in ``/etc/passwd`` with another ``uid``, or
+a line in ``/etc/group``), and any name when it cannot read these files:
+``local_user_del()`` would remove that system account. Else it does
+``openvpn_delete_csc()`` and removal of each override with that common name,
+``local_user_del()``, removal of the user, ``write_config()``. A server whose
+answer cannot be read counts as unknown, not as "nobody connected": the call is refused
 (``connection_unknown``) unless ``force`` is given. After the write the
 handler reads ``config.xml`` again and checks that the user and its
 overrides are gone and every other user and override is unchanged. The
@@ -136,8 +138,13 @@ from meho_backplane.connectors.pfsense.ops import PfSenseOp
 from meho_backplane.connectors.pfsense.ops_config_reads import _parse_config_root
 from meho_backplane.connectors.pfsense.ops_filter_rule import parse_filter_rules_xml
 from meho_backplane.connectors.pfsense.ops_openvpn_rule import rule_tag
+from meho_backplane.connectors.pfsense.ops_openvpn_user_rules import (
+    rules_reaching,
+    source_check_php,
+)
 from meho_backplane.connectors.pfsense.ops_read import _xml_text
 from meho_backplane.connectors.pfsense.ops_user_write import (
+    USER_NAME_RE,
     _refusal,
     _user_rows,
 )
@@ -192,10 +199,8 @@ _DOT_NAME_MARKER: Final = "MEHO_VPN_DOT_NAME"
 _REMOVED_MARKER: Final = "MEHO_VPN_REMOVED"
 _REMOVED_RE: Final = re.compile(rf"^{_REMOVED_MARKER}\s*$", re.MULTILINE)
 
-#: A pfSense user name (``USER_NAME_RE`` of ``ops_user_write``) that does not start with a dot.
-#: pfSense makes the home directory ``/home/<name>`` for a new user and a
-#: delete removes it, so ``.``, ``..`` or ``.x`` must never be used.
-_VPN_USER_NAME_RE: Final = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,31}$")
+#: The one user name rule of every pfSense user operation (``ops_user_write``).
+_VPN_USER_NAME_RE: Final = USER_NAME_RE
 
 _MOUNT_RE: Final = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _VAULT_PATH_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
@@ -203,6 +208,9 @@ _VAULT_FIELD_RE: Final = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _DEFAULT_MOUNT: Final = "secret"
 _DEFAULT_FIELD: Final = "password"
 _CREATE_OP_ID: Final = "pfsense.openvpn.user.create"
+# The releases whose sources the create fragment was checked against (see
+# "Versions read" in docs/codebase/connectors-pfsense.md).
+_CREATE_RELEASES: Final = ("2.7.2",)
 _DELETE_OP_ID: Final = "pfsense.openvpn.user.delete"
 
 
@@ -381,11 +389,12 @@ def build_user_delete_playback(name: str, addresses: Iterable[str] = ()) -> str:
     Acts only when exactly one user has the name, it is not uid 0, the name
     is not a system account or group of the firewall, the user has no
     permission and is in no group other than ``all``, and no firewall rule
-    carries the user's tag or has one of the user's fixed tunnel addresses
-    as its source on the OpenVPN tab. These addresses are *addresses* (from
-    the handler's read) and the addresses of the user's overrides as they
-    are now. It prints ``MEHO_VPN_PROTECTED`` for a group or permission and
-    ``MEHO_VPN_RULES_REMAIN=<count>`` for remaining rules, and changes nothing.
+    carries the user's tag or has a source that holds one of the user's fixed
+    tunnel addresses, on any interface tab (see the rules module). These
+    addresses are *addresses* (from the handler's read) and the addresses of
+    the user's overrides as they are now. It prints ``MEHO_VPN_PROTECTED`` for
+    a group or permission and ``MEHO_VPN_RULES_REMAIN=<count>`` for remaining
+    rules, and changes nothing.
     """
     hosts = [str(ipaddress.IPv4Address(a)) for a in addresses]
     return _build_user_remove_playback(name, uid=None, addresses=hosts)
@@ -449,16 +458,12 @@ def _build_user_remove_playback(name: str, *, uid: str | None, addresses: list[s
         "    }",
         "  }",
         "}",
+        *source_check_php(),
         f"if (isset({rules}) && is_array({rules})) {{",
         f"  foreach ({rules} as $meho_r) {{",
-        "    $meho_if = isset($meho_r['interface'])",
-        "        ? explode(',', (string)$meho_r['interface']) : array();",
-        "    $meho_src = isset($meho_r['source']['address'])",
-        "        ? (string)$meho_r['source']['address'] : '';",
         "    if ((isset($meho_r['descr'])",
         f"        && trim((string)$meho_r['descr']) === {_php_squote(rule_tag(name))})",
-        "        || (in_array('openvpn', $meho_if, true)",
-        "        && in_array($meho_src, $meho_sources, true))) {",
+        "        || $meho_reach($meho_r['source'] ?? null)) {",
         "      $meho_tagged++;",
         "    }",
         "  }",
@@ -555,8 +560,32 @@ async def _target_secret_paths() -> set[str]:
     return found
 
 
+def _mount_is_kv2(answer: Any) -> bool:
+    """``True`` when the answer of ``sys/internal/ui/mounts/<mount>`` says KV version 2."""
+    body = answer.get("data") if isinstance(answer, dict) else None
+    if not isinstance(body, dict) or body.get("type") != "kv":
+        return False
+    options = body.get("options")
+    return isinstance(options, dict) and str(options.get("version")) == "2"
+
+
+def _not_kv2(mount: str, path: str) -> PfSenseRefusedError:
+    return PfSenseRefusedError(
+        _CREATE_OP_ID,
+        "vault_version_unknown",
+        f"Vault did not say that the mount {mount!r} is KV version 2, or gave no version "
+        f"number for {mount}/{path}. Nothing changed.",
+    )
+
+
 async def _vault_state(operator: Operator, mount: str, path: str) -> tuple[int, dict[str, Any]]:
     """Read ``<mount>/<path>`` with the caller's Vault login: ``(version, data)``.
+
+    First it checks that the mount is KV version 2 (the mount info a token
+    may read for any path it has access to). On a version 1 mount a read of
+    a new path looks like "nothing stored yet", so the answer alone is not
+    enough. A mount that is not version 2, or whose version cannot be read,
+    is refused (``vault_version_unknown``).
 
     ``(0, {})`` when nothing is stored there yet. A latest version that was
     deleted gives its number and no data. An answer without a whole-number
@@ -566,6 +595,11 @@ async def _vault_state(operator: Operator, mount: str, path: str) -> tuple[int, 
     """
     try:
         async with vault_client_for_operator(operator) as client:
+            mount_info = await asyncio.to_thread(
+                client.adapter.get, f"/v1/sys/internal/ui/mounts/{mount}"
+            )
+            if not _mount_is_kv2(mount_info):
+                raise _not_kv2(mount, path)
             try:
                 answer = await asyncio.to_thread(
                     client.secrets.kv.v2.read_secret_version,
@@ -575,6 +609,8 @@ async def _vault_state(operator: Operator, mount: str, path: str) -> tuple[int, 
                 )
             except hvac.exceptions.InvalidPath:
                 return 0, {}
+    except PfSenseRefusedError:
+        raise
     except Exception as exc:
         raise RuntimeError(
             f"reading the Vault path failed ({type(exc).__name__}); nothing changed"
@@ -585,12 +621,7 @@ async def _vault_state(operator: Operator, mount: str, path: str) -> tuple[int, 
     metadata = body.get("metadata")
     version = metadata.get("version") if isinstance(metadata, dict) else None
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
-        raise PfSenseRefusedError(
-            _CREATE_OP_ID,
-            "vault_version_unknown",
-            f"Vault gave no version number for {mount}/{path}; the mount may not be KV "
-            "version 2. Nothing changed.",
-        )
+        raise _not_kv2(mount, path)
     return version, dict(data) if isinstance(data, dict) else {}
 
 
@@ -691,6 +722,25 @@ def _may_exist(name: str) -> str:
     )
 
 
+async def _refuse_unchecked_release(
+    self: PfSenseConnector, target: Any, operator: Operator
+) -> None:
+    """Refuse a firewall whose pfSense release is not in ``_CREATE_RELEASES``."""
+    from meho_backplane.connectors.pfsense.connector import parse_pfsense_version
+
+    proc = await self._run_command(target, "cat /etc/version", operator=operator)
+    stdout = getattr(proc, "stdout", None)
+    text = stdout if isinstance(stdout, str) and proc.exit_status == 0 else ""
+    version = parse_pfsense_version(text)["version"]
+    if (version or "").split("-")[0] not in _CREATE_RELEASES:
+        raise PfSenseRefusedError(
+            _CREATE_OP_ID,
+            "version_not_checked",
+            f"the firewall reports pfSense {version or '(no version)'}; this op is checked "
+            f"only against pfSense {', '.join(_CREATE_RELEASES)}. Nothing changed.",
+        )
+
+
 async def _play_create(
     self: PfSenseConnector, target: Any, name: str, descr: str, operator: Operator
 ) -> str:
@@ -725,6 +775,7 @@ async def pfsense_openvpn_user_create(
     if operator is None:
         raise ValueError("pfsense.openvpn.user.create needs an operator to write to Vault")
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=False)
+    await _refuse_unchecked_release(self, target, operator)
 
     result: dict[str, Any] = {
         "op_class": "write",
@@ -849,6 +900,11 @@ async def _undo_create(
             script_body=build_user_undo_playback(name, uid),
             operator=operator,
         )
+    except asyncio.CancelledError as exc:
+        raise asyncio.CancelledError(
+            f"openvpn.user.create was cancelled again while the new user was removed. "
+            f"{_may_exist(name)}"
+        ) from exc
     except Exception:
         return f"the new user {name!r} could not be removed again. {lost}"
     refused = _system_refusal(_CREATE_OP_ID, name, played)
@@ -933,23 +989,14 @@ def _vpn_addresses(xml_text: str, name: str) -> list[str]:
     return [str(a) for a in sorted(found)]
 
 
-def _has_source(rule: dict[str, Any], addresses: list[str]) -> bool:
-    """``True`` when *rule* is on the OpenVPN tab and its source is one of *addresses*."""
-    if "openvpn" not in (rule.get("interface") or "").split(","):
-        return False
-    try:
-        source = ipaddress.IPv4Network(str(rule.get("source")), strict=False)
-    except ValueError:
-        return False
-    return source.prefixlen == 32 and str(source.network_address) in addresses
-
-
 def _user_rules(xml_text: str, name: str, addresses: list[str]) -> list[str]:
     """Return the ``ridentifier`` of every rule that grants access to *name*'s VPN address.
 
-    That is a rule tagged as *name*'s VPN rule, and a rule on the OpenVPN
-    tab whose source is one of *addresses*, tagged or not. Raises when the
-    rule list cannot be read: unknown is not "no rules".
+    That is a rule tagged as *name*'s VPN rule, and a rule on any interface
+    tab whose source holds one of *addresses* (the address, a network or an
+    alias with it), tagged or not; see
+    :mod:`~meho_backplane.connectors.pfsense.ops_openvpn_user_rules`. Raises
+    when the rule list cannot be read: unknown is not "no rules".
     """
     try:
         stored = parse_filter_rules_xml(xml_text)
@@ -958,10 +1005,11 @@ def _user_rules(xml_text: str, name: str, addresses: list[str]) -> list[str]:
             f"openvpn.user.delete: the firewall rules could not be read: {exc}"
         ) from exc
     tag = rule_tag(name)
+    reaching = {r["position"] for r in rules_reaching(xml_text, stored, addresses)}
     return [
         str(r.get("tracker"))
         for r in stored
-        if (r.get("descr") or "").strip() == tag or _has_source(r, addresses)
+        if (r.get("descr") or "").strip() == tag or r["position"] in reaching
     ]
 
 
@@ -971,7 +1019,8 @@ def _rules_remain(name: str, count: int, trackers: list[str]) -> PfSenseRefusedE
         _DELETE_OP_ID,
         "rules_remain",
         f"{count} firewall rule(s){ids} are tagged {rule_tag(name)!r} or have the user's "
-        "tunnel address as source on the OpenVPN tab, and still grant access by that "
+        "tunnel address in their source (the address, a network or an alias), on any "
+        "interface tab, and still grant access by that "
         "address; nothing changed. Remove them with pfsense.filter.rule.delete first. "
         "force does not skip this check.",
     )
@@ -1401,7 +1450,8 @@ OPENVPN_USER_OPS: tuple[PfSenseOp, ...] = (
                     "field, stored}, guidance}``. The password is never returned; read it "
                     "from Vault. A refusal (``ambiguous``, ``vault_path_is_target_secret``, "
                     "``vault_field_exists``, ``vault_version_unknown``, ``system_name``, "
-                    "``system_names_unreadable``, ``dot_name``) fails the call and changes "
+                    "``system_names_unreadable``, ``dot_name``, ``version_not_checked``: "
+                    "only pfSense 2.7.2 is supported) fails the call and changes "
                     "nothing."
                 ),
                 "next_step": (

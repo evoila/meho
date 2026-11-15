@@ -223,7 +223,22 @@ def test_bad_refs_are_refused_before_any_ssh(ref: str) -> None:
         "/home/agent/.config/environment.d/meho.conf",
         "/home/agent/.local/share/systemd/user/meho.service",
         "/home/agent/.config/plasma-workspace/env/meho.sh",
+        # Files and folders that programs run or load at their start.
+        "/home/agent/.gitconfig",
+        "/home/agent/.config/git/config",
+        "/home/agent/.vimrc",
+        "/home/agent/.inputrc",
+        "/home/agent/.tmux.conf",
+        "/home/agent/.bash_completion",
+        "/home/agent/.config/nvim/init.lua",
+        "/home/agent/.local/bin/tool",
+        "/home/agent/bin/tool",
+        "/home/agent/.local/share/bash-completion/completions/x",
+        "/home/agent/.oh-my-zsh/custom/x.zsh",
+        "/home/agent/.local/lib/python3.12/site-packages/x.pth",
+        "/home/agent/.local/lib/site-packages/x.pth",
         # Names are compared in lower case.
+        "/home/agent/.GitConfig",
         "/home/agent/.BashRC",
         "/home/agent/.SSH/key",
         "/home/agent/.Config/Fish/config.fish",
@@ -250,6 +265,21 @@ def test_places_the_system_runs_are_refused_before_any_ssh(path: str) -> None:
         "/home/agent/.local/share/meho/key",
         "/home/agent/.login-notes",
         "/home/agent/.qmail.bak",
+        "/home/agent/.gitconfig.bak",
+        "/home/agent/.config/git/ignore",
+        "/home/agent/.config/nvim-notes/key",
+        "/home/agent/.local/bin-notes/key",
+        "/home/agent/binx/key",
+        "/home/agent/.vimrc.bak",
+        "/home/agent/.local/lib/python3.12/notes/key",
+        "/home/agent/site-packages/key",
+        "/home/agent/.local/share/bash-completion-notes/key",
+        "/home/agent/.oh-my-zsh-notes/key",
+        # Tools keep their own login here: a secret in these files is normal.
+        "/home/agent/.netrc",
+        "/home/agent/.kube/config",
+        "/home/agent/.docker/config.json",
+        "/home/agent/.npmrc",
     ],
 )
 def test_places_next_to_the_refused_ones_stay_allowed(path: str) -> None:
@@ -326,8 +356,9 @@ def _run_script(
     script: str,
     *,
     home: Path | None = None,
-    owner_uid: str = "99999",
+    owner_uid: str = "4242",
     realpath: str | None = None,
+    awk: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run *script* with the local bash.
 
@@ -335,7 +366,9 @@ def _run_script(
     argument to ``runuser.log`` next to the home, then runs the command (the
     test user already is the owner). The test user plays root. A fake ``id``
     gives a known owner the user id *owner_uid* and fails for an unknown one.
-    *realpath*, when set, is the body of a fake ``realpath``.
+    *realpath*, when set, is the body of a fake ``realpath``. *awk*, when set,
+    is the body of a fake ``awk``, which stands for what ``/etc/login.defs``
+    gives (nothing: the file has no such line).
     """
     env = dict(os.environ)
     if home is not None:
@@ -355,6 +388,8 @@ def _run_script(
         )
         if realpath is not None:
             _fake_tool(fake_bin, "realpath", realpath)
+        if awk is not None:
+            _fake_tool(fake_bin, "awk", awk)
         env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
     return subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True, check=False, env=env
@@ -566,6 +601,72 @@ def test_home_lookup_refuses_a_system_user_as_owner(tmp_path: Path) -> None:
     assert proc.returncode == 5
     assert "===MEHO_SINK_ERR:system-owner===" in proc.stderr
     assert "MEHO_SINK_HOME" not in proc.stdout
+
+
+@_NEEDS_LINUX
+def test_scripts_refuse_an_owner_above_the_normal_user_range(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "nobody"
+    home.mkdir(parents=True)
+    target = home / "key"
+    proc = _run_script(
+        build_secret_sink_script(str(target), getpass.getuser(), b"v"), home=home, owner_uid="65534"
+    )
+    assert proc.returncode == 5
+    assert "===MEHO_SINK_ERR:system-owner===" in proc.stderr
+    assert not target.exists()
+    assert _runuser_log(home) == []
+    proc = _run_script(build_home_lookup_script(getpass.getuser()), home=home, owner_uid="65534")
+    assert proc.returncode == 5
+    assert "===MEHO_SINK_ERR:system-owner===" in proc.stderr
+    assert "MEHO_SINK_HOME" not in proc.stdout
+
+
+@_NEEDS_LINUX
+def test_script_still_writes_for_the_last_normal_user_id(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "seat"
+    home.mkdir(parents=True)
+    target = home / "key"
+    proc = _run_script(
+        build_secret_sink_script(str(target), getpass.getuser(), b"v"), home=home, owner_uid="60000"
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@_NEEDS_LINUX
+def test_script_refuses_the_first_id_above_the_default_range(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "dirsvc"
+    home.mkdir(parents=True)
+    target = home / "key"
+    # The fake awk prints nothing: the host file has no UID_MAX line.
+    script = build_secret_sink_script(str(target), getpass.getuser(), b"v")
+    proc = _run_script(script, home=home, owner_uid="60001", awk="exit 0\n")
+    assert proc.returncode == 5
+    assert "===MEHO_SINK_ERR:system-owner===" in proc.stderr
+    assert not target.exists()
+    assert _runuser_log(home) == []
+
+
+@_NEEDS_LINUX
+def test_script_uses_the_default_when_the_host_file_has_no_uid_max(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "seat"
+    home.mkdir(parents=True)
+    target = home / "key"
+    script = build_secret_sink_script(str(target), getpass.getuser(), b"v")
+    proc = _run_script(script, home=home, owner_uid="60000", awk="exit 0\n")
+    assert proc.returncode == 0, proc.stderr
+
+
+@_NEEDS_LINUX
+def test_script_allows_an_id_above_the_default_when_the_host_raises_uid_max(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home" / "dirsvc"
+    home.mkdir(parents=True)
+    target = home / "key"
+    script = build_secret_sink_script(str(target), getpass.getuser(), b"v")
+    awk = 'case "$*" in *UID_MAX*) echo 70000;; esac\n'
+    proc = _run_script(script, home=home, owner_uid="60001", awk=awk)
+    assert proc.returncode == 0, proc.stderr
 
 
 @_NEEDS_LINUX

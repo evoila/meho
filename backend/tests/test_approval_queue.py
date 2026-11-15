@@ -50,10 +50,10 @@ from starlette.requests import Request
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.delegation import actor_delegation
-from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, RoleGroup, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
-from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._audit import policy_rule_var, work_ref_var
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_handoff import (
     ApprovalExecutionPayload,
@@ -84,6 +84,7 @@ from meho_backplane.operations.approval_queue import (
     reject_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.policy.stamp import RuleStamp
 from meho_backplane.settings import get_settings
 
 # ---------------------------------------------------------------------------
@@ -182,7 +183,7 @@ def _make_operator(
 ) -> Operator:
     # Defaults to a USER (human) principal: deciding a parked op — approve /
     # reject / decide / expire — is a human-only action on every transport
-    # (v0.1-spec §7, meho-internal#289), so ``_check_reviewer_role`` now
+    # (v0.1-spec §7), so ``_check_reviewer_role`` now
     # refuses a machine ``principal_kind`` (agent / service / runner). These
     # service-level tests exercise the reviewer path, so the default reviewer
     # must be human; a test modelling an agent *parker* passes
@@ -726,6 +727,82 @@ async def test_approve_request_writes_decision_audit_row(session: AsyncSession) 
 
 
 @pytest.mark.asyncio
+async def test_request_and_its_audit_row_name_the_policy_rule(session: AsyncSession) -> None:
+    """The bound policy rule lands on the request and its "request" row (#6044).
+
+    The "decision" row stays empty, the same as ``policy_decision``: no gate
+    ran on the approver's task.
+    """
+    requester = _make_operator(sub="requester-sub")
+    reviewer = _make_operator(sub="reviewer-sub")
+    params: dict[str, object] = {}
+    stamp = RuleStamp(
+        source="default", rule_id="person.token", text="a token call waits", policy_version=2
+    )
+    token = policy_rule_var.set(stamp)
+    try:
+        pending = await create_pending_request(
+            session,
+            operator=requester,
+            connector_id="vault-1.x",
+            op_id="vault.kv.write",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+        )
+        await session.commit()
+    finally:
+        policy_rule_var.reset(token)
+
+    async with get_sessionmaker()() as s2:
+        await approve_request(s2, pending.id, operator=reviewer, params=params)
+        await s2.commit()
+
+    async with get_sessionmaker()() as fresh:
+        stored = await fresh.get(ApprovalRequest, pending.id)
+        rows = {row.path: row for row in (await fresh.execute(select(AuditLog))).scalars()}
+    assert stored is not None
+    assert stored.policy_rule == {
+        "source": "default",
+        "rule_id": "person.token",
+        "text": "a token call waits",
+        "decided": False,
+    }
+    assert stored.policy_version == 2
+    assert rows["approval.request"].policy_rule == "default:person.token (shadow)"
+    assert rows["approval.request"].policy_version == 2
+    assert rows["approval.decision"].policy_rule is None
+    assert rows["approval.decision"].policy_version is None
+
+
+@pytest.mark.asyncio
+async def test_request_without_a_bound_rule_leaves_the_columns_empty(
+    session: AsyncSession,
+) -> None:
+    """With the switch off nothing binds a rule, so the columns stay NULL (#6044)."""
+    params: dict[str, object] = {}
+    pending = await create_pending_request(
+        session,
+        operator=_make_operator(sub="requester-sub"),
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as fresh:
+        stored = await fresh.get(ApprovalRequest, pending.id)
+        row = (
+            await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.request"))
+        ).scalar_one()
+    assert stored is not None
+    assert (stored.policy_rule, stored.policy_version) == (None, None)
+    assert (row.policy_rule, row.policy_version) == (None, None)
+
+
+@pytest.mark.asyncio
 async def test_platform_admin_decision_row_names_the_role_source(session: AsyncSession) -> None:
     """A platform admin deciding in a tenant without a role group there (#5239).
 
@@ -759,6 +836,38 @@ async def test_platform_admin_decision_row_names_the_role_source(session: AsyncS
         by_path = {row.path: row.payload for row in rows}
     assert by_path["approval.decision"]["tenant_role_source"] == "platform_admin"
     assert "tenant_role_source" not in by_path["approval.request"]
+
+
+@pytest.mark.asyncio
+async def test_a_decision_row_names_the_bound_kind_of_the_approver(session: AsyncSession) -> None:
+    """The approver's right came from a binding of the policy file."""
+    requester = _make_operator(sub="requester-sub")
+    reviewer = _make_operator(sub="reviewer-sub", role=TenantRole.READ_ONLY).model_copy(
+        update={"approver": True, "bound_kind": RoleGroup.APPROVERS}
+    )
+    params: dict[str, Any] = {}
+    pending = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        await approve_request(s2, pending.id, operator=reviewer, params=params)
+        await s2.commit()
+
+    async with get_sessionmaker()() as fresh:
+        rows = (
+            await fresh.execute(select(AuditLog).where(AuditLog.method == "APPROVAL"))
+        ).scalars()
+        by_path = {row.path: row.payload for row in rows}
+    assert by_path["approval.decision"]["bound_kind"] == "Approvers"
+    assert "bound_kind" not in by_path["approval.request"]
 
 
 @pytest.mark.asyncio

@@ -144,6 +144,8 @@ async def _seed_audit_row(
     raw_payload: object,
     policy: RedactionPolicy | None,
     fingerprint: bool = False,
+    policy_rule: str | None = None,
+    policy_version: int | None = None,
 ) -> uuid.UUID:
     """Insert an audit row mirroring the dispatcher's write contract.
 
@@ -152,7 +154,9 @@ async def _seed_audit_row(
     seeds a pre-G11.4-T2 row (no ``raw_payload`` / ``redaction_policy_id``)
     so the ``REPLAY_NOT_APPLICABLE`` path can be exercised. *fingerprint*
     stores the raw payload the way the dispatcher does: each value the
-    redaction hid is a keyed fingerprint.
+    redaction hid is a keyed fingerprint. *policy_rule* and
+    *policy_version* fill the columns the policy evaluator writes in
+    shadow mode.
     """
     audit_id = uuid.uuid4()
     normalized = normalize_for_audit(raw_payload) if policy is not None else None
@@ -184,6 +188,8 @@ async def _seed_audit_row(
             payload=payload,
             raw_payload=raw_store,
             redaction_manifest=recorded_manifest,
+            policy_rule=policy_rule,
+            policy_version=policy_version,
         ),
     )
     return audit_id
@@ -226,6 +232,39 @@ async def test_match_when_policy_is_deterministic(session: AsyncSession) -> None
     # the bearer token has been removed.
     assert verdict.replayed_redacted is not None
     assert "secret-token" not in str(verdict.replayed_redacted)
+
+
+@pytest.mark.asyncio
+async def test_match_when_row_carries_policy_rule(session: AsyncSession) -> None:
+    """A row with the matched policy rule still replays to an empty diff.
+
+    The policy rule and policy file version are extra columns on the
+    row. Replay reads only the payload and the redaction manifest, so it
+    still matches, and the row keeps both values.
+    """
+    tenant_id = uuid.uuid4()
+    policy = _bearer_policy("test-bearer-rule")
+    register_policy(policy)
+    raw_payload = {"headers": {"Authorization": "Bearer secret-token-aaaabbbbccccdddd"}}
+    audit_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        raw_payload=raw_payload,
+        policy=policy,
+        policy_rule="default:person.safe (shadow)",
+        policy_version=3,
+    )
+    await session.commit()
+
+    verdict = await replay_policy(audit_id, tenant_id=tenant_id, session=session)
+
+    assert verdict.status is PolicyReplayStatus.MATCH
+    assert verdict.missing == ()
+    assert verdict.extra == ()
+    row = await session.get(AuditLog, audit_id)
+    assert row is not None
+    assert row.policy_rule == "default:person.safe (shadow)"
+    assert row.policy_version == 3
 
 
 @pytest.mark.asyncio

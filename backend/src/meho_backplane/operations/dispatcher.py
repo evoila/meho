@@ -322,6 +322,7 @@ from meho_backplane.operations._audit import (
     descriptor_op_class,
     parent_audit_id_var,
     policy_decision_var,
+    policy_rule_var,
     restore_audit_extras,
     reveal_secret_var,
     snapshot_audit_extras,
@@ -422,6 +423,7 @@ from meho_backplane.operations._secret_values import (
 )
 from meho_backplane.operations._target_connector_match import refuse_target_connector_mismatch
 from meho_backplane.operations._target_version_range import refuse_version_outside_range
+from meho_backplane.operations._tls_presented import probe_presented_leaf
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
     InvalidOpSchemaError,
@@ -480,6 +482,7 @@ from meho_backplane.operations.shutdown_drain import (
 )
 from meho_backplane.operations.uncertain_outcome import changes_target
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
+from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -1825,8 +1828,17 @@ async def _run_branch_with_error_handling(
         is_tls_verify_failure = isinstance(conn_exc.__cause__, ssl.SSLCertVerificationError) or (
             "CERTIFICATE_VERIFY_FAILED" in str(conn_exc)
         )
+        presented = (
+            await probe_presented_leaf(
+                getattr(target, "host", None) or "",
+                getattr(target, "port", None),
+                getattr(target, "tls_server_name", None),
+            )
+            if is_tls_verify_failure and getattr(target, "tls_ca_pin", None)
+            else None
+        )
         conn_result = (
-            result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms)
+            result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms, presented)
             if is_tls_verify_failure
             else result_connector_error(op_id, conn_exc, duration_ms)
         )
@@ -3739,39 +3751,47 @@ async def dispatch(
     call is kept in the list of running calls, so the stopping pod can wait
     for it and record it when it does not finish.
     """
-    if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
-        with agent_no_grant_log_scope():
-            return await _dispatch_now(
-                operator=operator,
-                connector_id=connector_id,
+    # #6044: no policy rule until this call's own policy gate runs. A step
+    # of a multi-step operation that is refused before its gate (wrong
+    # target, bad params, rate limit) must not write the parent's rule on
+    # its audit row. The reset puts the parent's rule back.
+    rule_token = policy_rule_var.set(None)
+    try:
+        if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
+            with agent_no_grant_log_scope():
+                return await _dispatch_now(
+                    operator=operator,
+                    connector_id=connector_id,
+                    op_id=op_id,
+                    target=target,
+                    params=params,
+                    _approved=_approved,
+                    preview_hash=preview_hash,
+                    idempotency_key=idempotency_key,
+                )
+        if is_draining() and not _approved:
+            _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
+            return shutting_down_result(op_id)
+        with agent_no_grant_log_scope(new=True):
+            async with track_operation(
                 op_id=op_id,
-                target=target,
-                params=params,
-                _approved=_approved,
-                preview_hash=preview_hash,
-                idempotency_key=idempotency_key,
-            )
-    if is_draining() and not _approved:
-        _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
-        return shutting_down_result(op_id)
-    with agent_no_grant_log_scope(new=True):
-        async with track_operation(
-            op_id=op_id,
-            connector_id=connector_id,
-            operator_sub=operator.sub,
-            tenant_id=operator.tenant_id,
-            approved_run=_approved,
-        ):
-            return await _dispatch_now(
-                operator=operator,
                 connector_id=connector_id,
-                op_id=op_id,
-                target=target,
-                params=params,
-                _approved=_approved,
-                preview_hash=preview_hash,
-                idempotency_key=idempotency_key,
-            )
+                operator_sub=operator.sub,
+                tenant_id=operator.tenant_id,
+                approved_run=_approved,
+            ):
+                return await _dispatch_now(
+                    operator=operator,
+                    connector_id=connector_id,
+                    op_id=op_id,
+                    target=target,
+                    params=params,
+                    _approved=_approved,
+                    preview_hash=preview_hash,
+                    idempotency_key=idempotency_key,
+                )
+    finally:
+        policy_rule_var.reset(rule_token)
 
 
 async def _dispatch_now(
@@ -4061,6 +4081,8 @@ async def _dispatch_now(
                 preview_hash=preview_hash,
                 params=params,
             )
+            # Only while POLICY_ENGINE_SHADOW is on; marked as not deciding.
+            policy_rule_var.set(take_rule())
             # #3980: a child step of an approved multi-step run goes ahead
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:

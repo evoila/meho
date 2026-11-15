@@ -468,8 +468,20 @@ class TargetCreate(BaseModel):
         """
         if value is not None:
             check_target_host(value, str(info.field_name))
-            assert_public_destination(value)
         return value
+
+    @model_validator(mode="after")
+    def _reject_non_public_destination_with_port(self) -> TargetCreate:
+        """Run the SSRF guard with the target's port.
+
+        A ``host:port`` allowlist entry admits a host on that port only,
+        so the guard needs the port. It runs here, after every field is
+        parsed, and screens ``host`` and ``fqdn`` with ``self.port``.
+        """
+        for value in (self.host, self.fqdn):
+            if value is not None:
+                assert_public_destination(value, self.port)
+        return self
 
     @model_validator(mode="after")
     def _ca_pin_excludes_insecure(self) -> TargetCreate:
@@ -618,8 +630,23 @@ class TargetUpdate(BaseModel):
         """
         if value is not None:
             check_target_host(value, str(info.field_name))
-            assert_public_destination(value)
         return value
+
+    @model_validator(mode="after")
+    def _reject_non_public_destination_with_port(self) -> TargetUpdate:
+        """Run the SSRF guard when the body carries its own port.
+
+        A ``host:port`` allowlist entry admits a host on that port only.
+        When the body sends ``port``, the sent ``host`` / ``fqdn`` are
+        screened with it here. When it does not, the port is the stored
+        one, which only the route handler knows, so it screens them in
+        ``_validate_update_body_fields``.
+        """
+        if self.port is not None:
+            for value in (self.host, self.fqdn):
+                if value is not None:
+                    assert_public_destination(value, self.port)
+        return self
 
     @model_validator(mode="after")
     def _ca_pin_excludes_insecure(self) -> TargetUpdate:

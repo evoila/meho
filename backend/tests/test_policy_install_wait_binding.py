@@ -60,7 +60,8 @@ _INSTALL_WAIT = {"classifications": [{"match": {"op": "iwfix.vm.stop"}, "always_
 _TENANT_UNDO = {"classifications": [{"match": {"op": "iwfix.vm.*"}, "always_wait": False}]}
 _REFUSAL = (
     "sets `always_wait: false` on `iwfix.vm.stop`, but `install:classifications[0]` makes it "
-    "always wait for the whole install. A tenant can make more operations wait, not fewer."
+    "always wait for the whole install. A tenant can make more operations wait, not fewer. "
+    "Remove `always_wait: false` from the tenant entry; its other fields can stay."
 )
 
 

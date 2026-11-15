@@ -5475,6 +5475,12 @@
                         "null"
                       ]
                     },
+                    "category": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
                     "cosine_score": {
                       "type": [
                         "number",
@@ -5495,6 +5501,12 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "labels": {
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "type": "object"
                     },
                     "op_id": {
                       "type": "string"
@@ -5565,6 +5577,12 @@
               },
               "operation": {
                 "properties": {
+                  "category": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "connector_id": {
                     "type": "string"
                   },
@@ -5627,6 +5645,12 @@
                       "when_to_use": {
                         "type": "string"
                       }
+                    },
+                    "type": "object"
+                  },
+                  "labels": {
+                    "additionalProperties": {
+                      "type": "string"
                     },
                     "type": "object"
                   },

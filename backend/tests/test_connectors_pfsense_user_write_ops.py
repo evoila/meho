@@ -220,10 +220,9 @@ def test_fragment_touches_only_the_one_users_disabled_element(disable: bool) -> 
         else "unset($config['system']['user'][$meho_idx]['disabled']);"
     )
     assert config_writes == [expected]
-    # Changed only when exactly one user matched and it is not uid 0.
-    assert "$meho_matched === 1 && (string)$config['system']['user'][$meho_idx]['uid'] !== '0'" in (
-        body
-    )
+    # Changed only when exactly one user matched, it is not uid 0 and the name has no leading dot.
+    assert "$meho_dot === 0 && $meho_matched === 1" in body
+    assert "(string)$config['system']['user'][$meho_idx]['uid'] !== '0'" in body
     assert "local_user_set($config['system']['user'][$meho_idx]);" in body
     assert body.count("write_config(") == 1
     assert "filter_configure" not in body

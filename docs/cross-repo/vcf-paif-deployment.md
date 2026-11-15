@@ -89,7 +89,7 @@ backplane's fail-closed posture is not the diagnostic.
   realm; Okta: SuperAdmin on the org; Authentik: realm admin).
 - The MEHO backplane chart already deploys against the cluster
   (chassis-era prerequisites met — see
-  [`docs/cross-repo/rke2-infra-coordination.md`](./rke2-infra-coordination.md)).
+  [`docs/cross-repo/ci-cluster-coordination.md`](./ci-cluster-coordination.md)).
 
 ## Step 1 — Verify PAIF's OpenAI-compat surface is reachable
 

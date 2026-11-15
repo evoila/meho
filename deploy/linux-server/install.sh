@@ -4,7 +4,7 @@
 #
 # install.sh: install form 2 of MEHO on a plain Linux server, with no
 # internet. It runs as root from the unpacked download (form-2 design,
-# section 4, in meho-internal docs/design/2026-10-10-install-forms/).
+# section 4).
 #
 # On a machine without MEHO it runs the six steps of the design (section 5):
 #   1. check the machine                        lib/checks.sh, lib/firewall.sh

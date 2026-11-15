@@ -6,9 +6,8 @@
 The Windows Server role/feature surface is driven by the ``ServerManager``
 module (``Get-WindowsFeature`` / ``Install-WindowsFeature`` /
 ``Uninstall-WindowsFeature``) over the shared PowerShell-over-SSH transport.
-This is the c1sql1 ``Install-WindowsFeature`` path
-(evoila-bosnia/claude-rdc-hetzner-dc#2789) — the Failover-Clustering role
-install that today rides ungoverned ``govc guest.run``.
+It is the governed path for ``Install-WindowsFeature``, for example the
+Failover-Clustering role install on a SQL Server cluster node.
 
 ``install`` is ``caution`` (additive, recoverable). ``remove`` was promoted to
 ``safety_level=dangerous`` + ``requires_approval=True`` by the #3288 operator
@@ -253,7 +252,7 @@ FEATURE_OPS: tuple[WinsrvOp, ...] = (
             "auto-restarts — returns ``restart_needed`` and leaves the reboot "
             "to the approval-gated ``winsrv.power.reboot`` (batch feature "
             "changes, then one governed reboot). safety_level=caution. This "
-            "is the c1sql1 Failover-Clustering install path."
+            "is the path for a Failover-Clustering role install."
         ),
         parameter_schema={
             "type": "object",

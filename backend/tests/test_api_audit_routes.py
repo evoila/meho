@@ -527,12 +527,12 @@ def test_who_touched_builds_target_filter(client: TestClient) -> None:
     ):
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = client.get(
-            "/api/v1/audit/who-touched/rdc-vcenter",
+            "/api/v1/audit/who-touched/example-vcenter",
             headers={"Authorization": f"Bearer {token}"},
         )
     assert resp.status_code == 200
     filters = mock_query.await_args.args[0]
-    assert filters.target == "rdc-vcenter"
+    assert filters.target == "example-vcenter"
     assert filters.since is not None  # default "24h" → datetime
     assert filters.limit == 100
 

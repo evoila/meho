@@ -89,6 +89,8 @@ from pydantic import BaseModel, ConfigDict
 from meho_backplane.auth.approval_sign_in_flow import (
     ApprovalSignInStatus,
     read_approval_sign_in,
+    sign_in_level_for_status,
+    sign_in_level_warning,
 )
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.jwt import verify_jwt_allow_unchosen
@@ -355,7 +357,15 @@ class ApprovalsStatus(BaseModel):
     :func:`meho_backplane.features.build_features_block`; they are state
     words only, never a key value. ``sign_in`` is the state of the
     approval client's own login flow in Keycloak (#6280,
-    :mod:`meho_backplane.auth.approval_sign_in_flow`).
+    :mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``
+    is the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,
+    ``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is
+    what MEHO does now with an approval sign-in that lacks the approval
+    level: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``
+    only while ``sign_in`` shows for sure that the realm does not give the
+    level, and ``required`` when it is ``ok`` or its read failed).
+    ``sign_in_level_warning`` is a short sentence whenever the level is not
+    required in practice or the read failed, else ``None``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -364,6 +374,9 @@ class ApprovalsStatus(BaseModel):
     effective_posture: str
     delegated_decision_posture: str
     sign_in: ApprovalSignInStatus | None = None
+    sign_in_level: str | None = None
+    sign_in_level_in_force: str | None = None
+    sign_in_level_warning: str | None = None
 
 
 class FeatureStatus(BaseModel):
@@ -996,11 +1009,13 @@ def _approvals_and_features() -> tuple[ApprovalsStatus, list[FeatureStatus]]:
     ``/ready`` uses. Only state words and setting *names* leave this
     function; the block itself never carries a key value.
     """
-    block = build_features_block(get_settings())
+    settings = get_settings()
+    block = build_features_block(settings)
     approvals = ApprovalsStatus(
         custody=block["approval_custody"]["custody"],
         effective_posture=block["approval_queue"]["effective_posture"],
         delegated_decision_posture=block["approval_queue"]["delegated_decision_posture"],
+        sign_in_level=settings.approval_sign_in_level,
     )
     features = [
         FeatureStatus(
@@ -1011,6 +1026,18 @@ def _approvals_and_features() -> tuple[ApprovalsStatus, list[FeatureStatus]]:
         for name, entry in block.items()
     ]
     return approvals, features
+
+
+def _with_sign_in(approvals: ApprovalsStatus, sign_in: ApprovalSignInStatus) -> ApprovalsStatus:
+    """Add the approval sign-in state and what it means for the approval level (#6281)."""
+    mode = approvals.sign_in_level or "auto"
+    return approvals.model_copy(
+        update={
+            "sign_in": sign_in,
+            "sign_in_level_in_force": sign_in_level_for_status(mode, sign_in),
+            "sign_in_level_warning": sign_in_level_warning(mode, sign_in),
+        }
+    )
 
 
 async def build_health_response(operator: Operator) -> HealthResponse:
@@ -1037,7 +1064,7 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     vault_status = await _federation_status_for(operator, log)
     db_state = await db_migration_status()
     approvals, features = _approvals_and_features()
-    approvals = approvals.model_copy(update={"sign_in": await read_approval_sign_in()})
+    approvals = _with_sign_in(approvals, await read_approval_sign_in())
     return HealthResponse(
         operator=_operator_identity(operator),
         vault=vault_status,

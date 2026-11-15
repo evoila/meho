@@ -59,7 +59,9 @@ When two or more connectors advertise support for a target's
    resolves. The wildcard candidate matches its product regardless of
    the class's ``supported_version_range`` attribute -- the empty
    ``(version, impl_id)`` slot in the registry key *is* the wildcard
-   signal (see :func:`_filter_candidates`). When the wildcard and ≥1
+   signal (see :func:`_filter_candidates`). The one exception is a class
+   with ``strict_version_range``: its wildcard does not match a known
+   version outside its range (a probe skips that check). When the wildcard and ≥1
    versioned entries share a candidate slot, the wildcard is
    *demoted* (removed from the candidate list) before the rest of
    the ladder runs. The wildcard is conceptually "matches any
@@ -126,6 +128,7 @@ to make the binding visible in ``pyproject.toml``.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -155,6 +158,10 @@ __all__ = [
 ResolutionLabel = str  # one of "no_connector" / "ambiguous_connector"
 
 _log = structlog.get_logger(__name__)
+
+# The leading release number of a version string, such as ``13.16`` in
+# ``13.16 (Debian 13.16-1.pgdg120+1)``.
+_LEADING_VERSION = re.compile(r"\s*v?(\d+(?:\.\d+)*)")
 
 
 # N818: the Error-suffix naming convention is intentionally violated —
@@ -303,7 +310,7 @@ def _version_to_float(v: Version) -> float:
 # ---------------------------------------------------------------------------
 
 
-def resolve_connector(target: Any) -> type[Connector]:
+def resolve_connector(target: Any, *, for_probe: bool = False) -> type[Connector]:
     """Resolve a :class:`Target` to the best registered connector class.
 
     Reads ``target.product`` and (when available)
@@ -313,6 +320,11 @@ def resolve_connector(target: Any) -> type[Connector]:
     Returns the connector **class** — the dispatcher instantiates it.
     Tests can supply a duck-typed target with ``.product`` and a
     ``.fingerprint`` exposing ``.version`` (or ``None``).
+
+    ``for_probe=True`` is for a call that only detects the target's product
+    and version. It skips the range check of a class with
+    :attr:`~meho_backplane.connectors.base.Connector.strict_version_range`,
+    so a target can be probed again after its system was upgraded.
 
     Raises
     ------
@@ -330,11 +342,13 @@ def resolve_connector(target: Any) -> type[Connector]:
     target_version = resolve_target_version(target)
     preferred_impl_id = getattr(target, "preferred_impl_id", None)
 
-    candidates = _filter_candidates(product, target_version, _target_tenant(target))
+    tenant_id = _target_tenant(target)
+    candidates = _filter_candidates(product, target_version, tenant_id, strict=not for_probe)
 
     if not candidates:
         raise NoMatchingConnector(
             f"no connector advertises support for (product={product!r}, version={target_version!r})"
+            + _supported_ranges_hint(product, tenant_id)
         )
 
     winner, reason, remaining = _run_tie_break_ladder(candidates, preferred_impl_id)
@@ -606,19 +620,61 @@ def _target_tenant(target: Any) -> UUID | None:
     return tenant_id if isinstance(tenant_id, UUID) else None
 
 
+def _supported_ranges_hint(product: str, tenant_id: UUID | None) -> str:
+    """The version ranges the connectors of *product* declare, for an error message."""
+    ranges = sorted(
+        {
+            f"{cls.impl_id or cls.product} supports {cls.supported_version_range}"
+            for (entry_product, _v, _i), cls in connectors_for_tenant(tenant_id).items()
+            if entry_product == product and cls.supported_version_range
+        }
+    )
+    return f"; {'; '.join(ranges)}" if ranges else ""
+
+
+def _version_in_range(version: Version | None, spec_str: str | None) -> bool:
+    """Whether *version* is inside *spec_str*; ``True`` when either is unknown."""
+    if version is None or not spec_str:
+        return True
+    try:
+        return version in SpecifierSet(spec_str)
+    except InvalidSpecifier:
+        return True
+
+
+def _parse_version(version: str | None) -> Version | None:
+    """*version* as a :class:`Version`; ``None`` when unknown or not parseable.
+
+    A version with build text after the number, such as PostgreSQL's
+    ``13.16 (Debian 13.16-1.pgdg120+1)``, is read by its leading number, so
+    the range check sees ``13.16`` and not an unknown version.
+    """
+    if version is None:
+        return None
+    try:
+        return Version(version)
+    except InvalidVersion:
+        pass
+    leading = _LEADING_VERSION.match(version)
+    if leading is None:
+        return None
+    try:
+        return Version(leading.group(1))
+    except InvalidVersion:
+        return None
+
+
+def _wildcard_fits(cls: type[Connector], version: Version | None) -> bool:
+    """Whether the wildcard row of *cls* fits a target of *version*."""
+    return not cls.strict_version_range or _version_in_range(version, cls.supported_version_range)
+
+
 def _filter_candidates(
-    product: str, target_version: str | None, tenant_id: UUID | None
+    product: str, target_version: str | None, tenant_id: UUID | None, *, strict: bool = True
 ) -> list[_Candidate]:
     """Enumerate the registry entries *tenant_id* sees that match ``product`` and version."""
     out: list[_Candidate] = []
-    parsed_target_version: Version | None
-    if target_version is not None:
-        try:
-            parsed_target_version = Version(target_version)
-        except InvalidVersion:
-            parsed_target_version = None
-    else:
-        parsed_target_version = None
+    parsed_target_version = _parse_version(target_version)
 
     for key, cls in connectors_for_tenant(tenant_id).items():
         entry_product, entry_version, entry_impl_id = key
@@ -639,8 +695,12 @@ def _filter_candidates(
         # version is known. The resolver's
         # ``versioned_over_wildcard`` tie-break (step 1 in
         # :func:`_run_tie_break_ladder`) ensures the versioned candidate
-        # wins whenever both are present.
+        # wins whenever both are present. A class with
+        # ``strict_version_range`` keeps its fallback for an unknown version
+        # only: a known version outside its range does not match.
         if entry_version == "" and entry_impl_id == "":
+            if strict and not _wildcard_fits(cls, parsed_target_version):
+                continue
             out.append(
                 _Candidate(
                     product=entry_product,
@@ -712,11 +772,13 @@ def _select(
 
 
 def resolve_connector_or_label(
-    target: Any,
+    target: Any, *, for_probe: bool = False
 ) -> tuple[type[Connector] | None, ResolutionLabel | None, str | None]:
     """Run :func:`resolve_connector` and translate exceptions to labels.
 
     Returns a 3-tuple ``(cls, label, exc_message)``:
+
+    *for_probe* is passed to :func:`resolve_connector`.
 
     * ``(cls, None, None)`` — resolver picked a class.
     * ``(None, "no_connector", message)`` — :exc:`NoMatchingConnector`
@@ -744,7 +806,7 @@ def resolve_connector_or_label(
     The pre-G0.14 ``/probe`` route used the v1 :func:`get_connector`
     lookup and the dispatcher used the v2 :func:`resolve_connector` —
     same target, two different yes/no answers (consumer feedback signal
-    19, `claude-rdc-hetzner-dc#697`). This helper is the shared code
+    19). This helper is the shared code
     path that closes that asymmetry: both callers now ask
     :func:`resolve_connector` the same way, and the labels above are the
     only output shape they can branch on.
@@ -761,7 +823,7 @@ def resolve_connector_or_label(
     doesn't need one) make that decision *before* calling this helper.
     """
     try:
-        cls = resolve_connector(target)
+        cls = resolve_connector(target, for_probe=for_probe)
     except NoMatchingConnector as exc:
         return None, "no_connector", str(exc)
     except AmbiguousConnectorResolution as exc:

@@ -169,7 +169,7 @@ class FetchMoreDrillIn(BaseModel):
     was skipped or failed (no tenant-scoped dispatch, store unreachable),
     ``available`` stays ``False`` and ``rationale`` names the
     narrower-params workaround. The contract is self-documenting per the
-    consumer's recommendation in ``claude-rdc-hetzner-dc#753``: *"the
+    consumer's recommendation: *"the
     reduced response itself should tell the agent how to fetch more"*.
 
     ``rationale`` is the operator/agent-facing string explaining the

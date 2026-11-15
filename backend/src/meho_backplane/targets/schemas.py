@@ -452,7 +452,7 @@ class TargetCreate(BaseModel):
     @field_validator("host", "fqdn")
     @classmethod
     def _reject_non_public_destination(cls, value: str | None, info: ValidationInfo) -> str | None:
-        """SSRF guard (evoila-bosnia/meho-internal#153).
+        """SSRF guard.
 
         :func:`check_target_host` runs first and refuses a malformed host.
 
@@ -609,7 +609,7 @@ class TargetUpdate(BaseModel):
     @field_validator("host", "fqdn")
     @classmethod
     def _reject_non_public_destination(cls, value: str | None, info: ValidationInfo) -> str | None:
-        """SSRF guard (evoila-bosnia/meho-internal#153) — same as create.
+        """SSRF guard — same as create.
 
         ``None`` is the PATCH absent-marker and passes untouched; a
         non-null ``host``/``fqdn`` is screened exactly like

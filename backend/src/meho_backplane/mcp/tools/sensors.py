@@ -266,9 +266,9 @@ register_mcp_tool(
             "'sensor_connector_mismatch' and a warning that names the "
             "connector that fits). A duplicate name -> "
             "'sensor_name_conflict'. "
-            "There is no update/pause path -- status is server-initialized "
-            "to 'active' at create (clients cannot supply it) and "
-            "set to 'paused' only by the check runner. "
+            "A new sensor starts 'active' (clients cannot supply status). "
+            "meho_sensor_pause and meho_sensor_resume pause and resume it; "
+            "the check runner also pauses it after a few refused logins. "
             "Response: {sensor_id, sensor: {...}}; sensor.connector_fit "
             "holds the target's product, version and any warning."
         ),

@@ -673,12 +673,12 @@ router = APIRouter(prefix="/api/v1", tags=["health"])
 #: Module-level dependency singleton (sibling-router convention, and
 #: what keeps ruff B008 happy): resolves the OPERATOR rank once at
 #: import time so a typo'd role fails at boot, not per-request.
-_operator_role_check = require_role(TenantRole.OPERATOR)
-
 #: The lowest role that runs the credential-backend check. It is the role
 #: :func:`authenticated_health` requires, so REST and the ``meho_status``
 #: MCP tool agree on who runs it.
 _FEDERATION_CHECK_ROLE: TenantRole = TenantRole.OPERATOR
+
+_operator_role_check = require_role(_FEDERATION_CHECK_ROLE)
 
 #: The ``vault`` answer for a caller below :data:`_FEDERATION_CHECK_ROLE`.
 _FEDERATION_NOT_CHECKED_FOR_ROLE = VaultStatus(

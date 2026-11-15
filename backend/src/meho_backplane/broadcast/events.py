@@ -223,8 +223,7 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
 #:
 #: The hazard is on the **read** side. ``classify_op`` is re-run at render
 #: time against the stored op-id by the audit drawer
-#: (:mod:`meho_backplane.ui.routes.audit.routes`) and the broadcast event
-#: drawer (:mod:`meho_backplane.ui.routes.broadcast.event`), where it
+#: (:mod:`meho_backplane.ui.routes.audit.routes`), where it
 #: supplies the row's displayed class and badge and feeds
 #: :func:`~meho_backplane.ui.routes.broadcast.aggregate_gate.is_aggregate_only`.
 #: A prefix branch would therefore relabel every gateway row as

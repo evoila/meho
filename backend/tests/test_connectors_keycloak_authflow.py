@@ -606,12 +606,12 @@ async def test_refused_binding_says_what_the_run_changed(kc: KeycloakConnector, 
     assert extras["exception_class"] == "KeycloakMissingRightsError"
     for text in (extras["exception_message"], extras["remediation"]):
         assert "stopped half-way" in text
-        assert repr(_FLOW) in text
         assert repr(_FLOW_ID) in text
         assert f"flow_created={'true' if made else 'false'}" in text
         assert "refused (HTTP 403) to bind it to the client" in text
     assert "<truncated>" not in extras["exception_message"]
     remediation = extras["remediation"]
+    assert repr(_FLOW) in remediation
     assert "(client 'meho-cli-approve')" in remediation
     if made:
         assert "These stay in the realm: the flow, the level setting." in remediation
@@ -683,6 +683,58 @@ async def test_refused_flow_write_says_the_flow_may_be_half_made(
     assert "Delete it in Keycloak before you run the operation again" in remediation
     assert "Nothing was changed" not in remediation
     assert kc._admin_tokens == {}
+
+
+async def test_refused_read_inside_a_step_is_named_as_a_read(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(flow_steps=_good_steps(), client=_client())
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        # The level step's settings are read only inside the step. (A route
+        # with the same pattern replaces the fake's.)
+        mock.get(path__regex=rf"^{_ADMIN}/authentication/config/[^/]+$").respond(403)
+        result = await _run(_FLOW_OP, {})
+    extras = result["extras"]
+    assert extras["exception_class"] == "KeycloakMissingRightsError"
+    for text in (extras["exception_message"], extras["remediation"]):
+        assert (
+            "refused (HTTP 403) to read what is needed to write the settings of the level step"
+            in text
+        )
+    assert "<truncated>" not in extras["exception_message"]
+    assert "MEHO changed nothing." in extras["remediation"]
+    assert fake.writes == []
+
+
+async def test_refused_read_back_of_the_binding_says_it_was_made(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(flow_steps=_good_steps(), client=_client())
+    reads = 0
+
+    def client(request: httpx.Request) -> httpx.Response:
+        # The read after the client PUT is refused; the reads before it pass.
+        nonlocal reads
+        if request.method == "GET" and fake.writes:
+            reads += 1
+            return httpx.Response(403)
+        return fake._client(request)
+
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        mock.route(path=f"{_ADMIN}/clients/{_CLIENT_UUID}").mock(side_effect=client)
+        result = await _run(_FLOW_OP, {})
+    assert reads == 1
+    extras = result["extras"]
+    assert extras["exception_class"] == "KeycloakMissingRightsError"
+    for text in (extras["exception_message"], extras["remediation"]):
+        assert "refused (HTTP 403) to read back the change MEHO made to bind it to the client" in (
+            text
+        )
+    assert "<truncated>" not in extras["exception_message"]
+    remediation = extras["remediation"]
+    assert (
+        "These stay in the realm: the binding to the client (MEHO could not read it back)."
+        in remediation
+    )
+    assert [path for _, path, _ in fake.writes] == [f"{_ADMIN}/clients/{_CLIENT_UUID}"]
 
 
 async def test_flow_list_that_is_not_a_list_is_an_error(kc: KeycloakConnector) -> None:

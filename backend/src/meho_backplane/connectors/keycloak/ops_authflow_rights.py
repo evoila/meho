@@ -52,7 +52,7 @@ import contextlib
 import functools
 import json
 import weakref
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -79,12 +79,14 @@ __all__ = [
     "RIGHTS_CHECKED_AT_CALL",
     "AccountRights",
     "KeycloakMissingRightsError",
+    "ReadBackRefusedError",
     "find_client_uuid",
     "flow_refused_error",
     "missing_rights_error",
     "names_missing_rights",
     "read_account_rights",
     "read_or_write",
+    "reading_back",
     "register_rights_check",
     "rights_text",
 ]
@@ -386,12 +388,33 @@ async def missing_rights_error(
     )
 
 
+class ReadBackRefusedError(httpx.HTTPStatusError):
+    """Keycloak refused (HTTP 403) to read back a change the step made."""
+
+
+@contextlib.contextmanager
+def reading_back() -> Iterator[None]:
+    """Wrap the read back of a change: a 403 there becomes :class:`ReadBackRefusedError`.
+
+    The change was made, so the text of the stop must say so.
+    """
+    try:
+        yield
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403 or isinstance(exc, ReadBackRefusedError):
+            raise
+        raise ReadBackRefusedError(str(exc), request=exc.request, response=exc.response) from exc
+
+
 def read_or_write(exc: httpx.HTTPStatusError, step: str) -> str:
     """Name the refused request as a read or as the *step*.
 
     A refused GET inside a step is a read of what the step needs, not the
-    change of the step.
+    change of the step. A refused read back follows the change of the step:
+    the change was made.
     """
+    if isinstance(exc, ReadBackRefusedError):
+        return f"read back the change MEHO made to {step}"
     try:
         method = exc.request.method
     except RuntimeError:

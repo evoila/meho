@@ -1507,6 +1507,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#team-groups-for-the-policy-file-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Team groups for the policy file (optional)
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3628,6 +3639,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#team-groups-for-the-policy-file-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Team groups for the policy file (optional)
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -4992,6 +5014,28 @@ role. Only the platform admin (usually the first admin) is in it, on
 top of one of the five groups.</p>
 <p>To fill the groups from your company directory instead of by hand, see
 <a href="../login/">Company login</a>.</p>
+<h3 id="team-groups-for-the-policy-file-optional">Team groups for the policy file (optional)<a class="headerlink" href="#team-groups-for-the-policy-file-optional" title="Permanent link">&para;</a></h3>
+<p>The policy file can say which group is which team, in <code>bindings</code>
+(<a href="../../guides/policy-file/#which-login-group-is-which-team">The policy file</a>).
+This needs the setting <code>POLICY_APPROVER_ROUTING</code>. MEHO matches a team
+group by its full path or by a group attribute, never by its short name:
+a short name can belong to more than one group. So the token must carry
+one of the two:</p>
+<ul>
+<li><strong>Full path.</strong> On the <code>groups-claim</code> mapper, turn <strong>Full group path</strong>
+  on. The <code>groups</code> claim then holds <code>/MEHO-Operators/Network</code> instead of
+  <code>Network</code>. A binding names this full path.</li>
+<li><strong>Group attribute.</strong> Give each team group the attribute <code>meho_group</code>,
+  for example <code>&lt;tenant&gt;-network</code>. Add a User Attribute mapper
+  <code>meho-groups</code> (<strong>User Attribute</strong> = <code>meho_group</code>, <strong>Token Claim Name</strong> =
+  <code>meho_groups</code>, <strong>Claim JSON Type</strong> <code>String</code>, <strong>Multivalued</strong> on,
+  <strong>Aggregate attribute values</strong> on, <strong>Add to access token</strong> on). A
+  binding names the value. Leave the person's own <code>meho_group</code> attribute
+  empty, as for the other attributes above.</li>
+</ul>
+<p>A team group inside a role group (for example <code>Network</code> inside
+<code>MEHO-Operators</code>) takes <code>tenant_id</code> and <code>tenant_role</code> from its parent
+group. A binding never changes the role in the token.</p>
 <h2 id="step-6-create-an-operator-user">Step 6 — Create an operator user<a class="headerlink" href="#step-6-create-an-operator-user" title="Permanent link">&para;</a></h2>
 <p>Device-code login requires a real user to approve the request — a
 fresh realm prepared only for service-to-service traffic may not have

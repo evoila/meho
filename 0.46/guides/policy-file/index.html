@@ -2481,6 +2481,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#which-login-group-is-which-team" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which login group is which team
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#rules-that-no-file-can-loosen" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3150,6 +3161,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#which-login-group-is-which-team" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which login group is which team
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#rules-that-no-file-can-loosen" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3265,7 +3287,9 @@ has its own command, <code>meho policy</code>.</p>
 <h2 id="who-approves-routing">Who approves: routing<a class="headerlink" href="#who-approves-routing" title="Permanent link">&para;</a></h2>
 <p>The <code>routing</code> section says which login groups may approve a change that
 waits. It needs the setting <code>POLICY_APPROVER_ROUTING</code> (Helm
-<code>config.policy.approverRouting</code>), off by default.</p>
+<code>config.policy.approverRouting</code>), off by default. This one setting turns on
+both parts: the bindings at sign-in (next section) and the routing at the
+click.</p>
 <div class="highlight"><pre><span></span><code><span class="nt">routing</span><span class="p">:</span>
 <span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">match</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">category</span><span class="p">:</span><span class="w"> </span><span class="nv">network</span><span class="p p-Indicator">}</span>
 <span class="w">    </span><span class="nt">approvers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">SA-Operators</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">Admins</span><span class="p p-Indicator">]</span>
@@ -3299,6 +3323,61 @@ the setting was on keeps today's rule.</p>
 (<code>deploy/policy-profiles/separated-duties.yaml</code>): identity and secret
 changes only Admins approve, network and storage changes only
 SA-Operators and Admins.</p>
+<h2 id="which-login-group-is-which-team">Which login group is which team<a class="headerlink" href="#which-login-group-is-which-team" title="Permanent link">&para;</a></h2>
+<p>A tenant's file can say which login group is which team, in <code>bindings</code>.
+A binding gives a group one of the five group kinds (<code>Readers</code>,
+<code>Operators</code>, <code>SA-Operators</code>, <code>Admins</code>, <code>Approvers</code>) and a set of
+categories.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">bindings</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">match</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">group</span><span class="p">:</span><span class="w"> </span><span class="nv">/MEHO-Operators/Network</span><span class="p p-Indicator">}</span><span class="w">   </span><span class="c1"># the full path of the group</span>
+<span class="w">    </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SA-Operators</span>
+<span class="w">    </span><span class="nt">categories</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">network</span><span class="p p-Indicator">]</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">match</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">attribute</span><span class="p">:</span><span class="w"> </span><span class="s">"&lt;tenant&gt;-storage"</span><span class="p p-Indicator">}</span><span class="w">    </span><span class="c1"># the group attribute meho_group</span>
+<span class="w">    </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Operators</span>
+<span class="w">    </span><span class="nt">categories</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">storage</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+<ul>
+<li>MEHO matches the group by its <strong>full path</strong> or by its <strong>group
+  attribute</strong> <code>meho_group</code>, never by its short name. A short name can
+  belong to more than one group. The login setup must send full paths or
+  the attribute: see <a href="../../install/keycloak-realm/">Keycloak realm setup</a>.</li>
+<li><code>categories: ["*"]</code> means every category.</li>
+<li>A binding never changes a person's base level (read-only, operator or
+  admin). It can only pick between the kinds of that level: <code>Operators</code>
+  or <code>SA-Operators</code>, <code>Readers</code> or <code>Approvers</code>.</li>
+<li>A person whose groups match two kinds in one tenant cannot log in. Fix
+  the bindings or the groups.</li>
+<li>A person whose groups match no binding keeps the kind they have today.</li>
+<li><code>principal: agent</code> or <code>principal: service</code> binds a machine login. It can
+  only get <code>Readers</code>: only a person approves. A runner gets no binding.</li>
+<li>A token whose <code>groups</code> claim is not a list of texts matches no binding.</li>
+<li>When your file has no bindings, MEHO uses the shipped bindings: the
+  groups of the settings <code>JWT_ROLE_GROUPS</code> and <code>JWT_SELF_APPROVER_GROUP</code>,
+  by their full path. They count only for a person whose token has no
+  tenant list (<code>meho_tenants</code>, the older login setup). With a tenant list,
+  the person's entry for the tenant decides, as without bindings.
+  <code>meho policy export</code> shows them.</li>
+<li>A shipped binding takes its kind from the <strong>end</strong> of the group name:
+  <code>Corp-Operators</code> gives <code>Operators</code>. If your site renamed the groups,
+  check that each name ends with its kind. Run <code>meho policy export</code> and
+  read <code>bindings</code>. A group whose name ends with no kind (for example
+  <code>Corp-Read-Only</code>) is not there: write its binding yourself.</li>
+<li><code>meho policy diff</code> and the import compare your file with the <strong>stored</strong>
+  bindings, not the shipped ones. So the first import of an exported file
+  lists the shipped bindings as added. A file without <code>bindings</code> removes
+  the stored ones, and the shipped bindings count again.</li>
+<li>A binding can name any group of the login setup, also a group of
+  another tenant. Who is in that group is then decided by whoever manages
+  it. Bind only groups that your tenant manages. Two admins of the tenant
+  decide the bindings: one imports the file, a second one approves it.</li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Off by default</p>
+<p>Bindings count only while the setting <code>POLICY_APPROVER_ROUTING</code> (Helm
+<code>config.policy.approverRouting</code>) is on. The policy commands, and so
+the import of bindings, also need the setting <code>POLICY_CLASSIFICATION</code>
+(Helm <code>config.policy.classification</code>).</p>
+</div>
 <h2 id="rules-that-no-file-can-loosen">Rules that no file can loosen<a class="headerlink" href="#rules-that-no-file-can-loosen" title="Permanent link">&para;</a></h2>
 <p>MEHO checks each file against these rules. A file that breaks one is
 refused, and the message names the entry and the operation.</p>

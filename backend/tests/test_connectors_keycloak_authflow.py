@@ -11,8 +11,12 @@ What is proven:
 
 * the flow op is ``caution`` with approval and a plain ``write`` on the feed;
   the list is ``safe``;
-* a realm without the flow gets it with the steps of the realm file, and the
-  client gets it as its browser flow; a second run writes nothing;
+* a realm without the flow gets it with the steps of the realm file, the
+  level step gets its settings (level 2, asked for at every sign-in), the
+  realm names level 2 ``meho-approve`` next to its other levels, and the
+  client gets the flow as its browser flow; a second run writes nothing;
+* a level step without settings gets them; one with other settings stops
+  the op; a level map that is not a JSON object stops it;
 * a flow with other steps stops the op, names the difference, and nothing
   is written; a missing client stops the op before anything is written;
 * the binding keeps the client's other settings and reads the binding back;
@@ -64,10 +68,13 @@ _ADMIN = f"/admin/realms/{_REALM}"
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000005621")
 _CLIENT_UUID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 _FLOW_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
-_FLOW = "meho approval sign-in"
-_SUB = "meho approval sign-in - one-time code"
-_FLOW_Q = "meho%20approval%20sign-in"
-_SUB_Q = "meho%20approval%20sign-in%20-%20one-time%20code"
+_FLOW = "meho approval sign-in level"
+_LEVEL = "meho approval sign-in level - level 2"
+_SUB = "meho approval sign-in level - one-time code"
+_FLOW_Q = "meho%20approval%20sign-in%20level"
+_LEVEL_Q = "meho%20approval%20sign-in%20level%20-%20level%202"
+_SUB_Q = "meho%20approval%20sign-in%20level%20-%20one-time%20code"
+_LEVEL_SETTINGS = {"loa-condition-level": "2", "loa-max-age": "0"}
 _MADE_UP_SECRET = "made-up-idp-secret-5621"
 
 
@@ -175,21 +182,43 @@ def _step(
     return row
 
 
-def _good_steps() -> list[dict[str, Any]]:
+def _good_steps(*, settings: str | None = "level-config") -> list[dict[str, Any]]:
+    level_step = _step(1, "conditional-level-of-authentication", "REQUIRED", 0)
+    if settings:
+        level_step["authenticationConfig"] = settings
     return [
-        _step(0, "auth-username-password-form", "REQUIRED", 0),
-        _step(0, _SUB, "CONDITIONAL", 1, flow=True),
-        _step(1, "conditional-user-configured", "REQUIRED", 0),
-        _step(1, "auth-otp-form", "REQUIRED", 1),
+        _step(0, _LEVEL, "CONDITIONAL", 0, flow=True),
+        level_step,
+        _step(1, "auth-username-password-form", "REQUIRED", 1),
+        _step(1, _SUB, "CONDITIONAL", 2, flow=True),
+        _step(2, "conditional-user-configured", "REQUIRED", 0),
+        _step(2, "auth-otp-form", "REQUIRED", 1),
     ]
+
+
+#: The level of each flow's steps in the listing.
+_LEVEL_OF = {_FLOW_Q: 0, _LEVEL_Q: 1, _SUB_Q: 2}
 
 
 class FakeKeycloak:
     """Keeps the realm's flows, steps and the client between requests."""
 
-    def __init__(self, *, flow_steps: list[dict[str, Any]] | None, client: dict[str, Any] | None):
+    def __init__(
+        self,
+        *,
+        flow_steps: list[dict[str, Any]] | None,
+        client: dict[str, Any] | None,
+        levels: str | None = '{"meho-approve":2}',
+        settings: dict[str, str] | None = None,
+    ):
         self.flow_steps = flow_steps
         self.client = client
+        self.realm_attributes: dict[str, str] = {"frontendUrl": "https://kc.test.invalid"}
+        if levels is not None:
+            self.realm_attributes["acr.loa.map"] = levels
+        self.configs: dict[str, dict[str, Any]] = {
+            "level-config": {"alias": _LEVEL, "config": dict(settings or _LEVEL_SETTINGS)}
+        }
         self.writes: list[tuple[str, str, Any]] = []
 
     def mount(self, mock: respx.MockRouter) -> None:
@@ -199,9 +228,38 @@ class FakeKeycloak:
         mock.get(f"{_ADMIN}/clients").mock(side_effect=self._clients)
         mock.route(path=f"{_ADMIN}/clients/{_CLIENT_UUID}").mock(side_effect=self._client)
         mock.route(path=f"{_ADMIN}/authentication/flows").mock(side_effect=self._flows)
+        mock.route(path=_ADMIN).mock(side_effect=self._realm)
+        mock.get(path__regex=rf"^{_ADMIN}/authentication/config/[^/]+$").mock(
+            side_effect=self._config
+        )
+        mock.post(path__regex=rf"^{_ADMIN}/authentication/executions/[^/]+/config$").mock(
+            side_effect=self._add_config
+        )
         mock.route(path__regex=rf"^{_ADMIN}/authentication/flows/[^/]+/executions.*$").mock(
             side_effect=self._executions
         )
+
+    def _realm(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            body = json.loads(request.content)
+            self.writes.append(("PUT", request.url.path, body))
+            self.realm_attributes = body["attributes"]
+            return httpx.Response(204)
+        return httpx.Response(200, json={"realm": _REALM, "attributes": self.realm_attributes})
+
+    def _config(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=self.configs[request.url.path.rsplit("/", 1)[-1]])
+
+    def _add_config(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        self.writes.append(("POST", request.url.path, body))
+        execution = request.url.path.split("/")[-2]
+        assert self.flow_steps is not None
+        for row in self.flow_steps:
+            if row["id"] == execution:
+                row["authenticationConfig"] = f"config-{execution}"
+        self.configs[f"config-{execution}"] = body
+        return httpx.Response(201)
 
     def _clients(self, request: httpx.Request) -> httpx.Response:
         rows = [self.client] if self.client else []
@@ -242,7 +300,7 @@ class FakeKeycloak:
                 if row["id"] == body["id"]:
                     row["requirement"] = body["requirement"]
             return httpx.Response(204)
-        level = 0 if f"/flows/{_FLOW_Q}/" in raw else 1
+        level = _LEVEL_OF[raw.split("/flows/")[1].split("/")[0]]
         index = sum(1 for row in self.flow_steps if row["level"] == level)
         if raw.endswith("/executions/flow"):
             self.flow_steps.append(_step(level, body["alias"], "DISABLED", index, flow=True))
@@ -306,7 +364,7 @@ async def test_unknown_param_is_invalid(kc: KeycloakConnector) -> None:
 async def test_missing_flow_is_made_bound_and_second_run_changes_nothing(
     kc: KeycloakConnector,
 ) -> None:
-    fake = FakeKeycloak(flow_steps=None, client=_client())
+    fake = FakeKeycloak(flow_steps=None, client=_client(), levels='{"meho-touch":3}')
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         fake.mount(mock)
         first = await _run(_FLOW_OP, {})
@@ -317,28 +375,48 @@ async def test_missing_flow_is_made_bound_and_second_run_changes_nothing(
     out = first["result"]
     assert out["flow_created"] is True
     assert out["binding_changed"] is True
+    assert out["level_setting_added"] is True
+    assert out["level_changed"] is True
+    assert out["level_name"] == "meho-approve"
     assert out["flow_id"] == _FLOW_ID
     assert out["browser_flow_id"] == _FLOW_ID
     assert out["previous_browser_flow_id"] is None
     assert [(s["level"], s["step"], s["requirement"]) for s in out["flow_steps"]] == [
-        (0, "auth-username-password-form", "REQUIRED"),
-        (0, _SUB, "CONDITIONAL"),
-        (1, "conditional-user-configured", "REQUIRED"),
-        (1, "auth-otp-form", "REQUIRED"),
+        (0, _LEVEL, "CONDITIONAL"),
+        (1, "conditional-level-of-authentication", "REQUIRED"),
+        (1, "auth-username-password-form", "REQUIRED"),
+        (1, _SUB, "CONDITIONAL"),
+        (2, "conditional-user-configured", "REQUIRED"),
+        (2, "auth-otp-form", "REQUIRED"),
     ]
 
     # The flow and its steps went to the right parents.
     posts = [(path, body) for method, path, body in fake.writes if method == "POST"]
     assert posts[0][1]["alias"] == _FLOW
     assert posts[0][1]["providerId"] == "basic-flow"
-    assert posts[1] == (
-        f"{_ADMIN}/authentication/flows/{_FLOW_Q}/executions/execution",
-        {"provider": "auth-username-password-form"},
+    assert posts[1][0] == f"{_ADMIN}/authentication/flows/{_FLOW_Q}/executions/flow"
+    assert posts[1][1]["alias"] == _LEVEL
+    assert posts[2] == (
+        f"{_ADMIN}/authentication/flows/{_LEVEL_Q}/executions/execution",
+        {"provider": "conditional-level-of-authentication"},
     )
-    assert posts[2][0] == f"{_ADMIN}/authentication/flows/{_FLOW_Q}/executions/flow"
-    assert posts[2][1]["alias"] == _SUB
-    assert posts[3][0] == f"{_ADMIN}/authentication/flows/{_SUB_Q}/executions/execution"
-    assert posts[4][1] == {"provider": "auth-otp-form"}
+    assert posts[3][1] == {"provider": "auth-username-password-form"}
+    assert posts[4][0] == f"{_ADMIN}/authentication/flows/{_LEVEL_Q}/executions/flow"
+    assert posts[4][1]["alias"] == _SUB
+    assert posts[5][0] == f"{_ADMIN}/authentication/flows/{_SUB_Q}/executions/execution"
+    assert posts[6][1] == {"provider": "auth-otp-form"}
+    # The level step got its settings: level 2, asked for at every sign-in.
+    assert posts[7] == (
+        f"{_ADMIN}/authentication/executions/exec-1-0/config",
+        {"alias": _LEVEL, "config": _LEVEL_SETTINGS},
+    )
+
+    # The realm names level 2 and keeps its other levels and attributes.
+    assert json.loads(fake.realm_attributes["acr.loa.map"]) == {
+        "meho-touch": 3,
+        "meho-approve": 2,
+    }
+    assert fake.realm_attributes["frontendUrl"] == "https://kc.test.invalid"
 
     # The binding kept the other override and every other client setting.
     assert fake.client is not None
@@ -352,7 +430,94 @@ async def test_missing_flow_is_made_bound_and_second_run_changes_nothing(
     assert second["status"] == "ok", second
     assert second["result"]["flow_created"] is False
     assert second["result"]["binding_changed"] is False
+    assert second["result"]["level_setting_added"] is False
+    assert second["result"]["level_changed"] is False
     assert len(fake.writes) == writes_after_first
+
+
+async def test_level_step_without_settings_gets_them(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(flow_steps=_good_steps(settings=None), client=_client(browser=_FLOW_ID))
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run(_FLOW_OP, {})
+    assert result["status"] == "ok", result
+    assert result["result"]["level_setting_added"] is True
+    assert fake.writes == [
+        (
+            "POST",
+            f"{_ADMIN}/authentication/executions/exec-1-0/config",
+            {"alias": _LEVEL, "config": _LEVEL_SETTINGS},
+        )
+    ]
+
+
+async def test_level_step_with_other_settings_stops(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(
+        flow_steps=_good_steps(),
+        client=_client(),
+        settings={"loa-condition-level": "2", "loa-max-age": "36000"},
+    )
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run(_FLOW_OP, {})
+    assert result["status"] != "ok"
+    assert "other_steps" in json.dumps(result)
+    assert fake.writes == []
+
+
+async def test_level_map_that_is_not_an_object_stops(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(flow_steps=_good_steps(), client=_client(), levels="[2]")
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run(_FLOW_OP, {})
+    assert result["status"] != "ok"
+    assert "levels_not_object" in json.dumps(result)
+    assert fake.writes == []
+
+
+@pytest.mark.parametrize("steps", [None, "good"], ids=["flow missing", "flow present"])
+@pytest.mark.parametrize(
+    ("levels", "client_attributes", "code", "named"),
+    [
+        ('{"gold":2}', {}, "level_taken", "the name 'gold' already has level 2"),
+        (
+            '{"meho-approve":2}',
+            {"acr.loa.map": '{"gold":1}'},
+            "client_level_map",
+            "the client meho-cli-approve has its own acr.loa.map",
+        ),
+    ],
+    ids=["another name on level 2", "client has its own level map"],
+)
+async def test_a_level_conflict_stops_before_any_write(
+    kc: KeycloakConnector,
+    steps: str | None,
+    levels: str,
+    client_attributes: dict[str, str],
+    code: str,
+    named: str,
+) -> None:
+    client = _client()
+    client["attributes"].update(client_attributes)
+    fake = FakeKeycloak(flow_steps=_good_steps() if steps else None, client=client, levels=levels)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run(_FLOW_OP, {})
+    assert result["status"] != "ok"
+    dumped = json.dumps(result)
+    assert code in dumped
+    assert named in dumped
+    assert fake.writes == []
+
+
+async def test_an_empty_client_level_map_is_no_conflict(kc: KeycloakConnector) -> None:
+    client = _client()
+    client["attributes"]["acr.loa.map"] = "{}"
+    fake = FakeKeycloak(flow_steps=_good_steps(), client=client)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run(_FLOW_OP, {})
+    assert result["status"] == "ok", result
 
 
 async def test_same_steps_and_other_binding_only_binds(kc: KeycloakConnector) -> None:
@@ -370,12 +535,19 @@ async def test_same_steps_and_other_binding_only_binds(kc: KeycloakConnector) ->
 @pytest.mark.parametrize(
     ("steps", "named"),
     [
-        (_good_steps()[:2], "step 3 ('conditional-user-configured') is missing"),
+        (_good_steps()[:4], "step 5 ('conditional-user-configured') is missing"),
         (
-            [*_good_steps()[:3], _step(1, "auth-otp-form", "ALTERNATIVE", 1)],
-            "step 4 is 'auth-otp-form' (ALTERNATIVE",
+            [*_good_steps()[:5], _step(2, "auth-otp-form", "ALTERNATIVE", 1)],
+            "step 6 is 'auth-otp-form' (ALTERNATIVE",
         ),
-        ([*_good_steps(), _step(0, "auth-cookie", "ALTERNATIVE", 2)], "the flow has 5 steps"),
+        ([*_good_steps(), _step(0, "auth-cookie", "ALTERNATIVE", 1)], "the flow has 7 steps"),
+        (
+            [
+                _step(0, "auth-username-password-form", "REQUIRED", 0),
+                _step(0, "meho approval sign-in - one-time code", "CONDITIONAL", 1, flow=True),
+            ],
+            "step 1 is 'auth-username-password-form'",
+        ),
         ([_step(0, "auth-cookie", "ALTERNATIVE", 0), *_good_steps()], "step 1 is 'auth-cookie'"),
     ],
 )
@@ -414,6 +586,66 @@ async def test_binding_that_does_not_read_back_is_an_error(kc: KeycloakConnector
         result = await _run(_FLOW_OP, {})
     assert result["status"] != "ok"
     assert "check_failed" in json.dumps(result)
+
+
+@pytest.mark.parametrize("made", [True, False], ids=["flow made", "flow was there"])
+async def test_refused_binding_says_what_the_run_changed(kc: KeycloakConnector, made: bool) -> None:
+    fake = FakeKeycloak(flow_steps=None if made else _good_steps(), client=_client())
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        # The flow writes answer 2xx; Keycloak refuses only the client PUT.
+        refused = mock.put(f"{_ADMIN}/clients/{_CLIENT_UUID}").respond(
+            403, json={"error": "HTTP 403 Forbidden"}
+        )
+        fake.mount(mock)
+        result = await _run(_FLOW_OP, {})
+
+    assert refused.call_count == 1
+    assert result["status"] == "error", result
+    extras = result["extras"]
+    assert extras["http_status"] == 403
+    assert extras["exception_class"] == "KeycloakMissingRightsError"
+    for text in (extras["exception_message"], extras["remediation"]):
+        assert "stopped half-way" in text
+        assert repr(_FLOW) in text
+        assert repr(_FLOW_ID) in text
+        assert f"flow_created={'true' if made else 'false'}" in text
+        assert "refused (HTTP 403) to bind it to the client" in text
+    assert "<truncated>" not in extras["exception_message"]
+    remediation = extras["remediation"]
+    assert "(client 'meho-cli-approve')" in remediation
+    if made:
+        assert "These stay in the realm: the flow, the level setting." in remediation
+    else:
+        assert "MEHO changed nothing." in remediation
+    assert "manage-clients" in remediation
+    assert "try again after that" in remediation
+    assert any(method == "POST" for method, _, _ in fake.writes) is made
+    # The kept admin token is dropped, so the next call signs in again.
+    assert kc._admin_tokens == {}
+
+
+async def test_refused_level_write_says_what_the_run_changed(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(flow_steps=None, client=_client(), levels=None)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        # The flow writes answer 2xx; Keycloak refuses only the realm PUT.
+        refused = mock.put(_ADMIN).respond(403, json={"error": "HTTP 403 Forbidden"})
+        fake.mount(mock)
+        result = await _run(_FLOW_OP, {})
+
+    assert refused.call_count == 1
+    assert result["status"] == "error", result
+    extras = result["extras"]
+    assert extras["http_status"] == 403
+    assert extras["exception_class"] == "KeycloakMissingRightsError"
+    for text in (extras["exception_message"], extras["remediation"]):
+        assert "stopped half-way" in text
+        assert "refused (HTTP 403) to write the realm's level map" in text
+    assert "<truncated>" not in extras["exception_message"]
+    remediation = extras["remediation"]
+    assert "These stay in the realm: the flow, the level setting." in remediation
+    assert "the level name in the realm's level map" not in remediation
+    # The client was never changed.
+    assert not any(path.endswith(f"/clients/{_CLIENT_UUID}") for _, path, _ in fake.writes)
 
 
 async def test_flow_list_that_is_not_a_list_is_an_error(kc: KeycloakConnector) -> None:

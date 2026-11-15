@@ -159,6 +159,11 @@ non-`safe` operation for approval. See `sensor.md`, step 4 of
   threshold is this × the tick interval (60 s by default). Scales with
   the tick grid; the minimum of 2 keeps the threshold above the ordinary
   sleep-then-tick gap.
+- `SENSOR_AUTH_FAILURE_PARK_THRESHOLD` (default 3, 1 to 1000) — after
+  this many evaluations in a row with a refused login, the runner pauses
+  the sensor (`status_reason='auth_failed:ConnectorAuthError'`). Only an
+  evaluation whose call to the target succeeded sets the count back to
+  0; a timeout or another failed call leaves it as it is.
 - `CHECK_RUNNER_CLIENT_ID` / `CHECK_RUNNER_CLIENT_SECRET` with
   `VAULT_ADDR` set — then `VAULT_CHECK_RUNNER_ROLE` must name a Vault
   role other than `VAULT_OIDC_ROLE`, or the runner does not start

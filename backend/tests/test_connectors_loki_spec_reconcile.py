@@ -42,7 +42,7 @@ rewriting. ``loki.get`` (the agent-supplied arbitrary-path passthrough)
 declares no hand-coded vendor path and is excluded.
 
 First run against the real shelf (the local pre-verify against the
-consumer shelf branch for ``claude-rdc-hetzner-dc#2544``, 2026-08-18):
+consumer shelf branch for a consumer repository, 2026-08-18):
 **green** — all 7 declared op_ids served (6 by byte-for-byte match, the
 ``label_values`` literal by template). A red lane here is the guard
 surfacing a real finding, not harness noise. Protocol:

@@ -116,10 +116,10 @@ _TARGET_A = _StubTarget(
     secret_ref="k8s/rke2-meho",
 )
 _TARGET_B = _StubTarget(
-    name="rke2-infra",
-    host="rke2-infra.test.invalid",
+    name="example-rke2",
+    host="example-rke2.test.invalid",
     port=None,
-    secret_ref="k8s/rke2-infra",
+    secret_ref="k8s/example-rke2",
 )
 
 
@@ -1105,7 +1105,7 @@ def test_fingerprint_with_route_operator_forwards_to_kubeconfig_loader() -> None
     to the injected ``KubeconfigLoader`` verbatim — back-to-back with a
     dispatch-style call, both legs see the same identity.
 
-    The v0.8.0 dogfood cycle (#1302 + ``claude-rdc-hetzner-dc#771``)
+    The v0.8.0 dogfood cycle (#1302 + a consumer repository)
     surfaced ``vault OIDC malformed jwt: must have three parts`` on
     probe for K8s targets while dispatch worked. The bug: probe
     hard-coded the synthesised system operator (placeholder JWT) on

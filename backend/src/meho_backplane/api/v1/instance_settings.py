@@ -17,7 +17,7 @@ The design is ``core.md`` §5; the file, the endpoints and the table are in
 * ``GET /api/v1/settings/history`` -- the revisions, newest first.
 * ``POST /api/v1/settings/conventions-drift`` -- compare a file that holds
   only conventions with the tenant's operational conventions: added, changed,
-  only in MEHO. Writes nothing. The team wiki's CI job calls it with a login
+  only in MEHO. Writes nothing. The tenant wiki's CI job calls it with a login
   that may run this check and nothing else (``conventions_drift_only``).
 
 Who may call: all four need a login (401 without a token). Export, import and

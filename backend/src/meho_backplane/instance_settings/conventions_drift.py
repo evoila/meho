@@ -3,7 +3,7 @@
 
 """The conventions drift check: does MEHO hold the team rules as they are written?
 
-The team rules are written once, in the team wiki. Its CI job renders them
+The team rules are written once, in the tenant's wiki. Its CI job renders them
 into a settings file that holds only ``conventions`` and sends it here after
 each merge. The check compares that file with the caller's tenant's
 ``operational`` conventions (the ones in the session start text) and reports:

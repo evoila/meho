@@ -66,7 +66,7 @@ Consumer-side migration for the rdc-internal-specific seed
 
 The 8 ``rdc-internal``-specific conventions migrate to a consumer-
 side migration template the consumer applies post-deploy in their
-own repository (``claude-rdc-hetzner-dc``). That keeps the operational
+own repository. That keeps the operational
 discipline content alive for the consumer who originally authored it
 while removing it from the public OSS surface. See
 `docs/architecture/conventions-seed.md <../../../docs/architecture/conventions-seed.md>`_

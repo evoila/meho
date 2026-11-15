@@ -362,7 +362,14 @@ def install_risk_lowered(
 
 
 def install_risk_text(
-    name: str, risk: str, coords: OpCoordinates, install_ref: str, level: str, *, wide: bool
+    name: str,
+    risk: str,
+    coords: OpCoordinates,
+    install_ref: str,
+    level: str,
+    *,
+    wide: bool,
+    with_group: bool = False,
 ) -> str:
     """The sentences that refuse or mark an entry found by :func:`install_risk_lowered`.
 
@@ -370,9 +377,14 @@ def install_risk_text(
     text keeps its risk level, because it still counts for those. The
     suggested entry names the connector too: the same op id can exist on
     another connector, and an entry without a connector would set its
-    level as well.
+    level as well. *with_group* is true when the entry names a group: the
+    suggested entry then names the group too, so it is more specific than
+    the entry and decides the operation's level.
     """
     op_id = coords.op_id
+    where = f"connector `{coords.connector_id}`"
+    if with_group and coords.group_key is not None:
+        where += f" and group `{coords.group_key}`"
     head = (
         f"{name} sets `risk: {risk}`, but `{install_ref}` sets `{op_id}` to `{level}` "
         f"for the whole install, so `risk: {risk}` does not count for `{op_id}`."
@@ -381,7 +393,7 @@ def install_risk_text(
         return f"{head} Set `risk: {level}` or higher in this entry; its other fields can stay."
     return (
         f"{head} The entry still counts for the other operations it matches. Add a "
-        f"tenant entry for `{op_id}` of connector `{coords.connector_id}` with "
+        f"tenant entry for `{op_id}` of {where} with "
         f"`risk: {level}` or higher, or leave `{op_id}` out of this entry's match."
     )
 
@@ -410,7 +422,11 @@ def install_floor_texts(
             and (one.connector_id, one.op_id) != (found.connector_id, found.op_id)
             for one in coords
         )
-        texts.append(install_risk_text(name, entry.risk, *lowered, wide=wide))
+        texts.append(
+            install_risk_text(
+                name, entry.risk, *lowered, wide=wide, with_group=entry.group is not None
+            )
+        )
     return texts
 
 

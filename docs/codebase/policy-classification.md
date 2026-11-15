@@ -98,6 +98,8 @@ The rules are in `policy/classification.py` (`classify`, no database):
    specific entry or a narrower match, never to remove the level
    (`install_floor_texts`). The suggested entry names the operation and
    its connector, because the same op id can exist on another connector.
+   When the refused entry names a group, the suggested entry names the
+   group too; without it, the suggested entry ranks below the refused one.
    An entry that matches the op on two connectors counts as wide. The
    single edit has no `risk` field, so it refuses only the
    `always_wait: false` part (`install_wait_undone`).

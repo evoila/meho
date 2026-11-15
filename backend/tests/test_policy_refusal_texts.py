@@ -131,6 +131,32 @@ def test_an_entry_for_the_op_on_both_connectors_is_a_wide_entry() -> None:
     assert "Set `risk:" not in mistakes[0]
 
 
+def test_the_suggested_entry_for_a_group_entry_names_the_group() -> None:
+    # The entry names a group, so it outranks an entry with only a connector and an op.
+    tenant = {"classifications": [{"match": {"group": "vm", "op": _STOP}, "risk": "caution"}]}
+    mistakes = check_document(tenant, scope="tenant", install_document=_INSTALL, ops=_OPS)
+    assert len(mistakes) == 1
+    found = re.search(
+        r"Add a tenant entry for `(?P<op>[^`]+)` of connector `(?P<connector>[^`]+)` "
+        r"and group `(?P<group>[^`]+)` with `risk: (?P<level>[a-z]+)` or higher",
+        mistakes[0],
+    )
+    assert found is not None, mistakes[0]
+    assert found.group("op", "connector", "group", "level") == (_STOP, _OLD, "vm", "dangerous")
+
+    suggested = {
+        "match": {"connector": found["connector"], "group": found["group"], "op": found["op"]},
+        "risk": found["level"],
+    }
+    fixed = {"classifications": [*tenant["classifications"], suggested]}
+    assert check_document(fixed, scope="tenant", install_document=_INSTALL, ops=_OPS) == []
+    assert _levels(fixed) == _levels(tenant)
+
+    # Without the group, the entry is refused again.
+    del suggested["match"]["group"]
+    assert check_document(fixed, scope="tenant", install_document=_INSTALL, ops=_OPS) != []
+
+
 def test_an_entry_for_the_op_on_one_connector_gets_the_narrow_text() -> None:
     tenant = {"classifications": [{"match": {"connector": _OLD, "op": _STOP}, "risk": "caution"}]}
     mistakes = check_document(tenant, scope="tenant", install_document=_INSTALL, ops=_OPS)

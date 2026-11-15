@@ -1015,6 +1015,7 @@
   "tests/test_policy_routing.py": 2.28,
   "tests/test_policy_routing_classified.py": 29.23,
   "tests/test_preamble_doc_collections_band.py": 1.36,
+  "tests/test_probe_keeps_sign_ins.py": 3.0,
   "tests/test_proxy_headers.py": 0.08,
   "tests/test_published_tool_schema_shape.py": 0.21,
   "tests/test_read_docs_route.py": 2.69,

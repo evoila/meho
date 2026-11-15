@@ -173,6 +173,10 @@ class ResolvedTargetDescriptor(BaseModel):
     # the row changed. ``None`` from an older gateway: never treated as a
     # change.
     updated_at: datetime | None = None
+    # When a person last changed the target; a probe does not move it. The
+    # runner drops its kept login when this changes. ``None`` from an older
+    # gateway: ``updated_at`` is used instead.
+    connection_changed_at: datetime | None = None
 
 
 class RunnerPrincipal(BaseModel):

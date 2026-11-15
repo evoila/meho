@@ -1517,6 +1517,16 @@ class Target(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
+    # When a person last changed the target (create or update). A probe does
+    # not move it. Every MEHO process drops the sign-ins it keeps for the
+    # target when this value changes; ``updated_at`` also moves on each probe,
+    # so it cannot be that signal. ``NULL`` on a row from before migration
+    # ``0169`` is backfilled from ``updated_at``.
+    connection_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=lambda: datetime.now(UTC),
+    )
     # Soft-delete timestamp. NULL → live row; non-NULL → wall-clock
     # time of the DELETE call. Written by ``DELETE /api/v1/targets/{name}``
     # (G0.14-T4 #1145); never rewritten. Every read path

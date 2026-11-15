@@ -3486,6 +3486,15 @@ refuses <code>product: vmware</code> with 422 <code>unknown_product</code>.</p>
   it, dispatch fails with <code>connector_tls_verify_failed</code>, carrying
   Python's own <em>"IP address mismatch"</em> text inside
   <code>extras.exception_message</code>.</li>
+<li>If a target has a <code>tls_ca_pin</code> and TLS fails, the error says the pin
+  is stale. It does not tell you to set a pin. <code>extras.pin_stale</code> is
+  <code>true</code>, and <code>extras.presented_certificate</code> shows the issuer, the
+  subject and the SHA-256 fingerprint of the certificate the host
+  presents now. This happens when the host certificate was re-issued.
+  For an ESXi host or a vCenter whose certificates come from the VMCA
+  (the vCenter's own certificate authority), pin the <strong>VMCA root CA</strong>,
+  not the host certificate. Then a later re-issue does not break the
+  target. Update the pin with <code>--update</code>.</li>
 </ul>
 <p>You can leave <code>secret_ref</code> out entirely — see the next section.</p>
 <h3 id="the-record-schema">The record schema<a class="headerlink" href="#the-record-schema" title="Permanent link">&para;</a></h3>

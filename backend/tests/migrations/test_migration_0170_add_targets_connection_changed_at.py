@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0169_add_targets_connection_changed_at``.
+"""Behavioural tests for ``0170_add_targets_connection_changed_at``.
 
 The migration adds one nullable column to ``targets`` and fills it from
 ``updated_at`` for the rows that exist. ``downgrade()`` removes it and
 keeps the rows.
 
-Every step targets this migration's own revision (``0169``) and its
-``down_revision`` (``0168``), never ``head``.
+Every step targets this migration's own revision (``0170``) and its
+``down_revision`` (``0169``), never ``head``.
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0169"
-_DOWN_REVISION = "0168"
+_REVISION = "0170"
+_DOWN_REVISION = "0169"
 _TARGET_ID = "a" * 32
 _TENANT_ID = "b" * 32
 _UPDATED_AT = "2026-11-15 12:00:00.000000"
@@ -35,7 +35,7 @@ _UPDATED_AT = "2026-11-15 12:00:00.000000"
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0169.db"
+    db_path = tmp_path / "migration_0170.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

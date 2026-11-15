@@ -156,7 +156,7 @@ Limits:
   not sign in again for that. A probe that finds a new version drops the
   kept logins only when another connector serves the target now. A new
   value drops the kept logins once, then the next login uses the new
-  values. Rows from before migration `0169` got `connection_changed_at`
+  values. Rows from before migration `0170` got `connection_changed_at`
   from `updated_at`; a descriptor from an older gateway has none, and
   `updated_at` is used. The runner gets both times in its target
   descriptor from the gateway. The check and the drop run under a lock

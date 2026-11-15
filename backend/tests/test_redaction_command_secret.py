@@ -141,6 +141,23 @@ _WHOLE_OUTPUT: Final[list[tuple[str, str]]] = [
     ),
     (f"{_PASSWORD_IS}{PW} long phrase;Database=d", f"{_PASSWORD_IS}{_MARK};Database=d"),
     (f"Server=db;{_PASSWORD_IS}{PW} long phrase", f"Server=db;{_PASSWORD_IS}{_MARK}"),
+    # A connection string with one field and a closing ``;``.
+    (f"{_PASSWORD_IS}{PW} long phrase;", f"{_PASSWORD_IS}{_MARK};"),
+    (f"pw={PW} long phrase;", f"pw={_MARK};"),
+    (f"Pwd={PW} long phrase; ", f"Pwd={_MARK}; "),
+    # A command option keeps the words after its value, also before a ``;``.
+    (
+        f"run --{_PASSWORD_IS.lower()}{PW} --user alice; mode=fast",
+        f"run --{_PASSWORD_IS.lower()}{_MARK} --user alice; mode=fast",
+    ),
+    (
+        f"run -{_PASSWORD_IS}{PW} --user alice; mode=fast",
+        f"run -{_PASSWORD_IS}{_MARK} --user alice; mode=fast",
+    ),
+    (
+        f"login {_PASSWORD_IS.lower()}{PW} --verbose; echo ok",
+        f"login {_PASSWORD_IS.lower()}{_MARK} --verbose; echo ok",
+    ),
 ]
 
 

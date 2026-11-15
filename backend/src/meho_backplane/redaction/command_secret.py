@@ -20,8 +20,9 @@ option name and the words around it stay readable:
 * ``Password=``, ``Pwd=`` and ``pw=`` in a connection string; a value
   without quotes runs to the ``;`` (or the end of the line), so it may
   hold spaces. Text counts as a connection string when a ``;`` stands
-  before the label or a ``;`` and the next ``key=`` part follow the
-  value. Elsewhere ``password=`` takes one shell word, as an option does;
+  before the label, or a ``;`` ends the value and no option (``-x``) or
+  ``key=`` word stands in the value. A label behind ``-`` is a command
+  option. Elsewhere ``password=`` takes one shell word, as an option does;
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
   ``_SECRET``, ``_TOKEN`` or ``_KEY`` (``DB_PASSWORD=x``);
 * the text inside an XML element named like a secret
@@ -360,8 +361,9 @@ _VALUE_MAX: Final = 1024
 #: line break or a quote (the end of the string the connection string is in)
 #: also ends it.
 _VALUE_STOP: Final = re.compile(r"""[\r\n;'"]""")
-#: The next ``key=`` part of a connection string, after the ``;`` that ends a value.
-_NEXT_PART: Final = re.compile(r";[ \t]*[A-Za-z][\w .-]{0,63}=")
+#: A word that starts a new command argument: an option (``--user``, ``-v``) or a
+#: ``key=`` word. A connection string value has no such word.
+_COMMAND_WORD: Final = re.compile(r"\s(?:-{1,2}[A-Za-z]|[A-Za-z_][\w.-]{0,63}=)")
 
 
 def _quoted_connection_value(text: str, start: int) -> tuple[int, int]:
@@ -379,6 +381,20 @@ def _quoted_connection_value(text: str, start: int) -> tuple[int, int]:
         return start, close + 1
 
 
+def _is_connection_field(text: str, match: re.Match[str], start: int, stop: int) -> bool:
+    """True when the label at *match* is a field of a connection string.
+
+    A label behind ``-`` is a command option. Otherwise a ``;`` before the
+    label, or a ``;`` that ends a value with no command word in it, marks a
+    connection string.
+    """
+    if text[match.start() - 1 : match.start()] == "-":
+        return False
+    if text[max(0, match.start() - 40) : match.start()].rstrip().endswith(";"):
+        return True
+    return text.startswith(";", stop) and _COMMAND_WORD.search(text, start, stop) is None
+
+
 def _connection_span(text: str, match: re.Match[str]) -> tuple[int, int] | None:
     start = match.end()
     if start >= len(text) or text[start] in ";\n":
@@ -388,19 +404,18 @@ def _connection_span(text: str, match: re.Match[str]) -> tuple[int, int] | None:
     window = start + _VALUE_MAX
     stop = _VALUE_STOP.search(text, start, window)
     stop_at = min(len(text), window) if stop is None else stop.start()
-    # A value hidden by an earlier rule is not part of this one.
-    earlier = _PLACEHOLDER.search(text, start, stop_at)
-    if earlier is not None:
-        stop_at = earlier.start()
-    end = start + len(text[start:stop_at].rstrip())
-    before = text[max(0, match.start() - 40) : match.start()].rstrip()
-    if not (before.endswith(";") or _NEXT_PART.match(text, stop_at)):
-        # Not in a connection string (``--password=x --user a``, ``password=x user=a``):
+    if not _is_connection_field(text, match, start, stop_at):
+        # A command option or word (``--password=x --user a``, ``password=x user=a``):
         # the value is one shell word, so the words after it stay. ``pwd`` and ``pw``
         # are connection string words only.
         if match["label"].lower() != "password":
             return None
         return _value_span(text, start)
+    # A value hidden by an earlier rule is not part of this one.
+    earlier = _PLACEHOLDER.search(text, start, stop_at)
+    if earlier is not None:
+        stop_at = earlier.start()
+    end = start + len(text[start:stop_at].rstrip())
     return (start, end) if _is_hidden(text[start:end]) else None
 
 

@@ -3244,6 +3244,11 @@ no exception per system.</p>
 <li>A fresh sign-in for every approval, also in the web interface, comes
   from v0.42.0.</li>
 <li>An approved request that runs only as approved comes from v0.40.0.</li>
+<li>From v0.47.0, approving a request that asks for a secret value
+  (<code>reveal_secret: true</code>) does not run it. The person who asked fetches
+  the value once, within 15 minutes. A client that reads the value from
+  the stored result gets none and must change. See the
+  <a href="../../install/upgrades/#version-specific-notes">upgrade note</a>.</li>
 </ul>
 <h2 id="operator-guide">Operator guide<a class="headerlink" href="#operator-guide" title="Permanent link">&para;</a></h2>
 <ul>

@@ -3657,6 +3657,11 @@ groups and clients.</p>
 <td>The convention text that an old migration stored is reworded: two texts named internal things (a private repository and the naming history of a lab). A new migration changes only a row that still holds an old text.</td>
 <td><strong>Nothing to do.</strong> A row that an admin edited is not touched.</td>
 </tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td><strong>Action needed (API clients).</strong> Approving a request that asks for a secret value (<code>reveal_secret: true</code>) and waits for approval runs nothing. The approve answer says <code>dispatch_status: "waiting_for_requester"</code> and holds no value. MEHO stores no value. In <code>GET /api/v1/approvals/&lt;id&gt;/result</code>, <code>result</code> is <code>null</code> until the person who asked fetches the value. After the fetch, the stored result has <code>result: null</code>, <code>handle: null</code> and <code>extras.secret_value_withheld: true</code>. A client that reads the stored result gets no value.</td>
+<td>After the approval, the person who asked fetches the value with <code>POST /api/v1/approvals/&lt;id&gt;/reveal</code> or <code>meho secret read --approval &lt;id&gt; --field &lt;name&gt;</code> (or "Show value" in the console). This works once, and only within 15 minutes of the approval. A second or late fetch is refused with <code>409</code>; then send the request again. Change every client that reads the stored result. See <a href="../../can-do/hidden-secrets/">Secret values stay hidden</a>.</td>
+</tr>
 </tbody>
 </table>
 <p>The authoritative, always-current version of this table lives in

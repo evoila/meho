@@ -100,7 +100,9 @@ grant never clears its wait; `credential_read_grant_reason`), an op with a param
 gives; a grant never covers the address, so a person approves each call,
 and grant create refuses such a grant — `caller_address_grant_reason`), and an
 op a connector marks with `declare_per_call_approval` (`op_classes.py`; today
-`msad.group.add-member`, `msad.group.remove-member` and `secret.move`): a person approves each
+`msad.group.add-member`, `msad.group.remove-member`, `secret.move` and every
+operation registered as a change of rights, such as the Keycloak writes that
+change a token or a role): a person approves each
 call, and grant create refuses such a grant — `per_call_approval_grant_reason`.
 Parking is not refusal: a service principal can still propose a
 destructive op and read its result after a human approves. The steps are in

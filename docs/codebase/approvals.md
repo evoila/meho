@@ -1199,6 +1199,16 @@ decides: not the requester, a person in a chosen tenant, and an admin
   [policy-classification.md](policy-classification.md)) is one.
 - Any other caller passes `rights_change=True` to `create_pending_request`.
 
+**No grant and no run approval covers a registered change of rights.**
+`register_grant_op` and `register_rights_change_op` also mark the
+operation with `declare_per_call_approval`. So making a standing grant for
+it is refused, a stored grant row does not clear a call, and a run approval
+list that names it is refused. This is one rule in the core: a connector
+that registers a change of rights needs no second mark. The Keycloak
+writes that are changes of rights are listed in
+[connectors-keycloak.md](connectors-keycloak.md), "Writes that are
+changes of rights".
+
 A request parked before the column existed has no stored mark. It counts
 through the same `is_rights_change` check, so an upgrade weakens nothing.
 

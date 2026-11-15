@@ -457,6 +457,70 @@ another person's request. The single-operator self-approval switch
 against the registered levels of the first five. The test of the one-time
 code set-up checks that `user.required_actions.update` is `dangerous`.
 
+### Writes that are changes of rights
+
+A Keycloak write that can change what a login token says, or who has which
+role, is a change of rights. For such a write:
+
+- the requester never approves their own request;
+- another admin (a tenant admin or a platform admin) must approve it, so a
+  MEHO-SA-Operator who is not an admin cannot;
+- a standing grant, an older grant row and a run approval never cover it:
+  each call waits for its own approval. An agent's call waits too.
+
+`connectors/keycloak/rights_changes.py` holds the decision for every
+Keycloak write, with the reason:
+
+| Write | Change of rights? | Why |
+|---|---|---|
+| `realm.create` | yes | the realm body can hold users, groups, roles, clients, mappers and default roles |
+| `realm.update` | yes | realm settings decide default roles and groups, default client scopes, self sign-up and which user details a user may change |
+| `client.create` | yes | a client carries protocol mappers, scopes, full scope and a service account login |
+| `client.update` | yes | changes mappers, scopes, full scope, service account, redirect URIs, secret and login settings |
+| `client_scope.create` | yes | a client scope carries protocol mappers and role scope mappings |
+| `protocol_mapper.create` | yes | a mapper decides which claims a token holds |
+| `user.create` | yes | the new user can carry groups, roles and attributes that mappers read |
+| `role_mapping.assign` | yes | gives a user realm roles |
+| `group.member.add` | yes | puts a user into a group and gives them its roles |
+| `group.update_attributes` | yes | group attributes fill the tenant claims of every member |
+| `user.reset_password` | no | sets a password; no role or claim changes (it stays `dangerous`) |
+| `user.required_actions.update` | no | changes the next sign-in steps, not roles or claims |
+| `user.check_login` | no | tests one sign-in and changes nothing |
+| `user.logout`, `user.disable`, `user.delete` | no | they only take away |
+| `user.enable` | no | turns a login back on with the roles it already has |
+| `group.create` | no | a new group has no members; adding one is `group.member.add` |
+| `group.member.remove`, `group.delete`, `client.delete`, `realm.delete` | no | they only take away |
+| `authflow.ensure_approval_flow`, `.ensure_passkey_code_skip`, `.ensure_approval_touch` | no | they set MEHO's own sign-in steps, not roles or claims |
+
+The core has no ingested (spec-based) Keycloak operations, so the table
+covers the typed writes only. `backend/tests/test_keycloak_rights_change_writes.py`
+fails when a Keycloak write is on neither side of the table, so a new
+write needs this decision in the same pull request. The same test checks,
+for each change of rights, that the requester cannot approve it, that a
+standing grant and a run approval do not clear the wait, and that an
+agent's call waits.
+
+The three writes of one login or group (`group.member.add`,
+`role_mapping.assign`, `group.update_attributes`) are registered with
+`register_grant_op` (see "Changes of rights: the login is never its own
+approver" in [approvals.md](approvals.md)); the others with
+`register_rights_change_op`. Both functions add the per-call mark, so no
+connector has to set it a second time.
+
+**The approval card.** `connectors/keycloak/ops_write_rights_card.py`
+shows the object as it is now next to the new values:
+
+- `client.update` and `realm.update`: `current_values` (the value now of
+  each field the request sends) and the new values;
+- `protocol_mapper.create`: `current_mappers` (the client's mappers now)
+  and `new_mapper`.
+
+Secret values are hidden on both sides. When MEHO cannot read the object,
+the card says `current_values_available: false` (or
+`current_mappers_available: false`) and shows the new values only. The
+writes that make a new object show the new values; there is nothing to
+read yet.
+
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
 + membership drive the backplane's tenant claims (`tenant_id` /
 `tenant_role`), so creating an attributed role group and assigning

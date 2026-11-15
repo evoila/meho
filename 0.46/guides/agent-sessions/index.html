@@ -3774,6 +3774,11 @@ use the session routes.</p>
 <td><code>meho sessions show</code>, <code>GET /api/v1/sessions/{session_id}</code></td>
 </tr>
 <tr>
+<td>Download a session as whole files</td>
+<td><code>operator</code></td>
+<td><code>meho sessions get &lt;session-id&gt; &lt;folder&gt;</code>, <code>GET /api/v1/sessions/{session_id}/uploads/{seq}</code></td>
+</tr>
+<tr>
 <td>Delete a session</td>
 <td><code>tenant_admin</code></td>
 <td><code>meho sessions delete</code>, <code>DELETE /api/v1/sessions/{session_id}</code></td>
@@ -3818,7 +3823,10 @@ when it is not sure, for example when:</p>
 <p>A quarantined upload is stored, with the known secrets replaced. Only a
 tenant admin can download it. An operator gets
 <code>403 session_upload_quarantined</code>, and MEHO writes an audit row for the
-refused download. <code>meho sessions show</code> marks the upload as in quarantine.</p>
+refused download. <code>meho sessions show</code> marks the upload as in quarantine.
+<code>meho sessions get</code> skips it for an operator and says so. A file that
+needs the skipped upload is written only up to it, and is marked
+incomplete.</p>
 <h2 id="related">Related<a class="headerlink" href="#related" title="Permanent link">&para;</a></h2>
 <ul>
 <li>The developer page with the full upload flow:

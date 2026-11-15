@@ -48,6 +48,7 @@ The substrate has three consumer-facing surfaces, all dispatching through `query
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param → `filters.work_ref` (exact match). | Pre-canned shortcut: every write done under one change ticket. |
 | `GET /api/v1/audit/my-recent` | `filters.principal_sub = operator.sub` (exact match); `since` defaults to `"24h"`. Answers the `{items, next_cursor}` list envelope. | Pre-canned shortcut — operator can never see another operator's `my-recent` through this route. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Cross-tenant lookups → 404 (never 403, so existence never leaks). | Single-row fetch. |
+| `GET /api/v1/audit/traces` | Finds stored traces by request id, caller and time, without the audit row. | Read-only. |
 | `GET /api/v1/audit/{audit_id}/trace` | One dispatch's flight-recorder trace. | Read-only. See [`dispatch-flight-recorder.md`](../decisions/dispatch-flight-recorder.md). |
 | `GET /api/v1/audit/sessions/{session_id}/replay` | One agent session as a parent/child tree, through `replay_session`. Needs `tenant_admin`. An unknown or foreign session answers an empty tree, not 404. | Cross-session replay. |
 | `POST /api/v1/audit/class-counts` | The `query` filters; answers one row count per event class ([`audit_counts.py`](../../backend/src/meho_backplane/api/v1/audit_counts.py)). | Counts only. |

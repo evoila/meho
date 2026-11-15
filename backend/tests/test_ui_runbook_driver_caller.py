@@ -13,9 +13,17 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.runbooks.run_service import PreviousStepFailedError, StepCallerRequiredError
-from meho_backplane.runbooks.runs_schemas import CurrentStepResponse, RunCompletedResponse
+from meho_backplane.runbooks.runs_schemas import (
+    CurrentStepResponse,
+    RunCompletedResponse,
+    StepBody,
+    StepBodyVerify,
+    StepPosition,
+)
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.routes.runbooks import driver
+from meho_backplane.ui.routes.runbooks.driver_render import StepView
+from meho_backplane.ui.templating import get_templates
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-0000000012b4")
 _SUB = "person-alpha"
@@ -116,4 +124,36 @@ async def test_failed_check_shows_the_reason(
     assert result == "rendered"
     view.assert_called_once_with(current, failed=True)
     assert render.await_args.kwargs["view"] == "failed-view"
-    assert render.await_args.kwargs["error_message"] == reason
+    assert render.await_args.kwargs["failure_message"] == reason
+
+
+def test_failed_step_banner_escapes_the_reason() -> None:
+    """The stored reason shows in the failed-step banner, HTML-escaped."""
+    step = StepBody(
+        id="check",
+        title="Check",
+        body="",
+        type="manual",
+        verify=StepBodyVerify(type="confirm", prompt="ok?"),
+    )
+    html = (
+        get_templates()
+        .get_template("runbooks/_run_step.html")
+        .render(
+            run_id=str(uuid.uuid4()),
+            csrf_token="t",
+            step_view=StepView(
+                step=step, body_html="", position=StepPosition(n=1, total=1), failed=True
+            ),
+            terminal_state=None,
+            error_message=None,
+            failure_message="check call did not run: <b>denied</b>",
+            completed_at=None,
+            abandoned_at=None,
+            is_assignee=True,
+            is_admin=False,
+        )
+    )
+
+    assert "check call did not run: &lt;b&gt;denied&lt;/b&gt;" in html
+    assert "<b>denied</b>" not in html

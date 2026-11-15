@@ -70,7 +70,9 @@ For ``verify.type='operation_call'``: the service binds
 audit row written by the dispatched call carries the run / step
 correlation columns populated. The call runs with the identity of the
 caller who advances the run (the ``caller`` passed to :meth:`next_step`):
-its principal kind, client id, role and token. So an agent's check step
+its principal kind, client id, role and token. The call always follows
+the token rule, also when the run is advanced from the web console: for a
+person only a ``safe`` check runs at once. So an agent's check step
 is checked against the agent's grants, a service login's against its
 read scope and standing grants, and the audit row and any approval
 request name that caller. The :class:`OperationCallVerifyResponse`
@@ -643,6 +645,7 @@ class RunbookRunService:
             verify_response=persisted_response_dict,
             now=now,
             operator_sub=operator_sub,
+            reason=check_failure,
         )
 
         if outcome.kind == "failed":
@@ -715,12 +718,21 @@ class RunbookRunService:
         verify_response: dict[str, Any] | None,
         now: datetime,
         operator_sub: str,
+        reason: str | None = None,
     ) -> None:
-        """Add one check attempt to the step's history, and audit a confirm."""
-        step_state.attempts = _attempts_with(
-            step_state,
-            {"at": now.isoformat(), "passed": passed, "verify_response": verify_response},
-        )
+        """Add one check attempt to the step's history, and audit a confirm.
+
+        *reason* is the text of why the check call did not run; it is kept
+        on the attempt, so :meth:`get_failed_step_message` can show it later.
+        """
+        attempt: dict[str, Any] = {
+            "at": now.isoformat(),
+            "passed": passed,
+            "verify_response": verify_response,
+        }
+        if reason is not None:
+            attempt["reason"] = reason
+        step_state.attempts = _attempts_with(step_state, attempt)
         if step.verify.type == "confirm":
             # An operation_call attempt is audited by the dispatcher; a
             # confirm attempt has no dispatch, so write its row here, in
@@ -1043,6 +1055,36 @@ class RunbookRunService:
             current_step=step_body,
         )
 
+    async def get_failed_step_message(
+        self,
+        tenant_id: uuid.UUID,
+        run_id: uuid.UUID,
+    ) -> str | None:
+        """Return why the run's current step failed, or ``None`` when it did not fail.
+
+        The text is the same one :meth:`next_step` raised with
+        :class:`PreviousStepFailedError` when the step failed. It names the
+        reason that was stored with the last attempt when the check call
+        did not run (refused, failed, or waiting for approval). So the web
+        console shows the same text after a page reload. It exposes no step
+        content.
+
+        Raises :class:`RunNotFoundError` when *run_id* does not resolve in
+        this tenant.
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            run = await self._load_run_or_raise(session, tenant_id, run_id)
+            if run.state != "in_progress":
+                return None
+            step_states = await _load_step_states(session, run_id)
+        step_id = self._current_step_id_or_none(run, step_states)
+        if step_id is None or step_states[step_id].state != _STEP_FAILED:
+            return None
+        attempts = cast("list[dict[str, Any]]", step_states[step_id].attempts or [])
+        reason = attempts[-1].get("reason") if attempts else None
+        return _step_failed_message(step_id, reason if isinstance(reason, str) else None)
+
     async def get_run_assignee(
         self,
         tenant_id: uuid.UUID,
@@ -1252,7 +1294,9 @@ class RunbookRunService:
         ``expect``.
 
         The call runs as *caller*, the caller who advances the run; there
-        is no stand-in identity. Without *caller* the check is refused
+        is no stand-in identity. The call always follows the token rule
+        (``web_session`` is off for it), so also from the web console only
+        a ``safe`` check runs at once for a person. Without *caller* the check is refused
         with :class:`StepCallerRequiredError` before anything runs. A
         call result whose ``status`` is not ``ok`` raises
         :class:`_CheckCallNotRunError`, so the step fails with the call's
@@ -1295,24 +1339,18 @@ class RunbookRunService:
         run_token = run_id_var.set(run.run_id)
         step_token = step_id_var.set(current_step.id)
         work_ref_token = work_ref_var.set(run.work_ref)
+        # A check step follows the token rule on every path: also when the
+        # run is advanced from the web console, only a ``safe`` check runs
+        # at once for a person; a ``caution`` or higher check waits.
+        token_caller = caller.model_copy(update={"web_session": False})
         try:
-            call_result = await call_operation(caller, call_arguments)
+            call_result = await call_operation(token_caller, call_arguments)
         finally:
             work_ref_var.reset(work_ref_token)
             step_id_var.reset(step_token)
             run_id_var.reset(run_token)
 
-        status = call_result.get("status")
-        if status != "ok":
-            error = call_result.get("error") or f"the call ended with status {status!r}"
-            raise _CheckCallNotRunError(
-                str(error),
-                OperationCallVerifyResponse(
-                    type="operation_call",
-                    matched=False,
-                    actual={"status": status, "error": error},
-                ),
-            )
+        _raise_unless_call_ok(call_result)
         actual = call_result.get("result", {})
         if not isinstance(actual, dict):
             # The verify's _matches() compares dict-shaped expect against
@@ -1600,6 +1638,22 @@ def _template_body_from_row(row: RunbookTemplate) -> RunbookTemplateBody:
         description=row.description,
         target_kind=row.target_kind,
         steps=_steps_from_storage(row.steps),
+    )
+
+
+def _raise_unless_call_ok(call_result: dict[str, Any]) -> None:
+    """Raise :class:`_CheckCallNotRunError` when a check call did not return ``ok``."""
+    status = call_result.get("status")
+    if status == "ok":
+        return
+    error = call_result.get("error") or f"the call ended with status {status!r}"
+    raise _CheckCallNotRunError(
+        str(error),
+        OperationCallVerifyResponse(
+            type="operation_call",
+            matched=False,
+            actual={"status": status, "error": error},
+        ),
     )
 
 

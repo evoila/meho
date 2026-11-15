@@ -333,8 +333,8 @@ async def _failed_step_fragment(
     the step body for the failed step (it is still the run's current step);
     we project it with ``failed=True`` so the template hides Advance and
     renders the dead-end banner. *reason* is the service's text of why the
-    step failed (for example why the check call did not run); it shows as
-    the inline alert above the banner. A reassign-race that flipped the run
+    step failed (for example why the check call did not run); it shows in
+    the banner, as it does after a page reload. A reassign-race that flipped the run
     terminal in the meantime collapses to the matching terminal banner.
     """
     service = RunbookRunService()
@@ -367,7 +367,7 @@ async def _failed_step_fragment(
             abandoned_at=current.abandoned_at,
         )
     return await render_step_fragment(
-        request, session, run_id, view=step_view(current, failed=True), error_message=reason
+        request, session, run_id, view=step_view(current, failed=True), failure_message=reason
     )
 
 

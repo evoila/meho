@@ -3318,7 +3318,7 @@
 <td><code>meho_status</code></td>
 <td>—</td>
 <td>—</td>
-<td>Returns the operator's identity (sub, name, email, tenant_id, tenant_role) and MEHO's dependency status: Vault (reachable + KV read OK?), the database's revision and the one this build expects, the /ready checks (name, ok, detail), the approval settings (approval key state, whether a second person must approve), the gated features and the settings they still need, this session's OAuth scopes, the working-surface tools it should see versus the ones it lists, and the server's time in UTC (server_time; use it when you must write down the time).</td>
+<td>Returns the operator's identity (sub, name, email, tenant_id, tenant_role) and MEHO's dependency status: Vault (reachable + KV read OK?; for a read_only caller it is not checked, with checked=false and a detail that says the operator role is needed), the database's revision and the one this build expects, the /ready checks (name, ok, detail), the approval settings (approval key state, whether a second person must approve), the gated features and the settings they still need, this session's OAuth scopes, the working-surface tools it should see versus the ones it lists, and the server's time in UTC (server_time; use it when you must write down the time).</td>
 </tr>
 <tr>
 <td><code>preview_operation</code></td>

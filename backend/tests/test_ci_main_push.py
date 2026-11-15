@@ -3,9 +3,10 @@
 
 """A push to main must not start a CI run (#6387).
 
-Every change reaches main through the merge queue, and the queue run already
-ran the full matrix on the same code. A push run only repeated it: it took
-heavy runners from pull requests and merge groups, and the next merge
+Every pull request reaches main through the merge queue, except the advisory
+path in `docs/RELEASING.md`, which the nightly run covers. The queue run
+already ran the full matrix on the same code. A push run only repeated it: it
+took heavy runners from pull requests and merge groups, and the next merge
 cancelled it, which left a red gate on the commit.
 """
 

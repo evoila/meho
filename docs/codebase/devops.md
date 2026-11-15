@@ -1863,8 +1863,8 @@ runs the toolchain jobs in parallel, and so does every merge-queue run.
 A push to `main` starts no `ci.yml` run (#6387). Every pull request
 reaches `main` through the merge queue, except the advisory path in
 `docs/RELEASING.md`, which the nightly run covers. The queue run already ran
-the full matrix on exactly that code, and a push run only repeated it,
-took heavy runners and was cancelled by the next merge. The nightly run on
+the full matrix on exactly that code. A run on every push would only
+repeat it, take heavy runners and be cancelled by the next merge. The nightly run on
 `main` keeps the caches on `main` warm.
 `backend/tests/test_ci_main_push.py` pins this. Branch protection consumes the
 required jobs' status per
@@ -1915,10 +1915,10 @@ trace. The integration shards have no "Print peak memory" step; a short
 ### Merge queue (#769, #3253)
 
 Every workflow that owns a required status check triggers on
-`merge_group` in addition to `pull_request` and `push`: `ci.yml`,
+`merge_group` in addition to `pull_request`: `ci.yml`,
 `security-scan.yml`, `secret-scan.yml`, `dependency-license-check.yml`
 (all landed with #769), `chart.yml` (closed by #3253) and
-`migration-heads.yml` (#4204, see `docs/codebase/migrations.md`).
+`migration-heads.yml` (#4204, see `docs/codebase/migrations.md`). Except `ci.yml`, they also run on `push`.
 The `merge_group` event fires when a PR is admitted to the GitHub merge
 queue and runs the check matrix against the **synthesised merge
 commit** — PR head + current `main` tip + any PRs ahead in the queue. A
@@ -1960,7 +1960,7 @@ hangs the queue forever:
 | `Python License Check` | `dependency-license-check.yml` | yes — `changes` + job-level `if:` |
 | `NPM License Check` | `dependency-license-check.yml` | yes — same shape |
 | `helm install + helm test (pgvector preflight)` | `chart.yml` | **yes (#3253)** — the `helm-test-gate` aggregator (`if: always()`) is the required context and fails closed |
-| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter on `pull_request` and `merge_group`; when a migration lands on `main`, the push run also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). The operator registered the context after #4204 landed. |
+| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter on `pull_request` and `merge_group`; when a migration lands on `main`, the `push` trigger of `migration-heads.yml` (the only run this check has on a push to `main`) also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). The operator registered the context after #4204 landed. |
 
 Two shapes are load-bearing for queue compatibility and appear across
 these workflows:
@@ -2716,7 +2716,7 @@ side without the other would silently lose coverage reporting in
 SonarCloud, or make SonarCloud import 0% backend coverage from a run
 that never produced the file.
 
-Why nightly: a push run on `main` used to start 8 coverage shards next
+Why nightly: before #6387 a push to `main` started 8 coverage shards next
 to the 4 unit shards, so every merge filled the 12-runner heavy pool.
 Coverage took about 3,000 heavy-runner minutes a day, and the next merge
 cancelled most of it. Meanwhile the merge queue's unit shards waited for

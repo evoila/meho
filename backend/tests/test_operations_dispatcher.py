@@ -3398,6 +3398,10 @@ async def test_dispatch_pending_caution_op_no_permission_row(
         assert pending_row is not None
         assert pending_row.status == "pending"
         assert pending_row.op_id == "vault.kv.caution"
+        # The result carries the id of the committed approval.request row.
+        assert result.audit_id is not None
+        assert result.audit_id == pending_row.request_audit_id
+        assert await fresh.get(AuditLog, result.audit_id) is not None
 
         # The op itself did not execute → no audit row on its own path.
         op_rows = (

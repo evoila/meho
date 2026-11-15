@@ -16,7 +16,10 @@ So the dispatcher runs every error result through
 secret, each field that holds vendor text gets the fixed text
 :data:`VENDOR_TEXT_WITHHELD`. The fields MEHO writes itself stay:
 ``error_code``, ``exception_class``, ``http_status``, ``cause``,
-``remediation`` and the fault type ``upstream_fault.type``. The shape of the
+``remediation`` and the fault type ``upstream_fault.type``. So does the
+``exception_message`` of an error type that carries the
+:class:`~meho_backplane.connectors.base.ConnectorOwnMessage` mark: the
+connector wrote that sentence itself. The shape of the
 result does not change.
 
 The rule runs on the built result, not on the raised error. So the
@@ -41,7 +44,12 @@ from typing import Any, Final
 
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import OperationResult
-from meho_backplane.operations._errors import UPSTREAM_SAID, VAULT_SAID
+from meho_backplane.operations._errors import (
+    MESSAGE_SOURCE_KEY,
+    MESSAGE_SOURCE_MEHO,
+    UPSTREAM_SAID,
+    VAULT_SAID,
+)
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.flight_recorder.families import secret_tag_tokens
 from meho_backplane.redaction.policy import RedactionPolicy
@@ -101,7 +109,10 @@ def _summary_without_vendor_text(error: str | None) -> str | None:
 
 
 def _extras_without_vendor_text(extras: dict[str, Any]) -> dict[str, Any]:
+    own_message = extras.get(MESSAGE_SOURCE_KEY) == MESSAGE_SOURCE_MEHO
     for key in _VENDOR_TEXT_KEYS:
+        if own_message and key == "exception_message":
+            continue  # a sentence MEHO or the connector wrote; it holds no vendor text
         if isinstance(extras.get(key), str):
             extras[key] = VENDOR_TEXT_WITHHELD
     fault = extras.get("upstream_fault")

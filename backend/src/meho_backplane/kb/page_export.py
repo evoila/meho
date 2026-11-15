@@ -4,7 +4,7 @@
 """Export generic knowledge entries as Markdown pages (#5730).
 
 ``POST /api/v1/kb/export`` calls :func:`export_pages`. The caller is a
-CI job of the team wiki repo (or an operator through ``meho kb
+CI job of the tenant's wiki repo (or an operator through ``meho kb
 export``). It writes the pages into the wiki on its own machine and
 opens a merge request there. MEHO only reads: it writes nothing, and it
 never holds Git credentials.

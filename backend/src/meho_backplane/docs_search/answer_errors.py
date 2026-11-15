@@ -11,7 +11,7 @@ to one opaque JSON-RPC ``-32603`` ``"internal error: <ClassName>"`` at the
 dispatcher's generic catch (``mcp/server.py``): a consumer hitting a
 failure could not tell a config gap (no ``ANTHROPIC_API_KEY``) from a
 backend outage (corpus down) from a model-output bug (malformed
-synthesis), and so mis-diagnosed (``claude-rdc-hetzner-dc#1407`` gap 2).
+synthesis), and so mis-diagnosed (consumer feedback gap 2).
 
 This module is the **one** place that maps a raised leg exception onto a
 structured, JSON-safe envelope naming *which* leg failed and *why*. It is

@@ -715,7 +715,7 @@ async def test_wire_listing_entries_are_spec_shape_no_surface_leak() -> None:
     """Every listed entry is the MCP wire shape and never leaks ``surface``.
 
     The listing is what a client consumes, so the per-entry contract
-    (spec fields present, MEHO-internal ``surface`` absent) is pinned on
+    (spec fields present, internal ``surface`` absent) is pinned on
     the same path as the membership.
     """
     op = _operator(

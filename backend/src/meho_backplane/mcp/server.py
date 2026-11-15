@@ -1001,8 +1001,8 @@ def _issue_mcp_session_id(response: Response) -> uuid.UUID:
     G0.15-T4 (#1213) closed the regression where MEHO's chain captured
     the inbound header into the structlog contextvar (and from there
     into ``audit_log.agent_session_id``) but never **issued** one to
-    begin with. The visible symptom on `claude-rdc-hetzner-dc#753`
-    finding 2 was eight Claude Code MCP rows with
+    begin with. The visible symptom in consumer
+    feedback finding 2 was eight Claude Code MCP rows with
     ``agent_session_id: null`` despite ``meho_status`` /
     ``/ready.features.audit_replay`` advertising a populated
     ``capture_mode`` — both surfaces correctly reported the **capture**

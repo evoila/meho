@@ -46,7 +46,11 @@ import httpx
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
-from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
+from meho_backplane.connectors.base import (
+    ConnectorOwnMessage,
+    ConnectorResourceNotFoundError,
+    ConnectorUpstreamError,
+)
 from meho_backplane.operations.deny_reasons import (
     AGENT_NO_GRANT,
     AGENT_STEPS_NOT_DECLARED,
@@ -67,6 +71,8 @@ if TYPE_CHECKING:
     from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
 
 __all__ = [
+    "MESSAGE_SOURCE_KEY",
+    "MESSAGE_SOURCE_MEHO",
     "READ_SCOPE_DENIED_CODE",
     "UPSTREAM_SAID",
     "VAULT_SAID",
@@ -149,6 +155,12 @@ _TEXT_WITHHELD: str = "<diagnostic text withheld: redaction unavailable>"
 #: :mod:`meho_backplane.operations._vendor_text`).
 UPSTREAM_SAID: Final = " Upstream said: "
 VAULT_SAID: Final = " Vault said: "
+
+#: ``extras`` key and value that say: the ``exception_message`` is a sentence
+#: MEHO or a connector wrote itself (the error type has the
+#: :class:`~meho_backplane.connectors.base.ConnectorOwnMessage` mark).
+MESSAGE_SOURCE_KEY: Final = "message_source"
+MESSAGE_SOURCE_MEHO: Final = "meho"
 
 
 def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
@@ -896,6 +908,40 @@ def result_audit_commit_failed(
     )
 
 
+def result_audit_row_invalid(
+    op_id: str,
+    field: str,
+    reason: str,
+    duration_ms: float,
+) -> OperationResult:
+    """The audit row of this call could not be stored, so the call was not sent.
+
+    MEHO checks the values of the audit row before it sends a call to the
+    target (:func:`~meho_backplane.operations.audit_row_precheck.audit_row_problem`).
+    When one value can never be stored, the call is refused here: nothing
+    went to the target and no approval request was made. *field* names the
+    value, never its content. Compare ``audit_commit_failed``: there the call
+    ran and the outcome is unknown.
+    """
+    remediation = f"Nothing was sent to the target. Fix the value of {field} and call again."
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"audit_row_invalid: the audit record of this call could not be saved "
+            f"because {field} {reason}. The operation did not run."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "audit_row_invalid",
+            "field": field,
+            "reason": reason,
+            "execution_outcome": "not_started",
+            "remediation": remediation,
+        },
+    )
+
+
 def result_composite_resume_multi_gate_unsupported(
     *,
     composite_op_id: str,
@@ -1139,6 +1185,7 @@ def result_awaiting_approval(
     duration_ms: float,
     *,
     reused: bool = False,
+    audit_id: uuid.UUID | None = None,
 ) -> OperationResult:
     """Policy gate issued a ``needs-approval`` verdict; pending row created.
 
@@ -1162,6 +1209,10 @@ def result_awaiting_approval(
     existing request back instead of a new one. It adds
     ``extras["approval_request_reused"] = True``; the key is absent
     otherwise, so a new park's envelope is unchanged.
+
+    *audit_id* is the id of the committed ``approval.request`` audit row
+    of the pending request (its ``request_audit_id``). It becomes the
+    result's ``audit_id`` receipt. ``None`` when the caller has no row id.
     """
     extras: dict[str, Any] = {
         "error_code": "awaiting_approval",
@@ -1175,6 +1226,7 @@ def result_awaiting_approval(
         error=f"awaiting_approval: {op_id!r} requires approval before execution",
         duration_ms=duration_ms,
         extras=extras,
+        audit_id=audit_id,
     )
 
 
@@ -1521,6 +1573,11 @@ def result_connector_error(
         "exception_class": type(exc).__name__,
         "exception_message": msg,
     }
+    if isinstance(exc, ConnectorOwnMessage) and not isinstance(
+        exc, (httpx.HTTPStatusError, ConnectorUpstreamError)
+    ):
+        # The text of these two holds the URL or the vendor's words, mark or not.
+        extras[MESSAGE_SOURCE_KEY] = MESSAGE_SOURCE_MEHO
     if isinstance(exc, httpx.HTTPStatusError):
         extras["http_status"] = exc.response.status_code
         extras["upstream_message"] = _http_upstream_message(exc.response)
@@ -2176,8 +2233,7 @@ def result_connector_http_403(
     accepted/required permissions -- into an opaque
     ``connector_error: HTTPStatusError`` with only the httpx status
     line, the actionable detail buried in
-    ``extras["exception_message"]`` (consumer
-    ``claude-rdc-hetzner-dc#1138``).
+    ``extras["exception_message"]`` (consumer feedback).
 
     The cause is kept **connector-agnostic**: any upstream 403 means the
     upstream refused the call, not a transport fault. Most often the
@@ -2254,8 +2310,7 @@ def result_connector_http_422(
     ``connector_error: HTTPStatusError`` with only the httpx status line,
     the actionable detail buried in ``extras["exception_message"]``. That
     bare shape is exactly what slowed the diagnosis of the
-    requestBody-mangling bug T5 #1656 (consumer
-    ``claude-rdc-hetzner-dc#1138``).
+    requestBody-mangling bug T5 #1656 (consumer feedback).
 
     The cause is kept **connector-agnostic**: any upstream 422 means the
     upstream parsed the request and rejected its *content*, not transport

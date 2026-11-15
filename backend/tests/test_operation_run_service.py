@@ -60,7 +60,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-async def _seed_tenant(session: AsyncSession, *, slug: str = "rdc-internal") -> uuid.UUID:
+async def _seed_tenant(session: AsyncSession, *, slug: str = "example-tenant") -> uuid.UUID:
     existing: uuid.UUID | None = await session.scalar(
         select(Tenant.id).where(Tenant.slug == slug),
     )
@@ -414,7 +414,7 @@ async def test_list_is_tenant_isolated() -> None:
     """``list`` returns only the operator's tenant's runs."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        tenant_a = await _seed_tenant(session, slug="rdc-internal")
+        tenant_a = await _seed_tenant(session, slug="example-tenant")
         tenant_b = await _seed_tenant(session, slug="other-tenant")
     a_run = await _insert_run(tenant_a)
     await _insert_run(tenant_b)
@@ -428,7 +428,7 @@ async def test_list_is_tenant_isolated() -> None:
 async def test_poll_cross_tenant_is_not_found() -> None:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        tenant_a = await _seed_tenant(session, slug="rdc-internal")
+        tenant_a = await _seed_tenant(session, slug="example-tenant")
         tenant_b = await _seed_tenant(session, slug="other-tenant")
     run_id = await _insert_run(tenant_a)
     service = OperationRunService()

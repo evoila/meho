@@ -1131,10 +1131,12 @@ that header from one place, so every verb gets it without its own flag.
 - The root command has a persistent `--work-ref` flag. When the flag is
   not set, the CLI reads `MEHO_WORK_REF`. The flag wins.
 - The root `PersistentPreRunE` (`applyWorkRef` in `root.go`) checks the
-  value once with `api.ValidWorkRef`. The check is no stricter than the
-  backplane, which takes any non-empty text. It refuses only a blank
-  value and a value with a control character such as a line break,
-  because the `Meho-Work-Ref` header cannot carry one. A given flag is
+  value once with `api.ValidWorkRef`. The CLI check is simpler than the
+  backplane rule (below). It refuses only a blank value and a value with
+  a control character such as a line break, because the `Meho-Work-Ref`
+  header cannot carry one. The backplane then applies its one rule to
+  every ticket id, so it also refuses a tab inside the id, invisible
+  characters and a value over 256 characters. A given flag is
   always checked, so `--work-ref ""` is refused. An empty
   `MEHO_WORK_REF` means "not set". The variable is checked before the
   CLI trims it, so a trailing line break is refused too. A bad value
@@ -1143,6 +1145,15 @@ that header from one place, so every verb gets it without its own flag.
 - `meho operation call` has its own `--work-ref` flag, which goes into
   the request body. It is checked and trimmed the same way, so
   `--work-ref " CHG1 "` stores `CHG1`, like the global flag.
+- The backplane rule for a ticket id (`meho_backplane/work_ref.py`):
+  white space at both ends is removed; an empty value is refused; a
+  control character (also NUL, a line break and a tab), an invisible
+  format character (zero-width and direction marks) and a line or
+  paragraph separator are refused; the text is at most 256 characters
+  and is stored in Unicode form NFC. A value that breaks the rule is
+  refused with a message that names the rule (HTTP 400 for the header,
+  422 for a body, an invalid-params error for MCP). It is never cut or
+  changed without a word, apart from the strip and NFC.
 - The header carries the text as UTF-8. The backplane reads it as UTF-8
   (`decode_work_ref_header` in `operations/_audit.py`), so a non-ASCII
   ticket id such as `Änderung-7` lands on the audit row unchanged.
@@ -2913,9 +2924,13 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      `meho-cli-approve`, `--cli-approve-client-id`; it must match the
      chart's `config.keycloakCliApproveClientId`). It gets the same
      mappers except `meho-mcp-audience` and the same 4 default scopes,
-     and it uses its own login flow `meho approval sign-in` (password
-     form, then the one-time code when the person has one), which the
-     verb makes when it is missing (`bootstrap.go`, step 3a).
+     and it uses its own login flow `meho approval sign-in level` (password
+     form, then the one-time code when the person has one; it gives the
+     approval level `meho-approve`), which the verb makes when it is
+     missing, with the level step's settings and the level name in the
+     realm's `acr.loa.map` (`bootstrap.go`, step 3a; `flows.go`).
+     `meho approvals approve` asks for that level with
+     `acr_values=meho-approve` (`internal/auth/freshsignin.go`).
   2. Public authorization-code+PKCE MCP client (default name
      `meho-mcp`, `standardFlowEnabled=true`,
      `pkce.code.challenge.method=S256`, default redirect URIs for the

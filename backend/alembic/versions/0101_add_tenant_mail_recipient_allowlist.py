@@ -7,7 +7,7 @@ Revision ID: 0101
 Revises: 0100
 Create Date: 2026-09-08
 
-Task #3499 (Envision isolation, meho-internal#320). Ships the per-tenant
+Task #3499 (tenant isolation). Ships the per-tenant
 narrowing override for the ``mail.*`` connector's recipient floor. Today
 ``MAIL_RECIPIENT_ALLOWLIST`` is a single instance-wide env, so on a shared
 instance an approved ``mail.send`` in one tenant can deliver to the recipients

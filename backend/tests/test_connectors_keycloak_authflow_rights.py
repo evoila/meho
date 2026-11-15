@@ -403,7 +403,7 @@ async def test_flow_op_card_names_the_client(kc: KeycloakConnector) -> None:
         result = await _dispatch(_FLOW_OP)
     card = (await _effect(result))["preview"]
     assert card["client_id"] == "meho-cli-approve"
-    assert card["flow"] == "meho approval sign-in"
+    assert card["flow"] == "meho approval sign-in level"
     assert card["client_lookup_needs_one_of"] == [
         "query-clients",
         "view-clients",

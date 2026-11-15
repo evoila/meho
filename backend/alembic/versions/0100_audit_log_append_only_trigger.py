@@ -17,7 +17,7 @@ datastore stopped one. Anyone with write access to the Postgres instance
 silently rewrite or erase the audit row of the operation just performed --
 the free cover-up a compromise would otherwise inherit.
 
-Security review 2026-09-06 finding S18 (Task meho-internal#306 under
+Security review 2026-09-06 finding S18 (a Task under
 Initiative #262). Defence-in-depth: an invariant the application depends on
 belongs at the datastore that owns the data, not scattered as convention.
 

@@ -28,8 +28,8 @@ func TestParseTargetsYAMLHappyPath(t *testing.T) {
 targets:
   - name: vcenter-lab
     product: vcenter
-    host: vc-dc.evba.lab
-    sso_realm: evba.lab
+    host: vc-1.example.test
+    sso_realm: example.test
 `)
 	entries, err := parseTargetsYAML(in)
 	if err != nil {
@@ -100,7 +100,7 @@ func TestMapEntryKnownTopLevelPassthrough(t *testing.T) {
 	body, warnings := mapEntry(map[string]any{
 		"name":         "vault-lab",
 		"product":      "vault",
-		"host":         "vault.evba.lab",
+		"host":         "vault.example.test",
 		"port":         8200,
 		"vpn_required": true,
 	})
@@ -122,9 +122,9 @@ func TestMapEntryUnknownSpillsToExtras(t *testing.T) {
 	body, warnings := mapEntry(map[string]any{
 		"name":             "rke2-meho",
 		"product":          "kubernetes",
-		"host":             "10.5.50.153",
+		"host":             "192.0.2.153",
 		"kubeconfig_field": "/etc/rancher/rke2/rke2.yaml",
-		"sso_realm":        "evba.lab",
+		"sso_realm":        "example.test",
 	})
 	// #3649: each spilled key gets a warning, in sorted key order.
 	if len(warnings) != 2 ||
@@ -136,8 +136,8 @@ func TestMapEntryUnknownSpillsToExtras(t *testing.T) {
 	if !ok {
 		t.Fatalf("extras: got %T; want map[string]any", body["extras"])
 	}
-	if extras["sso_realm"] != "evba.lab" {
-		t.Errorf("extras.sso_realm: got %v; want evba.lab", extras["sso_realm"])
+	if extras["sso_realm"] != "example.test" {
+		t.Errorf("extras.sso_realm: got %v; want example.test", extras["sso_realm"])
 	}
 	if extras["kubeconfig_field"] != "/etc/rancher/rke2/rke2.yaml" {
 		t.Errorf("extras.kubeconfig_field: got %v", extras["kubeconfig_field"])
@@ -226,7 +226,7 @@ func TestMapEntrySkipsFingerprintWithWarning(t *testing.T) {
 	body, warnings := mapEntry(map[string]any{
 		"name":        "vault-lab",
 		"product":     "vault",
-		"host":        "vault.evba.lab",
+		"host":        "vault.example.test",
 		"fingerprint": map[string]any{"vendor": "hashicorp"},
 	})
 	if _, ok := body["fingerprint"]; ok {
@@ -245,7 +245,7 @@ func TestMapEntryPreferredImplIDIsTopLevel(t *testing.T) {
 	body, _ := mapEntry(map[string]any{
 		"name":              "vcenter-lab",
 		"product":           "vcenter",
-		"host":              "vc-dc.evba.lab",
+		"host":              "vc-1.example.test",
 		"preferred_impl_id": "vsphere-8.x",
 	})
 	if v, ok := body["preferred_impl_id"]; !ok || v != "vsphere-8.x" {
@@ -329,7 +329,7 @@ func TestMapEntryTLSTrustTopLevelStillSpillsUnknown(t *testing.T) {
 		"product":    "vmware-rest",
 		"host":       "vrli.nested.lab",
 		"verify_tls": false,
-		"sso_realm":  "evba.lab", // unknown → spill
+		"sso_realm":  "example.test", // unknown → spill
 	})
 	if v, ok := body["verify_tls"]; !ok || v != false {
 		t.Errorf("verify_tls top-level: got %v (present=%t); want false", v, ok)
@@ -338,8 +338,8 @@ func TestMapEntryTLSTrustTopLevelStillSpillsUnknown(t *testing.T) {
 	if !ok {
 		t.Fatalf("extras: got %T; want map[string]any (unknown key should spill)", body["extras"])
 	}
-	if extras["sso_realm"] != "evba.lab" {
-		t.Errorf("extras.sso_realm: got %v; want evba.lab", extras["sso_realm"])
+	if extras["sso_realm"] != "example.test" {
+		t.Errorf("extras.sso_realm: got %v; want example.test", extras["sso_realm"])
 	}
 	if _, leaked := extras["verify_tls"]; leaked {
 		t.Errorf("verify_tls must not be in extras: %v", extras)
@@ -359,13 +359,13 @@ func TestMapEntryTLSServerNameIsTopLevel(t *testing.T) {
 		"name":            "vcf-sddc-manager",
 		"product":         "vmware-rest",
 		"host":            "10.20.30.40",
-		"tls_server_name": "sddc-manager.evba.lab",
+		"tls_server_name": "sddc-manager.example.test",
 	})
 	if len(warnings) != 0 {
 		t.Errorf("warnings: got %v; want none", warnings)
 	}
-	if v, ok := body["tls_server_name"]; !ok || v != "sddc-manager.evba.lab" {
-		t.Errorf("tls_server_name top-level: got %v (present=%t); want sddc-manager.evba.lab", v, ok)
+	if v, ok := body["tls_server_name"]; !ok || v != "sddc-manager.example.test" {
+		t.Errorf("tls_server_name top-level: got %v (present=%t); want sddc-manager.example.test", v, ok)
 	}
 	if extras, ok := body["extras"].(map[string]any); ok {
 		if _, leaked := extras["tls_server_name"]; leaked {
@@ -383,10 +383,10 @@ func TestEntryToUpdateBodyTLSServerNameIsTopLevel(t *testing.T) {
 	// from `host` (TargetUpdate's documented clear semantics).
 	body, _ := entryToUpdateBody(map[string]any{
 		"name":            "vcf-sddc-manager",
-		"tls_server_name": "sddc-manager.evba.lab",
+		"tls_server_name": "sddc-manager.example.test",
 	})
-	if v, ok := body["tls_server_name"]; !ok || v != "sddc-manager.evba.lab" {
-		t.Errorf("tls_server_name top-level on update: got %v (present=%t); want sddc-manager.evba.lab", v, ok)
+	if v, ok := body["tls_server_name"]; !ok || v != "sddc-manager.example.test" {
+		t.Errorf("tls_server_name top-level on update: got %v (present=%t); want sddc-manager.example.test", v, ok)
 	}
 	if extras, ok := body["extras"].(map[string]any); ok {
 		if _, leaked := extras["tls_server_name"]; leaked {
@@ -418,11 +418,11 @@ func TestMapEntryTLSServerNameStillSpillsUnknown(t *testing.T) {
 		"product":         "vmware-rest",
 		"host":            "10.20.30.40",
 		"verify_tls":      true,
-		"tls_server_name": "sddc-manager.evba.lab",
-		"sso_realm":       "evba.lab", // unknown → spill
+		"tls_server_name": "sddc-manager.example.test",
+		"sso_realm":       "example.test", // unknown → spill
 	})
-	if v, ok := body["tls_server_name"]; !ok || v != "sddc-manager.evba.lab" {
-		t.Errorf("tls_server_name top-level: got %v (present=%t); want sddc-manager.evba.lab", v, ok)
+	if v, ok := body["tls_server_name"]; !ok || v != "sddc-manager.example.test" {
+		t.Errorf("tls_server_name top-level: got %v (present=%t); want sddc-manager.example.test", v, ok)
 	}
 	if v, ok := body["verify_tls"]; !ok || v != true {
 		t.Errorf("verify_tls top-level: got %v (present=%t); want true", v, ok)
@@ -431,8 +431,8 @@ func TestMapEntryTLSServerNameStillSpillsUnknown(t *testing.T) {
 	if !ok {
 		t.Fatalf("extras: got %T; want map[string]any (unknown key should spill)", body["extras"])
 	}
-	if extras["sso_realm"] != "evba.lab" {
-		t.Errorf("extras.sso_realm: got %v; want evba.lab", extras["sso_realm"])
+	if extras["sso_realm"] != "example.test" {
+		t.Errorf("extras.sso_realm: got %v; want example.test", extras["sso_realm"])
 	}
 	if _, leaked := extras["tls_server_name"]; leaked {
 		t.Errorf("tls_server_name must not be in extras: %v", extras)
@@ -444,7 +444,7 @@ func TestMapEntryExplicitExtrasMergesWithSpilled(t *testing.T) {
 	body, _ := mapEntry(map[string]any{
 		"name":       "vault-lab",
 		"product":    "vault",
-		"host":       "vault.evba.lab",
+		"host":       "vault.example.test",
 		"extras":     map[string]any{"namespace": "rdc"},
 		"account":    "12345",   // unknown → spill
 		"project_id": "rdc-dev", // unknown → spill
@@ -473,7 +473,7 @@ func TestEntryToUpdateBodyStripsImmutables(t *testing.T) {
 	body, _ := entryToUpdateBody(map[string]any{
 		"name":    "vault-lab",
 		"product": "vault",
-		"host":    "vault.evba.lab",
+		"host":    "vault.example.test",
 		"notes":   "patched",
 	})
 	if _, ok := body["name"]; ok {
@@ -482,7 +482,7 @@ func TestEntryToUpdateBodyStripsImmutables(t *testing.T) {
 	if _, ok := body["product"]; ok {
 		t.Errorf("update body should not carry `product`: got %v", body)
 	}
-	if body["host"] != "vault.evba.lab" {
+	if body["host"] != "vault.example.test" {
 		t.Errorf("host preserved: got %v", body["host"])
 	}
 	if body["notes"] != "patched" {
@@ -795,8 +795,8 @@ func TestRunImportDryRunPrintsPlan(t *testing.T) {
 targets:
   - name: vault-lab
     product: vault
-    host: vault.evba.lab
-    sso_realm: evba.lab
+    host: vault.example.test
+    sso_realm: example.test
 `)
 	if err := os.WriteFile(path, yaml, 0o600); err != nil {
 		t.Fatalf("write yaml: %v", err)
@@ -841,7 +841,7 @@ func TestRunImportDryRunExistingTargetRendersUpdate(t *testing.T) {
 targets:
   - name: vault-lab
     product: vault
-    host: vault.evba.lab
+    host: vault.example.test
     notes: patched
 `)
 	if err := os.WriteFile(path, yaml, 0o600); err != nil {

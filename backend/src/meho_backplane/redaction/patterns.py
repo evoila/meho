@@ -53,6 +53,7 @@ import re
 from typing import Final, Protocol
 
 from meho_backplane.redaction.bind_secret import BIND_KEY_SECRET
+from meho_backplane.redaction.command_secret import COMMAND_SECRET
 from meho_backplane.redaction.url_secret import URL_SECRET
 
 __all__ = [
@@ -170,17 +171,18 @@ _JWT = re.compile(
 # label away with it (``password: [REDACTED:param_name]`` would become
 # ``[REDACTED:api_key]``), so the look-ahead leaves it alone. Only a
 # complete placeholder is skipped: ``[REDACTED:``, a name, ``]`` and
-# then the end of the value (whitespace, a quote or the end of the
-# blob). A value that only starts like one (``[REDACTED:made-up``) or
-# that goes on after the ``]`` (``[REDACTED:x]made-up``) is a value
-# like any other and is redacted whole.
+# then the end of the value (whitespace, a quote, a ``;`` that ends one
+# value of a connection string, or the end of the blob). A value that
+# only starts like one (``[REDACTED:made-up``) or that goes on after
+# the ``]`` (``[REDACTED:x]made-up``) is a value like any other and is
+# redacted whole.
 #
 # The label may follow ``_`` or ``-`` (``DB_PASSWORD=...``,
 # ``GITHUB_TOKEN=...``, ``x-api-key: ...``), so the start is "no letter or
 # digit before the label" instead of ``\b``: ``_`` is a word character,
 # and ``\b`` would see no boundary between ``DB_`` and ``PASSWORD``. A
 # label glued to letters (``mypassword=``) still does not match.
-_NOT_A_PLACEHOLDER: Final[str] = r"(?!\[REDACTED:[^\]\s'\"]+\](?!" + _VALUE_CHARS + "))"
+_NOT_A_PLACEHOLDER: Final[str] = r"(?!\[REDACTED:[^\]\s'\"]+\](?![^\s'\";]))"
 #: The characters a tool prints in place of a typed password: ``*``, the
 #: bullets ``\u2022`` and ``\u25cf``, and the middle dot ``\u00b7``. A value
 #: made only of them is not a secret. Safe inside a regex ``[...]`` class.
@@ -340,6 +342,7 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "ceph_key": _CEPH_KEY,
     "bind_key_secret": BIND_KEY_SECRET,
     "url_secret": URL_SECRET,
+    "command_line_secret": COMMAND_SECRET,
     "uuid": _UUID,
     "ipv4": _IPV4,
     "ipv6": _IPV6,

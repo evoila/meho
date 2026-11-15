@@ -707,7 +707,11 @@ longer sign in to any app that uses this realm.
 
 Four writes in the group `account_write` (rows in
 `ops_write_account_schemas.py`, approval cards in
-`ops_write_account_preview.py`). All need approval.
+`ops_write_account_preview.py`). All need approval, and a person approves
+each call. No standing grant of a service account and no run approval
+covers them: `op_classes.py` marks all four with
+`declare_per_call_approval`, because they change who can sign in and with
+what rights.
 
 `client.assign`, `user.update` and `user.credential.delete` count as a
 change of rights (`GRANT_OPS` in `ops_write_grant.py`). `user.update` can

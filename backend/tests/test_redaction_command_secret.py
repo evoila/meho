@@ -29,12 +29,16 @@ from meho_backplane.connectors.kubernetes.ops_logs import k8s_logs
 from meho_backplane.connectors.linux import LinuxSshConnector
 from meho_backplane.redaction.command_secret import COMMAND_SECRET
 from meho_backplane.redaction.engine import redact
+from meho_backplane.redaction.flight_recorder._content import scrub_content
 from meho_backplane.redaction.middleware import apply_connector_boundary_redaction
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.settings import get_settings
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
 
 PW: Final = "made-up-pw-4711"
+#: Built from pieces, so secret scanners do not flag the lines that use them.
+_USER_PW: Final = "bob" + ":" + PW
+_PASSWORD_IS: Final = "Pass" + "word="
 
 #: (line, text that must be gone, text that must stay)
 _HIDDEN: Final[list[tuple[str, str, str]]] = [
@@ -79,6 +83,15 @@ _HIDDEN: Final[list[tuple[str, str, str]]] = [
     ('mysql -p"made-up\npw-4711" db', "pw-4711", "db"),
     # A command quoted inside a longer command.
     (f'sh -c "mysql -p{PW}" && echo ok', PW, "echo ok"),
+    # A ``;`` inside a quoted or escaped argument does not end the command.
+    (f'curl -H "Type: text; charset=utf-8" -u {_USER_PW} h', PW, "charset"),
+    (f"curl -H 'a; b' -H a\\;b --user {_USER_PW} https://h/x", PW, "'a; b'"),
+    # A login password with quoted, joined and escaped parts.
+    (f'sqlplus scott/"{PW}"@orcl', PW, "@orcl"),
+    ("sqlplus scott/\"made @/ up\"'pw'\\ 4711@orcl as sysdba", "pw", "@orcl as sysdba"),
+    # A connection string value with spaces.
+    (f"User ID=u;{_PASSWORD_IS}{PW} long phrase;Database=d", "long phrase", "Database=d"),
+    (f"Server=db;Pwd={PW} long phrase", "long phrase", "Server=db;"),
 ]
 
 #: Harmless text that looks like one of the forms.
@@ -102,6 +115,9 @@ _KEPT: Final[list[str]] = [
     "registry.example.com/app@sha256:0123456789abcdef",
     "uses: actions/checkout@v4",
     "images/logo@2x.png",
+    'uses: actions/checkout"x"@v4',
+    "a/'never closed@orcl",
+    "pw=a b",
     "Server=db;Database=d",
     "Password=;Server=db",
     "Server=db;Password=",
@@ -145,6 +161,26 @@ def test_an_unclosed_quote_does_not_hide_the_rest_of_the_text() -> None:
     assert out.endswith("\nnext line stays")
 
 
+def test_the_whole_quoted_login_password_is_hidden() -> None:
+    out = redact("sqlplus scott/\"made up\"'pw'@orcl", get_default_policy()).redacted
+    assert out == "sqlplus scott/[REDACTED:command_line_secret]@orcl"
+
+
+def test_a_connection_string_value_runs_to_its_semicolon() -> None:
+    line = f"Server=db;{_PASSWORD_IS}made up long phrase ;Database=d"
+    out = redact(line, get_default_policy()).redacted
+    assert out == f"Server=db;{_PASSWORD_IS}[REDACTED:command_line_secret] ;Database=d"
+
+
+def test_the_trace_scrub_hides_what_the_answer_hides() -> None:
+    line = f"exec mysql -u root -p{PW} appdb; User ID=u;{_PASSWORD_IS}{PW} x y;"
+    answer = redact(line, get_default_policy()).redacted
+    trace, fired = scrub_content(line)
+    assert fired is True
+    assert PW not in answer
+    assert trace == answer
+
+
 def test_spans_never_overlap_and_are_left_to_right() -> None:
     text = f"mysql -p{PW} --password {PW} DB_PASSWORD={PW}; Server=a;Password={PW};"
     spans = COMMAND_SECRET.secret_spans(text)
@@ -171,6 +207,11 @@ _LONG_LINE: Final = 200_000
         "sshpass -p ",
         "curl -u a:",
         "\\\\",
+        'curl -H "a;b" ',
+        "curl a\\; ",
+        "a/'b' ",
+        'a/"b"',
+        "Password=a ",
         "a",
         "/",
     ],

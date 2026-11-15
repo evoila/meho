@@ -15,8 +15,11 @@ option name and the words around it stay readable:
   ``sqlcmd`` / ``bcp`` / ``osql`` / ``nsrsqlsv`` with ``-P x``,
   ``ldapsearch`` / ``ldapmodify`` with ``-w x``, ``curl -u user:x``,
   ``smbclient -U user%x``;
-* a database login ``user/password@service`` (also ``@//host:port/service``);
-* ``Password=``, ``Pwd=`` and ``pw=`` in a connection string;
+* a database login ``user/password@service`` (also ``@//host:port/service``),
+  with quoted, joined and escaped password parts (``user/"x y"@service``);
+* ``Password=``, ``Pwd=`` and ``pw=`` in a connection string; a value
+  without quotes runs to the ``;`` (or the end of the line), so it may
+  hold spaces;
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
   ``_SECRET``, ``_TOKEN`` or ``_KEY`` (``DB_PASSWORD=x``);
 * the text inside an XML element named like a secret
@@ -42,6 +45,11 @@ from typing import Final
 __all__ = ["COMMAND_SECRET", "CommandSecretFinder"]
 
 _PLACEHOLDER: Final = re.compile(r"""\[REDACTED:[^\]\s'"]+\]""")
+#: A value that is already hidden: only mask characters (``*``, bullets, the
+#: middle dot, as ``patterns.MASK_CHARS``), or the ``***REDACTED***`` marker
+#: of the approval previews (``command_line.HIDDEN``). Both modules import
+#: this one, so the values are written here again.
+_MASKED: Final = re.compile("[*\u2022\u25cf\u00b7]+|\\*\\*\\*REDACTED\\*\\*\\*")
 
 #: A run of bare value characters (no white space, quote, backslash or operator).
 _BARE: Final = re.compile(r"""[^\s'"\\;|&<>()]+""")
@@ -87,8 +95,10 @@ def _value_end(text: str, start: int) -> int:
 
 
 def _is_hidden(value: str) -> bool:
-    """False for an empty value or a ``[REDACTED:...]`` placeholder."""
-    return bool(value) and _PLACEHOLDER.fullmatch(value) is None
+    """False for an empty value, a ``[REDACTED:...]`` placeholder or a masked value."""
+    return (
+        bool(value) and _PLACEHOLDER.fullmatch(value) is None and _MASKED.fullmatch(value) is None
+    )
 
 
 def _value_span(text: str, start: int) -> tuple[int, int] | None:
@@ -155,7 +165,6 @@ _TOOL: Final = re.compile(
     r"(?<![\w.-])(?:sshpass|mysql[a-z]{0,20}|mariadb[a-z-]{0,24}|sqlcmd|bcp|osql|nsrsqlsv"
     r"|ldap(?:search|modify|add|delete|compare|whoami)|curl|smbclient)(?![\w.:-])"
 )
-_WORD: Final = re.compile(r"[^\s;|&]+")
 _BLANKS: Final = re.compile(r"[ \t]*")
 _UPPER_P_TOOLS: Final = frozenset({"sqlcmd", "bcp", "osql", "nsrsqlsv"})
 _SSHPASS_VALUE_OPTIONS: Final = frozenset({"-f", "-d", "-P"})
@@ -235,11 +244,14 @@ def _segment_spans(text: str, first: int, tool: str) -> tuple[list[tuple[int, in
     while pos < size:
         gap = _BLANKS.match(text, pos)
         pos = pos if gap is None else gap.end()
-        word = _WORD.match(text, pos) if pos < size else None
-        if word is None:
+        if pos >= size or text[pos] in "\n;|&":
             break
-        start, end = word.span()
-        token = word.group(0)
+        # A whole shell word, so a ``;`` inside quotes does not end the command.
+        start, end = pos, _value_end(text, pos)
+        if end == start:
+            # ``< > ( )`` is a word of its own, as it was before.
+            end += 1
+        token = text[start:end]
         pos = end
         if skip_next:
             skip_next = False
@@ -270,10 +282,12 @@ def _tool_spans(text: str) -> list[tuple[int, int]]:
 
 # -- database login user/password@service ---------------------------------------
 
-_LOGIN: Final = re.compile(
-    r"(?<![\w/.:@$#-])[A-Za-z][\w$#-]{0,127}/(?P<pw>[^\s/@'\"]{1,256})@"
-    r"(?P<service>//[^\s'\"]{1,256}|[A-Za-z][\w.-]{0,127})"
-)
+_LOGIN_USER: Final = re.compile(r"(?<![\w/.:@$#-])[A-Za-z][\w$#-]{0,127}/")
+#: Longest login password that is read; the bound keeps the scan linear.
+_LOGIN_PASSWORD_MAX: Final = 256
+#: A run of bare login password characters: no ``/``, ``@``, white space, quote or ``\``.
+_LOGIN_BARE: Final = re.compile(r"""[^\s/@'"\\]+""")
+_SERVICE: Final = re.compile(r"//[^\s'\"]{1,256}|[A-Za-z][\w.-]{0,127}")
 #: What stands after ``@`` in text that is not a login: image digests
 #: (``app@sha256:...``), versions and branches (``actions/checkout@v4``,
 #: ``@main``), and commit ids.
@@ -282,14 +296,53 @@ _NOT_A_SERVICE: Final = re.compile(
 )
 
 
+def _login_password_end(text: str, start: int) -> int | None:
+    """Index of the ``@`` that ends the login password at *start*, or ``None``.
+
+    Bare characters, escaped characters and quoted parts are read, so
+    ``user/"made up"@service`` is one password. A quoted part may hold
+    ``/``, ``@`` and spaces.
+    """
+    window = text[start : start + _LOGIN_PASSWORD_MAX + 1]
+    pos = 0
+    while pos < len(window):
+        char = window[pos]
+        bare = _LOGIN_BARE.match(window, pos)
+        if bare is not None:
+            pos = bare.end()
+        elif char == "\\":
+            pos += 2
+        elif char in "'\"":
+            closing = (
+                window.find("'", pos + 1) + 1 if char == "'" else _skip_double_quoted(window, pos)
+            )
+            if closing <= 0:
+                return None
+            pos = closing
+        elif char == "@" and pos > 0:
+            return start + pos
+        else:
+            return None
+    return None
+
+
 def _login_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
-    for match in _LOGIN.finditer(text):
-        service = match["service"]
-        if not service.startswith("//") and _NOT_A_SERVICE.fullmatch(service.split(":")[0]):
+    pos = 0
+    while (match := _LOGIN_USER.search(text, pos)) is not None:
+        pos = match.end()
+        at = _login_password_end(text, match.end())
+        if at is None:
             continue
-        if _is_hidden(match["pw"]):
-            spans.append(match.span("pw"))
+        service = _SERVICE.match(text, at + 1)
+        if service is None:
+            continue
+        name = service.group(0)
+        if not name.startswith("//") and _NOT_A_SERVICE.fullmatch(name.split(":")[0]):
+            continue
+        if _is_hidden(text[match.end() : at]):
+            spans.append((match.end(), at))
+            pos = at
     return spans
 
 
@@ -301,7 +354,10 @@ _CONNECTION: Final = re.compile(
 #: Longest unquoted connection string value that is read. The bound keeps a text
 #: full of ``pw=`` from being scanned again and again.
 _VALUE_MAX: Final = 1024
-_VALUE_STOP: Final = re.compile(r"""[\s;'"]""")
+#: An unquoted value runs to the ``;`` that ends it, so it may hold spaces. A
+#: line break or a quote (the end of the string the connection string is in)
+#: also ends it.
+_VALUE_STOP: Final = re.compile(r"""[\r\n;'"]""")
 
 
 def _quoted_connection_value(text: str, start: int) -> tuple[int, int]:
@@ -327,11 +383,16 @@ def _connection_span(text: str, match: re.Match[str]) -> tuple[int, int] | None:
         return _quoted_connection_value(text, start)
     window = start + _VALUE_MAX
     stop = _VALUE_STOP.search(text, start, window)
-    end = min(len(text), window) if stop is None else stop.start()
+    stop_at = min(len(text), window) if stop is None else stop.start()
+    # A value hidden by an earlier rule is not part of this one.
+    earlier = _PLACEHOLDER.search(text, start, stop_at)
+    if earlier is not None:
+        stop_at = earlier.start()
+    end = start + len(text[start:stop_at].rstrip())
     if match["label"].lower() != "password":
         # ``pwd`` and ``pw`` are connection string words only between semicolons.
         before = text[max(0, match.start() - 40) : match.start()].rstrip()
-        if not (before.endswith(";") or text.startswith(";", end)):
+        if not (before.endswith(";") or text.startswith(";", stop_at)):
             return None
     return (start, end) if _is_hidden(text[start:end]) else None
 

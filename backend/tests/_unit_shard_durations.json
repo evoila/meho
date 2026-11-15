@@ -925,6 +925,7 @@
   "tests/test_preamble_doc_collections_band.py": 1.39,
   "tests/test_preview_grant_cover.py": 1.0,
   "tests/test_principal_display_name.py": 1.22,
+  "tests/test_probe_keeps_sign_ins.py": 3.0,
   "tests/test_proxy_headers.py": 0.19,
   "tests/test_published_tool_schema_shape.py": 0.36,
   "tests/test_read_docs_route.py": 2.73,

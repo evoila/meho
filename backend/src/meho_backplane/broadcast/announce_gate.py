@@ -24,6 +24,11 @@ login and a runner login. A service login and a runner login cannot make
 a claim, so in a tenant with the gate on their ``caution``-or-higher
 writes are refused.
 
+The full rule: in a tenant with the gate on, a ``caution``-or-higher
+write that would run at once is refused when the caller holds no active
+claim. A write that waits for approval is not asked. A claim counts only
+when it is trusted, not completed, and its TTL has not run out.
+
 Composition boundary: #2546 rate-limits the announce *call* (anti-flood);
 this gates *dispatch* on announce-*state*. The two compose -- a caller
 announces (subject to the rate limit), then its write dispatches pass the

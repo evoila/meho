@@ -43,6 +43,7 @@ from meho_backplane.operations.approval_queue import (
     result_state_of_envelope,
 )
 from meho_backplane.operations.grant_approval import is_rights_change
+from meho_backplane.policy.routing import routing_enabled, who_can_approve
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
 
@@ -220,6 +221,10 @@ def project_request_to_view(
     release the request was made under. The reason keys are ``None`` for a
     request that is not expired.
 
+    ``who_can_approve`` names the login groups that may approve the
+    request, when approver routing stored them
+    (:func:`~meho_backplane.policy.routing.who_can_approve`); else ``None``.
+
     ``target_id``, ``target_name`` and ``run_started_at`` (#5026): see
     :func:`_project_target_and_run_start`. ``outcome_unknown`` and
     ``outcome_check`` (#5026): see :func:`_project_outcome_check`.
@@ -237,6 +242,7 @@ def project_request_to_view(
         "proposed_effect": row.proposed_effect,
         "reveal_secret": bool(row.reveal_secret),
         "rights_change": is_rights_change(row),
+        "who_can_approve": who_can_approve(row.approver_roles) if routing_enabled() else None,
         "status": row.status,
         "reviewed_by": row.reviewed_by,
         "work_ref": row.work_ref,

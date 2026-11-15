@@ -324,6 +324,23 @@ def _seed_llm_instructions(existing: EndpointDescriptor, ctx: UpsertContext) -> 
         existing.llm_instructions = ctx.proto.llm_instructions
 
 
+def _keeps_stored_policy(existing: EndpointDescriptor, ctx: UpsertContext) -> bool:
+    """Return whether a re-ingest may only raise the stored risk level and approval flag.
+
+    True when a floor governs the operation, or when the row has a class
+    (the stored class stays when the floor gives none): the stricter
+    stored policy of such a row must not be lowered.
+    """
+    if existing.op_class is not None or ctx.proto.op_class is not None:
+        return True
+    return has_safety_floor(
+        product=ctx.product,
+        version=ctx.version,
+        impl_id=ctx.impl_id,
+        proto=ctx.proto,
+    )
+
+
 def _apply_safety_metadata(existing: EndpointDescriptor, ctx: UpsertContext) -> None:
     """Refresh safety metadata without weakening a connector-owned floor.
 
@@ -332,12 +349,7 @@ def _apply_safety_metadata(existing: EndpointDescriptor, ctx: UpsertContext) -> 
     """
     if ctx.proto.op_class is not None:
         existing.op_class = ctx.proto.op_class
-    if not has_safety_floor(
-        product=ctx.product,
-        version=ctx.version,
-        impl_id=ctx.impl_id,
-        proto=ctx.proto,
-    ):
+    if not _keeps_stored_policy(existing, ctx):
         existing.safety_level = ctx.proto.safety_level
         existing.requires_approval = ctx.proto.requires_approval
         return
@@ -360,12 +372,7 @@ def _capture_safety_change(
     with no trace anywhere.
     """
     incoming_safety: SafetyLevel = ctx.proto.safety_level
-    if has_safety_floor(
-        product=ctx.product,
-        version=ctx.version,
-        impl_id=ctx.impl_id,
-        proto=ctx.proto,
-    ):
+    if _keeps_stored_policy(existing, ctx):
         ranks = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
         if ranks[existing.safety_level] > ranks[incoming_safety]:
             incoming_safety = cast(SafetyLevel, existing.safety_level)

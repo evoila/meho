@@ -1450,14 +1450,14 @@ def _bundle_response_components(
 ) -> None:
     """Bundle the shared schemas the answer schema uses, so a safety floor can read them.
 
-    A nested ref to a component the spec never defines is left as it is:
-    an answer schema is never validated at dispatch, so it must not fail
-    an ingest that worked before.
+    A nested ref to a component the spec never defines is left as it is,
+    and every shared schema that does resolve is still bundled: an answer
+    schema is never validated at dispatch, so it must not fail an ingest
+    that worked before.
     """
-    try:
-        closure = _collect_component_schema_closure(response_schema, component_schemas)
-    except InvalidSchemaError:
-        return
+    closure = _collect_component_schema_closure(
+        response_schema, component_schemas, skip_unresolved=True
+    )
     if closure:
         response_schema["components"] = {"schemas": closure}
 

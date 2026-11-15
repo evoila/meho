@@ -542,7 +542,7 @@ schema. The stored `response_schema` holds the shared schemas the answer
 uses, under `components.schemas`, the same way `parameter_schema` does. A
 `$ref` to a shared schema that the file does not define is left as it is
 and does not fail the ingest, because nothing validates an answer schema at
-dispatch.
+dispatch. The shared schemas that the file does define are still bundled.
 
 Example: an API has `GET /clients`. Its answer is a list of
 `#/components/schemas/Client`, and `Client` has a `password` field. The
@@ -556,12 +556,16 @@ finds the field, and returns a copy of the operation with
 - **Stored on the row.** `EndpointDescriptor.op_class` (nullable). A
   re-ingest stores the class when the floor gives one. When the floor gives
   none, the class of an earlier ingest stays: a floor never weakens a row.
+  A row with a class also keeps its stored risk level and approval flag
+  when they are stricter: a re-ingest only raises them.
 - **Used on every call.** The credential read floor (at ingest and at
   lookup), the secret-read handling in the dispatcher, the audit row, the
   approval request and the preview use the stored class first. A stored
   class never replaces a credential or audit class that the op id already
   gives (`resolve_op_class`). So it also holds in a process that has no
-  floor and no op class list.
+  floor and no op class list. A standing grant never clears an operation
+  with a stored `credential_read`: grant create refuses it, and an
+  existing grant row does not run it.
 - **Not a global list.** The class is not added to `op_classes.py`.
   Ingested op ids such as `GET:/clients` are not unique across connectors.
 - **A two-argument floor** (version, operation) works as before.

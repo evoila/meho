@@ -88,6 +88,19 @@ paths:
                 type: object
                 properties:
                   thing: {$ref: '#/components/schemas/Missing'}
+  /mixed:
+    get:
+      operationId: mixed
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  client: {$ref: '#/components/schemas/Client'}
+                  thing: {$ref: '#/components/schemas/Missing'}
 components:
   schemas:
     Client:
@@ -105,6 +118,7 @@ components:
 _CLIENTS = "GET:/clients"
 _HEALTH = "GET:/health"
 _BROKEN = "GET:/broken"
+_MIXED = "GET:/mixed"
 
 
 @pytest.fixture(autouse=True)
@@ -200,6 +214,20 @@ def test_answer_schema_with_a_missing_shared_schema_does_not_fail_ingest() -> No
         "type": "object",
         "properties": {"thing": {"$ref": "#/components/schemas/Missing"}},
     }
+
+
+def test_answer_schema_keeps_the_shared_schemas_next_to_a_missing_one() -> None:
+    """One missing shared schema does not hide the others from the floor."""
+    register_ingest_safety_floor(product=_PRODUCT, impl_id=_IMPL_ID, floor=_credential_floor)
+    proto = _ops()[_MIXED]
+    schema = proto.response_schema
+
+    assert schema is not None
+    assert schema["properties"]["thing"] == {"$ref": "#/components/schemas/Missing"}  # type: ignore[index,call-overload]
+    assert sorted(schema["components"]["schemas"]) == ["Client", "Owner"]  # type: ignore[index,call-overload]
+    assert _password_names(schema) == 1
+    floored = apply_safety_floor(product=_PRODUCT, version=_VERSION, impl_id=_IMPL_ID, proto=proto)
+    assert floored.op_class == "credential_read"
 
 
 def test_floor_sees_the_password_field_and_sets_the_class() -> None:
@@ -331,6 +359,41 @@ async def test_reingest_keeps_a_stored_class_when_the_floor_gives_none(
     await _register(stub_embedding_service)
 
     assert (await _row(_CLIENTS)).op_class == "credential_read"
+
+
+@pytest.mark.asyncio
+async def test_reingest_without_the_floor_keeps_a_stricter_stored_policy(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A row with a stored class keeps its stricter risk level and approval flag."""
+    register_ingest_safety_floor(product=_PRODUCT, impl_id=_IMPL_ID, floor=_credential_floor)
+    await _register(stub_embedding_service)
+    async with get_sessionmaker()() as session, session.begin():
+        row = (
+            await session.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.product == _PRODUCT, EndpointDescriptor.op_id == _CLIENTS
+                )
+            )
+        ).scalar_one()
+        row.safety_level = "dangerous"
+        row.requires_approval = True
+    _FLOORS.clear()
+
+    await _register(stub_embedding_service)
+
+    row = await _row(_CLIENTS)
+    assert (row.op_class, row.safety_level, row.requires_approval) == (
+        "credential_read",
+        "dangerous",
+        True,
+    )
+    health = await _row(_HEALTH)
+    assert (health.op_class, health.safety_level, health.requires_approval) == (
+        None,
+        "safe",
+        False,
+    )
 
 
 @pytest.mark.asyncio

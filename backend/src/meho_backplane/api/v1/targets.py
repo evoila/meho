@@ -165,6 +165,7 @@ from meho_backplane.connectors._shared.gsm_creds import (
 )
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
+    TargetSecretForbiddenError,
     TargetSecretNotFoundError,
 )
 from meho_backplane.connectors.base import Connector
@@ -181,7 +182,7 @@ from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder.config import invalidate_target_override_cache
-from meho_backplane.operations._errors_target_secret import target_secret_not_found_parts
+from meho_backplane.operations._errors_target_secret import target_secret_error_detail
 from meho_backplane.operations._handler_resolve import (
     forget_target_in_connectors,
     get_or_create_connector_instance,
@@ -1411,27 +1412,19 @@ def _raise_fingerprint_failed(
     raise HTTPException(status_code=500, detail=detail) from exc
 
 
-def _raise_target_secret_not_found(
-    exc: TargetSecretNotFoundError, *, operator: Operator
+def _raise_target_secret_error(
+    exc: TargetSecretNotFoundError | TargetSecretForbiddenError, *, operator: Operator
 ) -> NoReturn:
-    """Turn a missing target secret into a 422 with the ``target_secret_not_found`` shape.
+    """Turn a target secret MEHO cannot read into a 422 with a clear error code.
 
-    The detail carries the target, the ref, whether MEHO built the ref from
-    the target name, and the fix. It has no Vault text and no Vault address.
+    ``detail.error`` is ``target_secret_not_found`` (Vault has no secret at
+    the ref) or ``connector_vault_forbidden`` (Vault refused the read). The
+    detail is the answer a call gets (:func:`target_secret_error_detail`):
+    the target, the ref, whether MEHO built the ref from the target name,
+    and the fix. It has no Vault text and no Vault address.
     """
-    derived, message, remediation = target_secret_not_found_parts(exc, tenant_id=operator.tenant_id)
-    raise HTTPException(
-        status_code=422,
-        detail={
-            "error": "target_secret_not_found",
-            "message": message,
-            "target": exc.target_name,
-            "secret_ref": exc.secret_ref,
-            "secret_ref_derived": derived,
-            "remediation": remediation,
-            "docs": "docs/codebase/error-message-shape.md",
-        },
-    ) from exc
+    detail = target_secret_error_detail(exc, tenant_id=operator.tenant_id)
+    raise HTTPException(status_code=422, detail=detail) from exc
 
 
 @router.post("/{name}/probe", response_model=FingerprintResult)
@@ -1464,6 +1457,13 @@ async def probe_target(
       the dispatcher's ``connector_error`` envelope at the route
       boundary so probe + dispatch agree on the shape of a connector
       failure — sub-signal A of consumer feedback).
+    * **422** when MEHO cannot read the target's secret.
+      ``detail.error`` is ``target_secret_not_found`` when Vault has no
+      secret at the target's ``secret_ref``, and
+      ``connector_vault_forbidden`` when Vault refuses the read. The
+      detail names the target and the ref, says whether MEHO built the
+      ref from the target name (``secret_ref_derived``), and gives the
+      fix in ``message``. It has no Vault text and no Vault address.
 
     No error branch writes to the DB row, so the column always
     reflects the *last successful* probe. The path value is a name,
@@ -1472,7 +1472,10 @@ async def probe_target(
     ``targets.probe`` operation calls too.
     """
     t = await resolve_route_target(session, operator.tenant_id, name)
-    fp = await probe_and_store_fingerprint(session, t, operator=operator)
+    try:
+        fp = await probe_and_store_fingerprint(session, t, operator=operator)
+    except (TargetSecretNotFoundError, TargetSecretForbiddenError) as secret_exc:
+        _raise_target_secret_error(secret_exc, operator=operator)
     return fp
 
 
@@ -1487,8 +1490,12 @@ async def probe_and_store_fingerprint(
     operation can check MEHO's policy for that target before the system
     is contacted. Returns the detected fingerprint. Raises
     :class:`HTTPException` with the status codes :func:`probe_target`
-    lists. The caller owns the transaction: this function only
-    ``flush``-es.
+    lists, except for a target secret MEHO cannot read:
+    :class:`TargetSecretNotFoundError` and
+    :class:`TargetSecretForbiddenError` pass to the caller unchanged. The
+    route turns them into its 422; the ``targets.probe`` operation lets
+    the dispatcher turn them into the result a call gets. The caller owns
+    the transaction: this function only ``flush``-es.
     """
     cls, label, exception_message = resolve_connector_or_label(t, for_probe=True)
     if label == "no_connector":
@@ -1518,8 +1525,8 @@ async def probe_and_store_fingerprint(
         fp = await cls().fingerprint(t, operator=operator)
     except HTTPException:
         raise
-    except TargetSecretNotFoundError as missing_exc:
-        _raise_target_secret_not_found(missing_exc, operator=operator)
+    except (TargetSecretNotFoundError, TargetSecretForbiddenError):
+        raise
     except Exception as exc:
         _raise_fingerprint_failed(exc, cls=cls, t=t, operator=operator)
     # ``model_dump(mode='json')`` produces a JSONB-safe dict (datetime

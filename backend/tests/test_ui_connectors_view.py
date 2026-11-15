@@ -1701,6 +1701,49 @@ def test_reprobe_returns_alert_when_no_matching_connector() -> None:
     assert "No matching connector" in body
 
 
+class _RefusedSecretConnector(_FakeConnector):
+    """Fake connector whose credential read is refused by Vault."""
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:
+        import hvac.exceptions
+
+        from meho_backplane.connectors._shared.vault_creds import TargetSecretForbiddenError
+
+        err = TargetSecretForbiddenError(target_name=target.name, secret_ref="tenants/shared/x")
+        err.__cause__ = hvac.exceptions.Forbidden(
+            "permission denied", method="GET", url="https://vault.test/v1/secret/data/x"
+        )
+        raise err
+
+
+def test_reprobe_refused_secret_read_returns_a_clear_alert() -> None:
+    """A refused secret read answers a 422 alert with the call's text, no Vault address."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    register_connector_v2(
+        product="fakeprod", version="1.0", impl_id="fakeprod", cls=_RefusedSecretConnector
+    )
+    _seed_target(tenant_id=_TENANT_A, name="refused-secret", product="fakeprod", fingerprint=None)
+    client, mock, csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.post(
+            "/ui/connectors/refused-secret/probe",
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 422, response.text
+    body = response.text
+    assert "connector_vault_forbidden" in body
+    assert "refused-secret" in body
+    assert "tenants/shared/x" in body
+    assert "vault.test" not in body
+    assert "Vault said:" not in body
+
+
 def test_reprobe_returns_404_for_unknown_target() -> None:
     """A re-probe POST against an unknown target returns 404."""
     _seed_tenant(_TENANT_A, "tenant-a")

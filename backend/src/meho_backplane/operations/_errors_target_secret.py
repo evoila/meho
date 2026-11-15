@@ -1,23 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The ``target_secret_not_found`` dispatch result.
+"""The answers for a target secret that MEHO cannot read.
 
-Vault has no secret at the target's own ``secret_ref``. The result names
-the target and the ref, says whether MEHO built the ref from the target
-name (a target added without a ``secret_ref`` gets
-``tenants/<tenant_id>/<name>``), and says how to fix it. It never carries
-the hvac text or the Vault URL.
+``target_secret_not_found``: Vault has no secret at the target's own
+``secret_ref``. The result names the target and the ref, says whether MEHO
+built the ref from the target name (a target added without a
+``secret_ref`` gets ``tenants/<tenant_id>/<name>``), and says how to fix
+it. It never carries the hvac text or the Vault URL.
+
+:func:`target_secret_error_detail` gives the same answer, and the one for
+a refused read (``connector_vault_forbidden``), to the probe of a target.
 """
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors._shared.vault_creds import TargetSecretNotFoundError
+from meho_backplane.connectors._shared.vault_creds import (
+    TargetSecretForbiddenError,
+    TargetSecretNotFoundError,
+)
+from meho_backplane.operations._errors import result_connector_vault_forbidden
 
-__all__ = ["result_target_secret_not_found", "target_secret_not_found_parts"]
+__all__ = [
+    "result_target_secret_not_found",
+    "target_secret_error_detail",
+    "target_secret_not_found_parts",
+]
 
 
 def target_secret_not_found_parts(
@@ -77,3 +89,37 @@ def result_target_secret_not_found(
             "remediation": remediation,
         },
     )
+
+
+def target_secret_error_detail(
+    exc: TargetSecretNotFoundError | TargetSecretForbiddenError, *, tenant_id: UUID
+) -> dict[str, Any]:
+    """Return the probe answer for a target secret MEHO cannot read.
+
+    The same fields and text as the operation result of a call, so a probe
+    and a call say the same thing: ``error`` (``target_secret_not_found`` or
+    ``connector_vault_forbidden``), ``message``, and the result's extras
+    (``target`` or ``secret_ref``, ``secret_ref_derived``, ...). It has no
+    Vault text and no Vault address.
+    """
+    if isinstance(exc, TargetSecretNotFoundError):
+        result = result_target_secret_not_found(
+            "targets.probe", exc, tenant_id=tenant_id, duration_ms=0.0
+        )
+    else:
+        # Call-time import, as in target_secret_not_found_parts.
+        from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
+
+        try:
+            expected: str | None = tenant_secret_ref(tenant_id, exc.target_name)
+        except ValueError:
+            expected = None
+        result = result_connector_vault_forbidden(
+            "targets.probe", exc, None, 0.0, expected_secret_ref=expected
+        )
+    extras = dict(result.extras or {})
+    detail: dict[str, Any] = {"error": extras.pop("error_code"), "message": result.error}
+    detail.update(extras)
+    detail["target"] = exc.target_name
+    detail["docs"] = "docs/codebase/error-message-shape.md"
+    return detail

@@ -47,6 +47,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.vault_creds import TargetSecretForbiddenError
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -166,14 +167,23 @@ def _make_forbidden(
     )
 
 
+def _own_ref_forbidden(
+    secret_ref: str = "secret/meho/vcf-logs/logmaster", target_name: str = "vcf-prod"
+) -> TargetSecretForbiddenError:
+    """Build the error the shared loader raises for a refused read of the target's own ref."""
+    err = TargetSecretForbiddenError(target_name=target_name, secret_ref=secret_ref)
+    err.__cause__ = _make_forbidden(secret_ref)
+    return err
+
+
 class _VaultForbiddenConnector(HttpConnector):
     """Connector whose dispatch fails credential resolution with hvac Forbidden.
 
     Mirrors the production shape: the shared operator-context reader
-    (``connectors/_shared/vault_creds.py``) lets
-    :exc:`hvac.exceptions.Forbidden` propagate raw out of the KV-v2
-    read, through the connector's session/auth path, into the
-    dispatcher's error-handling arms. The transport is short-circuited
+    (``connectors/_shared/vault_creds.py``) turns a refused read of the
+    target's own ref into :exc:`TargetSecretForbiddenError`, which passes
+    through the connector's session/auth path into the dispatcher's
+    error-handling arms. The transport is short-circuited
     so the test needs no live Vault.
     """
 
@@ -195,7 +205,7 @@ class _VaultForbiddenConnector(HttpConnector):
         data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        raise _make_forbidden()
+        raise _own_ref_forbidden(target.secret_ref, target.name)
 
     async def _request_json(
         self,
@@ -208,7 +218,7 @@ class _VaultForbiddenConnector(HttpConnector):
         json: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        raise _make_forbidden()
+        raise _own_ref_forbidden(target.secret_ref, target.name)
 
     async def fingerprint(  # type: ignore[override]
         self,
@@ -269,6 +279,25 @@ class _InvalidPathConnector(_VaultForbiddenConnector):
         raise hvac.exceptions.InvalidPath("no value found")
 
 
+class _SecondPathForbiddenConnector(_VaultForbiddenConnector):
+    """A handler whose read of a second Vault path is refused (plain hvac Forbidden)."""
+
+    impl_id = "vfb-rest-second"
+
+    async def _request_json(
+        self,
+        target: Any,
+        method: str,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        raise _make_forbidden("tenants/shared/db-password")
+
+
 async def _insert_ingested_descriptor(
     *,
     session: AsyncSession,
@@ -321,7 +350,7 @@ def test_builder_shape_with_secret_ref_names_cause_and_convention() -> None:
     target = _FakeTarget()
     out = result_connector_vault_forbidden(
         "GET:/api/v1/events",
-        _make_forbidden(),
+        _own_ref_forbidden(),
         target,
         duration_ms=1.0,
         expected_secret_ref=f"tenants/{_TENANT}/vcf-prod",
@@ -359,14 +388,14 @@ def test_builder_derived_ref_says_meho_built_it_and_does_not_advise_storing_ther
     derived = f"tenants/{_TENANT}/vcf-prod"
     out = result_connector_vault_forbidden(
         "GET:/api/v1/events",
-        _make_forbidden(),
+        _own_ref_forbidden(derived),
         _FakeTarget(secret_ref=derived),
         duration_ms=1.0,
         expected_secret_ref=derived,
     )
 
     assert out.error is not None
-    assert "MEHO built" in out.error
+    assert "this is the default path MEHO builds from the target name" in out.error
     assert "--secret-ref <path>" in out.error
     assert "store the credential at a path MEHO may read" in out.error
     assert f"stage the credential at {derived!r}" not in out.error
@@ -375,6 +404,30 @@ def test_builder_derived_ref_says_meho_built_it_and_does_not_advise_storing_ther
     assert out.extras["secret_ref_derived"] is True
     assert "exception_message" not in out.extras
     assert "http" not in str(out.extras)
+
+
+def test_builder_second_path_on_a_target_names_that_path_not_the_secret_ref() -> None:
+    """A refused read of another path does not blame the target's own ref."""
+    derived = f"tenants/{_TENANT}/vcf-prod"
+    out = result_connector_vault_forbidden(
+        "GET:/api/v1/events",
+        _make_forbidden("tenants/shared/db-password"),
+        _FakeTarget(secret_ref=derived),
+        duration_ms=1.0,
+        expected_secret_ref=derived,
+    )
+
+    assert out.error is not None
+    assert "'secret/metadata/tenants/shared/db-password'" in out.error
+    assert "This is not the target's own secret_ref" in out.error
+    assert "default path MEHO builds" not in out.error
+    assert derived not in out.error
+    assert "--secret-ref" not in out.error
+    assert "Vault said:" not in out.error
+    assert "vault.test" not in out.error
+    assert out.extras["refused_path"] == "secret/metadata/tenants/shared/db-password"
+    assert "exception_message" not in out.extras
+    assert "vault.test" not in str(out.extras)
 
 
 def test_builder_shape_without_target_is_generic() -> None:
@@ -402,7 +455,7 @@ def test_builder_shape_without_expected_ref_falls_back_to_convention() -> None:
     """No derivable expected path: the convention template is named instead."""
     out = result_connector_vault_forbidden(
         "GET:/api/v1/events",
-        _make_forbidden(),
+        _own_ref_forbidden(),
         _FakeTarget(),
         duration_ms=1.0,
         expected_secret_ref=None,
@@ -781,7 +834,47 @@ async def test_dispatch_derived_ref_forbidden_marks_derived_and_hides_vault_text
     assert result.error is not None
     assert result.extras["error_code"] == "connector_vault_forbidden"
     assert result.extras["secret_ref_derived"] is True
-    assert "MEHO built" in result.error
+    assert "this is the default path MEHO builds from the target name" in result.error
     assert "http" not in result.error
     assert "http" not in str(result.extras)
     assert f"stage the credential at {derived!r}" not in result.error
+
+
+@pytest.mark.asyncio
+async def test_dispatch_second_path_forbidden_on_a_derived_ref_target_names_that_path(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """A handler's refused read of a second path: no derived-ref answer, the path only."""
+    register_connector_v2(
+        product="vfb",
+        version="9",
+        impl_id="vfb-rest-second",
+        cls=_SecondPathForbiddenConnector,
+    )
+    await _insert_ingested_descriptor(
+        session=session,
+        product="vfb",
+        version="9",
+        impl_id="vfb-rest-second",
+        op_id="GET:/api/v1/events",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+    derived = f"tenants/{_TENANT}/vcf-prod"
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vfb-rest-second-9",
+        op_id="GET:/api/v1/events",
+        target=_FakeTarget(secret_ref=derived),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.extras["error_code"] == "connector_vault_forbidden"
+    assert result.extras["refused_path"] == "secret/metadata/tenants/shared/db-password"
+    assert "This is not the target's own secret_ref" in result.error
+    assert "default path MEHO builds" not in result.error
+    assert "vault.test" not in result.error
+    assert "vault.test" not in str(result.extras)

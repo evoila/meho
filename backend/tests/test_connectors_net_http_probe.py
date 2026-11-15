@@ -57,6 +57,7 @@ from meho_backplane.connectors.net.http_probe import (
     net_http_probe,
     register_net_http_probe_operations,
 )
+from meho_backplane.connectors.net.ops import TIMEOUT_HINT_ENV
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
@@ -513,6 +514,7 @@ async def test_timeout_maps_to_reason_timeout(
 ) -> None:
     """A slow probe past the deadline → reachable=false, reason='timeout'."""
     monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "203.0.113.9")
+    monkeypatch.setenv(TIMEOUT_HINT_ENV, "true")
 
     async def _hang(*_a: object, **_kw: object) -> object:
         await asyncio.sleep(10)
@@ -526,6 +528,44 @@ async def test_timeout_maps_to_reason_timeout(
     )
     assert result["reachable"] is False
     assert result["reason"] == "timeout"
+    assert "no route from the backplane is a possible cause" in result["hint"].lower()
+
+
+async def test_timeout_has_no_hint_when_switch_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the switch unset, a timeout keeps its old answer."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "203.0.113.9")
+    monkeypatch.delenv(TIMEOUT_HINT_ENV, raising=False)
+
+    async def _hang(*_a: object, **_kw: object) -> object:
+        await asyncio.sleep(10)
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(net_http_probe_mod.httpx.AsyncClient, "send", _hang)
+    result = await net_http_probe(
+        _make_operator(),
+        None,
+        {"url": "http://203.0.113.9/x", "timeout_seconds": 0.05},
+    )
+    assert result["reason"] == "timeout"
+    assert "hint" not in result
+
+
+async def test_refused_probe_has_no_timeout_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a timeout carries the hint: a refusal proves there is a route."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "203.0.113.9")
+    monkeypatch.setenv(TIMEOUT_HINT_ENV, "true")
+
+    async def _refuse(*_a: object, **_kw: object) -> object:
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(net_http_probe_mod.httpx.AsyncClient, "send", _refuse)
+    result = await net_http_probe(_make_operator(), None, {"url": "http://203.0.113.9/x"})
+    assert result["reachable"] is False
+    assert "hint" not in result
 
 
 # ---------------------------------------------------------------------------

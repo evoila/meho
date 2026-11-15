@@ -76,6 +76,7 @@ from meho_backplane.connectors.net.http_probe_trust import (
     ProbeTrust,
     resolve_probe_trust,
 )
+from meho_backplane.connectors.net.ops import _HINT_SCHEMA, _add_timeout_hint
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
@@ -272,6 +273,7 @@ _NET_HTTP_PROBE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "url": {"type": "string", "description": "The initially requested URL (audit-visible)."},
         "method": {"type": "string", "description": "The HTTP method issued."},
+        "hint": _HINT_SCHEMA,
     },
     "required": [
         "reachable",
@@ -391,7 +393,7 @@ def _result(
     captured, only ``body_size`` / ``body_sha256``. The shape matches
     :data:`_NET_HTTP_PROBE_RESPONSE_SCHEMA`.
     """
-    return {
+    payload: dict[str, Any] = {
         "reachable": reachable,
         "reason": reason,
         "status": status,
@@ -407,6 +409,7 @@ def _result(
         "url": url,
         "method": method,
     }
+    return _add_timeout_hint(payload)
 
 
 def _elapsed_ms(started: float) -> float:

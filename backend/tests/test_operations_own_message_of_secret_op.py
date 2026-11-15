@@ -161,7 +161,13 @@ def test_a_marked_http_error_stays_hidden() -> None:
 #: Each error type in ``meho_backplane`` whose message is shown on an operation
 #: that sends a secret. A new one fails the test below until it is added here,
 #: so each new one is seen in review.
-_MARKED_TYPES = {"LinuxWriteOwnMessageError"}
+_MARKED_TYPES = {
+    "LinuxWriteOwnMessageError",
+    # secret.move: a fixed sentence about a deleted sink version.
+    "SecretMergeDeletedVersionError",
+    # secret.move: target name, op id and MEHO's policy reason; no vendor text.
+    "VaultTargetRefusedError",
+}
 
 
 def _base_names(node: ast.ClassDef) -> set[str]:

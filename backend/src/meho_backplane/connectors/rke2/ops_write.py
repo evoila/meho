@@ -301,7 +301,7 @@ async def _resolve_sudo_password(
 
     Keys on a dedicated ``sudo_password`` field first, falling back to the
     SSH ``password`` (the consumer-wrapper convention). Raises
-    :class:`Rke2WriteError` when neither is set -- the safe-sudo primitive
+    :class:`Rke2WriteOwnMessageError` when neither is set -- the safe-sudo primitive
     requires a non-empty single-line credential and the rotate cannot
     legitimately proceed without root.
     """
@@ -501,10 +501,9 @@ async def rke2_token_rotate(
             "gate": "operator",
         }
 
-    try:
-        sudo_password = await _resolve_sudo_password(connector, target, operator)
-    except Rke2WriteError as exc:
-        return {"rotated": False, "error": str(exc), "gate": "credentials"}
+    # No sudo credential raises :class:`Rke2WriteOwnMessageError`. It is not
+    # caught here: the dispatcher records an error and shows its fixed sentence.
+    sudo_password = await _resolve_sudo_password(connector, target, operator)
 
     gate_error = await _fingerprint_gate(connector, target, operator)
     if gate_error is not None:

@@ -36,12 +36,17 @@ from meho_backplane.connectors.linux.ops_write import (
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.rke2 import ops_snapshot as rke2_snapshot
 from meho_backplane.connectors.rke2 import ops_write as rke2_write
+from meho_backplane.connectors.rke2.ops import RKE2_OPS
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._errors import MESSAGE_SOURCE_KEY, result_connector_error
-from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD, withhold_vendor_text
+from meho_backplane.operations._vendor_text import (
+    VENDOR_TEXT_WITHHELD,
+    sends_secret,
+    withhold_vendor_text,
+)
 from meho_backplane.settings import get_settings
 
 _SECRET_TAGS = ["license", "license-key"]
@@ -148,14 +153,21 @@ async def test_rke2_write_sudo_refusal_shows_meho_reason_on_a_secret_op() -> Non
 
 def test_rke2_snapshot_sudo_refusal_shows_meho_reason_on_a_secret_op() -> None:
     error = rke2_snapshot.Rke2SnapshotNoSudoError("this operation needs root; no sudo credential")
-    built = result_connector_error("rke2.etcd.snapshot.save", error, 1.0)
+    built = result_connector_error("rke2.etcd-snapshot.save", error, 1.0)
 
-    out = withhold_vendor_text(built, op_id="rke2.etcd.snapshot.save", tags=_SECRET_TAGS)
+    out = withhold_vendor_text(built, op_id="rke2.etcd-snapshot.save", tags=_SECRET_TAGS)
 
     assert out.extras["exception_message"] == str(error)
     assert issubclass(
         rke2_snapshot.Rke2SnapshotNoSudoError, rke2_snapshot.Rke2SnapshotPreconditionError
     )
+
+
+def test_rke2_snapshot_ops_do_not_send_a_secret() -> None:
+    snapshot_ops = [op for op in RKE2_OPS if op.op_id.startswith("rke2.etcd-snapshot.")]
+
+    assert snapshot_ops
+    assert not any(sends_secret(op.op_id, list(op.tags)) for op in snapshot_ops)
 
 
 def test_other_rke2_write_errors_stay_hidden() -> None:
@@ -310,7 +322,9 @@ async def _returning_handler(operator: Operator, target: Any, params: dict[str, 
     )
 
 
-async def _dispatch(handler: Any) -> tuple[Any, dict[str, Any]]:
+async def _dispatch(
+    handler: Any, op_id: str = _DISPATCH_OP, tags: list[str] = _DISPATCH_TAGS
+) -> tuple[Any, dict[str, Any]]:
     embedding = AsyncMock()
     embedding.encode_one.return_value = [0.1] * 384
     embedding.encode.return_value = [[0.1] * 384]
@@ -320,7 +334,7 @@ async def _dispatch(handler: Any) -> tuple[Any, dict[str, Any]]:
         product="demo",
         version="1.x",
         impl_id="demo",
-        op_id=_DISPATCH_OP,
+        op_id=op_id,
         handler=handler,
         summary="Demo op that sends a licence key.",
         description="Demo op for the own-message rule.",
@@ -328,7 +342,7 @@ async def _dispatch(handler: Any) -> tuple[Any, dict[str, Any]]:
         when_to_use=None,
         embedding_service=embedding,
         safety_level="safe",
-        tags=_DISPATCH_TAGS,
+        tags=tags,
     )
     operator = Operator(
         sub="op-own-message",
@@ -342,15 +356,13 @@ async def _dispatch(handler: Any) -> tuple[Any, dict[str, Any]]:
     result = await dispatch(
         operator=operator,
         connector_id="demo-1.x",
-        op_id=_DISPATCH_OP,
+        op_id=op_id,
         target=_Target(),
         params={},
     )
     async with get_sessionmaker()() as session:
         rows = (
-            (await session.execute(select(AuditLog).where(AuditLog.path == _DISPATCH_OP)))
-            .scalars()
-            .all()
+            (await session.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
         )
     assert len(rows) == 1
     return result, rows[0].payload
@@ -378,3 +390,27 @@ async def test_dispatch_hides_vendor_text_of_a_returned_result_that_claims_the_m
     assert MESSAGE_SOURCE_KEY not in result.extras
     assert "quokka" not in result.model_dump_json()
     assert "quokka" not in str(payload)
+
+
+_RKE2_ROTATE = next(op for op in RKE2_OPS if op.op_id == "rke2.token.rotate")
+
+
+async def _rke2_rotate_without_sudo(operator: Operator, target: Any, params: dict[str, Any]) -> Any:
+    return await rke2_write.rke2_token_rotate(_NoSudoSecretConnector(), target, params, operator)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_dispatch_env")
+async def test_dispatch_of_rke2_token_rotate_without_sudo_is_an_error_with_its_reason() -> None:
+    tags = list(_RKE2_ROTATE.tags)
+    assert sends_secret(_RKE2_ROTATE.op_id, tags)
+
+    result, payload = await _dispatch(
+        _rke2_rotate_without_sudo, op_id=_RKE2_ROTATE.op_id, tags=tags
+    )
+
+    assert result.status == "error"
+    assert result.extras["exception_class"] == "Rke2WriteOwnMessageError"
+    assert "no sudo_password / password" in result.extras["exception_message"]
+    assert payload["error"]["exception_message"] == result.extras["exception_message"]
+    assert VENDOR_TEXT_WITHHELD not in result.model_dump_json()

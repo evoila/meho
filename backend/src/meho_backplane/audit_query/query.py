@@ -68,6 +68,10 @@ Filter coverage
   trace. ``True`` keeps the rows with a stored trace, ``False`` the other
   rows, ``None`` applies no filter. The unique index
   ``dispatch_trace_audit_id_idx`` makes the check cheap.
+* ``full_row_lost`` / ``text_changed`` (#6452) read keys that only the audit
+  writer sets in ``payload``: ``full_row_lost.error_class`` on a short row,
+  ``text_changed: true`` on a row where a character or a number was
+  replaced. ``True`` keeps the marked rows, ``False`` the other rows.
 * ``parent_audit_id`` is a real column too (G0.6-T7 #398, migration ``0006``,
   indexed by ``audit_log_parent_audit_id_idx``). The filter narrows to
   ``audit_log.parent_audit_id = :parent_audit_id`` — exact match, so it
@@ -88,6 +92,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import AuditEventClass, AuditLog, DispatchTrace, Target, Tenant
+from meho_backplane.operations.audit_row_safe import FULL_ROW_LOST, TEXT_CHANGED
 
 from .cursor import CursorPosition, decode_cursor, encode_cursor
 from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult, EventClassCounts
@@ -284,6 +289,14 @@ def _apply_filters(
     if filters.has_trace is not None:
         has_trace = _has_trace_predicate(tenant_id=tenant_id)
         stmt = stmt.where(has_trace if filters.has_trace else sa.not_(has_trace))
+
+    if filters.full_row_lost is not None:
+        lost = AuditLog.payload[(FULL_ROW_LOST, "error_class")].as_string().is_not(None)
+        stmt = stmt.where(lost if filters.full_row_lost else sa.not_(lost))
+
+    if filters.text_changed is not None:
+        changed = AuditLog.payload[TEXT_CHANGED].as_boolean().is_(True)
+        stmt = stmt.where(changed if filters.text_changed else sa.not_(changed))
 
     if filters.principal is not None:
         pattern = f"%{_escape_like_literal(filters.principal)}%"

@@ -334,6 +334,7 @@ from meho_backplane.operations._branches import (
 )
 from meho_backplane.operations._catalog_guard import select_catalog_for_target
 from meho_backplane.operations._errors import (
+    MESSAGE_SOURCE_KEY,
     is_auth_failed_status,
     is_probe_pool_busy,
     is_probe_refused,
@@ -2091,6 +2092,20 @@ def _error_extras_for_audit(result: OperationResult) -> dict[str, Any] | None:
     return dict(extras) if extras else None
 
 
+def _without_message_source(result: OperationResult) -> OperationResult:
+    """Drop the own-message mark from an error result a handler returned.
+
+    Only :func:`~meho_backplane.operations._errors.result_connector_error`
+    sets the mark, from the type of the raised error. A handler that returns
+    its own result cannot set it, so the vendor text of an operation that
+    sends a secret stays hidden.
+    """
+    if MESSAGE_SOURCE_KEY not in result.extras:
+        return result
+    extras = {key: value for key, value in result.extras.items() if key != MESSAGE_SOURCE_KEY}
+    return result.model_copy(update={"extras": extras})
+
+
 async def _audit_returned_result(
     raw: Any,
     *,
@@ -2140,7 +2155,7 @@ async def _audit_returned_result(
     duration_ms = _elapsed_ms(started)
     if raw.status == "error":
         return await _audit_error_and_return(
-            raw,
+            _without_message_source(raw),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
@@ -3567,10 +3582,17 @@ async def _handle_needs_approval(
                 preview_hash=preview_hash,
                 idempotency_key=idempotency_key,
                 reveal_secret=reveal_secret,
+                category=descriptor.policy_category,
             )
             await session.commit()
         if getattr(request, "_reused", False):
-            return result_awaiting_approval(op_id, request.id, duration_ms, reused=True)
+            return result_awaiting_approval(
+                op_id,
+                request.id,
+                duration_ms,
+                reused=True,
+                audit_id=request.request_audit_id,
+            )
         # Record the add-on step events AFTER commit so a phantom event
         # cannot outlive a failed transaction (the helper is fail-open).
         expired_request = getattr(request, "_expired_request", None)
@@ -3587,7 +3609,9 @@ async def _handle_needs_approval(
             decision="pending",
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
-        return result_awaiting_approval(op_id, request.id, duration_ms)
+        return result_awaiting_approval(
+            op_id, request.id, duration_ms, audit_id=request.request_audit_id
+        )
     except IdempotencyKeyConflictError as exc:
         return await _audit_denied_and_return(
             result_idempotency_key_conflict(op_id, exc.request_id, duration_ms),

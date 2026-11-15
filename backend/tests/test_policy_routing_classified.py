@@ -23,6 +23,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, TenantPolicy
 from meho_backplane.operations._lookup import lookup_descriptor
+from meho_backplane.operations.composite import enforce_subop_policy
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.settings import get_settings
@@ -144,3 +145,25 @@ async def test_without_classification_a_category_entry_fits_no_call(
     assert call["status"] == "awaiting_approval", call
     row = await _request()
     assert row.approver_rule == "default"
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_step_stores_the_kinds_of_its_category() -> None:
+    """The step gate of a multi-step operation passes the step's category on."""
+    await _store_policy(_NETWORK_TO_SA)
+
+    gate = await enforce_subop_policy(
+        operator=_service(),
+        connector_id=_CONNECTOR,
+        op_id=_OP,
+        safety_level="caution",
+        requires_approval=True,
+        target=None,
+        params={},
+    )
+
+    assert gate is not None
+    assert gate.status == "awaiting_approval", gate
+    row = await _request()
+    assert row.approver_roles == ["SA-Operators", "Admins"]
+    assert row.approver_rule == "install:routing[0]"

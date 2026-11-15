@@ -19,13 +19,17 @@ Each problem is one sentence that names the entry
 (``classifications[N]``) and the operation. :func:`check_document` also
 refuses an unknown category or risk level, a ``taxonomy.default`` in a
 tenant's file, and two entries that give one operation different
-categories at the same level.
+categories at the same level. The ``routing`` entries are checked by
+:func:`meho_backplane.policy.routing.routing_mistakes`: a group kind that
+may approve none of the changes an entry routes, and a change that nobody
+may approve.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from typing import Any, Final
 from uuid import UUID
 
@@ -36,6 +40,7 @@ from sqlalchemy.orm import aliased
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.credential_read import has_credential_read_floor
+from meho_backplane.operations.role_floors import role_floor_for
 from meho_backplane.policy.classification import (
     RISK_LEVELS,
     ClassificationConflictError,
@@ -44,11 +49,13 @@ from meho_backplane.policy.classification import (
     Scope,
     Taxonomy,
     check_no_conflict,
+    classify,
     entries_from_document,
     install_wait_text,
     install_wait_undone,
     taxonomy_from_documents,
 )
+from meho_backplane.policy.routing import group_names, routing_mistakes, today_kinds
 
 __all__ = ["MAX_MISTAKES", "KnownOp", "check_document", "load_known_ops"]
 
@@ -178,6 +185,69 @@ def _floor_mistakes(entries: Sequence[ClassificationEntry], ops: Sequence[KnownO
     return mistakes
 
 
+def _lowest_level(op: KnownOp, classified_risk: str | None) -> int:
+    """The index in :data:`RISK_LEVELS` of the lowest level *op* can wait at."""
+    levels = [
+        RISK_LEVELS.index(lvl) for lvl in (op.safety_level, classified_risk) if lvl in RISK_LEVELS
+    ]
+    return max(levels, default=0)
+
+
+def _routing_floor_mistakes(
+    raw_routes: Sequence[dict[str, Any]],
+    ops: Sequence[KnownOp],
+    entries: Sequence[ClassificationEntry],
+    taxonomy: Taxonomy,
+) -> list[str]:
+    """A routing entry that sends an operation with a role floor to kinds that may not approve it.
+
+    Only Admins may approve an operation with the ``tenant_admin`` role
+    floor (for example ``targets.register``), at every risk level. Routing
+    only narrows, so an entry without Admins would leave such a change with
+    nobody to approve it. The check works like the run: for each risk level
+    the operation can wait at, the first entry that fits that level wins,
+    and only that entry is checked. An entry with ``risk`` fits only that
+    level; an entry without ``risk`` fits every level.
+    """
+    mistakes: list[str] = []
+    for op in ops:
+        if role_floor_for(op.coords.op_id) is None:
+            continue
+        classified = classify(op.coords, entries, taxonomy)
+        for level in RISK_LEVELS[_lowest_level(op, classified.risk) :]:
+            winner = _first_route(raw_routes, op, classified.category, level)
+            if winner is None:
+                continue
+            index, approvers = winner
+            kinds = today_kinds(level, op.coords.op_id)
+            if not approvers & set(kinds):
+                sentence = (
+                    f"`routing[{index}]` fits `{op.coords.op_id}` of connector "
+                    f"`{op.coords.connector_id}`, but only {group_names(kinds)} may approve "
+                    "it and the entry does not ask them. It would wait until it expires."
+                )
+                if sentence not in mistakes:
+                    mistakes.append(sentence)
+    return mistakes
+
+
+def _first_route(
+    raw_routes: Sequence[dict[str, Any]], op: KnownOp, category: str | None, level: str
+) -> tuple[int, set[str]] | None:
+    """The index and approvers of the first routing entry that fits *op* at *level*."""
+    for index, raw in enumerate(raw_routes):
+        match = raw.get("match") or {}
+        if match.get("category") is not None and match["category"] != category:
+            continue
+        connector = match.get("connector")
+        if connector is not None and not fnmatchcase(op.coords.connector_id, connector):
+            continue
+        if match.get("risk") is not None and match["risk"] != level:
+            continue
+        return index, {str(kind) for kind in raw.get("approvers") or []}
+    return None
+
+
 def _install_wait_mistakes(
     entries: Sequence[ClassificationEntry],
     install_entries: Sequence[ClassificationEntry],
@@ -223,6 +293,7 @@ def check_document(
     raw_entries: list[dict[str, Any]] = list(document.get("classifications") or [])
     mistakes = _taxonomy_mistakes(document, scope=scope, taxonomy=taxonomy)
     mistakes.extend(_entry_value_mistakes(raw_entries, taxonomy))
+    mistakes.extend(routing_mistakes(list(document.get("routing") or []), taxonomy))
     if mistakes:
         return _capped(mistakes)
     entries = entries_from_document(document, scope=scope)
@@ -236,4 +307,11 @@ def check_document(
             )
         except ClassificationConflictError as exc:
             mistakes.append(str(exc))
+        if not mistakes:
+            mistakes = _routing_floor_mistakes(
+                list(document.get("routing") or []),
+                ops,
+                [*base, *entries, *other_entries],
+                taxonomy,
+            )
     return _capped(mistakes)

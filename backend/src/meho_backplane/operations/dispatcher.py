@@ -334,6 +334,7 @@ from meho_backplane.operations._branches import (
 )
 from meho_backplane.operations._catalog_guard import select_catalog_for_target
 from meho_backplane.operations._errors import (
+    MESSAGE_SOURCE_KEY,
     is_auth_failed_status,
     is_probe_pool_busy,
     is_probe_refused,
@@ -461,6 +462,7 @@ from meho_backplane.operations.dispatch_limits import (
     resolve_dispatch_rate_limit,
 )
 from meho_backplane.operations.license_reads import is_license_read
+from meho_backplane.operations.op_policy import approval_classification
 from meho_backplane.operations.reducer import (
     SECRET_REVEAL_CONTEXT_KEY,
     PassThroughReducer,
@@ -2090,6 +2092,20 @@ def _error_extras_for_audit(result: OperationResult) -> dict[str, Any] | None:
     return dict(extras) if extras else None
 
 
+def _without_message_source(result: OperationResult) -> OperationResult:
+    """Drop the own-message mark from an error result a handler returned.
+
+    Only :func:`~meho_backplane.operations._errors.result_connector_error`
+    sets the mark, from the type of the raised error. A handler that returns
+    its own result cannot set it, so the vendor text of an operation that
+    sends a secret stays hidden.
+    """
+    if MESSAGE_SOURCE_KEY not in result.extras:
+        return result
+    extras = {key: value for key, value in result.extras.items() if key != MESSAGE_SOURCE_KEY}
+    return result.model_copy(update={"extras": extras})
+
+
 async def _audit_returned_result(
     raw: Any,
     *,
@@ -2139,7 +2155,7 @@ async def _audit_returned_result(
     duration_ms = _elapsed_ms(started)
     if raw.status == "error":
         return await _audit_error_and_return(
-            raw,
+            _without_message_source(raw),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
@@ -3160,6 +3176,10 @@ async def _build_proposed_effect(
         # ``op_class`` / ``preview`` / fail-soft-marker envelope built by
         # :func:`build_proposed_effect` itself unchanged.
         base["safety_level"] = descriptor.safety_level
+        # #6041: the category, labels and classification rule, so an
+        # approver sees at once what kind of change waits. Nothing while
+        # the POLICY_CLASSIFICATION switch is off.
+        base.update(approval_classification(descriptor))
         # #3980: a person's ``caution`` call that waits only because it came
         # with a token says so on the request. The same person may then
         # approve it with a click in the web interface.
@@ -3565,7 +3585,13 @@ async def _handle_needs_approval(
             )
             await session.commit()
         if getattr(request, "_reused", False):
-            return result_awaiting_approval(op_id, request.id, duration_ms, reused=True)
+            return result_awaiting_approval(
+                op_id,
+                request.id,
+                duration_ms,
+                reused=True,
+                audit_id=request.request_audit_id,
+            )
         # Record the add-on step events AFTER commit so a phantom event
         # cannot outlive a failed transaction (the helper is fail-open).
         expired_request = getattr(request, "_expired_request", None)
@@ -3582,7 +3608,9 @@ async def _handle_needs_approval(
             decision="pending",
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
-        return result_awaiting_approval(op_id, request.id, duration_ms)
+        return result_awaiting_approval(
+            op_id, request.id, duration_ms, audit_id=request.request_audit_id
+        )
     except IdempotencyKeyConflictError as exc:
         return await _audit_denied_and_return(
             result_idempotency_key_conflict(op_id, exc.request_id, duration_ms),

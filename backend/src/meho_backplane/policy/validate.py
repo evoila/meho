@@ -185,10 +185,11 @@ def _install_floor_mistakes(
 ) -> list[str]:
     """A tenant entry that undoes an install-wide wait or risk level: one sentence each part."""
     coords = [op.coords for op in ops]
+    both = [*install_entries, *entries]
     mistakes: list[str] = []
     for index, entry in enumerate(entries):
         name = f"`classifications[{index}]`"
-        mistakes.extend(install_floor_texts(name, entry, coords, install_entries))
+        mistakes.extend(install_floor_texts(name, entry, coords, both))
     return mistakes
 
 

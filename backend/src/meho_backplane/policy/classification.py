@@ -294,37 +294,73 @@ def install_wait_text(name: str, op_id: str, install_ref: str) -> str:
     )
 
 
+def _tenant_risk_decided_by(
+    entry: ClassificationEntry, matched: Sequence[ClassificationEntry]
+) -> str | None:
+    """The tenant's own risk level when *entry* is one that decides it, else ``None``.
+
+    *matched* are the entries that match one operation. A more specific
+    tenant entry that sets ``risk`` decides instead of *entry*.
+    """
+    tenant = [e for e in matched if e.scope == "tenant"]
+    if not any(e is entry for e in tenant):
+        tenant.append(entry)
+    top = _scope_top(tenant, "tenant", "risk")
+    if not any(e is entry for e in top):
+        return None
+    return max((e.risk or "safe" for e in top), key=RISK_LEVELS.index)
+
+
 def install_risk_lowered(
     entry: ClassificationEntry,
     coords: Iterable[OpCoordinates],
     entries: Sequence[ClassificationEntry],
 ) -> tuple[str, str, str] | None:
-    """Where a tenant *entry* sets a lower risk level than the install's policy.
+    """Where a tenant *entry* decides a lower risk level than the install's policy.
 
-    Returns ``(op_id, install_ref, install_level)`` for the first
-    operation in *coords* that *entry* matches and that an install entry
-    in *entries* sets to a higher level than ``entry.risk``. ``None``
-    when there is none.
+    *entries* are the install's entries and the other entries of the
+    tenant. Returns ``(op_id, install_ref, install_level)`` for the first
+    operation in *coords* that *entry* matches, where *entry* decides the
+    tenant's level and an install entry sets a higher one. A more specific
+    tenant entry that sets the install's level or higher decides that
+    operation instead, so it is not returned. ``None`` when there is none.
     """
     if entry.scope != "tenant" or entry.risk is None:
         return None
-    level = RISK_LEVELS.index(entry.risk)
     for one in coords:
         if not entry.matches(one):
             continue
-        install = _scope_risk([e for e in entries if e.matches(one)], "install")
-        if install is not None and RISK_LEVELS.index(install.risk or "safe") > level:
-            return one.op_id, install.ref, install.risk or "safe"
+        matched = [e for e in entries if e.matches(one)]
+        install = _scope_risk(matched, "install")
+        if install is None:
+            continue
+        tenant_level = _tenant_risk_decided_by(entry, matched)
+        install_level = install.risk or "safe"
+        if tenant_level is not None and RISK_LEVELS.index(tenant_level) < RISK_LEVELS.index(
+            install_level
+        ):
+            return one.op_id, install.ref, install_level
     return None
 
 
-def install_risk_text(name: str, risk: str, op_id: str, install_ref: str, level: str) -> str:
-    """The sentences that refuse or mark an entry found by :func:`install_risk_lowered`."""
+def install_risk_text(
+    name: str, risk: str, op_id: str, install_ref: str, level: str, *, wide: bool
+) -> str:
+    """The sentences that refuse or mark an entry found by :func:`install_risk_lowered`.
+
+    *wide* is true when the entry also matches other operations. Then the
+    text keeps its risk level, because it still counts for those.
+    """
+    head = (
+        f"{name} sets `risk: {risk}`, but `{install_ref}` sets `{op_id}` to `{level}` "
+        f"for the whole install, so `risk: {risk}` does not count for `{op_id}`."
+    )
+    if not wide:
+        return f"{head} Set `risk: {level}` or higher in this entry; its other fields can stay."
     return (
-        f"{name} sets `risk: {risk}` on `{op_id}`, but `{install_ref}` sets it to "
-        f"`{level}` for the whole install. A tenant can raise a risk level, not lower "
-        f"it. Remove `risk: {risk}` from the tenant entry, or set `{level}` or higher; "
-        "its other fields can stay."
+        f"{head} The entry still counts for the other operations it matches. Add a "
+        f"tenant entry for `{op_id}` with `risk: {level}` or higher, or leave `{op_id}` "
+        "out of this entry's match."
     )
 
 
@@ -337,7 +373,8 @@ def install_floor_texts(
     """Each part of a tenant *entry* that the install's policy overrules: one text each.
 
     The parts are ``always_wait: false`` against an install-wide wait and
-    a ``risk`` below the install's level. An empty list when neither.
+    a ``risk`` below the install's level. *entries* are the install's
+    entries and the tenant's entries. An empty list when neither.
     """
     texts: list[str] = []
     undone = install_wait_undone(entry, coords, entries)
@@ -345,7 +382,8 @@ def install_floor_texts(
         texts.append(install_wait_text(name, *undone))
     lowered = install_risk_lowered(entry, coords, entries)
     if lowered is not None and entry.risk is not None:
-        texts.append(install_risk_text(name, entry.risk, *lowered))
+        wide = any(entry.matches(one) and one.op_id != lowered[0] for one in coords)
+        texts.append(install_risk_text(name, entry.risk, *lowered, wide=wide))
     return texts
 
 

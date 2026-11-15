@@ -469,13 +469,16 @@ async def _no_effect_notes(
         return {}
     ops = await load_known_ops(session, scope="tenant", tenant_id=tenant_id)
     coords = [op.coords for op in ops]
-    notes: dict[int, list[str]] = {}
+    parsed: dict[int, ClassificationEntry] = {}
     for index, raw in enumerate(entries):
         try:
-            entry = entries_from_document({"classifications": [raw]}, scope="tenant")[0]
+            parsed[index] = entries_from_document({"classifications": [raw]}, scope="tenant")[0]
         except (ValueError, IndexError):
             continue
-        texts = install_floor_texts(f"`classifications[{index}]`", entry, coords, install_entries)
+    both = [*install_entries, *parsed.values()]
+    notes: dict[int, list[str]] = {}
+    for index, entry in parsed.items():
+        texts = install_floor_texts(f"`classifications[{index}]`", entry, coords, both)
         if texts:
             notes[index] = texts
     return notes

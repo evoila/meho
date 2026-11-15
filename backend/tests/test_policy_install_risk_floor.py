@@ -7,15 +7,19 @@
   level is a floor for every tenant; a tenant can raise it, not lower it.
   A tenant's own "always wait" holds under a more specific install entry
   with ``always_wait: false``.
-* The policy file: a tenant entry with a lower risk level than a matching
-  install entry is refused, and the text names the install entry. The
-  same holds on the REST import route.
-* The upgrade case: a stored tenant entry with a lower level no longer
-  lowers it, and the export marks only that part "Has no effect".
+* The policy file: a tenant entry that decides a lower risk level than a
+  matching install entry is refused. The text names the install entry
+  and the operation, and keeps the level of a wide entry, which still
+  counts for its other operations. A more specific tenant entry with the
+  install's level or higher makes the wide entry fine. The same holds on
+  the REST import route.
+* A stored tenant entry with a lower level: its level does not count for
+  that operation, and the export marks only that part "Has no effect".
 * An install-wide wait with a standing grant and with a run approval of
   a tenant: the call still waits, each time.
-* The single edit and the admin MCP tool: a tenant wait under an install
-  ``false`` is stored and holds; a category edit is not refused.
+* The single edit, on REST and on the admin MCP tool: a tenant wait under
+  an install ``false`` is stored and holds; ``always_wait: false`` under
+  an install wait is refused; a category edit is not refused.
 """
 
 from __future__ import annotations
@@ -86,10 +90,17 @@ _RUN = "run-install-floor"
 _INSTALL_RISK = {"classifications": [{"match": {"op": _STOP}, "risk": "destructive"}]}
 _TENANT_LOWER = {"classifications": [{"match": {"op": "irfix.vm.*"}, "risk": "caution"}]}
 _RISK_REFUSAL = (
-    "sets `risk: caution` on `irfix.vm.stop`, but `install:classifications[0]` sets it to "
-    "`destructive` for the whole install. A tenant can raise a risk level, not lower it. "
-    "Remove `risk: caution` from the tenant entry, or set `destructive` or higher; its "
-    "other fields can stay."
+    "sets `risk: caution`, but `install:classifications[0]` sets `irfix.vm.stop` to "
+    "`destructive` for the whole install, so `risk: caution` does not count for "
+    "`irfix.vm.stop`. The entry still counts for the other operations it matches. Add a "
+    "tenant entry for `irfix.vm.stop` with `risk: destructive` or higher, or leave "
+    "`irfix.vm.stop` out of this entry's match."
+)
+_NARROW_RISK_REFUSAL = (
+    "sets `risk: caution`, but `install:classifications[0]` sets `irfix.vm.stop` to "
+    "`destructive` for the whole install, so `risk: caution` does not count for "
+    "`irfix.vm.stop`. Set `risk: destructive` or higher in this entry; its other fields "
+    "can stay."
 )
 _INSTALL_WAIT = {"classifications": [{"match": {"op": _STOP}, "always_wait": True}]}
 _TENANT_UNDO = {"classifications": [{"match": {"op": "irfix.vm.*"}, "always_wait": False}]}
@@ -202,6 +213,29 @@ def test_a_tenant_file_with_a_lower_level_is_refused() -> None:
         _TENANT_LOWER, scope="tenant", install_document=_INSTALL_RISK, ops=_OPS
     )
     assert mistakes == [f"`classifications[0]` {_RISK_REFUSAL}"]
+
+
+def test_a_tenant_entry_for_the_one_operation_gets_the_narrow_text() -> None:
+    tenant = {"classifications": [{"match": {"op": _STOP}, "risk": "caution"}]}
+    mistakes = check_document(tenant, scope="tenant", install_document=_INSTALL_RISK, ops=_OPS)
+    assert mistakes == [f"`classifications[0]` {_NARROW_RISK_REFUSAL}"]
+
+
+@pytest.mark.parametrize("level", ["destructive", "dangerous"])
+def test_a_more_specific_tenant_entry_makes_the_wide_entry_fine(level: str) -> None:
+    """``dangerous`` is below the install level: then the narrow entry is refused, not the wide."""
+    tenant = {
+        "classifications": [
+            {"match": {"connector": _CONNECTOR}, "risk": "caution"},
+            {"match": {"op": _STOP}, "risk": level},
+        ]
+    }
+    mistakes = check_document(tenant, scope="tenant", install_document=_INSTALL_RISK, ops=_OPS)
+    if level == "destructive":
+        assert mistakes == []
+    else:
+        assert len(mistakes) == 1
+        assert mistakes[0].startswith("`classifications[1]` sets `risk: dangerous`")
 
 
 def test_an_entry_that_lowers_the_level_and_ends_the_wait_gets_two_mistakes() -> None:
@@ -324,7 +358,7 @@ def _admin(tenant_id: uuid.UUID = _TENANT) -> Operator:
 @pytest.mark.usefixtures("ops")
 async def test_an_install_level_holds_in_two_tenants_and_after_the_upgrade() -> None:
     await _store(None, _INSTALL_RISK)
-    # Stored before the upgrade: this entry used to lower the level.
+    # A stored tenant entry with a lower level: the install level holds.
     await _store(_TENANT, _TENANT_LOWER)
     for tenant_id in (_TENANT, _OTHER_TENANT):
         policies = await _policies(tenant_id)
@@ -366,6 +400,35 @@ async def test_the_export_marks_only_the_part_that_has_no_effect() -> None:
         "  risk: caution\n"
     )
     assert plan.mistakes == [f"`classifications[0]` {_RISK_REFUSAL}"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("ops")
+async def test_a_wide_tenant_entry_still_counts_for_its_other_operations() -> None:
+    await _store(None, _INSTALL_RISK)
+    await _store(
+        _TENANT, {"classifications": [{"match": {"connector": _CONNECTOR}, "risk": "dangerous"}]}
+    )
+    async with get_sessionmaker()() as session:
+        text = await export_policy(session, scope="tenant", tenant_id=_TENANT)
+        plan = await build_plan(session, scope="tenant", tenant_id=_TENANT, content=text.encode())
+        fixed = text.replace(
+            "  risk: dangerous\n",
+            "  risk: dangerous\n- match:\n    op: irfix.vm.stop\n  risk: destructive\n",
+        )
+        fixed_plan = await build_plan(
+            session, scope="tenant", tenant_id=_TENANT, content=fixed.encode()
+        )
+    note = text.splitlines()[2]
+    assert note.startswith("# Has no effect: `classifications[0]` sets `risk: dangerous`")
+    assert "does not count for `irfix.vm.stop`" in note
+    assert "still counts for the other operations it matches" in note
+    assert "Remove" not in note
+    assert plan.mistakes == [note.removeprefix("# Has no effect: ")]
+    assert fixed_plan.mistakes == []
+    policies = await _policies(_TENANT)
+    assert policies[_STOP] == ("destructive", True, False)
+    assert policies[_LIST][0] == "dangerous"
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +499,7 @@ async def _seed_grant_and_run_approval() -> None:
                 op_id=_STOP,
                 connector_id=_CONNECTOR,
                 target_id=None,
-                reason="fixture: made before the install policy",
+                reason="fixture: standing grant",
                 created_by_sub="fixture-admin",
             )
         )
@@ -447,7 +510,7 @@ async def _seed_grant_and_run_approval() -> None:
                 principal_sub=_SERVICE_SUB,
                 work_ref=_RUN,
                 entries=[{"connector_id": _CONNECTOR, "op_id": _STOP}],
-                reason="fixture: approved before the install policy",
+                reason="fixture: run approval",
                 requested_at=now,
                 expires_at=now + timedelta(hours=1),
                 approved_at=now,
@@ -536,8 +599,36 @@ async def test_a_single_edit_adds_a_wait_under_an_install_false() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("ops")
-async def test_a_category_edit_on_an_old_lower_level_is_not_refused() -> None:
-    """Only a part an edit sets is checked; the old level still has no effect."""
+async def test_the_rest_single_edit_refuses_ending_an_install_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_vault(monkeypatch)
+    await _store(None, _INSTALL_WAIT)
+    key = make_rsa_keypair("kid-install-wait-edit")
+    token = mint_token(
+        key, sub="admin-a", tenant_id=str(_TENANT), tenant_role=TenantRole.TENANT_ADMIN.value
+    )
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = TestClient(app).post(
+            "/api/v1/policy/classification",
+            json={"match": {"op": "irfix.vm.*"}, "always_wait": False},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert detail.startswith("classification_refused: This edit sets `always_wait: false`")
+    assert "`install:classifications[0]`" in detail
+    async with get_sessionmaker()() as session:
+        assert list((await session.execute(select(ApprovalRequest))).scalars()) == []
+        stored = list((await session.execute(select(TenantPolicy))).scalars())
+    assert [row.tenant_id for row in stored] == [None]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("ops")
+async def test_a_category_edit_on_a_stored_lower_level_is_not_refused() -> None:
+    """Only a part an edit sets is checked; the stored lower level still does not count."""
     await _store(None, _INSTALL_RISK)
     await _store(_TENANT, _TENANT_LOWER)
     edit = ClassificationEdit(

@@ -77,9 +77,15 @@ The rules are in `policy/classification.py` (`classify`, no database):
      tenant's value.
 
    A tenant file that sets `always_wait: false` on an operation the
-   install makes wait, or a lower `risk` than a matching install entry,
-   is refused. The text names the install entry and says what to remove;
-   the other fields of the entry can stay (`install_floor_texts`). The
+   install makes wait is refused; the text says to remove that part. A
+   tenant entry that decides a lower `risk` for an operation than a
+   matching install entry is refused too (`install_risk_lowered`). A more
+   specific tenant entry with the install's level or higher decides that
+   operation instead, and then the wide entry is fine. The text says that
+   the level "does not count for `<op>`". For a wide entry it says that
+   the entry still counts for its other operations, and suggests a more
+   specific entry or a narrower match, never to remove the level
+   (`install_floor_texts`). The
    single edit has no `risk` field, so it refuses only the
    `always_wait: false` part (`install_wait_undone`).
 5. **Ties** (same rank): for `risk` the higher level wins, for

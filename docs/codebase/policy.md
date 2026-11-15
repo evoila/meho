@@ -71,10 +71,14 @@ is one sentence that names the entry:
   code is refused. A file can raise a risk level, not lower it.
 - **An install-wide "always wait" or risk level.** In a tenant's file, an
   entry with `always_wait: false` that matches an operation the install's
-  policy makes always wait is refused. So is an entry with a lower `risk`
-  than the install's level for a matching operation. The sentence names the
-  install entry, for example `install:classifications[0]`, and says which
-  part to remove; the other fields of the entry can stay.
+  policy makes always wait is refused. So is an entry that decides a lower
+  `risk` than the install's level for a matching operation; a more
+  specific tenant entry with the install's level or higher makes it fine.
+  The sentence names the install entry, for example
+  `install:classifications[0]`, and the operation where the part does not
+  count. For a wide entry it suggests a more specific entry or a narrower
+  match, not to remove the level, because the level still counts for the
+  other operations.
 - Two entries that give one operation a different category (or a different
   value for one label key) at the same level.
 
@@ -93,12 +97,14 @@ evaluator and its compare-only run (`POLICY_ENGINE_SHADOW`) all follow
 it. The details and the case of a connector that a tenant registers
 under its own id are in [policy-classification.md](policy-classification.md).
 
-**Stored before the upgrade.** A tenant entry stored before this rule
+**A stored tenant entry against the install.** A stored tenant entry
 that sets an install-wide wait back, or that sets a lower risk level
-than the install, now has no effect for that part (its other fields still
-count). `export_policy` writes one `# Has no effect: ...` comment for each
-such part above the entry, and a new import of the same entry is refused,
-so the tenant admin removes that part.
+than the install, has no effect for that part on that operation (its
+other fields, and its level on other operations, still count).
+`export_policy` writes one `# Has no effect: ...` comment for each such
+part above the entry, with the same text as the import refusal, and a
+new import of the same entry is refused until the tenant admin fixes
+it.
 
 ## Plan, import, approval
 

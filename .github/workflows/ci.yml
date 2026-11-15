@@ -156,9 +156,10 @@
 name: CI
 
 on:
-  # No `push` trigger (#6387). Every change reaches `main` through the merge
-  # queue, and the queue run already ran the full matrix on exactly that
-  # code. A push run repeated it, took heavy runners from pull requests and
+  # No `push` trigger (#6387). Every pull request reaches `main` through the
+  # merge queue, except the advisory path in `docs/RELEASING.md`, which the
+  # nightly run covers. The queue run already ran the full matrix on exactly
+  # that code. A push run repeated it, took heavy runners from pull requests and
   # merge groups, and was cancelled by the next merge, which left a red
   # gate on the commit although no test failed. What a push run gave besides
   # tests is a warm cache on `main` (uv, the PHP package files). The nightly
@@ -193,8 +194,8 @@ concurrency:
   # IMPORTANT: already-running merge_group jobs must NEVER be cancelled.
   # A cancelled queue check causes the merge attempt to fail and the PR
   # falls out of the queue — defeating the whole point of the merge queue.
-  # The conditional below restricts cancel-in-progress to pull_request /
-  # push contexts only. Queued (not-yet-started) merge_group runs can
+  # The conditional below turns cancel-in-progress off for merge_group
+  # runs only. Queued (not-yet-started) merge_group runs can
   # still be displaced by newer queue entries; that is expected behaviour.
   # The nightly `schedule` run has its own group (`ci-<ref>-schedule`), so
   # a merge during the run does not cancel it.
@@ -220,8 +221,8 @@ jobs:
     #                same heavy Python lanes skip. The job
     #                `python-outside-backend` runs instead: only the backend
     #                tests that read files outside `backend/`. Fails CLOSED
-    #                like `docs_only`: it starts `true`, and push, merge_group
-    #                and any diff problem keep it `true` (full run).
+    #                like `docs_only`: it starts `true`, and merge_group, the
+    #                nightly run and any diff problem keep it `true` (full run).
     #
     # WHY a `changes`-job + job-level `if:` and NOT `on.paths` (#2140):
     # GitHub treats a job skipped by its own `if:` as **Success** (it
@@ -241,7 +242,7 @@ jobs:
     # thing allowed to skip the heavy lanes is a diff we can PROVE is
     # docs-only. `--no-renames` makes a rename appear as delete(old)+add(new)
     # so a code→`*.md` (or `*.md`→code) rename can never smuggle a non-docs
-    # path past the allow-list. merge_group / push NEVER fast-path (a queue
+    # path past the allow-list. merge_group / nightly NEVER fast-path (a queue
     # batch may mix docs + code; the queue run must always run the full
     # matrix) — they emit `docs_only=false` unconditionally.
     #
@@ -252,7 +253,7 @@ jobs:
     #                set instead of the six shards. Same fail-closed rule as
     #                docs_only: backend/tests/_unit_connector_select.py says
     #                which diffs qualify, and any doubt, any error, and every
-    #                merge_group / push run give empty (the full run).
+    #                merge_group / nightly run give empty (the full run).
     #
     #   test_map — `true` when the test map picked the unit tests of a PR
     #                (#5642). Only computed on a PR that is not docs-only, has
@@ -262,7 +263,7 @@ jobs:
     #                the tests. The step `upload-selection` stores them for
     #                the `python-unit-shard` job. Same fail-closed rule: no
     #                map, an old map, a file the map cannot judge, too many
-    #                tests, any error, and every merge_group / push run give
+    #                tests, any error, and every merge_group / nightly run give
     #                `false` (the full run).
     #
     # No fork-PR guard (#4835): this job runs on a GitHub-hosted runner, with
@@ -432,7 +433,7 @@ jobs:
           }
 
           if [ "${{ github.event_name }}" != "pull_request" ]; then
-            # push / merge_group: never fast-path; always the full matrix.
+            # merge_group / nightly: never fast-path; always the full matrix.
             echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (full run)"
           elif classify; then
             migrations="${c_migrations}"
@@ -2810,7 +2811,7 @@ jobs:
     # migrations)" in branches/main branch protection (manual ops step,
     # not code — #2140 acceptance item B.3).
     needs: changes
-    # Run on any non-PR event (push / merge_group — never leave a required
+    # Run on any non-PR event (merge_group / nightly — never leave a required
     # check Pending), OR a same-repo PR that touched migration files. A
     # no-migration same-repo PR (and every fork PR) skips this job via
     # `if:`, which reports Success and satisfies the required check.

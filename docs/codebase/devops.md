@@ -1860,7 +1860,9 @@ into `GITHUB_STEP_SUMMARY` on every successful publish.
 
 `ci.yml` is the central per-PR test harness. Every PR targeting `main`
 runs the toolchain jobs in parallel, and so does every merge-queue run.
-A push to `main` starts no `ci.yml` run (#6387): the queue run already ran
+A push to `main` starts no `ci.yml` run (#6387). Every pull request
+reaches `main` through the merge queue, except the advisory path in
+`docs/RELEASING.md`, which the nightly run covers. The queue run already ran
 the full matrix on exactly that code, and a push run only repeated it,
 took heavy runners and was cancelled by the next merge. The nightly run on
 `main` keeps the caches on `main` warm.
@@ -2756,7 +2758,8 @@ This is defence in depth on top of branch protection — the
 `meho-runners-ci` self-hosted runner pool is internal infrastructure, so
 arbitrary code from a forked PR (`go test`, `pytest`, `helm template`
 with custom values) is never allowed to execute on it. The OR
-short-circuits on `push` events so main-branch CI is unaffected.
+short-circuits on `merge_group` and nightly `schedule` events, so those
+runs are unaffected.
 
 The six jobs that moved to GitHub-hosted runners (#4626, step 1) have no
 guard since #4835: `changes`, `python-lint`, `go-lint-test`,

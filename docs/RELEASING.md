@@ -152,10 +152,9 @@ How users get the new version is in the
   workflow (`image.yml` / `cli-release.yml` / `chart.yml`) fires on the
   `v*` tag with **no** other gate, so the tag publishes whatever `main`
   is at — a red `main` ships a broken or incomplete image, chart, and
-  CLI. A push to `main` does not start a CI run any more. The proof of
-  green for the tagged commit is the **merge-queue run** of that merge
-  commit. Confirm it before step 4, and also look at the latest nightly
-  run on `main`:
+  CLI. A push to `main` starts no CI run. The proof of green for the
+  tagged commit is the **merge-queue run** of that merge commit. Confirm
+  it before step 4, and also look at the latest nightly run on `main`:
 
   ```bash
   gh run list --repo evoila/meho --commit <merge-commit-sha> \
@@ -164,20 +163,22 @@ How users get the new version is in the
     --branch main --limit 3 --json headSha,conclusion,status,url
   ```
 
+  An empty list is not green. A commit that was merged outside the
+  merge queue (see "Merging an advisory fix" below) has no merge-queue
+  run. For such a commit, the proof is the first green nightly CI run
+  on `main` that contains the commit. Do not tag before that run is
+  green.
+
 - [ ] **"cancelled" ≠ "green".** A cancelled CI run is *inconclusive*,
-  not a pass. A cancelled run (for example a nightly run that was
-  stopped) is the common cause, and a
-  cancelled run reads green-ish in a glance — it is not. (A hung
+  not a pass, even though it reads green-ish in a glance. (A hung
   `python-coverage` job is *no longer* a cause: since #2800 a pytest
   hang trips the step-level timeout and degrades to an absorbed job
   failure with run conclusion `success`, so a `cancelled` run
-  means a genuine cancel.) If the merge-queue run
-  for the tagged commit is `cancelled`, **re-run it and wait
-  for a real `success`** before tagging:
-
-  ```bash
-  gh run rerun <run-id> --repo evoila/meho   # then re-check conclusion
-  ```
+  means a genuine cancel.) Do not re-run a cancelled merge-queue run:
+  after the merge the queue branch is gone, and the watchdog job
+  cancels the re-run. When the merge-queue run of the tagged commit is
+  `cancelled` or missing, the proof is the next green nightly run on
+  `main` that contains the commit. Wait for it before tagging.
 
 - [ ] **Security-advisory reconciliation (every rc and GA tag).** Every
   `### Security` entry in `CHANGELOG.md` must have a row in the advisory
@@ -206,7 +207,10 @@ How users get the new version is in the
   The steps are in decision record 0010
   (`docs/decisions/0010-who-approves-pull-requests.md` in the private
   maintainer repo). Every other pull
-  request keeps the normal path.
+  request keeps the normal path. Such a merge gets no merge-queue run,
+  and a push to `main` starts no CI run. So after the merge, wait for
+  the next green nightly CI run on `main` that contains the fix before
+  you push the release tag.
 
 - [ ] **The appliance's CIS exception list is approved (every release
   that ships the appliance OVA).** `deploy/appliance/cis/exceptions.md`

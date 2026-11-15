@@ -15,7 +15,7 @@ at dispatch. Both guards are **ingest-time**: rows persisted by earlier
 ingests keep their dangling-ref schemas and stay undispatchable, failing
 every call with the structured ``invalid_op_schema`` error (the live-hit:
 the governed content-library file-PULL op on a pre-fix vCenter ingest,
-claude-rdc-hetzner-dc's c3gov1 build, 2026-08-24).
+a consumer's build, 2026-08-24).
 
 The original spec document is **not** recoverable server-side — the DB
 stores no spec bytes (``spec_provenance`` records only ``uri`` +

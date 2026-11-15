@@ -28,6 +28,7 @@ from meho_backplane.db.models import (
     ScheduledTriggerStatus,
 )
 from meho_backplane.scheduler.cron import is_valid_cron_expr, resolve_timezone
+from meho_backplane.work_ref import WorkRef
 
 __all__ = [
     "CHECK_EVENTS_OFF_NOTICE",
@@ -60,13 +61,6 @@ _TIMEZONE_MAX_LENGTH = 64
 #: a UUID-shaped value in production; 256 chars covers any tenant-side
 #: customisation (longer values are almost certainly a misconfiguration).
 _IDENTITY_SUB_MAX_LENGTH = 256
-
-#: Max length of a ``work_ref`` change-ticket reference. An opaque
-#: cross-system string (``"gh:evoila/meho#13"`` / a Jira key / a CR id);
-#: bounded so an adversarial caller cannot smuggle a large blob past the
-#: validator. Mirrors the 256-char cap the audit ``work_ref`` sink
-#: applies (:class:`~meho_backplane.api.v1.audit_models`).
-_WORK_REF_MAX_LENGTH = 256
 
 #: Shared wire-description fragment naming the scheduler's tick-quantization
 #: latency contract, surfaced on the timestamp fields so REST / MCP / CLI
@@ -261,7 +255,7 @@ class ScheduledTriggerCreate(BaseModel):
         ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT
     )
     tenant_id: uuid.UUID | None = None
-    work_ref: Annotated[str | None, Field(max_length=_WORK_REF_MAX_LENGTH)] = None
+    work_ref: WorkRef | None = None
 
     @model_validator(mode="after")
     def _validate_discriminated_union(self) -> ScheduledTriggerCreate:

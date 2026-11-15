@@ -6,7 +6,7 @@
 Storage is driven by the ``Storage`` module (``Get-Disk`` / ``Get-Volume`` /
 ``Initialize-Disk`` / ``New-Partition`` / ``Format-Volume``) and the ``iSCSI``
 module (``Get-IscsiTarget`` / ``Connect-IscsiTarget``) over the shared
-PowerShell-over-SSH transport. This is the c1sql1 SQL-FCI shared-disk path:
+PowerShell-over-SSH transport. This is the shared-disk path of a SQL Server failover cluster:
 attach an iSCSI target, then provision the raw disk into a volume.
 
 ``iscsi.connect`` and ``disk.format`` are ``caution`` (recoverable

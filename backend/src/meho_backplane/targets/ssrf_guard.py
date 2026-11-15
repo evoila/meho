@@ -38,7 +38,7 @@ covering at minimum ``127.0.0.0/8``, ``10.0.0.0/8``,
 That guard is a different sink and is deliberately not
 modified or reused directly (it fails closed on unresolvable hostnames
 and rejects with an ingest-specific error type); the *pattern* is
-shared, per evoila-bosnia/meho-internal#153.
+shared.
 
 **Allowlist override.** MEHO is an on-prem product — operators
 legitimately register vCenter/Harbor/NSX targets on RFC 1918 space. The
@@ -100,7 +100,7 @@ __all__ = [
 #: Env var holding the operator-configured destination allowlist:
 #: comma-separated CIDR ranges (``10.0.0.0/8``), bare IPs
 #: (``192.168.7.10``), and/or hostname literals
-#: (``harbor.lab.internal``). Unset/empty = no exemptions (guard fully
+#: (``harbor.example.test``). Unset/empty = no exemptions (guard fully
 #: on). Read per call — no process-lifetime cache — so tests and
 #: hot-reconfigured deployments see the current value without a
 #: cache-clear hook.
@@ -377,8 +377,7 @@ def screen_and_resolve(host: str) -> list[str] | None:
     rather than re-resolving the name. Because the address returned here
     is the address the connection uses, a resolver that changes its
     answer between the screen and the connect cannot steer the socket at
-    a destination the guard never saw (the check/use gap,
-    evoila-bosnia/meho-internal#275).
+    a destination the guard never saw (the check/use gap).
 
     Returns ``None`` for a passthrough destination — an empty host, an
     allowlisted hostname literal (trusted verbatim), or an unresolvable

@@ -141,7 +141,7 @@ def test_retrieve_resource_in_templates_list(
     template = templates.get(_RETRIEVE_TEMPLATE)
     assert template is not None
     assert template["mimeType"] == "application/json"
-    # MEHO-internal RBAC fields are dropped from the wire shape.
+    # internal RBAC fields are dropped from the wire shape.
     assert "required_role" not in template
     assert "audit_redact_uri" not in template
 

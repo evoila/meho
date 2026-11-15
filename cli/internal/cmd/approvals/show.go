@@ -154,6 +154,7 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	}
 	fmt.Fprintf(w, "Connector:    %s\n", output.SafeText(d.ConnectorId))
 	fmt.Fprintf(w, "Operation:    %s\n", output.SafeText(d.OpId))
+	printClassification(w, d.ProposedEffect)
 	// Resolved subject of a path-variable op (#3353): the concrete entity
 	// (name + moid) recovered from identity params, so the reviewer reads
 	// `web-01 (vm-1042)` instead of the unresolved `{vm}` in the op id.
@@ -243,6 +244,15 @@ func printRunOutcome(w io.Writer, d *api.ApprovalRequestView) {
 	}
 	if o.ErrorCode != nil {
 		fmt.Fprintf(w, "Error code:   %s\n", output.SafeText(*o.ErrorCode))
+	}
+	// The run is "ok" when MEHO ran the script, even if the script itself
+	// failed. A non-zero exit code must not read as a plain success.
+	if o.ExitCode != nil {
+		if *o.ExitCode != 0 {
+			fmt.Fprintf(w, "Exit code:    %d (the script ran, but it failed)\n", *o.ExitCode)
+		} else {
+			fmt.Fprintf(w, "Exit code:    %d\n", *o.ExitCode)
+		}
 	}
 	// The next step a failed multi-step operation names (#5377), for
 	// example the VM question that holds the change.

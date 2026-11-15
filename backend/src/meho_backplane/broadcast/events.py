@@ -922,7 +922,7 @@ def redact_payload(
 
 
 # ---------------------------------------------------------------------------
-# Tier-1 defence-in-depth for full-detail broadcasts (meho-internal #151)
+# Tier-1 defence-in-depth for full-detail broadcasts
 # ---------------------------------------------------------------------------
 #
 # ``classify_op`` is allowlist-driven: whether a secret-bearing write op

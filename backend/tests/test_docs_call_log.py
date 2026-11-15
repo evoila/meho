@@ -430,8 +430,7 @@ async def test_upstream_ask_completion_logs_hit_and_cited_ids_only(
     It carries the ids-only ask fields with ``answer_source="upstream"`` and
     the backend's timing, never the query, the answer or a chunk's text, and
     never a ``gs://`` path. The upstream path logs no query text even with
-    the flag on: the backend does not return its rewritten query yet
-    (evoila-bosnia/MEHO.Knowledge#513).
+    the flag on: the backend does not return its rewritten query yet.
     """
     if query_text_flag:
         _enable_query_text_flag(monkeypatch)

@@ -91,6 +91,7 @@ from meho_backplane.policy.store import (
 )
 
 __all__ = [
+    "CLASSIFICATION_FIELDS",
     "SAFETY_RANK",
     "EffectivePolicy",
     "OpKey",
@@ -100,16 +101,48 @@ __all__ = [
     "apply_effective_policy",
     "apply_policy_edit",
     "apply_step_classification",
+    "approval_classification",
     "effective_policy",
     "effective_policy_map",
+    "hidden_classification_fields",
     "list_overrides",
     "load_overrides",
+    "policy_in_force",
     "register_policy_repair_op",
     "remove_override",
 ]
 
 #: Order of the four risk levels, lowest first.
 SAFETY_RANK: Final[dict[str, int]] = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
+
+#: The fields of a search hit and of the call contract that show the
+#: classification. They are left out while the ``POLICY_CLASSIFICATION``
+#: switch is off, so those answers stay exactly as they were.
+CLASSIFICATION_FIELDS: Final[frozenset[str]] = frozenset({"category", "labels"})
+
+
+def hidden_classification_fields() -> set[str]:
+    """The fields to leave out of an answer: all of them while the switch is off."""
+    return set() if classification_enabled() else set(CLASSIFICATION_FIELDS)
+
+
+def approval_classification(row: EndpointDescriptor) -> dict[str, Any]:
+    """The classification an approval request carries, or ``{}`` while the switch is off.
+
+    ``category``, ``labels`` and ``classification_rule`` (the entry that
+    set them) of *row*, as :func:`apply_effective_policy` or
+    :func:`apply_step_classification` set them. ``category`` is ``None``
+    when two entries conflict. A classified row always has a rule; a row
+    has none when the switch was off at lookup, so this reads no setting.
+    """
+    if row.policy_rule_ref is None:
+        return {}
+    return {
+        "category": row.policy_category,
+        "labels": dict(row.policy_labels),
+        "classification_rule": row.policy_rule_ref,
+    }
+
 
 #: What the edit tools say when a risk level would go below the classification.
 _PULL_REQUEST_HINT: Final[str] = (
@@ -344,6 +377,21 @@ def _with_classification(policy: EffectivePolicy, classified: Classification) ->
     )
 
 
+def policy_in_force(
+    row: EndpointDescriptor,
+    overrides: Iterable[OperationPolicyOverride],
+    classified: Classification,
+) -> EffectivePolicy:
+    """The policy of *row* with *classified* in place of its stored classification.
+
+    The same order as :func:`effective_policy_map`: the code's value, the
+    overrides, the classification, then the floors. The dry run of a
+    classification edit shows it for the values before and after.
+    """
+    base = effective_policy(row.safety_level, row.requires_approval, overrides)
+    return _with_floors(row, _with_classification(base, classified))
+
+
 def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectivePolicy:
     """Raise *policy* for a credential read and for a caller-address parameter."""
     safety_level, requires_approval = raise_for_credential_read(
@@ -372,7 +420,9 @@ async def apply_effective_policy(
     back: the stored row keeps the classification. *group_keys* is passed
     to :func:`effective_policy_map`. ``row.policy_always_wait`` (not a
     column) gets :attr:`EffectivePolicy.always_wait`, so the grant checks
-    see it.
+    see it. ``row.policy_category``, ``policy_labels`` and
+    ``policy_rule_ref`` (not columns either) get the classification, so
+    the call contract and the approval request can show it.
     """
     policies = await effective_policy_map(
         session, tenant_id=tenant_id, rows=[row], group_keys=group_keys
@@ -381,7 +431,7 @@ async def apply_effective_policy(
     session.expunge(row)
     row.safety_level = policy.safety_level
     row.requires_approval = policy.requires_approval
-    row.policy_always_wait = policy.always_wait
+    _set_classification(row, policy)
     return row
 
 
@@ -408,8 +458,16 @@ async def apply_step_classification(
     )
     step.safety_level = policy.safety_level
     step.requires_approval = policy.requires_approval
-    step.policy_always_wait = policy.always_wait
+    _set_classification(step, policy)
     return step
+
+
+def _set_classification(row: EndpointDescriptor, policy: EffectivePolicy) -> None:
+    """Copy the classification of *policy* to the attributes of *row* that are not columns."""
+    row.policy_always_wait = policy.always_wait
+    row.policy_category = policy.category
+    row.policy_labels = dict(policy.labels)
+    row.policy_rule_ref = policy.rule_ref
 
 
 # ---------------------------------------------------------------------------

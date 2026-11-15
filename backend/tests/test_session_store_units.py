@@ -232,6 +232,32 @@ def test_check_is_sure_about_placeholders(line: bytes) -> None:
     assert not check_part(line).unclear
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param("password: ********\n", id="stars"),
+        pytest.param("password=\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\n", id="bullets"),
+        pytest.param(
+            "Enter SYS user password:\n\u25cf\u25cf\u25cf\u25cf\u25cf\u25cf\n", id="next-line"
+        ),
+        pytest.param('{"input": {"password": "\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7"}}', id="json"),
+    ],
+)
+def test_check_keeps_a_mask_only_value(line: str) -> None:
+    raw = line.encode("utf-8")
+    part = check_part(raw)
+    assert part.content == raw
+    assert not part.unclear
+    assert part.redactions == {}
+
+
+def test_check_still_finds_a_real_value_after_the_masks() -> None:
+    plain = check_part("password: \u2022\u2022\u2022\u2022madeUpValue99\n".encode())
+    assert plain.content == b"[REDACTED:api_key]\n"
+    json_line = '{"input": {"password": "\u2022\u2022\u2022\u2022madeUpValue99"}}'
+    assert check_part(json_line.encode()).unclear_reasons == ("possible_secret",)
+
+
 # The markers are split so the secret scanners of the repo do not flag them.
 _BEGIN = b"-----BEGIN " + b"OPENSSH PRIVATE KEY-----\n"
 _END = b"-----END " + b"OPENSSH PRIVATE KEY-----\n"

@@ -218,6 +218,7 @@
   "tests/test_ci_check_release_body_paths.py": 1.23,
   "tests/test_ci_coverage_shards.py": 0.38,
   "tests/test_ci_fork_runner_isolation.py": 0.61,
+  "tests/test_ci_main_push.py": 0.52,
   "tests/test_ci_measure_test_map.py": 0.1,
   "tests/test_ci_merge_queue_cleanup.py": 3.4,
   "tests/test_ci_merge_queue_watchdog.py": 3.63,

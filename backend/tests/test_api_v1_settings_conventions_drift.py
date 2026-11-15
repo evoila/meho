@@ -272,7 +272,7 @@ async def test_the_check_saves_nothing_and_writes_one_read_audit_row(client: Tes
 @pytest.mark.parametrize(
     ("content", "expected"),
     [
-        (_file(_RULES, policies={"announce_gate_enabled": True}), "spec.tenants[0].policies"),
+        (_file(_RULES, policies={"run_approval_target_kinds": True}), "spec.tenants[0].policies"),
         (_file(_RULES, targets=[]), "spec.tenants[0].targets"),
         (_file(None), "spec.tenants[0].conventions` is required"),
         (_file([{**_RULES[0], "kind": "reference"}]), "conventions[0].kind` must be"),

@@ -39,7 +39,7 @@ func newRecentCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.Target, "target", "", "exact target filter")
 	cmd.Flags().StringVar(&opts.ActorSub, "actor-sub", "", "exact delegated-agent filter")
 	cmd.Flags().StringVar(&opts.WorkRef, workref.FilterFlag, "", "exact work-reference filter")
-	cmd.Flags().BoolVar(&opts.ActiveOnly, "active-only", false, "exclude expired TTL claims")
+	cmd.Flags().BoolVar(&opts.ActiveOnly, "active-only", false, "keep only active claims (not completed, TTL not run out)")
 	cmd.Flags().IntVar(&opts.Limit, "limit", 100, "maximum events (1-1000)")
 	cmd.Flags().BoolVar(&opts.JSONOut, "json", false, "emit JSON")
 	cmd.Flags().StringVar(&opts.BackplaneOverride, "backplane", "", "backplane URL")

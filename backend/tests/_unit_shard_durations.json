@@ -274,6 +274,7 @@
   "tests/test_connectors_fleet_lcm_spec_reconcile.py": 1.04,
   "tests/test_connectors_fleet_lcm_typed_reads.py": 9.26,
   "tests/test_connectors_gcloud_auth.py": 0.44,
+  "tests/test_connectors_gcloud_backup_bucket.py": 3.49,
   "tests/test_connectors_gcloud_call_operation.py": 1.4,
   "tests/test_connectors_gcloud_e2e.py": 0.46,
   "tests/test_connectors_gcloud_ops.py": 0.57,

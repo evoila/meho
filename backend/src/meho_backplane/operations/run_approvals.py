@@ -255,7 +255,8 @@ async def _check_approver_group(
     level, so the list cannot be approved.
 
     With the ``POLICY_APPROVER_ROUTING`` switch on, each entry is routed
-    like a single request (:func:`_check_routed_entry`).
+    like a single request (:func:`_check_routed_entry`), and the routing of
+    each entry lands on the approve audit row (``approver_routing``).
     """
     from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
     from meho_backplane.operations.approval_queue import (
@@ -264,6 +265,7 @@ async def _check_approver_group(
         may_approve_high_risk,
     )
 
+    routed: list[dict[str, object]] = []
     for index, raw in enumerate(entries):
         entry = RunApprovalEntry.model_validate(raw)
         if is_rights_change_op(entry.op_id) and not operator.may_approve_rights_change(
@@ -293,7 +295,7 @@ async def _check_approver_group(
                 f"{descriptor.safety_level} operation. Only {_HIGH_RISK_APPROVERS_TEXT} may "
                 "approve a list with a dangerous or destructive operation"
             )
-        await _check_routed_entry(session, operator, index, entry, descriptor)
+        await _check_routed_entry(session, operator, index, entry, descriptor, routed)
 
 
 async def _check_routed_entry(
@@ -302,6 +304,7 @@ async def _check_routed_entry(
     index: int,
     entry: RunApprovalEntry,
     descriptor: EndpointDescriptor,
+    routed: list[dict[str, object]],
 ) -> None:
     """Refuse the list when approver routing sends *entry* to other login groups.
 
@@ -309,6 +312,10 @@ async def _check_routed_entry(
     (:func:`~meho_backplane.policy.routing.approver_set_for`), worked out
     now from the entry's risk level and category in this tenant. A change
     of rights is not routed. Does nothing while the switch is off.
+
+    The entry's routing rule and group kinds are added to *routed*, which
+    is bound as ``audit_approver_routing``: the audit row of the approve
+    names them, also when the list is refused.
     """
     if not routing_enabled() or is_rights_change_op(entry.op_id):
         return
@@ -320,6 +327,15 @@ async def _check_routed_entry(
         level=descriptor.safety_level,
         category=descriptor.policy_category,
     )
+    routed.append(
+        {
+            "entry": index,
+            "op_id": entry.op_id,
+            "approver_rule": found.rule,
+            "approver_roles": list(found.kinds),
+        }
+    )
+    structlog.contextvars.bind_contextvars(audit_approver_routing=routed)
     refusal = routing_refusal(operator, list(found.kinds), found.rule)
     if refusal is not None:
         raise RunApprovalGroupError(

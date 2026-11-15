@@ -24,10 +24,11 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, TenantPolicy
+from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog, TenantPolicy
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ApprovalGroupForbiddenError,
@@ -45,6 +46,7 @@ from meho_backplane.policy.document import (
 )
 from meho_backplane.policy.routing import (
     DEFAULT_RULE,
+    ROUTING_INVALID_RULE,
     RouteEntry,
     kind_of,
     route,
@@ -617,6 +619,53 @@ async def test_a_bad_stored_routing_refuses_the_park() -> None:
 
     with pytest.raises(ValueError, match="`routing` must be a list"):
         await _park("caution")
+
+    (row,) = await _audit_rows("approval.request")
+    assert row.status_code == 409
+    assert row.payload["result_status"] == "routing_invalid"
+    assert row.payload["approver_rule"] == ROUTING_INVALID_RULE
+    assert "`routing` must be a list" in row.payload["routing_error"]
+    async with get_sessionmaker()() as session:
+        assert (await session.scalars(select(ApprovalRequest))).all() == []
+
+
+async def _audit_rows(path: str) -> list[AuditLog]:
+    async with get_sessionmaker()() as session:
+        return list(
+            (
+                await session.scalars(
+                    select(AuditLog).where(AuditLog.method == "APPROVAL", AuditLog.path == path)
+                )
+            ).all()
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_routing_on")
+async def test_the_request_and_approve_audit_rows_name_the_routing_rule() -> None:
+    await _store_policy(_NETWORK_ONLY_SA)
+    request_id = await _park("caution")
+
+    await _approve(request_id, _person(_OTHER, sa_operator=True))
+
+    (request_row,) = await _audit_rows("approval.request")
+    (decision_row,) = await _audit_rows("approval.decision")
+    for row in (request_row, decision_row):
+        assert row.payload["approver_rule"] == "install:routing[0]"
+        assert row.payload["approver_roles"] == ["SA-Operators", "Admins"]
+
+
+@pytest.mark.asyncio
+async def test_with_the_switch_off_the_audit_rows_name_no_routing_rule() -> None:
+    await _store_policy(_NETWORK_ONLY_SA)
+    request_id = await _park("caution")
+
+    await _approve(request_id, _person(_OTHER))
+
+    for path in ("approval.request", "approval.decision"):
+        (row,) = await _audit_rows(path)
+        assert "approver_rule" not in row.payload
+        assert "approver_roles" not in row.payload
 
 
 # ---------------------------------------------------------------------------

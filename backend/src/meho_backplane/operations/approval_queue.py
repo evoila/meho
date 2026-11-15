@@ -174,7 +174,12 @@ from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
 from meho_backplane.operations.uncertain_outcome import envelope_is_uncertain
-from meho_backplane.policy.routing import routing_enabled, routing_refusal, stamp_approver_set
+from meho_backplane.policy.routing import (
+    ROUTING_INVALID_RULE,
+    routing_enabled,
+    routing_refusal,
+    stamp_approver_set,
+)
 from meho_backplane.version import running_release_id
 
 __all__ = [
@@ -261,6 +266,8 @@ _DECISION_STATUS_CODE_EXPIRED: int = 410
 #: MEHO was updated while the request waited (#5030), or the target changed
 #: or no longer resolves (:func:`refuse_resume_if_target_changed`).
 _RESUME_REFUSED_STATUS_CODE: int = 409
+#: The audit status of a park refused because the stored routing is not valid.
+_ROUTING_REFUSED_STATUS_CODE: int = 409
 
 #: Who may approve another person's ``dangerous`` or ``destructive`` change,
 #: in words for the refusal texts. The rule itself is in
@@ -1369,6 +1376,12 @@ async def _write_audit_row(
     # a "request" row, the reviewer on a "decision" row), when
     # AUDIT_CLIENT_IDENTITY is on.
     apply_client_block(payload, operator)
+    # Approver routing: the group kinds that may approve the request and
+    # the routing entry that set them. Only on a request routed while the
+    # POLICY_APPROVER_ROUTING switch was on.
+    if request.approver_rule is not None:
+        payload["approver_rule"] = request.approver_rule
+        payload["approver_roles"] = request.approver_roles
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
@@ -1711,7 +1724,11 @@ async def create_pending_request(
     )
     if rights_change or is_rights_change(request):
         request.rights_change = True
-    await stamp_approver_set(session, request, category=category)
+    try:
+        await stamp_approver_set(session, request, category=category)
+    except ValueError as exc:
+        await _audit_routing_refusal(operator, request, str(exc))
+        raise
     if idempotency_key is None:
         session.add(request)
         await session.flush()
@@ -1753,6 +1770,42 @@ async def create_pending_request(
     # fails. The transient attr does not persist to the DB row.
     request._audit_id = request_audit_id  # type: ignore[attr-defined]
     return request
+
+
+async def _audit_routing_refusal(
+    operator: Operator, request: ApprovalRequest, routing_error: str
+) -> None:
+    """Write the audit row of a park refused because the stored routing is not valid.
+
+    The caller's transaction rolls back with the refusal, so the row is
+    written in its own session. Its id is the request's
+    ``request_audit_id``, the id the "request" row would have had. A failed
+    write is logged; the park is refused either way.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+
+    try:
+        async with get_sessionmaker()() as session:
+            await _write_audit_row(
+                session,
+                audit_id=request.request_audit_id,
+                event_class=AuditEventClass.POLICY_DECISION,
+                operator=operator,
+                request=request,
+                path="approval.request",
+                status_code=_ROUTING_REFUSED_STATUS_CODE,
+                duration_ms=0.0,
+                extra_payload={
+                    "result_status": "routing_invalid",
+                    "approver_rule": ROUTING_INVALID_RULE,
+                    "routing_error": routing_error,
+                },
+            )
+            await session.commit()
+    except Exception:
+        _log().exception(
+            "approval_routing_refusal_audit_failed", approval_request_id=str(request.id)
+        )
 
 
 def _approval_lock_key(scope: str, key: str) -> int:

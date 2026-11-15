@@ -13,6 +13,7 @@ import uuid
 from typing import Any
 
 import pytest
+import structlog
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -77,6 +78,14 @@ async def test_a_person_outside_the_routed_kinds_cannot_approve_the_list(
         "this change (routing rule `install:routing[0]`). You are in MEHO-Operators."
     )
     assert (await RunApprovalService().get(_TENANT_A, approval_id)).status == "pending"
+    assert structlog.contextvars.get_contextvars()["audit_approver_routing"] == [
+        {
+            "entry": 0,
+            "op_id": _WRITE_OP,
+            "approver_rule": "install:routing[0]",
+            "approver_roles": ["Admins"],
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -90,6 +99,9 @@ async def test_a_person_in_the_routed_kinds_approves_the_list(
     read = await RunApprovalService().approve(_approver(role=TenantRole.TENANT_ADMIN), approval_id)
 
     assert read.status == "approved"
+    # The audit middleware puts every ``audit_*`` value on the approve audit row.
+    (routed,) = structlog.contextvars.get_contextvars()["audit_approver_routing"]
+    assert (routed["approver_rule"], routed["approver_roles"]) == ("install:routing[0]", ["Admins"])
 
 
 @pytest.mark.asyncio
@@ -103,6 +115,7 @@ async def test_with_the_switch_off_the_list_keeps_todays_rule(
     read = await RunApprovalService().approve(_approver(role=TenantRole.OPERATOR), approval_id)
 
     assert read.status == "approved"
+    assert "audit_approver_routing" not in structlog.contextvars.get_contextvars()
 
 
 @pytest.mark.asyncio

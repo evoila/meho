@@ -60,6 +60,7 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "DEFAULT_RULE",
+    "ROUTING_INVALID_RULE",
     "ApproverSet",
     "RouteEntry",
     "approver_set_for",
@@ -78,6 +79,10 @@ __all__ = [
 
 #: ``approver_rule`` when no routing entry fits: today's rule.
 DEFAULT_RULE: Final[str] = "default"
+
+#: ``approver_rule`` on the audit row of a park refused because the stored
+#: routing is not valid.
+ROUTING_INVALID_RULE: Final[str] = "invalid"
 
 
 def routing_enabled() -> bool:

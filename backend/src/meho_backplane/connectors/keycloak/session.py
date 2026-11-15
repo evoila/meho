@@ -13,7 +13,7 @@ deployed Keycloak whose operator-login clients are not yet configured
 (the chicken-and-egg the issue body calls out). So the connector
 authenticates to the Keycloak Admin REST API with a **separate admin
 credential** sourced from Vault at the consumer path
-``secret/rdc-hetzner-dc/keycloak/admin``.
+``secret/<consumer>/keycloak/admin``.
 
 Credential-protocol discriminator
 ==================================
@@ -62,7 +62,7 @@ target-configurable without a schema migration:
   (the admin-cli / service-account client typically lives in
   ``master``). Defaults to :data:`DEFAULT_ADMIN_REALM`.
 * ``managed_realm`` — the realm the connector manages and fingerprints
-  (``evba`` on the RDC fleet). Defaults to :data:`DEFAULT_MANAGED_REALM`.
+  (the realm of your deployment). Defaults to :data:`DEFAULT_MANAGED_REALM`.
 
 Both are read through :func:`resolve_realm_config` which tolerates a
 missing ``extras`` attribute (pre-G0.3 stub targets) and falls back to
@@ -102,9 +102,8 @@ __all__ = [
 #: ``master``; a target can override via ``extras["admin_realm"]``.
 DEFAULT_ADMIN_REALM: str = "master"
 
-#: The realm the connector manages + fingerprints. ``evba`` is the RDC
-#: fleet's managed realm; a target can override via
-#: ``extras["managed_realm"]``.
+#: The realm the connector manages + fingerprints. A target can
+#: override it via ``extras["managed_realm"]``.
 DEFAULT_MANAGED_REALM: str = "evba"
 
 #: The four field names the credential-shape discriminator inspects. Kept

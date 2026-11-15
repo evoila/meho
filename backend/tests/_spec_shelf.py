@@ -4,7 +4,7 @@
 """Product-agnostic spec-shelf resolver + reconcile-assert harness (#2980).
 
 Vendor API specs are pinned in the operator's private spec-shelf repo
-(``evoila-bosnia/claude-rdc-hetzner-dc``, ``docs/<product>-<version>/``)
+(a consumer repository, ``docs/<product>-<version>/``)
 rather than this public chassis repo, so the vendor-licensed schema
 corpus never lands in public history. CI provisions the shelf through a
 secret-gated sparse checkout and points ``MEHO_CONSUMER_DOCS_ROOT`` at

@@ -54,7 +54,11 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import _CREDENTIAL_MINT_OPS, classify_op
 from meho_backplane.connectors.kubernetes import KubernetesConnector
-from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.registry import (
+    clear_registry,
+    register_connector,
+    register_connector_v2,
+)
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.vault import (
     VaultConnector,
@@ -127,6 +131,7 @@ def _registry() -> Iterator[None]:
     clear_registry()
     register_connector_v2(product="vault", version="1.x", impl_id="vault", cls=VaultConnector)
     register_connector_v2(product="k8s", version="1.x", impl_id="k8s", cls=KubernetesConnector)
+    register_connector("k8s", KubernetesConnector)  # wildcard, as production does
     reset_dispatcher_caches()
     yield
     reset_dispatcher_caches()

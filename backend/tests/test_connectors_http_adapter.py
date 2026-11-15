@@ -61,6 +61,7 @@ import tempfile as _tempfile
 import threading as _threading
 import types
 import zlib
+from collections.abc import AsyncIterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from unittest.mock import patch
@@ -622,7 +623,6 @@ async def test_request_json_204_no_content_returns_empty_payload() -> None:
 
 # ---------------------------------------------------------------------------
 # Response-body byte cap — reject oversize before buffer+parse
-# (evoila-bosnia/meho-internal#297)
 # ---------------------------------------------------------------------------
 
 
@@ -862,9 +862,9 @@ async def test_request_json_gzip_encoded_response_decodes_once_regression_3459()
     ``httpx.DecodingError: Error -3 while decompressing data: incorrect header
     check``. Every ingested/typed HTTP read of a compressing vendor broke.
     This models a vCenter 8.x target behind an ingested ``vmware-rest``
-    connector that gzips its response; buffering the raw wire bytes
-    (:meth:`~httpx.Response.aiter_raw`) keeps them consistent with the retained
-    header, so the body decodes exactly once and parses.
+    connector that gzips its response; the cap loop now keeps the decoded bytes
+    and drops the ``Content-Encoding`` header, so the body decodes exactly once
+    and parses.
     """
     conn = _ConcreteHttpConnector()
     target = _make_target()
@@ -939,12 +939,11 @@ async def test_request_json_deflate_encoded_response_decodes_once() -> None:
 async def test_request_json_rejects_oversize_compressed_body_by_content_length(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The cap measures the compressed transfer length, not the decoded size.
+    """The compressed-transfer ceiling refuses a body by its ``Content-Length``.
 
-    The cap loop now counts raw wire bytes, matching the ``Content-Length``
-    fast-reject — both measure the compressed length the vendor actually put on
-    the wire. A gzip body whose *compressed* ``Content-Length`` exceeds the cap
-    is refused up front, and the rejection quotes that compressed length.
+    This tests the ceiling on bytes on the wire. A gzip body whose
+    *compressed* ``Content-Length`` exceeds the cap is refused before its
+    body is read, and the rejection quotes that compressed length.
     """
     monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 8)
     conn = _ConcreteHttpConnector()
@@ -965,9 +964,229 @@ async def test_request_json_rejects_oversize_compressed_body_by_content_length(
             )
 
     assert "Content-Length" in str(exc_info.value)
+    assert "bytes on the wire" in str(exc_info.value)
     assert str(len(compressed)) in str(exc_info.value)
     assert route.called
     await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_json_rejects_compression_bomb_by_decoded_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A small gzip body that expands past the cap is refused (decoded ceiling).
+
+    The compressed body is far under the cap, so the transfer ceiling and the
+    ``Content-Length`` fast-reject both pass. Only the decoded-size ceiling
+    can stop it. The decoded body would be ``"x" * 64 KiB`` - well over the
+    1 KiB cap - and is not valid JSON, so a parse would not raise the cap error.
+    """
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    compressed = gzip.compress(b"x" * 65536)
+    assert len(compressed) < 1024  # passes the compressed ceiling
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.get("/api/inventory").respond(
+            200,
+            content=compressed,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+        )
+        with pytest.raises(ResponseTooLargeError) as exc_info:
+            await conn._request_json(
+                target, "GET", "/api/inventory", operator=_make_operator("tok")
+            )
+
+    assert "cap on decoded bytes" in str(exc_info.value)
+    assert "Content-Length" not in str(exc_info.value)
+    assert route.called
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_rejects_compression_bomb_by_decoded_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The non-idempotent path has the same decoded-size ceiling."""
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    compressed = zlib.compress(b"y" * 65536)
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.post("/api/sessions").respond(
+            200,
+            content=compressed,
+            headers={"content-type": "application/json", "content-encoding": "deflate"},
+        )
+        with pytest.raises(ResponseTooLargeError):
+            await conn._post_json(
+                target,
+                "/api/sessions",
+                operator=_make_operator("tok"),
+                json={"provider": "Local"},
+            )
+    await conn.aclose()
+
+
+class _CountingChunkStream(httpx.AsyncByteStream):
+    """Send a body in fixed chunks, with no Content-Length, and count the reads."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+        self.sent = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self.chunks:
+            self.sent += 1
+            yield chunk
+
+
+def _split(data: bytes, size: int) -> list[bytes]:
+    return [data[i : i + size] for i in range(0, len(data), size)]
+
+
+@pytest.mark.asyncio
+async def test_capped_read_counts_wire_chunks_that_decode_to_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bytes after the end of a gzip stream decode to nothing but still count.
+
+    The decoded body is only ``{}``, so the decoded ceiling never fires. The
+    wire ceiling must stop the read once the raw bytes pass the cap, before
+    the rest of the padding is read.
+    """
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
+    wire = gzip.compress(b"{}") + b"\0" * 5000
+    stream = _CountingChunkStream(_split(wire, 256))
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/items").respond(
+            200,
+            stream=stream,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+        )
+        async with httpx.AsyncClient(base_url="https://vcenter.example.com") as client:
+            with pytest.raises(ResponseTooLargeError) as exc_info:
+                await http_adapter._read_capped_json_response(client, "GET", "/api/items")
+
+    assert "cap on bytes on the wire" in str(exc_info.value)
+    assert stream.sent == 1024 // 256 + 1
+    assert stream.sent < len(stream.chunks)
+
+
+@pytest.mark.asyncio
+async def test_capped_read_stops_a_chunked_compression_bomb_early(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bomb sent in several chunks is refused before its last chunk is read.
+
+    The decoded total passes the cap after a few chunks, so the rest of the
+    body is never read and never decoded.
+    """
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 64 * 1024)
+    wire = zlib.compress(b"z" * (16 * 1024 * 1024))
+    assert len(wire) < 64 * 1024  # passes the wire ceiling
+    stream = _CountingChunkStream(_split(wire, 64))
+    assert len(stream.chunks) > 100
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/items").respond(
+            200,
+            stream=stream,
+            headers={"content-type": "application/json", "content-encoding": "deflate"},
+        )
+        async with httpx.AsyncClient(base_url="https://vcenter.example.com") as client:
+            with pytest.raises(ResponseTooLargeError):
+                await http_adapter._read_capped_json_response(client, "GET", "/api/items")
+
+    assert stream.sent < len(stream.chunks) // 4
+
+
+@pytest.mark.asyncio
+async def test_capped_read_refuses_two_content_codings_before_reading() -> None:
+    """A body that is gzipped twice is refused, and no body byte is read.
+
+    httpx would decode both layers of one wire chunk in a single step, before
+    the decoded-size check runs, so MEHO accepts at most one coding.
+    """
+    wire = gzip.compress(gzip.compress(b"{}"))
+    stream = _CountingChunkStream([wire])
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/items").respond(
+            200,
+            stream=stream,
+            headers={"content-type": "application/json", "content-encoding": "gzip, gzip"},
+        )
+        async with httpx.AsyncClient(base_url="https://vcenter.example.com") as client:
+            with pytest.raises(ResponseTooLargeError) as exc_info:
+                await http_adapter._read_capped_json_response(client, "GET", "/api/items")
+
+    assert "at most one" in str(exc_info.value)
+    assert stream.sent == 0
+
+
+@pytest.mark.asyncio
+async def test_capped_read_keeps_an_unknown_content_coding() -> None:
+    """A coding that httpx does not know is not decoded, so its header stays."""
+    body = b"\x00\x01opaque"
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/items").respond(
+            200,
+            content=body,
+            headers={"content-encoding": "x-vendor-pack"},
+        )
+        async with httpx.AsyncClient(base_url="https://vcenter.example.com") as client:
+            resp = await http_adapter._read_capped_json_response(client, "GET", "/api/items")
+
+    assert resp.content == body
+    assert resp.headers["content-encoding"] == "x-vendor-pack"
+    assert resp.headers["content-length"] == str(len(body))
+
+
+@pytest.mark.asyncio
+async def test_capped_read_drops_encoding_headers_after_decoding() -> None:
+    """An under-cap gzip body is returned decoded, without stale encoding headers.
+
+    A stale ``Content-Length`` would be the compressed size, and a kept
+    ``Content-Encoding`` would make a second read decode plain bytes again.
+    """
+    body = json.dumps({"value": list(range(20))}).encode()
+    compressed = gzip.compress(body)
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/items").respond(
+            200,
+            content=compressed,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+        )
+        async with httpx.AsyncClient(base_url="https://vcenter.example.com") as client:
+            resp = await http_adapter._read_capped_json_response(client, "GET", "/api/items")
+
+    assert resp.content == body
+    assert "content-encoding" not in resp.headers
+    assert resp.headers.get("content-length") in (None, str(len(body)))
+    assert resp.headers["content-type"] == "application/json"
+
+
+@pytest.mark.asyncio
+async def test_capped_read_keeps_encoding_headers_on_an_empty_body() -> None:
+    """A HEAD answer has no body, so callers still see its Content-Encoding."""
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.head("/api/items").respond(
+            200,
+            headers={"content-encoding": "gzip", "content-length": "12345"},
+        )
+        async with httpx.AsyncClient(base_url="https://vcenter.example.com") as client:
+            resp = await http_adapter._read_capped_json_response(client, "HEAD", "/api/items")
+
+    assert resp.headers["content-encoding"] == "gzip"
+    assert resp.headers["content-length"] == "12345"
 
 
 # ---------------------------------------------------------------------------
@@ -1839,7 +2058,7 @@ async def test_unpinned_verifying_target_still_passes_no_verify_arg() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Same-origin redirect policy (evoila/meho-internal#101 row L11)
+# Same-origin redirect policy
 # ---------------------------------------------------------------------------
 
 
@@ -2161,7 +2380,7 @@ def test_same_origin_http_scheme_upgrade_is_cross_origin() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Socket-boundary address pinning (F13, evoila-bosnia/meho-internal#275)
+# Socket-boundary address pinning (F13)
 #
 # These drive the real transport against loopback servers (respx is not
 # used — it short-circuits above ``connect_tcp``, which is exactly the seam

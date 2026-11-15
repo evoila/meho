@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.connectors.base import Connector
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.operations._audit import resolve_agent_session_id, work_ref_var
+from meho_backplane.operations.embed import build_embedding_text, encode_endpoint_text
 from meho_backplane.operations.ingest.api_schemas import EditOpWarning
 from meho_backplane.operations.ingest.connector_registration import (
     resolved_auto_shim_class,
@@ -75,6 +76,7 @@ __all__ = [
     "load_ops_outside_groups",
     "login_type_of",
     "operator_disabled_op_ids",
+    "refresh_op_embedding",
     "scope_has_groups",
     "scope_has_rows",
     "select_groups",
@@ -964,6 +966,29 @@ def validate_edit_op_args(
         )
 
 
+def _mark_admin_edited(op_row: EndpointDescriptor, field: str) -> None:
+    """Record that an admin set *field*, so typed registration keeps it (#5321)."""
+    marked = list(op_row.admin_edited_fields or [])
+    if field not in marked:
+        op_row.admin_edited_fields = [*marked, field]
+
+
+async def refresh_op_embedding(op_row: EndpointDescriptor) -> None:
+    """Rebuild the search vector of *op_row* from its current text (#5321).
+
+    An admin edit of ``custom_description`` changes the search text. The
+    next start compares the code text with the saved text, finds them equal
+    and keeps the vector, so the vector must match the new text right away.
+    """
+    text = build_embedding_text(
+        summary=op_row.summary or "",
+        description=op_row.description or "",
+        custom_description=op_row.custom_description,
+        tags=op_row.tags,
+    )
+    op_row.embedding = await encode_endpoint_text(text)
+
+
 def apply_op_overrides(
     op_row: EndpointDescriptor,
     *,
@@ -990,12 +1015,14 @@ def apply_op_overrides(
     if custom_description is not _UNSET:
         op_row.custom_description = custom_description
         fields_updated.append("custom_description")
+        _mark_admin_edited(op_row, "custom_description")
     if is_enabled is not None:
         op_row.is_enabled = is_enabled
         fields_updated.append("is_enabled")
     if llm_instructions is not None:
         op_row.llm_instructions = llm_instructions
         fields_updated.append("llm_instructions")
+        _mark_admin_edited(op_row, "llm_instructions")
     return fields_updated
 
 

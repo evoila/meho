@@ -185,7 +185,7 @@ def _make_async_client(app: FastAPI) -> httpx.AsyncClient:
 def _mint_operator(
     *,
     keypair: Any,
-    sub: str = "damir",
+    sub: str = "operator-a",
     tenant_id: str = TENANT_A_ID,
     role: TenantRole = TenantRole.OPERATOR,
     audience: str = AUDIENCE,
@@ -230,7 +230,7 @@ async def _seed_multi_level_session(
     *,
     tenant_id: uuid.UUID,
     agent_session_id: uuid.UUID,
-    principal_sub: str = "damir",
+    principal_sub: str = "operator-a",
 ) -> dict[str, uuid.UUID]:
     """Seed root → child → grandchild + a later sibling root in one session.
 
@@ -659,7 +659,7 @@ async def test_scenario_3_self_referential_row_terminates(
             session,
             tenant_id=uuid.UUID(TENANT_A_ID),
             occurred_at=_BASE,
-            principal_sub="damir",
+            principal_sub="operator-a",
             op_id="vsphere.vm.list",
             op_class="read",
             agent_session_id=agent_session_id,
@@ -698,7 +698,7 @@ async def test_scenario_3_mutual_cycle_terminates_at_max_depth(
             session,
             tenant_id=uuid.UUID(TENANT_A_ID),
             occurred_at=_BASE,
-            principal_sub="damir",
+            principal_sub="operator-a",
             op_id="vsphere.vm.list",
             op_class="read",
             agent_session_id=agent_session_id,
@@ -709,7 +709,7 @@ async def test_scenario_3_mutual_cycle_terminates_at_max_depth(
             session,
             tenant_id=uuid.UUID(TENANT_A_ID),
             occurred_at=_BASE + timedelta(seconds=1),
-            principal_sub="damir",
+            principal_sub="operator-a",
             op_id="vsphere.vm.get",
             op_class="read",
             agent_session_id=agent_session_id,
@@ -758,7 +758,7 @@ async def test_scenario_3_deep_chain_truncates_at_max_depth(
                 session,
                 tenant_id=uuid.UUID(TENANT_A_ID),
                 occurred_at=_BASE + timedelta(seconds=i),
-                principal_sub="damir",
+                principal_sub="operator-a",
                 op_id="vsphere.vm.list",
                 op_class="read",
                 agent_session_id=agent_session_id,
@@ -807,7 +807,7 @@ async def _bulk_seed_anchor_rows(
         {
             "id": uuid.uuid4(),
             "occurred_at": base + timedelta(milliseconds=i),
-            "operator_sub": "damir",
+            "operator_sub": "operator-a",
             "method": "POST",
             "path": "/mcp",
             "status_code": 200,

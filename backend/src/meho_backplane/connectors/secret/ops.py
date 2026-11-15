@@ -78,10 +78,13 @@ SECRET_REF_PROPERTY: dict[str, Any] = {
         "A '<kind>:<ref>' secret reference. 'kind' selects the store "
         "adapter (e.g. 'vault'); 'ref' is the store-specific address "
         "(for vault: a KV-v2 path with a '#<field>' fragment, e.g. "
-        "'vault:secret/db/prod#password'). Kind 'vault-target' names a "
-        "registered Vault target whose role does the read or write: "
-        "'vault-target:<target>/<path>#<field>'. References only — never "
-        "the secret value."
+        "'vault:secret/db/prod#password'; for linux, a write-only place "
+        "for a file in the owner's home on a host: "
+        "'<target>/<absolute path>#<owner>', e.g. "
+        "'linux:seat-host/home/agent/.config/key#agent'). Kind "
+        "'vault-target' names a registered Vault target whose role does "
+        "the read or write: 'vault-target:<target>/<path>#<field>'. "
+        "References only — never the secret value."
     ),
 }
 

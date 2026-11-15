@@ -19,7 +19,7 @@ Payload shapes go through the REAL ``classify_op`` + ``redact_payload``
 so what the feed shows is byte-for-byte what production would show.
 
 Everything is tagged ``discovered_by="dev-seed"`` (nodes/edges) or uses
-the fictional ``*@evba.lab`` / ``agent:*`` principals (audit rows), so
+the fictional ``*@example.test`` / ``agent:*`` principals (audit rows), so
 ``--reset`` can cleanly remove it all.
 
 Usage (from ``backend/``, env sourced like devserver):
@@ -54,9 +54,9 @@ SEED_SOURCE = "dev-seed"
 
 # Fictional principals — doubles as the --reset selector for audit rows.
 HUMANS = (
-    ("amira.ops@evba.lab", "Amira Rahman"),
-    ("jonas.sre@evba.lab", "Jonas Keller"),
-    ("mila.net@evba.lab", "Mila Petrov"),
+    ("amira.ops@example.test", "Amira Rahman"),
+    ("jonas.sre@example.test", "Jonas Keller"),
+    ("mila.net@example.test", "Mila Petrov"),
 )
 AGENTS = (
     ("agent:vm-rightsizer", "VM Rightsizer"),
@@ -66,9 +66,9 @@ AGENTS = (
 ALL_PRINCIPAL_SUBS = tuple(s for s, _ in HUMANS + AGENTS)
 
 TARGETS = (
-    ("vcenter-fra1", "vmware-vcenter", "vcenter.fra1.evba.lab"),
-    ("k8s-prod", "kubernetes", "k8s-api.fra1.evba.lab"),
-    ("vault-core", "vault", "vault.fra1.evba.lab"),
+    ("vcenter-fra1", "vmware-vcenter", "vcenter.fra1.example.test"),
+    ("k8s-prod", "kubernetes", "k8s-api.fra1.example.test"),
+    ("vault-core", "vault", "vault.fra1.example.test"),
     ("hrobot-fra", "hetzner-robot", "robot-ws.your-server.de"),
 )
 

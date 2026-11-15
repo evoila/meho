@@ -50,7 +50,8 @@ backend offers its own grounded-answer endpoint and that opted in
 (``backend.ref["answer"] = "upstream"``) is answered by that endpoint, mapped
 into the same ``{answer, citations[]}`` shape; every other collection runs the
 backplane's expand -> retrieve -> synthesize pipeline. The response schema is
-the same either way; the source is logged, not returned.
+the same either way. The response also names the path in ``answer_source``
+(``local`` or ``upstream``), and the source is logged too.
 
 Answer-pipeline legs -> 5xx (the #1918 structured error model, REST-ready)
 --------------------------------------------------------------------------
@@ -133,6 +134,7 @@ from meho_backplane.docs_search import (
 )
 from meho_backplane.docs_search.answer import AskPipelineOutcome, answer_docs_question
 from meho_backplane.docs_search.answer_errors import CAUSE_UPSTREAM_REJECTED
+from meho_backplane.docs_search.call_log import AnswerSource
 from meho_backplane.docs_search.target_scope import apply_target_default
 
 __all__ = [
@@ -140,6 +142,7 @@ __all__ = [
     "router",
     "run_ask_pipeline",
     "run_ask_pipeline_capturing_retrieval",
+    "run_ask_pipeline_with_source",
 ]
 
 router = APIRouter(prefix="/api/v1", tags=["docs"])
@@ -217,12 +220,17 @@ class AskDocsResponse(BaseModel):
     the ``link`` shape is produced by the shared
     :func:`~meho_backplane.docs_search.citation_link_payload` helper, kept as
     the single source of truth for the citation-link contract.
+
+    ``answer_source`` names the path that wrote the answer: ``local`` (the
+    backplane's own pipeline) or ``upstream`` (the collection backend's answer
+    endpoint). It names a path, never document content.
     """
 
     model_config = ConfigDict(frozen=True)
 
     answer: str
     citations: list[dict[str, Any]]
+    answer_source: AnswerSource | None = None
 
 
 def _compute_query_hash(query: str) -> str:
@@ -300,15 +308,15 @@ async def _resolve_collection_or_http_error(
 run_ask_pipeline_capturing_retrieval = answer_docs_question
 
 
-async def run_ask_pipeline(
+async def run_ask_pipeline_with_source(
     operator: Operator,
     query: str,
     *,
     scope: DocsScope,
     collection: DocCollection,
     limit: int,
-) -> DocsAnswer:
-    """Answer through the one answer seam, naming the failed leg on error.
+) -> tuple[DocsAnswer, AnswerSource]:
+    """Answer through the one answer seam; return the answer and its path.
 
     The raising in-process entrypoint the REST route below calls. A thin
     wrapper over :func:`run_ask_pipeline_capturing_retrieval` (the answer seam,
@@ -334,7 +342,26 @@ async def run_ask_pipeline(
         # answer seam) preserves the original traceback.
         raise outcome.error
     assert outcome.answer is not None  # success outcome always carries an answer
-    return outcome.answer
+    return outcome.answer, outcome.answer_source
+
+
+async def run_ask_pipeline(
+    operator: Operator,
+    query: str,
+    *,
+    scope: DocsScope,
+    collection: DocCollection,
+    limit: int,
+) -> DocsAnswer:
+    """Answer through the one answer seam; return only the answer.
+
+    Same as :func:`run_ask_pipeline_with_source`, for callers that do not need
+    the answer source.
+    """
+    answer, _source = await run_ask_pipeline_with_source(
+        operator, query, scope=scope, collection=collection, limit=limit
+    )
+    return answer
 
 
 def _raise_pipeline_http_error(answer_error: AskDocsAnswerError) -> NoReturn:
@@ -495,7 +522,7 @@ async def ask_docs_endpoint(
 
     log = structlog.get_logger()
     try:
-        answer = await run_ask_pipeline(
+        answer, answer_source = await run_ask_pipeline_with_source(
             operator,
             body.query,
             scope=docs_scope,
@@ -528,6 +555,7 @@ async def ask_docs_endpoint(
     return AskDocsResponse(
         answer=answer.answer,
         citations=[_citation_payload(chunk) for chunk in answer.citations],
+        answer_source=answer_source,
     )
 
 

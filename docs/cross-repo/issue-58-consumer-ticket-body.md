@@ -145,7 +145,7 @@ All landed on `evoila/meho` via the producer-side PR:
 | `targets.yaml` contract | [`docs/cross-repo/targets-yaml.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/targets-yaml.md) | Schema, field reference, anti-patterns, worked example, health-probe contract |
 | Worked example for `meho` | [`docs/cross-repo/targets-yaml.md` — Worked example](https://github.com/evoila/meho/blob/main/docs/cross-repo/targets-yaml.md#worked-example) | Copy-paste-ready YAML; the consumer's `targets.yaml` should match this verbatim except for chart `version_pin` (consumer chooses cadence) and `notes` (operator-private) |
 | README badge placeholder | [`README.md`](https://github.com/evoila/meho/blob/main/README.md) (Status block) | Marker the maintainer replaces with the live badge URL via a follow-up PR once Half 2 lands |
-| `repository_dispatch` event spec | [`docs/cross-repo/rke2-infra-coordination.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/rke2-infra-coordination.md) | The `meho-image-pushed` event type the counter listens for to refresh on every green merge |
+| `repository_dispatch` event spec | [`docs/cross-repo/ci-cluster-coordination.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/ci-cluster-coordination.md) | The `meho-image-pushed` event type the counter listens for to refresh on every green merge |
 
 ### Out of scope (do NOT do here)
 
@@ -203,7 +203,7 @@ gh run list \
 
 ### References
 
-- Cross-repo handshake spec: [`evoila/meho/docs/cross-repo/rke2-infra-coordination.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/rke2-infra-coordination.md)
+- Cross-repo handshake spec: [`evoila/meho/docs/cross-repo/ci-cluster-coordination.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/ci-cluster-coordination.md)
 - Green-counter contract: [`evoila/meho/docs/acceptance/green-counter.md`](https://github.com/evoila/meho/blob/main/docs/acceptance/green-counter.md)
 - `targets.yaml` schema + worked example: [`evoila/meho/docs/cross-repo/targets-yaml.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/targets-yaml.md)
 - Shields.io endpoint-badge format: <https://shields.io/badges/endpoint-badge>

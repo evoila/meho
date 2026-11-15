@@ -138,7 +138,7 @@ class TestEventMatchesLineageFilters:
         announcement = AgentAnnouncementEvent(
             tenant_id=_TENANT,
             principal_sub="op-test",
-            activity="probing rdc-vcenter",
+            activity="probing example-vcenter",
             ts=_TS,
         )
         assert not event_matches(

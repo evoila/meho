@@ -5,7 +5,7 @@
 
 A retrieved :class:`~meho_backplane.docs_search.service.DocsChunk` carries a
 ``source_url`` that, for the GCS-backed vendor corpus, is a **raw object
-path** -- ``gs://meho-knowledge-vmware-corpus/kb/broadcom-kb/articles/41/414551.html``
+path** -- ``gs://example-corpus/kb/broadcom-kb/articles/41/414551.html``
 or ``gs://.../community/williamlam/blog/.../post.md``. An operator can't open
 a ``gs://`` URL: a browser has no handler for the scheme, so rendering it as an
 ``href`` produces a dead link. Yet the source *identity* is right there in the
@@ -483,7 +483,7 @@ def normalize_source_ref(
       (so a chunk always carries a usable reference). MEHO owns the
       reference->object mapping internally.
 
-    The raw corpus object path (``gs://meho-knowledge-.../...``) is **never**
+    The raw corpus object path (``gs://example-corpus-.../...``) is **never**
     returned -- that leak is exactly what this closes. A pure Option B (opaque
     ref for every chunk) was rejected: it would drop the clickable KB/web URL
     the resolver already derives, and Option A is the more consumer-useful

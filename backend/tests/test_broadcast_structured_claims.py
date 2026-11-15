@@ -347,7 +347,8 @@ def test_announce_schema_exposes_claim_fields(
     assert set(props["planned_op_class"]["enum"]) == set(PLANNED_OP_CLASS_VALUES)
     assert props["ttl_minutes"]["minimum"] == 1
     assert props["ttl_minutes"]["maximum"] == 1440
-    assert props["work_ref"]["maxLength"] == 256
+    # The length of a ticket id is checked after trim and NFC by the shared rule.
+    assert "maxLength" not in props["work_ref"]
     assert props["run_id"]["format"] == "uuid"
     # Structured claims are optional -- only 'activity' stays required.
     assert announce["inputSchema"]["required"] == ["activity"]

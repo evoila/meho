@@ -177,7 +177,7 @@ _MAX_MOUNT_LENGTH: Final[int] = 256
 _MAX_PATH_LENGTH: Final[int] = 1024
 
 #: Maximum target-name length accepted on the query string. A target name
-#: is a short slug (``rdc-vault``); the bound protects the form parse.
+#: is a short slug (``example-vault``); the bound protects the form parse.
 _MAX_TARGET_LENGTH: Final[int] = 256
 
 #: Module-level ``Depends`` closure -- built once (rather than inline) to

@@ -356,6 +356,7 @@ func runMCPHandshake(ctx context.Context, r *doctorReport, mcpURL string, client
 	}
 	addSurfaceCheck(r, health, listed)
 	addApprovalSignInCheck(r, health)
+	addApprovalLevelCheck(r, health)
 }
 
 func callMehoStatus(ctx context.Context, s *mcpSession) (*api.HealthResponse, error) {

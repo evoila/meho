@@ -1131,6 +1131,37 @@ def test_overrides_report_page_lists_reduced_approval() -> None:
     assert f'data-op-id="{_OP_ID}"' in report.text
     assert "read-only in practice" in report.text
     assert "turned off" in report.text
+    # The switch is off: no "Category" column; the page says what a whole-install row is.
+    assert "<th>Category</th>" not in report.text
+    assert "data-override-category" not in report.text
+    assert "data-overrides-install-note" in report.text
+
+
+def test_overrides_report_page_shows_the_category_with_the_switch_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _classification_on(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A, safety_level="caution", requires_approval=True)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+    try:
+        client.patch(
+            f"/ui/connectors/registry/{_CONNECTOR_ID}/operations/{_OP_ID}",
+            data={"safety_level": "dangerous"},
+            headers=_edit_headers(csrf),
+        )
+        report = client.get("/ui/connectors/overrides?show=all")
+    finally:
+        mock.stop()
+    assert report.status_code == 200, report.text
+    assert f'data-op-id="{_OP_ID}"' in report.text
+    assert "<th>Category</th>" in report.text
+    assert "data-override-category" in report.text
 
 
 # ---------------------------------------------------------------------------
@@ -1236,6 +1267,8 @@ def test_classify_page_needs_tenant_admin(monkeypatch: pytest.MonkeyPatch) -> No
         mock.stop()
     assert page.status_code == 403
     assert preview.status_code == 403
+    assert "Classifying operations needs the tenant_admin role." in page.text
+    assert "re-probe" not in page.text
 
 
 def test_classify_page_dry_run_then_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1269,6 +1302,7 @@ def test_classify_page_dry_run_then_request(monkeypatch: pytest.MonkeyPatch) -> 
     assert 'data-matched="1"' in preview.text
     assert f'data-op-id="{_OP_ID}"' in preview.text
     assert "data-classify-request" in preview.text
+    assert "data-classify-in-force" in preview.text
     assert count_after_preview == 0
     assert requested.status_code == 200, requested.text
     assert "data-classify-requested" in requested.text

@@ -74,6 +74,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     check_param_secret_ref,
     strip_credential_value,
 )
+from meho_backplane.connectors.base import ConnectorOwnMessage
 from meho_backplane.connectors.linux._sudo import run_remote_bash_with_sudo
 from meho_backplane.connectors.linux.ops import (
     SSH_TRANSPORT_NOTE,
@@ -128,6 +129,14 @@ class LinuxWriteError(ValueError):
 
     A :class:`ValueError` subclass so the dispatcher's handler-exception catch
     maps it to a ``connector_error`` result rather than an unhandled crash.
+    """
+
+
+class LinuxWriteOwnMessageError(ConnectorOwnMessage, LinuxWriteError):
+    """A :class:`LinuxWriteError` whose message is a fixed sentence of MEHO.
+
+    The message holds no host output and no secret, so an operation that sends
+    a secret still shows it (:class:`ConnectorOwnMessage`).
     """
 
 
@@ -355,7 +364,7 @@ async def _resolve_sudo_password(
     secret = await connector._resolve_secret(target, operator)
     password = secret.get("sudo_password") or secret.get("password")
     if not password:
-        raise LinuxWriteError(
+        raise LinuxWriteOwnMessageError(
             "the target's Vault secret carries no sudo_password / password; a "
             "governed root write needs a sudo credential"
         )

@@ -117,11 +117,16 @@ refused, and the message names the entry and the operation.
   `{match: {connector: X, op: <op-id>}, risk: <level>}`. The same
   operation id can exist on another connector, for example on another
   version of the product. An entry without the connector sets that
-  operation's level too.
+  operation's level too. When the refused entry names a group, the
+  message names the group as well. Put it in the new entry too, for
+  example `{match: {connector: X, group: <group>, op: <op-id>}, risk: <level>}`.
+  Without the group, the new entry is less specific than the refused
+  one, and the file is refused again.
 - Which install values make **every** call wait: `always_wait: true` and
   `risk: destructive`. With `risk: dangerous`, a call waits too, but
-  three things can still let it run without a new approval: a standing
-  grant of a service account, an agent grant, and a run approval.
+  two things can still let it run without a new approval: a standing
+  grant of a service account, and a run approval of a service account.
+  An agent grant cannot: a `dangerous` call of an agent always waits.
 - An install entry matches connectors by their id, not by product. A
   connector that a tenant registers itself, under its own id, is matched
   only by an install entry with a wildcard connector, for example

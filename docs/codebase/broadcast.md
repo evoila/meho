@@ -483,8 +483,8 @@ path, merged as a clobber-free union of distinct keys
    does not. The full table is in
    [`reflex-advisory.md`](reflex-advisory.md).
    #3133 also shipped an opt-in announce gate that refuses a write
-   without a claim; since #3762 it asks only agents (see *People read,
-   agents publish* below).
+   without a claim; it never asks a person (see *People read, agents
+   publish* below).
 
 ## Who can publish (#3736)
 
@@ -608,14 +608,18 @@ Only trusted agents publish. Nothing in MEHO announces for anyone on its
 own. So a person's write may not wait for an announcement a person
 cannot make:
 
-- **The announce gate asks only agents.** The opt-in per-tenant gate
+- **Only a person skips the announce gate.** The opt-in per-tenant gate
   (`broadcast/announce_gate.py`) refuses a caution-or-higher write
-  without an active claim. Before #3762 it did not look at who called
-  and stopped people too. Now it first checks `is_agent_caller`
-  (`auth/agent_admission.py`, the same check that decides who may
-  publish). A person's write is never refused for a missing claim; an
-  agent's still is, in a tenant with `announce_gate_enabled` on. See
-  [reflex-advisory.md](reflex-advisory.md).
+  without an active claim, in a tenant with `announce_gate_enabled` on.
+  It first checks whether the caller is a person: `is_human_principal`
+  (`auth/operator.py`) names a person, and the call is not inside a
+  hosted agent run (`is_agent_caller`, `auth/agent_admission.py`). A
+  person's write is never refused for a missing claim. An AI tool that
+  works with a person's own login counts as that person. Every other
+  caller is asked: agents, hosted agent runs, service logins and runner
+  logins. A service login and a runner login cannot make a claim, so in
+  a tenant with the gate on their caution-or-higher writes are refused.
+  See [reflex-advisory.md](reflex-advisory.md).
 - **Reads use trusted claims.** The target advisory and the reflex claim
   lookup use only trusted claims, judged by their newest step (see *When
   a claim is active* above). "Newest" means committed last: the reads

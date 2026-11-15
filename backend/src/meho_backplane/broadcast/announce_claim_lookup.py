@@ -9,8 +9,8 @@ and if not, why not? Two features ask this on every write from an agent:
 * the reflex advisory's announce-before-mutate nudge
   (:mod:`meho_backplane.broadcast.reflex`) uses :func:`announce_claim_gap`;
 * the opt-in announce gate (:mod:`meho_backplane.broadcast.announce_gate`)
-  uses :func:`caller_has_active_announce_claim`. The gate asks only for an
-  agent; a person's write never waits for a claim (#3762).
+  uses :func:`caller_has_active_announce_claim`. The gate never asks a
+  person; a person's write never waits for a claim (#3762).
 
 The lookup reads the ``agent_announcement`` archive, the same record
 ``meho_broadcast_recent`` reads. The index

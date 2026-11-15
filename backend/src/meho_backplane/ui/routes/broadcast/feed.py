@@ -13,8 +13,8 @@ Two routes, one feed
 ====================
 
 * ``GET /ui/broadcast`` -- the full page (``broadcast/feed.html``,
-  extends ``base.html``). Renders the chrome, the filter bar, the
-  drawer slot, and the feed fragment (``broadcast/_feed.html``) inline.
+  extends ``base.html``). Renders the chrome, the filter bar and the
+  feed fragment (``broadcast/_feed.html``) inline.
 * ``GET /ui/broadcast/feed`` -- the filter-submit target. Returns the
   **fragment only** (``broadcast/_feed.html``): the SSE sink wired to
   ``/ui/broadcast/stream?<filters>`` plus the feed list. The filter bar

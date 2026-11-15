@@ -17,14 +17,17 @@ rule of the opt-in announce gate of #3133 that also stopped people
   agent principal (#3736). Nothing in MEHO announces for anyone on its
   own; operations, approvals and checks publish no Broadcast event
   (#3758). The audit log is the record of operations.
-- **People are no longer stopped by the announce gate; agents still are.**
-  The old gate did not look at who called: in a tenant that turned it
-  on, it stopped people and agents alike. Now it asks only agents. A
-  person cannot publish, so the gate could refuse a person's write for a
-  claim the person can never make. An agent can publish, so the gate
-  still asks an agent's `caution`-or-higher write for an active claim
-  first, as before. `announce_gate_enabled` still turns the gate on or
-  off for a tenant.
+- **Only a person skips the announce gate.** The old gate did not look
+  at who called: in a tenant that turned it on, it stopped every caller.
+  Now a person is never asked. A person cannot publish, so the gate
+  could refuse a person's write for a claim the person can never make.
+  Every other caller is asked: agents, hosted agent runs, service logins
+  and runner logins. In a tenant with the gate on, their
+  `caution`-or-higher writes need an active claim first. A service login
+  and a runner login cannot make a claim, so in such a tenant those
+  writes are refused. An AI tool that works with a person's own login
+  counts as that person and is not asked. `announce_gate_enabled` turns
+  the gate on or off for a tenant.
 - **A claim is advice to readers.** Readers that ask "who is working on
   this target now" use only trusted claims. A claim is active while its
   newest step is not the `completion` and its finite TTL has not run
@@ -39,10 +42,11 @@ events off Broadcast. This record finishes that change for the parts
 that still assumed the mixed feed:
 
 - The announce gate (#3133) asked every caller for a claim before a
-  caution-or-higher write, people and agents alike. After #3736 only
-  agents can make a claim, so for a person the gate could only refuse,
-  never pass. For an agent it still does its job: announce first, then
-  write.
+  caution-or-higher write, people included. Since agents alone publish,
+  only agents can make a claim, so for a person the gate could only refuse, never pass.
+  For an agent it does its job: announce first, then write. Service and
+  runner logins stay asked, so the change frees only the callers it was
+  meant for.
 - The target advisory read the Valkey stream, which had operation events,
   and treated a claim without a TTL as active forever.
 - The web console offered operation filters, an "Operations" switch and
@@ -50,12 +54,12 @@ that still assumed the mixed feed:
 
 ## What changed
 
-- The announce gate asks only agents. It tells a person from an agent
-  with `is_agent_caller` (`auth/agent_admission.py`), the same check
-  that decides who may publish: an agent token, or a call inside a
-  hosted agent run. The `announce_required` refusal, the
-  `Tenant.announce_gate_enabled` switch and its key in the settings file
-  stay as they were.
+- The announce gate skips only a person. A person is a caller that
+  `is_human_principal` (`auth/operator.py`) names a person (a `user`
+  login) and that is not inside a hosted agent run (`is_agent_caller`,
+  `auth/agent_admission.py`). Every other caller is asked. The
+  `announce_required` refusal, the `Tenant.announce_gate_enabled`
+  switch and its key in the settings file stay as they were.
 - The target advisory and the reflex claim lookup read trusted claims
   from the archive and judge each claim by its newest step
   (`broadcast/claim_state.py`). The newest step is the one committed

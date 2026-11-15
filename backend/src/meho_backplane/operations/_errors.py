@@ -1061,8 +1061,8 @@ def result_announce_required(op_id: str, remediation: str, duration_ms: float) -
     """Opt-in announce gate rejected the call before execution (#3133).
 
     Returned when a tenant has enabled the announce gate
-    (:mod:`meho_backplane.broadcast.announce_gate`) and an agent
-    dispatched a write-class op of ``caution`` safety or higher without an
+    (:mod:`meho_backplane.broadcast.announce_gate`) and a caller that is
+    not a person dispatched a write-class op of ``caution`` safety or higher without an
     active announce claim covering it. A person never gets it (#3762).
     This is a policy rejection, **not** a NEEDS_APPROVAL path -- there is
     no durable approval row and no four-eyes queue; the caller

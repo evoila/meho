@@ -5,8 +5,8 @@
 
 People read Broadcast; only trusted agents publish on it. So a person's
 write cannot depend on an announcement that a person cannot make. The
-opt-in announce gate asks only agents for a claim
-(``tests/test_announce_gate.py``):
+opt-in announce gate never asks a person for a claim; every other
+caller is asked (``tests/test_announce_gate.py``):
 
 * a person's ``caution`` write runs without any claim, with and without
   an MCP session, also in a tenant that turned the gate on;

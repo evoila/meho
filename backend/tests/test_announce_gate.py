@@ -4,12 +4,13 @@
 """Opt-in dispatch-time announce gate (#3133, Initiative #3128).
 
 The enforcing companion to the reflex advisory: off by default and
-opt-in per tenant, it rejects an agent's caution-or-higher write-class op
-before execution when the agent holds no active announce claim covering
-it, with a structured ``announce_required`` denial naming
-``meho_broadcast_announce``. Since #3762 it asks only agents: a person's
-write is never refused for a missing claim, because only agents publish
-on Broadcast.
+opt-in per tenant, it rejects a caution-or-higher write-class op before
+execution when the caller holds no active announce claim covering it,
+with a structured ``announce_required`` denial naming
+``meho_broadcast_announce``. Since #3762 only a person skips it: a
+person's write is never refused for a missing claim, because only agents
+publish on Broadcast. Agents, hosted agent runs, service logins and
+runner logins are asked.
 Fail-open throughout -- a disabled or unreadable policy, or an unreachable
 claim scan, never blocks a dispatch.
 
@@ -17,7 +18,7 @@ Coverage mirrors the acceptance criteria on the issue, by name:
 
 * enablement is a structured per-tenant flag, default OFF, read through a
   cache-aware fail-open resolver;
-* the gate blocks only for agent caller + enabled-tenant + write-class +
+* the gate blocks only for a caller that is not a person + enabled-tenant + write-class +
   ``safety_level >= caution`` + no covering claim; a person, a covering
   claim, a read-class op, a ``safe`` op, and a disabled tenant each pass;
 * the gate composes on the shared dispatch path -- an enabled-tenant
@@ -103,6 +104,11 @@ def _operator(sub: str = "user-b", *, tenant_id: UUID = _TENANT) -> Operator:
 
 def _agent(sub: str = "agent-b") -> Operator:
     """An agent token: the gate asks it for a claim (#3762)."""
+    return _machine(PrincipalKind.AGENT, sub)
+
+
+def _machine(kind: PrincipalKind, sub: str = "machine-b") -> Operator:
+    """A login that is not a person: the gate asks it for a claim (#3762)."""
     return Operator(
         sub=sub,
         name=sub,
@@ -110,7 +116,8 @@ def _agent(sub: str = "agent-b") -> Operator:
         raw_jwt="fixture-jwt-not-real",
         tenant_id=_TENANT,
         tenant_role=TenantRole.OPERATOR,
-        principal_kind=PrincipalKind.AGENT,
+        principal_kind=kind,
+        runner_id=uuid.uuid4() if kind is PrincipalKind.RUNNER else None,
     )
 
 
@@ -333,6 +340,39 @@ async def test_gate_asks_a_hosted_agent_run() -> None:
     ):
         block = await announce_gate_blocks(
             _operator(), op_class="write", safety_level="caution", target_name="vault-1"
+        )
+    assert block is not None
+
+
+@pytest.mark.parametrize("kind", [PrincipalKind.SERVICE, PrincipalKind.RUNNER])
+async def test_gate_asks_a_service_or_runner_login(kind: PrincipalKind) -> None:
+    """Only a person skips the gate: a service or runner login is asked (#3762)."""
+    await _seed_tenant(enabled=True)
+    with patch(
+        "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim",
+        new=AsyncMock(return_value=False),
+    ):
+        block = await announce_gate_blocks(
+            _machine(kind), op_class="write", safety_level="caution", target_name="vault-1"
+        )
+    assert block is not None
+    assert "meho_broadcast_announce" in block
+
+
+async def test_gate_asks_a_token_without_a_kind_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client login whose token names no kind counts as a service login, so it is asked."""
+    from meho_backplane.auth.jwt import _extract_principal_kind
+
+    monkeypatch.setenv("JWT_SERVICE_ACCOUNT_USERNAME_PREFIX", "")
+    get_settings.cache_clear()
+    kind = _extract_principal_kind({"azp": "deploy-bot", "client_id": "deploy-bot"}, get_settings())
+    await _seed_tenant(enabled=True)
+    with patch(
+        "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim",
+        new=AsyncMock(return_value=False),
+    ):
+        block = await announce_gate_blocks(
+            _machine(kind), op_class="write", safety_level="caution", target_name="vault-1"
         )
     assert block is not None
 

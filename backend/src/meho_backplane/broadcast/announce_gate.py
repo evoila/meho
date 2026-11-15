@@ -12,12 +12,16 @@ is a structured, fail-loud policy denial naming ``meho_broadcast_announce``
 -- it is **not** a NEEDS_APPROVAL path (no durable approval row, no
 four-eyes queue).
 
-Only agents are gated (#3762). People read Broadcast and only agents
-publish on it, so a person cannot make the claim the gate asks for. A
-person's write is therefore never refused here. The gate tells the two
-apart with :func:`~meho_backplane.auth.agent_admission.is_agent_caller`,
-the same check that decides who may publish: an agent token, or a call
-inside a hosted agent run.
+Only a person skips the gate (#3762). People read Broadcast and only
+agents publish on it, so a person cannot make the claim the gate asks
+for, and a person's write is never refused here. A person is a caller
+that :func:`~meho_backplane.auth.operator.is_human_principal` names a
+person and that is not inside a hosted agent run
+(:func:`~meho_backplane.auth.agent_admission.is_agent_caller`). Every
+other caller is asked: an agent token, a hosted agent run, a service
+login and a runner login. A service login and a runner login cannot make
+a claim, so in a tenant with the gate on their ``caution``-or-higher
+writes are refused.
 
 Composition boundary: #2546 rate-limits the announce *call* (anti-flood);
 this gates *dispatch* on announce-*state*. The two compose -- a caller
@@ -55,7 +59,7 @@ import structlog
 from sqlalchemy import select
 
 from meho_backplane.auth.agent_admission import is_agent_caller
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.broadcast.announce_claim_lookup import caller_has_active_announce_claim
 from meho_backplane.broadcast.history import WRITE_OP_CLASSES
 from meho_backplane.db.change_counter import ChangeCounter
@@ -119,6 +123,11 @@ def invalidate_announce_gate_cache(tenant_id: UUID) -> None:
     _TENANT_GATE_CACHE.pop(tenant_id, None)
 
 
+def _is_person(operator: Operator) -> bool:
+    """Whether *operator* is a person working outside a hosted agent run."""
+    return is_human_principal(operator) and not is_agent_caller(operator)
+
+
 async def announce_gate_enabled(tenant_id: UUID) -> bool:
     """Whether the announce gate is enabled for *tenant_id* (default ``False``).
 
@@ -159,9 +168,8 @@ async def announce_gate_blocks(
 
     Short-circuits (returns ``None`` -- no block) in order, cheapest first:
 
-    * the caller is a person, not an agent
-      (:func:`~meho_backplane.auth.agent_admission.is_agent_caller` is
-      ``False``) -- a person cannot publish a claim, so no policy read;
+    * the caller is a person (:func:`_is_person`) -- a person cannot
+      publish a claim, so no policy read;
     * the op is not write-class (*op_class* not in
       :data:`~meho_backplane.broadcast.history.WRITE_OP_CLASSES`) -- no
       policy read. *op_class* is the class the dispatcher stores on the
@@ -172,13 +180,13 @@ async def announce_gate_blocks(
     * the caller holds an active covering claim
       (:func:`~meho_backplane.broadcast.announce_claim_lookup.caller_has_active_announce_claim`).
 
-    Only when an agent calls, the tenant opted in AND the claim is absent
-    does it return :data:`_ANNOUNCE_REQUIRED_REMEDIATION`. Fail-open: any internal error
-    resolves to ``None`` (no block), warn-logged as
+    Only when a caller that is not a person calls, the tenant opted in AND
+    the claim is absent does it return :data:`_ANNOUNCE_REQUIRED_REMEDIATION`.
+    Fail-open: any internal error resolves to ``None`` (no block), warn-logged as
     ``announce_gate_check_failed``.
     """
     try:
-        if not is_agent_caller(operator):
+        if _is_person(operator):
             return None
         if op_class not in WRITE_OP_CLASSES:
             return None
@@ -193,7 +201,7 @@ async def announce_gate_blocks(
         return _ANNOUNCE_REQUIRED_REMEDIATION
     except Exception:
         # Fail-open: the gate only ever ADDS a rejection when it can
-        # positively determine an agent called, the tenant opted in and
+        # positively determine a non-person called, the tenant opted in and
         # the claim is absent. An internal error must never convert a
         # would-be dispatch into a denial.
         _log.warning("announce_gate_check_failed", tenant_id=str(operator.tenant_id))

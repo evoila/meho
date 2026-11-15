@@ -17,25 +17,25 @@ announce before mutating.
    `build_reflex_advisory(...)` fragment merged into the same `extras`
    dict. Returns `{"reflex_advisory": "<one line>"}` or `{}`.
 2. **Announce gate** (default OFF, opt-in per tenant) — a pre-execution
-   dispatch gate that *rejects* an agent's caution-or-higher write-class
-   op dispatched without an active announce claim, in a tenant that
-   opted in.
+   dispatch gate that *rejects* a caution-or-higher write-class op
+   dispatched without an active announce claim, in a tenant that opted
+   in. It never asks a person.
 
 The advisory *nudges*; the gate *enforces*. Both copy the established
 #2550 / #2718 advisory mould: fail-open, bounded, Valkey `SET NX EX`
 dedupe where a dedupe applies.
 
-**People are no longer stopped; agents still are (#3762).** Until #3762
-the gate did not look at who called: it stopped people and agents alike.
-But only agents can publish an announcement (#3736), so the gate could
-refuse a person's write for a claim the person could never make. Now the
-gate asks only agents. It tells a person from an agent with
-`is_agent_caller` (`auth/agent_admission.py`), the same check that
-decides who may publish: an agent token, or a call inside a hosted agent
-run. A person's write is never refused for a missing claim. An agent's
-caution-or-higher write in a tenant with the gate on still needs an
-active claim first, as before. `announce_gate_enabled` still turns the
-gate on or off. See
+**Only a person skips the gate.** Only agents can publish an
+announcement, so a person can never make the claim the gate asks
+for. A person is a caller that `is_human_principal` (`auth/operator.py`)
+names a person and that is not inside a hosted agent run
+(`is_agent_caller`, `auth/agent_admission.py`). An AI tool that works
+with a person's own login counts as that person. Every other caller is
+asked: agents, hosted agent runs, service logins and runner logins. In a
+tenant with the gate on, their caution-or-higher writes need an active
+claim first. A service login and a runner login cannot make a claim, so
+there those writes are refused. `announce_gate_enabled` turns the gate
+on or off. See
 [the decision record](../decisions/2026-11-08-broadcast-people-read-agents-publish.md).
 
 ## Key types
@@ -49,7 +49,8 @@ gate on or off. See
   `30`, `ge=0`; `0` disables the advisory before any I/O.
 - `meho_backplane.broadcast.announce_gate.announce_gate_blocks(operator, *, op_class, safety_level, target_name)`
   — the gate decision; returns a remediation string (block) or `None`.
-  Always `None` for a person (`is_agent_caller(operator)` is `False`).
+  Always `None` for a person (`_is_person(operator)`: `is_human_principal`
+  and not `is_agent_caller`).
 - `announce_gate_enabled(tenant_id) -> bool` — the cache-aware, fail-open
   per-tenant enablement resolver.
 - `tenant.announce_gate_enabled` — the structured per-tenant policy flag
@@ -127,7 +128,7 @@ response falls through to announce on the next.
 dispatch(...)   # Step 4, verdict == AUTO_EXECUTE, not the _approved resume
   → announce_gate_blocks(operator, op_class, safety_level, target_name)
       [returns None — no block — in order, cheapest first:]
-        · not is_agent_caller(operator)                 # a person (#3762)
+        · _is_person(operator)                          # a person
         · op_class not in WRITE_OP_CLASSES
         · _SAFETY_RANK[safety_level] < _SAFETY_RANK["caution"]
         · not announce_gate_enabled(tenant_id)        # cached, fail-open
@@ -153,11 +154,12 @@ dispatch(...)   # Step 4, verdict == AUTO_EXECUTE, not the _approved resume
   `call_operation` carries a session and an operator `meho operation
   call` does not, so the same code nudges the former and stays silent for
   the latter.
-- **Surface-agnostic gate, for agents only.** The gate keys on
+- **Surface-agnostic gate; a person is never asked.** The gate keys on
   announce-*state* and on who calls, not the surface, so an agent's
   enabled-tenant caution write with no claim is rejected identically over
-  MCP and CLI. A person's write is never rejected (#3762). It composes with #2546 (which
-  rate-limits the announce *call*): announce once, then the write passes.
+  MCP and CLI. A person's write is never rejected; every other
+  caller is asked. It composes with the rate limit on the announce
+  *call*: announce once, then the write passes.
 - **Deduped advisory.** At most one nudge per `(agent_session_id,
   heuristic)` per window, via an atomic Valkey `SET NX EX` — the #2718
   dedupe primitive, one key per heuristic.
@@ -166,8 +168,8 @@ dispatch(...)   # Step 4, verdict == AUTO_EXECUTE, not the _approved resume
   yields `{}`. Any gate error — an unreadable enablement policy
   (`announce_gate_enablement_read_failed`), an unreachable claim scan
   (`announce_gate_check_failed`) — resolves to *no block*. The gate only
-  ever *adds* a rejection when it can positively determine an agent
-  called, the tenant opted in AND the claim is absent.
+  ever *adds* a rejection when it can positively determine a caller that
+  is not a person called, the tenant opted in AND the claim is absent.
 - **Bounded.** The read heuristic is one indexed `EXISTS` probe on
   `audit_log` (the `audit_log_agent_session_id_idx` b-tree). The announce
   heuristic and the gate share one archive query (`announce_claim_gap`):

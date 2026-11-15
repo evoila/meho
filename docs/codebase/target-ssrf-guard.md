@@ -56,7 +56,9 @@ off-switch.
     target port, else their default). For them (`connect_checked`) that
     port is the one checked, also when the host has a port in it: these
     drivers get only the checked address and dial their own port
-    (`use_embedded_port=False`). An entry with a port never matches
+    (`use_embedded_port=False`). A port written in the host is dropped
+    also when the host is a name on the allowlist: the driver gets the
+    name without the port and dials its own port. An entry with a port never matches
     while the port is unknown, so the guard stays closed. A target update
     that sends `host`, `fqdn` or `port` checks the new destination: the
     sent values, else the stored ones (`screen_destination_change`).

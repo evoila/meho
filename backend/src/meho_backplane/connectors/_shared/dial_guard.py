@@ -145,15 +145,20 @@ async def connect_checked[T](
     (by default ``OSError``: refused, unreachable, timed out), the next
     checked address from that same answer is tried. When every address
     fails, the last error is raised. Any other error is raised at once. A
-    host name listed verbatim on the allowlist is handed to *connect* as
-    written, once.
+    host name listed verbatim on the allowlist is handed to *connect* by
+    name, once.
 
     *port* is the port the driver dials. It is the port that is checked: a
     port embedded in *host* is ignored, because the driver gets only the
-    address and dials *port*.
+    address or the name and dials *port*. So an allowlisted name written
+    with a port (``db.example.test:9443``) reaches *connect* without the
+    port (``db.example.test``). A name without a port is passed unchanged.
     """
     addresses = await screen_dial_addresses_async(host, port, use_embedded_port=False)
     if addresses is None:
+        candidate = host.strip()
+        if _effective_port(candidate, None) is not None:
+            return await connect(_dialed_host(candidate))
         return await connect(host)
     last_exc: BaseException | None = None
     for address in addresses:

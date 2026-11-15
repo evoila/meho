@@ -494,3 +494,87 @@ async def test_driver_port_that_matches_the_entry_is_admitted(
         await ssh_module._dial(target, {"username": "u", "known_hosts": None})
     assert calls[0][0][0] == "192.168.7.10"
     assert calls[0][1]["port"] == 2222
+
+
+# --- an allowlisted name with a port in it is dialed on the driver's port ---
+
+_NAME = "db.example.test"
+
+
+async def test_connect_checked_drops_the_port_from_an_allowlisted_name(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    _allow(_guard_live, f"{_NAME}:27017")
+    dialed: list[str] = []
+
+    async def _connect(host: str) -> str:
+        dialed.append(host)
+        return host
+
+    assert await connect_checked(f"{_NAME}:9443", _connect, port=27017) == _NAME
+    assert await connect_checked(_NAME, _connect, port=27017) == _NAME
+    assert dialed == [_NAME, _NAME]
+
+
+@pytest.mark.parametrize("port", [None, mongodb_session.DEFAULT_PORT])
+async def test_mongodb_dials_its_own_port_for_an_allowlisted_name_with_a_port(
+    _guard_live: pytest.MonkeyPatch, port: int | None
+) -> None:
+    _allow(_guard_live, f"{_NAME}:{mongodb_session.DEFAULT_PORT}")
+    calls = _record_dial(_guard_live, mongodb_session, "AsyncMongoClient")
+    target = types.SimpleNamespace(name="db", host=f"{_NAME}:9443", port=port, secret_ref=None)
+    with pytest.raises(_DialedError):
+        await mongodb_session.connect_client(target, None)
+    assert calls[0][1]["host"] == _NAME
+    assert calls[0][1]["port"] == mongodb_session.DEFAULT_PORT
+
+
+@pytest.mark.parametrize("port", [None, postgres_session.DEFAULT_PORT])
+async def test_postgres_dials_its_own_port_for_an_allowlisted_name_with_a_port(
+    _guard_live: pytest.MonkeyPatch, port: int | None
+) -> None:
+    _allow(_guard_live, f"{_NAME}:{postgres_session.DEFAULT_PORT}")
+    calls = _record_dial(_guard_live, postgres_session.asyncpg, "connect")
+    target = types.SimpleNamespace(name="db", host=f"{_NAME}:9443", port=port, secret_ref=None)
+    with pytest.raises(_DialedError):
+        await postgres_session.connect_read_only(target, None)
+    assert calls[0][1]["host"] == _NAME
+    assert calls[0][1]["port"] == postgres_session.DEFAULT_PORT
+
+
+@pytest.mark.parametrize("port", [None, mssql_session.DEFAULT_PORT])
+async def test_mssql_dials_its_own_port_for_an_allowlisted_name_with_a_port(
+    _guard_live: pytest.MonkeyPatch, port: int | None
+) -> None:
+    _allow(_guard_live, f"{_NAME}:{mssql_session.DEFAULT_PORT}")
+    calls = _record_dial(_guard_live, mssql_session, "_blocking_connect")
+    target = types.SimpleNamespace(name="db", host=f"{_NAME}:9443", port=port, secret_ref=None)
+    with pytest.raises(_DialedError):
+        await mssql_session._connect(target, {}, database=None, query_timeout=5)
+    assert calls[0][1]["host"] == _NAME
+    assert calls[0][1]["port"] == mssql_session.DEFAULT_PORT
+
+
+@pytest.mark.parametrize("port", [None, 22])
+async def test_ssh_dials_its_own_port_for_an_allowlisted_name_with_a_port(
+    _guard_live: pytest.MonkeyPatch, port: int | None
+) -> None:
+    _allow(_guard_live, f"{_NAME}:22")
+    calls = _record_dial(_guard_live, ssh_module.asyncssh, "connect")
+    target = types.SimpleNamespace(name="db", host=f"{_NAME}:9443", port=port, secret_ref=None)
+    with pytest.raises(_DialedError):
+        await ssh_module._dial(target, {"username": "u", "known_hosts": None})
+    assert calls[0][0][0] == _NAME
+    assert calls[0][1]["port"] == 22
+
+
+async def test_mongodb_passes_an_allowlisted_name_without_a_port_unchanged(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    _allow(_guard_live, _NAME)
+    calls = _record_dial(_guard_live, mongodb_session, "AsyncMongoClient")
+    target = types.SimpleNamespace(name="db", host=_NAME, port=None, secret_ref=None)
+    with pytest.raises(_DialedError):
+        await mongodb_session.connect_client(target, None)
+    assert calls[0][1]["host"] == _NAME
+    assert calls[0][1]["port"] == mongodb_session.DEFAULT_PORT

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import ssl
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -143,3 +144,40 @@ async def test_probe_dials_the_screened_address_with_the_sni_name(
 
     assert await probe_presented_leaf("host.example.test", 8443, None) is None
     assert seen == {"host": "192.0.2.7", "server_hostname": "host.example.test"}
+
+
+@pytest.mark.asyncio
+async def test_slow_dns_stays_within_the_timeout_and_does_not_block_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _slow_screen(host: str) -> list[str]:
+        time.sleep(0.5)
+        return ["192.0.2.7"]
+
+    async def _never(*args: object, **kwargs: object) -> None:
+        raise AssertionError("must not dial after the timeout")
+
+    monkeypatch.setattr("meho_backplane.operations._tls_presented.screen_and_resolve", _slow_screen)
+    monkeypatch.setattr("asyncio.open_connection", _never)
+
+    ticks = 0
+
+    async def _ticker() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    ticker = asyncio.create_task(_ticker())
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    try:
+        out = await probe_presented_leaf("host.example.test", 443, None, timeout=0.1)
+    finally:
+        ticker.cancel()
+    elapsed = loop.time() - start
+
+    assert out is None
+    assert elapsed < 0.4
+    # The loop kept running other tasks while DNS was slow.
+    assert ticks >= 3

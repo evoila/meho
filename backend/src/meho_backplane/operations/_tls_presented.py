@@ -10,7 +10,9 @@ certificate. It sends no request and trusts nothing: the handshake does
 not verify, because its only job is to show the certificate.
 
 The destination goes through the same target address check as the
-connector path first. The probe dials the screened address and offers
+connector path first. That check looks up DNS, so it runs in a worker
+thread, inside the same timeout as the connect and the handshake. The
+probe dials the screened address and offers
 the target name as the TLS server name. A refused destination is not
 dialed.
 
@@ -29,7 +31,7 @@ from cryptography.hazmat.primitives import hashes
 
 from meho_backplane.targets.ssrf_guard import _dialed_host, screen_and_resolve
 
-#: Seconds for the connect and the handshake together.
+#: Seconds for the DNS lookup, the connect and the handshake together.
 PROBE_TIMEOUT_S: float = 3.0
 _DEFAULT_PORT: int = 443
 
@@ -57,24 +59,27 @@ async def probe_presented_leaf(
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+
+    async def _screen_and_open() -> asyncio.StreamWriter:
+        # Same check as the connector path. Refused targets raise here
+        # and are not dialed. The DNS lookup blocks, so it runs in a
+        # worker thread. Dial the screened address, not the name.
+        addrs = await asyncio.to_thread(screen_and_resolve, host)
+        dial_host = addrs[0] if addrs else _dialed_host(host)
+        _reader, opened = await asyncio.open_connection(
+            dial_host,
+            port or _DEFAULT_PORT,
+            ssl=ctx,
+            server_hostname=server_name or host,
+            ssl_handshake_timeout=timeout,
+        )
+        return opened
+
     writer: asyncio.StreamWriter | None = None
     try:
-        # Same check as the connector path. Refused targets raise here
-        # and are not dialed. Dial the screened address, not the name.
-        addrs = screen_and_resolve(host)
-        dial_host = addrs[0] if addrs else _dialed_host(host)
-        _reader, opened = await asyncio.wait_for(
-            asyncio.open_connection(
-                dial_host,
-                port or _DEFAULT_PORT,
-                ssl=ctx,
-                server_hostname=server_name or host,
-                ssl_handshake_timeout=timeout,
-            ),
-            timeout=timeout,
-        )
-        writer = opened
-        ssl_object: Any = opened.get_extra_info("ssl_object")
+        # One timeout covers the DNS lookup, the connect and the handshake.
+        writer = await asyncio.wait_for(_screen_and_open(), timeout=timeout)
+        ssl_object: Any = writer.get_extra_info("ssl_object")
         der = ssl_object.getpeercert(binary_form=True) if ssl_object is not None else None
         return describe_certificate(der) if der else None
     except Exception:  # never raise out of the error path

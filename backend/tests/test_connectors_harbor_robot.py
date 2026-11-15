@@ -322,6 +322,81 @@ async def test_robot_create_sends_correct_permission_body(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("access", "expected"),
+    [
+        (["pull"], ["pull"]),
+        (["push"], ["push"]),
+        (["pull", "push"], ["push", "pull"]),
+        (None, ["push", "pull"]),
+    ],
+)
+async def test_robot_create_sends_chosen_access(
+    monkeypatch: pytest.MonkeyPatch, access: list[str] | None, expected: list[str]
+) -> None:
+    """The access param picks the Harbor actions; no param keeps push+pull."""
+    install_fake_client(
+        monkeypatch,
+        secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
+    )
+    connector = _make_connector()
+    captured_body: dict = {}
+
+    def _capture(request: respx.models.Request) -> respx.MockResponse:
+        import json as _json
+
+        captured_body.update(_json.loads(request.content))
+        return respx.MockResponse(201, json={"id": 10, "name": "robot$alpha+x", "secret": "x"})
+
+    params: dict = {"name": "x", "project": "alpha", "duration": 90}
+    if access is not None:
+        params["access"] = access
+    with respx.mock() as mock:
+        mock.post("https://harbor.test.invalid/api/v2.0/robots").mock(side_effect=_capture)
+        await connector.robot_create(_make_operator(), _TARGET, params)
+
+    actions = [a["action"] for a in captured_body["permissions"][0]["access"]]
+    assert actions == expected
+    assert {a["resource"] for a in captured_body["permissions"][0]["access"]} == {"repository"}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("access", [[], ["delete"], ["pull", "delete"]])
+async def test_robot_create_refuses_bad_access_before_calling_harbor(
+    monkeypatch: pytest.MonkeyPatch, access: list[str]
+) -> None:
+    install_fake_client(
+        monkeypatch,
+        secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
+    )
+    connector = _make_connector()
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post("https://harbor.test.invalid/api/v2.0/robots")
+        with pytest.raises(ValueError, match="access"):
+            await connector.robot_create(
+                _make_operator(),
+                _TARGET,
+                {"name": "x", "project": "alpha", "duration": 90, "access": access},
+            )
+        assert not route.called
+    await connector.aclose()
+
+
+def test_robot_create_schema_limits_access_to_pull_and_push() -> None:
+    import jsonschema
+
+    from meho_backplane.connectors.harbor.ops import _HARBOR_ROBOT_CREATE_PARAMETER_SCHEMA as S
+
+    base = {"name": "x", "project": "p", "duration": -1}
+    jsonschema.validate({**base, "access": ["pull"]}, S)
+    jsonschema.validate(base, S)
+    for bad in ([], ["delete"], ["pull", "pull"], "pull"):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate({**base, "access": bad}, S)
+
+
+@pytest.mark.asyncio
 async def test_robot_create_raises_on_http_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

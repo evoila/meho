@@ -482,7 +482,8 @@ class HarborConnector(HttpConnector):
         with the same name, which Harbor rejects with 409 anyway, but
         the tenacity decorator must not trigger).
 
-        The handler grants push + pull access on the named project via the
+        The handler grants the access in ``params["access"]`` (``push`` and/or
+        ``pull``; default both) on the named project via the
         Harbor v2 robot API (``POST /api/v2.0/robots`` with ``level=project``).
         System-level access (omit ``level`` + ``namespace``) is out of scope.
 
@@ -506,7 +507,8 @@ class HarborConnector(HttpConnector):
             Resolved Harbor target (must satisfy :class:`HarborTargetLike`).
         params
             Schema-validated: ``name`` (str), ``project`` (str),
-            ``duration`` (int, -1 for never-expire).
+            ``duration`` (int, -1 for never-expire); optional ``access``
+            (list of ``push`` / ``pull``, default both).
 
         Returns
         -------
@@ -525,6 +527,10 @@ class HarborConnector(HttpConnector):
         name = str(params["name"])
         project = str(params["project"])
         duration = int(params["duration"])
+        requested = set(params.get("access", ("push", "pull")))
+        actions = [a for a in ("push", "pull") if a in requested]
+        if not actions or requested - {"push", "pull"}:
+            raise ValueError("access must be a non-empty list of 'push' and 'pull'")
 
         body: dict[str, Any] = {
             "name": name,
@@ -535,10 +541,7 @@ class HarborConnector(HttpConnector):
                 {
                     "kind": "project",
                     "namespace": project,
-                    "access": [
-                        {"resource": "repository", "action": "push"},
-                        {"resource": "repository", "action": "pull"},
-                    ],
+                    "access": [{"resource": "repository", "action": action} for action in actions],
                 }
             ],
         }

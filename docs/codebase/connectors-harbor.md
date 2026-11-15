@@ -192,6 +192,10 @@ and `harbor.health` expose these same two reads as operator-callable typed ops.
 
 Both robot writes register in the `robot` group (not `harbor-robots`).
 
+`robot_create` takes an optional `access` list (`pull`, `push`; default both,
+so old callers are unchanged). `["pull"]` makes a pull-only robot. Delete is not
+offered. The value is part of the call params, so the approver sees it.
+
 `robot_create` (op `harbor.robot.create`) is classified `credential_mint`.
 The connector declares this class in `op_classes.py` with
 `declare_op_classes`, and `classify_op` in `broadcast/events.py` reads it

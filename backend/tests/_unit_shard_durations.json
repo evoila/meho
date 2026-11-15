@@ -358,6 +358,7 @@
   "tests/test_connectors_keycloak_path_encoding.py": 2.09,
   "tests/test_connectors_keycloak_realm_delete.py": 23.38,
   "tests/test_connectors_keycloak_redaction.py": 0.09,
+  "tests/test_connectors_keycloak_scope_mapper.py": 30.54,
   "tests/test_connectors_keycloak_spec_reconcile.py": 1.26,
   "tests/test_connectors_keycloak_update_merge.py": 7.09,
   "tests/test_connectors_keycloak_user_logout.py": 4.65,

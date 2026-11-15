@@ -502,9 +502,9 @@ def test_contributing_fork_steps_start_a_ci_run() -> None:
     # The maintainer pushes the exact commit they read, not the fork branch.
     assert "git push origin <full-sha>:refs/heads/ci/pr-<number>" in section
     triggers = _triggers(_load_workflow(_WORKFLOWS_DIR / "ci.yml"))
-    # A pushed ci/pr-<number> branch alone starts no run; the draft pull
-    # request does.
-    assert triggers["push"]["branches"] == ["main"]
+    # A pushed ci/pr-<number> branch starts no run, because ci.yml has no
+    # push trigger; the draft pull request starts the run.
+    assert "push" not in triggers
     assert "workflow_dispatch" not in triggers
 
 

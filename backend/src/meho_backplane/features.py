@@ -555,8 +555,9 @@ def _policy_block(settings: Settings) -> dict[str, Any]:
 
     ``approver_routing`` is the ``POLICY_APPROVER_ROUTING`` switch: a
     waiting request stores who may approve it, from the policy file's
-    ``routing`` section (:mod:`meho_backplane.policy.routing`). Off by
-    default.
+    ``routing`` section (:mod:`meho_backplane.policy.routing`), and the
+    ``bindings`` of the policy file give login groups a group kind and
+    categories (:mod:`meho_backplane.policy.bindings`). Off by default.
 
     ``notes`` holds one sentence when ``approver_routing`` is on and
     ``classification`` is off: then no change has a category, so a routing

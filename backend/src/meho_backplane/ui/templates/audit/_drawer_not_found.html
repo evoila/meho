@@ -8,7 +8,7 @@
 
   The boundary is opaque: a cross-tenant id and a non-existent id both
   render this fragment at 404 (never a 403, which would leak that the id
-  exists for another tenant). Mirrors ``broadcast/_event_drawer_not_found.html``.
+  exists for another tenant).
   It carries the same ``x-data``/``click.outside`` dismiss island so a
   click outside (or Escape / Close) clears it consistently.
 -#}

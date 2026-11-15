@@ -635,8 +635,9 @@ shape what the caller sees and how it reads more:
   the `audit_id`, so the caller knows not to run it again. A failed call
   (#3864) and a refused call (#4669) return the id of their `error` or
   `denied` row the same way, so an agent can link a refusal to its audit
-  row without searching the audit log. `audit_id` is `null` only when no
-  row was written or the write failed.
+  row without searching the audit log. A call that waits for approval
+  returns the id of its `approval.request` row the same way.
+  `audit_id` is `null` only when no row was written or the write failed.
 
 The full rules, bounds, and errors are in
 [`result-spill.md`](result-spill.md). Tests:

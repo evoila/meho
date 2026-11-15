@@ -52,6 +52,8 @@ from typing import Any, Final, Literal
 __all__ = [
     "DEFAULT_RULE_REF",
     "DEFAULT_TAXONOMY",
+    "LABEL_KEY_MAX",
+    "LABEL_VALUE_MAX",
     "RISK_LEVELS",
     "Classification",
     "ClassificationConflictError",
@@ -83,6 +85,10 @@ _SCOPES: Final[tuple[Scope, ...]] = ("install", "tenant")
 _GLOB_METACHARS: Final[frozenset[str]] = frozenset("*?[")
 _LABEL_KEY_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._/-]+")
 
+#: The longest label key and label value, in characters.
+LABEL_KEY_MAX: Final[int] = 63
+LABEL_VALUE_MAX: Final[int] = 255
+
 #: The rule reference of an operation that no entry matches.
 DEFAULT_RULE_REF: Final[str] = "taxonomy.default"
 
@@ -107,8 +113,15 @@ def label_text_ok(key: str, value: str) -> bool:
 
     A key has only letters, digits and ``. _ / -``. A value has only
     printable characters, so no line breaks and no control characters.
+    A key has 1 to :data:`LABEL_KEY_MAX` characters and a value 1 to
+    :data:`LABEL_VALUE_MAX`, the same limits a write has.
     """
-    return bool(_LABEL_KEY_RE.fullmatch(key)) and value.isprintable()
+    return (
+        len(key) <= LABEL_KEY_MAX
+        and 0 < len(value) <= LABEL_VALUE_MAX
+        and bool(_LABEL_KEY_RE.fullmatch(key))
+        and value.isprintable()
+    )
 
 
 @dataclass(frozen=True)

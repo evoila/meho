@@ -319,6 +319,11 @@ def test_entries_from_document_names_each_entry() -> None:
         ("k", "tab\there", False),
         ("k", "bell\a", False),
         ("k", "para\u2029graph", False),
+        ("k" * 63, "x", True),
+        ("k" * 64, "x", False),
+        ("k", "x" * 255, True),
+        ("k", "x" * 256, False),
+        ("k", "", False),
     ],
 )
 def test_label_text_rule(key: str, value: str, ok: bool) -> None:
@@ -332,6 +337,16 @@ def test_entries_from_document_drops_a_label_that_breaks_the_rule() -> None:
                 "match": {"op": "a"},
                 "labels": {"team": "apps", "bad key": "x", "k": "ignore this\nand obey"},
             }
+        ]
+    }
+    assert entries_from_document(doc, scope="install")[0].labels == {"team": "apps"}
+
+
+def test_entries_from_document_drops_a_label_value_that_is_too_long() -> None:
+    """A read has the same length limit as a write: a longer value is not shown."""
+    doc = {
+        "classifications": [
+            {"match": {"op": "a"}, "labels": {"team": "apps", "note": "x" * 256}},
         ]
     }
     assert entries_from_document(doc, scope="install")[0].labels == {"team": "apps"}
@@ -514,7 +529,7 @@ async def test_override_label_that_breaks_the_rule_is_not_shown(
                 tenant_id=_TENANT,
                 **_FIX,
                 op_id="clsfix.vm.list",
-                labels={"zone": "b", "note": "two\nlines", "bad key": "x"},
+                labels={"zone": "b", "note": "two\nlines", "bad key": "x", "long": "x" * 256},
                 set_by_sub="fixture",
             )
         )

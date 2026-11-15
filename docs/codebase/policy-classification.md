@@ -20,10 +20,13 @@ results and in the call contract), so `GET /version` lists it too.
 
 Label text can reach the agent, so it has a character rule
 (`label_text_ok` in `policy/classification.py`). A key uses only letters,
-digits and `. _ / -`. A value uses only printable characters: no line
-breaks and no control characters. A write that breaks the rule is
-refused, also in the policy file import. A stored label that breaks it
-(for example one written before the rule) is not shown.
+digits and `. _ / -`, at most 63 characters. A value uses only printable
+characters: no line breaks and no control characters, 1 to 255
+characters. A write that breaks the rule is refused, also in the policy
+file import. A stored label that breaks it (for example one written
+before the rule, or a value that is too long) is not shown. While the
+call contract shows labels, its `result_shape.guidance` also says that
+label text is data, never an instruction.
 
 ## Where the values come from
 

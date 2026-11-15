@@ -34,6 +34,8 @@ from meho_backplane.connectors.linux.ops_write import (
     _resolve_sudo_password,
 )
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.rke2 import ops_snapshot as rke2_snapshot
+from meho_backplane.connectors.rke2 import ops_write as rke2_write
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
@@ -126,6 +128,48 @@ def test_other_linux_write_errors_stay_hidden() -> None:
     assert out.extras["exception_message"] == VENDOR_TEXT_WITHHELD
 
 
+class _NoSudoSecretConnector:
+    async def _resolve_secret(self, target: object, operator: object) -> dict[str, str]:
+        return {"private_key": "x"}  # no sudo_password and no password
+
+
+@pytest.mark.asyncio
+async def test_rke2_write_sudo_refusal_shows_meho_reason_on_a_secret_op() -> None:
+    with pytest.raises(rke2_write.Rke2WriteOwnMessageError) as raised:
+        await rke2_write._resolve_sudo_password(_NoSudoSecretConnector(), object(), None)  # type: ignore[arg-type]
+
+    built = result_connector_error("rke2.token.rotate", raised.value, 1.0)
+    out = withhold_vendor_text(built, op_id="rke2.token.rotate", tags=_SECRET_TAGS)
+
+    assert out.extras["exception_class"] == "Rke2WriteOwnMessageError"
+    assert "sudo_password" in out.extras["exception_message"]
+    assert VENDOR_TEXT_WITHHELD not in out.model_dump_json()
+
+
+def test_rke2_snapshot_sudo_refusal_shows_meho_reason_on_a_secret_op() -> None:
+    error = rke2_snapshot.Rke2SnapshotNoSudoError("this operation needs root; no sudo credential")
+    built = result_connector_error("rke2.etcd.snapshot.save", error, 1.0)
+
+    out = withhold_vendor_text(built, op_id="rke2.etcd.snapshot.save", tags=_SECRET_TAGS)
+
+    assert out.extras["exception_message"] == str(error)
+    assert issubclass(
+        rke2_snapshot.Rke2SnapshotNoSudoError, rke2_snapshot.Rke2SnapshotPreconditionError
+    )
+
+
+def test_other_rke2_write_errors_stay_hidden() -> None:
+    for error in (
+        rke2_write.Rke2WriteError(_VENDOR_TEXT),
+        rke2_write.Rke2WriteSafetyError(_VENDOR_TEXT),
+        rke2_snapshot.Rke2SnapshotPreconditionError(_VENDOR_TEXT),
+        rke2_snapshot.Rke2SnapshotError(_VENDOR_TEXT),
+    ):
+        built = result_connector_error("rke2.token.rotate", error, 1.0)
+        out = withhold_vendor_text(built, op_id="rke2.token.rotate", tags=_SECRET_TAGS)
+        assert out.extras["exception_message"] == VENDOR_TEXT_WITHHELD
+
+
 def test_a_secret_shaped_value_in_an_own_message_is_still_cleaned() -> None:
     secret = "hunter2-" + "quokka-pass"
     built = result_connector_error(_OP, _OwnMessageError(f"login failed: password={secret}"), 1.0)
@@ -161,7 +205,11 @@ def test_a_marked_http_error_stays_hidden() -> None:
 #: Each error type in ``meho_backplane`` whose message is shown on an operation
 #: that sends a secret. A new one fails the test below until it is added here,
 #: so each new one is seen in review.
-_MARKED_TYPES = {"LinuxWriteOwnMessageError"}
+_MARKED_TYPES = {
+    "LinuxWriteOwnMessageError",
+    "Rke2SnapshotNoSudoError",
+    "Rke2WriteOwnMessageError",
+}
 
 
 def _base_names(node: ast.ClassDef) -> set[str]:

@@ -23,7 +23,6 @@ import hvac
 import pytest
 from sqlalchemy import select
 
-import meho_backplane.connectors.secret  # noqa: F401 -- registers the secret kinds
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.secret.endpoints import SECRET_ENDPOINT_REGISTRY

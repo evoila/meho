@@ -896,7 +896,7 @@ field, so a response from an older backplane prints as it always did.
 | Line | Source field | Example |
 |---|---|---|
 | `Logged in as …` | `operator` | `Logged in as alice@example.com (sub: …)` |
-| `Vault: …` | `vault` | `Vault: reachable, read OK (version=42)` |
+| `Vault: …` | `vault` | `Vault: reachable, read OK (version=42)`. A `read_only` login reads the liveness route, so `meho status` prints no Vault line for it; the text `not checked (needs the operator role)` shows only in `meho doctor` |
 | `DB: …` | `db` | `DB: migrated, revision 0115` |
 | `Server time: …` | `server_time` | `Server time: 2026-10-31T14:34:28Z` — the server's time in UTC (#5504); also printed for a login that chose no tenant |
 | `Readiness: …` | `readiness` | `Readiness: ready (keycloak, vault, db, broadcast, docs_backends ok)` |
@@ -1383,7 +1383,10 @@ makes exactly the calls it reports, and none with `--no-network`.
    the backplane audits this authenticated route.
 3. **MCP handshake** — `initialize` → `notifications/initialized` →
    `resources/list` → `tools/list` → `tools/call meho_status` on
-   `<backplane>/mcp`, with the same bearer. Answers may be JSON or SSE.
+   `<backplane>/mcp`, with the same bearer. For a `read_only` login the
+   Vault part of the `meho_status` answer is not checked, and the
+   doctor prints `vault not checked (needs the operator role)`.
+   Answers may be JSON or SSE.
    The `Mcp-Session-Id` from `initialize` is echoed and shown as a
    correlation id.
 4. **working surface** — compares `surface_summary.listed_working_tools`

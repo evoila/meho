@@ -80,7 +80,9 @@ register_mcp_tool(
         description=(
             "Returns the operator's identity (sub, name, email, tenant_id, "
             "tenant_role) and MEHO's dependency status: Vault (reachable + "
-            "KV read OK?), the database's revision and the one this build "
+            "KV read OK?; for a read_only caller it is not checked, with "
+            "checked=false and a detail that says the operator role is "
+            "needed), the database's revision and the one this build "
             "expects, the /ready checks (name, ok, detail), the approval "
             "settings (approval key state, whether a second person must "
             "approve), the gated features and the settings they still need, "

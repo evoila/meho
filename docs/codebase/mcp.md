@@ -1305,9 +1305,9 @@ Vault as the caller and reads a secret. A `read_only` caller gets every
 other part of the answer, and `vault.checked = false` with
 `vault.detail = "not checked: needs the operator role"`. MEHO makes no
 Vault login and no secret read for that caller. `meho status` prints
-`Vault: not checked (needs the operator role)`, and `meho doctor`
-(which reads the `meho_status` answer) prints
-`vault not checked (needs the operator role)`.
+no Vault line for a `read_only` login: it reads the liveness route
+instead. Only `meho doctor` (which reads the `meho_status` answer)
+prints `vault not checked (needs the operator role)`.
 
 ### Operator surface (`mcp:admin` elevation required)
 

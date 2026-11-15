@@ -16,9 +16,6 @@
 # In this version a team is one of the five login group kinds (Readers,
 # Operators, SA-Operators, Admins, Approvers). Routing only narrows: a
 # group never approves more than it may approve today.
-#
-# A copy of this file ships inside MEHO
-# (backend/src/meho_backplane/policy/profiles/). Keep the two the same.
 policy: v1
 description: >-
   Separated duties. Identity and secret changes only Admins approve.

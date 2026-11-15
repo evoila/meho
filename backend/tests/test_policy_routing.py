@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import uuid
-from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +27,8 @@ from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.features import CATEGORY_WITHOUT_CLASSIFICATION, build_features_block
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog, TenantPolicy
+from meho_backplane.features import CATEGORY_WITHOUT_CLASSIFICATION, build_features_block
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ApprovalGroupForbiddenError,
@@ -547,22 +546,18 @@ async def test_no_category_warning_unless_routing_on_and_classification_off(
 # The shipped "separated duties" file
 # ---------------------------------------------------------------------------
 
-_DEPLOY_COPY = (
+_SEPARATED_DUTIES = (
     Path(__file__).resolve().parents[2] / "deploy" / "policy-profiles" / "separated-duties.yaml"
 )
 
 
-def _packaged() -> bytes:
-    return (files("meho_backplane.policy") / "profiles" / "separated-duties.yaml").read_bytes()
-
-
-def test_the_two_copies_of_separated_duties_are_the_same() -> None:
-    assert _DEPLOY_COPY.read_bytes() == _packaged()
+def _separated_duties() -> bytes:
+    return _SEPARATED_DUTIES.read_bytes()
 
 
 @pytest.mark.parametrize("scope", ["install", "tenant"])
 def test_separated_duties_passes_the_import_checks(scope: str) -> None:
-    parsed = parse_policy_file(_packaged())
+    parsed = parse_policy_file(_separated_duties())
     assert parsed.mistakes == []
     assert parsed.model is not None
 
@@ -577,7 +572,7 @@ def test_separated_duties_passes_the_import_checks(scope: str) -> None:
 
 
 def test_separated_duties_routes_network_to_sa_operators_and_admins() -> None:
-    parsed = parse_policy_file(_packaged())
+    parsed = parse_policy_file(_separated_duties())
     assert parsed.model is not None
     entries = routes_from_documents(document_of(parsed.model), None)
 

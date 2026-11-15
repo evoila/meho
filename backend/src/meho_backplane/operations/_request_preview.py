@@ -113,6 +113,7 @@ from meho_backplane.operations._validate import (
 )
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.license_reads import is_license_read
+from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 
@@ -872,6 +873,7 @@ async def preview_dispatch(
     # that asks for the hidden values of a secret read gets the floor.
     params, reveal_secret = split_reveal_secret(params)
     raise_descriptor_for_reveal(descriptor, reveal_secret=reveal_secret)
+    raise_descriptor_for_params(descriptor, params)
     # The park check and the governance fields each run the policy gate.
     with agent_no_grant_log_scope():
         envelope = await _park_check_envelope(

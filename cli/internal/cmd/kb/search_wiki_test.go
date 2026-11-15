@@ -47,7 +47,7 @@ func TestRunSearchPrintsWikiHits(t *testing.T) {
 	}
 	for _, want := range []string{
 		"no kb hits for this query",
-		"team wiki hits (docs collection team-wiki)",
+		"wiki hits (docs collection team-wiki)",
 		"Snapshot limits",
 		"blob/abc123/products/x/snapshot-limits.md",
 		"1 wiki hits are shown above as their imported copy",
@@ -65,7 +65,7 @@ func TestPrintWikiHitsSaysWhyNotSearched(t *testing.T) {
 	printWikiHits(&buf, &api.KbWikiSearch{
 		Collection: "team-wiki",
 		Searched:   false,
-		Message:    ptr("The team wiki (docs collection `team-wiki`) was not searched: the knowledge index did not answer; try again later."),
+		Message:    ptr("Your wiki (docs collection `team-wiki`) was not searched: the knowledge index did not answer; try again later."),
 	})
 	if !strings.Contains(buf.String(), "was not searched: the knowledge index did not answer") {
 		t.Errorf("missing reason in %q", buf.String())

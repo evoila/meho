@@ -10,6 +10,9 @@
 - **The settings file** is not a full backup. A full restore also needs
   a backup of the password safe and of the Kubernetes Secrets the
   install made. See [the settings file](../guides/settings-file.md).
+- **The login setup** (identity providers, the directory connection,
+  groups and their members) is not in the settings file. To move it to
+  another install, see [Move the login setup](move-login-setup.md).
 
 Take a snapshot or a backup before each update.
 

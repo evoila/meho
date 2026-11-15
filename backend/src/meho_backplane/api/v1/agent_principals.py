@@ -80,7 +80,7 @@ router = APIRouter(prefix="/api/v1/agent-principals", tags=["agent-principals"])
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
-#: Human-only governance gate (meho-internal#289). Attached to **register**
+#: Human-only governance gate. Attached to **register**
 #: so a non-human ``principal_kind`` (agent / service / runner) cannot mint
 #: another agent principal over REST, even holding the ``tenant_admin`` role
 #: an agent principal is minted with — the REST half of

@@ -11,7 +11,7 @@ shape: arbitrary, operator-chosen keys (``tls.key``, an app token, a
 label the pattern engine can key on. So a read that returns a ``Secret``
 object would leak every value verbatim unless a value happened to match a
 named credential pattern -- exactly the read-side payload gap
-meho-internal#322 surfaced for the Envision visitor tenant.
+that a review of the visitor tenant surfaced.
 
 This module is the k8s per-connector redactor (the same shape as
 ``connectors/keycloak/redaction.py`` and ``connectors/rabbitmq/redact.py``):

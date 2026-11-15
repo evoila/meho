@@ -70,6 +70,7 @@ nav:
       - Set up login: install/login-setup.md
       - Tools for your laptop: install/laptop-tools.md
       - Back up, restore and update: install/backup-restore-update.md
+      - Move the login setup to another install: install/move-login-setup.md
       - Common problems: install/common-problems.md
       - Ways to install MEHO: install/ways-to-install.md
       - "The install trail: full detail and your own parts": install/index.md

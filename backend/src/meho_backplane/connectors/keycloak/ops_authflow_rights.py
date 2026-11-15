@@ -1,0 +1,458 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""The login flow ops check the rights of the target's account before they wait.
+
+The ``keycloak.authflow.ensure_*`` ops change login flows. A change of a
+login flow needs the realm-management role ``manage-realm``. MEHO checks
+the roles of the target's account before the call waits for approval. Each
+of these ops registers, with :func:`register_rights_check`:
+
+* a check before the wait (``register_permission_preflight``). It reads the
+  roles of the target's account. When a role the run needs is missing, it
+  sets ``will_be_denied``, so the dispatcher refuses the call before an
+  approval request exists. The text names the missing role and the account;
+* the approval card (``register_preview_builder``). It lists the roles the
+  run needs, and says in one line whether MEHO could check them;
+* :func:`names_missing_rights` on the handler: a 403 at the run still stops
+  with the same text.
+
+Where the roles come from. The admin roles of the account are in the
+connector's own admin token, as ``resource_access.<admin client>.roles``.
+The admin client is ``realm-management`` when the account signs in to the
+managed realm itself, and ``<realm>-realm`` when it signs in to ``master``.
+Keycloak checks the rights of an Admin REST API call mainly with these
+roles, so the check reads them: no extra request and no extra right. The
+token is only read here; it is never shown or stored. When the token has
+``resource_access`` but no entry for the admin client, MEHO does not take
+that as "no roles": the roles count as not checked. The card and the check
+of one request share one read, so a wrong password makes one failed
+sign-in, not two.
+
+After a refusal (before the wait, or a 403 at the run), MEHO drops the
+admin token it keeps, so the next call signs in again and gets the roles
+as they are then.
+
+A role in *per_object* (``manage-clients`` for the client binding) does
+not prove a denial when it is missing: a Keycloak permission on the one
+client can give the same right, and that is not in the token. So such a
+role never refuses the call. The card says MEHO could not check it.
+
+When the roles cannot be read (the token is not a JWT, it has no
+``resource_access`` claim, as with a lightweight access token, or the
+account signs in to a third realm), the call still waits for approval. The
+card says "MEHO could not check the rights of the target's account".
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import contextlib
+import functools
+import json
+import weakref
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Final
+
+import httpx
+
+from meho_backplane.connectors.base import ConnectorUpstreamError
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
+from meho_backplane.operations._preview import (
+    PermissionPreflight,
+    PreviewBuilder,
+    PreviewContext,
+    register_permission_preflight,
+    register_preview_builder,
+)
+
+if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
+    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+    from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
+
+__all__ = [
+    "CLIENT_LOOKUP_ROLES",
+    "NO_RIGHTS_CHECK",
+    "RIGHTS_CHECKED_AT_CALL",
+    "AccountRights",
+    "KeycloakMissingRightsError",
+    "find_client_uuid",
+    "missing_rights_error",
+    "names_missing_rights",
+    "read_account_rights",
+    "register_rights_check",
+    "rights_text",
+]
+
+#: The card line when MEHO could not read the roles of the target's account.
+NO_RIGHTS_CHECK: Final[str] = "MEHO could not check the rights of the target's account."
+#: The card line of a preview that does not talk to Keycloak.
+RIGHTS_CHECKED_AT_CALL: Final[str] = (
+    "MEHO checks the rights of the target's account when the call is made."
+)
+#: Added to each next step: a changed role can take a few minutes to show in the token.
+_TOKEN_DELAY: Final[str] = (
+    "Keycloak can keep the old roles in MEHO's sign-in token for a few minutes; "
+    "try again after that."
+)
+
+#: An op that finds a client first: Keycloak lets any one of these roles do that.
+CLIENT_LOOKUP_ROLES: Final[tuple[str, ...]] = ("query-clients", "view-clients", "manage-clients")
+
+_MASTER_REALM: Final[str] = "master"
+_REALM_MANAGEMENT: Final[str] = "realm-management"
+_DOC_REF: Final[str] = "docs/codebase/connectors-keycloak.md#rights-of-the-login-flow-ops"
+
+Handler = Callable[
+    ["KeycloakConnector", "Operator", "KeycloakTargetLike", dict[str, Any]],
+    Awaitable[dict[str, Any]],
+]
+
+
+class KeycloakMissingRightsError(ConnectorUpstreamError):
+    """Keycloak answered 403 to a login flow op. ``remediation`` names the roles."""
+
+    def __init__(self, message: str, *, upstream_message: str | None, remediation: str) -> None:
+        super().__init__(message, http_status=403, upstream_message=upstream_message)
+        self.remediation = remediation
+
+
+@dataclass(frozen=True)
+class AccountRights:
+    """The admin roles of the target's account, as far as MEHO could read them.
+
+    ``roles`` is ``None`` when they could not be read. ``client`` and
+    ``admin_realm`` say where the roles live; ``client`` is ``None`` when
+    the account signs in to a realm that cannot manage the managed realm,
+    and ``admin_realm`` is ``None`` when MEHO could not read the target's realms.
+    """
+
+    account: str | None
+    admin_realm: str | None
+    client: str | None
+    roles: frozenset[str] | None
+
+
+def _admin_client(admin_realm: str, managed_realm: str) -> str | None:
+    """The client whose roles give admin rights on *managed_realm*."""
+    if admin_realm == _MASTER_REALM:
+        return f"{managed_realm}-realm"
+    if admin_realm == managed_realm:
+        return _REALM_MANAGEMENT
+    return None
+
+
+def _claims(token: str) -> dict[str, Any] | None:
+    """The payload of a JWT, read without a check of the signature; ``None`` when not a JWT."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))
+        payload = json.loads(raw)
+    except (binascii.Error, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _client_roles(claims: dict[str, Any], client: str) -> frozenset[str] | None:
+    """The roles of *client* in ``resource_access``; ``None`` when they are not there."""
+    access = claims.get("resource_access")
+    if not isinstance(access, dict):
+        return None
+    entry = access.get(client)
+    roles = entry.get("roles") if isinstance(entry, dict) else None
+    if not isinstance(roles, list):
+        return None
+    return frozenset(role for role in roles if isinstance(role, str))
+
+
+async def read_account_rights(
+    connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike
+) -> AccountRights:
+    """Read the admin roles of the target's account from the connector's admin token.
+
+    Never raises: any failure gives ``roles=None`` (could not check).
+    """
+    try:
+        realms = resolve_realm_config(target)
+    except Exception:
+        return AccountRights(None, None, None, None)
+    client = _admin_client(realms.admin_realm, realms.managed_realm)
+    unknown = AccountRights(None, realms.admin_realm, client, None)
+    try:
+        token = await connector._admin_token(target, operator)
+    except Exception:
+        return unknown
+    claims = _claims(token)
+    if claims is None:
+        return unknown
+    name = claims.get("preferred_username") or claims.get("azp")
+    account = name if isinstance(name, str) and name else None
+    roles = _client_roles(claims, client) if client is not None else None
+    return AccountRights(account, realms.admin_realm, client, roles)
+
+
+#: One read per request: the card and the check get the same context.
+_READS: dict[int, AccountRights] = {}
+
+
+async def _shared_read(ctx: PreviewContext, connector: KeycloakConnector) -> AccountRights:
+    """Read the rights once for *ctx*; the entry goes away with *ctx*."""
+    key = id(ctx)
+    rights = _READS.get(key)
+    if rights is None:
+        rights = await read_account_rights(connector, ctx.operator, ctx.target)
+        _READS[key] = rights
+        weakref.finalize(ctx, _READS.pop, key, None)
+    return rights
+
+
+async def _forget_token(connector: KeycloakConnector, target: KeycloakTargetLike) -> None:
+    """Drop the kept admin token, so the next call gets the roles as they are then."""
+    with contextlib.suppress(Exception):
+        await connector.invalidate_credentials(target)
+
+
+def _missing(roles: tuple[str, ...], rights: AccountRights) -> list[str]:
+    if rights.roles is None:
+        return []
+    return [role for role in roles if role not in rights.roles]
+
+
+def _account(rights: AccountRights) -> str:
+    return repr(rights.account) if rights.account else "of the target"
+
+
+def _denying(
+    roles: tuple[str, ...], per_object: tuple[str, ...], rights: AccountRights
+) -> list[str]:
+    """The missing roles whose lack proves that Keycloak refuses the run."""
+    return [role for role in _missing(roles, rights) if role not in per_object]
+
+
+def _lacks_text(denying: list[str], rights: AccountRights) -> str:
+    """Short: the account and the roles it lacks (fits the 256-character reason)."""
+    return (
+        f"the account {_account(rights)} lacks the role(s) {', '.join(denying)} "
+        f"of the client {rights.client!r} in the realm {rights.admin_realm!r}"
+    )
+
+
+def rights_text(op_id: str, roles: tuple[str, ...], rights: AccountRights) -> str:
+    """Name the roles *op_id* needs, where they live, and the ones the account lacks."""
+    account = _account(rights)
+    if rights.client:
+        where = f"of the client {rights.client!r} in the realm {rights.admin_realm!r}"
+    elif rights.admin_realm:
+        where = f"for this realm (the account signs in to the realm {rights.admin_realm!r})"
+    else:
+        where = "for this realm"
+    text = f"{op_id} needs the role(s) {', '.join(roles)} {where} on the account {account}."
+    missing = _missing(roles, rights)
+    if missing:
+        text += f" The account lacks: {', '.join(missing)}."
+    return (
+        f"{text} Give the account the role(s) in Keycloak, then run the operation again. "
+        + _TOKEN_DELAY
+    )
+
+
+def _live_connector(ctx: PreviewContext) -> KeycloakConnector | None:
+    """The live Keycloak connector of the park; ``None`` on the egress-free preview path."""
+    if ctx.connector_instance is None or ctx.target is None:
+        return None
+    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+
+    connector = ctx.connector_instance
+    return connector if isinstance(connector, KeycloakConnector) else None
+
+
+def _preflight(
+    op_id: str, roles: tuple[str, ...], per_object: tuple[str, ...]
+) -> PermissionPreflight:
+    async def check(ctx: PreviewContext) -> dict[str, Any] | None:
+        connector = _live_connector(ctx)
+        if connector is None:
+            return None
+        rights = await _shared_read(ctx, connector)
+        if rights.roles is None:
+            return None
+        denying = _denying(roles, per_object, rights)
+        denied = bool(denying)
+        result: dict[str, Any] = {
+            "check": "keycloak.admin_token_roles",
+            "path": f"{rights.admin_realm}/{rights.client}",
+            "account": rights.account,
+            "required": list(roles),
+            "granted": sorted(role for role in roles if role in rights.roles),
+            "will_be_denied": denied,
+        }
+        if denied:
+            result["reason"] = _lacks_text(denying, rights)
+            result["remediation"] = (
+                f"Give the account the role(s) in Keycloak, then call {op_id} again. "
+                + _TOKEN_DELAY
+            )
+            result["doc_ref"] = _DOC_REF
+            await _forget_token(connector, ctx.target)
+        return result
+
+    return check
+
+
+def _not_checked_text(roles: tuple[str, ...], not_checked: list[str], rights: AccountRights) -> str:
+    checked = [role for role in roles if role not in not_checked]
+    text = f"MEHO checked the account {_account(rights)}"
+    if checked:
+        text += f": it has the role(s) {', '.join(checked)} of the client {rights.client!r}"
+    return (
+        f"{text}. It lacks the role(s) {', '.join(not_checked)}, but a Keycloak permission "
+        "on the one object can give the same right. MEHO could not check that permission."
+    )
+
+
+def _card(
+    roles: tuple[str, ...], per_object: tuple[str, ...], builder: PreviewBuilder
+) -> PreviewBuilder:
+    async def build(ctx: PreviewContext) -> dict[str, Any] | None:
+        preview = dict(await builder(ctx) or {})
+        connector = _live_connector(ctx)
+        rights = await _shared_read(ctx, connector) if connector is not None else None
+        preview["roles_needed"] = list(roles)
+        if rights is None:
+            preview["rights_check"] = RIGHTS_CHECKED_AT_CALL
+        elif rights.roles is None:
+            preview["rights_check"] = NO_RIGHTS_CHECK
+        elif _denying(roles, per_object, rights):
+            preview["rights_check"] = rights_text(ctx.descriptor.op_id, roles, rights)
+        elif not_checked := _missing(roles, rights):
+            preview["rights_check"] = _not_checked_text(roles, not_checked, rights)
+        else:
+            preview["rights_check"] = (
+                f"MEHO checked the account {_account(rights)}: it has the role(s) "
+                f"{', '.join(roles)} of the client {rights.client!r}."
+            )
+        return preview
+
+    return build
+
+
+def register_rights_check(
+    op_id: str,
+    roles: tuple[str, ...],
+    builder: PreviewBuilder,
+    *,
+    per_object: tuple[str, ...] = (),
+) -> None:
+    """Register the check before the wait and the approval card of a login flow op.
+
+    *builder* makes the rest of the card; the roles and the check line are
+    added to it. A role in *per_object* can be replaced by a Keycloak
+    permission on one object, so its lack never refuses the call.
+    """
+    register_permission_preflight(op_id, _preflight(op_id, roles, per_object))
+    register_preview_builder(op_id, _card(roles, per_object, builder))
+
+
+async def missing_rights_error(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    exc: httpx.HTTPStatusError,
+    *,
+    op_id: str,
+    roles: tuple[str, ...],
+    message: str,
+    done: str = "",
+) -> KeycloakMissingRightsError:
+    """The error for a 403 at the run; also drops the kept admin token.
+
+    *done* says what the run changed before the 403; it goes first in the
+    remediation, which keeps a longer text than *message*.
+    """
+    rights = await read_account_rights(connector, operator, target)
+    await _forget_token(connector, target)
+    remediation = rights_text(op_id, roles, rights)
+    return KeycloakMissingRightsError(
+        message,
+        upstream_message=exc.response.text or None,
+        remediation=f"{done} {remediation}" if done else remediation,
+    )
+
+
+def names_missing_rights(op_id: str, roles: tuple[str, ...]) -> Callable[[Handler], Handler]:
+    """Turn a 403 of the handler into :class:`KeycloakMissingRightsError` naming the roles."""
+
+    def wrap(handler: Handler) -> Handler:
+        @functools.wraps(handler)
+        async def run(
+            connector: KeycloakConnector,
+            operator: Operator,
+            target: KeycloakTargetLike,
+            params: dict[str, Any],
+        ) -> dict[str, Any]:
+            try:
+                return await handler(connector, operator, target, params)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 403:
+                    raise
+                raise await missing_rights_error(
+                    connector,
+                    operator,
+                    target,
+                    exc,
+                    op_id=op_id,
+                    roles=roles,
+                    message=(
+                        f"{op_id} stopped: Keycloak refused a request with HTTP 403. "
+                        "The target's account lacks a right; see extras.remediation."
+                    ),
+                ) from exc
+
+        return run
+
+    return wrap
+
+
+async def find_client_uuid(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    realm_segment: str,
+    client_id: str,
+    *,
+    op_id: str,
+    roles: tuple[str, ...],
+) -> str | None:
+    """Find the client of a login flow op; a 403 names the roles of the lookup.
+
+    The lookup is the op's first request, so nothing was changed yet.
+    """
+    try:
+        return await connector._find_client_uuid(
+            target, realm_segment, client_id, operator=operator
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            raise
+        lookup = ", ".join(CLIENT_LOOKUP_ROLES)
+        raise await missing_rights_error(
+            connector,
+            operator,
+            target,
+            exc,
+            op_id=op_id,
+            roles=roles,
+            message=(
+                f"{op_id} stopped: Keycloak refused (HTTP 403) to find the client "
+                f"{client_id!r}. Nothing was changed. See extras.remediation."
+            ),
+            done=(
+                f"Keycloak refused (HTTP 403) to find the client {client_id!r}; that needs "
+                f"one of the roles {lookup}. Nothing was changed."
+            ),
+        ) from exc

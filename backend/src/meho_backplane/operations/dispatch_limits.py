@@ -11,7 +11,7 @@ internal agent-run LLM spend. Nothing bounded a client's
 visitor -- or a runaway agent loop -- on a shared instance could exhaust
 DB / connector pools and, via triggered internal agent runs, the
 server-side LLM budget, degrading every tenant. This module is the
-server-side backstop the finding (meho-internal#321) asked for.
+server-side backstop the finding asked for.
 
 Two controls, both enforced on the shared dispatch path so CLI, MCP and
 the REST dispatch route are covered by one seam (they all funnel through

@@ -63,13 +63,13 @@
 # One short job, `python-outside-backend` (GitHub-hosted runner), runs only
 # the backend tests that read files outside `backend/` (the Helm chart, the Go
 # CLI, the workflows, the docs). The fan-in requires that job to pass on this
-# path. push and merge_group always run everything.
+# path. merge_group and the nightly run always run everything.
 #
 # Test map run (#5642): a PR that would otherwise run all the unit shards
 # runs one unit job with only the tests its change can break. The nightly
 # run makes the test map (which tests run each source file) from its
 # coverage data; the `changes` job picks the tests with it. Any doubt means
-# all the shards. push and merge_group always run all the shards.
+# all the shards. merge_group and the nightly run always run all the shards.
 #
 # Out of scope (deliberately delegated to existing workflows; do not
 # duplicate here):
@@ -612,7 +612,7 @@ jobs:
     # One-connector run (#5297): when `changes` sets single_connector, the
     # matrix below has ONE leg, and the pytest step runs that connector's
     # tests plus the contract set (tests/_unit_connector_select.py) instead
-    # of a quarter of the suite. Only a pull request can get there; the
+    # of a quarter of the suite. Only a pull request can get there;
     # the merge queue always runs the six shards.
     # Test map run (#5642): when `changes` sets test_map, the matrix also has
     # ONE leg, and the pytest step runs the tests that `changes` picked and

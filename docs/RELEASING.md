@@ -841,7 +841,7 @@ git fetch origin main
 RC_SHA=$(git rev-parse origin/main)   # the candidate; do not recompute it later
 RC_PREV=$(git describe --tags --abbrev=0 "$RC_SHA")   # previous tag of any kind, relative to the candidate (not to your checkout)
 git log -1 --format='%H %s' "$RC_SHA"
-gh run list --repo evoila/meho --commit "$RC_SHA" --branch main   # the CI run you are verifying
+gh run list --repo evoila/meho --commit "$RC_SHA" --event merge_group   # the CI run you are verifying
 ```
 
 If `main` moves while you work through R3, you have two honest

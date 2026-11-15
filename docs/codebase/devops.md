@@ -2426,7 +2426,7 @@ runs one short job instead.
 A pull request that changes only one connector folder runs **one** unit
 job instead of the six `python-unit-shard` legs. The job is named
 `Python unit tests for connector <name>`. It runs that connector's tests
-plus a fixed contract set. The merge queue and pushes to `main` always run
+plus a fixed contract set. The merge queue and the nightly run always run
 the six shards, so every test still runs before a change lands on `main`.
 
 - **Who decides.** The `changes` job sets the output `single_connector`.
@@ -2474,7 +2474,7 @@ the six shards, so every test still runs before a change lands on `main`.
 A pull request that would run all the `python-unit-shard` legs can run
 **one** unit job instead, with only the tests its change can break. The
 job is named `Python unit tests picked by the test map`. The merge queue
-and pushes to `main` always run all the shards, so every test still runs
+and the nightly run always run all the shards, so every test still runs
 before a change lands on `main`. A wrong pick costs one failed merge-queue
 run, not a broken `main`.
 

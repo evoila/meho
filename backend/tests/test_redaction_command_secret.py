@@ -146,7 +146,10 @@ def test_an_unclosed_quote_does_not_hide_the_rest_of_the_text() -> None:
 
 
 def test_spans_never_overlap_and_are_left_to_right() -> None:
-    text = f"mysql -p{PW} --password {PW} DB_PASSWORD={PW}; Server=a;Password={PW};"  # trufflehog:ignore
+    text = (
+        f"mysql -p{PW} --password {PW} DB_PASSWORD={PW}; "
+        f"Server=a;Password={PW};"  # trufflehog:ignore
+    )
     spans = COMMAND_SECRET.secret_spans(text)
     assert spans == sorted(spans)
     assert all(a[1] <= b[0] for a, b in itertools.pairwise(spans))

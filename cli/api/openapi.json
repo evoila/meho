@@ -39954,6 +39954,12 @@
             "format": "date-time",
             "nullable": true,
             "title": "Updated At"
+          },
+          "connection_changed_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Connection Changed At"
           }
         },
         "type": "object",

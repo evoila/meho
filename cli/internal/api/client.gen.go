@@ -9311,25 +9311,26 @@ type RerunResponseBody_DispatchResult struct {
 // is ever embedded (the runner spools assignments on disk, so a value
 // would durably persist — a locked no-durable-artifact violation).
 type ResolvedTargetDescriptor struct {
-	Aliases         *[]string               `json:"aliases,omitempty"`
-	AuthModel       *string                 `json:"auth_model,omitempty"`
-	Extras          *map[string]interface{} `json:"extras,omitempty"`
-	Fingerprint     *map[string]interface{} `json:"fingerprint"`
-	Fqdn            *string                 `json:"fqdn"`
-	Host            string                  `json:"host"`
-	Id              openapi_types.UUID      `json:"id"`
-	Name            string                  `json:"name"`
-	Port            *int                    `json:"port"`
-	PreferredImplId *string                 `json:"preferred_impl_id"`
-	Product         string                  `json:"product"`
-	SecretFieldMap  *map[string]string      `json:"secret_field_map,omitempty"`
-	SecretRef       *string                 `json:"secret_ref"`
-	TenantId        openapi_types.UUID      `json:"tenant_id"`
-	TlsCaPin        *string                 `json:"tls_ca_pin"`
-	TlsServerName   *string                 `json:"tls_server_name"`
-	UpdatedAt       *time.Time              `json:"updated_at"`
-	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
-	Version         *string                 `json:"version"`
+	Aliases             *[]string               `json:"aliases,omitempty"`
+	AuthModel           *string                 `json:"auth_model,omitempty"`
+	ConnectionChangedAt *time.Time              `json:"connection_changed_at"`
+	Extras              *map[string]interface{} `json:"extras,omitempty"`
+	Fingerprint         *map[string]interface{} `json:"fingerprint"`
+	Fqdn                *string                 `json:"fqdn"`
+	Host                string                  `json:"host"`
+	Id                  openapi_types.UUID      `json:"id"`
+	Name                string                  `json:"name"`
+	Port                *int                    `json:"port"`
+	PreferredImplId     *string                 `json:"preferred_impl_id"`
+	Product             string                  `json:"product"`
+	SecretFieldMap      *map[string]string      `json:"secret_field_map,omitempty"`
+	SecretRef           *string                 `json:"secret_ref"`
+	TenantId            openapi_types.UUID      `json:"tenant_id"`
+	TlsCaPin            *string                 `json:"tls_ca_pin"`
+	TlsServerName       *string                 `json:"tls_server_name"`
+	UpdatedAt           *time.Time              `json:"updated_at"`
+	VerifyTls           *bool                   `json:"verify_tls,omitempty"`
+	Version             *string                 `json:"version"`
 }
 
 // ResultIngestResponse “POST /checks/results“ response — idempotency accounting.

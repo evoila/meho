@@ -506,13 +506,17 @@ class HarborConnector(HttpConnector):
             Resolved Harbor target (must satisfy :class:`HarborTargetLike`).
         params
             Schema-validated: ``name`` (str), ``project`` (str),
-            ``duration`` (int, -1 for never-expire).
+            ``duration`` (int, -1 for never-expire), and optional
+            ``vault_target`` (``vault:<path>#<field>``).
 
         Returns
         -------
         dict[str, Any]
             ``{id: int, name: str, secret: str}`` — the secret is the
             minted credential, returned ONLY on creation by Harbor.
+            With ``vault_target`` the secret is written to Vault and the
+            answer holds a fingerprint and the length instead
+            (:mod:`~meho_backplane.connectors.harbor.ops_robot_vault`).
 
         Raises
         ------
@@ -522,9 +526,15 @@ class HarborConnector(HttpConnector):
             catches all exceptions and wraps them as ``connector_error``
             OperationResults.
         """
+        from meho_backplane.connectors.harbor.ops_robot_vault import (
+            parse_vault_target,
+            store_new_robot_secret,
+        )
+
         name = str(params["name"])
         project = str(params["project"])
         duration = int(params["duration"])
+        vault_dest = parse_vault_target(operator, params)
 
         body: dict[str, Any] = {
             "name": name,
@@ -543,6 +553,8 @@ class HarborConnector(HttpConnector):
             ],
         }
         result = await self._post_json(target, _ROBOTS_PATH, operator=operator, json=body)
+        if vault_dest is not None:
+            return await store_new_robot_secret(self, operator, target, params, vault_dest, result)
         return {
             "id": result["id"],
             "name": result["name"],

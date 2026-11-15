@@ -126,7 +126,9 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
    The import also loads `op_classes.py`, which declares
    `harbor.robot.create` as `credential_mint` for the broadcast classifier,
    and `ops_robot_delete_preview.py`, which registers the preview builder
-   for `harbor.robot.delete`.
+   for `harbor.robot.delete`, and `ops_robot_vault.py`, which registers the
+   `vault_target` params check and permission preflight of
+   `harbor.robot.create`.
 3. At lifespan startup `run_typed_op_registrars` invokes the queued registrars,
    landing the 12 read + 2 write descriptor rows before the first dispatch. No
    `meho connector ingest` is required — the read core dispatches on a fresh
@@ -201,6 +203,27 @@ value replaced. It registers `safety_level="caution"`, tagged
 `write`/`credential-mint`, with `requires_approval=True`: minting a robot
 credential gives out new access, so a human `tenant_admin` dispatch waits at
 `awaiting_approval` until a second person approves it.
+
+**`vault_target` (an agent must set it).** Harbor shows the robot secret
+only once, and MEHO hides secret fields from an agent. So `robot_create`
+takes an optional `vault_target` (`vault:<path>#<field>`, the form
+`secret.move` uses; the path is below the default KV v2 mount). The code is
+in `ops_robot_vault.py`:
+
+- Before the Harbor call, the handler checks the form and the tenant scope of
+  the path. A bad target stops the call before a robot exists.
+- The handler merges the secret into that Vault item (`vault.kv.patch`; when
+  the item is missing, `vault.kv.put` with `cas=0`). Other fields stay.
+- The answer holds `id`, `name`, `status="stored"`, `stored_to`,
+  `value_fingerprint` and `length`. It has no `secret`.
+- When the Vault write fails, the handler deletes the new robot, because its
+  secret would be lost. The error names the exception class only.
+- Park time: a params check refuses a wrong form as `invalid_params`, and a
+  permission preflight asks Vault (`sys/capabilities-self`) whether the write
+  will be denied. If so, the call is refused with `write_capability_denied`
+  and no approval card is made.
+- Without `vault_target` the answer holds the secret, as before (for a person
+  at the CLI).
 
 `robot_delete` (op `harbor.robot.delete`) registers
 `safety_level="destructive"` + `requires_approval=True`, tagged

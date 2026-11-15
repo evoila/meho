@@ -10,8 +10,8 @@
   these onto ``#audit-results-rows``, so paging never drops rows already
   shown).
 
-  Each row colour-codes its op_class via the broadcast badge palette
-  (``badge_class``, imported from ``ui.routes.broadcast.feed`` -- no duplicate
+  Each row colour-codes its op_class via the badge palette
+  (``badge_class``, from ``ui.routes.audit.op_class_badges`` -- no duplicate
   colour map) and renders three one-click pivots:
 
     * who-touched -- a ``target``-bound query (``/ui/audit?target=<name>``),

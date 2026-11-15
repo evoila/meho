@@ -49,7 +49,7 @@ _BROADCAST_FILTER: Final[dict[str, str | None]] = {
     "filter.target": "Target name.",
     "filter.actor_sub": None,
     "filter.work_ref": "Change-ticket reference.",
-    "filter.active_only": "Drop expired claims.",
+    "filter.active_only": "Only active claims: not completed, TTL not run out.",
 }
 
 QUERY_TOPOLOGY_SHORT: Final = ShortText(

@@ -353,6 +353,7 @@ from meho_backplane.operations._errors import (
     result_connector_auth_failed,
     result_connector_error,
     result_connector_http_403,
+    result_connector_http_410,
     result_connector_http_422,
     result_connector_not_found,
     result_connector_probe_refused,
@@ -2326,6 +2327,8 @@ def _classify_http_status_error(
 
     * ``403`` -> :func:`result_connector_http_403` (#1649) -- the credential
       authenticated but lacks the op's required scope.
+    * ``410`` -> :func:`result_connector_http_410` -- the product version
+      removed the API.
     * ``422`` -> :func:`result_connector_http_422` (#1649) -- the upstream
       parsed the request and rejected its content.
     * an auth-class status (``401`` / vRLI's ``440``, scoped by the connector's
@@ -2344,6 +2347,8 @@ def _classify_http_status_error(
     status_code = http_exc.response.status_code
     if status_code == 403:
         return result_connector_http_403(op_id, http_exc, duration_ms)
+    if status_code == 410:
+        return result_connector_http_410(op_id, http_exc, duration_ms)
     if status_code == 422:
         return result_connector_http_422(op_id, http_exc, duration_ms)
     if is_auth_failed_status(status_code, _profile_expiry_statuses(connector_instance)):
@@ -4188,10 +4193,11 @@ async def _dispatch_now(
 
             # --- Opt-in announce gate (#3133) --------------------------
             # Verdict is AUTO_EXECUTE. In a tenant that has enabled the
-            # announce gate, a caution-or-higher write-class op is rejected
-            # before execution unless the caller holds an active announce
-            # claim covering it. Off by default and fail-open, so an
-            # ordinary dispatch reaches this line and proceeds unchanged.
+            # announce gate, a caller's caution-or-higher write-class op is
+            # rejected before execution unless the caller holds an active
+            # announce claim covering it; a person is never asked (#3762).
+            # Off by default and fail-open, so an ordinary dispatch
+            # reaches this line and proceeds unchanged.
             # Not run on the ``_approved`` resume path -- an operator
             # already approved that exact call; re-gating it here would
             # strand an approved op behind an announce it can no longer add.

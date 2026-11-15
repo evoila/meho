@@ -1391,7 +1391,7 @@ async def test_dispatch_typed_returns_no_connector_when_resolver_misses(
     label (with the resolver's exception message in
     ``extras["exception_message"]``) so operators see the upstream
     diagnosis, matching ``signals 7`` and ``8`` of
-    ``claude-rdc-hetzner-dc#697``.
+    a consumer dogfood report.
     """
     # Register a typed op for a product, but DON'T register a
     # connector class for it — the resolver must miss.
@@ -1434,8 +1434,8 @@ async def test_dispatch_typed_returns_ambiguous_when_resolver_cant_tiebreak(
 ) -> None:
     """Typed branch surfaces ``ambiguous_connector`` with the resolver's diagnostic message.
 
-    Mirrors the live ``rdc-rke2-infra-k8s`` shape from
-    ``claude-rdc-hetzner-dc#697`` signal 8: the Kubernetes connector
+    Mirrors a live Kubernetes target shape from
+    a consumer dogfood report, signal 8: the Kubernetes connector
     self-registers under ``('k8s', '', '')`` (v1) AND ``('k8s',
     '1.x', 'k8s')`` (v2), the tie-break ladder treats both as
     equally specific (both have ``supported_version_range=None``),
@@ -4666,3 +4666,43 @@ async def test_dispatch_ingested_write_with_person_token_waits(
         params=params,
     )
     assert result.status == "awaiting_approval", result.error
+
+
+def test_isolate_global_registries_restores_safety_floors() -> None:
+    """The autouse isolation fixture restores the connector safety floors.
+
+    Connector floors register on import. A test that empties the floor store
+    (as a registry-clearing test does) must not strip every other connector's
+    floors for the rest of the worker. Drive the conftest fixture by hand so
+    the assertion sees the state after its teardown.
+    """
+    from meho_backplane.operations.ingest import safety_floors
+    from tests import conftest
+
+    isolate_gen_fn = cast(
+        "Callable[[], Iterator[None]]",
+        conftest._isolate_global_registries.__wrapped__,  # type: ignore[attr-defined]
+    )
+    marker = ("isolation-test-product", "isolation-test-impl")
+    safety_floors.register_ingest_safety_floor(
+        product=marker[0], impl_id=marker[1], floor=lambda _impl, proto: proto
+    )
+    before = dict(safety_floors._FLOORS)
+    try:
+        gen = isolate_gen_fn()
+        next(gen)  # setup: snapshot
+
+        safety_floors._FLOORS.clear()
+        safety_floors.register_ingest_safety_floor(
+            product="other-product", impl_id="other-impl", floor=lambda _impl, proto: proto
+        )
+
+        with pytest.raises(StopIteration):
+            next(gen)  # teardown: restore
+
+        assert dict(safety_floors._FLOORS) == before
+        assert marker in safety_floors._FLOORS
+        assert ("other-product", "other-impl") not in safety_floors._FLOORS
+    finally:
+        safety_floors._FLOORS.clear()
+        safety_floors._FLOORS.update(before)

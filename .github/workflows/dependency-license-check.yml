@@ -67,8 +67,8 @@ jobs:
   changes:
     name: Detect manifest changes
     # Emits `manifests=true` when a PR touches a dependency manifest, so
-    # the two required license jobs run only then. On push / merge_group
-    # / workflow_dispatch it emits `true` unconditionally, so the
+    # the two required license jobs run only then. On push and
+    # workflow_dispatch it emits `true` unconditionally, so the
     # required checks are never left Pending on a non-PR event.
     #
     # This carries the narrowing that used to live in `on.pull_request.
@@ -80,6 +80,13 @@ jobs:
     # They need nothing from the internal network, and a hosted runner
     # also keeps PR-controlled build metadata off the internal pool. See
     # docs/codebase/devops.md "Untrusted pull-request isolation".
+    #
+    # Skipped in the merge queue (#6350). The licence checks read only the
+    # manifests of the pull request, and the pull request run did it
+    # already. The two license jobs below need this job, so they are
+    # skipped too. A skipped job reports as passed, so both required
+    # contexts still come and no runner starts.
+    if: github.event_name != 'merge_group'
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 5
     outputs:

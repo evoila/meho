@@ -751,8 +751,8 @@ class MemoryService:
         (substring), ``tag`` (membership in ``metadata.tags``), and
         ``expires_at`` (lifted from ``doc_metadata``). The in-process
         layer is acceptable for v0.2 -- memory corpora per tenant are
-        small (consumer-needs.md L131 names ~15 files on Damir's
-        laptop); SQL-side promotion is the v0.2.next escape hatch.
+        small (consumer-needs.md L131 names ~15 files on one
+        operator's laptop); SQL-side promotion is the v0.2.next escape hatch.
 
         ``limit`` caps the *returned* list, not the candidate set;
         the server-side query pulls up to ``limit * 4`` rows before

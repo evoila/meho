@@ -22,7 +22,21 @@ on the result in `meho_backplane/operations/dispatcher.py`.
 
 ## Safety levels at a glance
 
-This is what happens today when no grant matches. In this table:
+This is what happens when no grant matches. The column "Agent login, no
+grant" depends on the switch `AGENT_GRANT_REQUIRED` (#6189):
+
+- **`off`** (the default): the risk-level default, as before. A `safe`
+  operation runs at once on every target of the tenant.
+- **`on`**: the call is refused on every risk level, also `safe`, with the
+  code `agent_no_grant`. The agent needs a grant first
+  ([agent-permission-grants.md](agent-permission-grants.md#starting-grant-sets-agentsgrant_setspy-6191)).
+- **`observe`**: the same as `off`, and MEHO logs one
+  `agent_no_grant_would_deny` line for each call that `on` would refuse.
+
+The switch changes only the agent login. People, service accounts and
+runners keep the rules in the other columns, in every switch state.
+
+In this table:
 
 - **Agent login** is a token for an agent identity (`principal_kind=agent`).
 - **Person, web interface** is a person working in the web interface
@@ -36,14 +50,15 @@ This is what happens today when no grant matches. In this table:
 
 | Safety level | Agent login, no grant | Person, web interface | Person, token | Service account |
 |---|---|---|---|---|
-| `safe` | runs at once | runs at once | runs at once | runs at once; a person can limit it to named targets with a read scope (#4992, see below) |
-| `caution` | waits for approval | runs at once | waits for approval | a change waits for approval unless a standing grant covers it; a read runs at once (inside the read scope, when one is set) |
-| `dangerous` | waits for approval | waits for approval | waits for approval | waits for approval unless a standing grant covers it |
-| `destructive` | waits for approval | waits for approval | waits for approval | always waits for approval |
+| `safe` | `off`: runs at once. `on`: refused, `agent_no_grant` | runs at once | runs at once | runs at once; a person can limit it to named targets with a read scope (#4992, see below) |
+| `caution` | `off`: waits for approval. `on`: refused, `agent_no_grant` | runs at once | waits for approval | a change waits for approval unless a standing grant covers it; a read runs at once (inside the read scope, when one is set) |
+| `dangerous` | `off`: waits for approval. `on`: refused, `agent_no_grant` | waits for approval | waits for approval | waits for approval unless a standing grant covers it |
+| `destructive` | `off`: waits for approval. `on`: refused, `agent_no_grant` | waits for approval | waits for approval | always waits for approval |
 
 One sentence per level:
 
-- **`safe`:** everyone runs it at once.
+- **`safe`:** everyone runs it at once. With the switch `on`, an agent
+  login runs it only when a grant covers it.
 - **`caution`:** a person in the web interface runs it at once. A token
   call and an agent login wait until a person approves it. A person may
   approve their own token `caution` change with a click in the web
@@ -56,9 +71,10 @@ One sentence per level:
   group rules (for example a MEHO-SA-Operator). Agents never approve.
 
 So an agent's `caution`, `dangerous` and `destructive` requests all wait
-for a person's approval (#3980). Agents never approve, on any path: not
-their own requests and not anyone else's. Who may approve follows the
-approval groups
+for a person's approval (#3980). With the switch `on`, this holds only
+when a grant covers the call; with no grant the call is refused. Agents
+never approve, on any path: not their own requests and not anyone else's.
+Who may approve follows the approval groups
 ([approvals.md](approvals.md#the-approval-groups-and-how-a-person-approves-3325)).
 
 An op marked `requires_approval` also waits for approval, for every kind of

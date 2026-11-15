@@ -91,6 +91,7 @@ from meho_backplane.core.keycloak import (
     finish_realm,
 )
 from meho_backplane.core.keycloak_recovery import ADD_RECOVERY_CODES, RECOVERY_STEP
+from meho_backplane.core.keycloak_role_check import check as check_role
 from meho_backplane.operations import (
     register_typed_operation,
     reset_dispatcher_caches,
@@ -858,7 +859,7 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
             monkeypatch.setattr(
                 approvals_module,
                 "check_fresh_approval_sign_in",
-                lambda operator, settings: ApprovalAuth(
+                lambda operator, settings, **_kwargs: ApprovalAuth(
                     channel="rest",
                     method="fresh_sign_in",
                     auth_time=int(time.time()),
@@ -1092,7 +1093,34 @@ async def test_an_older_install_gets_recovery_codes_once_meho_admin_may_change_l
     assert _recovery_settings(keycloak) == ("true", "ALTERNATIVE")
 
 
-_APPROVAL_FLOW = "meho approval sign-in"
+async def test_the_check_before_an_upgrade_stops_only_without_manage_realm(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """The pre-upgrade check (#6336) reads meho-admin's real roles: no role, no upgrade."""
+    await _run_stage(keycloak, store)  # the first-start account is gone; meho-admin is used
+    capfd.readouterr()
+
+    async def check() -> None:
+        async with httpx.AsyncClient(base_url=keycloak.base_url, timeout=30) as http:
+            await check_role(HttpAdmin(http), keycloak.env)
+
+    await check()
+    assert "role check: meho-admin has manage-realm" in capfd.readouterr().out
+
+    url, roles = _manage_realm_of_meho_admin(keycloak)
+    httpx.request("DELETE", url, headers=_master_headers(keycloak), json=roles).raise_for_status()
+    try:
+        with pytest.raises(RealmStageError, match="lacks the realm-management role manage-realm"):
+            await check()
+    finally:
+        httpx.post(url, headers=_master_headers(keycloak), json=roles).raise_for_status()
+    assert keycloak.env[ADMIN_SECRET_ENV] not in capfd.readouterr().out
+
+    await check()
+    assert "has manage-realm" in capfd.readouterr().out
+
+
+_APPROVAL_FLOW = "meho approval sign-in level"
 
 
 def _approval_flow_and_binding(kc: _Keycloak) -> tuple[str | None, str | None]:
@@ -1133,7 +1161,8 @@ async def test_an_upgrade_makes_the_approval_flow_and_binds_it_again(
     flow_id, bound = _approval_flow_and_binding(keycloak)
     assert flow_id and bound == flow_id
     steps = httpx.get(
-        f"{admin}/authentication/flows/meho%20approval%20sign-in/executions", headers=headers
+        f"{admin}/authentication/flows/meho%20approval%20sign-in%20level/executions",
+        headers=headers,
     ).json()
     assert [
         (
@@ -1144,8 +1173,78 @@ async def test_an_upgrade_makes_the_approval_flow_and_binds_it_again(
         )
         for s in steps
     ] == [
-        (0, "auth-username-password-form", "REQUIRED"),
-        (0, "meho approval sign-in - one-time code", "CONDITIONAL"),
-        (1, "conditional-user-configured", "REQUIRED"),
-        (1, "auth-otp-form", "REQUIRED"),
+        (0, "meho approval sign-in level - level 2", "CONDITIONAL"),
+        (1, "conditional-level-of-authentication", "REQUIRED"),
+        (1, "auth-username-password-form", "REQUIRED"),
+        (1, "meho approval sign-in level - one-time code", "CONDITIONAL"),
+        (2, "conditional-user-configured", "REQUIRED"),
+        (2, "auth-otp-form", "REQUIRED"),
     ]
+    # The level step got its settings back, and the realm names the level.
+    level_step = next(
+        s for s in steps if s.get("providerId") == "conditional-level-of-authentication"
+    )
+    settings = httpx.get(
+        f"{admin}/authentication/config/{level_step['authenticationConfig']}", headers=headers
+    ).json()
+    assert settings["config"] == {"loa-condition-level": "2", "loa-max-age": "0"}
+    realm = httpx.get(admin, headers=headers).json()
+    assert json.loads(realm["attributes"]["acr.loa.map"])["meho-approve"] == 2
+
+
+#: Realm settings the write of the level map must leave alone, with values
+#: that differ from the realm file and from Keycloak's defaults.
+_REALM_SETTINGS = {
+    "bruteForceProtected": True,
+    "failureFactor": 7,
+    "waitIncrementSeconds": 120,
+    "maxFailureWaitSeconds": 900,
+    "maxDeltaTimeSeconds": 3600,
+    "offlineSessionMaxLifespanEnabled": True,
+    "offlineSessionMaxLifespan": 86400,
+    "displayName": "MEHO level test",
+    "webAuthnPolicyPasswordlessUserVerificationRequirement": "preferred",
+}
+
+
+def _kept_settings(realm: Mapping[str, Any]) -> dict[str, Any]:
+    """The realm settings the level write must keep: the ones above and the passkey policy."""
+    return {
+        key: value
+        for key, value in realm.items()
+        if key in _REALM_SETTINGS or key.startswith("webAuthnPolicyPasswordless")
+    }
+
+
+async def test_the_level_write_keeps_the_other_realm_settings(
+    keycloak: _Keycloak, store: _FakeStore, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A realm without ``meho-approve`` gets it; nothing else of the realm changes (#6281).
+
+    The stage reads the realm attributes, changes only ``acr.loa.map`` and
+    sends the attributes back. Some realm settings live in realm attributes
+    inside Keycloak, so this checks them after a real write.
+    """
+    admin = f"{keycloak.base_url}/admin/realms/meho"
+    headers = _master_headers(keycloak)
+    realm = httpx.get(admin, headers=headers).json()
+    realm.update(_REALM_SETTINGS)
+    realm["attributes"] = {
+        **realm["attributes"],
+        "acr.loa.map": json.dumps({"meho-touch": 3}),
+        "meho-test-extra": "kept",
+    }
+    httpx.put(admin, headers=headers, json=realm).raise_for_status()
+    before = httpx.get(admin, headers=headers).json()
+    assert json.loads(before["attributes"]["acr.loa.map"]) == {"meho-touch": 3}
+    assert {key: before[key] for key in _REALM_SETTINGS} == _REALM_SETTINGS
+    capfd.readouterr()
+
+    await _run_stage(keycloak, store)
+
+    assert "sign-in levels: set (meho-approve)" in capfd.readouterr().out
+    after = httpx.get(admin, headers=headers).json()
+    assert json.loads(after["attributes"]["acr.loa.map"]) == {"meho-touch": 3, "meho-approve": 2}
+    assert _kept_settings(after) == _kept_settings(before)
+    others = {k: v for k, v in before["attributes"].items() if k != "acr.loa.map"}
+    assert {k: after["attributes"].get(k) for k in others} == others

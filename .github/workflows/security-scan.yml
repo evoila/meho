@@ -165,8 +165,10 @@ jobs:
     # issue for new advisories.
     #
     # A GitHub-hosted runner for pull requests (safe for forks without a
-    # fork guard). The merge queue uses our own pool (#6325). trivy only
-    # reads the lock file and runs no code from the pull request.
+    # fork guard). trivy only reads the lock file and runs no code from the
+    # pull request. Skipped in the merge queue (#6350): the lock file is the
+    # same one the pull request run checked, and the check is not required.
+    if: github.event_name != 'merge_group'
     runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     # Least privilege: the job only checks out the repository.

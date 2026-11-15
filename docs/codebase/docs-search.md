@@ -69,13 +69,28 @@ through **one** in-process seam,
 `/ui/corpus` **Ask mode** (T2, #1917 — a toggle alongside the original
 retrieve mode). The seam returns an `AskPipelineOutcome` (the answer, or the
 classified #1918 `AskDocsAnswerError` plus the chunks retrieved before it,
-and the `answer_source`). The REST route calls `run_ask_pipeline` (the thin
-raising wrapper in `meho_backplane.api.v1.ask_docs`), the UI BFF calls
+and the `answer_source`). The REST route calls `run_ask_pipeline_with_source`
+(the thin raising wrapper in `meho_backplane.api.v1.ask_docs`; it returns the
+answer and the `answer_source`, and `run_ask_pipeline` returns the answer
+alone), and the REST response carries the `answer_source` (`local` or
+`upstream`). The UI BFF calls
 `run_ask_pipeline_capturing_retrieval` (the seam under its established
 name) so it can fail open on a leg failure, and the MCP handler calls the
 seam directly — the MCP module carries no copy of its own of the
 pipeline. `ask_docs` is single-collection only on every face (no
 `collections` fan-out field).
+
+**CLI: `meho docs ask`.** `meho docs ask "<question>" --collection <key>
+[--product] [--version] [--limit N] [--json]` calls `POST /api/v1/ask_docs`
+with the same login, token refresh and server-side access check as
+`meho docs search`. It takes exactly one `--collection` (not `all`). Bad
+arguments exit 4 before any call. It prints `Answer (source: <path>)`, the
+answer, then the sources numbered 1 to n in response order (the `[k]`
+markers of a backend answer point to these numbers). Control characters in
+the answer, titles and links are replaced before printing; the answer keeps
+its line breaks. A 502 or 503 prints the leg, the cause and the message (and
+the wait from `Retry-After`) and exits 4. `--json` prints the response as the
+server sent it. The code is in `cli/internal/cmd/docs/ask.go`.
 
 `read_docs` (#3948) reads more around a hit: the text before and after it,
 the whole page, or its section. It works for a collection whose backend
@@ -1145,7 +1160,7 @@ The REST face of the **answer** pipeline — the synthesis sibling of
 collection gate exactly (validate `collection` scope → 422; the shared
 `resolve_entitled_ready_collection` gate → unknown / cross-tenant / absent
 → 422, not entitled → 403, disabled → terminal 403, transiently not-ready →
-409), then runs `run_ask_pipeline` (the raising wrapper over the one answer
+409), then runs `run_ask_pipeline_with_source` (the raising wrapper over the one answer
 seam: the backend's answer for an opted-in collection, else the in-process
 expand → retrieve-per-variant → RRF-merge → synthesize composition) and
 returns `AskDocsResponse{answer, citations[]}`, each citation carrying the

@@ -15,7 +15,7 @@ of trailing-slash 307 redirects:
 ::
 
     GET /api/v1/connectors/k8s-1.x/operations  (no trailing slash)
-    → 307  Location: http://meho.evba.lab/api/v1/connectors/k8s-1.x/operations/
+    → 307  Location: http://meho.example.test/api/v1/connectors/k8s-1.x/operations/
                      ^^^^ HTTPS→HTTP downgrade
 
 That downgrade lets an on-path attacker observe (and tamper with) the
@@ -134,7 +134,7 @@ def test_trailing_slash_redirect_reflects_x_forwarded_proto_https(
         "/api/v1/widgets",
         headers={
             "X-Forwarded-Proto": "https",
-            "Host": "meho.evba.lab",
+            "Host": "meho.example.test",
         },
         follow_redirects=False,
     )
@@ -145,7 +145,7 @@ def test_trailing_slash_redirect_reflects_x_forwarded_proto_https(
         f"expected Location to reflect X-Forwarded-Proto=https, got {location!r} — "
         "the HTTPS→HTTP redirect downgrade (Issue #730) has regressed"
     )
-    assert location == "https://meho.evba.lab/api/v1/widgets/"
+    assert location == "https://meho.example.test/api/v1/widgets/"
 
 
 def test_trailing_slash_redirect_without_forwarded_proto_uses_request_scheme(
@@ -161,12 +161,12 @@ def test_trailing_slash_redirect_without_forwarded_proto_uses_request_scheme(
     """
     response = trusted_client.get(
         "/api/v1/widgets",
-        headers={"Host": "meho.evba.lab"},
+        headers={"Host": "meho.example.test"},
         follow_redirects=False,
     )
 
     assert response.status_code == 307, response.text
-    assert response.headers["location"] == "http://meho.evba.lab/api/v1/widgets/"
+    assert response.headers["location"] == "http://meho.example.test/api/v1/widgets/"
 
 
 def test_untrusted_upstream_ignores_x_forwarded_proto(
@@ -191,7 +191,7 @@ def test_untrusted_upstream_ignores_x_forwarded_proto(
         "/api/v1/widgets",
         headers={
             "X-Forwarded-Proto": "https",
-            "Host": "meho.evba.lab",
+            "Host": "meho.example.test",
         },
         follow_redirects=False,
     )

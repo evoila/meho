@@ -23,7 +23,9 @@ metadata:
     # successful one is removed, a failed one stays for `kubectl logs`.
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
-  ttlSecondsAfterFinished: {{ .Values.migrationJob.ttlSecondsAfterFinished }}
+  # No `ttlSecondsAfterFinished` (#6336): a failed Job and its log stay until
+  # the next install or upgrade replaces them. Helm's own error says only
+  # "Job failed"; the log names the reason (docs-site/install/upgrades.md).
   backoffLimit: {{ .Values.migrationJob.backoffLimit }}
   template:
     metadata:

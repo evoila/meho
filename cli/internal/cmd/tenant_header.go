@@ -18,6 +18,9 @@ import (
 // backplane request of the command sends the Meho-Work-Ref and
 // Meho-Tenant headers.
 func applyRequestContext(cmd *cobra.Command, args []string) error {
+	if err := applyProfile(cmd); err != nil {
+		return err
+	}
 	if err := applyWorkRef(cmd, args); err != nil {
 		return err
 	}

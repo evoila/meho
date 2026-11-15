@@ -47,8 +47,8 @@ func newServiceListCmd() *cobra.Command {
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho holodeck service list --target holorouter-hetzner-dc\n" +
-			"  meho holodeck service list --target holorouter-hetzner-dc --json | jq '.result.rows[]'",
+		Example: "  meho holodeck service list --target my-router\n" +
+			"  meho holodeck service list --target my-router --json | jq '.result.rows[]'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

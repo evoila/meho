@@ -46,7 +46,7 @@ func newRealmCreateCmd() *cobra.Command {
 			"requires approval; a 409 already-exists is an idempotent success.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example:       "  meho keycloak realm create --target keycloak-lab -f realm-evba.json",
+		Example:       "  meho keycloak realm create --target keycloak-lab -f realm-example.json",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

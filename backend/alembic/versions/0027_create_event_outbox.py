@@ -9,7 +9,7 @@ Create Date: 2026-05-26
 
 This migration is the storage substrate of Initiative #804 (G11.3
 Scheduler P2), Task #824 (T3). It adds the ``event_outbox`` table --
-one row per MEHO-internal event that a subscribed agent trigger may
+one row per internal event that a subscribed agent trigger may
 fire on (an agent run reaching a terminal state; future kinds: audit
 predicates, connector alerts).
 

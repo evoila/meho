@@ -16,18 +16,27 @@ in MEHO.
 ## Files
 
 - `agent.json`: the agent (system prompt, tools, turn budget).
-- `permissions.json`: what the agent may do. It reads freely. Every change
-  waits for a person to approve it.
 - `trigger.json`: the event trigger. It matches `check.dashboard.changed`
   events that are worse and are not known noise.
 
 ## Set it up
 
-The agent needs its own login first (a Keycloak client). Register it as in the
-[R1 guide](../r1-tiered-triage/GUIDE.md), with the client id
-`agent:checks-investigator`. MEHO cannot make this login for you.
+The agent needs its own login first (a Keycloak client). Register it with the
+starting grants "read everything":
 
-Then run two commands from this folder.
+```bash
+meho agent-principal register checks-investigator --grants read-everything
+```
+
+The client id is `agent:checks-investigator`. The grant lets the agent run
+`safe` operations at once on every target in this tenant, also on targets
+added later. The agent only reads. Anything else it tries waits until a
+person approves it. Without a grant, and with the server setting
+`AGENT_GRANT_REQUIRED=on`, the agent could run nothing. See the
+[hosted agents guide](../../docs-site/guides/hosted-agents.md#starting-grants-pick-them-when-you-create-the-agent).
+
+Then run two commands from this folder. The agent already has a grant, so
+`meho agent create` needs no `--grants`.
 
 ```bash
 # 1. Create the agent.
@@ -47,8 +56,8 @@ meho scheduler create \
   --in-flight-policy fail_into_audit
 ```
 
-Then give the agent its grants. Post each row of `permissions.json` with
-`meho agent grant create --principal <sub> --op <pattern> --target '*' --verdict <verdict>`.
+Check the agent's grant with
+`meho agent grant list --principal agent:checks-investigator`.
 
 ## What happens
 

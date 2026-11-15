@@ -90,8 +90,9 @@ TAG_FEATURE: Final[dict[str, str]] = {
     "knowledge": "memory_knowledge",
     "memory": "memory_knowledge",
     "operations": "typed_connector_reads",
-    # Classification of operations (#6038): new and behind the
-    # POLICY_CLASSIFICATION switch, so it rides the beta ``write_surfaces``
+    # Classification of operations (#6038) and the policy file (policy: v1:
+    # validate / preview / import / export / history): new and behind the
+    # POLICY_CLASSIFICATION switch, so they ride the beta ``write_surfaces``
     # tier, like the settings file.
     "policy": "write_surfaces",
     "retrieval": "memory_knowledge",

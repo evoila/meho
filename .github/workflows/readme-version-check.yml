@@ -34,15 +34,9 @@ on:
     paths:
       - 'README.md'
       - '.github/workflows/readme-version-check.yml'
-  # Fires when a PR enters the GitHub merge queue. Required so the
-  # `README Version Check` status context — a required check in branch
-  # protection — reports against the synthesised merge commit, not just
-  # the PR head. Bare `merge_group:` is intentional: the `merge_group`
-  # event does not support `paths:` filtering (GitHub docs only allow
-  # `types:`), so the job runs on every queue admission. It is a single
-  # cheap grep + tag lookup, so the redundant runs are negligible. Same
-  # rationale as ci.yml / dependency-license-check.yml (#769).
-  merge_group:
+  # No `merge_group` trigger: the check reads only README.md and the tags,
+  # and it is not a required check. A merge-queue run adds nothing, so it
+  # does not start (#6350).
   workflow_dispatch:
 
 concurrency:

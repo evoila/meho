@@ -435,7 +435,7 @@ def test_happy_path_returns_full_federation_response(
             "tenant_role": "operator",
             "tenants": [],
         },
-        "vault": {"reachable": True, "read_ok": True, "detail": "version=11"},
+        "vault": {"reachable": True, "read_ok": True, "detail": "version=11", "checked": True},
         # #4830: the probe's revisions ride along so an upgrade can be
         # confirmed from ``meho status``.
         "db": {"migrated": True, "revision": head, "head": head, "detail": f"revision={head}"},

@@ -61,6 +61,7 @@ __all__ = [
     "SecondaryTargetWrite",
     "approved_agent_requester",
     "approved_requester_sub",
+    "approved_requester_subject",
     "bind_approved_requester",
     "requester_policy_preflight",
     "requester_subject",
@@ -243,6 +244,18 @@ def approved_agent_requester() -> tuple[Operator | None, str | None] | None:
     except (KeyError, TypeError, ValueError):
         return None, requester.act
     return principal, requester.act
+
+
+def approved_requester_subject() -> dict[str, Any] | None:
+    """The card's record of the bound requester, else ``None``.
+
+    ``None`` also when the card has no record, or its ``sub`` does not
+    match the row. ``act`` comes from the row, not from the card.
+    """
+    requester = _approved_requester_var.get()
+    if requester is None or requester.subject is None:
+        return None
+    return {**requester.subject, "act": requester.act}
 
 
 def _requester_operator(requester: _Requester, subject: Mapping[str, Any]) -> Operator:

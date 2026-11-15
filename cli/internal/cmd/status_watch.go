@@ -101,7 +101,7 @@ func runWatch(ctx context.Context, opts watchOptions) error {
 		backoff = defaultBackoff
 	}
 
-	service, user := auth.KeyForBackplane(opts.BackplaneURL)
+	service, user := auth.KeyForContext(ctx, opts.BackplaneURL)
 	tok, err := store.Load(service, user)
 	if err != nil {
 		if errors.Is(err, auth.ErrTokenNotFound) {

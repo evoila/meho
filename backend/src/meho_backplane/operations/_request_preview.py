@@ -11,8 +11,7 @@ only a **hashed** ``params_hash`` (an intentional privacy + row-size
 choice -- full args may carry secrets), not the resolved method / path /
 body. During the #1656 dogfood the consumer had to "bisect payload
 shapes from the outside" to discover the body was being sent wrapped,
-because nothing inside meho exposed the constructed request
-(``claude-rdc-hetzner-dc#1138``).
+because nothing inside meho exposed the constructed request.
 
 This module is the lowest-friction fix consistent with the dumb-substrate
 posture: a **read-only preview** that resolves an op + params to the
@@ -104,6 +103,7 @@ from meho_backplane.operations._preview_steps import (
 )
 from meho_backplane.operations._secret_values import split_reveal_secret
 from meho_backplane.operations._target_connector_match import mismatch_preview_envelope
+from meho_backplane.operations._target_version_range import version_range_preview_envelope
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     _is_mutating,
@@ -395,6 +395,11 @@ async def _resolve_descriptor(
     )
     if mismatch is not None:
         return mismatch
+    outside = version_range_preview_envelope(
+        descriptor=descriptor, connector_id=connector_id, target=target
+    )
+    if outside is not None:
+        return outside
 
     return await _catalog_choice(
         operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
@@ -535,6 +540,7 @@ async def _park_check_envelope(
         descriptor=descriptor,
         target=target,
         connector_id=connector_id,
+        params=params,
         decide_only=True,
     )
     if verdict is not PermissionVerdict.NEEDS_APPROVAL:
@@ -561,6 +567,7 @@ async def _governance_fields(
     descriptor: EndpointDescriptor,
     target: Any,
     connector_id: str,
+    params: dict[str, Any],
 ) -> dict[str, Any]:
     """The risk level and the policy verdict for this caller and target (#4923).
 
@@ -569,8 +576,9 @@ async def _governance_fields(
     ``auto-execute``, ``needs-approval`` or ``deny`` — from the same
     :func:`~meho_backplane.operations._validate.policy_gate` the dispatcher
     runs (Step 4), called with ``decide_only=True`` so it writes nothing: no
-    audit row, no approval request, no standing-grant use. ``policy_reason``
-    is the gate's reason string, or ``None`` when the gate gives none (a
+    audit row, no approval request, no standing-grant use. The gate gets the
+    call's *params*, so the op's requester check gives the call's answer.
+    ``policy_reason`` is the gate's reason string, or ``None`` when the gate gives none (a
     person's call that runs at once). A call that would run at once is
     also checked step by step (:func:`preview_step_verdict`, #5492): a
     multi-step operation reads as covered only when its write steps are
@@ -587,6 +595,7 @@ async def _governance_fields(
         descriptor=descriptor,
         target=target,
         connector_id=connector_id,
+        params=params,
         decide_only=True,
     )
     step_refusal = None
@@ -885,6 +894,7 @@ async def preview_dispatch(
             descriptor=descriptor,
             target=target,
             connector_id=connector_id,
+            params=params,
         )
     return {**envelope, **governance}
 

@@ -10,6 +10,12 @@ Vault-federation + DB-migration bundle the chassis ``GET /api/v1/health``
 route returns, scoped to the operator the MCP dispatcher already
 authenticated.
 
+The tool is open to every role, but the Vault check inside it is not.
+The check logs in to Vault as the caller and reads a secret, so it runs
+only for a caller with at least the ``operator`` role, the same rule as
+``GET /api/v1/health``. A ``read_only`` caller gets every other part of
+the answer and a ``vault`` block with ``checked=false``.
+
 Why this is the *reference* tool
 ================================
 

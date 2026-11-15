@@ -56,7 +56,7 @@ from meho_backplane.operations.meta_tools import call_operation, search_operatio
 from meho_backplane.operations.reducer import PassThroughReducer
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
-_TARGET_NAME = "rdc-keycloak-e2e"
+_TARGET_NAME = "keycloak-e2e"
 _KC_HOST = "keycloak-e2e.test.invalid"
 _KC_BASE_URL = f"https://{_KC_HOST}"
 _ADMIN_TOKEN = "kc-admin-token-e2e"
@@ -96,7 +96,7 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 
 _FIXTURE_REALM: dict[str, Any] = {
-    "realm": "evba",
+    "realm": "example",
     "enabled": True,
     "sslRequired": "external",
     "loginTheme": "meho",
@@ -109,8 +109,8 @@ _FIXTURE_CLIENT: dict[str, Any] = {
     "enabled": True,
     "publicClient": False,
     "secret": _CLIENT_SECRET_SENTINEL,
-    "redirectUris": ["https://meho.evba.lab/callback"],
-    "webOrigins": ["https://meho.evba.lab"],
+    "redirectUris": ["https://meho.example.test/callback"],
+    "webOrigins": ["https://meho.example.test"],
     "protocolMappers": [
         {"name": "tenant_id", "protocol": "openid-connect", "config": {"claim.name": "tenant_id"}}
     ],
@@ -158,7 +158,7 @@ _FIXTURE_ROLES: list[dict[str, Any]] = [
         "description": "Operator role",
         "composite": False,
         "clientRole": False,
-        "containerId": "evba",
+        "containerId": "example",
     },
     {
         "id": "role-uuid-admin",
@@ -166,7 +166,7 @@ _FIXTURE_ROLES: list[dict[str, Any]] = [
         "description": "Realm administrator",
         "composite": True,
         "clientRole": False,
-        "containerId": "evba",
+        "containerId": "example",
     },
 ]
 
@@ -187,16 +187,18 @@ def _mount_admin_routes(mock: respx.MockRouter) -> None:
     mock.post("/realms/master/protocol/openid-connect/token").respond(
         200, json={"access_token": _ADMIN_TOKEN, "expires_in": 300}
     )
-    mock.get("/admin/realms/evba").respond(200, json=_FIXTURE_REALM)
-    mock.get("/admin/realms/evba/clients").respond(200, json=_FIXTURE_CLIENTS)
-    mock.get(f"/admin/realms/evba/clients/{_CLIENT_UUID}").respond(200, json=_FIXTURE_CLIENT)
-    mock.get("/admin/realms/evba/client-scopes").respond(200, json=_FIXTURE_CLIENT_SCOPES)
-    mock.get("/admin/realms/evba/users").respond(200, json=_FIXTURE_USERS)
-    mock.get(f"/admin/realms/evba/users/{_USER_UUID}/role-mappings").respond(
+    mock.get("/admin/realms/example").respond(200, json=_FIXTURE_REALM)
+    mock.get("/admin/realms/example/clients").respond(200, json=_FIXTURE_CLIENTS)
+    mock.get(f"/admin/realms/example/clients/{_CLIENT_UUID}").respond(200, json=_FIXTURE_CLIENT)
+    mock.get("/admin/realms/example/client-scopes").respond(200, json=_FIXTURE_CLIENT_SCOPES)
+    mock.get("/admin/realms/example/users").respond(200, json=_FIXTURE_USERS)
+    mock.get(f"/admin/realms/example/users/{_USER_UUID}/role-mappings").respond(
         200, json=_FIXTURE_ROLE_MAPPINGS
     )
-    mock.get("/admin/realms/evba/roles").respond(200, json=_FIXTURE_ROLES)
-    mock.get(f"/admin/realms/evba/roles/{_ROLE_NAME}/users").respond(200, json=_FIXTURE_ROLE_USERS)
+    mock.get("/admin/realms/example/roles").respond(200, json=_FIXTURE_ROLES)
+    mock.get(f"/admin/realms/example/roles/{_ROLE_NAME}/users").respond(
+        200, json=_FIXTURE_ROLE_USERS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -227,10 +229,10 @@ async def _seed_keycloak_target() -> TargetORM:
             host=_KC_HOST,
             port=443,
             fqdn=None,
-            secret_ref="rdc-hetzner-dc/keycloak/admin",
+            secret_ref="example-site/keycloak/admin",
             auth_model="shared_service_account",
             vpn_required=False,
-            extras={},
+            extras={"managed_realm": "example"},
             fingerprint={"version": "26.0.5"},
             notes="seeded by test_connectors_keycloak_e2e",
         )
@@ -323,7 +325,7 @@ async def test_keycloak_e2e_realm_get(keycloak_e2e: KeycloakConnector) -> None:
         )
     assert result["status"] == "ok", f"realm.get failed: {result.get('error')}"
     realm = result["result"]["realm"]
-    assert realm["realm"] == "evba"
+    assert realm["realm"] == "example"
     assert realm["sslRequired"] == "external"
 
 
@@ -369,7 +371,7 @@ async def test_keycloak_e2e_client_get_returns_flows_uris_mappers(
     assert result["status"] == "ok", f"client.get failed: {result.get('error')}"
     client = result["result"]["client"]
     # Acceptance: flows + redirect URIs + protocol mappers an operator reads.
-    assert client["redirectUris"] == ["https://meho.evba.lab/callback"]
+    assert client["redirectUris"] == ["https://meho.example.test/callback"]
     assert client["protocolMappers"][0]["name"] == "tenant_id"
     assert client["authenticationFlowBindingOverrides"]["browser"] == "flow-uuid-abc"
     # Acceptance: secret redacted.
@@ -460,7 +462,7 @@ async def test_keycloak_e2e_role_list(keycloak_e2e: KeycloakConnector) -> None:
     rows = result["result"]["rows"]
     assert {row["name"] for row in rows} == {"operator", "admin"}
     # RoleRepresentation fields the access-review caller reads.
-    assert rows[0]["containerId"] == "evba"
+    assert rows[0]["containerId"] == "example"
     assert rows[0]["clientRole"] is False
 
 
@@ -567,8 +569,8 @@ async def test_keycloak_e2e_admin_token_refreshes_across_dispatch(
             200,
             json={"access_token": _ADMIN_TOKEN, "expires_in": 60},
         )
-        mock.get("/admin/realms/evba").respond(200, json=_FIXTURE_REALM)
-        mock.get("/admin/realms/evba/clients").respond(200, json=_FIXTURE_CLIENTS)
+        mock.get("/admin/realms/example").respond(200, json=_FIXTURE_REALM)
+        mock.get("/admin/realms/example/clients").respond(200, json=_FIXTURE_CLIENTS)
 
         first = await call_operation(
             _OPERATOR,

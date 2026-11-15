@@ -538,10 +538,11 @@ async def _claim_dashboard_transition(
         ]
         claimed = False
         dashboard_edge = current != previous_memo
-        if dashboard_edge:
-            # Compare-and-swap: the memo tracks the freshly computed state so a
-            # still-non-green Dashboard fires exactly once (on the edge), and the
-            # rowcount is the atomic claim token that coalesces concurrent callers.
+        # #6008: no claim while a new Dashboard waits for members; its first ok is silent.
+        waiting = _is_waiting_first_state(previous_memo, current, evaluations)
+        silent_first = previous_memo is None and current == "ok"
+        if dashboard_edge and not waiting:
+            # Compare-and-swap: fires once per edge; rowcount is the atomic claim token.
             claimed = await _claim_rollup_transition(
                 session, dashboard_id, expected=previous_memo, new=current
             )
@@ -558,7 +559,7 @@ async def _claim_dashboard_transition(
                     changes.append(returned)
         transition: _ClaimedTransition | None = None
         member_notices: list[DashboardNotice] = []
-        if claimed:
+        if claimed and not silent_first:
             transition = _ClaimedTransition(
                 dashboard=dashboard_snapshot,
                 non_green=non_green,
@@ -575,6 +576,42 @@ async def _claim_dashboard_transition(
         await session.commit()
 
     return _DashboardClaims(transition=transition, member_notices=member_notices)
+
+
+def _is_waiting_first_state(
+    previous_memo: str | None,
+    current: str,
+    evaluations: list[_MemberRow],
+) -> bool:
+    """True for a new Dashboard that is red only because members have not reported.
+
+    A Dashboard with no memo yet and a ``degraded`` / ``critical`` fold, where
+    every failing member is only waiting for its first confirmed result
+    (:func:`_awaits_first_result`), is not alerted. The memo stays ``NULL`` so
+    every later evaluation in the wait is judged the same way.
+    """
+    if previous_memo is not None or current not in ("degraded", "critical"):
+        return False
+    return all(
+        _awaits_first_result(s, ev)
+        for _, s, ev in evaluations
+        if ev.effective_state in ("degraded", "critical")
+    )
+
+
+def _awaits_first_result(sensor: Sensor, evaluation: MemberEvaluation) -> bool:
+    """True when a member is ``unknown`` only because it has no confirmed result yet.
+
+    That is a Sensor that never ran, or one whose first results still wait for
+    confirmation (``pending_state`` set while ``last_state`` is still the
+    initial ``unknown``). A Sensor that ran and has no reading in waiting
+    reports a real ``unknown`` (a timeout or a run error) and counts as failing.
+    """
+    if evaluation.raw_state != "unknown":
+        return False
+    if sensor.last_evaluated_at is None:
+        return True
+    return sensor.last_state == "unknown" and sensor.pending_state is not None
 
 
 async def _claim_member_changes(

@@ -163,12 +163,27 @@ the target, or set its version, and the list shows the result.
 
 To change a sensor later, use `meho sensor edit` (see
 [Change a sensor or a dashboard](#change-a-sensor-or-a-dashboard)).
-There is deliberately **no pause verb**. Nor is `paused`
-a self-protection you can wait for: the runner parks a sensor **only**
-when its stored cadence (`cron_expr` / `timezone`) no longer parses,
-stamping `status_reason` with `invalid_cadence:<error>`. There is no
-failure counter — a sensor that evaluates `critical` or `unknown`
-forever stays `active` forever. The way to stop one is to delete it:
+To stop a sensor for a while, pause it. A paused sensor is not run, so it
+does not call its target. It keeps its id, its result history and its place
+in every dashboard:
+
+```bash
+meho sensor pause <uuid>
+meho sensor resume <uuid>
+```
+
+Pause and resume are safe to run twice. Use them, for example, while you fix
+the credential of the target.
+
+MEHO also pauses a sensor for you in two cases. The first is a stored
+cadence that no longer parses (`status_reason` is `invalid_cadence:<error>`).
+The second is a target that refuses the login several times in a row
+(`status_reason` is `auth_failed:ConnectorAuthError`). By default this is 3
+times; set `SENSOR_AUTH_FAILURE_PARK_THRESHOLD` to change it. This stops a
+stale credential from being tried on every run. MEHO then mails a warning to
+the mail recipients (`--notify-email`) of every dashboard that holds the
+sensor. Fix the credential, then resume the sensor. A sensor that reads `critical` or `unknown` for other
+reasons stays `active`. To remove a sensor and its history, delete it:
 
 ```bash
 meho sensor delete <uuid>
@@ -206,7 +221,7 @@ The same view lives in the operator console at `/ui/checks` (list)
 and `/ui/checks/{dashboard_id}` (member breakdown). Dashboards have
 CLI, REST, and UI surfaces; sensors additionally have MCP tools
 (`meho_sensor_list` / `meho_sensor_create` / `meho_sensor_delete` /
-`meho_sensor_results`) —
+`meho_sensor_pause` / `meho_sensor_resume` / `meho_sensor_results`) —
 **dashboards have no MCP
 tools today**.
 
@@ -497,8 +512,9 @@ It is off until you opt in, and it has real prerequisites:
 
 - An **enabled agent definition named `checks-investigator`** in your
   tenant (the name is configurable deploy-side). The
-  [tiered-triage example](https://github.com/evoila/meho/tree/main/examples/r1-tiered-triage)
-  is the mould — read-only toolset, writes need approval.
+  [checks investigator example](https://github.com/evoila/meho/tree/main/examples/checks-investigator)
+  shows it: a read-only toolset, and an agent login registered with
+  `--grants read-everything`, so writes wait for approval.
 - The agent runtime, which is **experimental** maturity — check the
   [feature-maturity index](../reference/maturity.md) before leaning
   on it.

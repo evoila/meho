@@ -445,13 +445,18 @@ What MEHO does on the host:
     (`_SYSTEM_RUNS` in the code): a `.ssh` folder anywhere in the path, the
     folders `.config/systemd`, `.config/autostart`, `.config/fish`,
     `.config/environment.d`, `.config/plasma-workspace` and
-    `.local/share/systemd`, and the file names `authorized_keys`,
+    `.local/share/systemd`, `.config/nvim`, `.config/git/config`,
+    `.local/bin`, `bin`, `.local/share/bash-completion`, `.oh-my-zsh` and
+    any `site-packages` folder under `.local/lib`, and the file names `authorized_keys`,
     `authorized_keys2`, `.bashrc`, `.bash_profile`, `.bash_login`,
     `.bash_logout`, `.bash_aliases`, `.profile`, `.zshrc`, `.zshenv`,
     `.zprofile`, `.zlogin`, `.zlogout`, `.cshrc`, `.tcshrc`, `.login`,
     `.logout`, `.kshrc`, `.mkshrc`, `.xprofile`, `.xinitrc`, `.xsession`,
     `.xsessionrc`, `.pam_environment`, `.forward`, `.procmailrc`,
-    `.mailfilter`, `.qmail`, `.rhosts`, `.shosts`, `.k5login`. Names are
+    `.mailfilter`, `.qmail`, `.rhosts`, `.shosts`, `.k5login`, `.gitconfig`, `.vimrc`, `.inputrc`,
+    `.tmux.conf`, `.bash_completion`. The list is not complete. Files where
+    a tool keeps its own login (`.netrc`, `.kube/config`,
+    `.docker/config.json`, `.npmrc`) stay allowed. Names are
     compared in lower case, so `.BashRC` is refused too.
 - `secret.move` runs the same checks before the call can wait for approval.
   A refused place makes no approval card: the call fails with
@@ -466,6 +471,9 @@ What MEHO does on the host:
     the file gives none). A system user's home is often a folder that others
     read or share, for example a web root or a mail spool, so a secret
     written there would not stay with one user;
+  - the reason `system-owner` also for an owner whose user id is above the
+    host's last normal user id (`UID_MAX` in `/etc/login.defs`; 60000 when
+    the file gives none), for example `nobody`;
   - the reason `no-home` when the home does not exist.
 
   When the path is not inside the home, MEHO stops before it sends the

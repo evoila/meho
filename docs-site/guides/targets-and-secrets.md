@@ -318,10 +318,12 @@ file, use one of these:
   meho approvals approve --filter-work-ref gh:acme/ops#42 --in-order
   ```
 
-Then probe. The probe invokes the connector matched to the target's
-`product`, live, and persists the resulting fingerprint:
+Then probe. A target exists only after a person approved its request, so
+approve the rows first. The probe invokes the connector matched to the
+target's `product`, live, and persists the resulting fingerprint:
 
 ```bash
+meho approvals approve <approval-id-of-the-row>
 meho targets probe lab-rke2
 ```
 

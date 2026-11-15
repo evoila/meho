@@ -815,7 +815,8 @@ model, or resume endpoint):
    console, or runs the import with `--work-ref`. Then a person goes
    through all its rows with
    `meho approvals approve --filter-work-ref <ref> --in-order`, which asks
-   for a yes at each row.
+   for a yes at each row. The person who ran the import can approve its
+   rows this way only after a fresh approval sign-in.
 
    Only `verify_access_token_with_refresh`
    (`backend/src/meho_backplane/ui/auth/refresh.py`) sets

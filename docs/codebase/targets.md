@@ -25,7 +25,11 @@ optional `aliases`, `version`, `port`, `fqdn`, `secret_ref`,
 `auth_model`, `verify_tls`, `tls_ca_pin`, `tls_server_name`,
 `vpn_required`, `extras`, `notes`, `preferred_impl_id`,
 `secret_field_map`, `flight_recorder_capture`. Any other field
-is refused. `vpn_required` (boolean, default `false`) records that a
+is refused. A call that sets `secret_field_map` or
+`flight_recorder_capture` waits for a person on every call, whoever makes
+it: no standing grant and no run approval covers it
+(`declare_wait_when_set` in `connectors/targets/__init__.py`). A call
+without these two fields keeps the usual rules. `vpn_required` (boolean, default `false`) records that a
 VPN must be up to reach the target. MEHO does not act on it; it is
 shown to the people and agents that read the target (#5075). Every
 `target` argument elsewhere resolves
@@ -70,7 +74,8 @@ re-run of a failed approved call by the requester, also a service login.
   check of `PATCH` on the stored row with the sent fields (a `tls_ca_pin`
   with `verify_tls: false`), 409 for a `POST` whose name a live target of
   the tenant already has, 404 for an unknown target, and 409
-  `target_has_references` for a delete without `force`. Nothing is written until a person approves it. The CLI
+  `target_has_references` for a delete without `force`. A `PATCH` with
+  no field answers 422 `no_fields`. Nothing is written until a person approves it. The CLI
   prints the approval id and exits 0.
 - `meho targets import` sends one `POST` or `PATCH` per row, so each row
   makes its own approval request: a file with 50 rows makes 50 requests.
@@ -622,8 +627,11 @@ with a token becomes a call of this op.
   `secret_field_map` merge, Vault login keys in `extras`), and the change
   drops kept logins like a `PATCH` does.
 - **By id, not by name.** An approved call changes the target the
-  approver saw. The preview names that target and the fields the call
-  sends.
+  approver saw. The preview names that target. Its `changes` map shows
+  each sent field with its stored value and its new value
+  (`{"host": {"from": "<stored>", "to": "<new>"}}`), so the approver sees
+  what the call changes. Secret-shaped values are hidden the same way as
+  in the generic parameter echo; `secret_ref` is a path and shows.
 - **Fields.** Every field of `TargetUpdate` except `name`. Only the sent
   fields change; an explicit `null` clears a nullable field. A call with
   no field besides `target_id` is refused, and nothing changes.

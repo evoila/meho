@@ -50,7 +50,10 @@ routing:
   same `match` are a mistake.
 - `labels` pass the same check as the single edit (`_check_labels` in
   `policy/store.py`): at most 32 labels, a key of 1 to 63 characters and a
-  value of 1 to 255 characters. A mistake names the entry.
+  value of 1 to 255 characters, and the character rule of
+  [policy-classification.md](policy-classification.md) (a key uses only
+  letters, digits and `. _ / -`; a value has no line breaks and no control
+  characters). A mistake names the entry.
 - Each `routing` entry has a `match` (at least one of `category`,
   `connector`, `risk`; `connector` is a pattern, the other two are exact)
   and `approvers`: one to five of the login group kinds `Readers`,

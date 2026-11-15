@@ -479,19 +479,15 @@ def test_overrides_mutation_requires_csrf() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_overrides_route_resolves_before_event() -> None:
+def test_overrides_route_resolves_to_the_overrides_handler() -> None:
     """``GET /ui/broadcast/overrides`` binds the overrides handler.
 
-    AC5: the overrides router is included before the event router, so the
-    literal ``/ui/broadcast/overrides`` is matched ahead of the
-    parametrised ``/ui/broadcast/event/{audit_id}`` -- the GET resolves to
-    the overrides handler (renders the rules pane), not the event drawer.
+    The operation drawer route ``/ui/broadcast/event/{audit_id}`` is gone
+    (#3762), so nothing else under ``/ui/broadcast`` can catch the path.
     """
     app = _build_app()
     # GET and POST share the ``/ui/broadcast/overrides`` path, so key on
-    # (path, method) to disambiguate. The GET must bind the overrides
-    # list handler (registered before the event router), never the event
-    # drawer's ``/ui/broadcast/event/{audit_id}``.
+    # (path, method) to disambiguate.
     # Use iter_routes to walk the 0.137+ route tree (include_router now
     # produces nested _IncludedRouter objects, not a flat list).
     routes = {
@@ -507,16 +503,10 @@ def test_overrides_route_resolves_before_event() -> None:
         == "ui_broadcast_overrides_delete"
     )
 
-    # The overrides router is included before the event router in
-    # build_router(), so a literal /ui/broadcast/overrides resolves to the
-    # overrides list handler, not the event handler. iter_routes flattens the
-    # 0.137+ tree in registration order, preserving first-match-wins order.
     ordered_paths = [getattr(route, "path", "") for route in iter_routes(app.routes)]
-    overrides_idx = ordered_paths.index("/ui/broadcast/overrides")
-    event_idx = ordered_paths.index("/ui/broadcast/event/{audit_id}")
-    assert overrides_idx < event_idx
+    assert "/ui/broadcast/event/{audit_id}" not in ordered_paths
 
-    # And it actually renders the overrides pane (not the event drawer).
+    # And it actually renders the overrides pane.
     _seed_tenant(_TENANT_A, "tenant-a")
     client, mock, _ = _authenticated_client_with_role(
         tenant_id=_TENANT_A,

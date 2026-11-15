@@ -28,9 +28,12 @@ meho --profile initiator operation call ...
 
 # Decide it as the approver:
 meho --profile approver approvals approve <approval-id>
-# The browser sign-in that `approvals approve` asks for decides who
-# approves. The profile only picks the login for `approvals list` and
-# `approvals show`.
+# The browser sign-in that `approvals approve` and `approvals runs
+# approve` ask for decides who approves; it does not use the profile.
+# Every other approvals command uses the stored login of the active
+# profile: `list`, `show`, `reject`, `withdraw`, `result`,
+# `mark-checked`, `runs list`, `runs show` and `runs revoke`. A reject
+# needs no new sign-in, so it is decided as the profile's identity.
 
 # Or set the profile for a whole shell:
 export MEHO_PROFILE=approver

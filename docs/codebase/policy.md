@@ -43,7 +43,10 @@ classifications:
   same `match` are a mistake.
 - `labels` pass the same check as the single edit (`_check_labels` in
   `policy/store.py`): at most 32 labels, a key of 1 to 63 characters and a
-  value of 1 to 255 characters. A mistake names the entry.
+  value of 1 to 255 characters, and the character rule of
+  [policy-classification.md](policy-classification.md) (a key uses only
+  letters, digits and `. _ / -`; a value has no line breaks and no control
+  characters). A mistake names the entry.
 - `bindings` (a tenant's file only) says which login group is which team:
   a group, matched by its full path or its group attribute, gets one of the
   five group kinds and a set of categories. They count only while the

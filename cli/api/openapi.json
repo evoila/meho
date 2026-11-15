@@ -28153,6 +28153,16 @@
             "nullable": true,
             "title": "Policy Decision"
           },
+          "policy_rule": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Rule"
+          },
+          "policy_version": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Policy Version"
+          },
           "event_class": {
             "type": "string",
             "title": "Event Class"
@@ -39631,6 +39641,16 @@
             "type": "string",
             "nullable": true,
             "title": "Policy Decision"
+          },
+          "policy_rule": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Rule"
+          },
+          "policy_version": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Policy Version"
           },
           "event_class": {
             "type": "string",

@@ -53,7 +53,7 @@ from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
-from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._audit import policy_rule_var, work_ref_var
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_handoff import (
     ApprovalExecutionPayload,
@@ -84,6 +84,7 @@ from meho_backplane.operations.approval_queue import (
     reject_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.policy.stamp import RuleStamp
 from meho_backplane.settings import get_settings
 
 # ---------------------------------------------------------------------------
@@ -723,6 +724,82 @@ async def test_approve_request_writes_decision_audit_row(session: AsyncSession) 
     # #3733: the park is a gate decision; the approve is an approval decision.
     assert request_rows[0].event_class == "policy_decision"
     assert decision_rows[0].event_class == "approval_decision"
+
+
+@pytest.mark.asyncio
+async def test_request_and_its_audit_row_name_the_policy_rule(session: AsyncSession) -> None:
+    """The bound policy rule lands on the request and its "request" row (#6044).
+
+    The "decision" row stays empty, the same as ``policy_decision``: no gate
+    ran on the approver's task.
+    """
+    requester = _make_operator(sub="requester-sub")
+    reviewer = _make_operator(sub="reviewer-sub")
+    params: dict[str, object] = {}
+    stamp = RuleStamp(
+        source="default", rule_id="person.token", text="a token call waits", policy_version=2
+    )
+    token = policy_rule_var.set(stamp)
+    try:
+        pending = await create_pending_request(
+            session,
+            operator=requester,
+            connector_id="vault-1.x",
+            op_id="vault.kv.write",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+        )
+        await session.commit()
+    finally:
+        policy_rule_var.reset(token)
+
+    async with get_sessionmaker()() as s2:
+        await approve_request(s2, pending.id, operator=reviewer, params=params)
+        await s2.commit()
+
+    async with get_sessionmaker()() as fresh:
+        stored = await fresh.get(ApprovalRequest, pending.id)
+        rows = {row.path: row for row in (await fresh.execute(select(AuditLog))).scalars()}
+    assert stored is not None
+    assert stored.policy_rule == {
+        "source": "default",
+        "rule_id": "person.token",
+        "text": "a token call waits",
+        "decided": False,
+    }
+    assert stored.policy_version == 2
+    assert rows["approval.request"].policy_rule == "default:person.token (shadow)"
+    assert rows["approval.request"].policy_version == 2
+    assert rows["approval.decision"].policy_rule is None
+    assert rows["approval.decision"].policy_version is None
+
+
+@pytest.mark.asyncio
+async def test_request_without_a_bound_rule_leaves_the_columns_empty(
+    session: AsyncSession,
+) -> None:
+    """With the switch off nothing binds a rule, so the columns stay NULL (#6044)."""
+    params: dict[str, object] = {}
+    pending = await create_pending_request(
+        session,
+        operator=_make_operator(sub="requester-sub"),
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as fresh:
+        stored = await fresh.get(ApprovalRequest, pending.id)
+        row = (
+            await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.request"))
+        ).scalar_one()
+    assert stored is not None
+    assert (stored.policy_rule, stored.policy_version) == (None, None)
+    assert (row.policy_rule, row.policy_version) == (None, None)
 
 
 @pytest.mark.asyncio

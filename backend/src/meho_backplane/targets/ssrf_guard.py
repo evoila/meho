@@ -51,6 +51,14 @@ a deployment can opt its LAN back in without disabling the guard
 globally. There is deliberately no weighting/DSL beyond this — the
 simplest override that preserves the security property.
 
+An entry can also carry a port: ``host.name:8443``, ``10.1.2.3:8443`` or
+``[fd00::5]:8443``. Such an entry admits that destination **only on that
+port**; a bare entry still admits every port. A port is checked only when
+the caller knows it (the HTTP dial path and a port embedded in the stored
+host do); where no port is known, a port entry does not match the dial.
+A driver that dials only the checked address on its own port (SSH, the
+database drivers) is checked on that port, never on a port in the host.
+
 **Fail-open on unresolvable hostnames — by design.** A hostname that
 does not resolve is allowed through at both layers: at create time the
 backplane may simply not share the target's resolver view (split-horizon
@@ -84,7 +92,8 @@ import asyncio
 import ipaddress
 import os
 import socket
-from typing import Final
+import urllib.parse
+from typing import Final, NamedTuple
 
 import httpx
 
@@ -123,16 +132,55 @@ class TargetDestinationBlockedError(ValueError):
     """
 
 
-def _parse_allowlist() -> tuple[
-    tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
-    frozenset[str],
-]:
+class _Allowlist(NamedTuple):
+    """The parsed :data:`TARGET_SSRF_ALLOWLIST_ENV`.
+
+    ``networks`` / ``hostnames`` are bare entries (any port). The
+    ``pinned_*`` fields hold entries written with a port; they admit a
+    destination only on that port.
+    """
+
+    networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
+    hostnames: frozenset[str]
+    pinned_networks: tuple[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, int], ...]
+    pinned_hostnames: frozenset[tuple[str, int]]
+
+
+def _split_port(entry: str) -> tuple[str, int] | None:
+    """Split ``host:port`` / ``[v6]:port`` into ``(host, port)``, else ``None``.
+
+    A bare IPv6 address has many colons and no brackets, so it is not a
+    port entry. A port that is not a number from 1 to 65535 raises
+    :class:`ValueError`, loud for the same reason a bad CIDR does.
+    """
+    if entry.startswith("["):
+        head, sep, tail = entry.rpartition("]:")
+        host = head[1:] if sep else ""
+        port_text = tail
+    else:
+        host, sep, port_text = entry.rpartition(":")
+        if ":" in host:
+            return None
+    if not sep or not host:
+        return None
+    if not port_text.isdigit() or not 1 <= int(port_text) <= 65535:
+        raise ValueError(
+            f"{TARGET_SSRF_ALLOWLIST_ENV} entry {entry!r} has a port that is "
+            "not a number from 1 to 65535; fix the deployment configuration"
+        )
+    return host, int(port_text)
+
+
+def _parse_allowlist() -> _Allowlist:
     """Parse :data:`TARGET_SSRF_ALLOWLIST_ENV` into networks + hostnames.
 
     A token containing ``/`` must be a valid CIDR (``strict=False`` so
     ``10.0.0.1/8`` normalises rather than errors); a bare-IP token
-    becomes its single-host network. Any other token is a hostname
-    literal, matched case-insensitively with a trailing dot stripped.
+    becomes its single-host network. A ``host:port`` token (see
+    :func:`_split_port`) is a port entry: its host part is an IP literal
+    or a hostname, and it admits that host on that port only. Any other
+    token is a hostname literal, matched case-insensitively with a
+    trailing dot stripped.
     A malformed CIDR raises :class:`ValueError` naming the offending
     token — loud, because silently dropping an entry would re-block a
     destination the operator explicitly opted in (same fail-fast posture
@@ -140,6 +188,8 @@ def _parse_allowlist() -> tuple[
     """
     networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
     hostnames: set[str] = set()
+    pinned_networks: list[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, int]] = []
+    pinned_hostnames: set[tuple[str, int]] = set()
     for token in os.environ.get(TARGET_SSRF_ALLOWLIST_ENV, "").split(","):
         entry = token.strip()
         if not entry:
@@ -154,11 +204,21 @@ def _parse_allowlist() -> tuple[
                 f"{TARGET_SSRF_ALLOWLIST_ENV} entry {entry!r} is not a valid "
                 "CIDR range; fix the deployment configuration"
             )
-        hostnames.add(entry.rstrip(".").lower())
-    return tuple(networks), frozenset(hostnames)
+        with_port = _split_port(entry)
+        if with_port is None:
+            hostnames.add(entry.rstrip(".").lower())
+            continue
+        host, port = with_port
+        try:
+            pinned_networks.append((ipaddress.ip_network(host, strict=False), port))
+        except ValueError:
+            pinned_hostnames.add((host.rstrip(".").lower(), port))
+    return _Allowlist(
+        tuple(networks), frozenset(hostnames), tuple(pinned_networks), frozenset(pinned_hostnames)
+    )
 
 
-def is_allowlisted(host: str) -> bool:
+def is_allowlisted(host: str, port: int | None = None) -> bool:
     """True when *host* itself is an exact entry on :data:`TARGET_SSRF_ALLOWLIST_ENV`.
 
     *host* is a bare host as :func:`urllib.parse.urlsplit` returns it (no
@@ -169,23 +229,37 @@ def is_allowlisted(host: str) -> bool:
     * an IP literal matches when it is listed as a single address: a bare
       IP entry, or a ``/32`` (IPv4) or ``/128`` (IPv6) entry.
 
+    An entry written with a port (``host:8443``) counts only when *port*
+    is that port; without a *port* only bare entries count.
+
     An IP that only falls inside a wider listed range does not count, and
     there is no DNS lookup, so a hostname that merely resolves into a listed
     range does not count either. Callers use this to grant an explicitly
     named host something more than the public-destination screen allows
     (for example, a plain ``http`` corpus endpoint).
     """
-    networks, hostnames = _parse_allowlist()
+    allow = _parse_allowlist()
     candidate = host.strip()
     if not candidate:
         return False
     try:
         addr = ipaddress.ip_address(candidate)
     except ValueError:
-        return candidate.rstrip(".").lower() in hostnames
+        name = candidate.rstrip(".").lower()
+        return name in allow.hostnames or (
+            port is not None and (name, port) in allow.pinned_hostnames
+        )
     return any(
         network.prefixlen == network.max_prefixlen and network.network_address == addr
-        for network in networks
+        for network in allow.networks
+    ) or (
+        port is not None
+        and any(
+            network.prefixlen == network.max_prefixlen
+            and network.network_address == addr
+            and pinned_port == port
+            for network, pinned_port in allow.pinned_networks
+        )
     )
 
 
@@ -214,6 +288,44 @@ def _is_blocked(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 
 def _dialed_host(candidate: str) -> str:
     """Return the exact host httpx will dial for ``https://{candidate}``.
+
+    Thin wrapper over :func:`_dialed_url`; see it for the rules.
+    """
+    return _dialed_url(candidate).host
+
+
+def _effective_port(
+    candidate: str, port: int | None, *, use_embedded_port: bool = True
+) -> int | None:
+    """The port a dial of *candidate* uses, or ``None`` when it is not known.
+
+    A port embedded in the stored value wins, because httpx parses it out of
+    ``https://{candidate}`` and dials it. Otherwise the caller's *port* is
+    used. An unparseable value has no known port (the screen refuses it).
+
+    A driver that is handed only the checked IP address (SSH, the database
+    drivers) never dials the embedded port: it dials its own *port*. Such a
+    caller passes ``use_embedded_port=False``, and *port* is used as it is.
+
+    httpx drops an explicit ``:443`` from ``https://host:443`` (it is the
+    scheme default), so the embedded port is read from the raw value too.
+    """
+    if not use_embedded_port:
+        return port
+    try:
+        embedded = _dialed_url(candidate).port
+    except TargetDestinationBlockedError:
+        return port
+    if embedded is None:
+        try:
+            embedded = urllib.parse.urlsplit(f"https://{candidate}").port
+        except ValueError:
+            embedded = None
+    return embedded if embedded is not None else port
+
+
+def _dialed_url(candidate: str) -> httpx.URL:
+    """Return the URL httpx will dial for ``https://{candidate}``.
 
     Closes the normalize-vs-screen divergence: the transport builds
     ``https://{host}`` and httpx parses URL structure *out of* the
@@ -251,7 +363,7 @@ def _dialed_host(candidate: str) -> str:
             "target host must not embed URL structure (credentials, query, "
             "or fragment); provide a bare hostname or IP address literal"
         )
-    return url.host
+    return url
 
 
 def _resolve_addrs(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
@@ -280,9 +392,13 @@ def _resolve_addrs(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Addr
 
 def _reject_blocked(
     addrs: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
-    networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
+    allow: _Allowlist,
+    port: int | None,
 ) -> None:
     """Raise when any address in *addrs* is blocked and not allowlisted.
+
+    A range listed with a port admits an address only when *port* is that
+    port; with no known port it admits nothing.
 
     The single screening loop shared by :func:`assert_public_destination`
     and :func:`screen_and_resolve`, so the assert-only and
@@ -293,7 +409,12 @@ def _reject_blocked(
     for addr in addrs:
         if not _is_blocked(addr):
             continue
-        if any(addr in network for network in networks):
+        if any(addr in network for network in allow.networks):
+            continue
+        if port is not None and any(
+            addr in network and pinned_port == port
+            for network, pinned_port in allow.pinned_networks
+        ):
             continue
         raise TargetDestinationBlockedError(
             "target destination is not a public address; refusing it as a "
@@ -301,7 +422,9 @@ def _reject_blocked(
         )
 
 
-def _screen(host: str) -> list[str] | None:
+def _screen(
+    host: str, port: int | None = None, *, use_embedded_port: bool = True
+) -> list[str] | None:
     """Screen *host* and return the validated addresses it may dial.
 
     The shared core of both public entry points. *host* may be an
@@ -324,11 +447,19 @@ def _screen(host: str) -> list[str] | None:
     (fail-open — see the module docstring). Raises
     :class:`TargetDestinationBlockedError` on a blocked, non-allowlisted
     address, on refused URL structure, or on an unparseable value.
+
+    *port* is the port the caller will dial, when it knows it. A port
+    embedded in *host* wins, unless the caller passes
+    ``use_embedded_port=False`` (see :func:`_effective_port`). An
+    allowlist entry written with a port (``host:8443``) admits the
+    destination only on that port, so it never matches while the port is
+    unknown.
     """
     candidate = host.strip()
     if not candidate:
         return None
-    networks, hostnames = _parse_allowlist()
+    allow = _parse_allowlist()
+    port = _effective_port(candidate, port, use_embedded_port=use_embedded_port)
     literal = (
         candidate[1:-1] if candidate.startswith("[") and candidate.endswith("]") else candidate
     )
@@ -339,14 +470,17 @@ def _screen(host: str) -> list[str] | None:
         try:
             addrs = [ipaddress.ip_address(dialed)]
         except ValueError:
-            if dialed.rstrip(".").lower() in hostnames:
+            name = dialed.rstrip(".").lower()
+            if name in allow.hostnames or (
+                port is not None and (name, port) in allow.pinned_hostnames
+            ):
                 return None
             addrs = _resolve_addrs(dialed)
-    _reject_blocked(addrs, networks)
+    _reject_blocked(addrs, allow, port)
     return [str(addr) for addr in addrs] if addrs else None
 
 
-def assert_public_destination(host: str) -> None:
+def assert_public_destination(host: str, port: int | None = None) -> None:
     """Reject *host* when it is, or resolves to, a non-public address.
 
     The create/update-time and connect-time *pre-check* entry point:
@@ -362,10 +496,12 @@ def assert_public_destination(host: str) -> None:
             dialable destination. The message never includes the
             resolved address (no internal-topology oracle).
     """
-    _screen(host)
+    _screen(host, port)
 
 
-def screen_and_resolve(host: str) -> list[str] | None:
+def screen_and_resolve(
+    host: str, port: int | None = None, *, use_embedded_port: bool = True
+) -> list[str] | None:
     """Screen *host* and return the addresses a connection may pin to.
 
     The connect-time arm consumed by the pinning transport
@@ -385,10 +521,10 @@ def screen_and_resolve(host: str) -> list[str] | None:
     succeeds naturally). Raises :class:`TargetDestinationBlockedError`
     identically to :func:`assert_public_destination`.
     """
-    return _screen(host)
+    return _screen(host, port, use_embedded_port=use_embedded_port)
 
 
-async def assert_public_destination_async(host: str) -> None:
+async def assert_public_destination_async(host: str, port: int | None = None) -> None:
     """Async wrapper for the connect-time re-check.
 
     Runs :func:`assert_public_destination` in a worker thread via
@@ -399,4 +535,4 @@ async def assert_public_destination_async(host: str) -> None:
     :func:`_resolve_addrs` (or the allowlist env var) affects this path
     identically.
     """
-    await asyncio.to_thread(assert_public_destination, host)
+    await asyncio.to_thread(assert_public_destination, host, port)

@@ -422,7 +422,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: d3af407656ea998f5964df13b84040a7f8292244c247d4951a80cca969e24470
+        checksum/config: 4ad378f00467e4a10f92c5f67dfb78450e14fc335d938b9c5bd8a913a1f3f446
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.
@@ -848,7 +848,8 @@ data:
   # operations. Off by default.
   POLICY_CLASSIFICATION: "false"
   # The policy evaluator runs next to today's checks and logs every
-  # difference. It decides nothing. Off by default.
+  # difference. It also writes the rule it matched on audit rows and
+  # approval requests. It decides nothing. Off by default.
   POLICY_ENGINE_SHADOW: "false"
   # A waiting request stores who may approve it, from the policy file's
   # routing section. Off by default.

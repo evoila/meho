@@ -14,6 +14,9 @@
   verdict in every cell (no mismatch line).
 * The approval side: a forced difference writes one line and the answer
   stays today's.
+* The gate keeps the rule the evaluator matched, marked as not deciding,
+  for the audit row and the approval request (#6044). With the switch off,
+  or when the shadow fails, it keeps none, and no old rule is left behind.
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ from meho_backplane.operations._validate import policy_gate
 from meho_backplane.operations.approval_rights import approve_right
 from meho_backplane.policy import shadow
 from meho_backplane.policy.evaluate import Decision, RuleRef, Verdict
+from meho_backplane.policy.stamp import RuleStamp, keep_rule, take_rule
 from meho_backplane.settings import get_settings
 from tests._sandbox_mode_helpers import (
     seed_grant_row,
@@ -217,6 +221,57 @@ async def test_a_failure_in_the_shadow_keeps_the_answer(monkeypatch: pytest.Monk
     assert verdict is PermissionVerdict.NEEDS_APPROVAL
     assert _mismatches(logs) == []
     assert any(e.get("event") == "policy_shadow_failed" for e in logs)
+
+
+# ---------------------------------------------------------------------------
+# The kept rule (#6044)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_gate_keeps_the_rule_once_marked_as_not_deciding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shadow, "evaluate", _forced(Verdict.DENY))
+    verdict = await _gate("person", _operator("person"), _descriptor("safe"))
+    assert verdict is PermissionVerdict.AUTO_EXECUTE
+    stamp = take_rule()
+    assert stamp == RuleStamp(source="default", rule_id="forced", text="x", decided=False)
+    assert stamp.label() == "default:forced (shadow)"
+    assert stamp.as_json() == {
+        "source": "default",
+        "rule_id": "forced",
+        "text": "x",
+        "decided": False,
+    }
+    assert take_rule() is None
+
+
+@pytest.mark.asyncio
+async def test_switch_off_keeps_no_rule_and_drops_an_old_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_off(monkeypatch)
+    keep_rule(RuleStamp(source="default", rule_id="old", text="from an earlier gate"))
+    await _gate("person", _operator("person"), _descriptor("safe"))
+    assert take_rule() is None
+
+
+@pytest.mark.asyncio
+async def test_a_failure_in_the_shadow_keeps_no_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(*_args: Any, **_kwargs: Any) -> Decision:
+        raise RuntimeError("evaluator broke")
+
+    monkeypatch.setattr(shadow, "evaluate", broken)
+    keep_rule(RuleStamp(source="default", rule_id="old", text="from an earlier gate"))
+    await _gate("person", _operator("person"), _descriptor("safe"))
+    assert take_rule() is None
+
+
+def test_a_rule_that_decided_has_no_shadow_mark() -> None:
+    stamp = RuleStamp(source="tenant_rule", rule_id="r1", text="t", policy_version=4, decided=True)
+    assert stamp.label() == "tenant_rule:r1"
+    assert stamp.as_json()["decided"] is True
 
 
 @pytest.mark.asyncio

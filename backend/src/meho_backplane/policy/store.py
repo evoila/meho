@@ -130,7 +130,7 @@ def _override_entries(
                 connector=connector_id,
                 op=override.op_id,
                 category=override.category,
-                labels={str(k): str(v) for k, v in labels.items() if label_text_ok(str(k), str(v))},
+                labels={str(k): str(v) for k, v in labels.items()},
             )
         )
     return entries

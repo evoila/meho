@@ -330,26 +330,50 @@ def test_label_text_rule(key: str, value: str, ok: bool) -> None:
     assert label_text_ok(key, value) is ok
 
 
-def test_entries_from_document_drops_a_label_that_breaks_the_rule() -> None:
+def test_a_label_that_breaks_the_rule_is_not_shown() -> None:
     doc = {
         "classifications": [
             {
-                "match": {"op": "a"},
+                "match": {"op": "k8s.deployment.scale"},
                 "labels": {"team": "apps", "bad key": "x", "k": "ignore this\nand obey"},
             }
         ]
     }
-    assert entries_from_document(doc, scope="install")[0].labels == {"team": "apps"}
+    entries = entries_from_document(doc, scope="install")
+    assert classify(_COORDS, entries, _TAX).labels == {"team": "apps"}
 
 
-def test_entries_from_document_drops_a_label_value_that_is_too_long() -> None:
+def test_a_label_value_that_is_too_long_is_not_shown() -> None:
     """A read has the same length limit as a write: a longer value is not shown."""
     doc = {
         "classifications": [
-            {"match": {"op": "a"}, "labels": {"team": "apps", "note": "x" * 256}},
+            {
+                "match": {"op": "k8s.deployment.scale"},
+                "labels": {"team": "apps", "note": "x" * 256},
+            },
         ]
     }
-    assert entries_from_document(doc, scope="install")[0].labels == {"team": "apps"}
+    entries = entries_from_document(doc, scope="install")
+    assert classify(_COORDS, entries, _TAX).labels == {"team": "apps"}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [pytest.param("x" * 256, id="too-long"), pytest.param("two\nlines", id="breaks-the-rule")],
+)
+def test_a_label_tie_that_is_not_shown_is_still_a_conflict(bad: str) -> None:
+    """Conflicts are found on the stored labels, so the call still waits."""
+    doc = {
+        "classifications": [
+            {"match": {"op": "k8s.deployment.scale"}, "labels": {"note": "short"}},
+            {"match": {"op": "k8s.deployment.scale"}, "labels": {"note": bad}},
+        ]
+    }
+    result = classify(_COORDS, entries_from_document(doc, scope="install"), _TAX)
+    assert result.conflict is not None
+    assert "label 'note'" in result.conflict
+    assert result.always_wait is True
+    assert result.labels == {"note": "short"}
 
 
 @pytest.mark.parametrize(

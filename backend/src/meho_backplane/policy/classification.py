@@ -206,6 +206,7 @@ class Classification:
     specific entry that matched, or :data:`DEFAULT_RULE_REF`.
     ``conflict`` is the one-sentence reason when two entries of the same
     rank disagree; the operation then has no category and waits.
+    ``labels`` holds only the labels that pass :func:`label_text_ok`.
     """
 
     category: str | None
@@ -424,7 +425,10 @@ def classify(
     risk = max(risks, key=RISK_LEVELS.index) if risks else None
     always_wait = any(_scope_wait(matched, scope) is not None for scope in _SCOPES)
     category, category_conflict = _category(coords, matched, taxonomy)
-    labels, label_conflict = _labels(coords, matched)
+    # Conflicts are found on the labels as stored; a label MEHO cannot show
+    # is left out only after that, so it can still make the call wait.
+    stored, label_conflict = _labels(coords, matched)
+    labels = {k: v for k, v in stored.items() if label_text_ok(k, v)}
     conflict = category_conflict or label_conflict
     rule_ref = max(matched, key=lambda e: e.rank).ref if matched else DEFAULT_RULE_REF
     if conflict is not None:
@@ -477,7 +481,7 @@ def _entry_from_raw(raw: Mapping[str, Any], *, ref: str, scope: Scope) -> Classi
         category=_text(raw.get("category")),
         risk=risk,
         always_wait=always_wait,
-        labels={k: v for k, v in labels.items() if label_text_ok(k, v)},
+        labels=dict(labels),
     )
 
 

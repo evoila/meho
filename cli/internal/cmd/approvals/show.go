@@ -154,6 +154,7 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	}
 	fmt.Fprintf(w, "Connector:    %s\n", output.SafeText(d.ConnectorId))
 	fmt.Fprintf(w, "Operation:    %s\n", output.SafeText(d.OpId))
+	printClassification(w, d.ProposedEffect)
 	// Resolved subject of a path-variable op (#3353): the concrete entity
 	// (name + moid) recovered from identity params, so the reviewer reads
 	// `web-01 (vm-1042)` instead of the unresolved `{vm}` in the op id.

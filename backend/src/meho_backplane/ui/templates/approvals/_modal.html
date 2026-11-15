@@ -554,8 +554,41 @@
           {% if effect.get("op_class") %}
             <span class="badge badge-ghost badge-sm font-mono" title="Operation class">{{ effect.get("op_class") }}</span>
           {% endif %}
+          {% if effect.get("category") %}
+            <span class="badge badge-outline badge-sm font-mono" title="Category">{{ effect.get("category") }}</span>
+          {% endif %}
         </div>
       </div>
+
+      {#- #6041: the classification the request waits under (only when the
+          POLICY_CLASSIFICATION switch was on at request time). A null
+          category means two classification rules disagree. -#}
+      {% if "classification_rule" in effect %}
+        <dl class="mt-2 space-y-1 text-xs" data-testid="approval-classification">
+          {% if not effect.get("category") %}
+            <div class="flex items-baseline justify-between gap-4">
+              <dt class="shrink-0 text-base-content/55">Category</dt>
+              <dd>none: two classification rules disagree</dd>
+            </div>
+          {% endif %}
+          {% if effect.get("labels") %}
+            <div class="flex items-baseline justify-between gap-4">
+              <dt class="shrink-0 text-base-content/55">Labels</dt>
+              <dd class="font-mono [overflow-wrap:anywhere] text-right">
+                {%- for key, value in effect.get("labels") | dictsort -%}
+                  {{ key }}={{ value }}{% if not loop.last %}, {% endif %}
+                {%- endfor -%}
+              </dd>
+            </div>
+          {% endif %}
+          {% if effect.get("classification_rule") %}
+            <div class="flex items-baseline justify-between gap-4">
+              <dt class="shrink-0 text-base-content/55">Classification rule</dt>
+              <dd class="font-mono [overflow-wrap:anywhere] text-right">{{ effect.get("classification_rule") }}</dd>
+            </div>
+          {% endif %}
+        </dl>
+      {% endif %}
 
       {% if effect.get("write_capability_warning") %}
         {#- #2331: the permission preflight found the connector identity likely

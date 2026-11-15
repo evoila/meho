@@ -78,9 +78,11 @@ References
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import re
 import shlex
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import dns.exception
@@ -92,10 +94,17 @@ import dns.zone
 import structlog.contextvars
 
 from meho_backplane.connectors._shared.vault_creds import strip_credential_value
-from meho_backplane.connectors.bind9._atomic import atomic_apply
+from meho_backplane.connectors.bind9._atomic import (
+    AtomicApplyError,
+    AtomicApplyResult,
+    atomic_apply,
+    read_file_locked,
+)
 from meho_backplane.connectors.bind9.ops import Bind9Op
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.bind9.connector import Bind9Connector
 
@@ -1162,6 +1171,71 @@ async def _resolve_zone_and_path(
     )
 
 
+# How often a write redoes its change on a newer zonefile before it gives
+# up. Each retry means another write finished in between, so a few tries
+# cover a burst of writes on one zone.
+_MAX_CONFLICT_RETRIES = 6
+
+
+@dataclass(frozen=True)
+class _ZonePlan:
+    """The change a handler worked out from one read of the zonefile."""
+
+    new_text: str
+    verify_cmd: str
+    rdata: str | None = None
+
+
+async def _apply_zone_change(
+    connector: Bind9Connector,
+    target: Any,
+    *,
+    operator: Operator | None,
+    sudo_password: str,
+    zonefile_path: str,
+    zone_name: str,
+    plan: Callable[[str], _ZonePlan | dict[str, Any]],
+) -> tuple[AtomicApplyResult, _ZonePlan] | dict[str, Any]:
+    """Read the zonefile, plan the change, and write it; redo it if the file moved.
+
+    The read holds the server lock, so it never sees a file that another
+    write has half written. ``plan`` gets the zonefile text and returns
+    the :class:`_ZonePlan`, or
+    a finished answer (a refusal) that is handed back as it is. The write
+    carries the hash of the text that was read. If another write changed
+    the file in between, ``atomic_apply`` writes nothing and raises step
+    ``conflict``; this function then reads the new file and plans again,
+    so no change is lost. After :data:`_MAX_CONFLICT_RETRIES` conflicts
+    the last error is raised.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        current_text = await _read_zonefile_text_locked(
+            connector, target, zonefile_path, operator, sudo_password
+        )
+        outcome = plan(current_text)
+        if isinstance(outcome, dict):
+            return outcome
+        try:
+            result = await atomic_apply(
+                connector,
+                target,
+                operator=operator,
+                sudo_password=sudo_password,
+                audit_slice_path=zonefile_path,
+                zone_name=zone_name,
+                staged_bytes=outcome.new_text.encode("utf-8"),
+                verify_command=outcome.verify_cmd,
+                expected_sha256=hashlib.sha256(current_text.encode("utf-8")).hexdigest(),
+            )
+        except AtomicApplyError as exc:
+            if exc.step != "conflict" or attempt > _MAX_CONFLICT_RETRIES:
+                raise
+            continue
+        return result, outcome
+
+
 async def _read_zonefile_text(
     connector: Bind9Connector,
     target: Any,
@@ -1184,6 +1258,29 @@ async def _read_zonefile_text(
     # remote exit status + stderr.
     cat_proc = await connector._run_command(target, cmd, operator=operator)
     return _require_zero_exit(cat_proc, command=cmd)
+
+
+async def _read_zonefile_text_locked(
+    connector: Bind9Connector,
+    target: Any,
+    zonefile_path: str,
+    operator: Operator | None,
+    sudo_password: str,
+) -> str:
+    """Read the zonefile while holding the server lock that writes take.
+
+    Used by the write ops: a plain ``cat`` (:func:`_read_zonefile_text`)
+    can run while another write has cut the file to zero length, and a
+    change planned on that text would fail or answer ``not_found``.
+    """
+    proc = await read_file_locked(
+        connector,
+        target,
+        operator=operator,
+        sudo_password=sudo_password,
+        path=zonefile_path,
+    )
+    return _require_zero_exit(proc, command=f"cat {shlex.quote(zonefile_path)}")
 
 
 async def bind9_record_add(
@@ -1244,43 +1341,46 @@ async def bind9_record_add(
         explicit_view=explicit_view,
         operator=operator,
     )
-    current_text = await _read_zonefile_text(connector, target, zonefile_path, operator)
 
-    try:
-        new_text = _add_record_to_zonefile(
-            current_text,
-            zone_name=zone_name,
-            fqdn=fqdn,
-            ip=ip,
-            record_type=record_type,
-        )
-    except dns.exception.DNSException as exc:
-        raise ValueError(
-            f"failed to parse / transform zonefile for zone {zone_name!r}: {exc}"
-        ) from exc
+    def plan(current_text: str) -> _ZonePlan:
+        try:
+            new_text = _add_record_to_zonefile(
+                current_text,
+                zone_name=zone_name,
+                fqdn=fqdn,
+                ip=ip,
+                record_type=record_type,
+            )
+        except dns.exception.DNSException as exc:
+            raise ValueError(
+                f"failed to parse / transform zonefile for zone {zone_name!r}: {exc}"
+            ) from exc
+        # A caller-supplied ``view`` means split-horizon disambiguation:
+        # ``dig @localhost`` may be answered by a different view than the one
+        # we edited (#2897), so assert the staged serial loaded into the
+        # named view via ``rndc zonestatus``. On a no-views / single-view
+        # target keep the stronger record-level dig check.
+        if explicit_view is not None:
+            verify_cmd = _zonestatus_serial_verify(
+                zone_name, explicit_view, _soa_serial_from_text(new_text, zone_name)
+            )
+        else:
+            verify_cmd = _dig_add_verify(fqdn, ip, record_type)
+        return _ZonePlan(new_text, verify_cmd)
 
-    # A caller-supplied ``view`` means split-horizon disambiguation:
-    # ``dig @localhost`` may be answered by a different view than the one
-    # we edited (#2897), so assert the staged serial loaded into the
-    # named view via ``rndc zonestatus``. On a no-views / single-view
-    # target keep the stronger record-level dig check.
-    if explicit_view is not None:
-        verify_cmd = _zonestatus_serial_verify(
-            zone_name, explicit_view, _soa_serial_from_text(new_text, zone_name)
-        )
-    else:
-        verify_cmd = _dig_add_verify(fqdn, ip, record_type)
-
-    apply_result = await atomic_apply(
+    # Read, plan and write run as one unit; a zonefile that changed in
+    # between is read again and the change is planned again.
+    applied = await _apply_zone_change(
         connector,
         target,
         operator=operator,
         sudo_password=sudo_password,
-        audit_slice_path=zonefile_path,
+        zonefile_path=zonefile_path,
         zone_name=zone_name,
-        staged_bytes=new_text.encode("utf-8"),
-        verify_command=verify_cmd,
+        plan=plan,
     )
+    assert not isinstance(applied, dict)  # ``plan`` never returns a finished answer here
+    apply_result = applied[0]
 
     # Chassis-shape audit enrichment: bind ``audit_state_before`` /
     # ``audit_state_after`` so the dispatcher's audit-row payload
@@ -1337,40 +1437,41 @@ async def bind9_record_remove(
         explicit_view=explicit_view,
         operator=operator,
     )
-    current_text = await _read_zonefile_text(connector, target, zonefile_path, operator)
 
-    try:
-        new_text = _remove_record_from_zonefile(
-            current_text,
-            zone_name=zone_name,
-            fqdn=fqdn,
-        )
-    except dns.exception.DNSException as exc:
-        raise ValueError(
-            f"failed to parse / transform zonefile for zone {zone_name!r}: {exc}"
-        ) from exc
+    def plan(current_text: str) -> _ZonePlan:
+        try:
+            new_text = _remove_record_from_zonefile(
+                current_text,
+                zone_name=zone_name,
+                fqdn=fqdn,
+            )
+        except dns.exception.DNSException as exc:
+            raise ValueError(
+                f"failed to parse / transform zonefile for zone {zone_name!r}: {exc}"
+            ) from exc
+        # View-aware verify -- see bind9_record_add for the rationale. For a
+        # targeted view the removal is confirmed by the staged serial being
+        # loaded into that view; otherwise the FQDN must resolve to neither
+        # an A nor an AAAA answer via the local resolver.
+        if explicit_view is not None:
+            verify_cmd = _zonestatus_serial_verify(
+                zone_name, explicit_view, _soa_serial_from_text(new_text, zone_name)
+            )
+        else:
+            verify_cmd = _dig_remove_verify(fqdn)
+        return _ZonePlan(new_text, verify_cmd)
 
-    # View-aware verify -- see bind9_record_add for the rationale. For a
-    # targeted view the removal is confirmed by the staged serial being
-    # loaded into that view; otherwise the FQDN must resolve to neither
-    # an A nor an AAAA answer via the local resolver.
-    if explicit_view is not None:
-        verify_cmd = _zonestatus_serial_verify(
-            zone_name, explicit_view, _soa_serial_from_text(new_text, zone_name)
-        )
-    else:
-        verify_cmd = _dig_remove_verify(fqdn)
-
-    apply_result = await atomic_apply(
+    applied = await _apply_zone_change(
         connector,
         target,
         operator=operator,
         sudo_password=sudo_password,
-        audit_slice_path=zonefile_path,
+        zonefile_path=zonefile_path,
         zone_name=zone_name,
-        staged_bytes=new_text.encode("utf-8"),
-        verify_command=verify_cmd,
+        plan=plan,
     )
+    assert not isinstance(applied, dict)  # ``plan`` never returns a finished answer here
+    apply_result = applied[0]
 
     # Chassis audit enrichment — see bind9_record_add for rationale.
     structlog.contextvars.bind_contextvars(
@@ -1502,79 +1603,82 @@ async def bind9_record_delete(
             candidates=exc.candidates,
         )
 
-    current_text = await _read_zonefile_text(connector, target, zonefile_path, operator)
-    try:
-        matches = _find_record_matches(
-            current_text, zone_name=zone_name, fqdn=fqdn, record_type=record_type
-        )
-    except dns.exception.DNSException as exc:
-        raise ValueError(f"failed to parse zonefile for zone {zone_name!r}: {exc}") from exc
+    def plan(current_text: str) -> _ZonePlan | dict[str, Any]:
+        try:
+            matches = _find_record_matches(
+                current_text, zone_name=zone_name, fqdn=fqdn, record_type=record_type
+            )
+        except dns.exception.DNSException as exc:
+            raise ValueError(f"failed to parse zonefile for zone {zone_name!r}: {exc}") from exc
 
-    target_rdata, status = _resolve_delete_target(
-        matches, record_type=record_type, rdata_param=rdata_param
-    )
-    if status == "not_found":
-        detail = f" with rdata {rdata_param!r}" if rdata_param is not None else ""
-        return _delete_refusal(
-            "not_found",
-            fqdn=fqdn,
-            record_type=record_type,
-            rdata=rdata_param,
-            zone=zone_name,
-            view=view,
-            guidance=(
-                f"no {record_type} record at {fqdn!r}{detail} in zone {zone_name!r}; "
-                "nothing deleted"
-            ),
+        target_rdata, status = _resolve_delete_target(
+            matches, record_type=record_type, rdata_param=rdata_param
         )
-    if status == "ambiguous":
-        return _delete_refusal(
-            "ambiguous",
-            fqdn=fqdn,
-            record_type=record_type,
-            rdata=rdata_param,
-            zone=zone_name,
-            view=view,
-            candidates=matches,
-            guidance=(
-                f"{fqdn!r} carries {len(matches)} {record_type} records "
-                f"({', '.join(matches)}); pass ``rdata`` to name the single "
-                "record to delete — this op never deletes more than one"
-            ),
-        )
+        if status == "not_found":
+            detail = f" with rdata {rdata_param!r}" if rdata_param is not None else ""
+            return _delete_refusal(
+                "not_found",
+                fqdn=fqdn,
+                record_type=record_type,
+                rdata=rdata_param,
+                zone=zone_name,
+                view=view,
+                guidance=(
+                    f"no {record_type} record at {fqdn!r}{detail} in zone {zone_name!r}; "
+                    "nothing deleted"
+                ),
+            )
+        if status == "ambiguous":
+            return _delete_refusal(
+                "ambiguous",
+                fqdn=fqdn,
+                record_type=record_type,
+                rdata=rdata_param,
+                zone=zone_name,
+                view=view,
+                candidates=matches,
+                guidance=(
+                    f"{fqdn!r} carries {len(matches)} {record_type} records "
+                    f"({', '.join(matches)}); pass ``rdata`` to name the single "
+                    "record to delete — this op never deletes more than one"
+                ),
+            )
 
-    assert target_rdata is not None  # status == "ok" ⇒ a resolved value
-    try:
-        new_text = _delete_one_record_from_zonefile(
-            current_text,
-            zone_name=zone_name,
-            fqdn=fqdn,
-            record_type=record_type,
-            rdata=target_rdata,
-        )
-    except (dns.exception.DNSException, ValueError) as exc:
-        raise ValueError(f"failed to transform zonefile for zone {zone_name!r}: {exc}") from exc
+        assert target_rdata is not None  # status == "ok" ⇒ a resolved value
+        try:
+            new_text = _delete_one_record_from_zonefile(
+                current_text,
+                zone_name=zone_name,
+                fqdn=fqdn,
+                record_type=record_type,
+                rdata=target_rdata,
+            )
+        except (dns.exception.DNSException, ValueError) as exc:
+            raise ValueError(f"failed to transform zonefile for zone {zone_name!r}: {exc}") from exc
 
-    # View-aware verify — see bind9_record_add for the #2897 rationale. The
-    # no-views path asserts the deleted VALUE is gone (others at the name may
-    # remain), not that the name stops resolving.
-    if explicit_view is not None:
-        verify_cmd = _zonestatus_serial_verify(
-            zone_name, explicit_view, _soa_serial_from_text(new_text, zone_name)
-        )
-    else:
-        verify_cmd = _dig_value_absent_verify(fqdn, record_type, target_rdata)
+        # View-aware verify — see bind9_record_add for the #2897 rationale. The
+        # no-views path asserts the deleted VALUE is gone (others at the name may
+        # remain), not that the name stops resolving.
+        if explicit_view is not None:
+            verify_cmd = _zonestatus_serial_verify(
+                zone_name, explicit_view, _soa_serial_from_text(new_text, zone_name)
+            )
+        else:
+            verify_cmd = _dig_value_absent_verify(fqdn, record_type, target_rdata)
+        return _ZonePlan(new_text, verify_cmd, rdata=target_rdata)
 
-    apply_result = await atomic_apply(
+    applied = await _apply_zone_change(
         connector,
         target,
         operator=operator,
         sudo_password=sudo_password,
-        audit_slice_path=zonefile_path,
+        zonefile_path=zonefile_path,
         zone_name=zone_name,
-        staged_bytes=new_text.encode("utf-8"),
-        verify_command=verify_cmd,
+        plan=plan,
     )
+    if isinstance(applied, dict):
+        return applied
+    apply_result, applied_plan = applied
 
     # Chassis audit enrichment — see bind9_record_add for rationale.
     structlog.contextvars.bind_contextvars(
@@ -1586,7 +1690,7 @@ async def bind9_record_delete(
         "deleted": True,
         "fqdn": fqdn,
         "type": record_type,
-        "rdata": target_rdata,
+        "rdata": applied_plan.rdata,
         "zone": zone_name,
         "file": zonefile_path,
         "view": view,

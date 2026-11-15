@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0169_add_endpoint_descriptor_op_class`` (#6485).
+"""Tests for Alembic migration ``0170_add_endpoint_descriptor_op_class`` (#6485).
 
 * The upgrade adds exactly one column, ``endpoint_descriptor.op_class``,
   and it is nullable. No other table or column changes.
@@ -24,8 +24,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0169"
-_DOWN_REVISION = "0168"
+_REVISION = "0170"
+_DOWN_REVISION = "0169"
 
 _OLD_ROW_INSERT = (
     "INSERT INTO endpoint_descriptor (id, product, version, impl_id, op_id, source_kind, "
@@ -39,7 +39,7 @@ _OLD_ROW_INSERT = (
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0169.db"
+    db_path = tmp_path / "migration_0170.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

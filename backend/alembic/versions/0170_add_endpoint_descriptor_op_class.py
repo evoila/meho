@@ -3,8 +3,8 @@
 
 """Add the stored op class to ``endpoint_descriptor`` (#6485).
 
-Revision ID: 0169
-Revises: 0168
+Revision ID: 0170
+Revises: 0169
 Create Date: 2026-11-15
 
 One nullable column, ``endpoint_descriptor.op_class``: the class a
@@ -22,8 +22,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0169"
-down_revision: str | None = "0168"
+revision: str = "0170"
+down_revision: str | None = "0169"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

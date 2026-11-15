@@ -51,6 +51,7 @@ from meho_backplane.policy.classification import (
     entries_from_document,
     install_wait_text,
     install_wait_undone,
+    label_text_ok,
     taxonomy_from_documents,
 )
 from meho_backplane.settings import get_settings
@@ -129,7 +130,7 @@ def _override_entries(
                 connector=connector_id,
                 op=override.op_id,
                 category=override.category,
-                labels={str(k): str(v) for k, v in labels.items()},
+                labels={str(k): str(v) for k, v in labels.items() if label_text_ok(str(k), str(v))},
             )
         )
     return entries
@@ -301,6 +302,11 @@ def _check_labels(labels: Mapping[str, str]) -> None:
         if not value or len(value) > _MAX_LABEL_VALUE:
             raise ValueError(
                 f"The value of label {key!r} must have 1 to {_MAX_LABEL_VALUE} characters."
+            )
+        if not label_text_ok(key, value):
+            raise ValueError(
+                f"Label {key!r}: a key may use only letters, digits and . _ / -, "
+                "and a value only printable characters with no line breaks."
             )
 
 

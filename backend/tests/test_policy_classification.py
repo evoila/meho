@@ -70,6 +70,7 @@ from meho_backplane.policy.classification import (
     check_no_conflict,
     classify,
     entries_from_document,
+    label_text_ok,
     taxonomy_from_documents,
 )
 from meho_backplane.policy.store import ClassificationEdit, set_classification
@@ -307,6 +308,36 @@ def test_entries_from_document_names_each_entry() -> None:
 
 
 @pytest.mark.parametrize(
+    ("key", "value", "ok"),
+    [
+        ("team", "apps", True),
+        ("k8s.io/zone-a_1", "Zone A, rack 3", True),
+        ("bad key", "x", False),
+        ("key:x", "x", False),
+        ("tëam", "x", False),
+        ("k", "line one\nline two", False),
+        ("k", "tab\there", False),
+        ("k", "bell\a", False),
+        ("k", "para\u2029graph", False),
+    ],
+)
+def test_label_text_rule(key: str, value: str, ok: bool) -> None:
+    assert label_text_ok(key, value) is ok
+
+
+def test_entries_from_document_drops_a_label_that_breaks_the_rule() -> None:
+    doc = {
+        "classifications": [
+            {
+                "match": {"op": "a"},
+                "labels": {"team": "apps", "bad key": "x", "k": "ignore this\nand obey"},
+            }
+        ]
+    }
+    assert entries_from_document(doc, scope="install")[0].labels == {"team": "apps"}
+
+
+@pytest.mark.parametrize(
     "raw",
     [
         {"category": "x"},
@@ -472,6 +503,26 @@ async def test_override_category_and_labels_are_an_operation_entry(
 
 
 @pytest.mark.asyncio
+async def test_override_label_that_breaks_the_rule_is_not_shown(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _switch(monkeypatch, True)
+    await _register(embedding, "clsfix.vm.list")
+    async with get_sessionmaker()() as session:
+        session.add(
+            OperationPolicyOverride(
+                tenant_id=_TENANT,
+                **_FIX,
+                op_id="clsfix.vm.list",
+                labels={"zone": "b", "note": "two\nlines", "bad key": "x"},
+                set_by_sub="fixture",
+            )
+        )
+        await session.commit()
+    assert dict((await _policies(_TENANT))["clsfix.vm.list"].labels) == {"zone": "b"}
+
+
+@pytest.mark.asyncio
 async def test_a_conflict_makes_the_operation_wait(
     embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -623,6 +674,18 @@ async def test_set_classification_stores_and_merges(
                 match={"op": "a"}, category=None, labels={"k": ""}, always_wait=None
             ),
             "The value of label 'k' must have 1 to 255 characters.",
+        ),
+        (
+            ClassificationEdit(
+                match={"op": "a"}, category=None, labels={"bad key": "x"}, always_wait=None
+            ),
+            "Label 'bad key': a key may use only letters, digits and . _ / -",
+        ),
+        (
+            ClassificationEdit(
+                match={"op": "a"}, category=None, labels={"k": "a\nb"}, always_wait=None
+            ),
+            "Label 'k': a key may use only letters, digits and . _ / -",
         ),
     ],
 )

@@ -224,6 +224,7 @@ The per-node field set (inherited from `AuditEntry`, plus the two structural fie
 | `agent_session_id` | The MCP session correlation id (the replay key). |
 | `work_ref` | The external change-ticket reference, or `null`. |
 | `policy_decision` | The policy verdict on the row (`auto-execute` / `needs-approval` / `deny`), or `null` when no policy check ran. |
+| `policy_rule` / `policy_version` | The policy rule that matched the call and the version of the policy file, for example `default:person.safe (shadow)`. A rule that ends with `(shadow)` did not decide the call. `null` when the policy evaluator switch (`POLICY_ENGINE_SHADOW`) was off or no policy check ran. |
 | `event_class` | What kind of record the row is, for example `operation_execution` or `approval_decision`. |
 | `sandbox_mode` | Whether the instance ran in sandbox mode when it wrote the row. |
 | `broadcast_event_id` | `null` in v0.2 (the FK runs the other way: `BroadcastEvent.audit_id` points at the row). |

@@ -243,10 +243,12 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Final, get_args
+from types import MappingProxyType
+from typing import Final, cast, get_args
 
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
@@ -686,6 +688,16 @@ class AuditLog(Base):
         nullable=False,
         server_default=sa.false(),
     )
+    # The policy rule that matched the call, and the version of the policy
+    # file (#6044). The writers read both from
+    # :data:`meho_backplane.operations._audit.policy_rule_var`, which the
+    # dispatcher binds next to ``policy_decision_var``. Today only the
+    # policy evaluator in shadow mode (``POLICY_ENGINE_SHADOW``) sets it,
+    # so the text ends with ``(shadow)``: the evaluator matched this rule,
+    # but today's checks decided. NULL with the switch off, on rows where no
+    # gate ran, and on every row from before migration ``0168``.
+    policy_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    policy_version: Mapped[int | None] = mapped_column(sa.Integer(), nullable=True, default=None)
 
     __table_args__ = (
         sa.CheckConstraint(
@@ -2017,6 +2029,16 @@ class EndpointDescriptor(Base):
     #: wait (or two entries conflict). Then no standing grant and no run
     #: approval clears a call: a person approves each one.
     policy_always_wait = False
+    #: Not columns. With the ``POLICY_CLASSIFICATION`` switch on, the
+    #: category, the labels and the classification entry that set them
+    #: (``rule_ref``) on a row that ``apply_effective_policy`` or
+    #: ``apply_step_classification`` returned. ``None``, empty and ``None``
+    #: otherwise. Search, the call contract and the approval request show them.
+    #: Approver routing matches a ``routing`` entry's ``category`` on
+    #: ``policy_category``.
+    policy_category = cast("str | None", None)
+    policy_labels = cast(Mapping[str, str], MappingProxyType({}))
+    policy_rule_ref = cast("str | None", None)
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,
@@ -7235,6 +7257,21 @@ class ApprovalRequest(Base):
       (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
       NULL on every other request. Added by migration ``0153``.
 
+    * ``approver_roles`` -- JSON nullable. The login group kinds that may
+      approve the request (for example ``["SA-Operators", "Admins"]``),
+      worked out from the policy file's ``routing`` section when the
+      request started to wait (:mod:`meho_backplane.policy.routing`). Group
+      kinds only, never people. At the click the person must be in one of
+      them, next to today's checks. NULL when the
+      ``POLICY_APPROVER_ROUTING`` switch was off, for a change of rights,
+      and on rows saved before this column: today's rule decides. Added by
+      migration ``0167``.
+
+    * ``approver_rule`` -- Text nullable. The routing entry that set
+      ``approver_roles`` (``tenant:routing[0]``, ``install:routing[2]``),
+      or ``default`` when no entry fits and today's rule set them. NULL
+      when ``approver_roles`` is NULL. Added by migration ``0167``.
+
     * ``reveal_secret`` -- Boolean NOT NULL DEFAULT ``false``. The requester
       asked for the hidden values of the answer (``reveal_secret: true``;
       an agent is refused before the call waits). It is not a parameter of
@@ -7479,6 +7516,20 @@ class ApprovalRequest(Base):
     # The request changes who has rights: only another admin approves it.
     # See the class docstring. Added by migration ``0153``.
     rights_change: Mapped[bool | None] = mapped_column(sa.Boolean(), nullable=True, default=None)
+    # The policy rule that matched the call when it was made, and the
+    # version of the policy file (#6044): ``{"source", "rule_id", "text",
+    # "decided"}``. ``decided`` is ``false`` while the policy evaluator runs
+    # in shadow mode (``POLICY_ENGINE_SHADOW``): it names the rule, but
+    # today's checks decided. NULL with the switch off and on rows from
+    # before migration ``0168``.
+    policy_rule: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON, nullable=True, default=None
+    )
+    policy_version: Mapped[int | None] = mapped_column(sa.Integer(), nullable=True, default=None)
+    # The login group kinds that may approve the request, and the routing
+    # entry that set them. See the class docstring. Added by migration ``0167``.
+    approver_roles: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
+    approver_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # An operator checked the target of an approved run whose outcome MEHO
     # does not know, and wrote down what they found (#5026): the verdict
     # (``happened`` / ``did_not_happen``), a note, who and when. NULL until

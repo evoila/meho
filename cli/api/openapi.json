@@ -28197,6 +28197,16 @@
             "nullable": true,
             "title": "Policy Decision"
           },
+          "policy_rule": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Rule"
+          },
+          "policy_version": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Policy Version"
+          },
           "event_class": {
             "type": "string",
             "title": "Event Class"
@@ -31538,7 +31548,7 @@
             "type": "boolean",
             "nullable": true,
             "title": "Always Wait",
-            "description": "true: every call of a matched operation waits for approval. false: back to the operation's own value, never below it."
+            "description": "true: every call of a matched operation waits for approval. false: back to the operation's own value, never below it. false is refused when the install's policy makes a matched operation always wait."
           }
         },
         "additionalProperties": false,
@@ -39734,6 +39744,16 @@
             "type": "string",
             "nullable": true,
             "title": "Policy Decision"
+          },
+          "policy_rule": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Rule"
+          },
+          "policy_version": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Policy Version"
           },
           "event_class": {
             "type": "string",

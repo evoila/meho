@@ -5110,7 +5110,7 @@ meho service-principals read-scope show <principal-sub> [flags]
 
 ## `meho sessions`
 
-Upload, list, show and delete stored agent sessions
+Upload, list, show, download and delete stored agent sessions
 
 ```
 meho sessions
@@ -5128,6 +5128,17 @@ meho sessions delete <session-id> [flags]
 - `--confirm` — do not ask before deleting
 - `--json` — print the result as JSON
 
+### `meho sessions get`
+
+Download one stored agent session as whole files
+
+```
+meho sessions get <session-id> <folder> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by `meho login`)
+- `--json` — print what was written as JSON
+
 ### `meho sessions list`
 
 List the stored agent sessions of your tenant (GET /api/v1/sessions)
@@ -5141,7 +5152,9 @@ meho sessions list [flags]
 - `--json` — print the sessions as JSON
 - `--limit` — sessions per page (1 to 200)
 - `--project` — only sessions of this project
+- `--since` — only sessions with an upload at or after this time (RFC 3339 with a time zone, for example 2026-11-02T00:00:00Z)
 - `--state` — only sessions in this state: open, ended or unfinished
+- `--until` — only sessions that started before this time (RFC 3339 with a time zone)
 
 ### `meho sessions push`
 

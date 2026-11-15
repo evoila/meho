@@ -741,6 +741,11 @@ async def test_gcloud_e2e_all_ops_have_op_id_registered() -> None:
         "gcloud.iam.workload_identity_pools.providers.create",
         "gcloud.iam.workload_identity_pools.providers.update_keys",
         "gcloud.iam.service_accounts.binding.add",
+        "gcloud.storage.buckets.create",
+        "gcloud.storage.buckets.update_settings",
+        "gcloud.storage.buckets.read",
+        "gcloud.storage.buckets.access.add",
+        "gcloud.iam.service_accounts.create",
     }
     registered_op_ids = {op.op_id for op in GCLOUD_OPS}
     assert registered_op_ids == expected_op_ids, (

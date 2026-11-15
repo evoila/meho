@@ -9,7 +9,9 @@ sides on the approval card:
 
 * ``keycloak.client.update``: ``current_values`` holds the client's values
   of each field the request sends, read from Keycloak when the request
-  waits; ``new_values`` holds the values the request sends.
+  waits; ``new_values`` holds the values the request sends. For a map
+  field (such as ``attributes``), the write changes only the keys it
+  sends, so ``current_values`` shows only those keys too.
 * ``keycloak.realm.update``: the same, for the realm. The card of
   :mod:`.ops_write_realm_smtp` (realm, requested fields, where the SMTP
   password comes from) gets ``current_values`` added.
@@ -160,8 +162,17 @@ def _add_current_values(
         card["current_values_available"] = False
         return card
     card["current_values_available"] = True
-    card["current_values"] = _hide(ctx, {key: current.get(key) for key in requested})
+    card["current_values"] = _hide(
+        ctx, {key: _value_now(current.get(key), sent) for key, sent in requested.items()}
+    )
     return card
+
+
+def _value_now(now: Any, sent: Any) -> Any:
+    """The value now of a field; for a map field, only the keys the request sends."""
+    if isinstance(now, dict) and isinstance(sent, dict):
+        return {key: now.get(key) for key in sent}
+    return now
 
 
 async def _client_update_card(ctx: PreviewContext) -> dict[str, Any] | None:

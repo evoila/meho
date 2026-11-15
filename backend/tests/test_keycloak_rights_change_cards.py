@@ -110,6 +110,16 @@ async def test_client_update_shows_the_values_now_and_the_new_values() -> None:
 
 
 @pytest.mark.asyncio
+async def test_client_update_shows_only_the_sent_keys_of_a_map_field() -> None:
+    client_now = {**_CLIENT_NOW, "attributes": {"pkce.code.challenge.method": "S256", "a": "1"}}
+    params = {"id": _CLIENT_UUID, "representation": {"attributes": {"a": "2", "b": "3"}}}
+
+    card = await _card("keycloak.client.update", params, _connector(client_now))
+
+    assert card["current_values"] == {"attributes": {"a": "1", "b": None}}
+
+
+@pytest.mark.asyncio
 async def test_client_update_hides_the_client_secret_on_both_sides() -> None:
     params = {"id": _CLIENT_UUID, "representation": {"secret": "made-up-new-secret-0b2d"}}
 
@@ -162,7 +172,7 @@ async def test_realm_update_shows_the_values_now_and_hides_the_smtp_password() -
     assert card["realm"] == "example"
     assert card["current_values_available"] is True
     assert card["current_values"]["registrationAllowed"] is False
-    assert card["current_values"]["smtpServer"]["host"] == "mail.example.test"
+    assert card["current_values"]["smtpServer"] == {"host": "mail.example.test"}
     assert card["representation"]["registrationAllowed"] is True
     assert card["smtp_password_secret_ref"] == "example/keycloak/smtp"
     assert _SMTP_PASSWORD not in json.dumps(card)

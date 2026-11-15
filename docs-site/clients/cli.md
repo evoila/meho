@@ -201,8 +201,10 @@ default login. This replaces using one `XDG_CONFIG_HOME` for each
 identity. All profiles share the saved backplane URL, so a login with
 another URL changes it for every profile (the login prints one line
 when it does). The browser sign-in of `meho approvals approve` decides
-who approves; the profile only picks the login for `approvals list`
-and `approvals show`.
+who approves; it does not use the profile. Every other approvals
+command uses the stored login of the active profile: `list`, `show`,
+`reject`, `withdraw`, `result`, `mark-checked` and `runs`. A reject
+needs no new sign-in, so it is decided as the profile's identity.
 
 ### How long the login lasts
 

@@ -7,9 +7,10 @@ The handler is in
 :mod:`~meho_backplane.connectors.keycloak.ops_write_scope_mapper`.
 :mod:`~meho_backplane.connectors.keycloak.ops_write_schemas` folds
 :data:`SCOPE_MAPPER_OPS` into the connector's ``WRITE_OPS``. The row is
-``dangerous`` with ``requires_approval=True``: a mapper decides what goes
-into the login token, so only a MEHO-SA-Operator or a tenant admin may
-approve, and the self-approval switch does not cover it.
+``dangerous`` with ``requires_approval=True``. A mapper decides what goes
+into the login token, so the op is a change of rights: the requester never
+approves it, the approver is another admin, and a person approves each
+call (registered in the handler module).
 """
 
 from __future__ import annotations
@@ -44,11 +45,25 @@ _PARAMS: dict[str, Any] = {
         "representation": {
             "type": "object",
             "description": (
-                "Only the mapper fields to change. A field not sent stays as it is. "
-                "``config`` merges key by key. The mapper ``id`` cannot be changed."
+                "Only the mapper fields to change: ``name`` and ``config``. A field "
+                "not sent stays as it is. ``config`` merges key by key. The mapper's "
+                "type (``protocolMapper``) and ``protocol`` cannot be changed."
             ),
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "A new name for the mapper.",
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Config keys to change, as strings. Other keys stay.",
+                    "minProperties": 1,
+                    "additionalProperties": {"type": "string"},
+                },
+            },
             "minProperties": 1,
-            "additionalProperties": True,
+            "additionalProperties": False,
         },
     },
     "required": ["representation"],
@@ -105,8 +120,8 @@ SCOPE_MAPPER_OPS: tuple[KeycloakOp, ...] = (
         description=(
             "Finds a client scope and one of its protocol mappers by id or exact "
             "name, then changes only the fields in ``representation``. Other "
-            "fields stay. ``config`` merges key by key. An id and a name sent "
-            "together must name one object. Safe to run twice. requires_approval=True."
+            "fields stay. Only ``name`` and ``config`` can change. A change of "
+            "rights: another admin approves each call. requires_approval=True."
         ),
         parameter_schema=_PARAMS,
         response_schema=_RESULT,
@@ -121,7 +136,9 @@ SCOPE_MAPPER_OPS: tuple[KeycloakOp, ...] = (
                 "add one value to a hardcoded-claim mapper, so more people get a "
                 "claim in their token. A second hardcoded-claim mapper with the "
                 "same claim name does not add values; it overwrites the first. "
-                "Change the existing mapper instead. A second person must approve. "
+                "Change the existing mapper instead. This is a change of rights: "
+                "another admin must approve each call, and no standing grant or "
+                "run approval covers it. "
                 "To add a mapper to a client, use ``keycloak.protocol_mapper.create``."
             ),
             "when_to_call": "When the claim a client scope puts into tokens must change.",
@@ -140,7 +157,8 @@ SCOPE_MAPPER_OPS: tuple[KeycloakOp, ...] = (
                 "mapper_id": "Mapper UUID from the scope's protocolMappers list.",
                 "mapper_name": "Exact mapper name; resolved to UUID when mapper_id is absent.",
                 "representation": (
-                    "Only the fields to change, for example {'config': {'claim.value': '<value>'}}."
+                    "Only the fields to change, for example {'config': {'claim.value': "
+                    "'<value>'}}. Only 'name' and 'config' are allowed."
                 ),
             },
             "output_shape": (

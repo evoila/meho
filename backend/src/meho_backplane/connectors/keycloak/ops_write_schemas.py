@@ -27,7 +27,8 @@ a tenant-rights change, like ``keycloak.group.member.add`` and
 * ``keycloak.protocol_mapper.create`` -- a mapper decides the claims, also
   ``tenant_id`` / ``tenant_role``.
 * ``keycloak.client_scope.protocol_mapper.update`` -- the same, for a
-  mapper on a client scope.
+  mapper on a client scope. It is also registered as a change of rights:
+  the requester never approves it and the approver is another admin.
 * ``keycloak.user.reset_password`` -- sets the password of any user of the
   realm, so it lets someone sign in as that user.
 

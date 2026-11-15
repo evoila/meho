@@ -16,8 +16,12 @@ one key and keeps the others.
 A name that matches no scope or mapper raises
 :exc:`~meho_backplane.connectors.keycloak.ops_write.KeycloakUserNotFoundError`
 (the connector's shared "not found" error) and nothing is written. A name
-that matches more than one raises :exc:`ValueError`. The mapper's ``id``
-cannot be changed.
+that matches more than one raises :exc:`ValueError`.
+
+``representation`` may hold only ``name`` and ``config``. A change of the
+mapper's type (``protocolMapper``) or ``protocol`` makes another kind of
+mapper, whose config keys mean other things. The approver then could not
+compare the old and the new values on the card. So this op does not do it.
 
 A request that gives both an id and a name for the scope (or for the
 mapper) must name one object: the name stored in Keycloak for that id must
@@ -25,10 +29,19 @@ be the name sent. Otherwise the request is refused before it waits for
 approval, and again when it runs. Nothing is written.
 
 The approval card shows the ids and the names stored in Keycloak, also when
-the caller sent only one of them. After approval, the op acts on the ids on
-the card. It does not look a name up again. When the stored name of an id
-is no longer the one on the card, the run is refused. A card without both
-ids and both names is refused too.
+the caller sent only one of them. It also shows the mapper as it is now:
+its type, protocol and claim name, and the old value of each field sent
+(secrets hidden). After approval, the op acts on the ids on the card. It
+does not look a name up again. The run is refused when the stored name of
+an id is no longer the one on the card, or when the mapper's type,
+protocol or config is no longer the one the card was made from. A card
+without both ids, both names and that content is refused too.
+
+The op is a change of rights: a mapper decides what goes into a login
+token. So the requester never approves it, and the approver is another
+admin (:func:`~meho_backplane.operations.grant_approval.register_rights_change_op`).
+A person approves each call: no standing grant and no run approval covers
+it (:func:`~meho_backplane.op_classes.declare_per_call_approval`).
 
 Safe to run twice: the same fields written again is a success.
 
@@ -38,6 +51,8 @@ The op-metadata row is in
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -55,12 +70,14 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import get_or_no
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.op_classes import declare_per_call_approval
 from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
     PreviewContext,
     approved_preview,
     register_preview_builder,
 )
+from meho_backplane.operations.grant_approval import register_rights_change_op
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -70,6 +87,9 @@ if TYPE_CHECKING:
 __all__ = ["keycloak_client_scope_protocol_mapper_update"]
 
 _OP_ID = "keycloak.client_scope.protocol_mapper.update"
+
+#: The fields ``representation`` may change.
+_CHANGEABLE = frozenset({"name", "config"})
 
 
 def _opt_str(value: Any) -> str | None:
@@ -227,24 +247,31 @@ async def _resolve(
     )
 
 
-def _approved_ids(params: dict[str, Any]) -> dict[str, Any] | None:
-    """The request with the ids and names on the approval card, during the approved run.
+def _content_hash(mapper: dict[str, Any]) -> str:
+    """A SHA-256 of the mapper's type, protocol and config, to tell a later change."""
+    content = {key: mapper.get(key) for key in ("protocolMapper", "protocol", "config")}
+    return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+
+
+def _approved_card(params: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    """The request with the ids and names on the approval card, and the card's content hash.
 
     ``None`` when the call is not the approved run of a request. A card
-    without both ids and both names is refused: MEHO cannot tell which
-    objects the approver saw.
+    without both ids, both names and the content hash is refused: MEHO
+    cannot tell what the approver saw.
     """
     card = approved_preview(_OP_ID)
     if card is None:
         return None
     pinned = {key: _opt_str(card.get(key)) for keys in _ID_NAME_KEYS for key in keys[:2]}
-    if any(value is None for value in pinned.values()):
+    content = _opt_str(card.get("mapper_content_hash"))
+    if content is None or any(value is None for value in pinned.values()):
         raise ValueError(
-            f"{_OP_ID}: the approval card does not show the ids and names of the client "
-            "scope and the mapper, so MEHO cannot tell what was approved. Nothing was "
+            f"{_OP_ID}: the approval card does not show the client scope and the mapper "
+            "as they were, so MEHO cannot tell what was approved. Nothing was "
             "changed. Send a new request."
         )
-    return {**params, **pinned}
+    return {**params, **pinned}, content
 
 
 async def keycloak_client_scope_protocol_mapper_update(
@@ -263,10 +290,21 @@ async def keycloak_client_scope_protocol_mapper_update(
     representation = params.get("representation")
     if not isinstance(representation, dict) or not representation:
         raise ValueError(f"{_OP_ID} requires a non-empty 'representation' object")
-    if "id" in representation:
-        raise ValueError(f"{_OP_ID}: the mapper 'id' cannot be changed; remove it")
-    pinned = _approved_ids(params)
-    found = await _resolve(self, operator, target, pinned or params, approved=pinned is not None)
+    if not set(representation) <= _CHANGEABLE:
+        raise ValueError(
+            f"{_OP_ID}: 'representation' may change only 'name' and 'config'; remove "
+            f"{sorted(set(representation) - _CHANGEABLE)}"
+        )
+    approved = _approved_card(params)
+    found = await _resolve(
+        self, operator, target, approved[0] if approved else params, approved=approved is not None
+    )
+    if approved is not None and _content_hash(found.mapper) != approved[1]:
+        raise ValueError(
+            f"{_OP_ID}: the mapper changed after the approval: its type, protocol or "
+            "config is not the one on the approval card. Nothing was changed. A new "
+            "request is needed."
+        )
     try:
         check = await read_merge_write(
             self,
@@ -294,6 +332,24 @@ async def keycloak_client_scope_protocol_mapper_update(
     }
 
 
+def _current(mapper: dict[str, Any], representation: dict[str, Any]) -> dict[str, Any]:
+    """The mapper as it is now: type, protocol, claim name, and the old value of each field sent."""
+    raw_config = mapper.get("config")
+    config: dict[str, Any] = raw_config if isinstance(raw_config, dict) else {}
+    before: dict[str, Any] = {}
+    for key, value in representation.items():
+        if key == "config" and isinstance(value, dict):
+            before["config"] = {name: config.get(name) for name in value}
+        else:
+            before[key] = mapper.get(key)
+    return {
+        "protocolMapper": mapper.get("protocolMapper"),
+        "protocol": mapper.get("protocol"),
+        "claim_name": config.get("claim.name"),
+        "before": redact_secret_fields(before),
+    }
+
+
 def _live_connector(ctx: PreviewContext) -> KeycloakConnector | None:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
 
@@ -304,12 +360,15 @@ def _live_connector(ctx: PreviewContext) -> KeycloakConnector | None:
 
 
 async def _scope_mapper_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Card: the scope and the mapper (ids and stored names) and the fields to change.
+    """Card: the scope and the mapper (ids and stored names), the mapper now, and the change.
 
-    When the objects cannot be read (no live connector, an unknown name, a
-    fault), the card still shows the request and says
-    ``current_available: false``. The approved run then refuses, because the
-    card has no ids.
+    ``current`` holds the mapper's type, protocol and claim name, and the old
+    value of each field sent; ``representation`` holds the new values (both
+    with secrets hidden). ``mapper_content_hash`` lets the approved run tell
+    whether the mapper changed in between. When the objects cannot be read
+    (no live connector, an unknown name, a fault), the card still shows the
+    request and says ``current_available: false``. The approved run then
+    refuses, because the card has no ids and no content hash.
     """
     representation = ctx.params.get("representation")
     representation = representation if isinstance(representation, dict) else {}
@@ -336,6 +395,8 @@ async def _scope_mapper_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         scope_name=found.scope_name,
         mapper_id=found.mapper_id,
         mapper_name=found.mapper_name,
+        current=_current(found.mapper, representation),
+        mapper_content_hash=_content_hash(found.mapper),
         current_available=True,
     )
     return preview
@@ -369,5 +430,7 @@ async def _refuse_names_of_other_objects(ctx: PreviewContext) -> str | None:
     return None
 
 
+register_rights_change_op(_OP_ID)
+declare_per_call_approval([_OP_ID])
 register_park_check(_OP_ID, _refuse_names_of_other_objects)
 register_preview_builder(_OP_ID, _scope_mapper_preview)

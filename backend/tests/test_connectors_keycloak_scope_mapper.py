@@ -21,7 +21,14 @@ What is proven:
 * a name that matches nothing is an error and nothing is written; a name
   that matches two is an error too;
 * a vendor error is an error, not a success;
-* the approval gate holds, and the audit row names the scope and the mapper.
+* the approval gate holds, and the audit row names the scope and the mapper;
+* the op is a change of rights: the requester never approves it, the
+  approver is another admin, and no standing grant, run approval or agent
+  grant clears the wait;
+* the card shows the mapper as it is now (type, protocol, claim name, old
+  values) next to the new values, and the approved run is refused when the
+  mapper's content changed after approval;
+* ``representation`` may change only ``name`` and ``config``.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -45,17 +53,39 @@ from meho_backplane.connectors.keycloak.session import (
     KeycloakTargetLike,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
+from meho_backplane.db.models import (
+    AgentPermission,
+    ApprovalRequest,
+    AuditLog,
+    EndpointDescriptor,
+    RunApproval,
+    ServicePrincipalGrant,
+    Tenant,
+)
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.op_classes import needs_per_call_approval
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations.approval_queue import (
+    RightsChangeApprovalError,
     approve_request,
     resume_dispatch_after_approval,
 )
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.grant_approval import is_rights_change_op
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
+from meho_backplane.operations.run_approval_schemas import RunApprovalCreate, RunApprovalEntry
+from meho_backplane.operations.run_approvals import (
+    RunApprovalService,
+    RunApprovalValidationError,
+)
+from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate
+from meho_backplane.operations.service_grants import (
+    GrantValidationError,
+    ServicePrincipalGrantService,
+)
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
 
@@ -306,13 +336,13 @@ async def test_change_by_ids_skips_the_lookups_and_shows_stored_names(
     assert not mappers.called
 
 
-async def test_a_top_level_field_changes_and_config_is_kept(kc: KeycloakConnector) -> None:
+async def test_a_rename_changes_the_name_and_keeps_config(kc: KeycloakConnector) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         mock.get(_MAPPER_PATH).mock(
             side_effect=[
                 httpx.Response(200, json=_mapper()),
-                httpx.Response(200, json={**_mapper(), "consentRequired": True}),
+                httpx.Response(200, json={**_mapper(), "name": "capabilities-v2"}),
             ]
         )
         put = mock.put(_MAPPER_PATH).respond(204)
@@ -321,11 +351,32 @@ async def test_a_top_level_field_changes_and_config_is_kept(kc: KeycloakConnecto
             {
                 "scope_id": _SCOPE_UUID,
                 "mapper_id": _MAPPER_UUID,
-                "representation": {"consentRequired": True},
+                "representation": {"name": "capabilities-v2"},
             },
         )
     assert result["status"] == "ok", result
-    assert json.loads(put.calls.last.request.content) == {**_mapper(), "consentRequired": True}
+    assert json.loads(put.calls.last.request.content) == {**_mapper(), "name": "capabilities-v2"}
+
+
+@pytest.mark.parametrize(
+    "representation",
+    [{"protocolMapper": "oidc-usermodel-attribute-mapper"}, {"protocol": "saml"}],
+    ids=["type", "protocol"],
+)
+async def test_a_change_of_type_or_protocol_is_refused(
+    kc: KeycloakConnector, representation: dict[str, Any]
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_MAPPER_PATH).respond(200, json=_mapper())
+        put = mock.put(_MAPPER_PATH).respond(204)
+        result = await _run(
+            _OP,
+            {"scope_id": _SCOPE_UUID, "mapper_id": _MAPPER_UUID, "representation": representation},
+        )
+    assert result["status"] != "ok"
+    assert result["extras"]["error_code"] == "invalid_params"
+    assert not put.called
 
 
 async def test_same_change_twice_is_a_success_both_times(kc: KeycloakConnector) -> None:
@@ -681,5 +732,231 @@ async def test_approved_run_is_refused_when_the_card_has_no_ids(kc: KeycloakConn
     assert card["current_available"] is False
     assert card["scope_id"] is None
     assert resumed.status != "ok"
-    assert "approval card does not show the ids" in str(resumed.model_dump(mode="json"))
+    assert "approval card does not show the client scope and the mapper" in str(
+        resumed.model_dump(mode="json")
+    )
+    assert not put.called
+
+
+# ---------------------------------------------------------------------------
+# A change of rights
+# ---------------------------------------------------------------------------
+
+_BY_NAMES = {"scope_name": _SCOPE_NAME, "mapper_name": _MAPPER_NAME, "representation": _CHANGE}
+
+
+def _principal(sub: str, kind: PrincipalKind) -> Operator:
+    return _operator(sub).model_copy(update={"principal_kind": kind})
+
+
+async def _call(operator: Operator, params: dict[str, Any]) -> dict[str, Any]:
+    return await call_operation(
+        operator,
+        {"connector_id": _CONNECTOR_ID, "op_id": _OP, "target": _TARGET_NAME, "params": params},
+    )
+
+
+async def _target_id() -> uuid.UUID:
+    async with get_sessionmaker()() as session:
+        target = await resolve_target(session, _TENANT_ID, _TARGET_NAME)
+    target_id: uuid.UUID = target.id
+    return target_id
+
+
+def test_op_is_a_change_of_rights_approved_call_by_call() -> None:
+    assert is_rights_change_op(_OP)
+    assert needs_per_call_approval(_OP)
+
+
+@pytest.mark.parametrize(
+    "requester",
+    [
+        _operator("kc-mapper-admin", TenantRole.TENANT_ADMIN),
+        _operator("kc-mapper-admin").model_copy(update={"self_approver": True}),
+    ],
+    ids=["tenant-admin", "sa-operator"],
+)
+async def test_the_requester_cannot_approve_their_own_request(
+    kc: KeycloakConnector, requester: Operator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APPROVAL_ALLOW_SELF_APPROVAL", "true")
+    get_settings.cache_clear()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount_all(mock)
+        call = await _call(requester, _BY_NAMES)
+        assert call["status"] == "awaiting_approval", call
+        request_id = uuid.UUID(call["extras"]["approval_request_id"])
+        async with get_sessionmaker()() as session:
+            assert (await session.get(ApprovalRequest, request_id)).rights_change is True  # type: ignore[union-attr]
+            with pytest.raises(RightsChangeApprovalError):
+                await approve_request(session, request_id, operator=requester, params=None)
+            await session.rollback()
+    assert not put.called
+
+
+async def test_an_sa_operator_who_is_not_an_admin_cannot_approve(kc: KeycloakConnector) -> None:
+    reviewer = _operator("kc-mapper-sa").model_copy(update={"self_approver": True})
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount_all(mock)
+        call = await _park(_BY_NAMES)
+        request_id = uuid.UUID(call["extras"]["approval_request_id"])
+        async with get_sessionmaker()() as session:
+            with pytest.raises(RightsChangeApprovalError):
+                await approve_request(session, request_id, operator=reviewer, params=None)
+            await session.rollback()
+    assert not put.called
+
+
+async def test_a_standing_grant_does_not_clear_the_wait(kc: KeycloakConnector) -> None:
+    service = _principal("svc-kc-mapper", PrincipalKind.SERVICE)
+    with pytest.raises(GrantValidationError, match="a person approves each call"):
+        await ServicePrincipalGrantService().create(
+            _TENANT_ID,
+            "kc-mapper-admin",
+            ServiceGrantCreate(
+                principal_sub=service.sub,
+                op_id=_OP,
+                connector_id=_CONNECTOR_ID,
+                reason="fixture: try to grant the mapper change",
+            ),
+        )
+    # A row stored past the create check, as an older row would be.
+    async with get_sessionmaker()() as session:
+        session.add(
+            ServicePrincipalGrant(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT_ID,
+                principal_sub=service.sub,
+                op_id=_OP,
+                connector_id=_CONNECTOR_ID,
+                target_id=None,
+                reason="fixture: made before the per-call mark",
+                created_by_sub="kc-mapper-admin",
+            )
+        )
+        await session.commit()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount_all(mock)
+        call = await _call(service, _BY_NAMES)
+    assert call["status"] == "awaiting_approval", call
+    assert not put.called
+
+
+async def test_a_run_approval_does_not_clear_the_wait(kc: KeycloakConnector) -> None:
+    service = _principal("svc-kc-mapper", PrincipalKind.SERVICE)
+    run_ref = "run-kc-mapper-0001"
+    with pytest.raises(RunApprovalValidationError, match="a person approves each call"):
+        await RunApprovalService().request(
+            service,
+            RunApprovalCreate(
+                work_ref=run_ref,
+                entries=[RunApprovalEntry(connector_id=_CONNECTOR_ID, op_id=_OP)],
+                reason="fixture: try to list the mapper change",
+            ),
+        )
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as session:
+        session.add(
+            RunApproval(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT_ID,
+                principal_sub=service.sub,
+                work_ref=run_ref,
+                entries=[
+                    {
+                        "connector_id": _CONNECTOR_ID,
+                        "op_id": _OP,
+                        "target_id": str(await _target_id()),
+                    }
+                ],
+                reason="fixture: stored past the request check",
+                requested_at=now,
+                expires_at=now + timedelta(hours=1),
+                approved_at=now,
+                approved_by_sub="kc-mapper-admin",
+            )
+        )
+        await session.commit()
+    token = work_ref_var.set(run_ref)
+    try:
+        with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+            put = _mount_all(mock)
+            call = await _call(service, _BY_NAMES)
+    finally:
+        work_ref_var.reset(token)
+    assert call["status"] == "awaiting_approval", call
+    assert not put.called
+
+
+async def test_an_agent_grant_does_not_clear_the_wait(kc: KeycloakConnector) -> None:
+    agent = _principal("agent-kc-mapper", PrincipalKind.AGENT)
+    async with get_sessionmaker()() as session:
+        if await session.get(Tenant, _TENANT_ID) is None:
+            session.add(Tenant(id=_TENANT_ID, slug="t-kc-mapper", name="Tenant kc mapper"))
+            await session.flush()
+        session.add(
+            AgentPermission(
+                tenant_id=_TENANT_ID,
+                principal_sub=agent.sub,
+                op_pattern=_OP,
+                verdict="auto-execute",
+                created_by_sub="kc-mapper-admin",
+            )
+        )
+        await session.commit()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount_all(mock)
+        call = await _call(agent, _BY_NAMES)
+    assert call["status"] == "awaiting_approval", call
+    assert not put.called
+
+
+# ---------------------------------------------------------------------------
+# The card shows the mapper as it is now; the run checks it did not change
+# ---------------------------------------------------------------------------
+
+
+async def test_card_shows_the_mapper_now_and_the_old_and_new_values(
+    kc: KeycloakConnector,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mapper = {**_mapper(), "config": {**_mapper()["config"], "secret": "s3cr3t-old"}}
+        _mount_all(mock)
+        mock.get(_MAPPER_PATH).respond(200, json=mapper)
+        change = {"config": {"claim.value": _NEW_VALUE, "secret": "s3cr3t-new"}}
+        call = await _park({**_BY_NAMES, "representation": change})
+        assert call["status"] == "awaiting_approval", call
+        card = await _card(uuid.UUID(call["extras"]["approval_request_id"]))
+    assert card["current"]["protocolMapper"] == "oidc-hardcoded-claim-mapper"
+    assert card["current"]["protocol"] == "openid-connect"
+    assert card["current"]["claim_name"] == "capabilities"
+    assert card["current"]["before"]["config"]["claim.value"] == '["meho-docs"]'
+    assert card["representation"]["config"]["claim.value"] == _NEW_VALUE
+    assert "s3cr3t-old" not in json.dumps(card)
+    assert "s3cr3t-new" not in json.dumps(card)
+    assert card["mapper_content_hash"]
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"config": {**_mapper()["config"], "claim.value": '["meho-docs","other"]'}},
+        {"protocolMapper": "oidc-usermodel-attribute-mapper"},
+        {"protocol": "saml"},
+    ],
+    ids=["config", "type", "protocol"],
+)
+async def test_approved_run_is_refused_when_the_mapper_changed_after_approval(
+    kc: KeycloakConnector, changed: dict[str, Any]
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount_all(mock)
+        call = await _park(_BY_NAMES)
+        assert call["status"] == "awaiting_approval", call
+        mock.get(_MAPPER_PATH).respond(200, json={**_mapper(), **changed})
+        resumed = await _approve_and_resume(uuid.UUID(call["extras"]["approval_request_id"]))
+    assert resumed.status != "ok"
+    dumped = str(resumed.model_dump(mode="json"))
+    assert "the mapper changed after the approval" in dumped
+    assert "A new request is needed" in dumped
     assert not put.called

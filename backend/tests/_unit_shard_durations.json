@@ -1089,6 +1089,7 @@
   "tests/test_service_grants.py": 2.64,
   "tests/test_service_principal_grant_gate.py": 1.43,
   "tests/test_service_read_scope_gate.py": 1.34,
+  "tests/test_session_store_week_read.py": 4.04,
   "tests/test_settings.py": 0.87,
   "tests/test_soak_harness_driver.py": 8.25,
   "tests/test_soak_harness_host_detach_from_vds.py": 8.58,

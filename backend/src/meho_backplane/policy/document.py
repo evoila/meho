@@ -16,6 +16,10 @@ It holds:
   wait" mark (:mod:`meho_backplane.policy.classification`);
 * ``routing``: who is asked to approve a change that waits, by category,
   connector or risk level (:mod:`meho_backplane.policy.routing`).
+* ``bindings``: which login group is which team. A group, matched by its
+  full path or its group attribute, gets one of the five group kinds and a
+  set of categories (:mod:`meho_backplane.policy.bindings`). Only a
+  tenant's file holds bindings.
 
 The parser uses the strict YAML loader of the settings file
 (:mod:`meho_backplane.instance_settings.schema`): a repeated key, a YAML
@@ -54,11 +58,14 @@ from meho_backplane.instance_settings.schema import (
 from meho_backplane.policy.store import _check_labels
 
 __all__ = [
+    "ALL_CATEGORIES",
+    "BINDING_PRINCIPALS",
     "GROUP_KINDS",
     "MAX_POLICY_BYTES",
     "POLICY_VERSION",
     "ParsedPolicy",
     "PolicyFile",
+    "binding_dict",
     "canonical_sha256",
     "document_of",
     "file_sha256",
@@ -74,9 +81,16 @@ MAX_POLICY_BYTES: Final[int] = 1024 * 1024
 
 _CATEGORY_RE: Final[str] = r"^[a-z][a-z0-9_-]{0,62}$"
 
-#: The five login group kinds a routing entry may ask, in this order.
+#: The five login group kinds a routing entry may ask and a binding may give,
+#: in this order.
 GROUP_KINDS: Final[tuple[str, ...]] = tuple(kind.value for kind in RoleGroup)
 _PATTERN = Annotated[str, Field(min_length=1, max_length=200)]
+
+#: Who a binding is for. ``person`` is the default.
+BINDING_PRINCIPALS: Final[tuple[str, ...]] = ("person", "agent", "service", "runner")
+
+#: The one ``categories`` value of a binding that means every category.
+ALL_CATEGORIES: Final[str] = "*"
 
 
 class _Strict(BaseModel):
@@ -183,6 +197,70 @@ class PolicyRoute(_Strict):
         return value
 
 
+class PolicyBindingMatch(_Strict):
+    """``bindings[].match``: the login group, by full path or by group attribute."""
+
+    group: Annotated[str, Field(min_length=2, max_length=255)] | None = None
+    attribute: Annotated[str, Field(min_length=1, max_length=255)] | None = None
+
+    @field_validator("group")
+    @classmethod
+    def _full_path(cls, value: str | None) -> str | None:
+        if value is not None and (not value.startswith("/") or value.endswith("/")):
+            raise ValueError(
+                "must be the full path of the group, for example /MEHO-Operators/Network; "
+                "a short group name never matches"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> PolicyBindingMatch:
+        if (self.group is None) == (self.attribute is None):
+            raise ValueError("needs exactly one of group (the full path) or attribute")
+        return self
+
+
+class PolicyBinding(_Strict):
+    """``bindings[]``: one login group, its group kind and its categories.
+
+    The categories are checked against the taxonomy later
+    (:func:`meho_backplane.policy.validate.check_document`).
+    """
+
+    match: PolicyBindingMatch
+    kind: str
+    categories: list[str] = Field(min_length=1, max_length=200)
+    principal: str = "person"
+
+    @field_validator("kind")
+    @classmethod
+    def _known_kind(cls, value: str) -> str:
+        if value not in GROUP_KINDS:
+            raise ValueError("is not a group kind; use " + ", ".join(GROUP_KINDS))
+        return value
+
+    @field_validator("principal")
+    @classmethod
+    def _known_principal(cls, value: str) -> str:
+        if value not in BINDING_PRINCIPALS:
+            raise ValueError("is not a kind of login; use " + ", ".join(BINDING_PRINCIPALS))
+        return value
+
+    @field_validator("categories")
+    @classmethod
+    def _categories_fit(cls, value: list[str]) -> list[str]:
+        if ALL_CATEGORIES in value and len(value) > 1:
+            raise ValueError(f'"{ALL_CATEGORIES}" means every category; list it alone')
+        if any(name != ALL_CATEGORIES and not re.match(_CATEGORY_RE, name) for name in value):
+            raise ValueError(
+                "holds a name that is not a category name: use 1 to 63 lower case "
+                f'letters, digits, - and _, starting with a letter, or "{ALL_CATEGORIES}"'
+            )
+        if len(set(value)) != len(value):
+            raise ValueError("lists a category twice")
+        return value
+
+
 class PolicyFile(_Strict):
     """The whole file. ``policy`` is checked separately for a clear sentence."""
 
@@ -191,6 +269,7 @@ class PolicyFile(_Strict):
     taxonomy: PolicyTaxonomy | None = None
     classifications: list[PolicyClassification] = Field(default_factory=list, max_length=2000)
     routing: list[PolicyRoute] = Field(default_factory=list, max_length=200)
+    bindings: list[PolicyBinding] = Field(default_factory=list, max_length=500)
 
 
 @dataclass
@@ -220,6 +299,17 @@ def _repeated_match_mistakes(model: PolicyFile) -> list[str]:
             mistakes.append(
                 f"`routing[{index}].match` repeats `routing[{seen[key]}]`; the first one "
                 "always wins, so list each match once."
+            )
+        else:
+            seen[key] = index
+    seen = {}
+    for index, binding in enumerate(model.bindings):
+        key = json.dumps(
+            [binding.principal, binding.match.model_dump(exclude_none=True)], sort_keys=True
+        )
+        if key in seen:
+            mistakes.append(
+                f"`bindings[{index}].match` repeats `bindings[{seen[key]}]`; list each group once."
             )
         else:
             seen[key] = index
@@ -297,7 +387,21 @@ def document_of(model: PolicyFile) -> dict[str, Any]:
             {"match": r.match.model_dump(exclude_none=True), "approvers": list(r.approvers)}
             for r in model.routing
         ]
+    if model.bindings:
+        document["bindings"] = [binding_dict(b) for b in model.bindings]
     return document
+
+
+def binding_dict(binding: PolicyBinding) -> dict[str, Any]:
+    """The stored form of one binding; ``principal`` only when it is not ``person``."""
+    out: dict[str, Any] = {
+        "match": binding.match.model_dump(exclude_none=True),
+        "kind": binding.kind,
+        "categories": list(binding.categories),
+    }
+    if binding.principal != "person":
+        out["principal"] = binding.principal
+    return out
 
 
 def normalise_document(document: dict[str, Any] | None) -> dict[str, Any]:
@@ -320,11 +424,13 @@ def canonical_sha256(document: dict[str, Any] | None) -> str:
     Key order, comments and empty keys do not count, and neither does the
     order of the classification entries or of the categories: the most
     specific entry wins, not the first one. The order of the ``routing``
-    entries counts: the first entry that matches wins.
+    entries counts: the first entry that matches wins. The order of the
+    bindings does not count: every binding that matches a login counts.
     """
     meaning = normalise_document(document)
-    if "classifications" in meaning:
-        meaning["classifications"] = sorted(meaning["classifications"], key=_json)
+    for key in ("classifications", "bindings"):
+        if key in meaning:
+            meaning[key] = sorted(meaning[key], key=_json)
     taxonomy = meaning.get("taxonomy")
     if isinstance(taxonomy, dict) and "categories" in taxonomy:
         taxonomy["categories"] = sorted(taxonomy["categories"], key=_json)

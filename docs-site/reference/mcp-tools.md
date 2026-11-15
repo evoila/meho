@@ -106,7 +106,9 @@ Connector lifecycle, principals and grants, scheduler, sensors, topology mutatio
 | `meho_sensor_create` | beta | — | Create one sensor under the operator's tenant. |
 | `meho_sensor_delete` | beta | — | Hard-delete one sensor by id. |
 | `meho_sensor_list` | beta | — | List sensors for the operator's tenant. |
+| `meho_sensor_pause` | beta | — | Pause one sensor. |
 | `meho_sensor_results` | beta | — | Per-tick evidence trend query for one sensor. |
+| `meho_sensor_resume` | beta | — | Resume a paused sensor. |
 | `meho_targets_register` | ga | — | Register a new target in the operator's tenant (tenant_admin only). |
 | `meho_targets_update` | ga | — | Change fields of one target in the operator's tenant (tenant_admin only). |
 | `meho_topology_annotate` | beta | — | Assert a curated `graph_edge` that auto-discovery cannot infer (tenant_admin only). |

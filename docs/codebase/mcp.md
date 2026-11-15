@@ -860,6 +860,21 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   added only when the caller sets `include_scores` **and** is
   `tenant_admin` (the same role the full descriptor read needs);
   anyone else gets the slim hit.
+- **Category and labels, behind a switch (#6041).** While the switch
+  `POLICY_CLASSIFICATION` is on, a ranked hit and the exact-op contract
+  also carry `category` (for example `network`) and `labels` (a map of
+  free `key=value` text). They are the operation's classification for
+  the caller's tenant, the same values dispatch uses
+  ([policy-classification.md](policy-classification.md)). `category` is
+  `null` when two classification rules disagree; then every call waits
+  for approval. Search stays tenant-wide: it does not say whether a call
+  waits for *this* caller. With the switch off, both keys are left out,
+  so every answer is the same as before. The registered `outputSchema`
+  names both fields; while the switch is off,
+  `classification_schema_for_settings`
+  (`mcp/tools/_search_classification.py`) takes them out of the schema
+  that `tools/list` sends, so that list does not change either. Tests:
+  `backend/tests/test_policy_classification_shown.py`.
 - **The admin's description, behind a switch (#4753).** An admin can
   replace an operation's text with `meho_connector_edit_op`
   (`custom_description`). The backplane switch
@@ -1343,7 +1358,9 @@ session (on top of the Role + Extra-gate columns).
 | `meho_sensor_create` | tenant_admin | — | Create a sensor (op + assertion + cadence + severity). |
 | `meho_sensor_delete` | tenant_admin | — | Hard-delete a sensor by id. |
 | `meho_sensor_list` | operator | — | List sensors with their latest-result projection. |
+| `meho_sensor_pause` | tenant_admin | — | Pause a sensor: the runner stops running it; its history stays. |
 | `meho_sensor_results` | operator | — | Per-tick evidence trend history for one sensor. |
+| `meho_sensor_resume` | tenant_admin | — | Resume a paused sensor; it runs again at once. |
 | `meho_targets_register` | tenant_admin | — | Register a new target in the tenant. |
 | `meho_targets_update` | tenant_admin | — | Change fields of one target in the tenant, by its id. |
 | `meho_topology_annotate` | tenant_admin | — | Assert a curated graph edge auto-discovery can't infer. |
@@ -1555,7 +1572,7 @@ Five synthetic connectors follow this mould (natural key
 | `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |
 | `targets-registry-1.x` | `targets.probe` | (dispatch-only; a `safe` op that detects a target's product and version and stores them, the same code as `POST /api/v1/targets/{name}/probe`) | #5653 |
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
-| `spaces-records-1.x` | `spaces.assign`, `spaces.unassign`, `spaces.reassign`, `spaces.member.disable`, `spaces.overview` | (dispatch-only; the four writes are `caution` + `requires_approval` and need `tenant_admin`; the overview is a `safe` read) | #4933 |
+| `spaces-records-1.x` | `spaces.assign`, `spaces.unassign`, `spaces.reassign`, `spaces.member.disable`, `spaces.overview`, `spaces.drift` | (dispatch-only; the four writes are `caution` + `requires_approval` and need `tenant_admin`; the overview and the drift check are `safe` reads) | #4933 |
 | `inventory-1.x` | `inventory.export` | (dispatch-only; a `safe` read that turns stored or inline inventories into a file in a named format) | #5218 |
 
 **Per-op role floor.** `targets.register`, `targets.update`, the four `spaces.*` writes and the five `topology.*`

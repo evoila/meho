@@ -4,10 +4,10 @@
 """Per-target Vault role/auth-mount resolution (#3274).
 
 Pins the ``Target``-side contract frozen with the lab
-(``claude-rdc-hetzner-dc#2814`` / PR ``#2815``): a vault target advertising
+(a consumer repository / PR ``#2815``): a vault target advertising
 ``extras["vault_role"]`` (optionally ``extras["vault_mount"]``) selects that
 role at login; anything else falls through to the settings-global role +
-mount byte-for-byte. The live ``rdc-vault-teardown`` target ships
+mount byte-for-byte. The live ``vault-teardown`` target ships
 ``version=null`` / ``secret_ref=null``, so the resolver is exercised against
 that exact shape.
 """
@@ -53,7 +53,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 def _make_vault_target(**overrides: Any) -> Target:
-    """Build a ``Target`` in the live ``rdc-vault-teardown`` shape.
+    """Build a ``Target`` in the live ``vault-teardown`` shape.
 
     ``product="vault"``, ``version=None`` (resolves via the connector's
     wildcard registration), ``secret_ref=None`` (JWT-federated — no stored
@@ -62,13 +62,13 @@ def _make_vault_target(**overrides: Any) -> Target:
     defaults: dict[str, Any] = {
         "id": uuid.uuid4(),
         "tenant_id": uuid.uuid4(),
-        "name": "rdc-vault-teardown",
+        "name": "vault-teardown",
         "aliases": [],
         "product": "vault",
         "version": None,
-        "host": "vault.rdc.internal",
+        "host": "vault.example.test",
         "port": 8200,
-        "fqdn": "vault.rdc.internal",
+        "fqdn": "vault.example.test",
         "secret_ref": None,
         "auth_model": AuthModel.SHARED_SERVICE_ACCOUNT,
         "vpn_required": True,
@@ -111,7 +111,7 @@ def test_resolve_role_only() -> None:
 
 
 def test_resolve_role_and_mount_live_teardown_shape() -> None:
-    """The live ``rdc-vault-teardown`` shape resolves both role and auth mount.
+    """The live ``vault-teardown`` shape resolves both role and auth mount.
 
     version=None, secret_ref=None, extras carry role ``meho-teardown`` on the
     ``jwt-meho`` auth mount — the exact registered target this ships for.

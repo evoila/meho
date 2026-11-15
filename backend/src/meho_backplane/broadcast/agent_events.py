@@ -48,7 +48,7 @@ as untrusted:
   ``<<TENANT_CONVENTIONS ... END_TENANT_CONVENTIONS>>`` wrapper around
   agent-untrusted operational rules
   (:mod:`meho_backplane.conventions.preamble`). Enforced at the read
-  boundary since evoila-bosnia/meho-internal#154:
+  boundary:
   :func:`~meho_backplane.broadcast.history.dump_event_wire` wraps
   ``activity`` / ``scope`` / ``target`` in the untrusted-content
   envelope (:mod:`meho_backplane.untrusted_text`) on every LLM-facing

@@ -201,7 +201,7 @@ def _make_async_client(app: FastAPI) -> httpx.AsyncClient:
 def _mint_operator(
     *,
     keypair: Any,
-    sub: str = "damir",
+    sub: str = "operator-a",
     tenant_id: str = TENANT_A_ID,
     role: TenantRole = TenantRole.OPERATOR,
     audience: str = AUDIENCE,
@@ -258,14 +258,14 @@ async def test_scenario_1_tenant_a_query_never_returns_tenant_b_rows(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, sub="damir", tenant_id=TENANT_A_ID)
+    token_a = _mint_operator(keypair=key, sub="operator-a", tenant_id=TENANT_A_ID)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
             mock_discovery_and_jwks(mock_router, public_jwks(key))
             resp = await client.post(
                 "/api/v1/audit/query",
-                json={"target": "rdc-vcenter"},
+                json={"target": "example-vcenter"},
                 headers=_bearer(token_a),
             )
     assert resp.status_code == 200, resp.text
@@ -291,7 +291,7 @@ async def test_scenario_1_show_cross_tenant_audit_id_returns_404(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, sub="damir", tenant_id=TENANT_A_ID)
+    token_a = _mint_operator(keypair=key, sub="operator-a", tenant_id=TENANT_A_ID)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
@@ -324,14 +324,14 @@ async def test_scenario_1_body_tenant_id_is_rejected_422(
     """
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, sub="damir", tenant_id=TENANT_A_ID)
+    token_a = _mint_operator(keypair=key, sub="operator-a", tenant_id=TENANT_A_ID)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
             mock_discovery_and_jwks(mock_router, public_jwks(key))
             resp = await client.post(
                 "/api/v1/audit/query",
-                json={"tenant_id": TENANT_B_ID, "target": "rdc-vcenter"},
+                json={"tenant_id": TENANT_B_ID, "target": "example-vcenter"},
                 headers=_bearer(token_a),
             )
     assert resp.status_code == 422, resp.text
@@ -357,7 +357,7 @@ async def test_scenario_2_cursor_paginates_250_rows_in_three_pages(
             session,
             tenant_id=uuid.UUID(TENANT_A_ID),
             count=250,
-            principal_sub="damir",
+            principal_sub="operator-a",
             op_id="vsphere.vm.list",
             op_class="read",
         )
@@ -365,7 +365,7 @@ async def test_scenario_2_cursor_paginates_250_rows_in_three_pages(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, sub="damir", tenant_id=TENANT_A_ID)
+    token_a = _mint_operator(keypair=key, sub="operator-a", tenant_id=TENANT_A_ID)
     seen_ids: set[str] = set()
 
     async with _make_async_client(app) as client:
@@ -421,7 +421,7 @@ async def test_scenario_2_concurrent_insert_does_not_corrupt_cursor(
             seed_session,
             tenant_id=uuid.UUID(TENANT_A_ID),
             count=250,
-            principal_sub="damir",
+            principal_sub="operator-a",
             op_id="vsphere.vm.list",
             op_class="read",
             # Anchor the seed timestamps far enough in the past so
@@ -437,7 +437,7 @@ async def test_scenario_2_concurrent_insert_does_not_corrupt_cursor(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, sub="damir", tenant_id=TENANT_A_ID)
+    token_a = _mint_operator(keypair=key, sub="operator-a", tenant_id=TENANT_A_ID)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
@@ -472,7 +472,7 @@ async def test_scenario_2_concurrent_insert_does_not_corrupt_cursor(
                         writer_session,
                         tenant_id=uuid.UUID(TENANT_A_ID),
                         count=50,
-                        principal_sub="damir",
+                        principal_sub="operator-a",
                         op_id="vsphere.vm.list",
                         op_class="read",
                         # AFTER the seed batch (which anchored 2h ago).
@@ -568,7 +568,7 @@ async def test_scenario_3_audit_row_payload_is_aggregate_only(
             session,
             tenant_id=uuid.UUID(TENANT_A_ID),
             count=3,
-            principal_sub="damir",
+            principal_sub="operator-a",
             op_id="vault.kv.read",
             op_class="credential_read",
         )
@@ -576,14 +576,14 @@ async def test_scenario_3_audit_row_payload_is_aggregate_only(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, sub="damir", tenant_id=TENANT_A_ID)
+    token_a = _mint_operator(keypair=key, sub="operator-a", tenant_id=TENANT_A_ID)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
             mock_discovery_and_jwks(mock_router, public_jwks(key))
             resp = await client.post(
                 "/api/v1/audit/query",
-                json={"principal": "damir", "op_id": "vault.kv.*"},
+                json={"principal": "operator-a", "op_id": "vault.kv.*"},
                 headers=_bearer(token_a),
             )
     assert resp.status_code == 200, resp.text
@@ -621,7 +621,7 @@ async def test_scenario_3_audit_row_payload_is_aggregate_only(
     # the specific leak vectors.
     serialised = json.dumps(payload)
     assert "vault.kv" not in serialised, "audit row payload leaked op_id filter"
-    assert "damir" not in serialised, "audit row payload leaked the principal filter"
+    assert "operator-a" not in serialised, "audit row payload leaked the principal filter"
     assert "principal" not in payload
     assert "target" not in payload
 
@@ -641,13 +641,13 @@ async def test_scenario_4_who_touched_matches_query_with_target_filter(
         target_a = await seed_target(
             session,
             tenant_id=uuid.UUID(TENANT_A_ID),
-            name="rdc-vcenter",
+            name="example-vcenter",
         )
         await seed_audit_rows(
             session,
             tenant_id=uuid.UUID(TENANT_A_ID),
             count=3,
-            principal_sub="damir",
+            principal_sub="operator-a",
             op_id="vsphere.vm.list",
             op_class="read",
             target_id=target_a,
@@ -656,18 +656,18 @@ async def test_scenario_4_who_touched_matches_query_with_target_filter(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, sub="damir", tenant_id=TENANT_A_ID)
+    token_a = _mint_operator(keypair=key, sub="operator-a", tenant_id=TENANT_A_ID)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
             mock_discovery_and_jwks(mock_router, public_jwks(key))
             who = await client.get(
-                "/api/v1/audit/who-touched/rdc-vcenter",
+                "/api/v1/audit/who-touched/example-vcenter",
                 headers=_bearer(token_a),
             )
             query = await client.post(
                 "/api/v1/audit/query",
-                json={"target": "rdc-vcenter"},
+                json={"target": "example-vcenter"},
                 headers=_bearer(token_a),
             )
     assert who.status_code == 200, who.text
@@ -752,7 +752,7 @@ async def test_scenario_5_cli_json_wire_shape_is_jq_parseable(
             session,
             tenant_id=uuid.UUID(TENANT_A_ID),
             count=5,
-            principal_sub="damir",
+            principal_sub="operator-a",
             op_id="vsphere.vm.list",
             op_class="read",
         )
@@ -760,7 +760,7 @@ async def test_scenario_5_cli_json_wire_shape_is_jq_parseable(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, sub="damir", tenant_id=TENANT_A_ID)
+    token_a = _mint_operator(keypair=key, sub="operator-a", tenant_id=TENANT_A_ID)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
@@ -832,7 +832,7 @@ async def test_scenario_6_mcp_tools_list_contains_query_audit_only(
     key = make_rsa_keypair("kid-A")
     token_a = _mint_operator(
         keypair=key,
-        sub="damir",
+        sub="operator-a",
         tenant_id=TENANT_A_ID,
         audience=MCP_RESOURCE_URI,
     )
@@ -863,13 +863,13 @@ async def test_scenario_6_mcp_query_audit_call_returns_expected_shape(
         target_a = await seed_target(
             session,
             tenant_id=uuid.UUID(TENANT_A_ID),
-            name="rdc-vcenter",
+            name="example-vcenter",
         )
         await seed_audit_rows(
             session,
             tenant_id=uuid.UUID(TENANT_A_ID),
             count=3,
-            principal_sub="damir",
+            principal_sub="operator-a",
             op_id="vsphere.vm.list",
             op_class="read",
             target_id=target_a,
@@ -880,7 +880,7 @@ async def test_scenario_6_mcp_query_audit_call_returns_expected_shape(
     key = make_rsa_keypair("kid-A")
     token_a = _mint_operator(
         keypair=key,
-        sub="damir",
+        sub="operator-a",
         tenant_id=TENANT_A_ID,
         audience=MCP_RESOURCE_URI,
     )
@@ -894,7 +894,7 @@ async def test_scenario_6_mcp_query_audit_call_returns_expected_shape(
                 method="tools/call",
                 params={
                     "name": "query_audit",
-                    "arguments": {"target": "rdc-vcenter", "since": "24h"},
+                    "arguments": {"target": "example-vcenter", "since": "24h"},
                 },
             )
     # The MCP dispatcher returns the tool's dict-shape under
@@ -938,7 +938,7 @@ async def test_scenario_7_op_id_glob_matches_literal_segment_only(
                 session,
                 tenant_id=uuid.UUID(TENANT_A_ID),
                 occurred_at=datetime.now(UTC) - timedelta(seconds=10),
-                principal_sub="damir",
+                principal_sub="operator-a",
                 op_id=op_id,
                 op_class="read",
             )
@@ -946,7 +946,7 @@ async def test_scenario_7_op_id_glob_matches_literal_segment_only(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, sub="damir", tenant_id=TENANT_A_ID)
+    token_a = _mint_operator(keypair=key, sub="operator-a", tenant_id=TENANT_A_ID)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
@@ -976,7 +976,7 @@ async def test_scenario_8_audit_query_writes_its_own_queryable_row(
     """Issue body scenario 8: query_audit emits an audit row; queryable; no recursion."""
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, sub="damir", tenant_id=TENANT_A_ID)
+    token_a = _mint_operator(keypair=key, sub="operator-a", tenant_id=TENANT_A_ID)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:

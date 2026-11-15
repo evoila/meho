@@ -623,7 +623,6 @@ async def test_request_json_204_no_content_returns_empty_payload() -> None:
 
 # ---------------------------------------------------------------------------
 # Response-body byte cap — reject oversize before buffer+parse
-# (evoila-bosnia/meho-internal#297)
 # ---------------------------------------------------------------------------
 
 
@@ -2059,7 +2058,7 @@ async def test_unpinned_verifying_target_still_passes_no_verify_arg() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Same-origin redirect policy (evoila/meho-internal#101 row L11)
+# Same-origin redirect policy
 # ---------------------------------------------------------------------------
 
 
@@ -2381,7 +2380,7 @@ def test_same_origin_http_scheme_upgrade_is_cross_origin() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Socket-boundary address pinning (F13, evoila-bosnia/meho-internal#275)
+# Socket-boundary address pinning (F13)
 #
 # These drive the real transport against loopback servers (respx is not
 # used — it short-circuits above ``connect_tcp``, which is exactly the seam

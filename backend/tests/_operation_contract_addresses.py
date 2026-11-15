@@ -105,6 +105,10 @@ NOT_CALLER_ADDRESSES: Final[Mapping[tuple[str, str], str]] = {
     ),
     ("freeipa.host.delete", "fqdn"): _FREEIPA_HOST_NAME,
     ("freeipa.host.show", "fqdn"): _FREEIPA_HOST_NAME,
+    ("pfsense.openvpn.csc.sync", "entries[].tunnel_address"): (
+        "the fixed address a VPN client gets inside the OpenVPN tunnel network; "
+        "MEHO and the target never connect to it"
+    ),
     ("phpipam.address.reserve", "hostname"): (
         "the host name stored with the reserved address in phpIPAM; nothing connects to it"
     ),

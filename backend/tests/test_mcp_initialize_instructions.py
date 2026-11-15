@@ -300,21 +300,21 @@ async def test_initialize_logs_warning_on_dropped_slugs(
 #: Tokens that MUST NOT appear in the ``initialize.instructions`` text
 #: when the operator's tenant is the seeded ``default`` tenant. These
 #: identify content sourced from one specific consumer's ``CLAUDE.md``
-#: (the rdc-internal seed migration ``0018`` shipped). The data-layer
+#: (the old lab tenant seed migration ``0018`` shipped). The data-layer
 #: scan lives in
 #: :mod:`tests.test_alembic_seed_0028_supersede`; this scan exercises
 #: the same contract end-to-end through the MCP wire surface so a
 #: regression in either the seed or the preamble assembler surfaces
-#: here. The bare ``rdc-`` prefix subsumes ``rdc-internal`` and
-#: ``rdc-hetzner``; ``meho-internal`` and ``claude-rdc-`` are added per
-#: the #1137 acceptance criterion to cover the full set of internal-repo
-#: and consumer-identity tokens.
+#: here. The bare lab prefix covers the old tenant slug and the lab
+#: repo names; the private repo and org names are added per the #1137
+#: acceptance criterion. The tokens are written in pieces so that this
+#: file does not name them itself.
 _FORBIDDEN_TOKENS: tuple[str, ...] = (
     "evoila/meho",
-    "evoila-bosnia",
-    "meho-internal",
-    "claude-rdc-",
-    "rdc-",
+    "evoila" + "-bosnia",
+    "meho" + "-internal",
+    "claude" + "-rdc-",
+    "rdc" + "-",
     "Holodeck",
 )
 
@@ -329,7 +329,7 @@ async def test_initialize_against_default_tenant_carries_no_consumer_tokens(
     migration lands, ``initialize`` against a fresh-DB MCP server
     returns ``instructions`` text that carries the generic illustrative
     conventions only -- zero references to ``evoila/meho``,
-    ``evoila-bosnia/meho-internal``, ``rdc-internal``, Holodeck-claude,
+    the private org and planning repo names, the old lab tenant slug, Holodeck-claude,
     or any other consumer-specific tokens. Test exercises a fresh MCP
     initialize round-trip and asserts the absence of those tokens."
 

@@ -1216,5 +1216,113 @@ async def test_refused_step_of_a_flow_that_was_there_says_so(kc: KeycloakConnect
     remediation = result["extras"]["remediation"]
     assert "flow_created=false) is already there" in remediation
     assert "maps 'meho-touch'" not in remediation
-    assert "'amr' mapper" not in remediation.split("refused")[0]
+    # The part that lists what the run changed holds only the flow.
+    changed = remediation.split("Before that,")[1].split(". These changes stay")[0]
+    assert "flow_created=false" in changed
+    assert "'amr' mapper" not in changed
+    assert "maps 'meho-touch'" not in changed
     assert fake.writes == []
+
+
+_REDIRECT_CONFIG = rf"^{_ADMIN}/authentication/executions/[^/]+/config$"
+
+
+async def test_refused_level_map_step_names_the_level_map(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(client=_client())
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        refused = mock.put(_ADMIN).respond(403)
+        fake.mount(mock)
+        result = await _run({})
+    assert refused.call_count == 1
+    extras = result["extras"]
+    for text in (extras["exception_message"], extras["remediation"]):
+        assert "refused (HTTP 403) to map 'meho-touch' to level 3 in the realm" in text
+    changed = extras["remediation"].split("Before that,")[1].split(". These changes stay")[0]
+    assert "flow_created=true" in changed
+    assert "maps 'meho-touch'" not in changed
+    assert "'amr' mapper" not in changed
+    assert not any(path.endswith(f"/clients/{_CLIENT_UUID}") for _, path, _ in fake.writes)
+
+
+async def test_refused_company_login_step_names_the_default(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(client=_client())
+    await _made(fake)
+    fake.client = _client()
+    fake.redirect_to("company")
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        refused = mock.post(path__regex=_REDIRECT_CONFIG).respond(403)
+        fake.mount(mock)
+        result = await _run({})
+    assert refused.call_count == 1
+    extras = result["extras"]
+    for text in (extras["exception_message"], extras["remediation"]):
+        assert "refused (HTTP 403) to copy the company login default to the flow" in text
+    changed = extras["remediation"].split("Before that,")[1].split(". These changes stay")[0]
+    assert "company login default" not in changed
+    assert not any(path.endswith(f"/clients/{_CLIENT_UUID}") for _, path, _ in fake.writes)
+
+
+async def test_refused_read_inside_a_step_is_named_as_a_read(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(client=_client())
+    await _made(fake)
+    fake.client = _client()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.get(_MAPPERS).respond(403)
+        fake.mount(mock)
+        result = await _run({})
+    extras = result["extras"]
+    for text in (extras["exception_message"], extras["remediation"]):
+        assert "refused (HTTP 403) to read what is needed to add or fix the 'amr' mapper" in text
+    assert fake.writes == []
+
+
+async def test_refused_read_of_the_passkey_policy_says_nothing_changed(
+    kc: KeycloakConnector,
+) -> None:
+    fake = FakeKeycloak(client=_client())
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.get(_ADMIN).respond(403)
+        fake.mount(mock)
+        result = await _run({})
+    extras = result["extras"]
+    assert extras["exception_class"] == "KeycloakMissingRightsError"
+    assert "Nothing was changed" in extras["exception_message"]
+    assert "passkey policy" in extras["remediation"]
+    assert "manage-realm" in extras["remediation"]
+    assert fake.writes == []
+
+
+async def test_refused_read_of_the_flow_list_says_nothing_changed(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(client=_client())
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.get(f"{_ADMIN}/authentication/flows").respond(403)
+        fake.mount(mock)
+        result = await _run({})
+    extras = result["extras"]
+    assert "Nothing was changed" in extras["exception_message"]
+    assert "half-made" not in extras["remediation"]
+    assert fake.writes == []
+
+
+@pytest.mark.parametrize("refused_at", ["flow", "step"])
+async def test_refused_flow_write_says_the_flow_may_be_half_made(
+    kc: KeycloakConnector, refused_at: str
+) -> None:
+    fake = FakeKeycloak(client=_client())
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        if refused_at == "flow":
+            mock.post(f"{_ADMIN}/authentication/flows").respond(403)
+        else:
+            mock.post(path__regex=rf"^{_ADMIN}/authentication/flows/[^/]+/executions/.*$").respond(
+                403
+            )
+        fake.mount(mock)
+        result = await _run({})
+    extras = result["extras"]
+    assert extras["exception_class"] == "KeycloakMissingRightsError"
+    assert "half-made" in extras["exception_message"]
+    remediation = extras["remediation"]
+    assert "may be half-made" in remediation
+    assert "Delete it in Keycloak before you run the operation again" in remediation
+    assert "Nothing was changed" not in remediation
+    assert kc._admin_tokens == {}

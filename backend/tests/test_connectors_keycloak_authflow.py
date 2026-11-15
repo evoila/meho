@@ -648,6 +648,43 @@ async def test_refused_level_write_says_what_the_run_changed(kc: KeycloakConnect
     assert not any(path.endswith(f"/clients/{_CLIENT_UUID}") for _, path, _ in fake.writes)
 
 
+async def test_refused_flow_list_read_says_nothing_changed(kc: KeycloakConnector) -> None:
+    fake = FakeKeycloak(flow_steps=None, client=_client())
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.get(f"{_ADMIN}/authentication/flows").respond(403)
+        fake.mount(mock)
+        result = await _run(_FLOW_OP, {})
+    extras = result["extras"]
+    assert extras["exception_class"] == "KeycloakMissingRightsError"
+    assert "Nothing was changed" in extras["exception_message"]
+    assert "half-made" not in extras["remediation"]
+    assert fake.writes == []
+
+
+@pytest.mark.parametrize("refused_at", ["flow", "step"])
+async def test_refused_flow_write_says_the_flow_may_be_half_made(
+    kc: KeycloakConnector, refused_at: str
+) -> None:
+    fake = FakeKeycloak(flow_steps=None, client=_client())
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        if refused_at == "flow":
+            mock.post(f"{_ADMIN}/authentication/flows").respond(403)
+        else:
+            mock.post(path__regex=rf"^{_ADMIN}/authentication/flows/[^/]+/executions/.*$").respond(
+                403
+            )
+        fake.mount(mock)
+        result = await _run(_FLOW_OP, {})
+    extras = result["extras"]
+    assert extras["exception_class"] == "KeycloakMissingRightsError"
+    assert "half-made" in extras["exception_message"]
+    remediation = extras["remediation"]
+    assert "may be half-made" in remediation
+    assert "Delete it in Keycloak before you run the operation again" in remediation
+    assert "Nothing was changed" not in remediation
+    assert kc._admin_tokens == {}
+
+
 async def test_flow_list_that_is_not_a_list_is_an_error(kc: KeycloakConnector) -> None:
     fake = FakeKeycloak(flow_steps=None, client=_client())
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:

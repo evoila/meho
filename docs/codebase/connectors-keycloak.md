@@ -1008,6 +1008,14 @@ request share one read, so a wrong password makes one failed sign-in.
   (alias, id, `flow_created`). `extras.remediation` also says what the run
   changed before: the flow, the level setting and the level name. These
   changes stay; a second run after the fix keeps them and does the rest.
+- **A 403 while an op finds or makes its flow** (`flow_refused_error`, used by
+  `ensure_approval_flow` and `ensure_approval_touch`; the touch op also
+  names a 403 at the realm read of the passkey policy). While the op only
+  reads, the text says nothing was changed. Once it began to make the
+  flow, the text says the flow may be half-made and must be deleted before
+  the next run, because a run finds it with other steps and stops.
+- **A refused read inside a step** is named as a read ("read what is needed
+  to ..."), not as the change of the step (`read_or_write`).
 - **A 403 at a step of `ensure_approval_touch`** after the flow exists (the
   realm's level map, the client's `amr` mapper, the company login default,
   the client binding): the run stops half-way. The error names the refused

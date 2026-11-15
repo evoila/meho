@@ -518,8 +518,13 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch 
 ```
 
 - The flow is missing: MEHO makes it with its settings, maps
-  `meho-touch` to level 3, adds the `amr` mapper to `meho-web`, and
-  binds the flow. The binding is the last change.
+  `meho-touch` to level 3, adds the `amr` mapper to `meho-web`, gives the
+  flow the company login default when the realm's browser flow has one,
+  and binds the flow. The binding is the last change.
+- Keycloak refuses a request with HTTP 403: MEHO names the missing role
+  and the account. When it was making the flow, the flow may be half-made.
+  Delete it in Keycloak before you run again, or the next run stops with
+  "another shape".
 - Everything is there: MEHO changes nothing, and every change flag in
   the result is `false`. So the call is safe to run twice.
 - The flow is there with other steps or other settings: MEHO stops,

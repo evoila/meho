@@ -93,8 +93,10 @@ from meho_backplane.connectors.keycloak.ops_authflow_passkey import (
 from meho_backplane.connectors.keycloak.ops_authflow_rights import (
     CLIENT_LOOKUP_ROLES,
     find_client_uuid,
+    flow_refused_error,
     missing_rights_error,
     names_missing_rights,
+    read_or_write,
     register_rights_check,
 )
 from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import (
@@ -392,9 +394,27 @@ async def _check_verification(
     The touch step uses this policy. Without ``required`` a passkey can pass
     without a PIN or fingerprint, and the touch would not prove the person.
     """
-    realm_rep = await connector._get_admin_json(
-        target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
-    )
+    try:
+        realm_rep = await connector._get_admin_json(
+            target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            raise
+        raise await missing_rights_error(
+            connector,
+            operator,
+            target,
+            exc,
+            op_id=ENSURE_APPROVAL_TOUCH_OP_ID,
+            roles=_ROLES,
+            message=(
+                f"{ENSURE_APPROVAL_TOUCH_OP_ID} stopped: Keycloak refused (HTTP 403) to read "
+                "the realm's passkey policy. Nothing was changed. See extras.remediation."
+            ),
+            done="Keycloak refused (HTTP 403) to read the realm's passkey policy. "
+            "Nothing was changed.",
+        ) from exc
     have = realm_rep.get(_POLICY_UV)
     if have != "required":
         raise KeycloakTouchFlowError(
@@ -698,16 +718,36 @@ async def _check_providers(
 async def _ensure_flow(
     connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
 ) -> tuple[str, bool, list[dict[str, Any]]]:
-    """Find or make the flow; return ``(flow_id, created, rows)``."""
-    flow_id = await _find_flow_id(connector, operator, target, realm)
-    created = flow_id is None
-    if flow_id is None:
-        await _check_providers(connector, operator, target, realm)
-        flow_id = await _make_flow(connector, operator, target, realm)
-    rows = await _read_rows(connector, operator, target, realm)
-    difference = _shape_difference(rows) or await _config_difference(
-        connector, operator, target, realm, rows
-    )
+    """Find or make the flow; return ``(flow_id, created, rows)``.
+
+    A 403 says whether the run only read (nothing changed) or may have made
+    the flow only in part.
+    """
+    writing = False
+    try:
+        flow_id = await _find_flow_id(connector, operator, target, realm)
+        created = flow_id is None
+        if flow_id is None:
+            await _check_providers(connector, operator, target, realm)
+            writing = True
+            flow_id = await _make_flow(connector, operator, target, realm)
+        rows = await _read_rows(connector, operator, target, realm)
+        difference = _shape_difference(rows) or await _config_difference(
+            connector, operator, target, realm, rows
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            raise
+        raise await flow_refused_error(
+            connector,
+            operator,
+            target,
+            exc,
+            op_id=ENSURE_APPROVAL_TOUCH_OP_ID,
+            roles=_ROLES,
+            flow_alias=TOUCH_FLOW_ALIAS,
+            writing=writing,
+        ) from exc
     if difference is not None and created:
         raise KeycloakTouchFlowError(
             "check_failed",
@@ -793,6 +833,7 @@ async def keycloak_authflow_ensure_approval_touch(
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code != 403:
             raise
+        refused = read_or_write(exc, refused)
         raise await missing_rights_error(
             self,
             operator,

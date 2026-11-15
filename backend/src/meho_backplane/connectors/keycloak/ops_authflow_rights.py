@@ -80,9 +80,11 @@ __all__ = [
     "AccountRights",
     "KeycloakMissingRightsError",
     "find_client_uuid",
+    "flow_refused_error",
     "missing_rights_error",
     "names_missing_rights",
     "read_account_rights",
+    "read_or_write",
     "register_rights_check",
     "rights_text",
 ]
@@ -381,6 +383,65 @@ async def missing_rights_error(
         message,
         upstream_message=exc.response.text or None,
         remediation=f"{done} {remediation}" if done else remediation,
+    )
+
+
+def read_or_write(exc: httpx.HTTPStatusError, step: str) -> str:
+    """Name the refused request as a read or as the *step*.
+
+    A refused GET inside a step is a read of what the step needs, not the
+    change of the step.
+    """
+    try:
+        method = exc.request.method
+    except RuntimeError:
+        return step
+    return f"read what is needed to {step}" if method == "GET" else step
+
+
+async def flow_refused_error(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    exc: httpx.HTTPStatusError,
+    *,
+    op_id: str,
+    roles: tuple[str, ...],
+    flow_alias: str,
+    writing: bool,
+) -> KeycloakMissingRightsError:
+    """The error for a 403 while the op finds or makes its flow.
+
+    With *writing* false the op only read, so nothing was changed. With
+    *writing* true the op may have made the flow and only some of its steps:
+    the next run finds that flow with other steps and stops, so it must be
+    deleted first.
+    """
+    what = "make the flow" if writing else "read the flow"
+    if writing:
+        done = (
+            f"The flow {flow_alias!r} may be half-made. Delete it in Keycloak before you run "
+            "the operation again: a run finds it with other steps and stops."
+        )
+        message = (
+            f"{op_id} stopped: Keycloak refused (HTTP 403) to {what} {flow_alias!r}. The flow "
+            "may be half-made. See extras.remediation."
+        )
+    else:
+        done = "Nothing was changed."
+        message = (
+            f"{op_id} stopped: Keycloak refused (HTTP 403) to {what} {flow_alias!r}. "
+            "Nothing was changed. See extras.remediation."
+        )
+    return await missing_rights_error(
+        connector,
+        operator,
+        target,
+        exc,
+        op_id=op_id,
+        roles=roles,
+        message=message,
+        done=f"Keycloak refused (HTTP 403) to {what} {flow_alias!r}. {done}",
     )
 
 

@@ -5,9 +5,10 @@
 
 The enforcing companion to the reflex advisory
 (:mod:`meho_backplane.broadcast.reflex`). Where the advisory *nudges*,
-this gate -- **off by default, opt-in per tenant** -- *rejects* an
-agent's write-class operation of ``caution`` safety or higher, before
-execution, when the agent holds no active announce claim covering it. The rejection
+this gate -- **off by default, opt-in per tenant** -- *rejects* a
+caller's write-class operation of ``caution`` safety or higher, before
+execution, unless the caller holds an active announce claim covering it;
+a person is never asked. The rejection
 is a structured, fail-loud policy denial naming ``meho_broadcast_announce``
 -- it is **not** a NEEDS_APPROVAL path (no durable approval row, no
 four-eyes queue).

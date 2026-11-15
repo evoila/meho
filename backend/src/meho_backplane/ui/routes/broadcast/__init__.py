@@ -30,9 +30,7 @@ Module layout:
   a live row.
 
 The pages show only agent announcements; people read them and cannot
-publish (#3762). The operation detail drawer
-(``/ui/broadcast/event/{audit_id}``) is gone with the operation rows; the
-audit console shows operations.
+publish (#3762). Operations are shown in the audit console.
 
 The umbrella :func:`build_router` aggregates both. It is mounted
 **before** :func:`meho_backplane.ui.routes.stubs.build_stubs_router` in

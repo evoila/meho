@@ -1663,8 +1663,11 @@ parsing it client-side keeps the untrusted data out of every attribute
 context; `tojson`'s `<`/`>` escaping prevents a `</script>` in a field
 from closing the element early.
 
-**The `op_id` scalar sinks (follow-up to B1, same PR #1044; the op_id
-filter itself was removed in #3762, so these sinks no longer exist).** The same
+**The `op_id` scalar sinks (follow-up to B1, same PR #1044).** Today the
+Broadcast page has no `op_id` filter (#3762). The live feed's `x-data`
+still uses a single-quoted attribute, and its only server value is
+`autoScroll: {{ wall | tojson }}`, a boolean; no query parameter reaches
+it. The history below explains why the attribute is single-quoted. The same
 `tojson`-in-a-double-quoted-`x-data` class shipped on the live feed too:
 `_feed.html`'s `opIdFilter: {{ op_id_filter | tojson }}` and
 `_filter_bar.html`'s `x-data="{ opId: {{ op_id_filter | tojson }} }"`.

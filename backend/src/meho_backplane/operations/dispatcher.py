@@ -4173,11 +4173,11 @@ async def _dispatch_now(
 
             # --- Opt-in announce gate (#3133) --------------------------
             # Verdict is AUTO_EXECUTE. In a tenant that has enabled the
-            # announce gate, an agent's caution-or-higher write-class op is
-            # rejected before execution unless the agent holds an active
-            # announce claim covering it. A person is never asked for a
-            # claim (#3762). Off by default and fail-open, so an
-            # ordinary dispatch reaches this line and proceeds unchanged.
+            # announce gate, a caller's caution-or-higher write-class op is
+            # rejected before execution unless the caller holds an active
+            # announce claim covering it; a person is never asked (#3762).
+            # Off by default and fail-open, so an ordinary dispatch
+            # reaches this line and proceeds unchanged.
             # Not run on the ``_approved`` resume path -- an operator
             # already approved that exact call; re-gating it here would
             # strand an approved op behind an announce it can no longer add.

@@ -125,7 +125,7 @@ fields. Connectors keep logins and credentials per target, keyed on
 `(tenant_id, id)`, and a change does not alter that key. So when the
 PATCH sends a field that changes how MEHO reaches or logs in to the
 target (`_CONNECTION_FIELDS`: `product`, `version`, `preferred_impl_id`, `host`,
-`port`, `fqdn`, `secret_ref`, `auth_model`, `verify_tls`, `tls_ca_pin`,
+`port`, `fqdn`, `secret_ref`, `secret_field_map`, `auth_model`, `verify_tls`, `tls_ca_pin`,
 `tls_server_name`, `extras`), the route calls `forget_target_in_connectors(target)`
 (`operations/_handler_resolve.py`, through
 `_drop_kept_logins_on_connection_change`).
@@ -147,12 +147,20 @@ Limits:
   second backplane server, a satellite runner) notices the change on
   its next call: the dispatcher and the runner executor call
   `forget_target_if_changed` with the target they just read. It keeps,
-  per process, the `updated_at` it saw last for each target. The update
-  route always refreshes `updated_at`, also when the same `secret_ref`
-  is sent again. A new value drops the kept logins once, then the next
-  login uses the new values. The runner gets `updated_at` in its target
+  per process, a change version for each target: the time a person last
+  changed it (`connection_changed_at`) and the connector class that
+  serves it now (the class itself, not its name). The update route sets `connection_changed_at` whenever it gets a
+  connection field (the same fields as above), also when the same
+  `secret_ref` is sent again. A probe does not move it: a probe moves
+  `updated_at` and stores the detected product and version, but MEHO does
+  not sign in again for that. A probe that finds a new version drops the
+  kept logins only when another connector serves the target now. A new
+  value drops the kept logins once, then the next login uses the new
+  values. Rows from before migration `0170` got `connection_changed_at`
+  from `updated_at`; a descriptor from an older gateway has none, and
+  `updated_at` is used. The runner gets both times in its target
   descriptor from the gateway. The check and the drop run under a lock
-  per target, and the new `updated_at` is recorded only when every hook
+  per target, and the new change version is recorded only when every hook
   is done. So a call that arrives while a hook still runs waits for the
   drop, instead of treating the version as handled and reusing the old
   login. Paths that call a connector without the dispatcher (topology

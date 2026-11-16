@@ -467,7 +467,9 @@ async def plan_edit(
         after=[*install_entries, *new_tenant_entries, *overrides],
         matched=matched,
         tenant_row=tenant,
-        install_wait_refusal=install_wait_text("This edit", *undone) if undone else None,
+        install_wait_refusal=(
+            install_wait_text("This edit", *undone, single_edit=True) if undone else None
+        ),
     )
 
 

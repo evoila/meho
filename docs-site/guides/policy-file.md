@@ -172,11 +172,21 @@ refused, and the message names the entry and the operation.
   operations of `X`. So do not remove the level. Add a more specific
   tenant entry for that operation with the install's level or higher, or
   leave the operation out of the match. With such an entry, the file is
-  accepted.
+  accepted. The message names the operation and its connector. Put both
+  in the new entry, for example
+  `{match: {connector: X, op: <op-id>}, risk: <level>}`. The same
+  operation id can exist on another connector, for example on another
+  version of the product. An entry without the connector sets that
+  operation's level too. When the refused entry names a group, the
+  message names the group as well. Put it in the new entry too, for
+  example `{match: {connector: X, group: <group>, op: <op-id>}, risk: <level>}`.
+  Without the group, the new entry is less specific than the refused
+  one, and the file is refused again.
 - Which install values make **every** call wait: `always_wait: true` and
-  `risk: destructive`. With `risk: dangerous`, a call waits too, but a
-  standing grant or a run approval of a service account can still let it
-  run without a new approval.
+  `risk: destructive`. With `risk: dangerous`, a call waits too, but
+  two things can still let it run without a new approval: a standing
+  grant of a service account, and a run approval of a service account.
+  An agent grant cannot: a `dangerous` call of an agent always waits.
 - An install entry matches connectors by their id, not by product. A
   connector that a tenant registers itself, under its own id, is matched
   only by an install entry with a wildcard connector, for example

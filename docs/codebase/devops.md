@@ -1867,18 +1867,19 @@ the full matrix on exactly that code. A run on every push would only
 repeat it, take heavy runners and be cancelled by the next merge. The nightly run on
 `main` keeps the caches on `main` warm.
 
-A failed Docker Hub login does not fail a job. Every "Docker Hub login" step
-in `ci.yml` has `continue-on-error: true`. The test images come through the
-Harbor image proxy (the `MEHO_TEST_*_IMAGE` job variables), so the login only
-adds pull headroom on Docker Hub. A short network problem on the way to Docker
-Hub then costs nothing, and cannot throw a pull request out of the merge queue.
-`backend/tests/test_ci_dockerhub_login_soft_fail.py` pins this.
 `backend/tests/test_ci_main_push.py` pins this. Branch protection consumes the
 required jobs' status per
 `branches/main/protection.required_status_checks.contexts` —
 re-verified after the 2026-05-20 #698 promotion of the integration
 lane, the structural corrective to the v0.2 / G3.4 green-but-hollow
 incidents #634 / #697.
+
+A failed Docker Hub login does not fail a job. Every "Docker Hub login" step
+in `ci.yml` has `continue-on-error: true`. The test images come through the
+Harbor image proxy (the `MEHO_TEST_*_IMAGE` job variables), so the login only
+adds pull headroom on Docker Hub. A short network problem on the way to Docker
+Hub then costs nothing, and cannot throw a pull request out of the merge queue.
+`backend/tests/test_ci_dockerhub_login_soft_fail.py` pins this.
 
 Since #3251 the required unit lane is **sharded**: the required context
 `Python (ruff + mypy + pytest)` no longer maps to one monolithic job but

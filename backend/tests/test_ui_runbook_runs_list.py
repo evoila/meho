@@ -739,6 +739,43 @@ def test_start_run_success_redirects_and_lands_row() -> None:
     assert redirect == f"/ui/runbooks/runs/{run.run_id}"
 
 
+def _post_start_with_work_ref(work_ref: str) -> Any:
+    session_id, jwks = _operator_session()
+    token = mint_csrf_token(str(session_id))
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        return client.post(
+            "/ui/runbooks/runs",
+            data={"template_slug": "drain-node", "target": "host-9", "work_ref": work_ref},
+            **_csrf_kwargs(token),
+        )
+
+
+def test_start_run_cleans_the_ticket_id_of_the_form() -> None:
+    """The start form strips the ticket id like every other door."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="drain-node", body=_manual_body())
+
+    response = _post_start_with_work_ref("  CHG1  ")
+
+    assert response.status_code == 204, response.text
+    (run,) = _run_rows(_TENANT_A)
+    assert run.work_ref == "CHG1"
+
+
+def test_start_run_refuses_a_bad_ticket_id_before_a_run_starts() -> None:
+    """An invisible character in the ticket id is a 422 that names the rule, and no run lands."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="drain-node", body=_manual_body())
+
+    response = _post_start_with_work_ref("CHG\u200b1")
+
+    assert response.status_code == 422, response.text
+    assert "control or invisible characters" in response.text
+    assert _run_rows(_TENANT_A) == []
+
+
 def test_start_run_missing_params_renders_alert_not_500() -> None:
     """A template needing an unsupplied ``${run.params.X}`` renders the modal alert.
 

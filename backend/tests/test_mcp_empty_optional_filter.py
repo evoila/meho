@@ -177,3 +177,37 @@ def test_write_tool_keeps_empty_optional_text(
     _call(client, "add_to_memory", arguments)
 
     assert seen_arguments == [arguments]
+
+
+#: List tools whose top-level ``work_ref`` filter is an optional text argument.
+_WORK_REF_FILTER_TOOLS = [
+    "meho_approvals_list",
+    "meho_agents_list_runs",
+    "meho_scheduler_list",
+    "meho_runbook_list_runs",
+]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+@pytest.mark.parametrize("tool", _WORK_REF_FILTER_TOOLS)
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_work_ref_filter_means_no_filter(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811 — pytest fixture
+    seen_arguments: list[dict[str, Any]],
+    tool: str,
+    blank: str,
+) -> None:
+    """A blank top-level ``work_ref`` filter is dropped, not refused by the ticket id rule.
+
+    REST refuses a blank filter (422), and so does the nested
+    ``filter.work_ref`` of the broadcast tools. On these list tools the blank
+    value is read as "no filter", like every other optional text filter.
+    """
+    client, _ = client_with_operator
+
+    unfiltered = _call(client, tool, {})
+    with_blank = _call(client, tool, {"work_ref": blank})
+
+    assert seen_arguments == [{}, {}]
+    assert "error" not in with_blank, with_blank
+    assert _answer(with_blank) == _answer(unfiltered)

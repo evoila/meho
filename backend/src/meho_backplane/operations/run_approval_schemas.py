@@ -25,7 +25,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from meho_backplane.work_ref import WorkRef
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
 
 __all__ = [
     "MAX_RUN_APPROVAL_ENTRIES",
@@ -80,7 +80,10 @@ class RunApprovalCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     work_ref: WorkRef = Field(
-        description="The run reference. Calls of the run send it in the Meho-Work-Ref header.",
+        description=(
+            "The run reference. Calls of the run send it in the Meho-Work-Ref header. "
+            + WORK_REF_FIELD_DESCRIPTION
+        ),
     )
     entries: list[RunApprovalEntry] = Field(min_length=1, max_length=MAX_RUN_APPROVAL_ENTRIES)
     reason: str = Field(

@@ -114,6 +114,7 @@ from meho_backplane.operations._validate import (
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.license_reads import is_license_read
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
+from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
 
@@ -588,7 +589,12 @@ async def _governance_fields(
     or when an agent calls a multi-step operation that changes something
     and declares no steps (:func:`agent_step_refusal`), as the dispatcher
     refuses it.
-    All four are advisory: none is in :data:`_PREVIEW_HASH_KEYS`, so
+    With ``POLICY_ENGINE_SHADOW`` on, two more fields come from
+    :func:`~meho_backplane.policy.who_approves.preview_policy_fields`:
+    ``policy_rule`` (the rule the policy evaluator matched for this gate,
+    marked ``decided: false``) and ``approvers`` (the login groups that may
+    approve when the call waits). With the switch off they are absent.
+    All are advisory: none is in :data:`_PREVIEW_HASH_KEYS`, so
     the hash does not change.
     """
     verdict, reason = await policy_gate(
@@ -599,6 +605,9 @@ async def _governance_fields(
         params=params,
         decide_only=True,
     )
+    # The rule the evaluator matched for this gate (only in shadow mode). The
+    # step checks below run gates of their own, so take it now.
+    stamp = take_rule()
     step_refusal = None
     if verdict is not PermissionVerdict.DENY and get_settings().agent_grant_required == "on":
         # The same up-front check the dispatcher runs (#6189).
@@ -614,11 +623,22 @@ async def _governance_fields(
         if steps is not None:
             verdict, step_reason = steps
             reason = f"{reason}; but {step_reason}" if reason else step_reason
+    # Imported lazily: the policy modules import the dispatcher, which imports this one.
+    from meho_backplane.policy.who_approves import preview_policy_fields
+
+    shadow_fields = await preview_policy_fields(
+        tenant_id=operator.tenant_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        verdict=verdict,
+        stamp=stamp,
+    )
     return {
         "safety_level": descriptor.safety_level,
         "requires_approval": descriptor.requires_approval,
         "policy_verdict": verdict.value,
         "policy_reason": reason,
+        **shadow_fields,
     }
 
 

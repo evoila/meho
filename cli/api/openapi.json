@@ -2307,6 +2307,60 @@
         }
       }
     },
+    "/api/v1/policy/explain": {
+      "post": {
+        "tags": [
+          "policy"
+        ],
+        "summary": "Explain",
+        "description": "Why a call runs, waits or is denied, and who may approve it. Runs nothing.\n\nThe answer is today's answer (the policy gate, decide-only), the policy\nevaluator's answer with every rule it matched (with\n``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and\nthe groups that may approve. No audit row for a call, no approval\nrequest, no call to an outside system. A caller who is not a tenant\nadmin or a platform admin gets the answer without the policy's entries\n(:func:`~meho_backplane.policy.explain.without_policy`).",
+        "operationId": "explain_api_v1_policy_explain_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyExplainBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyExplainResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/event-sources": {
       "get": {
         "tags": [
@@ -35396,6 +35450,311 @@
         "title": "EventSourceUpdate",
         "description": "PATCH body. Every field optional; ``name`` / ``slug`` are absent.\n\n``name`` and ``slug`` are immutable (rename or re-slug = delete +\nre-create) because ``slug`` is a live routing key external senders are\nalready pointed at. Sending ``secret`` rotates the Vault secret in\nplace at the source's existing ``secret_ref`` -- a new KV-v2 version at\nthe same path, so the ingest path reads the new value on its next\nlookup with no downtime (#2880 acceptance criterion 2). Omitting\n``secret`` leaves the stored secret untouched."
       },
+      "ExplainApprovers": {
+        "properties": {
+          "groups": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Groups"
+          },
+          "rule": {
+            "type": "string",
+            "nullable": true,
+            "title": "Rule",
+            "description": "default, rights_change, or a routing entry such as tenant:routing[0]. Null for a caller who is not a tenant admin or a platform admin."
+          }
+        },
+        "type": "object",
+        "required": [
+          "groups"
+        ],
+        "title": "ExplainApprovers",
+        "description": "The login groups that may approve another person's call, and the rule that says so."
+      },
+      "ExplainAsker": {
+        "properties": {
+          "me": {
+            "type": "boolean",
+            "title": "Me"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          },
+          "groups": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Groups"
+          },
+          "via": {
+            "type": "string",
+            "enum": [
+              "web",
+              "token"
+            ],
+            "title": "Via"
+          }
+        },
+        "type": "object",
+        "required": [
+          "me",
+          "kind",
+          "role",
+          "via"
+        ],
+        "title": "ExplainAsker",
+        "description": "Who the question is for."
+      },
+      "ExplainClassification": {
+        "properties": {
+          "risk_level": {
+            "type": "string",
+            "title": "Risk Level"
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "title": "Requires Approval"
+          },
+          "category": {
+            "type": "string",
+            "nullable": true,
+            "title": "Category",
+            "description": "Category, labels and entries are shown only to a tenant admin or a platform admin."
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Labels"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ExplainEntry"
+            },
+            "type": "array",
+            "title": "Entries",
+            "description": "Every matching entry, least specific first."
+          }
+        },
+        "type": "object",
+        "required": [
+          "risk_level",
+          "requires_approval"
+        ],
+        "title": "ExplainClassification",
+        "description": "The values the call is checked with, and the classification entries that matched."
+      },
+      "ExplainEntry": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "category": {
+            "type": "string",
+            "nullable": true,
+            "title": "Category"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Labels"
+          },
+          "risk": {
+            "type": "string",
+            "nullable": true,
+            "title": "Risk"
+          },
+          "always_wait": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Always Wait"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "title": "ExplainEntry",
+        "description": "One classification entry that matches the operation."
+      },
+      "ExplainEvaluator": {
+        "properties": {
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "run",
+              "wait",
+              "deny"
+            ],
+            "title": "Verdict"
+          },
+          "rule": {
+            "$ref": "#/components/schemas/ExplainRule",
+            "description": "The rule that decided."
+          },
+          "floor": {
+            "$ref": "#/components/schemas/ExplainRule",
+            "nullable": true,
+            "description": "The floor that decided, when a floor decided."
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/ExplainRule"
+            },
+            "type": "array",
+            "title": "Rules",
+            "description": "Every rule the evaluator matched, in order."
+          },
+          "same_as_today": {
+            "type": "boolean",
+            "title": "Same As Today"
+          }
+        },
+        "type": "object",
+        "required": [
+          "verdict",
+          "rule",
+          "rules",
+          "same_as_today"
+        ],
+        "title": "ExplainEvaluator",
+        "description": "The answer of the policy evaluator. It decides nothing yet (shadow mode)."
+      },
+      "ExplainRule": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "description": "floor, role_floor, default, agent_grant, standing_grant, ..."
+          },
+          "rule_id": {
+            "type": "string",
+            "title": "Rule Id"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "run",
+              "wait",
+              "deny"
+            ],
+            "nullable": true,
+            "title": "Verdict",
+            "description": "The answer of this step."
+          },
+          "path": {
+            "type": "string",
+            "nullable": true,
+            "title": "Path",
+            "description": "Place in the policy, for example tenant:classifications[2]."
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "rule_id",
+          "text"
+        ],
+        "title": "ExplainRule",
+        "description": "One rule. ``path`` is its place in the policy, when the policy set it."
+      },
+      "ExplainStoredRequest": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Request Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "risk_level": {
+            "type": "string",
+            "nullable": true,
+            "title": "Risk Level"
+          },
+          "policy_rule": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Policy Rule",
+            "description": "{source, rule_id, text, decided}; null when none was stored."
+          },
+          "policy_version": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Policy Version"
+          },
+          "approvers": {
+            "$ref": "#/components/schemas/ExplainApprovers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "op_id",
+          "connector_id",
+          "status",
+          "approvers"
+        ],
+        "title": "ExplainStoredRequest",
+        "description": "The rule stored on an approval request."
+      },
+      "ExplainToday": {
+        "properties": {
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "run",
+              "wait",
+              "deny"
+            ],
+            "title": "Verdict"
+          },
+          "policy_verdict": {
+            "type": "string",
+            "title": "Policy Verdict",
+            "description": "auto-execute, needs-approval or deny."
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "verdict",
+          "policy_verdict"
+        ],
+        "title": "ExplainToday",
+        "description": "Today's answer: what the policy gate does with the call now."
+      },
       "FeatureStatus": {
         "properties": {
           "name": {
@@ -38827,6 +39186,192 @@
         "title": "PermissionVerdict",
         "description": "Three-state verdict returned by the permission resolver.\n\n:attr:`AUTO_EXECUTE` \u2014 the op proceeds without human review.\n:attr:`NEEDS_APPROVAL` \u2014 the op is parked pending an operator\ndecision; the approval queue (G11.2-T4) handles the resume path.\n:attr:`DENY` \u2014 the op is refused immediately with a structured,\nagent-reasonable error.\n\nThe vocabulary is intentionally closed: a fourth verdict would\nrequire a code + migration change, which is the cheapest way to\nprevent drift between the DB layer and the policy engine."
       },
+      "PolicyExplainBody": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "minLength": 1,
+            "nullable": true,
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "minLength": 1,
+            "nullable": true,
+            "title": "Op Id"
+          },
+          "target": {
+            "type": "string",
+            "minLength": 1,
+            "nullable": true,
+            "title": "Target",
+            "description": "The target's name."
+          },
+          "me": {
+            "type": "boolean",
+            "title": "Me",
+            "default": false
+          },
+          "groups": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 5,
+            "title": "Groups",
+            "description": "Login group kinds, e.g. Operators."
+          },
+          "principal": {
+            "type": "string",
+            "enum": [
+              "person",
+              "agent",
+              "service"
+            ],
+            "title": "Principal",
+            "default": "person"
+          },
+          "via": {
+            "type": "string",
+            "enum": [
+              "web",
+              "token"
+            ],
+            "nullable": true,
+            "title": "Via",
+            "description": "For a person: web interface or token. Default: as you call with `me`, token with `groups`."
+          },
+          "file": {
+            "type": "string",
+            "maxLength": 1048576,
+            "nullable": true,
+            "title": "File",
+            "description": "A policy file (policy: v1) that is not imported; it replaces the stored policy of `scope`."
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "tenant",
+              "install"
+            ],
+            "title": "Scope",
+            "default": "tenant"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Request Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "PolicyExplainBody",
+        "description": "The question of ``POST /api/v1/policy/explain``.\n\nAsk about one call (``connector_id`` and ``op_id``) for yourself\n(``me``) or for a login with ``groups`` (``principal`` says which kind),\nor about a stored approval request (``request_id``) alone."
+      },
+      "PolicyExplainResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Status"
+          },
+          "engine": {
+            "type": "string",
+            "enum": [
+              "off",
+              "shadow"
+            ],
+            "title": "Engine",
+            "description": "off: the evaluator does not run. shadow: it runs, but today's checks decide."
+          },
+          "connector_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Op Id"
+          },
+          "target": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target"
+          },
+          "file": {
+            "type": "boolean",
+            "title": "File",
+            "description": "True when a policy file that is not imported was asked.",
+            "default": false
+          },
+          "asker": {
+            "$ref": "#/components/schemas/ExplainAsker",
+            "nullable": true
+          },
+          "answer": {
+            "type": "string",
+            "enum": [
+              "run",
+              "wait",
+              "deny"
+            ],
+            "nullable": true,
+            "title": "Answer",
+            "description": "What MEHO does with the call now: run, wait or deny."
+          },
+          "decided_by": {
+            "type": "string",
+            "const": "today",
+            "nullable": true,
+            "title": "Decided By"
+          },
+          "approvers": {
+            "$ref": "#/components/schemas/ExplainApprovers",
+            "nullable": true,
+            "description": "Who may approve; only when the answer is wait."
+          },
+          "today": {
+            "$ref": "#/components/schemas/ExplainToday",
+            "nullable": true
+          },
+          "evaluator": {
+            "$ref": "#/components/schemas/ExplainEvaluator",
+            "nullable": true,
+            "description": "Null while POLICY_ENGINE_SHADOW is off."
+          },
+          "classification": {
+            "$ref": "#/components/schemas/ExplainClassification",
+            "nullable": true
+          },
+          "request": {
+            "$ref": "#/components/schemas/ExplainStoredRequest",
+            "nullable": true
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error"
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Extras"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "engine"
+        ],
+        "title": "PolicyExplainResponse",
+        "description": "The answer of ``POST /api/v1/policy/explain``.\n\n``status`` is ``error`` when the operation or the target cannot be\nfound; ``error`` and ``extras`` then say why, as in the preview."
+      },
       "PolicyImportResponse": {
         "properties": {
           "preview": {
@@ -39161,6 +39706,22 @@
             "nullable": true,
             "title": "Policy Reason",
             "description": "The policy gate's reason for the verdict; null when it gives none (a person's call that runs at once)."
+          },
+          "policy_rule": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Policy Rule",
+            "description": "Only with POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched ({source, rule_id, text, decided}). decided is false: today's checks decide. Null when the evaluator failed."
+          },
+          "approvers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Approvers",
+            "description": "Only with POLICY_ENGINE_SHADOW on: the login groups that may approve the call when policy_verdict is needs-approval; empty otherwise."
           },
           "proposed_effect": {
             "additionalProperties": true,

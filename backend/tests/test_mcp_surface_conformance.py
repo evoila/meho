@@ -814,9 +814,20 @@ _SWITCHED_SHORT_TEXTS: dict[str, ShortText] = {
 }
 
 
-def _set_switches(monkeypatch: pytest.MonkeyPatch, *, similar: bool, recall: bool) -> None:
+def _set_switches(
+    monkeypatch: pytest.MonkeyPatch, *, similar: bool, recall: bool, shadow: bool | None = None
+) -> None:
+    """Set the switches; ``POLICY_ENGINE_SHADOW`` follows *recall* unless given.
+
+    ``preview_operation`` follows both ``TEAM_KNOWLEDGE_RECALL`` and
+    ``POLICY_ENGINE_SHADOW`` (its ``policy_rule`` and ``approvers`` output
+    fields), so its registered form needs both on.
+    """
     monkeypatch.setenv("KB_SIMILAR_CHECK", "true" if similar else "false")
     monkeypatch.setenv("TEAM_KNOWLEDGE_RECALL", "true" if recall else "false")
+    monkeypatch.setenv(
+        "POLICY_ENGINE_SHADOW", "true" if (recall if shadow is None else shadow) else "false"
+    )
     get_settings.cache_clear()
 
 
@@ -840,6 +851,22 @@ async def test_switches_off_listing_has_no_word_of_the_switched_features(
     assert "dry_run" in knowledge["inputSchema"]["properties"]
     for name in ("call_operation", "preview_operation"):
         assert "team_knowledge" not in tools[name]["outputSchema"]["properties"]
+    preview_fields = tools["preview_operation"]["outputSchema"]["properties"]
+    assert "policy_rule" not in preview_fields
+    assert "approvers" not in preview_fields
+
+
+@pytest.mark.parametrize("shadow", [False, True])
+async def test_preview_policy_fields_follow_the_shadow_switch(
+    monkeypatch: pytest.MonkeyPatch, shadow: bool
+) -> None:
+    """``policy_rule`` and ``approvers`` are in the preview's ``outputSchema`` only when on."""
+    _set_switches(monkeypatch, similar=False, recall=False, shadow=shadow)
+    tools = await _listed_tools(_operator())
+    preview_fields = tools["preview_operation"]["outputSchema"]["properties"]
+    assert ("policy_rule" in preview_fields) is shadow
+    assert ("approvers" in preview_fields) is shadow
+    assert "policy_rule" not in tools["call_operation"]["outputSchema"]["properties"]
 
 
 @pytest.mark.parametrize("switch", sorted(set(_SWITCHED_TOOLS.values())))

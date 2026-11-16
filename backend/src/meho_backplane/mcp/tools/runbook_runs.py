@@ -492,6 +492,7 @@ async def _next_handler(
             operator_sub=operator.sub,
             run_id=run_id,
             request=request,
+            caller=operator,
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
         raise _to_invalid_params("meho_runbook_next", exc) from exc

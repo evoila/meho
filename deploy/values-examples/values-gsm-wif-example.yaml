@@ -16,9 +16,9 @@
 # This example targets the hardest of the four requirement-matrix rows in
 # docs/deploying.md § "Per-operator WIF and background dispatch": an on-prem
 # cluster with NO ambient GCP identity (no GKE Workload Identity, no mounted
-# SA key). On that shape, background dispatch (Sensor evaluations, scheduled
-# topology refreshes, runbook verify dispatch) has no operator JWT to
-# federate, so the checkRunner service principal below is REQUIRED — without
+# SA key). On that shape, background dispatch (Sensor evaluations and
+# scheduled topology refreshes) has no operator JWT to federate (a runbook
+# check step runs with the token of the caller who advances the run), so the checkRunner service principal below is REQUIRED — without
 # it, credentialed Sensors read `unknown` forever. checkRunner.* is #2642's
 # chart surface; it is enabled here so this stays a complete, working recipe.
 # On GKE + Workload Identity, drop the checkRunner block: background reads

@@ -981,7 +981,10 @@ class Settings(BaseModel):
         run, so a restart does not start it again. Range ``[60, 604800]``.
     knowledge_upkeep_enabled:
         Whether to start the knowledge upkeep job in the FastAPI
-        lifespan. Default ``True``. Read once at startup.
+        lifespan. Default ``False``: the job changes which entries
+        ``search_knowledge`` returns (it merges and retires entries), so
+        it stays off until an operator turns it on with
+        ``KNOWLEDGE_UPKEEP_ENABLED=true``. Read once at startup.
     ui_keycloak_client_id:
         OAuth ``client_id`` of the **confidential** Keycloak client the
         operator-console BFF login flow authenticates against. Initiative
@@ -1985,7 +1988,7 @@ class Settings(BaseModel):
     memory_expiry_enabled: bool = True
     # Weekly knowledge upkeep and its report (lessons/upkeep.py).
     knowledge_upkeep_interval_seconds: int = Field(default=604800, ge=60, le=604800)
-    knowledge_upkeep_enabled: bool = True
+    knowledge_upkeep_enabled: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     # G11.2-T6 #819 — grant-expiry sweeper knobs. ``GRANT_EXPIRY_ENABLED``
     # follows the same opt-out shape as ``MEMORY_EXPIRY_ENABLED``.
     # ``GRANT_EXPIRY_TICK_INTERVAL_SECONDS`` defaults to 300 (5 minutes)
@@ -3357,7 +3360,7 @@ def get_settings() -> Settings:
             os.environ.get("KNOWLEDGE_UPKEEP_INTERVAL_SECONDS", "604800"),
         ),
         knowledge_upkeep_enabled=parse_bool_env(
-            os.environ.get("KNOWLEDGE_UPKEEP_ENABLED", "true"),
+            os.environ.get("KNOWLEDGE_UPKEEP_ENABLED", "false"),
         ),
         grant_expiry_tick_interval_seconds=int(
             os.environ.get("GRANT_EXPIRY_TICK_INTERVAL_SECONDS", "300"),

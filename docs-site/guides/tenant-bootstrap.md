@@ -22,8 +22,12 @@ first people log in.
     - **An agent makes the requests** and you approve them. This is the
       agent-requester pattern in
       [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
-      The agent needs no grant for this: an agent's `dangerous` request
-      waits for a person's approval by default.
+      The agent needs a grant only when the switch
+      `AGENT_GRANT_REQUIRED` is `on`. With `off` (the default) or
+      `observe`, an agent's `dangerous` request waits for a person's
+      approval also with no grant. With `on`, a request with no grant
+      is refused. A grant never lets it run alone: it still waits for a
+      person's approval.
 
     The group operations stay at the dangerous risk level (decision
     record:
@@ -342,12 +346,23 @@ writes below wait for your current approver, as before.
 1. **Register the agent.** The new `tenant_admin`, logged in to the new
    tenant, registers the agent principal. The test write
    (`vault.kv.put`, risk level `caution`) and the cleanup
-   (`vault.kv.delete`, risk level `dangerous`) both wait for approval
-   without a grant: an agent's request above `safe` always waits for a
-   person.
+   (`vault.kv.delete`, risk level `dangerous`) must wait for a
+   person's approval. What the agent needs for that depends on the
+   switch `AGENT_GRANT_REQUIRED`:
+
+   - `off` (the default) or `observe`: both wait for approval, also
+     with no grant.
+   - `on`: with no grant, both are refused (`agent_no_grant`). With a
+     grant, both wait for approval.
+
+   So give the agent the starting grant `read-everything`. It works in
+   every state. The new tenant has no target yet, so you cannot name one
+   with `read-targets`. The grant lets `safe` operations run at once.
+   It never lets a write run alone: the write and the cleanup still wait
+   for a person.
 
    ```bash
-   meho agent-principal register tenant-check
+   meho agent-principal register tenant-check --grants read-everything
    ```
 
 2. **Find the agent's login id.** The agent logs in to Vault with its own

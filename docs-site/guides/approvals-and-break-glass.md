@@ -298,11 +298,17 @@ that definition. Four steps:
 ```bash
 # 1. Register the agent principal (mints its client_credentials client;
 #    the output includes the client id you pass to --identity-ref below).
-meho agent-principal register nightly-writer
+#    --grants read-targets gives it one grant on the target it writes to.
+#    With AGENT_GRANT_REQUIRED=on, an agent with no grant is refused, so
+#    the write never waits for you. A grant never lets the write run
+#    alone: it still waits for a person's approval.
+meho agent-principal register nightly-writer \
+  --grants read-targets --target <target-name>
 
 # 2. Author an agent definition bound to that principal. Its toolset and
 #    prompt are what perform the write when the definition runs.
-#    All four flags are required.
+#    All four flags are required. It needs no --grants: the agent
+#    already has its grant from step 1.
 meho agent create nightly-writer --identity-ref agent:nightly-writer \
   --model-tier standard --turn-budget 20 \
   --system-prompt "<what the agent does>"

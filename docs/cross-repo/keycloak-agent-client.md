@@ -192,14 +192,23 @@ wiring for the full operator recipe.
 
 ```shell
 # CLI
-meho agent-principal register deploy-bot
+meho agent-principal register deploy-bot --grants none
 
 # REST
 curl -X POST https://meho.example.com/api/v1/agent-principals \
   -H "Authorization: Bearer <operator-token>" \
   -H "Content-Type: application/json" \
-  -d '{"name": "deploy-bot"}'
+  -d '{"name": "deploy-bot", "starting_grants": {"set": "none"}}'
 ```
+
+`--grants` (REST: `starting_grants`) picks the agent's first grants:
+`none`, `read-everything`, or `read-targets` with one `--target <name>`
+per target. MEHO needs the pick when the switch `AGENT_GRANT_REQUIRED`
+is `observe` or `on`. Without it, MEHO answers
+`422 starting_grants_required` and creates nothing. This example picks
+`none`: with the switch `on`, the agent runs nothing until you add a
+grant with `meho agent grant create`. See
+[Hosted agents](../../docs-site/guides/hosted-agents.md#starting-grants-pick-them-when-you-create-the-agent).
 
 On success you get back the record including:
 

@@ -478,6 +478,9 @@ these always wait for a person's approval. An agent never approves.
 Grants only check operations that run through `call_operation`. The
 discovery tools (`meho_connector_list`, `list_operation_groups`,
 `search_operations`, `list_targets`) are not affected by grants.
+A docs lookup that names a target (`search_docs` with `target`) is checked
+like a `safe` call on that target: it runs only when the agent's grants
+would let a `safe` operation run there at once.
 
 ### Recipe: a read-only agent for one operation on one target
 

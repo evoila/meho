@@ -52,7 +52,7 @@ import contextlib
 import functools
 import json
 import weakref
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -79,10 +79,14 @@ __all__ = [
     "RIGHTS_CHECKED_AT_CALL",
     "AccountRights",
     "KeycloakMissingRightsError",
+    "ReadBackRefusedError",
     "find_client_uuid",
+    "flow_refused_error",
     "missing_rights_error",
     "names_missing_rights",
     "read_account_rights",
+    "read_or_write",
+    "reading_back",
     "register_rights_check",
     "rights_text",
 ]
@@ -381,6 +385,86 @@ async def missing_rights_error(
         message,
         upstream_message=exc.response.text or None,
         remediation=f"{done} {remediation}" if done else remediation,
+    )
+
+
+class ReadBackRefusedError(httpx.HTTPStatusError):
+    """Keycloak refused (HTTP 403) to read back a change the step made."""
+
+
+@contextlib.contextmanager
+def reading_back() -> Iterator[None]:
+    """Wrap the read back of a change: a 403 there becomes :class:`ReadBackRefusedError`.
+
+    The change was made, so the text of the stop must say so.
+    """
+    try:
+        yield
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403 or isinstance(exc, ReadBackRefusedError):
+            raise
+        raise ReadBackRefusedError(str(exc), request=exc.request, response=exc.response) from exc
+
+
+def read_or_write(exc: httpx.HTTPStatusError, step: str) -> str:
+    """Name the refused request as a read or as the *step*.
+
+    A refused GET inside a step is a read of what the step needs, not the
+    change of the step. A refused read back follows the change of the step:
+    the change was made.
+    """
+    if isinstance(exc, ReadBackRefusedError):
+        return f"read back the change MEHO made to {step}"
+    try:
+        method = exc.request.method
+    except RuntimeError:
+        return step
+    return f"read what is needed to {step}" if method == "GET" else step
+
+
+async def flow_refused_error(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    exc: httpx.HTTPStatusError,
+    *,
+    op_id: str,
+    roles: tuple[str, ...],
+    flow_alias: str,
+    writing: bool,
+) -> KeycloakMissingRightsError:
+    """The error for a 403 while the op finds or makes its flow.
+
+    With *writing* false the op only read, so nothing was changed. With
+    *writing* true the op may have made the flow and only some of its steps:
+    the next run finds that flow with other steps and stops, so it must be
+    deleted first.
+    """
+    what = "make the flow" if writing else "read the flow"
+    if writing:
+        done = (
+            f"The flow {flow_alias!r} may be half-made. Delete it in Keycloak before you run "
+            "the operation again: a run finds it with other steps and stops."
+        )
+        message = (
+            f"{op_id} stopped: Keycloak refused (HTTP 403) to {what} {flow_alias!r}. The flow "
+            "may be half-made. See extras.remediation."
+        )
+    else:
+        done = "Nothing was changed."
+        message = (
+            f"{op_id} stopped: Keycloak refused (HTTP 403) to {what} {flow_alias!r}. "
+            "Nothing was changed. See extras.remediation."
+        )
+    return await missing_rights_error(
+        connector,
+        operator,
+        target,
+        exc,
+        op_id=op_id,
+        roles=roles,
+        message=message,
+        done=f"Keycloak refused (HTTP 403) to {what} {flow_alias!r}. {done}",
     )
 
 

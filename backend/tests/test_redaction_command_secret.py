@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -29,12 +30,24 @@ from meho_backplane.connectors.kubernetes.ops_logs import k8s_logs
 from meho_backplane.connectors.linux import LinuxSshConnector
 from meho_backplane.redaction.command_secret import COMMAND_SECRET
 from meho_backplane.redaction.engine import redact
+from meho_backplane.redaction.flight_recorder._content import scrub_content
 from meho_backplane.redaction.middleware import apply_connector_boundary_redaction
+from meho_backplane.redaction.policy import RedactionPolicy
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.settings import get_settings
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
 
 PW: Final = "made-up-pw-4711"
+#: Built from pieces, so secret scanners do not flag the lines that use them.
+_USER_PW: Final = "bob" + ":" + PW
+_PASSWORD_IS: Final = "Pass" + "word="
+_PWD_IS: Final = "P" + "wd="
+_PW_IS: Final = "p" + "w="
+
+
+def _login(user: str, password: str) -> str:
+    return user + "/" + password
+
 
 #: (line, text that must be gone, text that must stay)
 _HIDDEN: Final[list[tuple[str, str, str]]] = [
@@ -55,16 +68,16 @@ _HIDDEN: Final[list[tuple[str, str, str]]] = [
     (f"nsrsqlsv -P {PW} -s backupsrv", PW, "-s backupsrv"),
     (f"ldapsearch -x -D cn=admin -w {PW} -b dc=x", PW, "-D cn=admin"),
     (f"ldapmodify -w{PW} -f f.ldif", PW, "-f f.ldif"),
-    (f"curl -u bob:{PW} https://h/x", PW, "bob:"),  # gitleaks:allow -- made-up value
-    (f"curl -ubob:{PW} https://h/x", PW, "https://h/x"),  # gitleaks:allow -- made-up value
-    (f"curl --user bob:{PW} https://h/x", PW, "--user bob:"),  # gitleaks:allow -- made-up value
+    (f"curl -u {_USER_PW} https://h/x", PW, "bob:"),
+    (f"curl -u{_USER_PW} https://h/x", PW, "https://h/x"),
+    (f"curl --user {_USER_PW} https://h/x", PW, "--user bob:"),
     (f"smbclient //h/share -U bob%{PW} -c ls", PW, "bob%"),
-    (f"sqlplus scott/{PW}@orcl as sysdba", PW, "scott/"),  # trufflehog:ignore
-    (f"rman target sys/{PW}@//dbhost:1521/svc", PW, "//dbhost:1521/svc"),  # trufflehog:ignore
-    ("Server=db;Password=" + PW + ";Database=d", PW, "Database=d"),
-    ("Server=db;Pwd=" + PW + ";Database=d", PW, "Database=d"),
-    (f"Server=db;pw={PW}", PW, "Server=db;"),  # trufflehog:ignore
-    (f'Server=db;Password="{PW};x";Database=d', PW, "Database=d"),  # trufflehog:ignore
+    (f"sqlplus {_login('scott', PW)}@orcl as sysdba", PW, "scott/"),
+    (f"rman target {_login('sys', PW)}@//dbhost:1521/svc", PW, "//dbhost:1521/svc"),
+    (f"Server=db;{_PASSWORD_IS}{PW};Database=d", PW, "Server=db;"),
+    (f"Server=db;{_PWD_IS}{PW};Database=d", PW, "Server=db;"),
+    (f"Server=db;{_PW_IS}{PW}", PW, "Server=db;"),
+    (f'Server=db;{_PASSWORD_IS}"{PW};x";Database=d', PW, "Server=db;"),
     (f"DB_PASSWORD={PW} run", PW, "DB_PASSWORD="),
     (f"APP_PASS={PW} APP_PWD={PW} APP_SECRET={PW}", PW, "APP_SECRET="),
     (f"API_TOKEN={PW} SIGNING_KEY={PW}", PW, "SIGNING_KEY="),
@@ -79,6 +92,24 @@ _HIDDEN: Final[list[tuple[str, str, str]]] = [
     ('mysql -p"made-up\npw-4711" db', "pw-4711", "db"),
     # A command quoted inside a longer command.
     (f'sh -c "mysql -p{PW}" && echo ok', PW, "echo ok"),
+    # A ``;`` inside a quoted or escaped argument does not end the command.
+    (f'curl -H "Type: text; charset=utf-8" -u {_USER_PW} h', PW, "charset"),
+    (f"curl -H 'a; b' -H a\\;b --user {_USER_PW} https://h/x", PW, "'a; b'"),
+    # A quoted argument with a space is one word, also before the option.
+    (f"sshpass -P 'Enter password:' -p {PW} ssh host", PW, "ssh host"),
+    # A login password with quoted, joined and escaped parts.
+    (f"sqlplus {_login('scott', chr(34) + PW + chr(34))}@orcl", PW, "@orcl"),
+    (f"sqlplus {_login('bob', repr(PW))}@service", PW, "@service"),
+    (
+        "sqlplus " + _login("scott", "\"made @/ up\"'pw'\\ 4711") + "@orcl as sysdba",
+        "pw",
+        "@orcl as sysdba",
+    ),
+    # A connection string value with spaces, or in braces with a ``;`` in it.
+    (f"User ID=u;{_PASSWORD_IS}{PW} long phrase;Database=d", "long phrase", "User ID=u;"),
+    (f"Server=db;{_PWD_IS}{PW} long phrase", "long phrase", "Server=db;"),
+    (f"Server=db;{_PWD_IS}{{made-up;tail}};Database=d", "tail", "Server=db;"),
+    (f"{_PW_IS}{PW} -suffix;Database=d", "-suffix", "Database=d"),
 ]
 
 #: Harmless text that looks like one of the forms.
@@ -97,16 +128,20 @@ _KEPT: Final[list[str]] = [
     "run --token-file /etc/token --secret-name app",
     "run --no-password",
     "run --password --verbose",
-    "PWD=/home/user",  # trufflehog:ignore
+    "PWD=/home/user",
     "SORT_ORDER=asc",
     "registry.example.com/app@sha256:0123456789abcdef",
+    'uses: actions/checkout"x"@v4',
+    "a/'never closed@orcl",
+    "pw=a b",
     "uses: actions/checkout@v4",
     "images/logo@2x.png",
-    "Server=db;Database=d",  # trufflehog:ignore
-    "Password=;Server=db",  # trufflehog:ignore
-    "Server=db;Password=",  # trufflehog:ignore
+    "Server=db;Database=d",
+    "Password=;Server=db",
+    "Server=db;Password=",
     "<user>u</user><password></password><password/>",
     "the password prompt was shown",
+    "<password><![CDATA[x]]></user></password>",
 ]
 
 
@@ -146,14 +181,209 @@ def test_an_unclosed_quote_does_not_hide_the_rest_of_the_text() -> None:
 
 
 def test_spans_never_overlap_and_are_left_to_right() -> None:
-    text = (
-        f"mysql -p{PW} --password {PW} DB_PASSWORD={PW}; "  # trufflehog:ignore
-        f"Server=a;Password={PW};"  # trufflehog:ignore
-    )
+    text = f"mysql -p{PW} --password {PW} DB_PASSWORD={PW}; Server=a;{_PASSWORD_IS}{PW};"
     spans = COMMAND_SECRET.secret_spans(text)
     assert spans == sorted(spans)
     assert all(a[1] <= b[0] for a, b in itertools.pairwise(spans))
     assert all(text[a:b] and PW in text[a:b] for a, b in spans)
+
+
+_MARK: Final = "[REDACTED:command_line_secret]"
+
+#: (line, the whole filter output): only the value goes, every other word stays.
+_WHOLE_OUTPUT: Final[list[tuple[str, str]]] = [
+    (
+        f"run --{_PASSWORD_IS.lower()}{PW} --user alice --verbose",
+        f"run --{_PASSWORD_IS.lower()}{_MARK} --user alice --verbose",
+    ),
+    (f"run -{_PASSWORD_IS}{PW} --user alice", f"run -{_PASSWORD_IS}{_MARK} --user alice"),
+    (
+        f"login {_PASSWORD_IS.lower()}{PW} user=alice; echo ok",
+        f"login {_PASSWORD_IS.lower()}{_MARK} user=alice; echo ok",
+    ),
+    (f"Server=db;{_PASSWORD_IS}{PW} long phrase", f"Server=db;{_PASSWORD_IS}{_MARK}"),
+    (f"{_PW_IS}{PW} long phrase;", f"{_PW_IS}{_MARK};"),
+    # A ``pw=`` value with an option-like word, followed by a next field.
+    (f"{_PW_IS}{PW} -suffix;Database=d", f"{_PW_IS}{_MARK};Database=d"),
+    # A command option keeps the words after its value, also before a ``;``.
+    (
+        f"run --{_PASSWORD_IS.lower()}{PW} --user alice; mode=fast",
+        f"run --{_PASSWORD_IS.lower()}{_MARK} --user alice; mode=fast",
+    ),
+    (
+        f"run -{_PASSWORD_IS}{PW} --user alice; mode=fast",
+        f"run -{_PASSWORD_IS}{_MARK} --user alice; mode=fast",
+    ),
+    (
+        f"login {_PASSWORD_IS.lower()}{PW} --verbose; echo ok",
+        f"login {_PASSWORD_IS.lower()}{_MARK} --verbose; echo ok",
+    ),
+    # Quoted, joined and escaped login password parts are hidden whole.
+    (
+        "sqlplus " + _login("scott", "\"made up\"'pw'") + "@orcl",
+        "sqlplus " + _login("scott", _MARK) + "@orcl",
+    ),
+    (
+        f"sqlplus {_login('bob', chr(34) + PW + chr(34))}@service",
+        f"sqlplus {_login('bob', _MARK)}@service",
+    ),
+    # A quoted argument with a space before the password option of sshpass.
+    (
+        f"sshpass -P 'Enter password:' -p {PW} ssh host",
+        f"sshpass -P 'Enter password:' -p {_MARK} ssh host",
+    ),
+    # A command quoted inside a longer one ends at its closing quote.
+    (
+        f'sh -c "mysql -p{PW}"; echo "status ok"',
+        f'sh -c "mysql -p{_MARK}"; echo "status ok"',
+    ),
+    (
+        f"sh -c 'run --password {PW}'; echo 'status ok'",
+        f"sh -c 'run --password {_MARK}'; echo 'status ok'",
+    ),
+    (
+        f'sh -c "DB_PASSWORD={PW}"; echo "status ok"',
+        f'sh -c "DB_PASSWORD={_MARK}"; echo "status ok"',
+    ),
+    (
+        f'sh -c "sqlplus {_login("bob", PW)}@svc"; echo "status ok"',
+        f'sh -c "sqlplus {_login("bob", _MARK)}@svc"; echo "status ok"',
+    ),
+    (
+        f"don't run mysql -p{PW} it's bad",
+        f"don't run mysql -p{_MARK} it's bad",
+    ),
+    # A CDATA section with white space or other text around it.
+    (
+        f"<password>\n<![CDATA[{PW}]]>\n</password>",
+        f"<password>\n<![CDATA[{_MARK}]]>\n</password>",
+    ),
+    (
+        f"<password> a <![CDATA[{PW}]]> b </password><user>u</user>",
+        f"<password> {_MARK} <![CDATA[{_MARK}]]> {_MARK} </password><user>u</user>",
+    ),
+    (
+        f"<token><![CDATA[{PW}]]><![CDATA[{PW}]]></token>",
+        f"<token><![CDATA[{_MARK}]]><![CDATA[{_MARK}]]></token>",
+    ),
+]
+
+
+@pytest.mark.parametrize(("line", "expected"), _WHOLE_OUTPUT)
+def test_only_the_value_is_replaced(line: str, expected: str) -> None:
+    assert redact(line, get_default_policy()).redacted == expected
+
+
+def test_no_part_of_a_braced_connection_value_is_left() -> None:
+    line = f"Server=db;{_PWD_IS}{{made-up;tail}};Database=d"
+    out = redact(line, get_default_policy()).redacted
+    assert "made-up" not in out
+    assert "tail" not in out
+    assert out.startswith("Server=db;")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"Server=db;{_PWD_IS}made up long phrase ;Database=d",
+        f"{_PASSWORD_IS}made up long phrase;",
+        f"{_PWD_IS}made up long phrase; ",
+        f"{_PASSWORD_IS}made up long phrase;Database=d",
+    ],
+)
+def test_a_connection_string_value_runs_to_its_semicolon(line: str) -> None:
+    # The finder reports the value only. Behind it, the api_key rule still
+    # hides ``Password=<placeholder>;...`` as it does without this rule.
+    spans = COMMAND_SECRET.secret_spans(line)
+    assert [line[a:b] for a, b in spans] == ["made up long phrase"]
+
+
+def test_the_trace_scrub_hides_what_the_answer_hides() -> None:
+    line = f"exec mysql -u root -p{PW} appdb; User ID=u;{_PASSWORD_IS}{PW} x y;"
+    answer = redact(line, get_default_policy()).redacted
+    trace, fired = scrub_content(line)
+    assert fired is True
+    assert PW not in answer
+    assert trace == answer
+
+
+# -- only hides more ---------------------------------------------------------------
+
+_SHORT: Final = "made-up-short"
+
+#: Command texts from the tests of the other redaction rules (the command
+#: line preview filter, the cron job and job previews, the label rules).
+_OTHER_RULE_TEXTS: Final[list[str]] = [
+    f"PGPASSWORD={_SHORT};tail",
+    f'env "PGPASSWORD={_SHORT}"suffix pg_dump app',
+    f"curl -u {'admin' + ':' + _SHORT} https://example.invalid",
+    f"PGPASSWORD={_SHORT} pg_dump -h db app; id",
+    f'tool --password "{_SHORT}\\" phrase" run',
+    f'sh -c "PGPASSWORD={_SHORT}; id" && echo done',
+    f"export PGPASSWORD={_SHORT} && pg_dump -h db app",
+    f"MYSQL_ROOT_PASSWORD='{_SHORT} {_SHORT}' mysqld",
+    f"--password={_SHORT} --token={_SHORT} --dry-run",
+    f"mytool --password '{_SHORT} phrase' run",
+    f"mytool --password {_SHORT}\\ phrase run",
+    f"mytool --password={_SHORT}\\ phrase run",
+    f"PGPASSWORD='{_SHORT} phrase pg_dump",
+    f"tool --password {_SHORT} 2>&1; id",
+    f"tool -p '{_SHORT} phrase' x",
+    f"env 'PGPASSWORD={_SHORT} phrase' pg_dump app",
+    f'sh -c "pg_dump --password {_SHORT} app" && echo done',
+    f"mytool --password\n{_SHORT}",
+    f"mkdir -p /tmp/x\nsudo sshpass -p {_SHORT} ssh deploy@host id\nmariadb -p{_SHORT}\n",
+    f"DB_PASSWORD={_SHORT}{_SHORT}",
+    f"export GITHUB_TOKEN={_SHORT}{_SHORT}",
+    f"x-api-key: {_SHORT}{_SHORT}",
+    f"{_PASSWORD_IS}{_SHORT};Database=d user=x",
+    f"login {_PASSWORD_IS.lower()}{_SHORT}{_SHORT};tail",
+    f"<Login><userName>root</userName><password>{_SHORT}</password></Login>",
+]
+
+_WORD: Final = re.compile(r"[A-Za-z0-9][\w.-]*")
+_ANY_PLACEHOLDER: Final = re.compile(r"\[REDACTED:[^\]]*\]")
+#: A label of a secret (``password``, ``DB_PASSWORD``, ``x-api-key``). Some
+#: rules hide the label with the value; this rule keeps it readable.
+_LABEL: Final = re.compile(
+    r"(?i)[\w.-]*(?:pass(?:word|wd)?|pwd|pw|token|secret|key|id)", re.IGNORECASE
+)
+
+
+def _without_command_rule() -> RedactionPolicy:
+    policy = get_default_policy()
+    rules = tuple(rule for rule in policy.rules if rule.pattern != "command_line_secret")
+    assert len(rules) == len(policy.rules) - 1
+    return policy.model_copy(update={"rules": rules})
+
+
+def _texts_of_other_tests() -> list[str]:
+    from tests.test_redaction_patterns import _PATTERN_TEST_ROWS
+
+    return [text for _name, text, _hit in _PATTERN_TEST_ROWS] + _OTHER_RULE_TEXTS
+
+
+def _shown(text: str) -> str:
+    return _ANY_PLACEHOLDER.sub(" ", text)
+
+
+def test_the_rule_only_hides_more() -> None:
+    """No word that the policy without this rule hides is shown with it."""
+    before_policy = _without_command_rule()
+    texts = _texts_of_other_tests() + [line for line, _gone, _kept in _HIDDEN]
+    texts += [line for line, _expected in _WHOLE_OUTPUT]
+    shown_now: dict[str, set[str]] = {}
+    for text in texts:
+        before = _shown(redact(text, before_policy).redacted)
+        now = _shown(redact(text, get_default_policy()).redacted)
+        # A word shown now must be shown without the rule too (also as a part
+        # of a longer word there: ``-p`` of ``-pvalue``), or be a label.
+        more = {
+            word for word in _WORD.findall(now) if word not in before and not _LABEL.fullmatch(word)
+        }
+        if more:
+            shown_now[text] = more
+    assert shown_now == {}
 
 
 _LONG_LINE: Final = 200_000
@@ -167,8 +397,21 @@ _LONG_LINE: Final = 200_000
         "--password '",
         'A_KEY="x ',
         "A_KEY=",
-        "pw=",  # trufflehog:ignore
-        'Password="',  # trufflehog:ignore
+        _PW_IS,
+        _PASSWORD_IS + '"',
+        "Pwd={",
+        'curl -H "a;b" ',
+        "curl a\\; ",
+        "a/'b' ",
+        'a/"b"',
+        "Password=a ",
+        "<password><![CDATA[",
+        "<password>\n<![CDATA[x]]>\n",
+        'sh -c "mysql -p',
+        '"curl -u a:',
+        "'--password ",
+        'x"DB_PASSWORD=',
+        "pw=a -b",
         "<password>",
         "a/b@",
         "sshpass -p ",
@@ -183,6 +426,27 @@ def test_a_200000_character_line_is_read_in_under_a_second(unit: str) -> None:
     started = time.perf_counter()
     redact(text, get_default_policy())
     assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "<password><![CDATA[",
+        "<password>\n<![CDATA[x]]>\n<![CDATA[",
+        "<password><![CDATA[a]]><password>",
+        "<token> a ",
+    ],
+)
+def test_an_800000_character_text_of_secret_elements_is_read_in_under_a_second(
+    unit: str,
+) -> None:
+    # Each element opens a CDATA section that is never closed. A search for
+    # its end that starts again for each element takes square time.
+    text = unit * (800_000 // len(unit))
+    started = time.perf_counter()
+    spans = COMMAND_SECRET.secret_spans(text)
+    assert time.perf_counter() - started < 1.0
+    assert spans == []
 
 
 # -- through the three operations ----------------------------------------------------

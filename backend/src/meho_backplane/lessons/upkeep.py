@@ -3,7 +3,9 @@
 
 """The weekly knowledge upkeep job and its report.
 
-Too many old or doubled entries make the agent worse. Once per interval
+Too many old or doubled entries make the agent worse. The job is off by
+default (``KNOWLEDGE_UPKEEP_ENABLED=true`` turns it on), because it changes
+which entries knowledge search returns. Once per interval
 (``KNOWLEDGE_UPKEEP_INTERVAL_SECONDS``, one week by default) this job:
 
 1. **Merges duplicates.** Knowledge entries of one tenant with exactly

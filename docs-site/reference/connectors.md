@@ -50,7 +50,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 
 ## evoila's enterprise pack
 
-evoila's enterprise pack is a commercial add-on. It adds the VMware and VCF connectors, and connectors for Fortinet and CrowdStrike products, as a signed package on top of the public image. Their setup guides and operation lists come with the pack. To get the pack, contact evoila.
+evoila's enterprise pack is a commercial add-on. It adds the VMware and VCF connectors, and connectors for Fortinet, CrowdStrike and Dell NetWorker products, as a signed package on top of the public image. Their setup guides and operation lists come with the pack. To get the pack, contact evoila.
 
 | Product | Connectors | Built for | Tested live on | What it does |
 | --- | --- | --- | --- | --- |
@@ -76,6 +76,7 @@ evoila's enterprise pack is a commercial add-on. It adds the VMware and VCF conn
 | Fortinet FortiMail | `fortimail-rest-7.x` | 7.2 to 7.x | not yet recorded | Reads status, quarantine and mail queues, and changes block lists, safe lists and policies. |
 | Fortinet FortiSIEM | `fortisiem-rest-7.5`, `fortisiem-rest-7.4` | 7.4 to 7.x | `fortisiem-rest-7.5`: not yet recorded. `fortisiem-rest-7.4`: not yet recorded. | Reads the health of the FortiSIEM nodes and the organizations. |
 | CrowdStrike Falcon | `falcon-rest-2026.11` | cloud service | not yet recorded | Reads hosts and detections, and cuts a host off the network or gives it back. |
+| Dell NetWorker | `networker-rest-19.x` | 19.x | not yet recorded | Reads backup jobs, clients and workflows, and starts or stops backups, with approval. |
 
 ## Versions and how a connector is chosen
 

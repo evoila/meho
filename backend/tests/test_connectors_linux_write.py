@@ -1061,6 +1061,51 @@ async def test_secret_env_forbidden_path_fails_closed_no_ssh() -> None:
     assert "APP_DB_CRED" in str(exc.value)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "text"),
+    [
+        ("missing", "Vault has no secret at that path"),
+        ("refused", "Vault refused to read that path"),
+    ],
+)
+async def test_secret_env_unreadable_target_secret_names_the_path_no_ssh(
+    kind: str, text: str
+) -> None:
+    """A path the loader cannot read (missing, or refused) is a clear error, no SSH."""
+    from meho_backplane.connectors._shared.vault_creds import (
+        TargetSecretForbiddenError,
+        TargetSecretNotFoundError,
+    )
+
+    error: Exception = (
+        TargetSecretNotFoundError(target_name="linux-1", secret_ref="secret/app/db")
+        if kind == "missing"
+        else TargetSecretForbiddenError(target_name="linux-1", secret_ref="secret/app/db")
+    )
+    connector = LinuxSshConnector()
+    connector._resolve_secret = AsyncMock(side_effect=error)  # type: ignore[method-assign]
+    sudo_mock = AsyncMock()
+    with (
+        patch("meho_backplane.connectors.linux.ops_write.run_remote_bash_with_sudo", sudo_mock),
+        pytest.raises(LinuxWriteError) as exc,
+    ):
+        await linux_script_run(
+            connector,
+            _TARGET,
+            {
+                "script": "x",
+                "use_sudo": True,
+                "secret_env": {"APP_DB_CRED": "secret/app/db#cred"},
+            },
+        )
+    sudo_mock.assert_not_awaited()
+    assert "APP_DB_CRED" in str(exc.value)
+    assert "secret/app/db#cred" in str(exc.value)
+    assert text in str(exc.value)
+    assert exc.value.__cause__ is error
+
+
 # -- op schema + preview echo (reference mapping, never a value)
 
 

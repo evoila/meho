@@ -230,7 +230,7 @@ def test_shipped_subclasses_advertise_v2_metadata_per_their_initiative() -> None
     assert VaultConnector.product == "vault"
     assert VaultConnector.version == "1.x"
     assert VaultConnector.impl_id == "vault"
-    assert VaultConnector.supported_version_range is None
+    assert VaultConnector.supported_version_range == ">=1.18,<2.0"
     assert VaultConnector.priority == 0
 
     # G0.6 refactor (#391) flipped the K8s connector from the v1 single-

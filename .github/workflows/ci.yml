@@ -711,6 +711,7 @@ jobs:
       # the 1.18 LTS minor (not `:latest`) so an upstream Vault release
       # never breaks an unrelated PR.
       MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+      MEHO_TEST_OPENBAO_IMAGE: ${{ vars.CI_IMAGE_PROXY && format('{0}/openbao/openbao:2.7.1', vars.CI_IMAGE_PROXY) || 'openbao/openbao:2.7.1' }}
       # #2949 — vendor vCenter spec-shelf wiring (see the checkout step
       # below + docs/decisions/vendor-spec-ci-provisioning.md).
       # SPEC_SHELF_TOKEN_PRESENT surfaces *presence* of the
@@ -1875,6 +1876,7 @@ jobs:
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+      MEHO_TEST_OPENBAO_IMAGE: ${{ vars.CI_IMAGE_PROXY && format('{0}/openbao/openbao:2.7.1', vars.CI_IMAGE_PROXY) || 'openbao/openbao:2.7.1' }}
     defaults:
       run:
         working-directory: backend
@@ -2449,6 +2451,7 @@ jobs:
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+      MEHO_TEST_OPENBAO_IMAGE: ${{ vars.CI_IMAGE_PROXY && format('{0}/openbao/openbao:2.7.1', vars.CI_IMAGE_PROXY) || 'openbao/openbao:2.7.1' }}
       # G3.2-T6 (#326) — k3s container fixture for the K8s typed-connector
       # E2E acceptance harness (tests/integration/test_connectors_k8s_e2e.py
       # and the existing tests/integration/test_connectors_k8s_k3d.py).

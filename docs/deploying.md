@@ -675,6 +675,7 @@ Append a row here in the same PR that carries an upgrade-relevant change
 | **v0.47.0** | With `MCP_CLIENT_PER_TOOL_KIND` on, the account page of the web console shows "Your tools": each tool kind, its last use and a "Sign out this tool" button. The button ends the signed-in person's logins of that one tool in Keycloak. For this, MEHO's Keycloak admin client needs the realm-management role `manage-users`. Migration `0172` adds one index on `audit_log` (person and time); it changes no row, and on a large audit log it takes a while. | **Built-in Keycloak:** nothing to do; `meho-admin` already has `manage-users`. **Your own Keycloak:** give MEHO's Keycloak admin client `manage-users` before you turn the switch on. Without the role, the button shows an error that names it. See [The MCP clients of the AI tools](../docs-site/install/keycloak-realm.md#the-mcp-clients-of-the-ai-tools). |
 | **v0.47.0** | A request for `keycloak.role_mapping.assign` or `keycloak.role_mapping.client.assign` that already waited for approval before this version does not run, in every realm. Its card holds no list of what the role gives. The refusal says: "This request was made before MEHO read what a role gives. Send it again." | Send such a request again after the upgrade. |
 | **v0.47.0** | **Action needed (service logins and run approvals).** No standing grant and no run approval covers `keycloak.role_mapping.assign` and `keycloak.group.member.add`. Each call waits for a person to approve it, also when an older grant names the operation. A new grant or run approval that names them is refused. | Plan for a person to approve each call. Remove grants for these two operations that no longer do anything. |
+| **v0.47.0** | With approval notifications on (`webPush.enabled: true`), MEHO now sends them (#6002). A browser that a person switched on before the upgrade gets its first message only after that person's next sign-in to the web console, or the next time they open the account page. Until then MEHO does not know their login groups for it. After that, a person whose last sign-in is more than 7 days old gets no message until they sign in again. | Ask the people who use notifications to sign in to the web console once after the upgrade. Allow MEHO to reach the push services of the browser makers: see [Push services for approval notifications](../docs-site/install/index.md#push-services-for-approval-notifications). |
 
 ## Operational chart knobs
 
@@ -728,8 +729,15 @@ each lives inline in
   a person can switch on "Notify me about approvals in this browser". With a
   built-in core part, the install makes the push key in
   `<release>-core-web-push`; without one, set `webPush.secretName` to your
-  own Secret (key `vapid_private_key`), or the render stops. See
-  `docs/codebase/ui.md`, "Approval notifications".
+  own Secret (key `vapid_private_key`), or the render stops. MEHO then
+  needs outbound HTTPS to the push services of Apple, Google, Microsoft
+  and Mozilla; the host names are in
+  [Push services for approval notifications](../docs-site/install/index.md#push-services-for-approval-notifications).
+  With `replicaCount` above 1, each copy keeps its own rate limit and its
+  own order of the messages of one request, so a person may get more
+  messages, and a result may in rare cases arrive before its first
+  message. See `docs/codebase/ui.md`, "Approval notifications", and the
+  user guide `docs-site/guides/phone-and-laptop.md`.
 - **`API_DOCS_ENABLED`** (via `extraEnv`) — the API docs pages
   (`/openapi.json`, `/docs`, `/redoc`) are off unless this is `true`. They
   need no login, so turn them on only on an instance where that is fine.

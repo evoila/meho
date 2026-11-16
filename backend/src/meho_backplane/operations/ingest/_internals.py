@@ -115,12 +115,9 @@ OP_CROSS_TENANT_INGEST: Final[str] = "meho_connector_ingest_cross_tenant"
 #: bulk read-class enable path (G0.25-T7 #1749) flips ``is_enabled``
 #: only on ingested ops whose ``method`` is one of these; every
 #: write-shaped verb (POST / PUT / PATCH / DELETE) stays default-deny.
-#: ``EndpointDescriptor`` carries no ``op_class`` column — the
-#: read/write taxonomy the MCP tool registry uses lives on
-#: :class:`~meho_backplane.mcp.registry.ToolDefinition`, not the
-#: descriptor row — so HTTP method is the per-row read-class signal
-#: for ingested operations (typed / composite ops have ``method``
-#: NULL and are never matched). Stored uppercase to compare against
+#: HTTP method is the per-row read-class signal for ingested operations
+#: (typed / composite ops have ``method`` NULL and are never matched).
+#: Stored uppercase to compare against
 #: the verbatim spec verbs the ingest parser writes.
 READ_HTTP_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD"})
 

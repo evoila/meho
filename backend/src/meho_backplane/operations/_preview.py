@@ -83,9 +83,9 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 import structlog
 
 from meho_backplane.broadcast.events import (
-    classify_op,
     is_secret_name_value_pair,
     is_secret_param_name,
+    resolve_op_class,
 )
 from meho_backplane.redaction import apply_connector_boundary_redaction, get_default_policy, redact
 
@@ -477,7 +477,7 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     place of ``"preview"``.
     """
     op_id = ctx.descriptor.op_id
-    op_class = classify_op(op_id)
+    op_class = resolve_op_class(op_id, getattr(ctx.descriptor, "op_class", None))
     builder = _PREVIEW_BUILDERS.get(op_id)
     if op_class in _SENSITIVE_CLASSES and builder is None:
         # A credential-class op with NO bespoke builder must not surface
@@ -551,7 +551,7 @@ def _preview_unavailable_marker(
 
 
 def describe_preview_provenance(
-    preview: dict[str, Any] | None, *, op_id: str
+    preview: dict[str, Any] | None, *, op_id: str, stored_op_class: str | None = None
 ) -> tuple[bool, str | None]:
     """Classify a built ``proposed_effect`` envelope for the reviewer surface (#2332).
 
@@ -589,7 +589,7 @@ def describe_preview_provenance(
     # Collapsed to the identifier-only default: name WHY so the approver
     # sees a deliberately-redacted credential write distinctly from a
     # connector that simply never populated a preview.
-    if classify_op(op_id) in _SENSITIVE_CLASSES:
+    if resolve_op_class(op_id, stored_op_class) in _SENSITIVE_CLASSES:
         return False, PREVIEW_REASON_CREDENTIAL_REDACTED
     return False, PREVIEW_REASON_NOT_POPULATED
 

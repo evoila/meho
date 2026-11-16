@@ -185,13 +185,20 @@ Limits:
   its next call: the dispatcher and the runner executor call
   `forget_target_if_changed` with the target they just read. It keeps,
   per process, a change version for each target: the time a person last
-  changed it (`connection_changed_at`) and the connector class that
-  serves it now (the class itself, not its name). The update route sets `connection_changed_at` whenever it gets a
+  changed it (`connection_changed_at`), the connector class that
+  serves it now (the class itself, not its name), and the product the last
+  probe detected (`fingerprint.product`). The update route sets `connection_changed_at` whenever it gets a
   connection field (the same fields as above), also when the same
   `secret_ref` is sent again. A probe does not move it: a probe moves
   `updated_at` and stores the detected product and version, but MEHO does
   not sign in again for that. A probe that finds a new version drops the
-  kept logins only when another connector serves the target now. A new
+  kept logins only when another connector serves the target now. A probe
+  that finds another product behind the address drops them once, even when
+  the same connector serves the target: the old system is gone. A probe that
+  finds the same product, with a new version or only a new probe time,
+  drops nothing. The first probe of a target that was never probed before
+  also drops the kept logins once, because the product goes from none to a
+  name. This is harmless: the next call signs in again. A new
   value drops the kept logins once, then the next login uses the new
   values. Rows from before migration `0170` got `connection_changed_at`
   from `updated_at`; a descriptor from an older gateway has none, and

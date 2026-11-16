@@ -55,11 +55,15 @@ __all__ = [
     "_AUTH_FLOW_ADD_SUBFLOW_PATH",
     "_AUTH_FLOW_COPY_PATH",
     "_AUTH_FLOW_EXECUTIONS_PATH",
+    "_CLIENT_ROLE_PATH",
+    "_CLIENT_ROLE_USERS_PATH",
     "_EVENTS_CONFIG_PATH",
     "_IDENTITY_PROVIDERS_PATH",
     "_REQUIRED_ACTIONS_PATH",
     "_USER_BRUTE_FORCE_PATH",
     "_USER_CREDENTIALS_PATH",
+    "_USER_CREDENTIAL_PATH",
+    "_USER_ROLE_MAPPINGS_CLIENT_PATH",
     "_USER_SESSIONS_PATH",
     "fill_path",
     "quote_segment",
@@ -85,6 +89,17 @@ _USER_LOGOUT_PATH = "/admin/realms/{realm}/users/{user-id}/logout"
 _USER_SESSIONS_PATH = "/admin/realms/{realm}/users/{user-id}/sessions"
 _USER_CREDENTIALS_PATH = "/admin/realms/{realm}/users/{user-id}/credentials"
 _USER_BRUTE_FORCE_PATH = "/admin/realms/{realm}/attack-detection/brute-force/users/{user-id}"
+# Client role writes: a user's role mappings on one client (the spec names the
+# client placeholder ``{client-id}`` here, though it holds the client UUID), and
+# the role of one client.
+_USER_ROLE_MAPPINGS_CLIENT_PATH = (
+    "/admin/realms/{realm}/users/{user-id}/role-mappings/clients/{client-id}"
+)
+_CLIENT_ROLE_PATH = "/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}"
+# The users who hold one client role directly (the client role remove card).
+_CLIENT_ROLE_USERS_PATH = "/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}/users"
+# One stored credential of a user.
+_USER_CREDENTIAL_PATH = "/admin/realms/{realm}/users/{user-id}/credentials/{credentialId}"
 _ROLES_PATH = "/admin/realms/{realm}/roles"
 _ROLE_PATH = "/admin/realms/{realm}/roles/{role-name}"
 _ROLE_USERS_PATH = "/admin/realms/{realm}/roles/{role-name}/users"

@@ -24,6 +24,13 @@ op_id                               safety       Admin REST API
 ``keycloak.user.logout``            caution      ``POST .../users/{id}/logout``
 ==================================  ===========  ===========================================
 
+Four more writes (client roles, user details and one stored credential) have
+their own modules: ``ops_write_client_role`` (``keycloak.role_mapping.client.assign``
+and ``.remove``, dangerous), ``ops_write_user_update`` (``keycloak.user.update``,
+caution) and ``ops_write_user_credential``
+(``keycloak.user.credential.delete``, dangerous). Their op rows are in
+``ops_write_account_schemas``.
+
 ``keycloak.user.logout`` (#3851) came later. It ends every live session of
 one user, so their refresh tokens stop working at once.
 

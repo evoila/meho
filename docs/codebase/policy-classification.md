@@ -87,6 +87,8 @@ The rules are in `policy/classification.py` (`classify`, no database):
 
    A tenant file that sets `always_wait: false` on an operation the
    install makes wait is refused; the text says to remove that part. A
+   single edit that sends it is refused too; its text says not to send
+   `always_wait: false` (`install_wait_text(..., single_edit=True)`). A
    tenant entry that decides a lower `risk` for an operation than a
    matching install entry is refused too (`install_risk_lowered`). A more
    specific tenant entry with the install's level or higher decides that
@@ -94,7 +96,11 @@ The rules are in `policy/classification.py` (`classify`, no database):
    the level "does not count for `<op>`". For a wide entry it says that
    the entry still counts for its other operations, and suggests a more
    specific entry or a narrower match, never to remove the level
-   (`install_floor_texts`). The
+   (`install_floor_texts`). The suggested entry names the operation and
+   its connector, because the same op id can exist on another connector.
+   When the refused entry names a group, the suggested entry names the
+   group too; without it, the suggested entry ranks below the refused one.
+   An entry that matches the op on two connectors counts as wide. The
    single edit has no `risk` field, so it refuses only the
    `always_wait: false` part (`install_wait_undone`).
 5. **Ties** (same rank): for `risk` the higher level wins, for

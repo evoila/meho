@@ -17,11 +17,13 @@ import importlib
 import inspect
 import pkgutil
 import typing
+import unicodedata
 import uuid
 from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import quote
 
+import jsonschema
 import pytest
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.dependencies.models import Dependant
@@ -409,16 +411,67 @@ def test_a_bad_rest_filter_is_refused_with_the_rule(
     assert "hidden" not in response.text
 
 
-def test_the_openapi_file_shows_the_limit_of_each_filter() -> None:
+#: Values that break the length limit only before cleaning: they must pass.
+_LONG_ONLY_BEFORE_CLEANING = [
+    ("spaces around 256 characters", " " + "a" * 256 + " "),
+    ("130 decomposed letters", unicodedata.normalize("NFD", "\u00c4" * 130)),
+]
+
+
+def test_the_openapi_file_has_no_length_limit_before_cleaning() -> None:
     schema = _filter_app().app.openapi()  # type: ignore[attr-defined]
     for path, name in _REST_FILTERS:
         (param,) = [p for p in schema["paths"][path]["get"]["parameters"] if p["name"] == name]
         (string,) = [s for s in param["schema"]["anyOf"] if s.get("type") == "string"]
-        assert string["maxLength"] == 256, path
+        assert "maxLength" not in string, path
     for model in ("AuditQueryRequest", "AuditClassCountsRequest"):
         field = schema["components"]["schemas"][model]["properties"]["work_ref"]
         (string,) = [s for s in field["anyOf"] if s.get("type") == "string"]
-        assert string["maxLength"] == 256, model
+        assert "maxLength" not in string, model
+
+
+@pytest.mark.parametrize(("path", "name"), _REST_FILTERS)
+@pytest.mark.parametrize(("label", "raw"), _LONG_ONLY_BEFORE_CLEANING)
+def test_a_rest_filter_checks_the_length_after_cleaning(
+    path: str, name: str, label: str, raw: str
+) -> None:
+    response = _filter_app().get(path, params={name: raw})
+    assert response.status_code != 422, (label, response.text)
+
+
+@pytest.mark.parametrize(("label", "raw"), _LONG_ONLY_BEFORE_CLEANING)
+def test_a_model_filter_checks_the_length_after_cleaning_and_keeps_the_text(
+    label: str, raw: str
+) -> None:
+    from meho_backplane.runbooks.runs_schemas import ListRunsFilter
+
+    assert ListRunsFilter(work_ref=raw).work_ref == raw, label
+    assert audit_models.AuditQueryRequest(work_ref=raw).to_filters().work_ref == raw, label
+    assert work_ref_argument(raw) == raw, label
+
+
+@pytest.mark.parametrize(("label", "raw"), _LONG_ONLY_BEFORE_CLEANING)
+def test_an_audit_path_filter_checks_the_length_after_cleaning(label: str, raw: str) -> None:
+    response = _filter_app().get(f"/api/v1/audit/by-work-ref/{quote(raw)}")
+    assert response.status_code != 422, (label, response.text)
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("meho_scheduler_list", lambda ref: {"work_ref": ref}),
+        ("meho_broadcast_recent", lambda ref: {"filter": {"work_ref": ref}}),
+        ("meho_broadcast_watch", lambda ref: {"cursor": "c1", "filter": {"work_ref": ref}}),
+    ],
+)
+@pytest.mark.parametrize(("label", "raw"), _LONG_ONLY_BEFORE_CLEANING)
+def test_an_mcp_filter_schema_checks_the_length_after_cleaning(
+    tool: str, arguments: Callable[[str], dict[str, Any]], label: str, raw: str
+) -> None:
+    mcp_registry.eager_import_mcp_modules()
+    entry = mcp_registry.get_tool(tool)
+    assert entry is not None
+    jsonschema.validate(arguments(raw), entry[0].inputSchema)
 
 
 @pytest.mark.parametrize(("label", "raw", "words"), _BAD_FILTERS)
@@ -554,6 +607,41 @@ def test_the_mcp_model_error_text_names_the_field_and_the_rule() -> None:
     assert text.startswith("1 validation error(s): work_ref: ")
     assert "control or invisible characters (found U+200B)" in text
     assert "hidden" not in text
+
+
+def test_an_mcp_model_error_without_a_ticket_id_error_is_unchanged() -> None:
+    from pydantic import ValidationError
+
+    from meho_backplane.mcp.tools._work_ref_argument import validation_error_text
+    from meho_backplane.runbooks.runs_schemas import ListRunsFilter
+
+    with pytest.raises(ValidationError) as caught:
+        ListRunsFilter.model_validate({"status": "hidden", "work_ref": "CHG-7"})
+    assert validation_error_text(caught.value) == str(caught.value)
+    assert "input_value='hidden'" in validation_error_text(caught.value)
+
+
+async def test_an_mcp_tool_error_without_a_ticket_id_error_keeps_the_text_of_main() -> None:
+    from pydantic import ValidationError
+
+    from meho_backplane.mcp.tools import runbook_runs as runbook_tools
+    from meho_backplane.mcp.tools import scheduler as scheduler_tools
+    from meho_backplane.runbooks.runs_schemas import ListRunsFilter
+    from meho_backplane.scheduler.schemas import ScheduledTriggerCreate
+
+    create = {"name": "n", "kind": "nope", "agent_name": "a", "work_ref": "CHG-7"}
+    with pytest.raises(ValidationError) as model_error:
+        ScheduledTriggerCreate.model_validate(create)
+    with pytest.raises(McpInvalidParamsError) as caught:
+        await scheduler_tools._create_handler(_admin_operator(), create)
+    assert str(caught.value) == f"invalid arguments: {model_error.value}"
+
+    listing = {"status": "nope", "work_ref": "CHG-7"}
+    with pytest.raises(ValidationError) as model_error:
+        ListRunsFilter.model_validate(listing)
+    with pytest.raises(McpInvalidParamsError) as caught:
+        await runbook_tools._list_runs_handler(_admin_operator(), listing)
+    assert str(caught.value).endswith(f": {model_error.value}")
 
 
 def test_the_broadcast_history_filter_is_checked_or_refused() -> None:

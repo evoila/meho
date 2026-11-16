@@ -395,9 +395,11 @@ def test_builder_derived_ref_says_meho_built_it_and_does_not_advise_storing_ther
     )
 
     assert out.error is not None
-    assert "this is the default path MEHO builds from the target name" in out.error
+    assert "is the default path MEHO builds from the target name" in out.error
+    assert "or a person set the same path" in out.error
+    assert "has no secret_ref of its own" not in out.error
     assert "--secret-ref <path>" in out.error
-    assert "store the credential at a path MEHO may read" in out.error
+    assert f"store the credential at another path MEHO may read (not {derived!r})" in out.error
     assert f"stage the credential at {derived!r}" not in out.error
     assert "Vault said:" not in out.error
     assert "http" not in out.error
@@ -428,6 +430,50 @@ def test_builder_second_path_on_a_target_names_that_path_not_the_secret_ref() ->
     assert out.extras["refused_path"] == "secret/metadata/tenants/shared/db-password"
     assert "exception_message" not in out.extras
     assert "vault.test" not in str(out.extras)
+
+
+@pytest.mark.parametrize("method", ["PUT", "POST", "PATCH", "DELETE", "put"])
+def test_builder_second_path_refused_write_says_write(method: str) -> None:
+    """A refused write is not called a read."""
+    derived = f"tenants/{_TENANT}/vcf-prod"
+    exc = hvac.exceptions.Forbidden(
+        "permission denied",
+        method=method,
+        url="https://vault.test/v1/secret/data/tenants/shared/k8s-secret",
+    )
+    out = result_connector_vault_forbidden(
+        "k8s.secret.register",
+        exc,
+        _FakeTarget(secret_ref=derived),
+        duration_ms=1.0,
+        expected_secret_ref=derived,
+    )
+
+    assert out.error is not None
+    assert "Vault refused to write 'secret/data/tenants/shared/k8s-secret'" in out.error
+    assert "Vault refused to read" not in out.error
+    assert "does not let MEHO write it" in out.error
+    assert "vault.test" not in out.error
+
+
+@pytest.mark.parametrize("method", ["GET", "LIST", None])
+def test_builder_second_path_refused_read_or_unknown_method_says_read(method: str | None) -> None:
+    """A refused read, or an error with no method, keeps the read wording."""
+    exc = hvac.exceptions.Forbidden(
+        "permission denied",
+        method=method,
+        url="https://vault.test/v1/secret/metadata/tenants/shared/db-password",
+    )
+    out = result_connector_vault_forbidden(
+        "GET:/api/v1/events",
+        exc,
+        _FakeTarget(secret_ref=f"tenants/{_TENANT}/vcf-prod"),
+        duration_ms=1.0,
+    )
+
+    assert out.error is not None
+    assert "Vault refused to read 'secret/metadata/tenants/shared/db-password'" in out.error
+    assert "Vault refused to write" not in out.error
 
 
 def test_builder_shape_without_target_is_generic() -> None:
@@ -834,7 +880,7 @@ async def test_dispatch_derived_ref_forbidden_marks_derived_and_hides_vault_text
     assert result.error is not None
     assert result.extras["error_code"] == "connector_vault_forbidden"
     assert result.extras["secret_ref_derived"] is True
-    assert "this is the default path MEHO builds from the target name" in result.error
+    assert "is the default path MEHO builds from the target name" in result.error
     assert "http" not in result.error
     assert "http" not in str(result.extras)
     assert f"stage the credential at {derived!r}" not in result.error

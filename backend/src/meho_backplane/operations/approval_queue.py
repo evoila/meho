@@ -118,10 +118,12 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.operations._audit import (
     agent_session_id_var,
+    client_session_id_var,
     parent_audit_id_var,
     policy_decision_var,
     policy_rule_columns,
     policy_rule_var,
+    resolve_agent_session_id,
     resolve_audit_session_id,
     work_ref_var,
 )
@@ -1514,6 +1516,16 @@ resume_requester_var: ContextVar[ResumeRequester | None] = ContextVar(
 # code-quality-allow: already over the 100-line limit on main before #1481
 # (105 lines); the principal_act source fix adds a handful of lines, not the
 # bulk — splitting the row-build + audit-write is out of scope for this fix.
+def _session_is_from_client() -> bool:
+    """Return True when the parking call's session is the CLI login session.
+
+    That is the case when no agent run or MCP session is bound and the
+    ``meho`` CLI sent ``Meho-Session-Id``. The flag is stored on the request
+    row, so the re-dispatch puts the id back where it came from.
+    """
+    return resolve_agent_session_id() is None and client_session_id_var.get() is not None
+
+
 async def create_pending_request(
     session: AsyncSession,
     *,
@@ -1739,6 +1751,7 @@ async def create_pending_request(
         expires_at=bounded_expires_at,
         work_ref=work_ref_var.get(),
         agent_session_id=resolve_audit_session_id(),
+        session_from_client=_session_is_from_client(),
         request_audit_id=request_audit_id,
         resume_parent=stored_resume_parent,
         idempotency_key=idempotency_key,
@@ -3289,7 +3302,12 @@ async def _dispatch_resume_with_bound_context(
         resume_parent_override if resume_parent_override is not None else request.resume_parent
     )
     work_ref_token = work_ref_var.set(request.work_ref)
-    session_token = agent_session_id_var.set(request.agent_session_id)
+    # A CLI login session goes back on client_session_id_var, so the run's
+    # audit rows carry it but nothing treats the run as an agent session.
+    # The approver's own CLI session never labels the requester's run.
+    from_client = bool(request.session_from_client)
+    session_token = agent_session_id_var.set(None if from_client else request.agent_session_id)
+    client_token = client_session_id_var.set(request.agent_session_id if from_client else None)
     parent_token = parent_audit_id_var.set(request.request_audit_id)
     # #3548: the approver runs the op, but the parker asked for the data and is
     # the only one GET /approvals/{id}/result serves, so the parker owns any
@@ -3323,6 +3341,7 @@ async def _dispatch_resume_with_bound_context(
     finally:
         handle_owner_sub_var.reset(owner_token)
         parent_audit_id_var.reset(parent_token)
+        client_session_id_var.reset(client_token)
         agent_session_id_var.reset(session_token)
         work_ref_var.reset(work_ref_token)
     # Persist the reduced result envelope so the originating consumer can read it

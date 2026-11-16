@@ -628,6 +628,19 @@ console does not treat such a row as an agent row. The id is a label the
 client sends. It tells sessions apart; it does not say who the caller is. A CLI that has no saved session id (a login from an
 older CLI) sends no header; running `meho login` again fixes that.
 
+The CLI sets the header with `api.SetSessionIDHeader` on every backplane
+call: the generated client, and the hand-built requests too (`meho
+targets import`, `meho event-source`, `meho broadcast watch`, `meho
+status --watch`). The retry after a token refresh sends it again.
+
+A parked approval request stores `session_from_client=true` when its
+session id came from the CLI header (migration 0173). When the approved
+operation runs, `resume_dispatch_after_approval()` binds that id to
+`client_session_id_var`, not to `agent_session_id_var`. So the audit rows
+of the run carry the requester's CLI session, and the run is not an agent
+session: the coordination hints add nothing to its answer. The approver's
+own CLI session never labels the requester's run.
+
 `ApprovalRequestView` has `agent_session_id` next to `work_ref`.
 `meho approvals list` shows two more columns: `WORK-REF` and `SESSION`
 (the first 8 characters of the session id; `--json` has the whole id).

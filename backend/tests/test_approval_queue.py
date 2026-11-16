@@ -99,6 +99,24 @@ async def _approval_test_ok_handler(
     return {"result": "executed", "params": params}
 
 
+#: Sessions seen inside the resumed run of the CLI session test:
+#: (agent session, audit session) as the two resolvers return them.
+_cli_resume_seen: list[tuple[uuid.UUID | None, uuid.UUID | None]] = []
+
+
+async def _cli_session_recording_handler(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    """Record which session the run sees, for the CLI session resume test."""
+    from meho_backplane.operations._audit import (
+        resolve_agent_session_id,
+        resolve_audit_session_id,
+    )
+
+    _cli_resume_seen.append((resolve_agent_session_id(), resolve_audit_session_id()))
+    return {"result": "executed"}
+
+
 async def _approval_test_dangerous_handler(
     operator: Operator, target: Any, params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -3649,6 +3667,136 @@ async def test_mcp_session_lineage_park_approve_resume_replays_as_tree(
     chain_root = roots_by_path["approval.request"]
     child_paths = sorted(child.path for child in chain_root.children)
     assert child_paths == ["approval.decision", "lineagetest.op"]
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+@pytest.mark.asyncio
+async def test_cli_session_park_approve_resume_stays_a_client_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CLI login session keeps its audit label but is never an agent session.
+
+    The requester parks the op with ``Meho-Session-Id`` bound (the CLI login
+    session). A reviewer with their own CLI session approves, and the run
+    resumes. The parked row marks the session as from the client; the run's
+    audit row carries the requester's session; inside the run no agent
+    session is bound, so the reflex advisory adds nothing to the answer.
+    """
+    from unittest.mock import AsyncMock
+
+    from meho_backplane.broadcast.reflex import REFLEX_ADVISORY_EXTRAS_KEY
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+    from meho_backplane.operations import (
+        dispatch,
+        register_typed_operation,
+        reset_dispatcher_caches,
+    )
+    from meho_backplane.operations._audit import agent_session_id_var, client_session_id_var
+    from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+
+    reset_dispatcher_caches()
+    clear_registry()
+    _cli_resume_seen.clear()
+
+    class _OkConnector(Connector):
+        product = "clisessiontest"
+        version = "1.x"
+        impl_id = "clisessiontest"
+        priority = 10
+
+        async def fingerprint(self, host: str, port: int | None) -> FingerprintResult:
+            return FingerprintResult(
+                probe=ProbeResult(reachable=True, probe_method="none"),
+                product="clisessiontest",
+                version="1.x",
+            )
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> Any:
+            raise NotImplementedError
+
+    register_connector_v2(product="clisessiontest", version="", impl_id="", cls=_OkConnector)
+
+    stub_emb = AsyncMock()
+    stub_emb.encode_one.return_value = [0.1] * 384
+    stub_emb.encode.return_value = [[0.1] * 384]
+    stub_emb.dimension = 384
+
+    await register_typed_operation(
+        product="clisessiontest",
+        version="1.x",
+        impl_id="clisessiontest",
+        op_id="clisessiontest.op",
+        handler=_cli_session_recording_handler,
+        summary="Test op requiring approval.",
+        description="Test.",
+        parameter_schema={"type": "object"},
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_emb,
+    )
+
+    cli_session = uuid.uuid4()
+    requester = _make_operator(sub="cli-requester", principal_kind=PrincipalKind.USER)
+    params = {"x": 1}
+
+    token = client_session_id_var.set(cli_session)
+    try:
+        parked_result = await dispatch(
+            operator=requester,
+            connector_id="clisessiontest-1.x",
+            op_id="clisessiontest.op",
+            target=None,
+            params=params,
+        )
+    finally:
+        client_session_id_var.reset(token)
+    assert parked_result.status == "awaiting_approval"
+    approval_request_id = uuid.UUID(parked_result.extras["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        parked = await s.get(ApprovalRequest, approval_request_id)
+        assert parked is not None
+        assert parked.agent_session_id == cli_session
+        assert parked.session_from_client is True
+
+    reviewer = _make_operator(sub="cli-reviewer", principal_kind=PrincipalKind.USER)
+    reviewer_session = uuid.uuid4()
+    token = client_session_id_var.set(reviewer_session)
+    try:
+        async with get_sessionmaker()() as s:
+            approved = await approve_request(s, approval_request_id, operator=reviewer)
+            await s.commit()
+        resumed = await resume_dispatch_after_approval(operator=reviewer, request=approved)
+        assert client_session_id_var.get() == reviewer_session
+    finally:
+        client_session_id_var.reset(token)
+
+    assert resumed.status == "ok"
+    assert REFLEX_ADVISORY_EXTRAS_KEY not in (resumed.extras or {})
+    assert _cli_resume_seen == [(None, cli_session)]
+    assert agent_session_id_var.get() is None
+
+    async with get_sessionmaker()() as fresh:
+        dispatch_row = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.method == "DISPATCH")))
+            .scalars()
+            .one()
+        )
+    assert dispatch_row.agent_session_id == cli_session
 
     reset_dispatcher_caches()
     clear_registry()

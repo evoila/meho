@@ -47,9 +47,9 @@ and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
 `keycloak.user.sessions`, show one user's state after a logout or a password
 reset. Two more, `keycloak.user.lock_status` and
 `keycloak.realm.lock_settings`, show whether a user is locked after failed
-sign-ins. In total the connector registers 45
-operations: 19 `safe` reads and 26 writes that wait for
-approval (7 `caution`, 15 `dangerous`, 4 `destructive`).
+sign-ins. In total the connector registers 49
+operations: 19 `safe` reads and 30 writes that wait for
+approval (8 `caution`, 18 `dangerous`, 4 `destructive`).
 `keycloak.user.required_actions.update` makes a user set up a one-time code
 (OTP) at the next login, and `keycloak.user.otp_status` shows who has one
 (see "One-time code set-up").
@@ -75,6 +75,8 @@ fresh target with no asserted version still resolves.
   `group_member_remove`, `user_delete`, `group_delete`, `client_delete`,
   `user_logout`, `user_disable`, `user_enable`,
   `client_scope_protocol_mapper_update`, `realm_delete`, `user_check_login`,
+  `role_mapping_client_assign`, `role_mapping_client_remove`, `user_update`,
+  `user_credential_delete`,
   `authflow_ensure_approval_flow`, `authflow_ensure_passkey_code_skip`,
   `authflow_ensure_approval_touch`),
   the `_get_admin_json` / `_get_admin_list` GET
@@ -427,6 +429,10 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.user.disable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: false`) |
 | `keycloak.user.enable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: true`) |
 | `keycloak.client_scope.protocol_mapper.update` | dangerous | `GET` then `PUT .../client-scopes/{client-scope-id}/protocol-mappers/models/{id}` |
+| `keycloak.role_mapping.client.assign` | dangerous | `POST .../users/{user-id}/role-mappings/clients/{client-id}` |
+| `keycloak.role_mapping.client.remove` | dangerous | `DELETE .../users/{user-id}/role-mappings/clients/{client-id}` |
+| `keycloak.user.update` | caution | `PUT .../users/{user-id}` |
+| `keycloak.user.credential.delete` | dangerous | `DELETE .../users/{user-id}/credentials/{credentialId}` |
 | `keycloak.realm.delete` | destructive | `DELETE /admin/realms/{realm}` |
 | `keycloak.authflow.ensure_passkey_code_skip` | caution | `POST .../authentication/flows/browser/copy`, then `PUT .../realms/{realm}` |
 | `keycloak.authflow.ensure_approval_flow` | caution | `.../authentication/flows` and the client `PUT` (see "Approval sign-in flow and identity providers") |
@@ -704,6 +710,82 @@ longer sign in to any app that uses this realm.
   because `.disable` and `.enable` are not write suffixes).
 - The result is `{id, username, enabled, unrequested_changes, read_back_checked}`
   and carries no credential.
+### Client roles, user details and one stored credential
+
+Four writes in the group `account_write` (rows in
+`ops_write_account_schemas.py`, approval cards in
+`ops_write_account_preview.py`). All need approval, and a person approves
+each call. No standing grant of a service account and no run approval
+covers them: `op_classes.py` marks all four with
+`declare_per_call_approval`, because they change who can sign in and with
+what rights.
+
+`client.assign`, `user.update` and `user.credential.delete` count as a
+change of rights (`GRANT_OPS` in `ops_write_grant.py`). `user.update` can
+change a person's email or user name, and `user.credential.delete` can
+remove their passkey or one-time code, so both change how a person signs
+in. For these three, the person the change is for never approves it. In
+MEHO's own login realm another admin must approve it; a person who may
+approve their own changes cannot approve these alone. In MEHO's own login
+realm, a role of the `realm-management` client (in any case) also needs a
+platform admin as approver: it decides who may manage the realm. In another
+realm these writes are not a change of rights: the normal approval rules of
+their risk level apply, and only the person the change is for is refused.
+
+- `keycloak.role_mapping.client.assign` and `.remove` (dangerous). Pass the
+  user (`id`, or the exact `username`), `client_id` (the client's name, for
+  example `realm-management`) and `roles` (role names of that client, for
+  example `realm-admin`). The handler finds the client's UUID, reads every
+  role on that client, and only then sends the role representations. An
+  unknown client or role is an error before anything is sent, so a typo never
+  gives or removes part of the roles. Both are safe to run twice. The result
+  has `not_applied`: the names whose state after the write is not the
+  requested one, from a read of the user's roles on that client
+  (`read_back_checked: false` and `not_applied: null` when that read fails;
+  the write itself ran). The `.remove` card for a `realm-management` role
+  has one `warning` line and `holders_after`: how many users still hold
+  each role directly after the change (read from
+  `GET .../clients/{client-uuid}/roles/{role-name}/users`, up to 1000;
+  "unknown" when MEHO cannot read it).
+- `keycloak.user.update` (caution). The user is found by `id` or the current
+  `username`; the new values go in `changes`, with only `username`, `email`,
+  `firstName` and `lastName` allowed. The handler reads the user, puts the
+  fields on top, writes the user back and reads it again. Keycloak changes
+  the user name only when the realm sets `editUsernameAllowed`, and
+  otherwise keeps the old name and still answers 204. So the result has
+  `applied_fields` and `not_applied` (each with a reason that names
+  `editUsernameAllowed` for the user name), and `unrequested_changes` as in
+  `ops_write_merge.py`. User name and email are compared without regard to
+  case, because Keycloak stores them in lower case. Values are never returned.
+  The card shows the current user name and email (`current`, `null` when
+  MEHO cannot read the user) next to the new values in `changes`.
+- `keycloak.user.credential.delete` (dangerous). Pass the user and either
+  `credential_id` or `credential_type` (for example `otp` or
+  `webauthn-passwordless`); a type removes every credential of that type that
+  the user has when the call runs. The handler reads
+  `GET .../users/{user-id}/credentials`, deletes each match, and reads the
+  list again. No match is an error that names the types the user has. When a
+  delete fails after others ran, the error names the ids already removed.
+  Keycloak's list holds `secretData` and `credentialData`; both stay inside the
+  handler. Every credential is cut to an allow-list of `id`, `type`,
+  `userLabel` and `createdDate` (`CREDENTIAL_FIELDS` in
+  `ops_write_user_credential.py`), and that list is the only way a field gets
+  into a result or an approval card. The card shows what will be removed
+  (`will_remove`) and what stays (`will_keep`), and one `warning` line when
+  the user is left with no second factor or with no credential at all. The
+  approved run removes only the credentials on the card: right before it
+  runs, MEHO builds the card again, and when `will_remove` lists other ids
+  (for example a new one-time code of the same type), the run is refused
+  with "the credentials changed since the request; send a new request" and
+  nothing is deleted (`bound_ids` in `operations/grant_approval.py`). The
+  handler checks again with its own read: in the approved run it compares
+  the credentials it matched with the ids on the card the approver saw
+  (`approved_preview`, not the call params). When they differ, it deletes
+  nothing (`KeycloakCredentialsChangedError`). So a credential added
+  between the check and the delete is never removed.
+  A test with recorded `secretData` and `credentialData` checks the result,
+  the approval rows and the audit rows
+  (`tests/test_connectors_keycloak_account_writes.py`).
 
 ### Change a protocol mapper of a client scope (#5930)
 
@@ -1076,9 +1158,25 @@ request share one read, so a wrong password makes one failed sign-in.
 - **A 403 at a step of `ensure_approval_flow`** after the flow exists (the
   settings of the level step, the realm's level map, the client binding):
   the run stops half-way. The error names the refused step and the flow
-  (alias, id, `flow_created`). `extras.remediation` also says what the run
-  changed before: the flow, the level setting and the level name. These
+  (id, `flow_created`). `extras.remediation` also gives the flow's name and
+  says what the run changed before: the flow, the level setting and the level name. These
   changes stay; a second run after the fix keeps them and does the rest.
+- **A 403 while an op finds or makes its flow** (`flow_refused_error`, used by
+  `ensure_approval_flow` and `ensure_approval_touch`; the touch op also
+  names a 403 at the realm read of the passkey policy). While the op only
+  reads, the text says nothing was changed. Once it began to make the
+  flow, the text says the flow may be half-made and must be deleted before
+  the next run, because a run finds it with other steps and stops.
+- **A refused read inside a step** is named as a read ("read what is needed
+  to ..."), not as the change of the step (`read_or_write`).
+- **A refused read back after a write in the same step** (`reading_back`,
+  which raises `ReadBackRefusedError`): the text says "read back the change
+  MEHO made to ...", and the list of what the run changed holds that write,
+  marked "MEHO could not read it back". The approval op reads back only the
+  client binding; the touch op reads back the level map, the `amr` mapper
+  fix, the company login default and the binding. The short error message
+  of `ensure_approval_flow` gives the flow id but not the flow's name, so
+  the longest step still fits the 256-character limit.
 - **A 403 at a step of `ensure_approval_touch`** after the flow exists (the
   realm's level map, the client's `amr` mapper, the company login default,
   the client binding): the run stops half-way. The error names the refused
@@ -1252,9 +1350,10 @@ the client, the new flow, who is affected, and the way back:
 
 ### Park-time approval preview (#1857)
 
-Seventeen of the write ops register bespoke `proposed_effect` preview builders
+Eighteen of the write ops register bespoke `proposed_effect` preview builders
 (twelve in `connectors/keycloak/ops_write_preview.py`, one in
-`ops_login_check.py`, one in `ops_authflow.py`, one in
+`ops_user_required_actions.py`, one in `ops_login_check.py`, one in
+`ops_authflow.py`, one in
 `ops_authflow_passkey.py`, one in `ops_authflow_touch.py`, one in
 `ops_write_realm_smtp.py`), wired onto the per-op hook
 (`operations/_preview.py`, #1437) by an import side-effect in the package
@@ -1319,10 +1418,12 @@ Keycloak spec quirk). The lane
 [`backend/tests/test_connectors_keycloak_spec_reconcile.py`](../../backend/tests/test_connectors_keycloak_spec_reconcile.py)
 (the #2980 harness; parse-only, runs in the required unit sweep, uniform
 skip when the shelf is unconfigured) introspects those live constants and
-asserts all 49 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
+asserts all 55 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
 paths at #3280, +4 delete paths at #3944, +1 user logout path at #3851,
 +3 realm-delete paths at #3886, +8 login flow and identity provider
-paths at #5621, +3 passkey step paths, +1 user PUT path at #4940) are served by the pinned
+paths at #5621, +3 passkey step paths, +1 user PUT path at #4940,
++5 client role and credential delete paths, +1 client role users path)
+are served by the pinned
 `keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
 Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
 `org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Three dispatched

@@ -123,19 +123,30 @@ def tenant_secret_ref(tenant_id: UUID, target: str) -> str:
     return f"{TENANT_SECRET_PREFIX}/{tenant_id}/{leaf}"
 
 
+def secret_ref_matches(secret_ref: str | None, expected: str | None) -> bool:
+    """Return ``True`` when *secret_ref* is the *expected* path (spaces ignored).
+
+    The one check for "is this the derived ref". ``False`` when either side
+    is empty.
+    """
+    if not secret_ref or expected is None:
+        return False
+    return secret_ref.strip() == expected
+
+
 def is_derived_secret_ref(secret_ref: str | None, *, tenant_id: UUID, target_name: str) -> bool:
     """Return ``True`` when *secret_ref* is the path :func:`tenant_secret_ref` builds.
 
     That is the path a target added without a ``secret_ref`` gets. The
     target answers and the ``target_secret_not_found`` dispatch error show
-    it as ``secret_ref_derived``.
+    it as ``secret_ref_derived``. A person can set the same path by hand;
+    the two cannot be told apart.
     """
-    if not secret_ref:
-        return False
     try:
-        return secret_ref.strip() == tenant_secret_ref(tenant_id, target_name)
+        expected = tenant_secret_ref(tenant_id, target_name)
     except ValueError:
         return False
+    return secret_ref_matches(secret_ref, expected)
 
 
 async def relocate_target_secret(

@@ -195,16 +195,24 @@ Detail payloads land in ``extras``. Codes:
   :exc:`hvac.exceptions.Forbidden`: Vault answered ``permission denied``
   under the operator's identity. #2091 (Initiative #2150), extending the
   #1627/#1649 structured-cause pattern to the Vault-authorization
-  sibling. The load-bearing case is dispatch-time credential resolution
-  (``connectors/_shared/vault_creds.py`` reading ``target.secret_ref``):
-  a ref outside the readable per-tenant subtree (#1723) is the likely
-  cause, so the ``error`` names the target's ``secret_ref``, the
-  ``tenants/<tenant_id>/<name>`` convention, the exact expected path,
-  and the stage-the-credential remediation (never "widen the
-  deploy-owned Vault policy"). A typed ``vault.*`` op denied by the
-  Vault ACL itself gets the target-less generic shape. ``extras``
-  carries ``secret_ref`` / ``expected_secret_ref`` /
-  ``exception_class`` / ``exception_message``. Login-phase denials are
+  sibling. Three answers, by what Vault refused:
+
+  * the target's own ``secret_ref`` (the shared loader in
+    ``connectors/_shared/vault_creds.py`` raises
+    :exc:`~meho_backplane.connectors._shared.vault_creds.TargetSecretForbiddenError`):
+    the ``error`` names the target and its ``secret_ref``, says whether
+    MEHO built the ref from the target name (``secret_ref_derived``), and
+    advises a path MEHO may read plus ``meho targets update``. It holds no
+    Vault text and no Vault address;
+  * another path on a target (a plain ``Forbidden``): the ``error`` names
+    that path (``refused_path``, never the Vault address) and says "read"
+    or "write" by the request method hvac keeps on the error;
+  * no target (a typed ``vault.*`` op denied by the Vault ACL itself): the
+    target-less generic shape, with the Vault text in ``exception_message``.
+
+  The advice never says to widen the deploy-owned Vault policy.
+  ``extras`` carries ``secret_ref`` / ``secret_ref_derived`` /
+  ``expected_secret_ref`` / ``exception_class``. Login-phase denials are
   wrapped into the ``VaultClientError`` family before the handler sees
   them and still fall through to ``connector_error``.
 * ``connector_probe_refused`` -- a ``net.*`` handler raised
@@ -1902,22 +1910,12 @@ async def _run_branch_with_error_handling(
     except hvac.exceptions.Forbidden as vault_exc:
         # #2091: Vault answering "permission denied" during dispatch is a
         # classifiable authorization failure, not an unforeseen crash. The
-        # load-bearing case is credential resolution — the shared reader
-        # (``connectors/_shared/vault_creds.py``) reads ``target.secret_ref``
-        # under the operator's identity, and a ref outside the readable
-        # per-tenant subtree (#1723) surfaces as hvac's ``Forbidden``.
-        # Flattening it into the generic ``connector_error: Forbidden``
-        # below buried the cause in ``extras.exception_message``, reading
-        # exactly like a missing Vault grant (and inviting the wrong fix:
-        # widening the deploy-owned Vault policy). The structured
-        # ``connector_vault_forbidden`` names the target's ``secret_ref``
-        # and the per-tenant convention instead. A typed ``vault.*`` op
-        # denied by the Vault ACL itself lands here too (target-less
-        # message shape — the builder degrades gracefully). The arm sits
-        # ahead of the generic ``except Exception`` so the structured shape
-        # wins; ``hvac.exceptions.Forbidden`` is disjoint from every
-        # earlier arm's exception types. Login-phase denials never reach
-        # this arm — ``vault_client_for_operator`` wraps them into the
+        # builder picks the answer: the target's own ref (the loader's
+        # ``TargetSecretForbiddenError``), another path, or no target. The
+        # arm sits ahead of the generic ``except Exception`` so the
+        # structured shape wins; ``hvac.exceptions.Forbidden`` is disjoint
+        # from every earlier arm's exception types. Login-phase denials never
+        # reach this arm: ``vault_client_for_operator`` wraps them into the
         # ``VaultClientError`` family before the handler sees them.
         duration_ms = _elapsed_ms(started)
         # #2331: a typed KV-v2 *write* (``vault.kv.put`` / ``patch`` /

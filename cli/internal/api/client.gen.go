@@ -6651,9 +6651,11 @@ type EventSourceUpdate struct {
 
 // ExplainApprovers The login groups that may approve another person's call, and the rule that says so.
 type ExplainApprovers struct {
+	// Floor The install's routing entry that fits, such as install:routing[0]. It is a floor: a tenant's routing can only narrow it. Null when no install entry fits, and for a caller who is not a tenant admin or a platform admin.
+	Floor  *string  `json:"floor"`
 	Groups []string `json:"groups"`
 
-	// Rule default, rights_change, or a routing entry such as tenant:routing[0]. Null for a caller who is not a tenant admin or a platform admin.
+	// Rule default, rights_change, or the routing entries that fit, the install's first, such as install:routing[0], tenant:routing[1]. Null for a caller who is not a tenant admin or a platform admin.
 	Rule *string `json:"rule"`
 }
 

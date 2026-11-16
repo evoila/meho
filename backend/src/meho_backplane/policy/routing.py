@@ -22,11 +22,16 @@ binding, the role floor, the rules on own changes.
 
 The rules:
 
-* The tenant's entries come first, then the install's. The first entry
-  whose ``match`` fits wins. All fields of a ``match`` must fit.
-* Routing only narrows. The stored kinds are the entry's kinds that may
-  approve the change today (:func:`today_kinds`). A file never lets a
-  group approve what it may not approve today.
+* The install's routing is a floor. The first install entry whose
+  ``match`` fits counts first, then the first tenant entry that fits. All
+  fields of a ``match`` must fit. A person must be in the kinds of both,
+  so a tenant entry can only narrow the install's entry, never widen it
+  (:mod:`meho_backplane.policy.routing_floor`).
+* Routing only narrows. The stored kinds are the kinds of the fitting
+  entries that may approve the change today (:func:`today_kinds`). A file
+  never lets a group approve what it may not approve today.
+* ``approver_rule`` names every entry that fits, the install's first, for
+  example ``install:routing[0], tenant:routing[1]``.
 * No entry fits: today's rule. Everyone who may approve today may approve
   (``approver_rule`` ``"default"``).
 * A change of rights is not routed. Only another admin approves it, as
@@ -94,13 +99,17 @@ def routing_enabled() -> bool:
 
 @dataclass(frozen=True)
 class RouteEntry:
-    """One ``routing`` entry, with where it came from (``ref``)."""
+    """One ``routing`` entry, with where it came from (``ref``).
+
+    ``install`` is true for an entry of the install's policy: the floor.
+    """
 
     ref: str
     approvers: tuple[str, ...]
     category: str | None = None
     connector: str | None = None
     risk: str | None = None
+    install: bool = False
 
     def matches(self, *, category: str | None, connector_id: str, level: str | None) -> bool:
         """True when every field of the entry's ``match`` fits the change."""
@@ -113,10 +122,14 @@ class RouteEntry:
 
 @dataclass(frozen=True)
 class ApproverSet:
-    """The group kinds that may approve a change, and the rule that set them."""
+    """The group kinds that may approve a change, and the rule that set them.
+
+    ``floor`` is the install's entry that fits, or ``None``.
+    """
 
     kinds: tuple[str, ...]
     rule: str
+    floor: str | None = None
 
 
 def _ordered(kinds: Sequence[str] | set[str] | frozenset[str]) -> tuple[str, ...]:
@@ -155,7 +168,15 @@ def _text(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _routes(document: Mapping[str, Any] | None, scope: str) -> list[RouteEntry]:
+def _routes(
+    document: Mapping[str, Any] | None, scope: str, *, install: bool | None = None
+) -> list[RouteEntry]:
+    """The ``routing`` entries of *document*; *scope* starts each ``ref``.
+
+    *install* marks the entries as the install's (the floor). By default
+    they are when *scope* is ``install``.
+    """
+    is_install = scope == "install" if install is None else install
     raw_routes = (document or {}).get("routing") or []
     if not isinstance(raw_routes, list):
         raise ValueError(f"{scope}: `routing` must be a list.")
@@ -173,6 +194,7 @@ def _routes(document: Mapping[str, Any] | None, scope: str) -> list[RouteEntry]:
                 category=_text(match.get("category")),
                 connector=_text(match.get("connector")),
                 risk=_text(match.get("risk")),
+                install=is_install,
             )
         )
     return entries
@@ -181,7 +203,7 @@ def _routes(document: Mapping[str, Any] | None, scope: str) -> list[RouteEntry]:
 def routes_from_documents(
     install: Mapping[str, Any] | None, tenant: Mapping[str, Any] | None
 ) -> list[RouteEntry]:
-    """The routing entries for a tenant: its own first, then the install's.
+    """The routing entries for a tenant: its own, then the install's (the floor).
 
     Raises :class:`ValueError` when a stored document holds a bad entry.
     The import refuses such a file, so this means the stored row was
@@ -200,16 +222,30 @@ def route(
 ) -> ApproverSet:
     """Return the group kinds that may approve the change, and the rule.
 
-    The first entry that fits wins; its kinds are cut to the kinds that
-    may approve the change today. No entry fits: today's kinds.
+    The first install entry that fits counts, then the first tenant entry
+    that fits. The kinds are the kinds of both entries that may approve
+    the change today: a tenant entry only narrows the install's. No entry
+    fits: today's kinds.
     """
-    allowed = today_kinds(level, op_id)
-    for entry in entries:
-        if entry.matches(category=category, connector_id=connector_id, level=level):
-            return ApproverSet(
-                kinds=tuple(k for k in allowed if k in entry.approvers), rule=entry.ref
-            )
-    return ApproverSet(kinds=allowed, rule=DEFAULT_RULE)
+    kinds = today_kinds(level, op_id)
+    fitting: list[RouteEntry] = []
+    for install in (True, False):
+        entry = next(
+            (
+                e
+                for e in entries
+                if e.install is install
+                and e.matches(category=category, connector_id=connector_id, level=level)
+            ),
+            None,
+        )
+        if entry is not None:
+            fitting.append(entry)
+            kinds = tuple(k for k in kinds if k in entry.approvers)
+    if not fitting:
+        return ApproverSet(kinds=kinds, rule=DEFAULT_RULE)
+    floor = fitting[0].ref if fitting[0].install else None
+    return ApproverSet(kinds=kinds, rule=", ".join(e.ref for e in fitting), floor=floor)
 
 
 async def approver_set_for(
@@ -255,6 +291,7 @@ async def stamp_approver_set(
     )
     request.approver_roles = list(found.kinds)
     request.approver_rule = found.rule
+    request.approver_category = category
 
 
 def stored_kinds(value: Any) -> tuple[str, ...] | None:

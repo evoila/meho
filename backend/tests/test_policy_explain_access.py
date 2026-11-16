@@ -207,7 +207,7 @@ async def test_only_an_admin_sees_the_policy_entries(
         }
         assert _paths(body) == []
     operator_body = operator.json()
-    assert operator_body["approvers"] == {"groups": ["MEHO-Admins"], "rule": None}
+    assert operator_body["approvers"] == {"groups": ["MEHO-Admins"], "rule": None, "floor": None}
     assert operator_body["evaluator"]["rules"], operator_body
 
 
@@ -318,11 +318,12 @@ async def test_a_request_shows_the_groups_the_approve_check_uses(
         body = _ask(client, _token(key), request_id=request_id).json()
     approvers = body["request"]["approvers"]
     if routing:
-        assert approvers == {"groups": ["MEHO-Admins"], "rule": "tenant:routing[0]"}
+        assert approvers == {"groups": ["MEHO-Admins"], "rule": "tenant:routing[0]", "floor": None}
     else:
         assert approvers == {
             "groups": ["MEHO-Operators", "MEHO-SA-Operators", "MEHO-Admins", "MEHO-Approvers"],
             "rule": "default",
+            "floor": None,
         }
 
 

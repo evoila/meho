@@ -1311,16 +1311,23 @@ works out who may approve it and stores it on the request:
   example `["SA-Operators", "Admins"]`. Group kinds only, never people.
   MEHO stores no members, so the requester is never in it. Whether the
   requester may approve their own change is today's rule (below).
-- `approver_rule` (text): the routing entry that set them
-  (`tenant:routing[0]`, `install:routing[2]`), or `default`.
-- Migration `0167` adds both columns, nullable.
+- `approver_rule` (text): the routing entries that set them, the
+  install's first (`install:routing[2]`, `tenant:routing[0]`,
+  `install:routing[0], tenant:routing[1]`), or `default`.
+- `approver_category` (text): the category the routing used. The click
+  routes the request again with it (below).
+- Migration `0167` adds the first two columns, migration `0171` the third.
+  All are nullable.
 
 How the kinds are found:
 
-1. The tenant's routing entries, then the install's. The first entry whose
-   `match` fits wins. A `match` can name a `category`, a `connector`
-   pattern and a `risk` level; all that it names must fit.
-2. The entry's kinds are cut to the kinds that may approve the change
+1. The install's routing is a floor. The first install entry whose
+   `match` fits counts, then the first tenant entry whose `match` fits.
+   The kinds are the kinds that both name, so a tenant entry can only
+   narrow the install's ([policy.md](policy.md), "The install's routing is
+   a floor"). A `match` can name a `category`, a `connector` pattern and a
+   `risk` level; all that it names must fit.
+2. The kinds are cut to the kinds that may approve the change
    today (`today_kinds`, the same rule as `approver_groups` in
    `policy/evaluate.py`): a `dangerous` or `destructive` change only
    SA-Operators and Admins; a lower one also Operators and Approvers; an
@@ -1341,7 +1348,16 @@ without a category fits only entries without `category`.
 **At the click** (`_load_pending_for_approval`) today's checks run first,
 in their order: a person only, the read-only check, still pending, the
 deadline, the rights-change and group rules (also the rules on own
-changes), the role floor. Then `_check_routed_approver`: the person's
+changes), the role floor. Then `_check_install_floor`
+(`install_floor_refusal` in `policy/routing_floor.py`): MEHO routes the
+request again with the install's file as it is now, the stored risk level
+and the stored `approver_category`. When an install entry fits and the
+person's kind is not in it, `ApprovalRoutingError` with one sentence, for
+example "The install's routing (`install:routing[0]`) lets only
+MEHO-SA-Operators or MEHO-Admins approve this change. You are in
+MEHO-Operators. A tenant's routing can only narrow it." An install routing
+that is not valid refuses the click. A change of rights is not checked
+here. Then `_check_routed_approver`: the person's
 group kind (`kind_of`: Admins, SA-Operators, Operators, Approvers or
 Readers) must be in the stored kinds. If not, `ApprovalRoutingError` (a
 subclass of `ApprovalGroupForbiddenError`, so every approve route answers
@@ -1359,9 +1375,13 @@ console sign, the REST fields `may_approve` / `may_approve_reason`, the
 "may approve" compares the evaluator with today's answer before routing.
 
 **When the routing changes.** A waiting request keeps the group kinds it
-stored when it started to wait. A policy file that is imported later
-applies only to new requests, not to the ones already waiting. Run
-approvals are different: they store no kinds, so they use the policy that
+stored when it started to wait. A tenant file that is imported later
+applies only to new requests, not to the ones already waiting. The
+install's file is different: the click always checks the install's
+current routing too, so a narrower install file counts at once for the
+requests that already wait. `approve_right` (the console sign, the push
+recipients) uses only the stored kinds, so in that case the sign can say
+"may approve" and the click still refuses. Run approvals are different: they store no kinds, so they use the policy that
 is stored at the moment of the click.
 
 **Audit rows.** When a request has stored kinds, its audit rows carry
@@ -1380,7 +1400,11 @@ warn for each such entry, and `/ready` shows the same sentence under
 `features.policy.notes`.
 
 **Old requests and the switch.** A request without stored kinds (made while
-the switch was off, or before migration `0167`) keeps today's rule. With
+the switch was off, or before migration `0167`) keeps today's rule, but
+the click still checks the install's current routing for it. Such a
+request has no stored category, so only install entries without
+`category` can fit it; the same holds for a request stored before
+migration `0171`. With
 the switch off, MEHO stores nothing and checks no stored kinds, so turning
 the switch off brings back today's rule for every waiting request too. A
 stored value that is not a list of kinds lets nobody approve (fail
@@ -1406,7 +1430,9 @@ the policy that is stored at the moment a person approves it
 Tests: `tests/test_policy_routing.py`, `tests/test_policy_routing_classified.py`,
 `tests/test_run_approvals_routing.py`, `tests/test_ui_approvals_routing.py`,
 `tests/test_web_push_send.py`,
-`tests/migrations/test_migration_0167_add_approval_request_approver_roles.py`.
+`tests/test_policy_routing_floor.py`,
+`tests/migrations/test_migration_0167_add_approval_request_approver_roles.py`,
+`tests/migrations/test_migration_0171_add_approval_request_approver_category.py`.
 
 **Not yet:** a team is a group kind. Bindings that give a login group
 categories come later. The "separated duties" file

@@ -196,8 +196,8 @@ async def _policy_view(
     if routing_enabled():
         try:
             routes = [
-                *_routes(tenant_doc, labels["tenant"]),
-                *_routes(install_doc, labels["install"]),
+                *_routes(tenant_doc, labels["tenant"], install=False),
+                *_routes(install_doc, labels["install"], install=True),
             ]
         except ValueError as exc:
             raise invalid_routing(exc) from exc
@@ -484,7 +484,7 @@ async def explain_call(question: CallQuestion) -> PolicyExplainResponse:
 
 
 def _approvers_view(found: Approvers) -> ExplainApprovers:
-    return ExplainApprovers(groups=list(found.groups), rule=found.rule)
+    return ExplainApprovers(groups=list(found.groups), rule=found.rule, floor=found.floor)
 
 
 def _without_place(rule: ExplainRule | None) -> ExplainRule | None:
@@ -492,7 +492,9 @@ def _without_place(rule: ExplainRule | None) -> ExplainRule | None:
 
 
 def _without_rule(approvers: ExplainApprovers | None) -> ExplainApprovers | None:
-    return approvers.model_copy(update={"rule": None}) if approvers is not None else None
+    if approvers is None:
+        return None
+    return approvers.model_copy(update={"rule": None, "floor": None})
 
 
 def without_policy(response: PolicyExplainResponse) -> PolicyExplainResponse:
@@ -501,8 +503,8 @@ def without_policy(response: PolicyExplainResponse) -> PolicyExplainResponse:
     It keeps the answer, the reason, the risk level and who may approve.
     The entries of the policy and their places in it are left out: the
     matching classification entries with their category and labels, the
-    place of each evaluator rule, and the routing entry that names the
-    approvers.
+    place of each evaluator rule, and the routing entries (also the
+    install's floor) that name the approvers.
     """
     update: dict[str, Any] = {"approvers": _without_rule(response.approvers)}
     if response.classification is not None:
@@ -537,7 +539,9 @@ def _request_approvers(request: ApprovalRequest, level: str | None) -> Approvers
     The groups stored on the request count only while the
     ``POLICY_APPROVER_ROUTING`` switch is on, as in
     :func:`~meho_backplane.policy.routing.routing_refusal`. With the switch
-    off, or with no stored groups, today's rule.
+    off, or with no stored groups, today's rule. The floor is the
+    install's entry named in the stored rule; at the click MEHO also checks
+    the install's routing as it is then.
     """
     from meho_backplane.operations.grant_approval import is_rights_change
 
@@ -545,7 +549,9 @@ def _request_approvers(request: ApprovalRequest, level: str | None) -> Approvers
         return Approvers(("MEHO-Admins",), RIGHTS_CHANGE_RULE)
     kinds = stored_kinds(request.approver_roles) if routing_enabled() else None
     if kinds is not None:
-        return Approvers(tuple(f"MEHO-{kind}" for kind in kinds), request.approver_rule or "")
+        rule = request.approver_rule or ""
+        floor = next((p for p in rule.split(", ") if p.startswith("install:")), None)
+        return Approvers(tuple(f"MEHO-{kind}" for kind in kinds), rule, floor)
     return Approvers(
         tuple(f"MEHO-{kind}" for kind in _today_kinds(level, request.op_id)), "default"
     )

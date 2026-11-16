@@ -182,6 +182,7 @@ from meho_backplane.policy.routing import (
     routing_refusal,
     stamp_approver_set,
 )
+from meho_backplane.policy.routing_floor import install_floor_refusal
 from meho_backplane.version import running_release_id
 
 __all__ = [
@@ -3886,6 +3887,27 @@ def _check_routed_approver(operator: Operator, request: ApprovalRequest) -> None
         )
 
 
+async def _check_install_floor(
+    session: AsyncSession, operator: Operator, request: ApprovalRequest
+) -> None:
+    """Raise :class:`ApprovalRoutingError` when the install's current routing refuses *operator*.
+
+    The install's routing is a floor: it is checked first, with the
+    install's file as it is now, then the stored group kinds
+    (:func:`_check_routed_approver`). Does nothing while the
+    ``POLICY_APPROVER_ROUTING`` switch is off
+    (:func:`~meho_backplane.policy.routing_floor.install_floor_refusal`).
+    """
+    refusal = await install_floor_refusal(session, operator, request)
+    if refusal is not None:
+        raise ApprovalRoutingError(
+            request.id,
+            operator_sub=operator.sub,
+            role=operator.tenant_role.value,
+            reason=refusal,
+        )
+
+
 def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:
     """Compare the policy evaluator with today's answer, when ``POLICY_ENGINE_SHADOW`` is on."""
     from meho_backplane.policy.shadow import shadow_approval
@@ -3906,7 +3928,8 @@ async def _load_pending_for_approval(
     the most specific reason first: role gate → tenant-scoped load (under a
     row lock) → pending guard → deadline guard (security F12 / #274) →
     self-approval and group rule (#1401, #3328) → the op's role floor
-    (:func:`_check_approver_role_floor`) → the stored approver group kinds
+    (:func:`_check_approver_role_floor`) → the install's current approver
+    routing (:func:`_check_install_floor`) → the stored approver group kinds
     (:func:`_check_routed_approver`) → params-hash check (only when
     *params* is supplied) → destructive preview-binding re-verification
     (#3197). Returns the validated pending row and the
@@ -3934,6 +3957,7 @@ async def _load_pending_for_approval(
         _shadow_approval(operator, request, today=False)
         raise
     _shadow_approval(operator, request, today=True)
+    await _check_install_floor(session, operator, request)
     _check_routed_approver(operator, request)
     if params is not None and not params_hash_matches(params, request.params_hash):
         raise ParamsMismatchError(request_id)

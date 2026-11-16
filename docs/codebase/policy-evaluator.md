@@ -216,8 +216,12 @@ shadow keeps a rule; explain drops it (`forget_rule`).
 - `approvers` (only when the answer is `wait`): the login groups that may
   approve another person's call, and the rule. A change of rights: only
   `MEHO-Admins` (`rights_change`). With `POLICY_APPROVER_ROUTING` on: the
-  first routing entry that fits (`tenant:routing[0]`). Else today's rule
-  (`default`).
+  routing entries that fit, the install's first
+  (`install:routing[0], tenant:routing[1]`), and `floor`, the install's
+  entry: a tenant's routing can only narrow it
+  ([policy.md](policy.md), "The install's routing is a floor"). Else
+  today's rule (`default`). For a caller who is not a tenant admin or a
+  platform admin, `rule` and `floor` are null.
 
 **A file that is not imported (`file`).** Needs a tenant admin (or a
 platform admin for `scope: install`) and `POLICY_CLASSIFICATION` (with it

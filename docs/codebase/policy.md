@@ -57,11 +57,14 @@ routing:
 - Each `routing` entry has a `match` (at least one of `category`,
   `connector`, `risk`; `connector` is a pattern, the other two are exact)
   and `approvers`: one to five of the login group kinds `Readers`,
-  `Operators`, `SA-Operators`, `Admins`, `Approvers`. The order counts: the
-  first entry that fits a waiting change wins, and a tenant's entries come
-  before the install's. Two entries with the same `match` are a mistake.
-  Routing only narrows who may approve; see
-  [approvals.md](approvals.md), "Approver routing".
+  `Operators`, `SA-Operators`, `Admins`, `Approvers`. The order counts:
+  in each file, the first entry that fits a waiting change wins. Two
+  entries with the same `match` are a mistake. Routing only narrows who
+  may approve; see [approvals.md](approvals.md), "Approver routing".
+- **The install's routing is a floor** (decision of 15 November 2026). A
+  tenant's routing can only make it narrower, never wider. The install's
+  entry that fits counts first, then the tenant's; a person must be in
+  both. See "The install's routing is a floor" below.
 - `bindings` (a tenant's file only) says which login group is which team:
   a group, matched by its full path or its group attribute, gets one of the
   five group kinds and a set of categories. They count only while the
@@ -126,8 +129,82 @@ is one sentence that names the entry:
   entry with `risk: caution` that asks Admins covers the `caution` level,
   and a later entry is not checked at that level.
 
+- **A tenant's routing wider than the install's** (`policy/routing_floor.py`,
+  `tenant_floor_mistakes`, only while `POLICY_APPROVER_ROUTING` is on): see
+  the next section.
+
 At most 50 mistakes are listed, then one line says how many more there
 are.
+
+## The install's routing is a floor
+
+The rule: when the install's file says "changes of category X are approved
+by group A", a tenant can only narrow that. The people who may approve in
+the tenant are always some of the people the install allows. For a
+category that the install does not route, the tenant is free.
+
+Example. The install's file:
+
+```yaml
+routing:
+  - match: {category: network}
+    approvers: [SA-Operators, Admins]
+```
+
+A tenant's file may say `approvers: [Admins]` for `category: network`
+(narrower), or `approvers: [SA-Operators, Admins]` (the same). The import
+refuses `approvers: [Operators, SA-Operators, Admins]` (an added group),
+`approvers: [Approvers]` (another group), and `match: {risk: caution}`
+with every group (it would take the network changes away from the
+install's routing). The sentence names the category and the install's
+groups: "`routing[0]` lets MEHO-Operators approve changes with category
+`network`, but the install's routing (`install:routing[0]`) lets only
+MEHO-SA-Operators or MEHO-Admins approve them. A tenant can only narrow
+the install's routing: name only these groups, or fewer."
+
+**Narrower, exactly.** Routing names group kinds only (the five kinds). A
+login group, matched by its full path or its group attribute, counts as
+the kind its binding gives it ([policy-bindings.md](policy-bindings.md)).
+A tenant entry is narrower than an install entry when every kind it names
+is also named by the install entry.
+
+**Which install entries a tenant entry is checked against.** Every
+install entry that can route a change the tenant entry also routes. Two
+entries can share a change unless one field of their `match` tells them
+apart:
+
+- `category` or `risk`: both entries set it, to different values.
+- `connector`: both set a pattern, and the patterns cannot fit the same
+  connector id. When one pattern has no wildcard (`*`, `?`, `[`), MEHO
+  checks that text against the other pattern. When both have wildcards
+  and differ, MEHO counts them as sharing a change.
+
+A field that one entry leaves out fits everything. All of this is decided
+from the two files, at import time.
+
+**At the run and at the click.** When a request starts to wait, the first
+install entry that fits counts, then the first tenant entry that fits. The
+stored group kinds are the kinds of both (`approver_rule` names both, the
+install's first, for example `install:routing[0], tenant:routing[1]`). At
+the approve click MEHO first routes the request again with the install's
+current file and the stored category (`approval_request.approver_category`,
+migration `0171`), then checks the stored kinds. So a tenant entry stored
+before this rule, or an install file that changed later, never widens
+anything: where a tenant entry is wider, its extra groups do not count.
+Nothing fails open: an install routing that is not valid refuses the
+click.
+
+**A change of the install's file.** The preview of an install import
+(`meho policy diff --scope install`) lists the tenants whose stored
+routing no longer fits: the diff key `routing_floor` (one item per tenant,
+with `tenant_id` and `entries`) and one warning per entry. Those entries
+stay stored, but where they are wider they do not count.
+
+`meho policy explain` shows the routing entries that fit (`rule`) and the
+install's entry (`floor`): "Install's floor: install:routing[0] (a
+tenant's routing can only narrow it)".
+
+All of this runs only while `POLICY_APPROVER_ROUTING` is on.
 
 **The stricter of install and tenant counts** (decision of 12 November
 2026). For the risk level and for "always wait", the install and the
@@ -163,6 +240,9 @@ it.
   operations it matches) and `changes` (how many of those get other
   values). Entries are told apart by their whole `match` (each part on its
   own), so two different matches never share one line. `operations_changed` counts all operations whose values change.
+  An install import also has `routing_floor`: the tenants whose stored
+  routing is wider than the new file (see "The install's routing is a
+  floor").
   `based_on` is the SHA-256 of the meaning of the stored policy (key order,
   comments and empty keys do not count). It covers only the stored policy
   of the import's own scope. A tenant import does not notice a change to
@@ -258,5 +338,6 @@ approval by a second admin),
 `backend/tests/migrations/test_migration_0163_add_policy_revision.py`,
 `backend/tests/test_policy_routing.py` (the `routing` section, its checks,
 diff and export, the "separated duties" file, the stored approver kinds
-and the click),
+and the click), `backend/tests/test_policy_routing_floor.py` (the
+install's routing as a floor: import, run, click, install diff),
 `cli/internal/cmd/policy/file_test.go`.

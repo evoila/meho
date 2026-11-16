@@ -35393,7 +35393,13 @@
             "type": "string",
             "nullable": true,
             "title": "Rule",
-            "description": "default, rights_change, or a routing entry such as tenant:routing[0]. Null for a caller who is not a tenant admin or a platform admin."
+            "description": "default, rights_change, or the routing entries that fit, the install's first, such as install:routing[0], tenant:routing[1]. Null for a caller who is not a tenant admin or a platform admin."
+          },
+          "floor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Floor",
+            "description": "The install's routing entry that fits, such as install:routing[0]. It is a floor: a tenant's routing can only narrow it. Null when no install entry fits, and for a caller who is not a tenant admin or a platform admin."
           }
         },
         "type": "object",

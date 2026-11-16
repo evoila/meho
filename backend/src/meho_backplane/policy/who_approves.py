@@ -11,8 +11,9 @@ The groups are the ones that may approve another person's call:
 
 * A change of rights: only another admin (``MEHO-Admins``), as today. It
   is never routed.
-* With the ``POLICY_APPROVER_ROUTING`` switch on, the first ``routing``
-  entry of the policy that fits (:func:`~meho_backplane.policy.routing.route`).
+* With the ``POLICY_APPROVER_ROUTING`` switch on, the first install entry
+  that fits (the floor), narrowed by the first tenant entry that fits
+  (:func:`~meho_backplane.policy.routing.route`).
 * Else today's rule (:func:`~meho_backplane.policy.routing.today_kinds`).
 
 Whether the requester may approve their own call is today's rule, and is
@@ -61,11 +62,13 @@ RIGHTS_CHANGE_RULE: Final[str] = "rights_change"
 class Approvers:
     """The login groups that may approve, and the rule that says so.
 
-    The rule is ``default``, ``rights_change`` or a routing entry.
+    The rule is ``default``, ``rights_change`` or the routing entries that
+    fit. ``floor`` is the install's entry that fits, or ``None``.
     """
 
     groups: tuple[str, ...]
     rule: str
+    floor: str | None = None
 
 
 def invalid_routing(exc: ValueError) -> InvalidStoredPolicyError:
@@ -100,7 +103,7 @@ def approvers_from_routes(
     if routes is None:
         return Approvers(_names(today_kinds(level, op_id)), DEFAULT_RULE)
     found = route(routes, category=category, connector_id=connector_id, level=level, op_id=op_id)
-    return Approvers(_names(found.kinds), found.rule)
+    return Approvers(_names(found.kinds), found.rule, found.floor)
 
 
 async def approvers_for(
@@ -129,7 +132,7 @@ async def approvers_for(
             )
         except ValueError as exc:
             raise invalid_routing(exc) from exc
-    return Approvers(_names(found.kinds), found.rule)
+    return Approvers(_names(found.kinds), found.rule, found.floor)
 
 
 async def preview_policy_fields(

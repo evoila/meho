@@ -7277,10 +7277,19 @@ class ApprovalRequest(Base):
       and on rows saved before this column: today's rule decides. Added by
       migration ``0167``.
 
-    * ``approver_rule`` -- Text nullable. The routing entry that set
-      ``approver_roles`` (``tenant:routing[0]``, ``install:routing[2]``),
+    * ``approver_rule`` -- Text nullable. The routing entries that set
+      ``approver_roles``, the install's first (``install:routing[2]``,
+      ``tenant:routing[0]``, ``install:routing[0], tenant:routing[1]``),
       or ``default`` when no entry fits and today's rule set them. NULL
       when ``approver_roles`` is NULL. Added by migration ``0167``.
+
+    * ``approver_category`` -- Text nullable. The category the routing
+      used when the request started to wait. At the click MEHO routes the
+      request again with the install's current routing and this category
+      (:func:`~meho_backplane.policy.routing_floor.install_floor_refusal`).
+      NULL when the change had no category, when ``approver_roles`` is
+      NULL, and on rows saved before this column. Added by migration
+      ``0171``.
 
     * ``reveal_secret`` -- Boolean NOT NULL DEFAULT ``false``. The requester
       asked for the hidden values of the answer (``reveal_secret: true``;
@@ -7540,6 +7549,8 @@ class ApprovalRequest(Base):
     # entry that set them. See the class docstring. Added by migration ``0167``.
     approver_roles: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
     approver_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The category the routing used. Added by migration ``0171``.
+    approver_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # An operator checked the target of an approved run whose outcome MEHO
     # does not know, and wrote down what they found (#5026): the verdict
     # (``happened`` / ``did_not_happen``), a note, who and when. NULL until

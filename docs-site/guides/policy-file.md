@@ -67,8 +67,10 @@ routing:
   `risk` level, or some of them. All that it names must fit.
 - `approvers` lists login group kinds: `Readers`, `Operators`,
   `SA-Operators`, `Admins`, `Approvers`.
-- The first entry that fits wins. A tenant's entries come before the
-  install's. When no entry fits, the same people as today may approve.
+- In each file, the first entry that fits wins. When no entry fits, the
+  same people as today may approve.
+- **The install's routing is a floor.** A tenant can make it narrower,
+  never wider (see below).
 - Routing only makes the list shorter. A group never approves more than it
   may today: for example, Operators and Approvers never approve another
   person's `dangerous` or `destructive` change.
@@ -85,6 +87,48 @@ The approvals page shows "Who can approve", and the **For you** tab lists
 the changes you may approve. A person outside the stored groups gets one
 sentence that names who may approve. A change that started to wait before
 the setting was on keeps today's rule.
+
+### The install's routing is a floor
+
+When the install's file says "changes of category X are approved by group
+A", a tenant can only narrow that. The people who may approve in the
+tenant are always some of the people the install allows. For a category
+that the install does not route, the tenant is free.
+
+Example. The install's file says:
+
+```yaml
+routing:
+  - match: {category: network}
+    approvers: [SA-Operators, Admins]
+```
+
+A tenant's file may then say `approvers: [Admins]` for network changes.
+MEHO refuses the tenant's file when an entry:
+
+- adds a group, for example `[Operators, SA-Operators, Admins]`;
+- names another group, for example `[Approvers]`;
+- takes the network changes away from the install's entry, for example
+  `match: {risk: caution}` with every group.
+
+The refusal names the category and the install's groups.
+
+How MEHO decides: an entry is narrower when every group it names is also
+in the install's entry. A tenant entry is checked against every install
+entry that can fit the same change. Two entries cannot fit the same change
+when both name a `category` (or a `risk`) and the values differ, or when
+their `connector` patterns cannot fit the same connector. When both
+connector patterns have `*`, `?` or `[` and differ, MEHO counts them as
+fitting the same change. A login group, matched by its full path or its
+group attribute, counts as the group kind its binding gives it.
+
+When a change waits, the install's entry counts first, then the tenant's.
+A person must be in both. At the approve click MEHO checks the install's
+file as it is then. So a tenant entry stored before this rule, or an
+install file that changed later, cannot widen anything. When the install's
+file changes, `meho policy diff --scope install` lists the tenants whose
+routing no longer fits. Their entries stay, but where they are wider they
+do not count.
 
 MEHO ships a starting file, "separated duties"
 (`deploy/policy-profiles/separated-duties.yaml`): identity and secret
@@ -233,6 +277,9 @@ meho policy explain --request <request-id>
   groups that may approve it. The groups stored on the request count only
   while `POLICY_APPROVER_ROUTING` is on. With it off, explain shows
   today's groups, the same groups the approve check uses.
+- With routing on, "Who may approve" names the routing entries that fit,
+  the install's first. "Install's floor" names the install's entry: a
+  tenant's routing can only narrow it.
 
 Good to know:
 

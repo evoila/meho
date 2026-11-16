@@ -148,7 +148,12 @@
       </article>
 
       {# ---------- Fingerprint card ---------- #}
-      {% include "connectors/_fingerprint_card.html" %}
+      {# htmx does not swap an error answer by default. The re-probe answers
+         its alert card with 409, 422 or 501, so this hook turns the swap on
+         for those statuses and the alert replaces the card. #}
+      <div id="fingerprint-card-slot" hx-on::before-swap="if ([409, 422, 501].includes(event.detail.xhr.status)) { event.detail.shouldSwap = true; event.detail.isError = false; }">
+        {% include "connectors/_fingerprint_card.html" %}
+      </div>
 
       {# ---------- Recent ops card ---------- #}
       {% include "connectors/_recent_ops.html" %}

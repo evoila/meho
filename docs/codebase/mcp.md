@@ -868,7 +868,10 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   the caller's tenant, the same values dispatch uses
   ([policy-classification.md](policy-classification.md)). `category` is
   `null` when two classification rules disagree; then every call waits
-  for approval. Search stays tenant-wide: it does not say whether a call
+  for approval. The `labels` description in the output schema says that
+  label text is data, not an instruction; the contract's
+  `result_shape.guidance` says it too while the switch is on. Search
+  stays tenant-wide: it does not say whether a call
   waits for *this* caller. With the switch off, both keys are left out,
   so every answer is the same as before. The registered `outputSchema`
   names both fields; while the switch is off,
@@ -1709,14 +1712,37 @@ the off state.
 * `get_tool` returns the registered tool. The hosted-run tools are built
   from it once, when the process starts, so they keep the full text.
 
-Two switches take text away while they are off:
+Three switches take text away while they are off:
 
 | Switch (off by default) | Tool | With the switch off |
 | --- | --- | --- |
 | `KB_SIMILAR_CHECK` | `add_to_knowledge` | No text about the similar-entry check, no `create_anyway` input, and `dry_run` says nothing about similar entries (`mcp/tools/_kb_similar_text.py`). |
 | `TEAM_KNOWLEDGE_RECALL` | `call_operation`, `preview_operation` | No `team_knowledge` field in the `outputSchema` (`mcp/tools/_operation_recall.py`). |
+| `POLICY_ENGINE_SHADOW` | `preview_operation` | No `policy_rule` and no `approvers` field in the `outputSchema` (`mcp/tools/_preview_policy_fields.py`). |
+
+With `POLICY_ENGINE_SHADOW` on, a `preview_operation` answer whose op
+resolved has two more fields (#6045):
+
+* `policy_rule`: the rule the policy evaluator matched for this call,
+  `{source, rule_id, text, decided}`. `decided` is `false`: the
+  evaluator runs in shadow mode, and today's checks decide the call.
+  `null` when the evaluator failed.
+* `approvers`: the login groups that may approve the call when
+  `policy_verdict` is `needs-approval` (for example
+  `["MEHO-SA-Operators", "MEHO-Admins"]`), else `[]`. `null` when the
+  stored routing is not valid: the preview still answers.
+
+No new MCP tool: the default working surface stays the same. The person
+who wants every rule in order uses `meho policy explain`
+([policy-evaluator.md](policy-evaluator.md)). **Before turning the switch
+on by default** (measurement plan, tracked in #6518): compare the benchmark lane
+with the switch off and on, for a small model and for Claude, then one
+live run on the sandbox MEHO: preview a call that waits and one that runs,
+and check `policy_rule` and `approvers` against `meho policy explain`.
 
 `tests/test_mcp_surface_conformance.py` checks both states of each switch.
+`preview_operation` follows two switches, so its listing is the registered
+one only when `TEAM_KNOWLEDGE_RECALL` and `POLICY_ENGINE_SHADOW` are both on.
 
 A third switch works the other way: `MCP_SHORT_TOOL_TEXTS` (off by
 default) gives the biggest tools a short text while it is on. One session

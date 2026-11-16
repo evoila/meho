@@ -222,6 +222,7 @@ async def test_preview_builder_emits_ref_only_summary() -> None:
         "action": "secret.move",
         "source": {"kind": "vault", "ref": "secret/db/prod#password"},
         "sink": {"kind": "vault", "ref": "secret/db/replica#password"},
+        "merge": False,
         "reason": "promote replica credential",
     }
 

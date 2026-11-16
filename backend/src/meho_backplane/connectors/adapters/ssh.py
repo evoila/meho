@@ -108,6 +108,7 @@ from meho_backplane.connectors._shared.system_operator import (
     synthesise_system_operator,
 )
 from meho_backplane.connectors._shared.vault_creds import (
+    OperatorTokenRequiredError,
     load_vault_secret_data,
     strip_credential_value,
 )
@@ -382,6 +383,38 @@ class ConnectorUnreachableError(RuntimeError):
     """
 
 
+class ConnectorLoginRequiredError(RuntimeError):
+    """An ``about``-style op ran with no login of a person.
+
+    Raised by :meth:`SshConnector._assert_reachable` when the call carried
+    no token, so MEHO could not read the target's secret. The target may
+    well be reachable. The fix is to give the caller a login (for a
+    Sensor: a login for the check runner), not to look at the network.
+    The dispatcher shows ``remediation`` to the caller.
+    """
+
+    remediation = (
+        "The call has no login. Give the caller a login. For a Sensor, give "
+        "the check runner a login (the check-runner client id and secret)."
+    )
+
+
+_NO_LOGIN_KEY: Final = "no_login"
+
+
+def fingerprint_error_extras(exc: BaseException) -> dict[str, Any]:
+    """Build the ``extras`` of an unreachable :class:`FingerprintResult`.
+
+    Keeps the error text. Also marks the failure when the cause is a call
+    with no login, so :meth:`SshConnector._assert_reachable` can say so.
+    The probe route still gets ``reachable=False``, as before.
+    """
+    extras: dict[str, Any] = {"error": str(exc)}
+    if isinstance(exc, OperatorTokenRequiredError):
+        extras[_NO_LOGIN_KEY] = True
+    return extras
+
+
 async def _dial(target: Target, auth_kwargs: dict[str, Any]) -> asyncssh.SSHClientConnection:
     """Check the target address and open the SSH connection to a checked IP.
 
@@ -626,7 +659,10 @@ class SshConnector(Connector):
         return result
 
     def _assert_reachable(self, result: FingerprintResult) -> None:
-        """Raise :exc:`ConnectorUnreachableError` when ``result`` is unreachable.
+        """Raise when ``result`` is unreachable.
+
+        Raises :exc:`ConnectorLoginRequiredError` when the cause is a call
+        with no login, else :exc:`ConnectorUnreachableError`.
 
         Shared guard for typed-SSH ``about``-style ops that delegate to
         :meth:`fingerprint`. A subclass ``fingerprint`` that catches a
@@ -643,6 +679,11 @@ class SshConnector(Connector):
             return
         cause = result.extras.get("error")
         detail = f": {cause}" if cause else ""
+        if result.extras.get(_NO_LOGIN_KEY):
+            raise ConnectorLoginRequiredError(
+                f"no login: this call carries no person's token, so MEHO cannot read "
+                f"the secret of the target{detail}"
+            )
         raise ConnectorUnreachableError(
             f"target unreachable for {result.product!r} via {result.probe_method!r}{detail}"
         )

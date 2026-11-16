@@ -48,6 +48,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors._shared.vault_creds import (
     SecretRefReadError,
+    TargetSecretForbiddenError,
     TargetSecretNotFoundError,
 )
 from meho_backplane.connectors.kubernetes import (
@@ -435,6 +436,32 @@ async def test_ref_with_no_secret_is_a_param_read_error(monkeypatch: pytest.Monk
     assert not isinstance(info.value, TargetSecretNotFoundError)
     assert info.value.param == "string_data_secret_ref"
     assert info.value.cause_class == "InvalidPath"
+    assert _TARGET.name not in str(info.value)
+    core.patch_namespaced_secret.assert_not_called()
+
+
+async def test_ref_vault_refuses_is_a_param_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    ref = f"{_REF_ROOT}/apps/refused"
+    install_fake_client(
+        monkeypatch,
+        read_exc=hvac.exceptions.Forbidden(
+            "permission denied", method="get", url=f"https://vault.test/{ref}"
+        ),
+    )
+    core = _core_v1(_existing_secret())
+    with pytest.raises(SecretRefReadError) as info:
+        await _update(
+            core,
+            {
+                "name": "db-creds",
+                "namespace": "apps",
+                "string_data_secret_ref": {"t": f"{ref}#t"},
+            },
+        )
+
+    assert not isinstance(info.value, TargetSecretForbiddenError)
+    assert info.value.param == "string_data_secret_ref"
+    assert info.value.cause_class == "Forbidden"
     assert _TARGET.name not in str(info.value)
     core.patch_namespaced_secret.assert_not_called()
 

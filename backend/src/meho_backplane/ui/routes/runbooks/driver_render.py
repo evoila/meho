@@ -115,6 +115,7 @@ def _base_context(
         "step_view": None,
         "terminal_state": None,
         "error_message": None,
+        "failure_message": None,
         "completed_at": None,
         "abandoned_at": None,
         "is_assignee": False,
@@ -136,6 +137,10 @@ async def render_driver_page(
     * **Advance** only when ``session.operator_sub == assigned_to``.
     * **Reassign** only for a ``tenant_admin`` (the soft probe hides the
       control; the POST re-gates hard via ``require_ui_admin``).
+
+    A failed current step renders the failed-step banner with the stored
+    text of why it failed (:meth:`RunbookRunService.get_failed_step_message`),
+    the same text the Advance answer showed.
 
     A terminal run (``completed`` / ``abandoned``) renders the terminal
     banner with no step body and no Advance. ``RunNotFoundError`` (unknown
@@ -165,7 +170,9 @@ async def render_driver_page(
         context["is_assignee"] = session.operator_sub == assignee
         context["template_slug"] = current.template_slug
         context["template_version"] = current.template_version
-        context["step_view"] = step_view(current)
+        failure_message = await service.get_failed_step_message(session.tenant_id, run_id)
+        context["step_view"] = step_view(current, failed=failure_message is not None)
+        context["failure_message"] = failure_message
 
     response = get_templates().TemplateResponse(request, "runbooks/run_driver.html", context)
     set_csrf_cookie(response, csrf_token)
@@ -193,6 +200,7 @@ async def render_step_fragment(
     view: StepView | None,
     terminal_state: str | None = None,
     error_message: str | None = None,
+    failure_message: str | None = None,
     completed_at: object | None = None,
     abandoned_at: object | None = None,
 ) -> HTMLResponse:
@@ -216,6 +224,7 @@ async def render_step_fragment(
     context["step_view"] = view
     context["terminal_state"] = terminal_state
     context["error_message"] = error_message
+    context["failure_message"] = failure_message
     context["completed_at"] = completed_at
     context["abandoned_at"] = abandoned_at
     if view is not None and terminal_state is None and not view.failed:

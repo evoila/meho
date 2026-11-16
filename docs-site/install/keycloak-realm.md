@@ -518,8 +518,13 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch 
 ```
 
 - The flow is missing: MEHO makes it with its settings, maps
-  `meho-touch` to level 3, adds the `amr` mapper to `meho-web`, and
-  binds the flow. The binding is the last change.
+  `meho-touch` to level 3, adds the `amr` mapper to `meho-web`, gives the
+  flow the company login default when the realm's browser flow has one,
+  and binds the flow. The binding is the last change.
+- Keycloak refuses a request with HTTP 403: MEHO names the missing role
+  and the account. When it was making the flow, the flow may be half-made.
+  Delete it in Keycloak before you run again, or the next run stops with
+  "another shape".
 - Everything is there: MEHO changes nothing, and every change flag in
   the result is `false`. So the call is safe to run twice.
 - The flow is there with other steps or other settings: MEHO stops,
@@ -971,6 +976,12 @@ adds them to a running realm at the next upgrade.
    Only the client ID and the name differ.
 2. Give neither client a fixed tenant or role. A person gets their tenant
    and role from their group, as with `meho-mcp`.
+3. Give MEHO's Keycloak admin client the realm-management role
+   `manage-users`. With the switch on, the account page of the web
+   console shows "Your tools", and its "Sign out this tool" button needs
+   this role to list and end the signed-in person's logins. Without the
+   role, the button shows an error that names it. On the built-in
+   Keycloak, `meho-admin` already has the role.
 
 **Then turn the switch on.** Set `MCP_CLIENT_PER_TOOL_KIND=true` on the
 backplane (Helm: `config.mcpClientPerToolKind: "true"`).

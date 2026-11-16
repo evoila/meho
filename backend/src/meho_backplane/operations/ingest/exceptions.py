@@ -137,6 +137,7 @@ __all__ = [
     "ConnectorNotFoundError",
     "ConnectorScopeCandidate",
     "ConnectorUser",
+    "InvalidOpClassError",
     "InvalidSchemaError",
     "InvalidSpecError",
     "InvalidStateTransitionError",
@@ -239,6 +240,16 @@ class InvalidSchemaError(ValueError):
     when a path's parameter list isn't a list, or when the spec uses
     a structurally unsupported shape (component-path drill-down
     refs, for example).
+    """
+
+
+class InvalidOpClassError(InvalidSchemaError):
+    """A connector's safety floor set an op class that is not allowed.
+
+    Only the classes in
+    :data:`~meho_backplane.operations.ingest.safety_floors.FLOOR_OP_CLASSES`
+    (``credential_read`` and ``write``) may be set. The message names the
+    operation and the allowed classes.
     """
 
 

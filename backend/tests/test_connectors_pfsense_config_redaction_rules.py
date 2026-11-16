@@ -400,13 +400,11 @@ _NOT_SECRET_NAMES = (
     "community_additive",
     "community_match",
     "community_set",
-    "password_type",
     "passwordencrypt",
     "snortcommunityrules",
     "usepass",
     "usetoken",
     "useproxypass",
-    "hide_secrets",
     "nopasswd",
     "eve_log_files_hash",
     "pfb_dnsvip_skew",
@@ -431,6 +429,14 @@ def test_names_that_only_look_secret_stay_readable(name: str) -> None:
     redacted, count = redact_config_xml(xml)
     assert redacted == xml
     assert count == 0
+
+
+@pytest.mark.parametrize("name", ["password_type", "hide_secrets", "snmpAuthKey", "kubeconfig"])
+def test_a_name_the_shared_rule_hides_is_removed(name: str) -> None:
+    """The shared name rule of every other place counts here too."""
+    redacted, count = redact_config_xml(_wrap(f"<somepkg><{name}>{PLAIN}</{name}></somepkg>"))
+    assert PLAIN not in redacted
+    assert count == 1
 
 
 def test_unsure_names_stay_redacted() -> None:

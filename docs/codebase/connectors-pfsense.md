@@ -471,12 +471,16 @@ see the cleaned text.
   wrappers, entity references. Public certificates (`<crt>`), CSRs, SSH public
   keys (`authorizedkeys`) and WireGuard public keys stay. Plain free text is
   not checked for words, so a description that says "password" stays.
+- **The shared name rule.** A name that the shared rule of the other places
+  hides (`is_secret_param_name` in `broadcast/events.py`, see
+  `redaction.md`) is hidden here too, before the lists of this connector.
+  So this connector hides at least the names that every other place hides.
 - **Names that only look secret** (`_NOT_SECRET_NAMES` in
   `redaction_names.py`), checked against the package sources: the FRR
   route-map settings `community_set` / `community_match` / `community_action`
-  / `community_additive`, FRR `password_type` and `passwordencrypt`, Suricata
+  / `community_additive`, FRR `passwordencrypt`, Suricata
   `snortcommunityrules` and `eve_log_files_hash`, the OpenVPN client export
-  `usepass` / `usetoken` / `useproxypass`, WireGuard `hide_secrets`, sudo
+  `usepass` / `usetoken` / `useproxypass`, sudo
   `nopasswd`, pfBlockerNG `pfb_dnsvip_skew`, FreeRADIUS
   `varsettingsmotptokenlength`, and, for the `key` ending, `publickey` /
   `pubkey` / `public_key`, `widgetkey`, `eve_redis_key`, `prefetchkey`, the

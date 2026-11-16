@@ -199,7 +199,9 @@ replacement never breaks the JSON. Other lines are checked as text.
   before the new tail and knows the tail starts inside a key.
 - **Unclear content goes to quarantine.** The check is not sure when a file
   is not UTF-8 text, when a secret-like name still has a value, for
-  example `"password": "..."` in JSON, or when a private key starts or
+  example `"password": "..."` in JSON (a secret-like name is one that
+  MEHO hides in results, `redaction.md`, or a word of the check's own
+  list), or when a private key starts or
   ends in another upload. Variables (`${X}`), placeholders (`<x>`), short
   values, markers and values made only of mask characters (`*`, `•`, `●`,
   `·`) do not count.

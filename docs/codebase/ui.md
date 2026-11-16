@@ -1124,10 +1124,13 @@ dispatch path:
 
 - `caution` with `requires_approval`, a `tenant_admin` role floor, and a
   requester check: only a person asks, not an agent, a service login or
-  a call on someone's behalf. Every call waits for approval; a tenant
-  admin in `MEHO-SA-Operators` may approve their own.
+  a call on someone's behalf. Every call waits for approval. Every
+  tenant admin may approve their own request, so no second person is
+  needed.
 - `tool` is one of the kinds above that have a sign-out button. Like the
-  card, the operation refuses while `MCP_CLIENT_PER_TOOL_KIND` is off.
+  card, the operation refuses while `MCP_CLIENT_PER_TOOL_KIND` is off:
+  the requester check refuses the call at once, before any approval
+  request.
 - `user` is found in MEHO's own sign-in realm through MEHO's Keycloak
   admin client, never a Keycloak target (`auth/realm_users.py`): by user
   id, else by exact username. The person must be in a role group of the
@@ -1138,8 +1141,9 @@ dispatch path:
   signs out that id and checks the tenant again; it never looks the name
   up again. A card without a person id is refused.
 - The run calls the same `sign_out_tool`, with `for_user`. The audit row
-  `auth.tool_sign_out` has the admin as `operator_sub`, and `user_id` and
-  `username` of the person in the payload. A failed Keycloak call is an
+  `auth.tool_sign_out` has the admin who ran the call (the approver) as
+  `operator_sub`, and in the payload the admin who asked (`requested_by`,
+  from the approval request) and `user_id` and `username` of the person. A failed Keycloak call is an
   error result and writes only the 502 row with `outcome` `failed`.
 
 Tests: `tests/test_tools_sign_out_op.py`, `tests/test_realm_users.py`,

@@ -14,6 +14,10 @@ Both ops are pinned as credential classes in
 :mod:`meho_backplane.broadcast.events`, which suppresses the generic
 params echo; a bespoke builder is the only way the approver sees what is
 moved (the same pattern as ``secret.move`` in :mod:`.move_preview`).
+
+The export also has a params check: a source kind the export refuses
+(:data:`~.handoff.EXPORT_REFUSED_SOURCE_KINDS`) is refused before the call
+waits for approval.
 """
 
 from __future__ import annotations
@@ -21,9 +25,15 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.connectors.secret.endpoints import parse_secret_ref
+from meho_backplane.connectors.secret.handoff import EXPORT_REFUSED_SOURCE_KINDS
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+from meho_backplane.operations._validate import params_problem, register_params_check
 
-__all__ = ["build_secret_handoff_export_preview", "build_secret_handoff_import_preview"]
+__all__ = [
+    "build_secret_handoff_export_preview",
+    "build_secret_handoff_import_preview",
+    "check_secret_handoff_export_source",
+]
 
 
 def _ref_summary(raw: object) -> dict[str, str] | None:
@@ -73,5 +83,19 @@ async def build_secret_handoff_import_preview(ctx: PreviewContext) -> dict[str, 
     return _add_reason(summary, ctx.params)
 
 
+def check_secret_handoff_export_source(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Params check of ``secret.handoff.export``: refuse a source kind the export refuses."""
+    source = _ref_summary(params.get("from"))
+    if source is None or source["kind"] not in EXPORT_REFUSED_SOURCE_KINDS:
+        return None
+    return params_problem(
+        "from",
+        "a source the export reads with your own identity, such as 'vault:<path>#<field>'",
+        f"secret.handoff.export does not read from a {source['kind']!r} source; "
+        "move the secret to a 'vault:' place with secret.move first",
+    )
+
+
+register_params_check("secret.handoff.export", check_secret_handoff_export_source)
 register_preview_builder("secret.handoff.export", build_secret_handoff_export_preview)
 register_preview_builder("secret.handoff.import", build_secret_handoff_import_preview)

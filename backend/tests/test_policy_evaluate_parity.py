@@ -8,18 +8,22 @@ the same answers as today's checks before any policy switch becomes the
 default. This file runs every case through both and fails on any
 difference. It prints each differing case with both answers.
 
-* **Calls.** 6 caller kinds x 6 logins (the five login groups, and a
+* **Calls.** 7 caller kinds x 6 logins (the five login groups, and a
   platform admin in another tenant) x 4 risk levels x 32 combinations of
   five marks (requires approval, write, credential read, caller address,
-  role floor) x with and without a grant: 9,216 cases. Today's side is
-  ``policy_gate``; the evaluator's side is ``evaluate_call``, with the
-  same lookups. Both must give the same verdict, the same reason class,
-  the same approver groups and the same "waits only for its token" mark.
+  role floor) x the grants of the caller kind (``_GRANTS``); the agent
+  rows run with each ``AGENT_GRANT_REQUIRED`` setting: 41,472 cases.
+  Today's side is ``policy_gate``; the evaluator's side is
+  ``evaluate_call``, with the same lookups. Both must give the same
+  verdict, the same reason class, the same approver groups and the same
+  "waits only for its token" mark.
+* **Grants that never clear.** ``evaluate`` with a standing grant and a
+  run approval in its lookups, for an operation no grant clears: it waits.
 * **Approvals.** 5 approver kinds x 6 logins x own change or not x 5
-  risk levels (also none) x token wait x requires approval x role floor x
-  pending or decided x rights change x the break-glass switch: 19,200
-  cases. Today's side is ``approve_right`` (the checks of
-  ``approval_queue.py``); the evaluator's side is ``may_approve``.
+  risk levels (also none) x token wait x role floor x pending or decided
+  x rights change x the break-glass switch: 9,600 cases. Today's side is
+  ``approve_right`` (the checks of ``approval_queue.py``); the
+  evaluator's side is ``may_approve``.
 * **Routes.** Every REST route with a ``require_role`` check and every
   MCP tool, for each of the six logins: the door answers the same as the
   evaluator's role floor for the login the evaluator reads.
@@ -38,7 +42,8 @@ import itertools
 import uuid
 from collections.abc import Iterator
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -54,15 +59,24 @@ from meho_backplane.db.models import (
     ApprovalRequest,
     EndpointDescriptor,
     PermissionVerdict,
+    RunApproval,
     ServicePrincipalGrant,
 )
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.operations import role_floors
+from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._validate import policy_gate, waits_only_for_token_call
 from meho_backplane.operations.approval_rights import ApproveRightReason, approve_right
 from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 from meho_backplane.policy.approve import may_approve
-from meho_backplane.policy.evaluate import TOKEN_CALL_WAIT, Asked, Decision, Verdict
+from meho_backplane.policy.evaluate import (
+    TOKEN_CALL_WAIT,
+    Asked,
+    Decision,
+    Lookups,
+    Verdict,
+    evaluate,
+)
 from meho_backplane.policy.floors import call_floors
 from meho_backplane.policy.shadow import approval_ask_of, asker_of, evaluate_call
 from meho_backplane.settings import get_settings
@@ -71,7 +85,15 @@ from tests._route_tree_helpers import iter_routes
 _TENANT = uuid.UUID("00000000-0000-0000-0000-000000006043")
 _CONNECTOR = "parity-rest-1.0"
 
-_CALLERS = ("person_web", "person_token", "agent", "read_only_agent", "service", "hosted_run")
+_CALLERS = (
+    "person_web",
+    "person_token",
+    "agent",
+    "read_only_agent",
+    "service",
+    "runner",
+    "hosted_run",
+)
 _LOGINS = (*(group.value for group in RoleGroup), "platform_admin_elsewhere")
 _LEVELS = ("safe", "caution", "dangerous", "destructive")
 _MARKS = ("requires_approval", "write", "credential_read", "caller_address", "role_floor")
@@ -197,15 +219,33 @@ def _descriptor(level: str, mask: int) -> EndpointDescriptor:
 # ---------------------------------------------------------------------------
 
 
+#: The grants each caller kind can hold. ``run``, ``deny`` and ``approval``
+#: are an agent grant with that verdict for every operation. ``narrow`` is a
+#: wide agent grant that denies, next to a narrower one that runs: the
+#: narrower grant decides. ``standing`` is a standing grant per operation,
+#: ``run_approval`` a run approval that lists every operation that does not
+#: show a secret.
+_GRANTS = {
+    "agent": ("none", "run", "deny", "approval", "narrow"),
+    "service": ("none", "standing", "run_approval"),
+    "person": ("none", "standing"),
+}
+_AGENT_CALLERS = ("agent", "read_only_agent", "hosted_run")
+#: The ``AGENT_GRANT_REQUIRED`` settings the agent rows run with.
+_MODES = ("off", "observe", "on")
+_WORK_REF = "run-parity"
+
+
 @dataclass(frozen=True)
 class _Call:
     caller: str
     login: str
-    grant: bool
+    grant: str
+    mode: str = "off"
 
     @property
     def sub(self) -> str:
-        return f"{self.caller}:{self.login}:{'grant' if self.grant else 'none'}"
+        return f"{self.caller}:{self.login}:{self.grant}"
 
     @property
     def actor(self) -> str | None:
@@ -213,39 +253,88 @@ class _Call:
         return f"hosted-agent:{self.login}:{self.grant}" if self.caller == "hosted_run" else None
 
 
-_CALLS = tuple(_Call(*cell) for cell in itertools.product(_CALLERS, _LOGINS, (False, True)))
+def _grants_of(caller: str) -> tuple[str, ...]:
+    if caller in _AGENT_CALLERS:
+        return _GRANTS["agent"]
+    return _GRANTS["service" if caller == "service" else "person"]
+
+
+def _all_calls() -> tuple[_Call, ...]:
+    calls = []
+    for caller, login in itertools.product(_CALLERS, _LOGINS):
+        modes = _MODES if caller in _AGENT_CALLERS else ("off",)
+        for grant, mode in itertools.product(_grants_of(caller), modes):
+            calls.append(_Call(caller, login, grant, mode))
+    return tuple(calls)
+
+
+_CALLS = _all_calls()
+
+_AGENT_ROWS = {
+    "run": (("parity.*", PermissionVerdict.AUTO_EXECUTE),),
+    "deny": (("parity.*", PermissionVerdict.DENY),),
+    "approval": (("parity.*", PermissionVerdict.NEEDS_APPROVAL),),
+    "narrow": (
+        ("parity.*", PermissionVerdict.DENY),
+        ("parity.op1*", PermissionVerdict.AUTO_EXECUTE),
+    ),
+}
+
+
+def _grant_rows(call: _Call, now: datetime) -> list[Any]:
+    """The rows that give *call* its grant."""
+    if call.grant == "none" or call.mode != "off":
+        # The rows of a grant are the same in every mode; seed them once.
+        return []
+    if call.grant in _AGENT_ROWS:
+        return [
+            AgentPermission(
+                tenant_id=_TENANT,
+                principal_sub=call.actor or call.sub,
+                op_pattern=pattern,
+                verdict=verdict,
+                created_by_sub="test-admin",
+            )
+            for pattern, verdict in _AGENT_ROWS[call.grant]
+        ]
+    if call.grant == "run_approval":
+        return [
+            RunApproval(
+                tenant_id=_TENANT,
+                principal_sub=call.sub,
+                work_ref=_WORK_REF,
+                entries=[
+                    {"connector_id": _CONNECTOR, "op_id": _op_id(mask)}
+                    for mask in _MASKS
+                    if "credential_read" not in _marks(mask)
+                ],
+                reason="test: every operation",
+                requested_at=now,
+                expires_at=now + timedelta(hours=1),
+                approved_at=now,
+                approved_by_sub="test-approver",
+            )
+        ]
+    return [
+        ServicePrincipalGrant(
+            tenant_id=_TENANT,
+            principal_sub=call.sub,
+            op_id=_op_id(mask),
+            connector_id=_CONNECTOR,
+            target_id=None,
+            reason="test: every operation",
+            created_by_sub="test-admin",
+        )
+        for mask in _MASKS
+    ]
 
 
 async def _seed_grants() -> None:
-    """The grant of each call with a grant: an agent grant, or a standing grant per operation."""
+    """The grant of each call with a grant."""
+    now = datetime.now(UTC)
     async with get_sessionmaker()() as session, session.begin():
         for call in _CALLS:
-            if not call.grant:
-                continue
-            agent_sub = call.actor or call.sub
-            if call.caller in ("agent", "read_only_agent", "hosted_run"):
-                session.add(
-                    AgentPermission(
-                        tenant_id=_TENANT,
-                        principal_sub=agent_sub,
-                        op_pattern="parity.*",
-                        verdict=PermissionVerdict.AUTO_EXECUTE,
-                        created_by_sub="test-admin",
-                    )
-                )
-                continue
-            for mask in _MASKS:
-                session.add(
-                    ServicePrincipalGrant(
-                        tenant_id=_TENANT,
-                        principal_sub=call.sub,
-                        op_id=_op_id(mask),
-                        connector_id=_CONNECTOR,
-                        target_id=None,
-                        reason="test: every operation",
-                        created_by_sub="test-admin",
-                    )
-                )
+            session.add_all(_grant_rows(call, now))
 
 
 def _today_class(verdict: PermissionVerdict, reason: str | None) -> str:
@@ -297,6 +386,7 @@ async def _answers(call: _Call, level: str, mask: int) -> dict[str, Any]:
     """Today's answer and the evaluator's answer for one case."""
     operator = _operator(call.caller, call.login, call.sub)
     descriptor = _descriptor(level, mask)
+    work_ref = work_ref_var.set(_WORK_REF if call.grant == "run_approval" else None)
     with actor_delegation(call.actor) if call.actor else nullcontext():
         verdict, reason = await policy_gate(
             operator=operator, descriptor=descriptor, target=None, connector_id=_CONNECTOR
@@ -305,6 +395,7 @@ async def _answers(call: _Call, level: str, mask: int) -> dict[str, Any]:
         decision = await evaluate_call(
             operator=operator, descriptor=descriptor, target=None, connector_id=_CONNECTOR
         )
+    work_ref_var.reset(work_ref)
     waits = verdict is PermissionVerdict.NEEDS_APPROVAL
     approvers = _today_approvers(level, descriptor.op_id) if waits else frozenset()
     today = {
@@ -325,31 +416,88 @@ async def _answers(call: _Call, level: str, mask: int) -> dict[str, Any]:
 def _case_text(call: _Call, level: str, mask: int, answers: dict[str, Any]) -> str:
     marks = ",".join(sorted(_marks(mask))) or "no marks"
     return (
-        f"caller={call.caller} login={call.login} grant={call.grant} level={level} "
-        f"marks=[{marks}]\n  today={answers['today']} reason={answers['today_reason']!r}\n"
+        f"caller={call.caller} login={call.login} grant={call.grant} "
+        f"agent_grant_required={call.mode} level={level} marks=[{marks}]\n"
+        f"  today={answers['today']} reason={answers['today_reason']!r}\n"
         f"  evaluator={answers['evaluator']} trace={list(answers['trace'])}"
     )
 
 
+#: The kinds of answer each mode's table must reach, so a check that never runs cannot pass.
+_REACHED = {
+    "off": {
+        "run/default",
+        "run/standing_grant",
+        "run/run_approval",
+        "run/agent_grant",
+        "wait/wait",
+        "deny/role_floor",
+        "deny/agent_rule",
+    },
+    "observe": {"run/agent_grant", "wait/wait", "deny/agent_rule"},
+    "on": {"run/agent_grant", "wait/wait", "deny/agent_rule", "deny/agent_no_grant"},
+}
+
+
 @pytest.mark.asyncio
-async def test_every_call_gets_todays_answer() -> None:
+@pytest.mark.parametrize("mode", _MODES)
+async def test_every_call_gets_todays_answer(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    monkeypatch.setenv("AGENT_GRANT_REQUIRED", mode)
+    get_settings.cache_clear()
     await _seed_grants()
-    cases = 0
+    calls = [call for call in _CALLS if call.mode == mode]
     differences: list[str] = []
     seen: set[str] = set()
-    for call, level, mask in itertools.product(_CALLS, _LEVELS, _MASKS):
+    for call, level, mask in itertools.product(calls, _LEVELS, _MASKS):
         answers = await _answers(call, level, mask)
-        cases += 1
         seen.add(f"{answers['today']['verdict']}/{answers['today']['class']}")
         if answers["today"] != answers["evaluator"]:
             differences.append(_case_text(call, level, mask, answers))
-    assert cases == 6 * 6 * 4 * 32 * 2
+    cases = len(calls) * len(_LEVELS) * len(_MASKS)
+    rows = len(_AGENT_CALLERS) * len(_GRANTS["agent"])
+    if mode == "off":
+        rows += len(_GRANTS["service"]) + 3 * len(_GRANTS["person"])
+    assert cases == rows * 6 * 4 * 32
     assert not differences, f"{len(differences)} of {cases} cases differ:\n" + "\n".join(
         differences[:20]
     )
-    # The table reaches every kind of answer, so a check that never runs cannot pass.
-    assert {"run/default", "run/standing_grant", "run/agent_grant", "wait/wait"} <= seen
-    assert {"deny/role_floor"} <= seen
+    assert _REACHED[mode] <= seen
+
+
+#: The marks no standing grant and no run approval clears, as ``Asked`` fields.
+_NO_GRANT_ASKS = {
+    "shows a secret": {"op_class": frozenset({"credential_read"})},
+    "connects to an address the caller gives": {"caller_address": True},
+    "needs approval for every call": {"op_class": frozenset({"per_call_approval"})},
+    "always waits": {"op_class": frozenset({"classified_always_wait"})},
+}
+
+
+@pytest.mark.parametrize("mark", sorted(_NO_GRANT_ASKS))
+@pytest.mark.parametrize(("risk", "mutating"), [("caution", True), ("dangerous", False)])
+@pytest.mark.parametrize("sandbox", [False, True])
+def test_no_grant_clears_an_operation_that_always_waits(
+    mark: str, risk: str, mutating: bool, sandbox: bool
+) -> None:
+    """A standing grant and a run approval in the lookups still leave these calls waiting.
+
+    The lookups of a real call drop such a grant before the evaluator sees
+    it, so the call table cannot see a change of the evaluator's own rule.
+    """
+    asker = asker_of(_operator("service", "Operators", "service:direct"))
+    asked = Asked(
+        connector_id=_CONNECTOR,
+        op_id="parity.direct",
+        risk=risk,
+        mutating=mutating,
+        **_NO_GRANT_ASKS[mark],
+    )
+    found = Lookups(standing_grant="grant-1", run_approval="run-1", sandbox=sandbox)
+    decision = evaluate(asker, asked, found)
+    assert decision.verdict is Verdict.WAIT, decision.trace
+    # Without the mark, the same lookups clear the wait: the table tests the mark.
+    plain = replace(asked, op_class=frozenset(), caller_address=False)
+    assert evaluate(asker, plain, found).verdict is Verdict.RUN
 
 
 # ---------------------------------------------------------------------------
@@ -407,19 +555,17 @@ def _approval_differences() -> tuple[int, list[str]]:
         (False, True),  # own change
         _REQUEST_LEVELS,
         (False, True),  # token wait
-        (False, True),  # requires approval
         (False, True),  # role floor
         (True, False),  # pending
         (False, True),  # rights change
     )
-    for kind, login, own, level, token, ra, floor, pending, rights in product:
+    for kind, login, own, level, token, floor, pending, rights in product:
         approver = _operator(kind, login, f"approver:{kind}:{login}")
         request = _request(
             requester=approver.sub if own else "someone-else",
             op_id=_op_id(16 if floor else 0),
             level=level,
-            # The dispatcher stamps the token wait only on a call without requires approval.
-            token_wait=token and not ra,
+            token_wait=token,
             pending=pending,
             rights_change=rights,
         )
@@ -433,7 +579,7 @@ def _approval_differences() -> tuple[int, list[str]]:
         if not same:
             differences.append(
                 f"approver={kind} login={login} own={own} level={level} token_wait={token} "
-                f"requires_approval={ra} role_floor={floor} pending={pending} "
+                f"role_floor={floor} pending={pending} "
                 f"rights_change={rights}\n  today={today.may_approve} {today.reason.value} "
                 f"rule={today.rule}\n  evaluator={allowed} {rule.source}:{rule.rule_id}"
             )
@@ -447,7 +593,7 @@ def test_every_approval_gets_todays_answer(
     monkeypatch.setenv("APPROVAL_ALLOW_SELF_APPROVAL", "true" if break_glass else "false")
     get_settings.cache_clear()
     cases, differences = _approval_differences()
-    assert cases == 5 * 6 * 2 * 5 * 2 * 2 * 2 * 2 * 2
+    assert cases == 5 * 6 * 2 * 5 * 2 * 2 * 2 * 2
     assert not differences, f"{len(differences)} of {cases} cases differ:\n" + "\n".join(
         differences[:20]
     )

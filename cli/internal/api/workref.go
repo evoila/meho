@@ -50,9 +50,14 @@ func CleanWorkRef(ref string) string {
 // The length is counted after cleaning, so a decomposed id that is longer
 // than 256 characters only before the NFC step passes, as on the
 // backplane. One thing differs from the backplane, on purpose. The CLI
-// looks for control characters before it removes white space, so a
-// trailing line break in a flag or variable value is refused here,
-// although the backplane would remove it: it is most likely a mistake.
+// looks for refused characters before it removes white space. So it
+// refuses a control character or a line or paragraph separator also at the
+// start or the end of the id: a tab, a line feed, a vertical tab, a form
+// feed, a carriage return (so also CR LF), U+001C to U+001F, U+0085,
+// U+2028 and U+2029. The backplane strips these at the ends and
+// takes the value. So the CLI is stricter than the backplane, never
+// looser. Such a character in a flag or variable value is most likely a
+// mistake.
 // The shared case list
 // testdata/work_ref_cases.json is read by this package's test and by the
 // backend test, so the two rules cannot drift.

@@ -557,7 +557,8 @@ and NFC.
 Rows stored before this rule are not changed. A ticket id stored before
 this release may carry white space at the ends, or another Unicode form,
 so a run approval made for the cleaned text does not match such a row.
-A search filter still finds it with the exact old text (see below).
+A search filter still finds it with the exact old text, if that text
+follows the rule (see below).
 
 ### Search filters
 
@@ -566,10 +567,12 @@ A filter on a ticket id is checked with the same rule as a stored one
 message (HTTP 422, or invalid params on MCP). A good value matches two
 texts (`work_ref_filter_values` in `work_ref.py`): the cleaned id
 (stripped and made NFC), so a search finds a ticket id however it is
-typed, and the text exactly as typed, so a search with the exact old
-text still finds a row stored before the rule. A filter `"  CHG1  "`
-finds rows stored as `CHG1` and as `  CHG1  `; a filter `CHG1` finds
-only `CHG1`. The filters are:
+typed, and the text exactly as typed. So a search finds the exact text
+stored before the rule, if that text follows the rule. An old id that
+breaks the rule (for example with a tab) can no longer be used as a
+filter; such rows still show in a list without a filter. A filter
+`"  CHG1  "` finds rows stored as `CHG1` and as `  CHG1  `; a filter
+`CHG1` finds only `CHG1`. The filters are:
 
 - the audit search (`POST /api/v1/audit/query`, `POST
   /api/v1/audit/class-counts`, `GET /api/v1/audit/by-work-ref/{ref}`;
@@ -594,12 +597,13 @@ top-level filter of the MCP list tools `meho_approvals_list`,
 blank optional text arguments of read tools before it checks them
 (`mcp/handlers.py`). `tests/test_mcp_empty_optional_filter.py` pins this.
 
-The console search boxes of the agent runs, the scheduler and the audit
-pages check the value with the same rule (`filter_work_ref` in
+The console search boxes of the agent runs, the scheduler, the audit
+and the approvals pages, and the approvals "in order" page, check the
+value with the same rule (`filter_work_ref` in
 `ui/routes/work_ref_form.py`): they clean first and then count the
 length, and a bad value is a 422 that names the rule. A blank box means
-no filter. The approvals search box treats a blank box as no filter and
-sends any other value to the same search.
+no filter. The "in order" page needs a ticket, so there a blank value is
+a 422 too.
 
 ### How a new door is found
 
@@ -613,11 +617,9 @@ entries):
 
 - the `Meho-Work-Ref` header of the two agent run routes;
 - the four console forms that store a ticket id (`form_work_ref`);
-- the four console search boxes that check the value with
-  `filter_work_ref` (agent runs, scheduler, audit page and audit
-  results);
-- the two approvals search boxes and the approvals "in order" page,
-  which use the search of the REST filter.
+- the seven console search boxes and pages that check the value with
+  `filter_work_ref` (agent runs, scheduler, audit page, audit results,
+  the two approvals search boxes and the approvals "in order" page).
 
 The test fails too when an entry of the list matches no route. The
 command line tool has the same rule in `cli/internal/api/workref.go`.

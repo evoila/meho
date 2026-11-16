@@ -26,7 +26,8 @@ the same rule (:data:`WorkRefFilter`). It matches the cleaned id, so a search
 finds an id however it is typed. Rows stored before this rule may carry
 white space at the ends or another Unicode form. The filter also matches its
 text exactly as typed (:func:`work_ref_filter_values`), so a search with the
-exact old text still finds such a row.
+exact old text still finds such a row, if that text follows the rule. An old
+id that breaks the rule cannot be used as a filter.
 """
 
 from __future__ import annotations
@@ -61,8 +62,8 @@ WORK_REF_FIELD_DESCRIPTION: Final[str] = (
 #: The rule in one line, for the description of a ``work_ref`` search filter.
 WORK_REF_FILTER_DESCRIPTION: Final[str] = (
     "Ticket id to search for. It finds the id with white space at both ends "
-    "removed and in Unicode form NFC, and also the text exactly as typed, so "
-    "rows stored before this rule are found too. A blank value, control or "
+    "removed and in Unicode form NFC, and also the text exactly as typed. "
+    "A blank value, control or "
     f"invisible characters, or more than {WORK_REF_MAX_CHARS} characters after "
     "removing the white space are refused."
 )
@@ -125,7 +126,8 @@ def check_work_ref_filter_input(value: Any) -> Any:
 
     A value that breaks the rule raises :class:`WorkRefError`. A good value
     is returned unchanged, so :func:`work_ref_filter_values` can match rows
-    stored before the rule too. A non-string is left for the field type.
+    stored before the rule too, when their text follows the rule. A
+    non-string is left for the field type.
     """
     if isinstance(value, str):
         normalize_work_ref(value)

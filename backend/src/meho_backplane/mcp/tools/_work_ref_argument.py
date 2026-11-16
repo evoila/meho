@@ -8,7 +8,8 @@ breaks it is refused as invalid params, with a message that names the rule
 and never the refused text beyond the code point. A good value keeps its
 text as typed: the search matches it with
 :func:`meho_backplane.work_ref.work_ref_filter_values`, so rows stored before
-the rule are still found by their exact old text.
+the rule are still found by their exact old text, when that text follows the
+rule.
 """
 
 from __future__ import annotations

@@ -1138,10 +1138,14 @@ that header from one place, so every verb gets it without its own flag.
   separator. Text that is not valid UTF-8 is refused too. Like the
   backplane, the CLI counts the length after it strips white space and
   makes the text NFC, so 130 decomposed letters (260 characters as typed)
-  pass. One difference, on purpose: the CLI looks for control characters
-  before it strips white space, so a trailing line break is refused,
-  although the backplane would strip it. Such a line break in a flag or
-  variable value is most likely a mistake. A given
+  pass. One difference, on purpose: the CLI looks for refused characters
+  before it strips white space. So it refuses a control character or a
+  line or paragraph separator also at the start or the end of the id: a
+  tab, a line feed, a vertical tab, a form feed, a carriage return (so
+  also CR LF), U+001C to U+001F, U+0085, U+2028 and U+2029.
+  The backplane strips these at the ends and takes the value. So the CLI
+  is stricter than the backplane, never looser. Such a character in a
+  flag or variable value is most likely a mistake. A given
   flag is always checked, so `--work-ref ""` is refused. An empty
   `MEHO_WORK_REF` means "not set". A bad value stops the command before
   any request leaves the CLI. A good value is cleaned with
@@ -1219,9 +1223,11 @@ that header from one place, so every verb gets it without its own flag.
   space, a tab or an invisible character inside, or more than 256
   characters after stripping) gets HTTP 422 with a message that names
   the rule. The backplane matches the cleaned id and also the text
-  exactly as typed, so a search with the exact old text still finds a
-  row stored before the rule. An empty `--filter-work-ref=""` means no
-  filter.
+  exactly as typed. So a search finds the exact text stored before the
+  rule, if that text follows the rule. An old id that breaks the rule
+  (for example with a tab) can no longer be used as a filter; such rows
+  still show in a list without a filter. An empty `--filter-work-ref=""`
+  means no filter.
 - While the old `--work-ref` still filters (no `--filter-work-ref`
   given), `applyWorkRef` does not check it and does not tag the request
   with it. When `--filter-work-ref` is given, also empty, `--work-ref`

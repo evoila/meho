@@ -37,7 +37,8 @@ def filter_work_ref(raw: str | None) -> str | None:
 
     A blank box means "no filter" and gives ``None``. A good value is
     returned as typed, so the search also finds rows stored before the
-    rule (:func:`meho_backplane.work_ref.work_ref_filter_values`). The
+    rule whose text follows the rule
+    (:func:`meho_backplane.work_ref.work_ref_filter_values`). The
     length is counted after cleaning, as on REST.
     """
     if raw is None or not raw.strip():

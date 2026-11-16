@@ -313,6 +313,12 @@ _ENTERPRISE_PACK: tuple[tuple[str, str, str, str], ...] = (
         "cloud service",
         "Reads hosts and detections, and cuts a host off the network or gives it back.",
     ),
+    (
+        "Dell NetWorker",
+        "networker-rest-19.x",
+        "19.x",
+        "Reads backup jobs, clients and workflows, and starts or stops backups, with approval.",
+    ),
 )
 
 
@@ -430,8 +436,8 @@ def render_connector_index() -> str:
         "## evoila's enterprise pack",
         "",
         "evoila's enterprise pack is a commercial add-on. It adds the VMware "
-        "and VCF connectors, and connectors for Fortinet and CrowdStrike "
-        "products, as a signed package on top of the public image. "
+        "and VCF connectors, and connectors for Fortinet, CrowdStrike "
+        "and Dell NetWorker products, as a signed package on top of the public image. "
         "Their setup guides and operation lists come with the pack. To get "
         "the pack, contact evoila.",
         "",

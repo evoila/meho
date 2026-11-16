@@ -242,19 +242,21 @@ def secret_tag_tokens(tags: Iterable[str]) -> set[str]:
     }
 
 
-def _classify_op_class(op_id: str) -> str | None:
+def _classify_op_class(op_id: str, stored_op_class: str | None = None) -> str | None:
     """Return the sensitivity class from the authoritative classifier.
 
-    Delegates to :func:`meho_backplane.broadcast.events.classify_op`
+    Delegates to :func:`meho_backplane.broadcast.events.resolve_op_class`
     (lazy import: it lives in a heavier module and keeps this library's
-    import graph a leaf). Returns ``None`` if the classifier is
-    unavailable or raises -- the pattern/tag nets below still apply, and
-    the caller's best-effort (F7) contract handles any propagated fault.
+    import graph a leaf), with *stored_op_class*: the class a connector's
+    safety floor stored on the row of an ingested op. Returns ``None`` if
+    the classifier is unavailable or raises -- the pattern/tag nets below
+    still apply, and the caller's best-effort (F7) contract handles any
+    propagated fault.
     """
     try:
-        from meho_backplane.broadcast.events import classify_op
+        from meho_backplane.broadcast.events import resolve_op_class
 
-        return classify_op(op_id)
+        return resolve_op_class(op_id, stored_op_class)
     except Exception:  # pragma: no cover - classify_op is pure; defensive
         return None
 
@@ -285,6 +287,7 @@ def classify_body_exclusion(
     *,
     tags: Iterable[str] = (),
     method: str | None = None,
+    stored_op_class: str | None = None,
     delete_shaped_patterns: tuple[str, ...] | None = None,
     secret_family_patterns: tuple[str, ...] = SECRET_FAMILY_PATTERNS,
     secret_family_words: tuple[str, ...] = SECRET_FAMILY_WORDS,
@@ -292,6 +295,9 @@ def classify_body_exclusion(
     """Classify *op_id* for flight-recorder body exclusion.
 
     *tags* / *method* are the resolved descriptor signals (optional).
+    *stored_op_class* is the class stored on the row of an ingested op
+    (a connector's safety floor sets it): a stored ``credential_read``
+    records no body, like an op id that classifies as one.
     *delete_shaped_patterns* defaults to the single source of truth,
     ``Settings.service_grant_delete_shaped_patterns``, resolved lazily so
     this stays a pure library in tests that pass an explicit tuple.
@@ -312,7 +318,7 @@ def classify_body_exclusion(
     tag_set = {tag.strip().lower() for tag in tags if tag and tag.strip()}
 
     # --- secret-bearing: authoritative classifier first (single source) -
-    op_class = _classify_op_class(op_id)
+    op_class = _classify_op_class(op_id, stored_op_class)
     if op_class in SECRET_OP_CLASSES:
         return BodyExclusion(
             excluded=True,

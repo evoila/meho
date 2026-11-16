@@ -31,8 +31,9 @@ person's other tools keep working.
   too (status 502): it says what ended before the failure, if anything,
   and which error stopped it. A tenant admin can also sign out a tool of
   another person (``tools.sign_out``, :mod:`meho_backplane.connectors.tools`):
-  then the row's ``operator_sub`` is the admin, and its payload names the
-  person (``user_id``, ``username``).
+  then the row's ``operator_sub`` is the admin who ran the call (the
+  approver), and its payload names the admin who asked (``requested_by``)
+  and the person (``user_id``, ``username``).
 
 The tool's last access token keeps working until it expires: the access
 token lifetime of the realm (about five minutes on MEHO's built-in
@@ -261,13 +262,14 @@ async def sign_out_tool(
     kind: ToolKind,
     settings: Settings,
     for_user: RealmUser | None = None,
+    requested_by: str | None = None,
 ) -> ToolLoginsEnded:
     """End the logins of *operator_sub* for *kind* and write the audit row.
 
     *operator_sub* is the Keycloak user id of the person. With *for_user*,
     *operator_sub* is the admin who acts, and the logins of *for_user* end;
-    the audit row names both. The Keycloak calls run first, then the audit
-    row is written:
+    the audit row names both, and *requested_by*: the admin who asked.
+    The Keycloak calls run first, then the audit row is written:
 
     * at least one login ended: a row with status 200. Its ``outcome`` is
       ``signed_out``, or ``partly_signed_out`` when a login shared with
@@ -300,6 +302,7 @@ async def sign_out_tool(
             outcome="partly_signed_out" if partial is not None else "failed",
             error=type(cause).__name__,
             for_user=for_user,
+            requested_by=requested_by,
         )
         raise
     if not ended.ended_any:
@@ -312,6 +315,7 @@ async def sign_out_tool(
         started=started,
         outcome="partly_signed_out" if ended.shared_with else "signed_out",
         for_user=for_user,
+        requested_by=requested_by,
     )
     _log.info(
         "tool_sign_out",
@@ -334,6 +338,7 @@ async def _write_sign_out_row(
     outcome: str,
     error: str | None = None,
     for_user: RealmUser | None = None,
+    requested_by: str | None = None,
 ) -> uuid.UUID:
     """Write one ``auth.tool_sign_out`` row: status 200, or 502 with *error*."""
     payload: dict[str, object] = {
@@ -349,6 +354,8 @@ async def _write_sign_out_row(
     if for_user is not None:
         payload["user_id"] = for_user.id
         payload["username"] = for_user.username
+    if requested_by is not None:
+        payload["requested_by"] = requested_by
     return await write_internal_audit_row(
         event_class=AuditEventClass.OPERATION_EXECUTION,
         operator_sub=operator_sub,

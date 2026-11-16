@@ -11,9 +11,11 @@ groups and their logins.
   ``tenant_admin`` role floor, and a check that only a person asks.
 * **Approval** -- every call waits; the card names the person by id; an
   agent and an ``operator`` are refused; a tenant admin approves and the
-  sign-out runs.
+  sign-out runs, also the admin who asked; the switch off refuses the call
+  before any approval request.
 * **Run** -- only the chosen tool of the chosen person ends; the audit row
-  names the admin, the person and the login client. The approved run signs
+  names the admin who ran it, the admin who asked, the person and the login
+  client. The approved run signs
   out the id on the card, never a person found again by name.
 * **Bad cases** -- a person of another tenant, an unknown person, a card
   without a person, the switch off, the web console, and a Keycloak
@@ -40,6 +42,7 @@ from meho_backplane.auth.tool_sign_out import TOOL_SIGN_OUT_AUDIT_PATH
 from meho_backplane.connectors.tools.ops import (
     NEEDS_PERSON,
     NO_CARD_USER,
+    SWITCH_OFF,
     TOOLS_CONNECTOR_ID,
     TOOLS_SIGN_OUT_OP_ID,
     register_tools_sign_out_operation,
@@ -341,6 +344,43 @@ async def test_a_tenant_admin_approves_and_only_that_tool_ends() -> None:
     assert result.result["outcome"] == "signed_out"
     assert (_BOB, _DESKTOP) not in realm.offline
     assert (_ALICE, _DESKTOP) in realm.offline
+    (row,) = await _sign_out_rows()
+    assert row.operator_sub == "p-second-admin"
+    assert row.payload["requested_by"] == "p-admin"
+
+
+async def test_a_tenant_admin_approves_their_own_request() -> None:
+    with respx.mock(assert_all_called=False) as router:
+        realm = _FakeRealm(router)
+        request_id = await _park()
+        approver = _operator(web_session=True)
+        async with get_sessionmaker()() as session:
+            request = await approve_request(session, request_id, operator=approver)
+            await session.commit()
+        result = await resume_dispatch_after_approval(operator=approver, request=request)
+
+    assert result.status == "ok", result
+    assert result.result["outcome"] == "signed_out"
+    assert (_BOB, _DESKTOP) not in realm.offline
+    (row,) = await _sign_out_rows()
+    assert row.operator_sub == "p-admin"
+    assert row.payload["requested_by"] == "p-admin"
+
+
+async def test_the_switch_off_refuses_before_any_approval_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCP_CLIENT_PER_TOOL_KIND", "false")
+    get_settings.cache_clear()
+    with respx.mock(assert_all_called=False) as router:
+        realm = _FakeRealm(router)
+        call = await call_operation(_operator(), _args("bob"))
+
+    assert call["status"] == "denied", call
+    assert "MCP_CLIENT_PER_TOOL_KIND" in str(call)
+    assert tools_sign_out_requester_refusal(_operator(), {}) == SWITCH_OFF
+    assert await _approval_rows() == []
+    assert (_BOB, _DESKTOP) in realm.offline
 
 
 async def test_a_person_whose_id_is_not_a_uuid_is_approved_and_signed_out() -> None:

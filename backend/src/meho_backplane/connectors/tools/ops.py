@@ -14,20 +14,23 @@ verb is ``meho admin tools sign-out --user <name or id> --tool <kind>``.
   ``claude-code``, ``claude-desktop``, ``other-mcp``). The web console has
   no sign-out here, and the approval clients are not on the list. Like the
   account page, the op works only while ``MCP_CLIENT_PER_TOOL_KIND`` is on.
+  While the switch is off, the call is refused at once, before any
+  approval request.
 * ``user`` is the person's Keycloak user id or exact username in MEHO's
   own sign-in realm (:mod:`meho_backplane.auth.realm_users`). Only a
   person in a role group of the caller's tenant is found.
 * The approval card names the person by id. The approved run signs out
   that id, and checks again that it is in the tenant. It never looks the
   name up again: the name could point at another person by then.
-* The audit row ``auth.tool_sign_out`` names the admin (``operator_sub``),
+* The audit row ``auth.tool_sign_out`` names the admin who ran the call
+  (``operator_sub``, the approver), the admin who asked (``requested_by``),
   the person (``user_id``, ``username``) and the login client.
 
 Approval and role:
 
 * ``safety_level="caution"`` + ``requires_approval=True``: every call
-  waits until a person approves it. A tenant admin in
-  ``MEHO-SA-Operators`` may approve their own request.
+  waits until a person approves it. Every tenant admin may approve their
+  own request, so no second person is needed.
 * The role floor is ``tenant_admin``, and only a person asks (no agent,
   no service login, no call on someone's behalf).
 """
@@ -60,6 +63,7 @@ from meho_backplane.auth.tool_sign_out import (
     tool_kinds,
 )
 from meho_backplane.operations._preview import approved_preview
+from meho_backplane.operations.secondary_target_policy import approved_requester_sub
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.settings import Settings, get_settings
 
@@ -238,11 +242,15 @@ def tools_sign_out_requester_refusal(operator: Operator, params: dict[str, Any])
     """Why *operator* may not ask for this sign-out, or ``None`` when they may.
 
     Only a person asks, never on someone's behalf. The role floor checks
-    that the person is a ``tenant_admin``.
+    that the person is a ``tenant_admin``. While ``MCP_CLIENT_PER_TOOL_KIND``
+    is off, every call is refused here, so no approval request is made
+    that could only fail.
     """
     del params  # every sign-out has the same rule
     if not is_human_principal(operator) or resolve_actor_sub() is not None:
         return NEEDS_PERSON
+    if not get_settings().mcp_client_per_tool_kind:
+        return SWITCH_OFF
     return None
 
 
@@ -322,6 +330,7 @@ async def tools_sign_out(operator: Operator, target: Any, params: dict[str, Any]
             kind=kind,
             settings=settings,
             for_user=user,
+            requested_by=approved_requester_sub() or operator.sub,
         )
     except KeycloakConsentNotFoundError:
         return _result(user, kind, None)

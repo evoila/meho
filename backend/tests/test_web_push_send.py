@@ -9,7 +9,8 @@ what the browser would show.
 
 * A new request goes to the people who may approve it, in its tenant only.
 * A decision sends a follow-up with the same tag.
-* A push service that answers 404 or 410 removes the subscription.
+* A push service that answers 404 or 410 removes the subscription; a
+  failed delete does not stop the other sends.
 * A person gets at most one message per window, then one summary.
 * The message holds no operation, parameter or target.
 * The message goes out only after the audit row committed; a failed commit
@@ -41,6 +42,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -466,6 +468,41 @@ async def test_a_gone_browser_is_removed(push_service: _FakePushService, status:
     assert gone.endpoint not in repr(logs)
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        OperationalError("DELETE", {}, Exception("database is down")),
+        ConnectionRefusedError(111, "Connect call failed"),
+        TimeoutError(),
+    ],
+    ids=["OperationalError", "ConnectionRefusedError", "TimeoutError"],
+)
+async def test_a_failed_delete_of_a_gone_browser_does_not_stop_the_other_sends(
+    push_service: _FakePushService, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    gone, alive, other = _browser("gone"), _browser("alive"), _browser("other")
+    await _subscribe(gone, sub="admin", login="admin")
+    await _subscribe(alive, sub="admin", login="admin")
+    await _subscribe(other, sub="admin-2", login="admin")
+    push_service.status[gone.endpoint] = 410
+
+    async def _database_down(*_args: Any, **_kwargs: Any) -> None:
+        raise error
+
+    monkeypatch.setattr(send_module, "delete_gone", _database_down)
+
+    with capture_logs() as logs:
+        await _step(_request())
+
+    assert [m["title"] for m in push_service.to(alive)] == ["An approval waits"]
+    assert [m["title"] for m in push_service.to(other)] == ["An approval waits"]
+    failed = [entry for entry in logs if entry["event"] == "web_push_gone_not_removed"]
+    assert failed and failed[0]["error"] == type(error).__name__
+    assert not any(entry["event"] == "web_push_step_failed" for entry in logs)
+    assert gone.endpoint not in repr(logs)
+    assert len(await _rows()) == 3
+
+
 async def test_another_error_keeps_the_browser(push_service: _FakePushService) -> None:
     browser = _browser("busy")
     await _subscribe(browser, sub="admin", login="admin")
@@ -589,6 +626,21 @@ async def test_the_decision_arrives_after_a_delayed_waiting_message(
         "An approval waits",
         "Approval approved",
     ]
+
+
+async def test_waiting_for_sends_ends_when_a_done_task_is_still_listed() -> None:
+    """A done task whose callbacks have not run yet must not make the wait spin."""
+
+    async def _nothing() -> None:
+        return None
+
+    loop = asyncio.get_running_loop()
+    task = loop.create_task(_nothing())
+    await asyncio.wait({task})
+    send_module._TASKS.add(task)
+    loop.call_soon(send_module._TASKS.discard, task)
+
+    await asyncio.wait_for(send_module.wait_for_sends_for_testing(), timeout=5)
 
 
 def test_the_remembered_requests_stay_bounded() -> None:

@@ -39,6 +39,11 @@ import (
 // resolves to the repo's docs-site tree.
 const defaultOutPath = "../docs-site/reference/cli.md"
 
+// referenceNoteKey is the cobra annotation whose text the reference prints
+// under the short help. It holds a short note that belongs on the page but
+// not in the one-line short help.
+const referenceNoteKey = "docs-reference-note"
+
 // Public-safety redaction patterns. Cobra help strings are operator-facing
 // but a few embed internal planning references — GitHub issue numbers
 // (#3153), Goal/Task identifiers (G11.2-T6, G0.7), design-doc section
@@ -119,6 +124,9 @@ func renderCommand(sb *strings.Builder, c *cobra.Command, depth int) {
 	fmt.Fprintf(sb, "%s `%s`\n\n", headingPrefix(depth), c.CommandPath())
 	if short := redact(c.Short); short != "" {
 		fmt.Fprintf(sb, "%s\n\n", short)
+	}
+	if note := redact(c.Annotations[referenceNoteKey]); note != "" {
+		fmt.Fprintf(sb, "%s\n\n", note)
 	}
 	// The multi-paragraph `Long` help is deliberately omitted: it carries
 	// contributor-facing jargon and lab-recipe examples not suited to the

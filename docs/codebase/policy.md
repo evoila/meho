@@ -91,10 +91,15 @@ The runtime (`policy/store.py`) does not read the file: with no stored
 install policy it uses `DEFAULT_TAXONOMY` and no entries, which is the
 same. `backend/tests/test_policy_small_team_parity.py` keeps the two
 copies equal, keeps the file's taxonomy equal to `DEFAULT_TAXONOMY`, and
-checks that storing the file changes no operation: for every registered
-operation the risk level, the wait, the category and the answer (run,
-wait or deny) for each kind of caller stay the same. Later changes that
-add `bindings` and `routing` extend the file.
+checks that storing the file changes no operation. For every registered
+operation it compares, with and without the file: the risk level, the
+wait, "always wait", the category, who may approve (`approvers_for`), and
+the answer of `policy_gate` (run, wait or refuse, and the reason) for
+seven kinds of caller, with a standing grant, an agent grant and a run
+approval. It runs with `POLICY_CLASSIFICATION` and
+`POLICY_APPROVER_ROUTING` on. The file has no `routing` section, so who
+may approve stays today's rule. It cannot have `bindings`: they are for a
+tenant's file only.
 
 ## Checks
 

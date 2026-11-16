@@ -62,6 +62,13 @@ policy, without the comments. To start your own policy:
    `meho policy diff --scope install` to see what changes.
 4. Import it. A second admin approves the import.
 
+An import replaces the whole stored policy of its scope. When your install
+already has a policy, importing `small-team.yaml` removes every entry of
+that policy, also an entry that made an operation stricter. So export the
+install's policy first and add your entries to that file. A second admin
+must approve every import that changes something, and the changes made to
+single operations (`meho connector edit-op`) stay.
+
 The "small team" file is for the whole install (`--scope install`). A
 tenant's own file cannot set `taxonomy.default`.
 

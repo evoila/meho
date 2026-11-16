@@ -12,6 +12,9 @@ serves it. A probe moves ``updated_at`` but not that time. These tests pin:
   nothing;
 * a probe that finds a new version drops the kept sign-ins only when
   another connector serves the target now;
+* a probe that finds another product drops them once, in the process that
+  probed and in a second process; a probe that finds the same product with
+  a new version drops nothing;
 * a target update with a new secret reference, seen by a second process,
   drops the kept sign-ins;
 * a target update that sends the same values again drops them too;
@@ -197,6 +200,74 @@ async def test_a_probe_that_finds_a_new_version_on_the_same_connector_drops_noth
     after = replace(before, updated_at=_PROBE_TIME, version="1.1")
     assert await forget_target_if_changed(after) is False
     assert recorder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_probe_that_finds_another_product_drops_once() -> None:
+    recorder = _recorder()
+    before = _Target(fingerprint={"product": "probe-demo", "version": "1.0"})
+    assert await forget_target_if_changed(before) is False
+
+    after = replace(
+        before,
+        updated_at=_PROBE_TIME,
+        fingerprint={"product": "other-system", "version": "1.0"},
+    )
+    assert await forget_target_if_changed(after) is True
+    assert recorder.calls == ["invalidate_session", "invalidate_credentials"]
+    # Once: the same probe result seen again drops nothing.
+    recorder.calls.clear()
+    assert await forget_target_if_changed(after) is False
+    assert recorder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_second_process_sees_a_probe_that_found_another_product() -> None:
+    recorder = _recorder()
+    before = _Target(fingerprint={"product": "probe-demo", "version": "1.0"})
+    await forget_target_if_changed(before)
+    seen_by_other_process = dict(_SEEN_TARGET_VERSIONS)
+
+    # The probing process records the new product and drops its own logins.
+    after = replace(before, updated_at=_PROBE_TIME, fingerprint={"product": "other-system"})
+    assert await forget_target_if_changed(after) is True
+
+    # The second process still holds the old version, and sees the change on its next call.
+    _SEEN_TARGET_VERSIONS.clear()
+    _SEEN_TARGET_VERSIONS.update(seen_by_other_process)
+    recorder.calls.clear()
+    assert await forget_target_if_changed(after) is True
+    assert recorder.calls == ["invalidate_session", "invalidate_credentials"]
+
+
+@pytest.mark.asyncio
+async def test_a_probe_with_the_same_product_and_a_new_version_drops_nothing() -> None:
+    recorder = _recorder()
+    before = _Target(fingerprint={"product": "probe-demo", "version": "1.0"})
+    await forget_target_if_changed(before)
+    after = replace(
+        before,
+        updated_at=_PROBE_TIME,
+        fingerprint={"product": "probe-demo", "version": "1.1", "probed_at": "later"},
+    )
+    assert await forget_target_if_changed(after) is False
+    assert recorder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_object_fingerprint_is_read_like_a_dict() -> None:
+    """A fingerprint object (not a dict) is read the same way as a dict."""
+    recorder = _recorder()
+
+    @dataclass(frozen=True)
+    class _Fp:
+        product: str | None
+
+    before = _Target(fingerprint=_Fp("probe-demo"))
+    await forget_target_if_changed(before)
+    assert await forget_target_if_changed(replace(before, fingerprint=_Fp("probe-demo"))) is False
+    assert await forget_target_if_changed(replace(before, fingerprint=_Fp("x"))) is True
+    assert recorder.calls == ["invalidate_session", "invalidate_credentials"]
 
 
 def _connector_named_impl(module: str, version: str, version_range: str) -> type[Connector]:

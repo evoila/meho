@@ -125,8 +125,9 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
    `register_harbor_project_quota_operations`.
    The import also loads `op_classes.py`, which declares
    `harbor.robot.create` as `credential_mint` for the broadcast classifier,
-   and `ops_robot_delete_preview.py`, which registers the preview builder
-   for `harbor.robot.delete`.
+   `ops_robot_create_preview.py`, which registers the approval card preview
+   of `harbor.robot.create`, and `ops_robot_delete_preview.py`, which
+   registers the preview builder for `harbor.robot.delete`.
 3. At lifespan startup `run_typed_op_registrars` invokes the queued registrars,
    landing the 12 read + 2 write descriptor rows before the first dispatch. No
    `meho connector ingest` is required — the read core dispatches on a fresh
@@ -191,6 +192,15 @@ and `harbor.health` expose these same two reads as operator-callable typed ops.
 ### robot_create / robot_delete
 
 Both robot writes register in the `robot` group (not `harbor-robots`).
+
+`robot_create` takes an optional `access` list (`pull`, `push`; default both,
+so old callers are unchanged). `["pull"]` makes a pull-only robot. Delete is not
+offered. A `credential_mint` op gets no plain parameter echo on the approval
+card, so `ops_robot_create_preview.py` builds its own card: robot name,
+project, level, duration and the effective `access` (the default shows as
+push and pull). It reads only the call params and holds no secret. The handler
+and the card use the same `robot_access_actions` helper, so the card shows
+what Harbor gets.
 
 `robot_create` (op `harbor.robot.create`) is classified `credential_mint`.
 The connector declares this class in `op_classes.py` with
@@ -362,6 +372,28 @@ not one of the 9.
 | `harbor.artifact.vulnerabilities` *(standalone typed read, #2857)* | `harbor-artifacts` | `GET …/artifacts/{reference}/additions/vulnerabilities` |
 | `harbor.project.summary` *(standalone typed read, #2858)* | `harbor-projects` | `GET /api/v2.0/projects/{project_name_or_id}/summary` |
 | `harbor.quota.list` *(standalone typed read, #2858)* | `harbor-projects` | `GET /api/v2.0/quotas?reference=project` |
+| `harbor.project.create` *(typed write, `caution` + approval)* | `harbor-projects` | `POST /api/v2.0/projects` |
+| `harbor.artifact.copy` *(typed write, `caution` + approval)* | `harbor-artifacts` | `POST …/artifacts?from=` |
+
+`harbor.project.create` (`ops_project_create.py`) creates a project from
+`project_name`, `public` (default `false`, so private) and an optional
+`storage_limit` in bytes. It is safe to run twice: Harbor answers `409` for a
+taken name, and the handler returns `created: false` without a change. Any
+other HTTP error is raised. The result names `harbor.project.info` as the
+read back. Its tests are in `tests/test_connectors_harbor_project_create.py`.
+
+`harbor.artifact.copy` (`ops_artifact_copy.py`) copies an image inside Harbor
+from `from` (`<project>/<repository>@<digest>` or `:<tag>`) into `project` and
+`repository`. Nothing is uploaded. It is safe to run twice: it reads the source
+digest (for a tag), then reads the target by that digest. When the target holds
+that digest, under any tag or none, it returns `copied: false` and sends no
+copy. The copy itself names the source by digest (`from=<project>/<repository>@<digest>`),
+so a tag that moves after the read cannot change what is copied. Harbor copies
+the tags of the source image along with it. Only a
+`404` counts as "not there"; any other failed read, a missing source, and any
+copy error are raised. The result carries the `digest` and names
+`harbor.artifact.list` as the read back. Its tests are in
+`tests/test_connectors_harbor_artifact_copy.py`.
 
 **Quota lives on the summary endpoint, not on `Project`**: `harbor.project.info`
 (`GET /projects/{name}`) returns the vendor `Project` object, which has no
@@ -385,7 +417,7 @@ single `encode_segment` helper percent-encodes caller-controlled segments — so
 these constants ARE the dispatched surface. The lane
 [`test_connectors_harbor_spec_reconcile.py`](../../backend/tests/test_connectors_harbor_spec_reconcile.py)
 (parse-only, in the required unit sweep; uniform skip when the shelf is
-unconfigured) introspects those live constants and asserts all 14 hand-coded
+unconfigured) introspects those live constants and asserts all 16 hand-coded
 `METHOD:/path` op_ids are served by the pinned `harbor-2.12` shelf spec
 (`harbor-swagger.yaml` — `goharbor/harbor@v2.12.2` `api/v2.0/swagger.yaml`,
 Apache-2.0). The spec is Swagger 2.0 (ingest rejects it, #2090), so the lane
@@ -395,7 +427,7 @@ names (`{project_name_or_id}` on the project detail / `/summary` routes,
 `{project_name}` / `{repository_name}` / `{reference}` on the repository
 sub-tree, `{robot_id}` on the robot read and delete). All 14 were served on the
 first armed run — no repoints, no exclusions. The robot read before the delete
-(`GET /api/v2.0/robots/{robot_id}`) is the 15th. Standard:
+(`GET /api/v2.0/robots/{robot_id}`) is the 15th, the project create (`POST /api/v2.0/projects`) is the 16th, and the artifact copy (`POST …/artifacts`) is the 17th. Standard:
 [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ## CLI verbs
@@ -464,6 +496,8 @@ waits until a second person approves. `operation call` takes `--params`
 - `tests/test_connectors_harbor_robot.py` — `harbor.robot.create` /
   `harbor.robot.delete` handlers, operator threading into the Vault read,
   their broadcast classes, and the aggregate-only `credential_mint` payload.
+- `tests/test_connectors_harbor_robot_create_preview.py` — the approval card
+  of `harbor.robot.create` shows the effective access.
 - `tests/test_connectors_harbor_robot_delete.py` — the `destructive` +
   approval rules of `harbor.robot.delete` and its park-time blast radius.
 - `tests/integration/test_connectors_harbor_container.py` — env-gated real

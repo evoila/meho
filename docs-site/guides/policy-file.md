@@ -24,6 +24,54 @@ You keep the policy as one file, `policy: v1`. You can:
 The policy file is not part of the [settings file](settings-file.md). It
 has its own command, `meho policy`.
 
+## Start from the "small team" file
+
+MEHO ships a default policy file, "small team":
+[`deploy/policy-profiles/small-team.yaml`](https://github.com/evoila/meho/blob/main/deploy/policy-profiles/small-team.yaml).
+It describes what MEHO does when no policy file is imported:
+
+- it lists the six built-in categories (`network`, `storage`, `compute`,
+  `identity`, `secrets`, `other`),
+- every operation has the category `other`,
+- it has no entries, so every operation keeps the risk level and the
+  approval rule it has in MEHO's code.
+
+Until you import a file for the whole install, MEHO uses this file. So
+importing it changes nothing:
+
+```bash
+meho policy validate --scope install small-team.yaml # no mistakes
+meho policy diff --scope install small-team.yaml     # answers "No change."
+```
+
+Check this file with `--scope install`. Without it, `validate` checks the
+file as a tenant's file and reports `taxonomy.default` as a mistake.
+
+On a fresh install, the diff of an install file with no `taxonomy` block
+shows the six built-in categories as removed, but they still apply. An
+install file with no entries and no `taxonomy` block is not the same as the
+"small team" file, so its import waits for a second admin to approve it.
+
+On a fresh install, `meho policy export --scope install` writes the same
+policy, without the comments. To start your own policy:
+
+1. Export the install's policy, or copy `small-team.yaml`.
+2. Add your entries under `classifications`, and your own categories under
+   `taxonomy.categories`.
+3. Run `meho policy validate --scope install` to check it, and
+   `meho policy diff --scope install` to see what changes.
+4. Import it. A second admin approves the import.
+
+An import replaces the whole stored policy of its scope. When your install
+already has a policy, importing `small-team.yaml` removes every entry of
+that policy, also an entry that made an operation stricter. So export the
+install's policy first and add your entries to that file. A second admin
+must approve every import that changes something, and the changes made to
+single operations (`meho connector edit-op`) stay.
+
+The "small team" file is for the whole install (`--scope install`). A
+tenant's own file cannot set `taxonomy.default`.
+
 ## A small example
 
 ```yaml
@@ -128,6 +176,21 @@ bindings:
   tenant list (`meho_tenants`, the older login setup). With a tenant list,
   the person's entry for the tenant decides, as without bindings.
   `meho policy export` shows them.
+- A shipped binding counts only when it agrees with the token. The group
+  alone never gives or takes the right to approve: a person in the
+  shipped approver group may approve only when the token also says
+  `approver: true`, and a person with `approver: true` keeps that right in
+  the shipped readers group. So with the setting on and no stored
+  bindings, every person may approve exactly what they may approve with
+  the setting off.
+- A binding in your file (a stored binding) is your own choice. There the
+  group alone gives the flags of the kind: a read-only person in a group
+  bound to `Approvers` may approve, whatever the token says.
+- `meho policy export` with the setting on writes the shipped bindings into
+  your file. After an import they are stored bindings, and then they count
+  for every person, also for a person with a tenant list, whose groups may
+  belong to another tenant. In a setup with tenant lists, remove the
+  shipped bindings from the exported file before you import it.
 - A shipped binding takes its kind from the **end** of the group name:
   `Corp-Operators` gives `Operators`. If your site renamed the groups,
   check that each name ends with its kind. Run `meho policy export` and
@@ -145,7 +208,9 @@ bindings:
 !!! note "Off by default"
 
     Bindings count only while the setting `POLICY_APPROVER_ROUTING` (Helm
-    `config.policy.approverRouting`) is on. The policy commands, and so
+    `config.policy.approverRouting`) is on. You can import a file with
+    `bindings` while the setting is off: the bindings take effect when the
+    setting goes on. The policy commands, and so
     the import of bindings, also need the setting `POLICY_CLASSIFICATION`
     (Helm `config.policy.classification`).
 

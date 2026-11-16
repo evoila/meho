@@ -481,6 +481,7 @@ def descriptor_op_class(descriptor: EndpointDescriptor) -> str:
         descriptor.op_id,
         source_kind=descriptor.source_kind,
         safety_level=getattr(descriptor, "safety_level", None),
+        stored_op_class=getattr(descriptor, "op_class", None),
     )
 
 

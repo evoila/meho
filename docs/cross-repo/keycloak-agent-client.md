@@ -99,8 +99,8 @@ provisioned set:
 - Keycloak admin access to the realm where MEHO agents authenticate.
 - A Keycloak **confidential client** (e.g. `meho-admin`) in that realm
   with `serviceAccountsEnabled=true`. Its service account must hold the
-  Keycloak built-in role `manage-clients` in the target realm (see
-  Step 2 below).
+  Keycloak built-in roles `manage-clients` and `manage-users` in the
+  target realm (see Step 2 below).
 - The backplane already runs with `KEYCLOAK_ISSUER_URL` set and
   validated (`meho status` returns green).
 - Keycloak version **22+** (Admin REST API v2 path shape).
@@ -118,7 +118,7 @@ In the Keycloak Admin Console for your realm:
 5. **Credentials** tab → note the **Client secret** → copy it to
    `KEYCLOAK_ADMIN_CLIENT_SECRET`
 
-## Step 2 — Grant `manage-clients` to the service account
+## Step 2 — Grant `manage-clients` and `manage-users` to the service account
 
 The service account that backs `meho-admin` needs permission to
 create and update clients. In Keycloak 22+:
@@ -126,12 +126,22 @@ create and update clients. In Keycloak 22+:
 1. **Clients → `meho-admin` → Service account roles** tab
 2. **Assign role** → filter by **Client** → select the realm's
    `realm-management` client → assign `manage-clients`
+3. In the same way, assign `manage-users`. The "Sign out this tool"
+   button of the account page needs it: it reads a person's logins and
+   ends the logins of one tool. Without it, Keycloak answers 403 and the
+   page says that the right is missing.
 
 > **Security note**: `manage-clients` allows creating any client in the
 > realm. Restrict the `meho-admin` service account to only those
 > operations if your realm's threat model requires it (Keycloak fine-
 > grained admin permissions, available since Keycloak 24, can scope this
 > to clients whose `clientId` starts with `agent:`).
+>
+> `manage-users` is a strong right too. With it, the client can change
+> any user of the realm: their details, their passwords, their roles and
+> their logins. MEHO uses it only for "Sign out this tool": it lists the
+> logins of the signed-in person and ends that person's logins of one
+> tool. MEHO does not use it to read or change other users.
 
 ## Step 3 — Set the backplane env vars
 
@@ -192,14 +202,23 @@ wiring for the full operator recipe.
 
 ```shell
 # CLI
-meho agent-principal register deploy-bot
+meho agent-principal register deploy-bot --grants none
 
 # REST
 curl -X POST https://meho.example.com/api/v1/agent-principals \
   -H "Authorization: Bearer <operator-token>" \
   -H "Content-Type: application/json" \
-  -d '{"name": "deploy-bot"}'
+  -d '{"name": "deploy-bot", "starting_grants": {"set": "none"}}'
 ```
+
+`--grants` (REST: `starting_grants`) picks the agent's first grants:
+`none`, `read-everything`, or `read-targets` with one `--target <name>`
+per target. MEHO needs the pick when the switch `AGENT_GRANT_REQUIRED`
+is `observe` or `on`. Without it, MEHO answers
+`422 starting_grants_required` and creates nothing. This example picks
+`none`: with the switch `on`, the agent runs nothing until you add a
+grant with `meho agent grant create`. See
+[Hosted agents](../../docs-site/guides/hosted-agents.md#starting-grants-pick-them-when-you-create-the-agent).
 
 On success you get back the record including:
 

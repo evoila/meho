@@ -264,23 +264,38 @@ the two answers.
 
 `backend/tests/test_policy_evaluate_parity.py` runs every case through
 today's code and through the evaluator. It fails on any difference. It
-runs in the normal unit test job, in about 20 seconds.
+runs in the normal unit test job, in about 90 seconds.
 
-- **Calls** (9,216 cases): 6 caller kinds (a person in the web
-  interface, a person with a token, an agent, a `read_only` agent, a
-  service login, a hosted agent run) x 6 logins (the five login groups,
-  and a platform admin in another tenant) x 4 risk levels x 32
-  combinations of five marks (requires approval, write, shows a secret,
-  connects to an address the caller gives, needs the `tenant_admin`
-  role) x with and without a grant. Today's side is `policy_gate`; the
-  evaluator's side is `evaluate_call`, with the same lookups. Both must
-  give the same verdict, the same reason class, the same approver
-  groups and the same `waits_because`.
-- **Approvals** (19,200 cases): 5 approver kinds x 6 logins x own change
-  or not x 5 risk levels (also none) x token wait x requires approval x
-  role floor x pending or decided x change of rights x the break-glass
-  switch. Today's side is `approve_right`; the evaluator's side is
-  `may_approve`. Both must allow or refuse, for the same reason.
+- **Calls** (41,472 cases, one test per `AGENT_GRANT_REQUIRED` setting):
+  7 caller kinds (a person in the web interface, a person with a token,
+  an agent, a `read_only` agent, a service login, a runner, a hosted
+  agent run) x 6 logins (the five login groups, and a platform admin in
+  another tenant) x 4 risk levels x 32 combinations of five marks
+  (requires approval, write, shows a secret, connects to an address the
+  caller gives, needs the `tenant_admin` role) x the grants of the
+  caller kind. Today's side is `policy_gate`; the evaluator's side is
+  `evaluate_call`, with the same lookups. Both must give the same
+  verdict, the same reason class, the same approver groups and the same
+  `waits_because`.
+  - Grants of the agent rows (agent, `read_only` agent, hosted run): none,
+    an agent grant that runs, one that denies, one that needs approval,
+    and a wide grant that denies next to a narrower one that runs. These
+    rows run with `AGENT_GRANT_REQUIRED` set to `off`, `observe` and `on`.
+  - Grants of a service login: none, a standing grant, and a run approval
+    of the operations that do not show a secret.
+  - Grants of a person and a runner: none, and a standing grant.
+- **Grants that never clear**: a table that calls `evaluate` directly
+  with a standing grant and a run approval in `Lookups`, for an operation
+  that shows a secret, connects to an address the caller gives, needs
+  approval for every call, or always waits. The call must still wait.
+  The lookups of a real call drop such a grant first, so only this table
+  sees a change of `grant_may_clear`, `run_approval_may_clear` or
+  `NO_GRANT_MARKS`.
+- **Approvals** (9,600 cases): 5 approver kinds x 6 logins x own change
+  or not x 5 risk levels (also none) x token wait x role floor x pending
+  or decided x change of rights x the break-glass switch. Today's side is
+  `approve_right`; the evaluator's side is `may_approve`. Both must
+  allow or refuse, for the same reason.
 - **Routes and tools**: every REST route with a `require_role` check and
   every MCP tool, for each of the six logins. The evaluator has no route
   table, so the test checks that the evaluator reads the login the same
@@ -289,20 +304,22 @@ runs in the normal unit test job, in about 20 seconds.
 
 The "small team" file is checked in `test_policy_small_team_parity.py`:
 its export on a fresh install equals the file, and importing it changes
-no answer of any registered operation.
+no answer of any registered operation. That test compares today's answers
+before and after the import; it does not compare them with the evaluator.
 
 ### How to read a failing case
 
 The test prints up to 20 differing cases, each like this:
 
 ```
-caller=service login=Operators grant=True level=dangerous marks=[write]
+caller=service login=Operators grant=standing agent_grant_required=off level=dangerous marks=[write]
   today={'verdict': 'run', 'class': 'standing_grant', ...} reason='auto-granted by ...'
   evaluator={'verdict': 'wait', 'class': 'wait', ...} trace=['default service.dangerous: wait', ...]
 ```
 
-- The first line is the case: who asks, the login, the grant, the risk
-  level and the marks of the operation.
+- The first line is the case: who asks, the login, the grant, the
+  `AGENT_GRANT_REQUIRED` setting, the risk level and the marks of the
+  operation.
 - `today` is what MEHO does now, with today's reason text. `evaluator`
   is the evaluator's answer, with every step it took (`trace`).
 - The reason class says what let a call run (`default`,
@@ -321,16 +338,24 @@ today's `may_approve_reason` and rule, and the evaluator's rule.
 
 ### What the table does not cover
 
-- Sandbox mode, and a preview hash. A service login's `destructive` call
-  in sandbox mode with a preview hash can differ: today's gate checks the
-  hash and the blast radius before a delete grant counts, and the shadow
-  looks the grant up without these checks. The sandbox cases without a
-  hash are in `test_policy_shadow.py`.
-- A change of rights on the call side. `Decision.approvers` does not
-  know it yet (only another admin approves it), so the call table uses
-  no such operation. The approval table covers it.
-- Run approvals and `AGENT_GRANT_REQUIRED=on`. They are in
-  `test_policy_small_team_parity.py` and `test_policy_shadow.py`.
+These are the places where the two answers can differ today. Each has
+its own issue; when it is fixed, its line goes away.
+
+- Sandbox mode with a preview hash (#6594). A service login's
+  `destructive` call in sandbox mode with a preview hash can differ:
+  today's gate checks the hash and what else the call affects before a
+  delete grant counts, and the evaluator's lookup finds the grant without
+  these checks. The sandbox cases without a hash are in
+  `test_policy_shadow.py`.
+- A change of rights on the call side (#6595). `Decision.approvers` does
+  not know it yet (only another admin approves it), so the call table
+  uses no such operation. The approval table covers it.
+- Approver routing (#6596). The evaluator does not know approver routing
+  (`POLICY_APPROVER_ROUTING`): `Decision.approvers` and `may_approve`
+  always use today's group rule. The test runs with routing off.
+
+Also not in this file:
+
 - Read scopes. The evaluator's read scope step is in
   `test_policy_evaluate.py`.
 

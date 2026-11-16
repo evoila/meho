@@ -92,9 +92,13 @@ from meho_backplane.connectors.keycloak.ops_authflow_passkey import (
 )
 from meho_backplane.connectors.keycloak.ops_authflow_rights import (
     CLIENT_LOOKUP_ROLES,
+    ReadBackRefusedError,
     find_client_uuid,
+    flow_refused_error,
     missing_rights_error,
     names_missing_rights,
+    read_or_write,
+    reading_back,
     register_rights_check,
 )
 from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import (
@@ -371,7 +375,8 @@ async def _ensure_loa_map(
         json=merge_representation(before, {"attributes": {LOA_MAP_ATTRIBUTE: text}}),
         idempotent_conflict=False,
     )
-    after = await connector._get_admin_json(target, realm_path, operator=operator)
+    with reading_back():
+        after = await connector._get_admin_json(target, realm_path, operator=operator)
     if str(_loa_map(after).get(TOUCH_ACR)) != str(TOUCH_LEVEL):
         raise KeycloakTouchFlowError(
             "check_failed", f"the realm does not read back with {TOUCH_ACR!r} at level 3"
@@ -390,9 +395,27 @@ async def _check_verification(
     The touch step uses this policy. Without ``required`` a passkey can pass
     without a PIN or fingerprint, and the touch would not prove the person.
     """
-    realm_rep = await connector._get_admin_json(
-        target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
-    )
+    try:
+        realm_rep = await connector._get_admin_json(
+            target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            raise
+        raise await missing_rights_error(
+            connector,
+            operator,
+            target,
+            exc,
+            op_id=ENSURE_APPROVAL_TOUCH_OP_ID,
+            roles=_ROLES,
+            message=(
+                f"{ENSURE_APPROVAL_TOUCH_OP_ID} stopped: Keycloak refused (HTTP 403) to read "
+                "the realm's passkey policy. Nothing was changed. See extras.remediation."
+            ),
+            done="Keycloak refused (HTTP 403) to read the realm's passkey policy. "
+            "Nothing was changed.",
+        ) from exc
     have = realm_rep.get(_POLICY_UV)
     if have != "required":
         raise KeycloakTouchFlowError(
@@ -455,9 +478,9 @@ async def _ensure_amr_mapper(
         json={**mapper, "config": merged},
         idempotent_conflict=False,
     )
-    if not _amr_settings_ok(
-        await connector._get_admin_json(target, mapper_path, operator=operator)
-    ):
+    with reading_back():
+        after = await connector._get_admin_json(target, mapper_path, operator=operator)
+    if not _amr_settings_ok(after):
         raise KeycloakTouchFlowError(
             "check_failed",
             "the client's 'amr' mapper does not read back with its token settings on. "
@@ -545,8 +568,10 @@ async def _ensure_redirect(
             json={"alias": REDIRECT_CONFIG_ALIAS, "config": {"defaultProvider": wanted}},
             idempotent_conflict=False,
         )
-    rows = await _read_rows(connector, operator, target, realm)
-    if (await _redirect_default(connector, operator, target, realm, rows))[0] != wanted:
+    with reading_back():
+        rows = await _read_rows(connector, operator, target, realm)
+        have, _ = await _redirect_default(connector, operator, target, realm, rows)
+    if have != wanted:
         raise KeycloakTouchFlowError(
             "check_failed",
             "the company login default of the touch flow does not read back as the "
@@ -654,7 +679,8 @@ async def _bind(
         await connector._write_admin(
             target, "PUT", client_path, operator=operator, json=merged, idempotent_conflict=False
         )
-        client = await connector._get_admin_json(target, client_path, operator=operator)
+        with reading_back():
+            client = await connector._get_admin_json(target, client_path, operator=operator)
         overrides = client.get("authenticationFlowBindingOverrides")
     read_back = overrides.get("browser") if isinstance(overrides, dict) else None
     if read_back != flow_id:
@@ -694,16 +720,36 @@ async def _check_providers(
 async def _ensure_flow(
     connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
 ) -> tuple[str, bool, list[dict[str, Any]]]:
-    """Find or make the flow; return ``(flow_id, created, rows)``."""
-    flow_id = await _find_flow_id(connector, operator, target, realm)
-    created = flow_id is None
-    if flow_id is None:
-        await _check_providers(connector, operator, target, realm)
-        flow_id = await _make_flow(connector, operator, target, realm)
-    rows = await _read_rows(connector, operator, target, realm)
-    difference = _shape_difference(rows) or await _config_difference(
-        connector, operator, target, realm, rows
-    )
+    """Find or make the flow; return ``(flow_id, created, rows)``.
+
+    A 403 says whether the run only read (nothing changed) or may have made
+    the flow only in part.
+    """
+    writing = False
+    try:
+        flow_id = await _find_flow_id(connector, operator, target, realm)
+        created = flow_id is None
+        if flow_id is None:
+            await _check_providers(connector, operator, target, realm)
+            writing = True
+            flow_id = await _make_flow(connector, operator, target, realm)
+        rows = await _read_rows(connector, operator, target, realm)
+        difference = _shape_difference(rows) or await _config_difference(
+            connector, operator, target, realm, rows
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            raise
+        raise await flow_refused_error(
+            connector,
+            operator,
+            target,
+            exc,
+            op_id=ENSURE_APPROVAL_TOUCH_OP_ID,
+            roles=_ROLES,
+            flow_alias=TOUCH_FLOW_ALIAS,
+            writing=writing,
+        ) from exc
     if difference is not None and created:
         raise KeycloakTouchFlowError(
             "check_failed",
@@ -759,21 +805,25 @@ async def keycloak_authflow_ensure_approval_touch(
     changed = [f"the flow {TOUCH_FLOW_ALIAS!r} (id {flow_id!r}, flow_created={flag}) is {state}"]
     client_path = fill_path(_CLIENT_PATH, {"realm": realm, "client-uuid": client_uuid})
     refused = f"map {TOUCH_ACR!r} to level {TOUCH_LEVEL} in the realm"
+    made = f"the realm maps {TOUCH_ACR!r} to level {TOUCH_LEVEL}"
     try:
         loa_changed = await _ensure_loa_map(self, operator, target, realm)
         if loa_changed:
-            changed.append(f"the realm maps {TOUCH_ACR!r} to level {TOUCH_LEVEL}")
+            changed.append(made)
         refused = f"add or fix the 'amr' mapper of the client {client_id!r}"
+        made = f"the client {client_id!r} has the 'amr' mapper"
         mapper_added, mapper_fixed = await _ensure_amr_mapper(
             self, operator, target, realm, client_uuid
         )
         if mapper_added or mapper_fixed:
-            changed.append(f"the client {client_id!r} has the 'amr' mapper")
+            changed.append(made)
         refused = "copy the company login default to the flow"
+        made = "the flow has the company login default"
         redirect_copied = await _ensure_redirect(self, operator, target, realm, rows)
         if redirect_copied:
-            changed.append("the flow has the company login default")
+            changed.append(made)
         refused = f"bind the flow to the client {client_id!r}"
+        made = f"the flow is bound to the client {client_id!r}"
         binding = await _bind(
             self,
             operator,
@@ -786,6 +836,9 @@ async def keycloak_authflow_ensure_approval_touch(
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code != 403:
             raise
+        if isinstance(exc, ReadBackRefusedError):
+            changed.append(f"{made} (MEHO could not read it back)")
+        refused = read_or_write(exc, refused)
         raise await missing_rights_error(
             self,
             operator,

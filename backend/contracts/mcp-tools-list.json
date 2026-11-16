@@ -4023,6 +4023,15 @@
       "name": "preview_operation",
       "outputSchema": {
         "properties": {
+          "approvers": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "connector_id": {
             "type": "string"
           },
@@ -4050,6 +4059,26 @@
           "policy_reason": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "policy_rule": {
+            "properties": {
+              "decided": {
+                "type": "boolean"
+              },
+              "rule_id": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "type": [
+              "object",
               "null"
             ]
           },

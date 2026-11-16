@@ -807,7 +807,7 @@ class KeycloakAdminClient:
             Keycloak answered 403: the admin client lacks ``manage-users``.
         KeycloakAdminError
             Any other failure (a network error, 404, 5xx) or an answer that
-            is not a list.
+            is not a JSON list.
         """
         assert self._http is not None
         assert self._token
@@ -827,7 +827,10 @@ class KeycloakAdminClient:
                 "keycloak_list_user_sessions_failed", status=resp.status_code
             )
             raise KeycloakAdminError(f"Keycloak list_user_sessions failed: HTTP {resp.status_code}")
-        sessions = resp.json()
+        try:
+            sessions: Any = resp.json()
+        except ValueError as exc:
+            raise KeycloakAdminError("Keycloak list_user_sessions returned no JSON") from exc
         if not isinstance(sessions, list):
             raise KeycloakAdminError("Keycloak list_user_sessions returned no list")
         return [s for s in sessions if isinstance(s, dict)]

@@ -387,7 +387,15 @@ async def test_list_user_sessions_returns_the_logins() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("answer", [httpx.Response(403), httpx.Response(200, json={"a": 1})])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(403),
+        httpx.Response(200, json={"a": 1}),
+        httpx.Response(200, text="<html>proxy error</html>"),
+    ],
+    ids=["forbidden", "not-a-list", "not-json"],
+)
 async def test_list_user_sessions_failure_raises(answer: httpx.Response) -> None:
     with respx.mock as r:
         _mock_token(r)

@@ -360,7 +360,15 @@ writes below wait for your current approver, as before.
    you give the agent two grants with `needs-approval`: one for
    `vault.kv.put` and one for `vault.kv.delete`, both on that target
    only. Then the write and the cleanup wait for a person in every
-   state of the switch, and the agent may run nothing else.
+   state of the switch. What else the agent may run also depends on
+   the switch:
+
+   - `on`: nothing else. Every other call is refused
+     (`agent_no_grant`).
+   - `off` or `observe`: the two grants do not limit the agent. A call
+     that no grant covers gets the default for its risk level: a
+     `safe` read runs at once, on any target of the tenant. A `caution` or
+     `dangerous` call waits for a person's approval.
 
    ```bash
    meho agent-principal register tenant-check --grants none

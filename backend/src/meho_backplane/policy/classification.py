@@ -116,12 +116,12 @@ def label_text_ok(key: str, value: str) -> bool:
     A key has 1 to :data:`LABEL_KEY_MAX` characters and a value 1 to
     :data:`LABEL_VALUE_MAX`, the same limits a write has.
     """
-    return (
-        len(key) <= LABEL_KEY_MAX
-        and 0 < len(value) <= LABEL_VALUE_MAX
-        and bool(_LABEL_KEY_RE.fullmatch(key))
-        and value.isprintable()
-    )
+    return _label_key_ok(key) and 0 < len(value) <= LABEL_VALUE_MAX and value.isprintable()
+
+
+def _label_key_ok(key: str) -> bool:
+    """Whether *key* passes the key part of :func:`label_text_ok`."""
+    return len(key) <= LABEL_KEY_MAX and bool(_LABEL_KEY_RE.fullmatch(key))
 
 
 @dataclass(frozen=True)
@@ -248,10 +248,8 @@ def _category(
     return first.category, None
 
 
-def _labels(
-    coords: OpCoordinates, matched: Sequence[ClassificationEntry]
-) -> tuple[dict[str, str], str | None]:
-    """Each key from the most specific entry that sets it; a tie with two values is a conflict."""
+def _label_conflict(coords: OpCoordinates, matched: Sequence[ClassificationEntry]) -> str | None:
+    """A tie with two values for one key, found on the labels as stored."""
     labels: dict[str, str] = {}
     source: dict[str, ClassificationEntry] = {}
     for entry in sorted(matched, key=lambda e: e.rank, reverse=True):
@@ -261,9 +259,20 @@ def _labels(
                 labels[key] = value
                 source[key] = entry
             elif earlier.rank == entry.rank and labels[key] != value:
-                what = f"value for label {key!r}"
-                return labels, _conflict_text(coords.op_id, what, earlier, entry)
-    return labels, None
+                # A key MEHO does not show is not printed in the sentence either.
+                name = f"label {key!r}" if _label_key_ok(key) else "a label that is not shown"
+                return _conflict_text(coords.op_id, f"value for {name}", earlier, entry)
+    return None
+
+
+def _shown_labels(matched: Sequence[ClassificationEntry]) -> dict[str, str]:
+    """Each key from the most specific entry whose label passes :func:`label_text_ok`."""
+    labels: dict[str, str] = {}
+    for entry in sorted(matched, key=lambda e: e.rank, reverse=True):
+        for key, value in entry.labels.items():
+            if key not in labels and label_text_ok(key, value):
+                labels[key] = value
+    return labels
 
 
 def _scope_top(
@@ -425,10 +434,10 @@ def classify(
     risk = max(risks, key=RISK_LEVELS.index) if risks else None
     always_wait = any(_scope_wait(matched, scope) is not None for scope in _SCOPES)
     category, category_conflict = _category(coords, matched, taxonomy)
-    # Conflicts are found on the labels as stored; a label MEHO cannot show
-    # is left out only after that, so it can still make the call wait.
-    stored, label_conflict = _labels(coords, matched)
-    labels = {k: v for k, v in stored.items() if label_text_ok(k, v)}
+    # Conflicts are found on the labels as stored, so a label MEHO cannot show
+    # can still make the call wait. What MEHO shows skips such a label.
+    label_conflict = _label_conflict(coords, matched)
+    labels = _shown_labels(matched)
     conflict = category_conflict or label_conflict
     rule_ref = max(matched, key=lambda e: e.rank).ref if matched else DEFAULT_RULE_REF
     if conflict is not None:

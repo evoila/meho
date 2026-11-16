@@ -276,6 +276,29 @@ def test_a_label_tie_below_a_more_specific_entry_is_no_conflict() -> None:
     assert (result.conflict, result.labels) == (None, {"team": "ops"})
 
 
+def test_a_label_not_shown_does_not_hide_a_less_specific_good_value() -> None:
+    entries = [
+        _entry("general", connector="k8s-*", labels={"note": "short"}),
+        _entry("specific", op="k8s.deployment.scale", labels={"note": "x" * 256}),
+    ]
+    result = classify(_COORDS, entries, _TAX)
+    assert (result.conflict, result.labels) == (None, {"note": "short"})
+
+
+def test_a_conflict_on_a_key_not_shown_does_not_print_the_key() -> None:
+    key = "k" * 64
+    entries = [
+        _entry("first", op="k8s.deployment.*", labels={key: "a"}),
+        _entry("second", op="k8s.deployment.?cale", labels={key: "b"}),
+    ]
+    result = classify(_COORDS, entries, _TAX)
+    assert result.conflict is not None
+    assert "first" in result.conflict
+    assert "second" in result.conflict
+    assert "a label that is not shown" in result.conflict
+    assert key not in result.conflict
+
+
 def test_group_entry_does_not_match_an_operation_without_a_group() -> None:
     coords = OpCoordinates("k8s-1.x", None, "k8s.deployment.scale")
     result = classify(coords, [_entry("g", group="*", category="compute")], _TAX)
@@ -559,6 +582,34 @@ async def test_override_label_that_breaks_the_rule_is_not_shown(
         )
         await session.commit()
     assert dict((await _policies(_TENANT))["clsfix.vm.list"].labels) == {"zone": "b"}
+
+
+@pytest.mark.asyncio
+async def test_install_and_tenant_override_rows_are_no_label_tie(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tenant row is more specific than the install row, so the two never tie.
+
+    The tenant row's value is too long, so it is not shown; the install
+    row's good value for the same key is shown instead.
+    """
+    _switch(monkeypatch, True)
+    await _register(embedding, "clsfix.vm.list")
+    async with get_sessionmaker()() as session:
+        for tenant_id, note in ((None, "short"), (_TENANT, "x" * 256)):
+            session.add(
+                OperationPolicyOverride(
+                    tenant_id=tenant_id,
+                    **_FIX,
+                    op_id="clsfix.vm.list",
+                    labels={"note": note},
+                    set_by_sub="fixture",
+                )
+            )
+        await session.commit()
+    policy = (await _policies(_TENANT))["clsfix.vm.list"]
+    assert dict(policy.labels) == {"note": "short"}
+    assert policy.rule_ref == "tenant:override"
 
 
 @pytest.mark.asyncio

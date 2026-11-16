@@ -20,11 +20,11 @@ option name and the words around it stay readable:
 * ``Password=``, ``Pwd=`` and ``pw=`` in a connection string. A value in
   quotes or in braces (``Pwd={x;y}``) is read to its closing mark. A value
   without them runs to the ``;`` (or the end of the line), so it may hold
-  spaces. Text counts as a connection string when a ``;`` stands before
-  the label, or a ``;`` ends the value and a next field (``;Database=``)
-  follows or no option (``-x``) or ``key=`` word stands in the value. A
-  label behind ``-`` is a command option. Elsewhere ``password=`` takes one
-  shell word, as an option does;
+  spaces and quotes (``Pwd=made'up;``). Text counts as a connection string
+  when a ``;`` stands before the label, or a ``;`` ends the value and a
+  next field (``;Database=``) follows or no option (``-x``) or ``key=``
+  word stands in the value. A label behind ``-`` is a command option.
+  Elsewhere ``password=`` takes one shell word, as an option does;
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
   ``_SECRET``, ``_TOKEN`` or ``_KEY`` (``DB_PASSWORD=x``);
 * the text inside an XML element named like a secret
@@ -35,10 +35,11 @@ A value is read the way a shell reads one word: it ends at white space or
 at an operator (``; | & < > ( )``) that is not quoted or escaped. Quoted
 parts, escaped characters (``\\ `` and ``\\"``) and several parts joined
 together are one value, and a quoted part may run over a line break. A
-quote that is never closed ends the value in front of it, or, when the
-value starts with it, at the end of the line. A form that stands in a
+quote that is never closed is a plain character inside a value; a value
+that starts with one runs to the end of the line. A form that stands in a
 quoted command (``sh -c "mysql -px"; echo "ok"``) ends at the closing
-quote of that command.
+quote of that command. A quoted tool name (``"mysql" -px``) is not a
+quoted command: its options follow the closing quote.
 
 Every scan is linear. No pattern has a nested repeat, values are read by
 position, a form that starts inside an earlier hidden value is not read
@@ -100,7 +101,9 @@ def _value_end(text: str, start: int, size: int | None = None) -> int:
                 pos = closing
                 continue
             if pos > start:
-                return pos
+                # A quote inside a word that is never closed is a plain character.
+                pos += 1
+                continue
             line_end = text.find("\n", pos, size)
             return size if line_end == -1 else line_end
         break
@@ -346,6 +349,21 @@ def _segment_spans(
     return spans, pos
 
 
+#: The quoted text in front of a quoted executable: its opening quote and a path.
+_QUOTED_PATH: Final = re.compile(r"""['"][^\s'"]{0,256}$""")
+
+
+def _is_quoted_executable(text: str, match: re.Match[str], close: int) -> bool:
+    """True when the quotes hold only the tool name (``"mysql" -px``, ``'/bin/curl'``)."""
+    if close != match.end():
+        return False
+    before = _QUOTED_PATH.search(text, max(0, match.start() - 257), match.start())
+    if before is None or text[before.start()] != text[close]:
+        return False
+    path = before.group(0)[1:]
+    return not path or path.endswith("/")
+
+
 def _tool_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     quotes = _OuterQuotes(text)
@@ -353,8 +371,11 @@ def _tool_spans(text: str) -> list[tuple[int, int]]:
     while (match := _TOOL.search(text, pos)) is not None:
         tool = _tool_name(match.group(0)) or ""
         close = quotes.end(match.start())
-        size = len(text) if close is None else close
-        found, pos = _segment_spans(text, match.end(), tool, size)
+        first, size = match.end(), len(text) if close is None else close
+        if close is not None and _is_quoted_executable(text, match, close):
+            # The arguments follow the closing quote of the tool name.
+            first, size = close + 1, len(text)
+        found, pos = _segment_spans(text, first, tool, size)
         spans.extend(found)
         pos = max(pos, match.end())
     return spans
@@ -436,10 +457,10 @@ _CONNECTION: Final = re.compile(
 #: Longest unquoted connection string value that is read. The bound keeps a text
 #: full of ``pw=`` from being scanned again and again.
 _VALUE_MAX: Final = 1024
-#: An unquoted value runs to the ``;`` that ends it, so it may hold spaces. A
-#: line break or a quote (the end of the string the connection string is in)
-#: also ends it.
-_VALUE_STOP: Final = re.compile(r"""[\r\n;'"]""")
+#: An unquoted value runs to the ``;`` that ends it, so it may hold spaces and
+#: quotes. A line break, or the closing quote of a quoted command the
+#: connection string stands in, also ends it.
+_VALUE_STOP: Final = re.compile(r"[\r\n;]")
 #: A word that starts a new command argument: an option (``--user``, ``-v``) or a
 #: ``key=`` word. A connection string value has no such word.
 _COMMAND_WORD: Final = re.compile(r"\s(?:-{1,2}[A-Za-z]|[A-Za-z_][\w.-]{0,63}=)")
@@ -492,16 +513,17 @@ def _connection_span(
         return None
     if text[start] in _CLOSING:
         return _quoted_connection_value(text, start)
-    window = start + _VALUE_MAX
+    close = quotes.end(match.start())
+    window = min(len(text) if close is None else close, start + _VALUE_MAX)
     stop = _VALUE_STOP.search(text, start, window)
-    stop_at = min(len(text), window) if stop is None else stop.start()
+    stop_at = window if stop is None else stop.start()
     if not _is_connection_field(text, match, start, stop_at):
         # A command option or word (``--password=x --user a``, ``password=x user=a``):
         # the value is one shell word, so the words after it stay. ``pwd`` and ``pw``
         # are connection string words only.
         if match["label"].lower() != "password":
             return None
-        return _value_span(text, start, quotes.end(match.start()))
+        return _value_span(text, start, close)
     # A value hidden by an earlier rule is not part of this one.
     earlier = _PLACEHOLDER.search(text, start, stop_at)
     if earlier is not None:

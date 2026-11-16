@@ -110,6 +110,12 @@ _HIDDEN: Final[list[tuple[str, str, str]]] = [
     (f"Server=db;{_PWD_IS}{PW} long phrase", "long phrase", "Server=db;"),
     (f"Server=db;{_PWD_IS}{{made-up;tail}};Database=d", "tail", "Server=db;"),
     (f"{_PW_IS}{PW} -suffix;Database=d", "-suffix", "Database=d"),
+    # A quoted tool name: its options follow the closing quote.
+    (f'"mysql" -p{PW} db', PW, '"mysql" -p'),
+    (f"'/usr/bin/sshpass' -p {PW} ssh host", PW, "ssh host"),
+    # A quote inside a value that is never closed is part of the value.
+    (f"Server=db;{_PWD_IS}made'up;Database=d", "up", "Server=db;"),
+    ("run --password made'up --user a", "up", "--user a"),
 ]
 
 #: Harmless text that looks like one of the forms.
@@ -142,6 +148,8 @@ _KEPT: Final[list[str]] = [
     "<user>u</user><password></password><password/>",
     "the password prompt was shown",
     "<password><![CDATA[x]]></user></password>",
+    '"mysql" -p 3306',
+    'echo "mysql" is fine',
 ]
 
 
@@ -253,6 +261,13 @@ _WHOLE_OUTPUT: Final[list[tuple[str, str]]] = [
         f"don't run mysql -p{PW} it's bad",
         f"don't run mysql -p{_MARK} it's bad",
     ),
+    # A quoted tool name is not a quoted command.
+    (f'"mysql" -p{PW} db', f'"mysql" -p{_MARK} db'),
+    (f"'/usr/bin/mysql' -p{PW} db; echo ok", f"'/usr/bin/mysql' -p{_MARK} db; echo ok"),
+    # A quote inside a value that is never closed is part of the value.
+    (f"Server=db;{_PW_IS}made'up x;Database=d", f"Server=db;{_PW_IS}{_MARK};Database=d"),
+    ("run --password made'up --user a", f"run --password {_MARK} --user a"),
+    ('sh -c "mysql -pmade\'up"; echo "ok"', f'sh -c "mysql -p{_MARK}"; echo "ok"'),
     # A CDATA section with white space or other text around it.
     (
         f"<password>\n<![CDATA[{PW}]]>\n</password>",
@@ -271,6 +286,23 @@ _WHOLE_OUTPUT: Final[list[tuple[str, str]]] = [
 
 @pytest.mark.parametrize(("line", "expected"), _WHOLE_OUTPUT)
 def test_only_the_value_is_replaced(line: str, expected: str) -> None:
+    assert redact(line, get_default_policy()).redacted == expected
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        # The api_key rule hides ``Pwd=...`` and ``Password=...`` to the end, as on main.
+        (_PWD_IS, "Server=db;[REDACTED:api_key]"),
+        (_PASSWORD_IS, "Server=db;[REDACTED:api_key]"),
+        (_PW_IS, f"Server=db;{_PW_IS}{_MARK};Database=d"),
+    ],
+)
+def test_a_quote_inside_a_connection_string_value_does_not_end_it(
+    label: str, expected: str
+) -> None:
+    line = f"Server=db;{label}made'up;Database=d"
+    assert [line[a:b] for a, b in COMMAND_SECRET.secret_spans(line)] == ["made'up"]
     assert redact(line, get_default_policy()).redacted == expected
 
 
@@ -395,6 +427,9 @@ _LONG_LINE: Final = 200_000
         "mysql -p ",
         '--password " ',
         "--password '",
+        "--password a'",
+        "Server=a;Pwd=b'",
+        '"mysql" -p',
         'A_KEY="x ',
         "A_KEY=",
         _PW_IS,

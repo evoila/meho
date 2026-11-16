@@ -567,7 +567,12 @@ and the one of `realm.update` is the realm card of
 `client.update` and `protocol_mapper.create` get the switch with
 `register_preview_builder_switch`; it applies only when
 `PreviewContext.for_agent` is true. A call that waits for approval gives
-the caller no card, only the request id.
+the caller no card, only the request id. The MCP tools
+`meho_approvals_get` and `meho_approvals_list` follow the same switch:
+off, they show the params echo for `client.update` and
+`protocol_mapper.create`, and the realm card without `current_values` and
+`current_values_available` for `realm.update`
+(`register_person_only_preview_keys`).
 
 A client attribute with a secret in it is hidden like the client secret:
 `client.secret.rotated` (the old secret during a rotation) is on the

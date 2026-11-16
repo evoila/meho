@@ -2567,6 +2567,14 @@ The per-op preview is opt-in via a builder registry in
   op with no builder. The approval request a person reads always uses the
   builder. A new card for an op that agents already see goes behind a
   switch this way.
+  `register_person_only_preview_keys(op_id, enabled, keys)` (core only)
+  names the keys a builder adds for the person only. The MCP tools
+  `meho_approvals_get` and `meho_approvals_list` read the stored request
+  through `proposed_effect_for_agent`: with the switch off, an op behind
+  a builder switch shows the generic params echo of its stored params,
+  and an op with person-only keys shows its preview without them. So the
+  caller gets the same answer there as from `preview_operation`. The REST
+  approvals API and the console show the stored card.
 - At the park point, `dispatcher._handle_needs_approval` resolves the
   connector instance (same path the execute branch uses) and calls
   `build_proposed_effect`. A bespoke builder's result — wrapped as

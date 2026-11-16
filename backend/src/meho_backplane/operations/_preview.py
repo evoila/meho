@@ -107,7 +107,9 @@ __all__ = [
     "describe_preview_provenance",
     "has_preview_builder",
     "preview_failure_reason",
+    "proposed_effect_for_agent",
     "register_permission_preflight",
+    "register_person_only_preview_keys",
     "register_preview_builder",
     "register_preview_builder_switch",
 ]
@@ -412,6 +414,13 @@ _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {}
 #: approval request a person reads always uses the builder.
 _PREVIEW_BUILDER_SWITCHES: dict[str, Callable[[], bool]] = {}
 
+#: ``op_id`` -> the switch, and the keys its builder adds to the preview for
+#: the person only. Off, a caller reads the stored preview without them.
+_PERSON_ONLY_PREVIEW_KEYS: dict[str, tuple[Callable[[], bool], frozenset[str]]] = {}
+
+#: The keys a builder's result puts on a stored ``proposed_effect``.
+_BUILDER_RESULT_KEYS: Final[tuple[str, ...]] = ("preview", "preview_unavailable", "preview_error")
+
 #: ``op_id`` -> registered permission preflight. Opt-in: absence ⇒ no
 #: preflight (and no entry in the approval row's ``permission_preflight``).
 _PERMISSION_PREFLIGHTS: dict[str, PermissionPreflight] = {}
@@ -435,6 +444,62 @@ def register_preview_builder_switch(op_id: str, enabled: Callable[[], bool]) -> 
     already sees goes behind a switch this way.
     """
     _PREVIEW_BUILDER_SWITCHES[op_id] = enabled
+
+
+def register_person_only_preview_keys(
+    op_id: str, enabled: Callable[[], bool], keys: frozenset[str]
+) -> None:
+    """Show the preview *keys* of *op_id* to a caller only while ``enabled()`` is true.
+
+    The builder adds them to the approval request a person reads. Off, a
+    caller that reads the stored request (:func:`proposed_effect_for_agent`)
+    gets the preview without them.
+    """
+    _PERSON_ONLY_PREVIEW_KEYS[op_id] = (enabled, keys)
+
+
+def proposed_effect_for_agent(
+    op_id: str,
+    effect: dict[str, Any],
+    *,
+    params: Mapping[str, Any] | None,
+    connector_id: str | None,
+    tenant: str | None,
+) -> dict[str, Any]:
+    """The stored ``proposed_effect`` of an approval request, as a caller reads it.
+
+    The request a person reads always holds the builder's card. A caller
+    (``meho_approvals_get`` / ``meho_approvals_list``) gets what
+    ``preview_operation`` gives while a card's switch is off:
+
+    * the generic params echo of the stored params, for an op whose builder
+      switch is off (:func:`register_preview_builder_switch`);
+    * the preview without the person-only keys
+      (:func:`register_person_only_preview_keys`).
+
+    Every other ``proposed_effect`` comes back unchanged.
+    """
+    switch = _PREVIEW_BUILDER_SWITCHES.get(op_id)
+    if switch is not None and not switch() and any(key in effect for key in _BUILDER_RESULT_KEYS):
+        shown = {key: value for key, value in effect.items() if key not in _BUILDER_RESULT_KEYS}
+        shown.pop("preview_reason", None)
+        if params:
+            shown["params_echo"] = _redact_echoed_params(
+                dict(params), connector_id=connector_id, tenant=tenant, op_id=op_id
+            )
+        populated, reason = describe_preview_provenance(
+            shown if params else None, op_id=op_id, stored_op_class=shown.get("op_class")
+        )
+        shown["preview_populated"] = populated
+        if reason is not None:
+            shown["preview_reason"] = reason
+        return shown
+    person_only = _PERSON_ONLY_PREVIEW_KEYS.get(op_id)
+    preview = effect.get("preview")
+    if person_only is None or person_only[0]() or not isinstance(preview, dict):
+        return effect
+    kept = {key: value for key, value in preview.items() if key not in person_only[1]}
+    return {**effect, "preview": kept}
 
 
 def _preview_builder(op_id: str, *, for_agent: bool) -> PreviewBuilder | None:

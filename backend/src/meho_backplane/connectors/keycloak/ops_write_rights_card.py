@@ -39,7 +39,10 @@ API) always shows these cards. What the caller gets back from
 preview of ``keycloak.client.update`` and
 ``keycloak.protocol_mapper.create`` is the generic params echo, and the one
 of ``keycloak.realm.update`` is the realm card of
-:mod:`.ops_write_realm_smtp` without ``current_values``.
+:mod:`.ops_write_realm_smtp` without ``current_values``. The MCP approval
+tools (``meho_approvals_get`` and ``meho_approvals_list``) give the caller
+the same answers while the switch is off
+(:func:`~meho_backplane.operations._preview.proposed_effect_for_agent`).
 """
 
 from __future__ import annotations
@@ -61,6 +64,7 @@ from meho_backplane.connectors.keycloak.session import quote_segment, resolve_re
 from meho_backplane.operations._preview import (
     PreviewContext,
     _redact_echoed_params,
+    register_person_only_preview_keys,
     register_preview_builder,
     register_preview_builder_switch,
 )
@@ -245,3 +249,6 @@ register_preview_builder(REALM_UPDATE_OP_ID, _realm_update_card)
 register_preview_builder(PROTOCOL_MAPPER_CREATE_OP_ID, _protocol_mapper_create_card)
 register_preview_builder_switch(CLIENT_UPDATE_OP_ID, _cards_on)
 register_preview_builder_switch(PROTOCOL_MAPPER_CREATE_OP_ID, _cards_on)
+register_person_only_preview_keys(
+    REALM_UPDATE_OP_ID, _cards_on, frozenset({"current_values", "current_values_available"})
+)

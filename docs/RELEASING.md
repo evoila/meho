@@ -318,9 +318,9 @@ merge to `main`.
 - [ ] **Upgrade-notes discipline.** When the release carries an
       upgrade-relevant change (a chart field operators may have hand-patched,
       a new default-on guard, a schema-breaking value, a forward-only
-      migration with an operator caveat), append a row to the
-      version-specific upgrade-notes table in
-      [`deploying.md`](deploying.md) in this same PR. This is the discipline
+      migration with an operator caveat), add a row file
+      under [`upgrade-rows/`](upgrade-rows/README.md) in this same PR (it
+      shows in the version-specific upgrade-notes table of the docs site). This is the discipline
       that #2393's `startupProbe` (the Helm-4 SSA field-conflict caveat)
       would have triggered.
 

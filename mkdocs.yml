@@ -26,6 +26,11 @@ copyright: Copyright &copy; 2026 evoila Group — Apache 2.0
 
 strict: true
 
+# Adds the rows of docs/upgrade-rows/ to the upgrade table and checks the
+# tables (docs/codebase/how-code-is-organised.md, "Upgrade rows").
+hooks:
+  - scripts/ci/upgrade_rows.py
+
 theme:
   name: material
   palette:

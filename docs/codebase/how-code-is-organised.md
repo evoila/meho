@@ -44,6 +44,24 @@ These rules stop that.
     shorter, lower its pin in the same pull request. When a list is gone,
     remove its row.
 
+## Upgrade rows
+
+Almost every pull request that changes behaviour adds a row to the upgrade
+tables. Do not edit the tables. Add one file per row:
+`docs/upgrade-rows/<version>/<short-name>.md`, with a `## Note` and an
+`## Action` section of one line each (see `docs/upgrade-rows/README.md`).
+`mkdocs build` adds the rows to the end of the table in
+`docs-site/install/upgrades.md`. The checks are in
+`scripts/ci/upgrade_rows.py`: the build fails on a broken row file, and
+`backend/tests/test_upgrade_rows.py` fails on a conflict marker line, a row
+with the wrong number of columns, or a doubled row in either table.
+
+Why not a `merge=union` line in `.gitattributes`? It works with a local
+`git merge`. But GitHub does not read `.gitattributes` merge rules when it
+merges on its servers (the update button, the merge queue), so the conflict
+would stay there. Reference:
+<https://github.com/orgs/community/discussions/9288>.
+
 **Before you open a pull request:** merge main into your branch and run the
 tests again. Then check: does your change add a line to a file that other
 features also edit? If yes, move that part into your own module.

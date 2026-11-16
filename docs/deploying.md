@@ -599,9 +599,12 @@ MEHO is down until you roll back; the contract lists the recovery steps.
 
 ## Version-specific upgrade notes
 
-Append a row here in the same PR that carries an upgrade-relevant change
-(this discipline is enforced by a checklist line in
-[`RELEASING.md`](RELEASING.md)).
+Add a row in the same PR that carries an upgrade-relevant change (this
+discipline is enforced by a checklist line in
+[`RELEASING.md`](RELEASING.md)). Do not edit this table: add the row as its
+own file in [`upgrade-rows/`](upgrade-rows/README.md), so two pull requests
+never conflict here. The rows in that folder (v0.48.0 and later) show on the
+[Upgrades page](https://evoila.github.io/meho/latest/install/upgrades/).
 
 | Version | Upgrade note | Action |
 |---|---|---|

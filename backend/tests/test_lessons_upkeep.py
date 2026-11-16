@@ -38,7 +38,7 @@ from meho_backplane.lessons.upkeep import (
 )
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import Settings, get_settings
 from tests._kb_embedding_stub import fake_embedding_service
 from tests._lessons_helpers import seed_dispatch, seed_retrieval, seed_tenant
 
@@ -347,13 +347,16 @@ async def test_a_tick_writes_one_report_per_tenant_and_a_total() -> None:
     assert by_tenant[UPKEEP_SYSTEM_TENANT_ID]["retired_count"] == 1
 
 
-def test_settings_default_weekly_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = get_settings()
-    assert settings.knowledge_upkeep_enabled is True
-    assert settings.knowledge_upkeep_interval_seconds == 604800
-    monkeypatch.setenv("KNOWLEDGE_UPKEEP_ENABLED", "false")
+def test_settings_default_off_weekly_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KNOWLEDGE_UPKEEP_ENABLED", raising=False)
     get_settings.cache_clear()
-    assert get_settings().knowledge_upkeep_enabled is False
+    settings = get_settings()
+    assert settings.knowledge_upkeep_enabled is False
+    assert Settings.model_fields["knowledge_upkeep_enabled"].default is False
+    assert settings.knowledge_upkeep_interval_seconds == 604800
+    monkeypatch.setenv("KNOWLEDGE_UPKEEP_ENABLED", "true")
+    get_settings.cache_clear()
+    assert get_settings().knowledge_upkeep_enabled is True
     for bad in ("59", "604801"):
         monkeypatch.setenv("KNOWLEDGE_UPKEEP_INTERVAL_SECONDS", bad)
         get_settings.cache_clear()

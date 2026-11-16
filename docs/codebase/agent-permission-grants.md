@@ -128,6 +128,8 @@ For time-bounded elevations: same path, plus `expires_at` set on the row. The gr
 | Elevation active | As granted until expiry | Only if explicit grant (same cap) |
 | Elevation expired | Reverts to baseline | Denied |
 
+A call with no target (for example a `net.*` operation) matches only a grant for every target (`target_scope` `*` or empty), never a grant for named targets, so with `AGENT_GRANT_REQUIRED=on` a `read-targets` agent cannot run it.
+
 ### The upgrade row (migration `0155`)
 
 Migration `0155_agent_read_everything_at_upgrade` gives every agent that

@@ -68,6 +68,12 @@ On the retry, MEHO reads the linked request
 - the request was rejected, expired or withdrawn: the check runs the call
   again, so it asks for approval again.
 
+The request must be for the check's operation and connector. When the
+check is a multi-step operation and one of its steps waits, the request
+names that step and stores the multi-step operation in `resume_parent`.
+MEHO accepts that request too: the approved run re-runs the multi-step
+operation, so its stored result is the result of the check's operation.
+
 Only the caller who made the check wait reads the request, in the same
 tenant (`read_approval_result`). The read writes an `approval.result`
 audit row. An approved result is used once: the next retry of the same

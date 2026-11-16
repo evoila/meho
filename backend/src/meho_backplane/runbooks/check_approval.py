@@ -31,6 +31,7 @@ from meho_backplane.db.models import ApprovalRequestStatus
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
+    from meho_backplane.db.models import ApprovalRequest
 
 __all__ = ["APPROVAL_REQUEST_KEY", "LinkedApproval", "linked_approval_id", "read_linked_approval"]
 
@@ -62,6 +63,21 @@ def linked_approval_id(verify_response: dict[str, Any] | None) -> uuid.UUID | No
         return None
 
 
+def _request_op_ids(request: ApprovalRequest) -> set[str]:
+    """The operations an approval request stands for.
+
+    The request names the operation that waits. When a step of a
+    multi-step operation waits, the request also stores that multi-step
+    operation in ``resume_parent``; the approved run re-runs it, and its
+    stored result is the result of the multi-step operation.
+    """
+    op_ids = {request.op_id}
+    parent_op_id = (request.resume_parent or {}).get("op_id")
+    if isinstance(parent_op_id, str):
+        op_ids.add(parent_op_id)
+    return op_ids
+
+
 async def read_linked_approval(
     caller: Operator,
     request_id: uuid.UUID,
@@ -73,7 +89,8 @@ async def read_linked_approval(
 
     Returns ``None`` when the check must run its call again: the request is
     not found in the caller's tenant, belongs to another caller, is for
-    another operation, or was rejected, expired or withdrawn.
+    another operation (neither the operation that waits nor the multi-step
+    operation it is a step of), or was rejected, expired or withdrawn.
     """
     # Imported here: ``approval_queue`` imports the runbook modules through
     # the policy and conventions packages.
@@ -85,7 +102,7 @@ async def read_linked_approval(
         except ApprovalError:
             return None
         await session.commit()
-    if request.op_id != op_id or request.connector_id != connector_id:
+    if request.connector_id != connector_id or op_id not in _request_op_ids(request):
         return None
     if request.status == ApprovalRequestStatus.PENDING.value:
         return LinkedApproval(request_id=request_id, result=None)

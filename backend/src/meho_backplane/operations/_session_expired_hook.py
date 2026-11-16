@@ -98,8 +98,9 @@ def session_expired_by_hook(connector_instance: Any, response: httpx.Response) -
     """Whether the connector says *response* means that its login session ended.
 
     ``False`` for a status that is not 4xx, when the connector has no
-    ``is_session_expired`` method, when
-    the method answers anything but ``True``, and when it raises. A broken
+    ``is_session_expired`` method, when the method answers anything but
+    ``True`` (a warning is logged when the answer is not a bool), and when it
+    raises (a warning is logged too). A broken
     hook must never turn a real 403 into a sign-in loop.
     """
     if not 400 <= response.status_code < 500:
@@ -109,7 +110,7 @@ def session_expired_by_hook(connector_instance: Any, response: httpx.Response) -
     if not callable(hook):
         return False
     try:
-        return hook(response) is True
+        answer = hook(response)
     except Exception:
         _log.warning(
             "session_expired_hook_failed",
@@ -117,6 +118,13 @@ def session_expired_by_hook(connector_instance: Any, response: httpx.Response) -
             exc_info=True,
         )
         return False
+    if not isinstance(answer, bool):
+        _log.warning(
+            "session_expired_hook_bad_answer",
+            connector=type(connector_instance).__name__,
+            answer_type=type(answer).__name__,
+        )
+    return answer is True
 
 
 def may_resend_after_session_end(
@@ -148,21 +156,22 @@ def may_resend_after_session_end(
 def mark_session_relogin(status_code: int, *, resent: bool) -> None:
     """Show on the audit row and in the trace what MEHO did after "session ended".
 
-    The audit row gets ``session_relogin`` (MEHO signed in again in this
-    call), ``session_resent`` (MEHO sent the operation again) and
+    The audit row gets ``session_relogin`` (MEHO dropped the kept login, so
+    the next call signs in again; always true here, also when the operation
+    was not sent again), ``session_resent`` (MEHO sent the operation again) and
     ``session_relogin_status`` (the status that said the session ended), in
     its payload (through the ``audit_*`` binds, which the dispatcher drops
     when the call ends). The trace gets one ``session_relogin`` span. Neither
     carries a vendor body or a credential.
     """
     structlog.contextvars.bind_contextvars(
-        audit_session_relogin=resent,
+        audit_session_relogin=True,
         audit_session_resent=resent,
         audit_session_relogin_status=status_code,
     )
     record_typed_call(
         typed_span_start("session_relogin"),
-        extra={"session_relogin": resent, "resent": resent, "rejected_status": status_code},
+        extra={"session_relogin": True, "resent": resent, "rejected_status": status_code},
     )
 
 

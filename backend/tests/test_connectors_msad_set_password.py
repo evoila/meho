@@ -22,6 +22,10 @@ import pytest
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors._shared.pwsh import pwsh_run
+from meho_backplane.connectors._shared.vault_creds import (
+    TargetSecretForbiddenError,
+    TargetSecretNotFoundError,
+)
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.msad import MSAD_OPS, MsadConnector
 from meho_backplane.connectors.msad.ops_password import (
@@ -208,6 +212,37 @@ async def test_vault_error_names_the_reference_and_runs_nothing() -> None:
         await msad_user_set_password(
             connector, _TARGET, {"identity": "jdoe", "password_ref": "lab/ad/jdoe#password"}
         )
+    run_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [
+        (
+            TargetSecretNotFoundError(target_name="ad-1", secret_ref="lab/ad/jdoe"),
+            "Vault has no secret at that path",
+        ),
+        (
+            TargetSecretForbiddenError(target_name="ad-1", secret_ref="lab/ad/jdoe"),
+            "Vault refused to read that path",
+        ),
+    ],
+)
+async def test_unreadable_password_ref_names_the_path_and_runs_nothing(
+    error: Exception, text: str
+) -> None:
+    connector = MsadConnector()
+    run_mock = AsyncMock()
+    with (
+        patch.object(connector, "_resolve_secret", AsyncMock(side_effect=error)),
+        patch.object(connector, "_run_command", run_mock),
+        pytest.raises(ValueError, match="could not read password_ref lab/ad/jdoe#password") as exc,
+    ):
+        await msad_user_set_password(
+            connector, _TARGET, {"identity": "jdoe", "password_ref": "lab/ad/jdoe#password"}
+        )
+    assert text in str(exc.value)
+    assert exc.value.__cause__ is error
     run_mock.assert_not_awaited()
 
 

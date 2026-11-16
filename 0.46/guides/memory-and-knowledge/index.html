@@ -4026,7 +4026,9 @@ decide approvals in the tenant) or a tenant admin. MEHO refuses it from
 anyone else, also from the person who wrote the entry. A page imported
 from your wiki keeps the status a reviewer set there.
 The weekly upkeep never confirms a candidate. A candidate runs out after
-six months unless someone confirms it.</p>
+six months unless someone confirms it. The weekly upkeep marks such a
+candidate retired. The upkeep is off by default, so this happens only
+after you turn it on (see below).</p>
 <h3 id="instance-settings">Instance settings<a class="headerlink" href="#instance-settings" title="Permanent link">&para;</a></h3>
 <p>Three chart values (Helm values) change how knowledge works on the whole
 instance:</p>
@@ -4046,8 +4048,8 @@ instance:</p>
 </tr>
 <tr>
 <td><code>config.knowledgeUpkeepEnabled</code></td>
-<td><code>"true"</code></td>
-<td>Runs the weekly upkeep: it merges duplicate entries, retires expired ones and writes one report per tenant (<code>meho audit query</code>, principal <code>system:knowledge-upkeep</code>).</td>
+<td><code>"false"</code></td>
+<td>Set it to <code>"true"</code> to run the weekly upkeep: it merges duplicate entries, retires expired ones and writes one report per tenant (<code>meho audit query</code>, principal <code>system:knowledge-upkeep</code>). It is off by default because it changes which entries a knowledge search returns.</td>
 </tr>
 <tr>
 <td><code>config.knowledgeUpkeepIntervalSeconds</code></td>

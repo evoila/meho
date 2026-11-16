@@ -16,9 +16,8 @@ or go to `/ui/account`. The card **Your tools** lists each tool kind:
 - the name of the tool kind;
 - its login client in Keycloak (for example `meho-mcp-desktop`);
 - its last use: the newest entry of the audit log for you and that tool,
-  in the last 90 days. MEHO looks only at your newest 500 entries. It
-  shows "none in your newest 500 audit rows of the last 90 days" when
-  none of them is from that tool.
+  in the last 90 days. It shows "none in the last 90 days" when there is
+  no such entry.
 
 | Tool kind | Login client |
 |---|---|
@@ -38,7 +37,7 @@ login (it keeps a tool signed in for a long time) and each ordinary
 login. Then:
 
 - **The tool stops when its last access token ends.** That is within the
-  access token lifetime: at most about five and a half minutes on MEHO's
+  access token lifetime: about five and a half minutes on MEHO's
   built-in Keycloak. The tool's saved login ends.
 - **Your other tools keep working.** For example, if you sign out Claude
   Desktop, Claude Code and the command line keep their logins.
@@ -56,7 +55,8 @@ So MEHO keeps it, and your other tool keeps working. Then the card says
 "Partly signed out" and names the other tool. While that login lasts,
 the signed-out tool can still get new access tokens through it. To stop
 that too, end the login in your Keycloak account page. Then the other
-tool must sign in again.
+tool must sign in again. If you cannot open it, ask your admin to end
+that login in the Keycloak admin console (Users, your user, Sessions).
 
 If Keycloak has no login of that tool for you, the card says "Nothing
 changed". If a call to Keycloak fails, the card shows an error. Try again

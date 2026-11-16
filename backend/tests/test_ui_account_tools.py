@@ -34,15 +34,17 @@ from urllib.parse import unquote
 import httpx
 import pytest
 import respx
+import structlog
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
+from meho_backplane.auth import tool_sign_out
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.tool_sign_out import (
-    LAST_USE_MAX_ROWS,
     LAST_USE_WINDOW,
     TOOL_SIGN_OUT_AUDIT_PATH,
     tool_kinds,
@@ -64,6 +66,8 @@ from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_t
 from meho_backplane.ui.paths import static_root_dir, static_src_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.routes.account_tools import (
+    ADMIN_CONSOLE_TEXT,
+    AUDIT_FAILED_TEXT,
     FAILED_TEXT,
     FORBIDDEN_TEXT,
     NOT_CONFIGURED_TEXT,
@@ -83,9 +87,7 @@ _ME = "5d0c1a52-0000-4000-8000-00000000aaaa"
 _OTHER = "5d0c1a52-0000-4000-8000-00000000bbbb"
 _PAGE = "/ui/account"
 _SIGN_OUT = "/ui/account/tools/sign-out"
-_NONE_FOUND = (
-    f"none in your newest {LAST_USE_MAX_ROWS} audit rows of the last {LAST_USE_WINDOW.days} days"
-)
+_NONE_FOUND = f"none in the last {LAST_USE_WINDOW.days} days"
 
 
 @pytest.fixture(autouse=True)
@@ -329,22 +331,56 @@ def test_section_lists_tool_kinds_with_last_use() -> None:
     assert "not a" in body and "block" in body
 
 
-def test_last_use_reads_at_most_the_newest_rows() -> None:
-    """Only the person's newest LAST_USE_MAX_ROWS rows count; an older use is not found."""
+def test_last_use_is_exact_behind_many_newer_rows_of_another_tool() -> None:
+    """A tool used last week shows that date, also behind 600 newer rows of a busy tool.
+
+    The older read looked only at the person's newest 500 rows, so it
+    showed no last use here.
+    """
     now = datetime.now(UTC).replace(microsecond=0)
-    _seed_audit(_ME, "meho-mcp-desktop", now - timedelta(days=2))
-    _seed_audit(
-        _ME,
-        "meho-mcp-code",
-        *(now - timedelta(minutes=i) for i in range(1, LAST_USE_MAX_ROWS + 1)),
-    )
+    last_week = now - timedelta(days=7)
+    _seed_audit(_ME, "meho-mcp-desktop", last_week - timedelta(hours=1), last_week)
+    _seed_audit(_ME, "meho-mcp-code", *(now - timedelta(minutes=i) for i in range(1, 601)))
+    _seed_audit(_OTHER, "meho-mcp-desktop", now - timedelta(days=1))  # another person
+    _seed_audit(_ME, "meho-cli", now - LAST_USE_WINDOW - timedelta(days=1))  # too old
     client, _csrf = _client_for(_ME)
     with respx.mock(assert_all_called=False):
         body = client.get(_PAGE).text
+    assert "newest 500" not in body
     code_row = body.split('data-tool-row="claude-code"', 1)[1].split("data-tool-row=", 1)[0]
     assert (now - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M UTC") in code_row
     desktop_row = body.split('data-tool-row="claude-desktop"', 1)[1].split("data-tool-row=", 1)[0]
-    assert _NONE_FOUND in desktop_row
+    assert last_week.strftime("%Y-%m-%d %H:%M UTC") in desktop_row
+    cli_row = body.split('data-tool-row="cli"', 1)[1].split("data-tool-row=", 1)[0]
+    assert _NONE_FOUND in cli_row
+
+
+def test_last_use_ignores_rows_without_a_client_block() -> None:
+    """A row with no ``client`` block (switch off when it was written) is no use of any tool."""
+
+    async def _do() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            session.add(
+                AuditLog(
+                    id=uuid.uuid4(),
+                    event_class=AuditEventClass.OPERATION_EXECUTION,
+                    occurred_at=datetime.now(UTC),
+                    operator_sub=_ME,
+                    tenant_id=_TENANT,
+                    method="POST",
+                    path="/mcp",
+                    status_code=200,
+                    payload={},
+                )
+            )
+
+    asyncio.run(_do())
+    client, _csrf = _client_for(_ME)
+    with respx.mock(assert_all_called=False):
+        body = client.get(_PAGE).text
+    for key in ("web", "cli", "claude-code", "claude-desktop", "other-mcp"):
+        row = body.split(f'data-tool-row="{key}"', 1)[1].split("data-tool-row=", 1)[0]
+        assert _NONE_FOUND in row
 
 
 def test_web_console_row_has_no_sign_out_button() -> None:
@@ -408,7 +444,7 @@ def test_sign_out_desktop_keeps_the_other_tools() -> None:
     assert kc.can_renew(_OTHER, "meho-mcp-desktop")
     assert 'data-result="success"' in response.text
     assert SIGNED_OUT_TEXT.format(label="Claude Desktop") in html.unescape(response.text)
-    assert "about five minutes" in html.unescape(response.text)
+    assert "about five and a half minutes" in html.unescape(response.text)
     rows = _sign_out_rows()
     assert len(rows) == 1
     row = rows[0]
@@ -578,6 +614,7 @@ def test_shared_login_is_kept_and_named() -> None:
     assert PARTLY_SHARED_TEXT.format(label="Claude Desktop", others="Command line (meho)") in text
     assert "Partly signed out:" in text
     assert "Keycloak account page" in text
+    assert ADMIN_CONSOLE_TEXT in text
     assert "is signed out" not in text
     assert kc.can_renew(_ME, "meho-cli")
     assert kc.can_renew(_ME, "meho-mcp-desktop")
@@ -599,9 +636,9 @@ def test_only_a_shared_login_changes_nothing() -> None:
         response = _post(client, csrf, "claude-code")
     assert response.status_code == 200, response.text
     assert 'data-result="info"' in response.text
-    assert SHARED_ONLY_TEXT.format(label="Claude Code", others="Web console") in html.unescape(
-        response.text
-    )
+    text = html.unescape(response.text)
+    assert SHARED_ONLY_TEXT.format(label="Claude Code", others="Web console") in text
+    assert ADMIN_CONSOLE_TEXT in text
     assert kc.session_deletes == []
     assert kc.can_renew(_ME, "meho-mcp-code")
     assert kc.can_renew(_ME, "meho-web")
@@ -690,3 +727,57 @@ def test_failed_session_delete_after_offline_ended_says_partly(answer: Any) -> N
     payload = _assert_one_failed_row(error, outcome="partly_signed_out")
     assert payload["offline_login_ended"] is True
     assert payload["sessions_ended"] == 1
+
+
+# ---------------------------------------------------------------------------
+# A failed audit write
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("keycloak_fails", [False, True], ids=["ended", "keycloak-failed"])
+def test_failed_audit_write_shows_an_error_and_logs_what_ended(
+    monkeypatch: pytest.MonkeyPatch, keycloak_fails: bool
+) -> None:
+    """Keycloak ended the logins (or failed), then the audit row cannot be written.
+
+    The card shows an error, never "signed out". A log line written before
+    the row names the person, the client and what ended.
+    """
+
+    async def _no_audit(**_kwargs: Any) -> uuid.UUID:
+        raise OperationalError("INSERT INTO audit_log", {}, Exception("database is gone"))
+
+    monkeypatch.setattr(tool_sign_out, "write_internal_audit_row", _no_audit)
+    client, csrf = _client_for(_ME)
+    pairs = {(_ME, "meho-mcp-desktop")}
+    with respx.mock(assert_all_called=False) as router, structlog.testing.capture_logs() as logs:
+        if keycloak_fails:
+            # respx answers with the first route that matches.
+            router.get(url__regex=r"/sessions$").mock(return_value=httpx.Response(500))
+        kc = _FakeKeycloak(router, pairs, offline=pairs)
+        response = _post(client, csrf, "claude-desktop")
+    assert response.status_code == 200, response.text
+    text = html.unescape(response.text)
+    assert 'data-result="error"' in response.text
+    assert 'data-result="success"' not in response.text
+    assert AUDIT_FAILED_TEXT.format(label="Claude Desktop") in text
+    assert "is signed out" not in text
+    assert _sign_out_rows() == []
+    events = [e["event"] for e in logs]
+    assert events.index("tool_sign_out") < events.index("tool_sign_out_audit_failed")
+    line = next(e for e in logs if e["event"] == "tool_sign_out")
+    assert line["operator_sub"] == _ME
+    assert line["client_id"] == "meho-mcp-desktop"
+    if keycloak_fails:
+        assert kc.can_renew(_ME, "meho-mcp-desktop")
+        assert line["outcome"] == "failed"
+        assert line["offline_login_ended"] is False
+        assert line["sessions_ended"] == 0
+    else:
+        assert not kc.can_renew(_ME, "meho-mcp-desktop")
+        assert line["outcome"] == "signed_out"
+        assert line["offline_login_ended"] is True
+        assert line["sessions_ended"] == 1
+    failed = next(e for e in logs if e["event"] == "tool_sign_out_audit_failed")
+    assert failed["reason"] == "OperationalError"
+    assert "made-up-admin-secret" not in str(logs)

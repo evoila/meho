@@ -1058,11 +1058,17 @@ A kind whose client id is not set is left out.
 
 - **Last use** is the newest audit row of the person (every tenant) whose
   `client` block names that client, in the last 90 days. Audit rows name
-  the client only while `AUDIT_CLIENT_IDENTITY` is on. MEHO reads at most
-  the person's newest 500 rows of the 90 days (`LAST_USE_MAX_ROWS`),
-  through the index `audit_log_operator_sub_occurred_at_idx`. A tool
-  with no row among them shows "none in your newest 500 audit rows of the
-  last 90 days".
+  the client only while `AUDIT_CLIENT_IDENTITY` is on. `last_use_by_client`
+  makes one read per tool kind, through the index
+  `audit_log_operator_sub_client_azp_occurred_at_idx` (migration `0173`)
+  on `(operator_sub, (payload -> 'client') ->> 'azp', occurred_at)`. So
+  each read finds the newest row of that client directly, however many
+  rows the person has (about 2 ms for all five reads with 3 million rows
+  of one person on PostgreSQL 16). The query must use the same
+  expression as the index: `AUDIT_LOG_CLIENT_AZP` in `db/models.py`
+  writes the JSON keys into the SQL text, so PostgreSQL also uses the
+  index in a reused query plan. A tool with no such row shows "none in
+  the last 90 days".
 - **"Sign out this tool"** asks for a confirm, then posts
   `POST /ui/account/tools/sign-out` with the form field `tool` (the tool
   kind key, never a client id). With the Keycloak admin client (it needs
@@ -1083,8 +1089,9 @@ A kind whose client id is not set is left out.
   login) is kept, so the other tool keeps working. Then the tool can
   still renew through that login, so the result line is in the info
   style and starts with "Partly signed out". It names the other tool and
-  says how to end the shared login in the Keycloak account page. The user id is the person of the session, never a form
-  field. `tests/integration/test_keycloak_tool_sign_out.py` checks against
+  says how to end the shared login in the Keycloak account page, or to
+  ask an admin to end it in the Keycloak admin console. The user id is
+  the person of the session, never a form field. `tests/integration/test_keycloak_tool_sign_out.py` checks against
   a real Keycloak that only the signed-out tool stops renewing.
 - After at least one login ended, MEHO writes the audit row
   `auth.tool_sign_out` (method `INTERNAL`, status 200, payload
@@ -1103,9 +1110,15 @@ A kind whose client id is not set is left out.
   (`KeycloakForbiddenError`) gets its own line: the admin client lacks
   `manage-users`. No login at all says "Nothing changed"; only shared
   logins says so too and names the other tools. Neither writes a row.
+- Before each row, MEHO logs `tool_sign_out` with the person, the client
+  and what ended, so the event is kept when the row cannot be written.
+  When the write fails, `sign_out_tool` raises `ToolSignOutAuditError`
+  and logs `tool_sign_out_audit_failed`. The card shows an error line,
+  never "signed out": Keycloak may already have ended logins, but the
+  sign-out has no audit row.
 - The tool's last access token works until it ends: the access token
-  lifetime of the realm (about five minutes on the built-in realm: 300
-  seconds plus 30 seconds leeway). The card says so. Signing out is not a
+  lifetime of the realm (about five and a half minutes on the built-in
+  realm: 300 seconds plus 30 seconds leeway). The card says so. Signing out is not a
   block: the tool can sign in again, and with a signed-in browser that
   can happen without a question.
 - With the switch off, the card is not shown and the route answers 404.

@@ -20,8 +20,9 @@ off, the account page has no such section and the route answers 404.
   sign-out button (the web console), answers 404.
 
 A Keycloak failure answers the section with an error line; the audit row
-of the failed try says what ended before it, if anything. The logic is in
-:mod:`meho_backplane.auth.tool_sign_out`.
+of the failed try says what ended before it, if anything. When the audit
+row cannot be written, the line is an error too, never "signed out". The
+logic is in :mod:`meho_backplane.auth.tool_sign_out`.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from meho_backplane.auth.keycloak_admin import (
 )
 from meho_backplane.auth.tool_sign_out import (
     ToolKind,
+    ToolSignOutAuditError,
     ToolSignOutIncompleteError,
     last_use_by_client,
     sign_out_tool,
@@ -61,22 +63,26 @@ _require_ui_session_dep = Depends(require_ui_session)
 _get_session_dep = Depends(get_session)
 
 #: Result lines after a sign-out. Kept here so the tests pin the words.
+ADMIN_CONSOLE_TEXT = (
+    "If you cannot open it, ask your admin to end that login in the "
+    "Keycloak admin console (Users, your user, Sessions)."
+)
 SIGNED_OUT_TEXT = (
     "{label} is signed out. It stops when its last access token ends: within "
-    "the access token lifetime (about five minutes on MEHO's built-in "
-    "Keycloak). If it signs in again, it gets a new login."
+    "the access token lifetime (about five and a half minutes on MEHO's "
+    "built-in Keycloak). If it signs in again, it gets a new login."
 )
 PARTLY_SHARED_TEXT = (
     "Partly signed out: MEHO ended the logins that only {label} uses, but "
     "{label} also shares one browser login with {others}. MEHO did not end "
     "that login, so {others} keep working, and {label} can still get new "
     "access tokens through it. To end it too, sign out of that login in "
-    "your Keycloak account page. Then {others} must sign in again."
+    "your Keycloak account page. Then {others} must sign in again. " + ADMIN_CONSOLE_TEXT
 )
 SHARED_ONLY_TEXT = (
     "{label} has no login of its own: it shares one browser login with "
     "{others}. MEHO did not end it, so {others} keep working. Nothing "
-    "changed. To stop {label}, end that login in your Keycloak account page."
+    "changed. To stop {label}, end that login in your Keycloak account page. " + ADMIN_CONSOLE_TEXT
 )
 NOTHING_TO_SIGN_OUT_TEXT = "Keycloak has no login of {label} for you. Nothing changed."
 NOT_CONFIGURED_TEXT = (
@@ -96,6 +102,11 @@ PARTLY_SIGNED_OUT_TEXT = (
     "{label} is only partly signed out: Keycloak ended some of its logins, "
     "then a call failed. {label} may still work. Try again later. If it "
     "keeps failing, ask your MEHO admin."
+)
+AUDIT_FAILED_TEXT = (
+    "MEHO could not write the audit row for signing out {label}, so the "
+    "sign-out is not confirmed. Keycloak may already have ended some of its "
+    "logins. Ask your MEHO admin to check the MEHO log."
 )
 
 
@@ -167,6 +178,8 @@ async def _do_sign_out(session_ctx: UISessionContext, kind: ToolKind) -> _Result
             kind=kind,
             settings=get_settings(),
         )
+    except ToolSignOutAuditError:
+        return _Result("error", AUDIT_FAILED_TEXT.format(label=kind.label))
     except KeycloakConsentNotFoundError:
         return _Result("info", NOTHING_TO_SIGN_OUT_TEXT.format(label=kind.label))
     except KeycloakAdminNotConfiguredError:

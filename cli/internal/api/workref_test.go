@@ -17,13 +17,13 @@ import (
 )
 
 type workRefCase struct {
-	Name               string `json:"name"`
-	Raw                string `json:"raw"`
-	Repeat             int    `json:"repeat"`
-	Clean              string `json:"clean"`
-	CleanRepeat        int    `json:"clean_repeat"`
-	Rule               string `json:"rule"`
-	CLIRefuses         bool   `json:"cli_refuses"`
+	Name        string `json:"name"`
+	Raw         string `json:"raw"`
+	Repeat      int    `json:"repeat"`
+	Clean       string `json:"clean"`
+	CleanRepeat int    `json:"clean_repeat"`
+	Rule        string `json:"rule"`
+	CLIRefuses  bool   `json:"cli_refuses"`
 }
 
 func (c workRefCase) raw() string {

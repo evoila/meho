@@ -3314,6 +3314,39 @@ async def test_proposed_effect_carries_catalog_safety_level(
 
 
 @pytest.mark.asyncio
+async def test_create_pending_request_stores_cli_session_id(
+    session: AsyncSession,
+) -> None:
+    """With only the CLI session id bound, the parked row and its audit row carry it."""
+    from meho_backplane.operations._audit import client_session_id_var
+
+    session_id = uuid.uuid4()
+    params = {"key": "value"}
+    token = client_session_id_var.set(session_id)
+    try:
+        request = await create_pending_request(
+            session,
+            operator=_make_operator(sub="human-sub"),
+            connector_id="vault-1.x",
+            op_id="vault.kv.write",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+        )
+    finally:
+        client_session_id_var.reset(token)
+    await session.commit()
+
+    assert request.agent_session_id == session_id
+    audit_row = (
+        (await session.execute(select(AuditLog).where(AuditLog.path == "approval.request")))
+        .scalars()
+        .one()
+    )
+    assert audit_row.agent_session_id == session_id
+
+
+@pytest.mark.asyncio
 async def test_create_pending_request_persists_session_lineage(
     session: AsyncSession,
 ) -> None:

@@ -74,6 +74,7 @@ __all__ = [
     "policy_rule_columns",
     "policy_rule_var",
     "resolve_agent_session_id",
+    "resolve_audit_session_id",
     "restore_audit_extras",
     "reveal_secret_var",
     "run_id_var",
@@ -131,9 +132,10 @@ agent_session_id_var: ContextVar[uuid.UUID | None] = ContextVar(
 
 #: ContextVar carrying the session id the ``meho`` CLI sends in the
 #: ``Meho-Session-Id`` header. The audit middleware binds it for the whole
-#: request. :func:`resolve_agent_session_id` uses it last, after an agent run
-#: and an MCP session, so a CLI dispatch carries the id of its ``meho login``
-#: session.
+#: request. :func:`resolve_audit_session_id` uses it last, after an agent run
+#: and an MCP session, so the audit rows and parked approval requests of a CLI
+#: dispatch carry the id of its ``meho login`` session. It is a label the
+#: client sends. Nothing that decides or advises reads it.
 client_session_id_var: ContextVar[uuid.UUID | None] = ContextVar(
     "client_session_id",
     default=None,
@@ -277,6 +279,21 @@ def policy_rule_columns() -> dict[str, Any]:
     return {"policy_rule": stamp.label(), "policy_version": stamp.policy_version}
 
 
+def resolve_audit_session_id() -> uuid.UUID | None:
+    """Session id to store on an audit row or a parked approval request.
+
+    It is :func:`resolve_agent_session_id`, and when that is ``None`` the id
+    the CLI sent in ``Meho-Session-Id`` (:data:`client_session_id_var`).
+    Only writers of audit rows and approval requests use it. Code that
+    treats a session as an agent session (the reflex advisory, lessons
+    retrievals) keeps using :func:`resolve_agent_session_id`.
+    """
+    session_id = resolve_agent_session_id()
+    if session_id is not None:
+        return session_id
+    return client_session_id_var.get()
+
+
 def resolve_agent_session_id() -> uuid.UUID | None:
     """Resolve the effective session id for audit lineage on the current task.
 
@@ -300,10 +317,6 @@ def resolve_agent_session_id() -> uuid.UUID | None:
       direct MCP ``call_operation`` (ok, error or denied) and every
       operation an MCP tool runs inside carry the MCP session id.
 
-    * :data:`client_session_id_var` — bound by the audit middleware from the
-      ``Meho-Session-Id`` header the ``meho`` CLI sends. Its value is the id
-      the CLI minted at ``meho login`` and keeps until the next login.
-
     A client-credential service principal that dispatches over the REST
     chassis with a ``work_ref`` reaches the first source too:
     ``call_operation`` binds :data:`agent_session_id_var` to the session id
@@ -322,7 +335,7 @@ def resolve_agent_session_id() -> uuid.UUID | None:
         return session_id
     raw = structlog.contextvars.get_contextvars().get("mcp_session_id")
     if raw is None:
-        return client_session_id_var.get()
+        return None
     if not isinstance(raw, str):
         _log.warning("audit_lineage_malformed_mcp_session_id", value=raw)
         return None
@@ -616,7 +629,7 @@ def _apply_contextvar_lineage_mirrors(payload: dict[str, Any]) -> None:
     the columns. Each key is present only when its contextvar is bound:
 
     * session attribution -- ``agent_session_id``, the same value the
-      row's column gets from :func:`resolve_agent_session_id` (the agent
+      row's column gets from :func:`resolve_audit_session_id` (the agent
       run id inside MEHO's own agent loop, G11.4-T5 #1074, else the MCP
       session id of a direct MCP call, #4672), plus the ``model`` /
       ``provider`` / ``cost`` from the active :class:`AgentRunAuditMeta`
@@ -633,7 +646,7 @@ def _apply_contextvar_lineage_mirrors(payload: dict[str, Any]) -> None:
       written (:mod:`meho_backplane.operations.caller_gone`). The operation
       still ran to the end.
     """
-    agent_session_id = resolve_agent_session_id()
+    agent_session_id = resolve_audit_session_id()
     if agent_session_id is not None:
         payload["agent_session_id"] = str(agent_session_id)
     meta = agent_run_audit_meta_var.get()
@@ -779,7 +792,7 @@ async def write_audit_row(
     # of a direct MCP call, so the operation row carries the same session
     # as its MCP tool row and the session replay finds it. ``None`` only
     # for a call with neither (REST / CLI, system sweeps).
-    agent_session_id = resolve_agent_session_id()
+    agent_session_id = resolve_audit_session_id()
     # G12.1-T2 #1294 -- read the runbook correlation contextvars. The
     # columns (``run_id`` / ``step_id``) are added by migration ``0034``
     # (G12.1-T1 #1292). We pass them only when the model carries the

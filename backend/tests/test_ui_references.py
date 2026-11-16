@@ -322,11 +322,11 @@ def test_resolve_references_happy_path() -> None:
 
     refs = _resolve(row, op_id="acme.vm.list", is_admin=True)
 
-    # Principal: display name + service marker (agent session present).
+    # Principal: display name. A session id alone does not mark a service.
     assert refs.principal.resolved is True
     assert refs.principal.name == "Ada Lovelace"
     assert refs.principal.email == "ada@example.test"
-    assert refs.principal.is_service is True
+    assert refs.principal.is_service is False
     assert refs.principal.display == "Ada Lovelace"
 
     # Target: name + detail link.
@@ -469,6 +469,15 @@ def test_resolve_references_service_marker_from_actor_sub() -> None:
     refs = _resolve(row)
     assert refs.principal.is_service is True
     assert refs.principal.actor_sub == "agent-sub-77"
+
+
+def test_resolve_references_client_session_is_not_a_service_marker() -> None:
+    """A row with a client session id and no delegated actor is not a service."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    row = _seed_audit(tenant_id=_TENANT_A, actor_sub=None, agent_session_id=uuid.uuid4())
+
+    refs = _resolve(row)
+    assert refs.principal.is_service is False
 
 
 def test_resolve_references_replay_disabled_for_non_admin() -> None:

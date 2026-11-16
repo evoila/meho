@@ -619,10 +619,13 @@ next `meho login` makes a new one.
 The audit middleware (`backend/src/meho_backplane/audit.py`) reads the
 header and binds it to `client_session_id_var`
 (`backend/src/meho_backplane/operations/_audit.py`). A header that is not
-a UUID is ignored. `resolve_agent_session_id()` returns it last, after an
+a UUID is ignored. `resolve_audit_session_id()` returns it last, after an
 agent run and an MCP session. So the operation rows of a CLI call, the
 HTTP row of the call and a parked approval request all carry it in
-`agent_session_id`. A CLI that has no saved session id (a login from an
+`agent_session_id`. Only the writers of these rows use it. The coordination
+hints for agents (`resolve_agent_session_id()`) never see it, and the
+console does not treat such a row as an agent row. The id is a label the
+client sends. It tells sessions apart; it does not say who the caller is. A CLI that has no saved session id (a login from an
 older CLI) sends no header; running `meho login` again fixes that.
 
 `ApprovalRequestView` has `agent_session_id` next to `work_ref`.

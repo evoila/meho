@@ -394,7 +394,7 @@ def _resolve_principal(row: AuditLog) -> PrincipalRef:
     email_raw = payload.get("principal_email")
     email = email_raw if isinstance(email_raw, str) and email_raw else None
     actor_sub = row.actor_sub
-    is_service = row.agent_session_id is not None or actor_sub is not None
+    is_service = actor_sub is not None
     return PrincipalRef(
         sub=row.operator_sub,
         name=name,

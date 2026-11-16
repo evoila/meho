@@ -53,7 +53,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import (
     parent_audit_id_var,
-    resolve_agent_session_id,
+    resolve_audit_session_id,
     run_id_var,
     step_id_var,
     work_ref_var,
@@ -214,7 +214,7 @@ async def track_operation(
         request_id=current_request_id(),
         started_at=datetime.now(UTC),
         approved_run=approved_run,
-        agent_session_id=resolve_agent_session_id(),
+        agent_session_id=resolve_audit_session_id(),
         parent_audit_id=parent_audit_id_var.get(),
         run_id=run_id_var.get(),
         step_id=step_id_var.get(),

@@ -122,7 +122,7 @@ from meho_backplane.operations._audit import (
     policy_decision_var,
     policy_rule_columns,
     policy_rule_var,
-    resolve_agent_session_id,
+    resolve_audit_session_id,
     work_ref_var,
 )
 from meho_backplane.operations._errors import (
@@ -1733,7 +1733,7 @@ async def create_pending_request(
         created_at=created_at,
         expires_at=bounded_expires_at,
         work_ref=work_ref_var.get(),
-        agent_session_id=resolve_agent_session_id(),
+        agent_session_id=resolve_audit_session_id(),
         request_audit_id=request_audit_id,
         resume_parent=stored_resume_parent,
         idempotency_key=idempotency_key,

@@ -94,7 +94,7 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import (
     parent_audit_id_var,
-    resolve_agent_session_id,
+    resolve_audit_session_id,
     work_ref_var,
 )
 from meho_backplane.request_usage.collector import current_request_id
@@ -263,7 +263,7 @@ def request_is_preview() -> bool:
 def _request_lineage() -> dict[str, Any]:
     """Return the lineage columns the wrapper row would carry for this request."""
     return {
-        "agent_session_id": resolve_agent_session_id(),
+        "agent_session_id": resolve_audit_session_id(),
         "actor_sub": resolve_actor_sub(),
         "parent_audit_id": parent_audit_id_var.get(),
         "request_id": current_request_id(),

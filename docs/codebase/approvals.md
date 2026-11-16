@@ -1373,7 +1373,11 @@ in their order: a person only, the read-only check, still pending, the
 deadline, the rights-change and group rules (also the rules on own
 changes), the role floor. Then `_check_routed_approver`: the person's
 group kind (`kind_of`: Admins, SA-Operators, Operators, Approvers or
-Readers) must be in the stored kinds. If not, `ApprovalRoutingError` (a
+Readers) must be in the stored kinds. `kind_of` reads the role and the
+approve flags, and a binding of the policy file can set those flags
+([policy-bindings.md](policy-bindings.md)). So a binding can set the kind
+that the routing checks: a person whose group is bound to `SA-Operators`
+approves a change routed to SA-Operators. If not, `ApprovalRoutingError` (a
 subclass of `ApprovalGroupForbiddenError`, so every approve route answers
 403) with one sentence that names who may approve, for example: "Only
 MEHO-SA-Operators or MEHO-Admins may approve this change (routing rule

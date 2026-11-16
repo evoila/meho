@@ -3,11 +3,20 @@
 
 """Bindings without stored bindings change no login (``POLICY_APPROVER_ROUTING``).
 
-A tenant without stored bindings uses the shipped bindings. They count
-only for a login without a tenant list (``meho_tenants``): the ``groups``
-claim is not per tenant, so for a login with a list the list entry of the
-current tenant decides, as with the switch off. See
-:mod:`meho_backplane.policy.bindings`.
+A tenant without stored bindings uses the shipped bindings. For every
+login shape below, the switch on gives the same answer, the same role and
+the same approve flags as the switch off:
+
+* They count only for a login without a tenant list (``meho_tenants``):
+  the ``groups`` claim is not per tenant, so for a login with a list the
+  list entry of the current tenant decides, as with the switch off.
+* A shipped binding counts only when its kind gives the same approve
+  flags as the token. So the group alone never gives or takes the
+  approve right.
+
+The one difference: a login without a tenant list that matches a shipped
+binding notes its kind and categories (``bound_kind``,
+``bound_categories``). See :mod:`meho_backplane.policy.bindings`.
 """
 
 from __future__ import annotations
@@ -335,3 +344,60 @@ async def test_a_custom_self_approval_group_next_to_an_operator_group_changes_no
     assert on.model_dump(exclude={"bound_kind", "bound_categories"}) == off.model_dump(
         exclude={"bound_kind", "bound_categories"}
     )
+
+
+# ---------------------------------------------------------------------------
+# The approve right comes from the token, not from a shipped group alone
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("claims", "want_approver"),
+    [
+        pytest.param(
+            _person(groups=["/MEHO-Approvers"], tenant_role="read_only"),
+            False,
+            id="approver-group-no-claim",
+        ),
+        pytest.param(
+            _person(groups=["/MEHO-Approvers"], tenant_role="read_only", approver=False),
+            False,
+            id="approver-group-claim-false",
+        ),
+        pytest.param(
+            _person(groups=["/MEHO-Readers"], tenant_role="read_only", approver=True),
+            True,
+            id="readers-group-claim-true",
+        ),
+        pytest.param(
+            _person(groups=["/MEHO-Operators"], approver=True),
+            True,
+            id="operators-group-claim-true",
+        ),
+    ],
+)
+async def test_a_shipped_group_alone_gives_or_takes_no_approve_right(
+    monkeypatch: pytest.MonkeyPatch, claims: dict[str, Any], want_approver: bool
+) -> None:
+    """No tenant list, full group paths, no stored bindings: the token decides."""
+    _switch(monkeypatch, on=False)
+    off = await _login(monkeypatch, claims, None)
+    _switch(monkeypatch, on=True)
+    on = await _login(monkeypatch, claims, None)
+    assert isinstance(off, Operator) and isinstance(on, Operator)
+    assert off.approver is want_approver
+    assert on == off
+    assert on.bound_kind is None
+
+
+@pytest.mark.asyncio
+async def test_a_shipped_binding_that_agrees_with_the_token_is_noted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claims = _person(groups=["/MEHO-Approvers"], tenant_role="read_only", approver=True)
+    _switch(monkeypatch, on=True)
+    on = await _login(monkeypatch, claims, None)
+    assert isinstance(on, Operator)
+    assert on.approver is True
+    assert on.bound_kind is not None and on.bound_kind.value == "Approvers"

@@ -11,6 +11,8 @@
 * A plain role keeps the usual rule, and so does a realm outside the login.
 * A list that cannot be read counts as the strict case.
 * When the parts of the role change before the run, the run is refused.
+* A request that waited from before MEHO read the parts is refused, in every
+  realm.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write_effective_roles import (
     DEPTH_CAP,
     ROLE_PARTS_CHANGED,
+    ROLE_PARTS_NOT_READ,
 )
 from meho_backplane.db.models import ApprovalRequestStatus
 from meho_backplane.operations.approval_queue import ApprovalRoleFloorError
@@ -467,3 +470,23 @@ async def test_a_realm_outside_the_login_runs_as_before(monkeypatch: pytest.Monk
     reason = await grant_changed_since_request(_person("person-admin"), request, None, ctx.params)
 
     assert reason is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("realm", [_REALM, "customer-realm"])
+@pytest.mark.parametrize("op_id", [_REALM_ROLE, _CLIENT_ROLE])
+async def test_a_request_from_before_the_role_check_is_refused(
+    monkeypatch: pytest.MonkeyPatch, realm: str, op_id: str
+) -> None:
+    connector, _ = _connector()
+    ctx = _realm_ctx("reporting", connector, realm=realm)
+    live = await _card(ctx)
+    old = {key: value for key, value in live.items() if key != "effective_roles"}
+    request = await _row(await _park(ctx.params, {"preview": old}, op_id=op_id))
+    _live_card(monkeypatch, live)
+
+    reason = await grant_changed_since_request(
+        _person("person-platform"), request, None, ctx.params
+    )
+
+    assert reason == ROLE_PARTS_NOT_READ

@@ -1200,7 +1200,10 @@ Outside the login realm the list is empty and nothing changes.
 The run is bound to the list. Both ops are registered with `bound_ids` on
 `effective_roles`: if the live list has other role ids than the approved
 one, the run is refused and a new request is needed. A request parked
-before this rule has no list, so it is refused at the run too.
+before this rule has no list, so it is refused at the run too, in every
+realm. Both ops are also registered with `bound_ids_missing`, so this
+refusal says plainly: "This request was made before MEHO read what a role
+gives. Send it again."
 
 ## The rights-change mark: another admin must approve
 

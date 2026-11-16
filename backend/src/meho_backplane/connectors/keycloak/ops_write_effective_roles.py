@@ -23,7 +23,9 @@ a role is missing, there are more than :data:`ROLE_CAP` roles, or the
 nesting is deeper than :data:`DEPTH_CAP`. The approval then counts the
 change as the strict case. The same list is built again right before the
 approved change runs. When the ids differ, the run is refused
-(:data:`ROLE_PARTS_CHANGED`).
+(:data:`ROLE_PARTS_CHANGED`). A request that waited from before MEHO read
+the parts has no list on its card; its run is refused in every realm
+(:data:`ROLE_PARTS_NOT_READ`).
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ __all__ = [
     "DEPTH_CAP",
     "ROLE_CAP",
     "ROLE_PARTS_CHANGED",
+    "ROLE_PARTS_NOT_READ",
     "effective_roles",
     "platform_role_names",
 ]
@@ -67,6 +70,11 @@ DEPTH_CAP: Final[int] = 10
 ROLE_PARTS_CHANGED: Final[str] = (
     "The parts of the role changed since the request; send a new request. "
     "The operation did not run."
+)
+
+#: Why an approved role change made before this check existed did not run.
+ROLE_PARTS_NOT_READ: Final[str] = (
+    "This request was made before MEHO read what a role gives. Send it again."
 )
 
 

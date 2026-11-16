@@ -47,6 +47,7 @@ from meho_backplane.connectors.keycloak.ops_write_account_common import is_realm
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import find_group
 from meho_backplane.connectors.keycloak.ops_write_effective_roles import (
     ROLE_PARTS_CHANGED,
+    ROLE_PARTS_NOT_READ,
     effective_roles,
 )
 from meho_backplane.connectors.keycloak.ops_write_realm_delete import _backplane_login_realms
@@ -112,6 +113,7 @@ def register_grant_ops() -> None:
             user_id_params=user_params,
             group_id_params=(group_id_param,) if group_id_param else (),
             bound_ids=_BOUND_IDS.get(op_id),
+            bound_ids_missing=ROLE_PARTS_NOT_READ if op_id in _ROLE_OPS else None,
         )
 
 

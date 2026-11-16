@@ -446,6 +446,7 @@ async def _approvers(
         op_id=descriptor.op_id,
         level=descriptor.safety_level,
         category=descriptor.policy_category,
+        install_category=descriptor.policy_install_category,
     )
 
 

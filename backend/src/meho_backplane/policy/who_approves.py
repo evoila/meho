@@ -12,7 +12,8 @@ The groups are the ones that may approve another person's call:
 * A change of rights: only another admin (``MEHO-Admins``), as today. It
   is never routed.
 * With the ``POLICY_APPROVER_ROUTING`` switch on, the first install entry
-  that fits (the floor), narrowed by the first tenant entry that fits
+  that fits the category the install's policy alone gives (the floor),
+  narrowed by the first tenant entry that fits
   (:func:`~meho_backplane.policy.routing.route`).
 * Else today's rule (:func:`~meho_backplane.policy.routing.today_kinds`).
 
@@ -96,13 +97,25 @@ def approvers_from_routes(
     op_id: str,
     level: str | None,
     category: str | None,
+    install_category: str | None,
 ) -> Approvers:
-    """The approver groups of one call; *routes* is ``None`` while routing is off."""
+    """The approver groups of one call; *routes* is ``None`` while routing is off.
+
+    *install_category* is the category the install's policy alone gives
+    the call; the install's entries match on it.
+    """
     if _rights_change(op_id):
         return Approvers(("MEHO-Admins",), RIGHTS_CHANGE_RULE)
     if routes is None:
         return Approvers(_names(today_kinds(level, op_id)), DEFAULT_RULE)
-    found = route(routes, category=category, connector_id=connector_id, level=level, op_id=op_id)
+    found = route(
+        routes,
+        category=category,
+        install_category=install_category,
+        connector_id=connector_id,
+        level=level,
+        op_id=op_id,
+    )
     return Approvers(_names(found.kinds), found.rule, found.floor)
 
 
@@ -116,9 +129,15 @@ async def approvers_for(
     """
     level = descriptor.safety_level
     category = descriptor.policy_category
+    install_category = descriptor.policy_install_category
     if not routing_enabled() or _rights_change(descriptor.op_id):
         return approvers_from_routes(
-            None, connector_id=connector_id, op_id=descriptor.op_id, level=level, category=category
+            None,
+            connector_id=connector_id,
+            op_id=descriptor.op_id,
+            level=level,
+            category=category,
+            install_category=install_category,
         )
     async with get_sessionmaker()() as session:
         try:
@@ -129,6 +148,7 @@ async def approvers_for(
                 op_id=descriptor.op_id,
                 level=level,
                 category=category,
+                install_category=install_category,
             )
         except ValueError as exc:
             raise invalid_routing(exc) from exc

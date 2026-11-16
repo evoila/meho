@@ -38,7 +38,12 @@ kind). A category that no install entry routes is free.
 
 **At the run.** The install's entry counts first, then the tenant's; a
 person must be in the kinds of both
-(:func:`~meho_backplane.policy.routing.route`). At the approve click MEHO
+(:func:`~meho_backplane.policy.routing.route`). The install's entries match
+on the category the install's policy alone gives the change. A tenant may
+give an operation another category for its own rules, also one the install
+does not route, but the install's routing for the operation still applies.
+A request without stored group kinds started to wait while the switch was
+off: it keeps today's rule. At the approve click MEHO
 routes the request again with the install's current routing
 (:func:`install_floor_refusal`). So a tenant entry stored before this rule,
 or an install file that changed later, never widens anything: where the
@@ -210,16 +215,18 @@ def _level(request: ApprovalRequest) -> str | None:
 
 
 def _route_install(entries: Sequence[RouteEntry], request: ApprovalRequest) -> ApproverSet:
-    """Route *request* with the install's *entries* and the category it stored.
+    """Route *request* with the install's *entries* and the install's category it stored.
 
-    A request that started to wait before MEHO stored categories has the
-    empty text (migration ``0173``). Its category is not known. When an
-    install entry that matches on a category could fit it, no group may
-    approve it (rule :data:`CATEGORY_NOT_STORED`). Else the category does
-    not change the answer.
+    The category is the one the install's policy alone gave the change
+    (``approver_install_category``), not the tenant's. A request that
+    started to wait before MEHO stored categories has the empty text
+    (migration ``0173``). Its category is not known. When an install entry
+    that matches on a category could fit it, no group may approve it (rule
+    :data:`CATEGORY_NOT_STORED`). Else the category does not change the
+    answer.
     """
     level = _level(request)
-    category = request.approver_category
+    category = request.approver_install_category
     if category == "":
         if any(
             entry.category is not None
@@ -233,6 +240,7 @@ def _route_install(entries: Sequence[RouteEntry], request: ApprovalRequest) -> A
     return route(
         entries,
         category=category,
+        install_category=category,
         connector_id=request.connector_id,
         level=level,
         op_id=request.op_id,
@@ -242,16 +250,18 @@ def _route_install(entries: Sequence[RouteEntry], request: ApprovalRequest) -> A
 async def install_floor(session: AsyncSession, request: ApprovalRequest) -> ApproverSet | None:
     """Route *request* again with the install's stored routing as it is now.
 
-    Uses the request's risk level and the category it stored
-    (``approver_category``). ``None`` while the switch is off and for a
-    change of rights (it is not routed). The rule is ``default`` when no
-    install entry fits, and :data:`CATEGORY_NOT_STORED` when MEHO cannot
-    check it. Raises :class:`ValueError` when the install's stored routing
-    is not valid.
+    Uses the request's risk level and the category the install's policy
+    alone gave it (``approver_install_category``). ``None`` while the
+    switch is off, for a change of rights (it is not routed), and for a
+    request without stored group kinds: it started to wait while the
+    switch was off, so it keeps today's rule until it is decided or
+    expires. The rule is ``default`` when no install entry fits, and
+    :data:`CATEGORY_NOT_STORED` when MEHO cannot check it. Raises
+    :class:`ValueError` when the install's stored routing is not valid.
     """
     from meho_backplane.operations.grant_approval import is_rights_change
 
-    if not routing_enabled() or is_rights_change(request):
+    if not routing_enabled() or is_rights_change(request) or request.approver_roles is None:
         return None
     install_row, _ = await _documents(session, None)
     entries = _routes(
@@ -266,7 +276,8 @@ async def install_floor_refusal(
     """One sentence when the install's current routing does not let *operator* approve.
 
     See :func:`install_floor`. ``None`` while the switch is off, for a
-    change of rights, and when no install entry fits. A stored install
+    change of rights, for a request without stored group kinds, and when
+    no install entry fits. A stored install
     routing that is not valid refuses (fail closed), and so does a request
     whose category MEHO cannot know.
     """

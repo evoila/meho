@@ -14,6 +14,7 @@
   the tenant whose routing no longer fits.
 * A request that started to wait before MEHO stored its category is
   refused when an install entry that matches on a category may fit it.
+* A request from while the switch was off keeps the older rule.
 * ``meho policy explain --request`` uses the install's routing as it is
   now, as the click does.
 * With the switch off, nothing of this runs.
@@ -40,6 +41,7 @@ from meho_backplane.policy.routing_floor import (
 )
 from meho_backplane.policy.service import build_plan
 from meho_backplane.policy.validate import check_document
+from meho_backplane.settings import get_settings
 from tests.test_api_v1_approvals_fresh_sign_in import (
     _TENANT_A,
     _settings_env,  # noqa: F401 -- autouse fixture: pins the env these tests need
@@ -272,8 +274,33 @@ async def test_with_the_switch_off_the_click_does_not_check_the_floor(
     row = await _load(await _park("caution"))
 
     assert row.approver_category is None
+    assert row.approver_install_category is None
     async with get_sessionmaker()() as session:
         assert await install_floor_refusal(session, _person(_OTHER), row) is None
+
+
+@pytest.mark.asyncio
+async def test_a_request_from_while_the_switch_was_off_keeps_the_older_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It has no stored group kinds, so the install's routing does not count for it."""
+    _routing_off(monkeypatch)
+    await _store_policy(
+        {
+            "classifications": [],
+            "routing": [{"match": {"risk": "caution"}, "approvers": ["Admins"]}],
+        }
+    )
+    request_id = await _park("caution")
+    monkeypatch.setenv("POLICY_APPROVER_ROUTING", "true")
+    get_settings.cache_clear()
+
+    row = await _load(request_id)
+    assert row.approver_roles is None
+    async with get_sessionmaker()() as session:
+        assert await install_floor_refusal(session, _person(_OTHER), row) is None
+    assert "MEHO-Operators" in (await _explain(request_id)).groups
+    assert (await _approve(request_id, _person(_OTHER))).status == "approved"
 
 
 async def _from_before_the_category(request_id: uuid.UUID) -> None:
@@ -284,6 +311,7 @@ async def _from_before_the_category(request_id: uuid.UUID) -> None:
         row.approver_roles = list(_ALL_APPROVING)
         row.approver_rule = "tenant:routing[0]"
         row.approver_category = ""
+        row.approver_install_category = ""
         await session.commit()
 
 
@@ -348,6 +376,7 @@ async def test_two_tenants_do_not_affect_each_other() -> None:
                 op_id="demo.change",
                 level="caution",
                 category="network",
+                install_category="network",
             )
             for tenant in (_TENANT_A, _TENANT_B)
         }
@@ -389,7 +418,7 @@ async def test_the_install_diff_names_the_tenants_whose_routing_no_longer_fits()
 
 
 @pytest.mark.asyncio
-async def test_with_the_switch_off_the_install_diff_names_no_tenant(
+async def test_with_the_switch_off_the_install_diff_has_no_routing_floor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _routing_off(monkeypatch)
@@ -400,7 +429,7 @@ async def test_with_the_switch_off_the_install_diff_names_no_tenant(
         plan = await build_plan(session, scope="install", tenant_id=None, content=_NEW_INSTALL_FILE)
 
     assert plan.diff is not None
-    assert plan.diff["routing_floor"] == []
+    assert "routing_floor" not in plan.diff
 
 
 # ---------------------------------------------------------------------------

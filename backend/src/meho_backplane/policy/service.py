@@ -433,7 +433,7 @@ async def build_plan(
     plan.diff = _build_diff(
         before, document, scope=scope, ops=ops, old_side=old_side, new_side=new_side
     )
-    if scope == "install":
+    if scope == "install" and routing_enabled():
         plan.diff["routing_floor"] = await tenants_wider(session, document)
         plan.warnings.extend(floor_warnings(plan.diff["routing_floor"]))
     return plan

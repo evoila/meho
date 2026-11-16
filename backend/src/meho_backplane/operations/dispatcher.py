@@ -3800,6 +3800,7 @@ async def _handle_needs_approval(
                 idempotency_key=idempotency_key,
                 reveal_secret=reveal_secret,
                 category=descriptor.policy_category,
+                install_category=descriptor.policy_install_category,
             )
             await session.commit()
         if getattr(request, "_reused", False):

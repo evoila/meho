@@ -3,10 +3,10 @@
 
 """Behavioural tests for ``0173_add_approval_request_approver_category``.
 
-The migration adds one nullable column to ``approval_request``. Rows that
-exist already and have stored approver groups get the empty text: MEHO
-does not know their category. The other rows keep ``NULL``.
-``downgrade()`` removes the column again. Every step targets this migration's own
+The migration adds two nullable columns to ``approval_request``. Rows
+that exist already and have stored approver groups get the empty text in
+both: MEHO does not know their categories. The other rows keep ``NULL``.
+``downgrade()`` removes the columns again. Every step targets this migration's own
 revision (``0173``) and its ``down_revision`` (``0172``), never ``head``.
 """
 
@@ -27,7 +27,7 @@ from meho_backplane.settings import get_settings
 
 _REVISION = "0173"
 _DOWN_REVISION = "0172"
-_NEW = {"approver_category"}
+_NEW = {"approver_category", "approver_install_category"}
 _ROUTED_ID = "00000000-0000-0000-0000-000000000172"
 _UNROUTED_ID = "00000000-0000-0000-0000-000000000173"
 _TENANT_ID = "00000000-0000-0000-0000-000000000001"
@@ -60,7 +60,7 @@ def _columns(sync_url: str) -> dict[str, bool]:
         engine.dispose()
 
 
-def test_up_adds_one_nullable_column_and_down_drops_it(
+def test_up_adds_two_nullable_columns_and_down_drops_them(
     alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
 ) -> None:
     cfg, sync_url = alembic_cfg
@@ -104,7 +104,8 @@ def test_a_routed_row_from_before_gets_the_empty_text(
 
     command.upgrade(cfg, _REVISION)
 
-    assert _run(sync_url, "SELECT id, approver_category FROM approval_request ORDER BY id") == [
-        (_ROUTED_ID, ""),
-        (_UNROUTED_ID, None),
-    ]
+    rows = _run(
+        sync_url,
+        "SELECT id, approver_category, approver_install_category FROM approval_request ORDER BY id",
+    )
+    assert rows == [(_ROUTED_ID, "", ""), (_UNROUTED_ID, None, None)]

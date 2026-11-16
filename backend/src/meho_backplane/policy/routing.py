@@ -27,6 +27,11 @@ The rules:
   fields of a ``match`` must fit. A person must be in the kinds of both,
   so a tenant entry can only narrow the install's entry, never widen it
   (:mod:`meho_backplane.policy.routing_floor`).
+* An install entry matches on the category the install's policy alone
+  gives the change (``install_category``), a tenant entry on the category
+  the classification gives it. So a tenant that moves an operation to
+  another category for its own rules does not take it away from the
+  install's routing.
 * Routing only narrows. The stored kinds are the kinds of the fitting
   entries that may approve the change today (:func:`today_kinds`). A file
   never lets a group approve what it may not approve today.
@@ -216,6 +221,7 @@ def route(
     entries: Sequence[RouteEntry],
     *,
     category: str | None,
+    install_category: str | None,
     connector_id: str,
     level: str | None,
     op_id: str,
@@ -224,18 +230,19 @@ def route(
 
     The first install entry that fits counts, then the first tenant entry
     that fits. The kinds are the kinds of both entries that may approve
-    the change today: a tenant entry only narrows the install's. No entry
-    fits: today's kinds.
+    the change today: a tenant entry only narrows the install's. An
+    install entry matches on *install_category*, a tenant entry on
+    *category*. No entry fits: today's kinds.
     """
     kinds = today_kinds(level, op_id)
     fitting: list[RouteEntry] = []
-    for install in (True, False):
+    for install, fit_category in ((True, install_category), (False, category)):
         entry = next(
             (
                 e
                 for e in entries
                 if e.install is install
-                and e.matches(category=category, connector_id=connector_id, level=level)
+                and e.matches(category=fit_category, connector_id=connector_id, level=level)
             ),
             None,
         )
@@ -256,6 +263,7 @@ async def approver_set_for(
     op_id: str,
     level: str | None,
     category: str | None,
+    install_category: str | None,
 ) -> ApproverSet:
     """Load the stored policies of *tenant_id* and route the change."""
     install, tenant = await _documents(session, tenant_id)
@@ -263,11 +271,22 @@ async def approver_set_for(
         install.document if install is not None else None,
         tenant.document if tenant is not None else None,
     )
-    return route(entries, category=category, connector_id=connector_id, level=level, op_id=op_id)
+    return route(
+        entries,
+        category=category,
+        install_category=install_category,
+        connector_id=connector_id,
+        level=level,
+        op_id=op_id,
+    )
 
 
 async def stamp_approver_set(
-    session: AsyncSession, request: ApprovalRequest, *, category: str | None
+    session: AsyncSession,
+    request: ApprovalRequest,
+    *,
+    category: str | None,
+    install_category: str | None,
 ) -> None:
     """Store on *request* the group kinds that may approve it, and the rule.
 
@@ -276,7 +295,9 @@ async def stamp_approver_set(
     dispatcher stamped on ``proposed_effect``. *category* is the one the
     classification gave the looked-up row (``policy_category``, set while
     the ``POLICY_CLASSIFICATION`` switch is on); a request without a
-    category matches only entries without one.
+    category matches only entries without one. *install_category* is the
+    category the install's policy alone gives it
+    (``policy_install_category``); the install's entries match on it.
     """
     if not routing_enabled() or request.rights_change:
         return
@@ -288,10 +309,12 @@ async def stamp_approver_set(
         op_id=request.op_id,
         level=_text(effect.get("safety_level")),
         category=category,
+        install_category=install_category,
     )
     request.approver_roles = list(found.kinds)
     request.approver_rule = found.rule
     request.approver_category = category
+    request.approver_install_category = install_category
 
 
 def stored_kinds(value: Any) -> tuple[str, ...] | None:

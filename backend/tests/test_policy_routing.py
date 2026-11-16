@@ -112,6 +112,7 @@ async def _park(
             preview_hash="preview-hash" if level == "destructive" else None,
             rights_change=rights_change,
             category=category,
+            install_category=category,
         )
         await session.commit()
         return request.id
@@ -144,10 +145,20 @@ def test_a_category_entry_routes_its_changes_and_cuts_to_todays_kinds() -> None:
     entries = [_entry("install:routing[0]", ("Operators", "Admins"), category="network")]
 
     caution = route(
-        entries, category="network", connector_id="demo-1.x", level="caution", op_id="demo.x"
+        entries,
+        category="network",
+        install_category="network",
+        connector_id="demo-1.x",
+        level="caution",
+        op_id="demo.x",
     )
     dangerous = route(
-        entries, category="network", connector_id="demo-1.x", level="dangerous", op_id="demo.x"
+        entries,
+        category="network",
+        install_category="network",
+        connector_id="demo-1.x",
+        level="dangerous",
+        op_id="demo.x",
     )
 
     assert caution.kinds == ("Operators", "Admins")
@@ -160,7 +171,12 @@ def test_no_entry_fits_gives_todays_rule() -> None:
     entries = [_entry("install:routing[0]", ("Admins",), category="network")]
 
     found = route(
-        entries, category="storage", connector_id="demo-1.x", level="caution", op_id="demo.x"
+        entries,
+        category="storage",
+        install_category="storage",
+        connector_id="demo-1.x",
+        level="caution",
+        op_id="demo.x",
     )
 
     assert found.rule == DEFAULT_RULE
@@ -173,7 +189,14 @@ def test_no_category_matches_only_entries_without_one() -> None:
         _entry("install:routing[1]", ("SA-Operators",), risk="caution"),
     ]
 
-    found = route(entries, category=None, connector_id="demo-1.x", level="caution", op_id="x")
+    found = route(
+        entries,
+        category=None,
+        install_category=None,
+        connector_id="demo-1.x",
+        level="caution",
+        op_id="x",
+    )
 
     assert found.rule == "install:routing[1]"
 
@@ -186,7 +209,12 @@ def test_the_install_counts_first_and_the_tenant_only_narrows() -> None:
 
     entries = routes_from_documents(install, tenant)
     found = route(
-        entries, category="network", connector_id="demo-1.x", level="caution", op_id="demo.x"
+        entries,
+        category="network",
+        install_category="network",
+        connector_id="demo-1.x",
+        level="caution",
+        op_id="demo.x",
     )
 
     assert [(e.ref, e.install) for e in entries] == [
@@ -202,11 +230,30 @@ def test_the_install_counts_first_and_the_tenant_only_narrows() -> None:
 def test_a_risk_and_connector_entry_needs_both_to_fit() -> None:
     entries = [_entry("install:routing[0]", ("Admins",), connector="nsx-*", risk="destructive")]
 
-    other_level = route(entries, category=None, connector_id="nsx-4", level="caution", op_id="x")
-    other_connector = route(
-        entries, category=None, connector_id="k8s-1", level="destructive", op_id="x"
+    other_level = route(
+        entries,
+        category=None,
+        install_category=None,
+        connector_id="nsx-4",
+        level="caution",
+        op_id="x",
     )
-    both = route(entries, category=None, connector_id="nsx-4", level="destructive", op_id="x")
+    other_connector = route(
+        entries,
+        category=None,
+        install_category=None,
+        connector_id="k8s-1",
+        level="destructive",
+        op_id="x",
+    )
+    both = route(
+        entries,
+        category=None,
+        install_category=None,
+        connector_id="nsx-4",
+        level="destructive",
+        op_id="x",
+    )
 
     assert other_level.rule == DEFAULT_RULE
     assert other_connector.rule == DEFAULT_RULE
@@ -219,6 +266,7 @@ def test_an_operation_with_the_admin_role_floor_goes_to_admins_only() -> None:
     found = route(
         entries,
         category="network",
+        install_category="network",
         connector_id="demo-1.x",
         level="caution",
         op_id="targets.register",
@@ -582,12 +630,29 @@ def test_separated_duties_routes_network_to_sa_operators_and_admins() -> None:
     entries = routes_from_documents(document_of(parsed.model), None)
 
     network = route(
-        entries, category="network", connector_id="pfsense-ssh-1", level="caution", op_id="x"
+        entries,
+        category="network",
+        install_category="network",
+        connector_id="pfsense-ssh-1",
+        level="caution",
+        op_id="x",
     )
     identity = route(
-        entries, category="identity", connector_id="keycloak-admin-26", level="caution", op_id="x"
+        entries,
+        category="identity",
+        install_category="identity",
+        connector_id="keycloak-admin-26",
+        level="caution",
+        op_id="x",
     )
-    compute = route(entries, category="compute", connector_id="k8s-1", level="caution", op_id="x")
+    compute = route(
+        entries,
+        category="compute",
+        install_category="compute",
+        connector_id="k8s-1",
+        level="caution",
+        op_id="x",
+    )
 
     assert network.kinds == ("SA-Operators", "Admins")
     assert identity.kinds == ("Admins",)

@@ -161,6 +161,13 @@ MEHO refuses the tenant's file when an entry:
 
 The refusal names the category and the install's groups.
 
+A tenant may give an operation another category for its own rules, also
+a category of its own. The install's routing for the operation still
+applies: MEHO uses the category that the install's file alone gives the
+operation for the install's entries, and the tenant's category for the
+tenant's entries. So the people who may approve are always some of the
+people the install allows, whatever category the tenant chooses.
+
 How MEHO decides: an entry is narrower when every group it names is also
 in the install's entry. A tenant entry is checked against every install
 entry that can fit the same change. Two entries cannot fit the same change
@@ -172,7 +179,7 @@ group attribute, counts as the group kind its binding gives it.
 
 When a change waits, the install's entry counts first, then the tenant's.
 A person must be in both. At the approve click MEHO checks the install's
-file as it is then. So a tenant entry stored before this rule, or an
+file as it is then, with the install's category of the operation. So a tenant entry stored before this rule, or an
 install file that changed later, cannot widen anything. When the install's
 file changes, `meho policy diff --scope install` lists the tenants whose
 routing no longer fits. Their entries stay, but where they are wider they

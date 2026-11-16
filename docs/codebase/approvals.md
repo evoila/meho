@@ -1314,17 +1314,24 @@ works out who may approve it and stores it on the request:
 - `approver_rule` (text): the routing entries that set them, the
   install's first (`install:routing[2]`, `tenant:routing[0]`,
   `install:routing[0], tenant:routing[1]`), or `default`.
-- `approver_category` (text): the category the routing used. The click
-  routes the request again with it (below). The empty text on a request
-  that had stored kinds before migration `0173`: MEHO does not know its
-  category.
-- Migration `0167` adds the first two columns, migration `0173` the third.
-  All are nullable.
+- `approver_category` (text): the category the tenant's entries used (the
+  category the classification gave the change).
+- `approver_install_category` (text): the category that the install's
+  policy alone gives the change. The install's entries used it, and the
+  click routes the request again with it (below). A tenant can move an
+  operation to another category for its own rules; the install's routing
+  still applies with this one.
+- Both categories are the empty text on a request that had stored kinds
+  before migration `0173`: MEHO does not know them.
+- Migration `0167` adds the first two columns, migration `0173` the other
+  two. All are nullable.
 
 How the kinds are found:
 
 1. The install's routing is a floor. The first install entry whose
    `match` fits counts, then the first tenant entry whose `match` fits.
+   An install entry matches on the install's category, a tenant entry on
+   the tenant's.
    The kinds are the kinds that both name, so a tenant entry can only
    narrow the install's ([policy.md](policy.md), "The install's routing is
    a floor"). A `match` can name a `category`, a `connector` pattern and a
@@ -1344,7 +1351,9 @@ The risk level comes from `proposed_effect` (`safety_level`). The
 category is the one the classification gave the looked-up operation
 (`EndpointDescriptor.policy_category`, set by `apply_effective_policy` and
 `apply_step_classification` while `POLICY_CLASSIFICATION` is on). The
-dispatcher and the step gate pass it to `create_pending_request`. A request
+install's category is `EndpointDescriptor.policy_install_category`: the
+category from the install's classification entries and overrides alone.
+The dispatcher and the step gate pass both to `create_pending_request`. A request
 without a category fits only entries without `category`.
 
 **At the click** (`_load_pending_for_approval`) today's checks run first,
@@ -1353,7 +1362,10 @@ deadline, the rights-change and group rules (also the rules on own
 changes), the role floor. Then `_check_install_floor`
 (`install_floor_refusal` in `policy/routing_floor.py`): MEHO routes the
 request again with the install's file as it is now, the stored risk level
-and the stored `approver_category`. When an install entry fits and the
+and the stored `approver_install_category`. A request without stored
+kinds (it started to wait while the switch was off) is not checked here:
+it keeps today's rule until it is decided or expires. When an install
+entry fits and the
 person's kind is not in it, `ApprovalRoutingError` with one sentence, for
 example "The install's routing (`install:routing[0]`) lets only
 MEHO-SA-Operators or MEHO-Admins approve this change. You are in

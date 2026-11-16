@@ -3527,6 +3527,10 @@ needs.</p>
 <span class="w">          </span><span class="nt">protocol</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">TCP</span>
 </code></pre></div>
 <p>Every rule needs a <code>to</code> list. The chart refuses a rule without one.</p>
+<p>With approval notifications on (<code>webPush.enabled: true</code>), MEHO also needs
+HTTPS to the push services of Apple, Google, Microsoft and Mozilla. The
+host names are in
+<a href="../#push-services-for-approval-notifications">Push services for approval notifications</a>.</p>
 <p><strong>A target behind your ingress.</strong> Kubernetes does not say whether a
 network rule is checked before or after the cluster redirects a
 connection. On Calico and Canal with kube-proxy (RKE2's default), it is

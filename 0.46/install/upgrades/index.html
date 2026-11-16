@@ -3798,6 +3798,11 @@ groups and clients.</p>
 <td>With <code>MCP_CLIENT_PER_TOOL_KIND</code> on, the account page of the web console shows "Your tools": each tool kind, its last use and a "Sign out this tool" button. The button ends the signed-in person's logins of that one tool in Keycloak. For this, MEHO's Keycloak admin client needs the realm-management role <code>manage-users</code>. Migration <code>0172</code> adds one index on <code>audit_log</code> (person and time); it changes no row, and on a large audit log it takes a while.</td>
 <td><strong>Built-in Keycloak:</strong> nothing to do; <code>meho-admin</code> already has <code>manage-users</code>. <strong>Your own Keycloak:</strong> give MEHO's Keycloak admin client <code>manage-users</code> before you turn the switch on. Without the role, the button shows an error that names it. See <a href="../keycloak-realm/#the-mcp-clients-of-the-ai-tools">The MCP clients of the AI tools</a>.</td>
 </tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>With approval notifications on (<code>webPush.enabled: true</code>), MEHO now sends them. A browser that a person switched on before the upgrade gets its first message only after that person's next sign-in to the web console, or the next time they open the account page. Until then MEHO does not know their login groups for it. After that, a person whose last sign-in is more than 7 days old gets no message until they sign in again.</td>
+<td>Ask the people who use notifications to sign in to the web console once after the upgrade. Allow MEHO to reach the push services of the browser makers: see <a href="../#push-services-for-approval-notifications">Push services for approval notifications</a>.</td>
+</tr>
 </tbody>
 </table>
 <p>The authoritative, always-current version of this table lives in

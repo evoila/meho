@@ -650,6 +650,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#what-leaves-your-network" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What leaves your network
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#broadcast-runs-single-replica-with-ephemeral-streams" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3323,6 +3334,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#what-leaves-your-network" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What leaves your network
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#broadcast-runs-single-replica-with-ephemeral-streams" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3578,6 +3600,30 @@ actually manage. Plan the list before the first target registration —
 registering a target outside the allowlist is rejected, not warned
 about.
 (<a href="https://github.com/evoila/meho/blob/main/docs/deploying.md#operational-chart-knobs"><code>docs/deploying.md</code> § Operational chart knobs</a>.)</p>
+<h3 id="what-leaves-your-network">What leaves your network<a class="headerlink" href="#what-leaves-your-network" title="Permanent link">&para;</a></h3>
+<p>MEHO connects to the systems you add as targets, and to the services you
+set up for it yourself: for example your AI service, your company login,
+or a mail server or webhook for check notifications. This table lists
+what MEHO sends to a service outside your network that you did not set
+up yourself.</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Default</th>
+<th>Goes to</th>
+<th>What leaves</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Approval notifications (<code>webPush.enabled</code>)</td>
+<td>Off</td>
+<td>The push services of Apple, Google, Microsoft and Mozilla (<a href="../install/#push-services-for-approval-notifications">host names</a>)</td>
+<td>One message for each notification, encrypted for the person's browser: "an approval waits" (or the result), the tenant name and the request id. The request id is also sent readable, so the push service can replace a waiting message by its result. Never the operation, its parameters or the target. <a href="../guides/phone-and-laptop/#what-leaves-your-network">Details</a></td>
+</tr>
+</tbody>
+</table>
 <h3 id="broadcast-runs-single-replica-with-ephemeral-streams">Broadcast runs single-replica, with ephemeral streams<a class="headerlink" href="#broadcast-runs-single-replica-with-ephemeral-streams" title="Permanent link">&para;</a></h3>
 <p>The activity-broadcast bus is deliberately <strong>one replica</strong> in the
 current chart: no Sentinel sidecar ships with it, streams are ephemeral
@@ -3833,6 +3879,9 @@ caveat is one-directional — setting a <strong>custom</strong>
 <code>config.retrievalEmbeddingModel</code> makes the backplane download it at
 runtime, which is exactly what an air-gapped estate cannot do. Keep the
 default model.</p>
+<p>Keep approval notifications off (<code>webPush.enabled: false</code>, the default).
+They reach a phone or laptop only through the push services of the
+browser makers on the internet.</p>
 <p><strong>Three artefacts have to be mirrored:</strong></p>
 <ol>
 <li>the backplane image, <code>ghcr.io/evoila/meho</code>;</li>

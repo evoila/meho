@@ -1363,6 +1363,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#push-services-for-approval-notifications" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Push services for approval notifications
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3452,6 +3463,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#push-services-for-approval-notifications" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Push services for approval notifications
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3848,6 +3870,50 @@ instead.</p>
 because Kubernetes reads a rule with no <code>to</code> as "every destination". The
 chart also refuses keys it does not know, so a typo such as <code>port:</code> for
 <code>ports:</code> cannot remove the port limit.</p>
+<h4 id="push-services-for-approval-notifications">Push services for approval notifications<a class="headerlink" href="#push-services-for-approval-notifications" title="Permanent link">&para;</a></h4>
+<p>Only when you turn on approval notifications (<code>webPush.enabled: true</code>,
+off by default): MEHO sends each notification to the push service of the
+browser maker of the person's phone or laptop. So MEHO needs outbound
+HTTPS (TCP 443) to these hosts:</p>
+<table>
+<thead>
+<tr>
+<th>Browser maker</th>
+<th>Host</th>
+<th>Used by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Apple</td>
+<td><code>*.push.apple.com</code></td>
+<td>Safari on iPhone, iPad and Mac</td>
+</tr>
+<tr>
+<td>Google</td>
+<td><code>fcm.googleapis.com</code></td>
+<td>Chrome on Android, Mac and Windows</td>
+</tr>
+<tr>
+<td>Microsoft</td>
+<td><code>*.notify.windows.com</code></td>
+<td>Edge on Windows</td>
+</tr>
+<tr>
+<td>Mozilla</td>
+<td><code>updates.push.services.mozilla.com</code></td>
+<td>Firefox</td>
+</tr>
+</tbody>
+</table>
+<p>MEHO sends to no other host: it refuses a browser whose push address is
+not on this list. The browser makers do not publish fixed address ranges
+for these hosts. So allow the host names in your firewall or outgoing
+proxy. MEHO uses the <code>HTTPS_PROXY</code> and <code>NO_PROXY</code> variables of its
+container for these sends. In the Kubernetes network rules, the second
+rule of the example above (public addresses on port 443) covers them.</p>
+<p>What a notification carries, and what leaves your network:
+<a href="../guides/phone-and-laptop/#what-leaves-your-network">MEHO on your phone and laptop</a>.</p>
 <h3 id="step-3-install-the-chart">Step 3 — Install the chart<a class="headerlink" href="#step-3-install-the-chart" title="Permanent link">&para;</a></h3>
 <p>The chart is published as an OCI artefact. Install:</p>
 <div class="highlight"><pre><span></span><code>helm<span class="w"> </span>upgrade<span class="w"> </span>--install<span class="w"> </span>meho<span class="w"> </span>oci://ghcr.io/evoila/meho-chart<span class="w"> </span><span class="se">\</span>

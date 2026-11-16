@@ -317,7 +317,7 @@ func printRunApproval(w io.Writer, run *api.RunApprovalRead) {
 	for index, entry := range run.Entries {
 		fmt.Fprintf(w, "    - %s  %s  %s\n", output.SafeText(entry.ConnectorId), output.SafeText(entry.OpId), describeRunEntryTarget(entry))
 		if reason, ok := waits[index]; ok {
-			fmt.Fprintf(w, "      waits for a person on every call: %s\n", output.SafeText(reason))
+			fmt.Fprintf(w, "      waits for a person: %s\n", output.SafeText(reason))
 		}
 	}
 }

@@ -127,8 +127,7 @@ func TestPrintRunApprovalShowsEveryEntry(t *testing.T) {
 }
 
 // TestPrintRunApprovalSaysWhichEntriesWait: an entry the run approval never
-// covers carries a line under it, so the approver sees that each of its
-// calls still waits for a person.
+// covers carries a line under it with the reason the server gives.
 func TestPrintRunApprovalSaysWhichEntriesWait(t *testing.T) {
 	run := newRunApproval(t, "pending")
 	run.Entries = append(run.Entries, api.RunApprovalEntry{ConnectorId: "kubernetes-1.x", OpId: "k8s.secret.read_to_ref"})
@@ -139,11 +138,32 @@ func TestPrintRunApprovalSaysWhichEntriesWait(t *testing.T) {
 	var buf bytes.Buffer
 	printRunApproval(&buf, &run)
 	out := buf.String()
-	want := "k8s.secret.read_to_ref  no target\n      waits for a person on every call: " + reason + "\n"
+	want := "k8s.secret.read_to_ref  no target\n      waits for a person: " + reason + "\n"
 	if !strings.Contains(out, want) {
 		t.Errorf("output missing %q; got:\n%s", want, out)
 	}
-	if strings.Count(out, "waits for a person on every call") != 1 {
+	if strings.Count(out, "      waits for a person: ") != 1 {
 		t.Errorf("only the listed entry waits; got:\n%s", out)
+	}
+}
+
+// TestPrintRunApprovalShowsTheServerReason: when only some calls of an entry
+// wait, the line under it repeats the server reason and adds no claim of its own.
+func TestPrintRunApprovalShowsTheServerReason(t *testing.T) {
+	run := newRunApproval(t, "pending")
+	run.Entries = append(run.Entries, api.RunApprovalEntry{ConnectorId: "vault-1.x", OpId: "vault.kv.read"})
+	reason := "op 'vault.kv.read' reads a credential. A run approval never covers it: each call with reveal_secret waits for a person"
+	run.EntriesThatWait = &[]api.RunApprovalWaitNote{
+		{Entry: 2, ConnectorId: "vault-1.x", OpId: "vault.kv.read", Reason: reason},
+	}
+	var buf bytes.Buffer
+	printRunApproval(&buf, &run)
+	out := buf.String()
+	want := "vault.kv.read  no target\n      waits for a person: " + reason + "\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("output missing %q; got:\n%s", want, out)
+	}
+	if strings.Contains(out, "every call") {
+		t.Errorf("output must not say every call waits; got:\n%s", out)
 	}
 }

@@ -141,8 +141,8 @@ class RunApprovalRead(BaseModel):
     entries_that_wait: list[RunApprovalWaitNote] | None = Field(
         default=None,
         description=(
-            "Entries the run approval never covers: each of their calls waits for a "
-            "person. Filled by request, show and approve; null in list, revoke and end."
+            "Entries that wait for a person; the reason says which calls. Filled by "
+            "request, show and approve; null in list, revoke and end."
         ),
     )
 

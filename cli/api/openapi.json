@@ -41140,7 +41140,7 @@
             "type": "array",
             "nullable": true,
             "title": "Entries That Wait",
-            "description": "Entries the run approval never covers: each of their calls waits for a person. Filled by request, show and approve; null in list, revoke and end."
+            "description": "Entries that wait for a person; the reason says which calls. Filled by request, show and approve; null in list, revoke and end."
           }
         },
         "type": "object",
